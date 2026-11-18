@@ -194,7 +194,7 @@ export function ScenarioStack({
   /** Show a control that queues a sample message the way a Send during a turn does. */
   queueSimulator?: boolean;
 }) {
-  const [model, setModel] = useState("gpt-6-astra");
+  const [model, setModel] = useState("gpt-6.2-astra");
   const [effort, setEffort] = useState<IntelligenceEffort>("medium");
   const [toolSelection, setToolSelection] = useState(galleryToolSelection);
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);

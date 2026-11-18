@@ -636,10 +636,10 @@ export interface ModelOption {
 
 export const modelCatalog: ModelOption[] = [
   {
-    id: "codex:gpt-6-astra",
-    label: "GPT-6 Astra",
+    id: "codex:gpt-6.2-astra",
+    label: "GPT-6.2 Astra",
     payer: "Codex plan",
-    displayLabel: "GPT-6 Astra · Codex plan",
+    displayLabel: "GPT-6.2 Astra · Codex plan",
     description: "The most capable model for long, careful work.",
     available: true,
   },
@@ -660,10 +660,10 @@ export const modelCatalog: ModelOption[] = [
     available: true,
   },
   {
-    id: "credits:gpt-6-astra",
-    label: "GPT-6 Astra",
+    id: "credits:gpt-6.2-astra",
+    label: "GPT-6.2 Astra",
     payer: "Opengeni credits",
-    displayLabel: "GPT-6 Astra · Opengeni credits",
+    displayLabel: "GPT-6.2 Astra · Opengeni credits",
     description: "Billed to your organization's credit balance.",
     available: false,
     unavailableReason: "No credit balance. An owner can add credits in Billing.",

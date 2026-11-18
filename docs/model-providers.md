@@ -115,8 +115,8 @@ Opengeni does not scrape `GET /models`. Membership is the reviewed catalog
 
 Exactly one built-in provider. `OPENGENI_OPENAI_PROVIDER` is `openai` (default)
 or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
-`gpt-6-astra`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
-`gpt-6-astra,gpt-6-sol,gpt-6-luna`). A custom base URL still speaks
+`gpt-6.2-astra`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
+`gpt-6.2-astra,gpt-6.2-sol,gpt-6-sol,gpt-6-luna`). A custom base URL still speaks
 Responses; it does not become Chat Completions.
 
 |            | OpenAI                                                                                        | Azure                                                                                                                |
@@ -789,8 +789,8 @@ Choose an active deployment default before retiring its old entry.
 ```json
 {
   "schemaVersion": 1,
-  "defaultModel": "gpt-6-astra",
-  "builtInModels": ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+  "defaultModel": "gpt-6.2-astra",
+  "builtInModels": ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-sol", "gpt-6-luna"],
   "registryProviders": [],
   "gatewayModels": [],
   "openrouterModels": [],
@@ -1546,7 +1546,7 @@ the same membership, connection-readiness, workspace-policy, and provider-health
 decision as the human picker. Its result is one text string in catalog order:
 
 ```text
-Current: gpt-6-astra
+Current: gpt-6.2-astra
 - openrouter/nvidia/nemotron-3-super-120b-a12b:free | Nemotron 3 Super 120B | free | Good for bounded tool-driven work.
 - gpt-6-sol | GPT-6 Sol | credits
 ```
@@ -1721,11 +1721,14 @@ or downgrades that tier; Opengeni never silently falls back to Standard. The
 GPT-6 family uses the 1.05M context window. A configured GPT-5.6 id still pins
 Codex's 272,000 / 258,400 / 244,800 raw / effective / auto-compact catalog.
 
-GPT-6 Astra and GPT-6.1 Sol also advertise **Ultrafast** (service tier
-`ultrafast`, 6× billing multiplier) where OpenAI serves it: the built-in
-provider only on the direct OpenAI API (`api.openai.com`, never Azure OpenAI or
-another base URL), and Codex subscription models only when a connected account's
-live model list advertises the tier for that model.
+GPT-6 Astra, GPT-6.1 Sol, GPT-6.2 Astra and GPT-6.2 Sol also advertise
+**Ultrafast** (service tier `ultrafast`) where OpenAI serves it. Its billing
+multiplier is 6×, except GPT-6.2's launch rate of 3× through 2027-02-28
+(OpenAI moves it to 6× on 2027-03-01, so a release before then must too). It is
+offered by the built-in provider only on the direct OpenAI API
+(`api.openai.com`, never Azure OpenAI or another base URL), and on Codex
+subscription models only when a connected account's live model list advertises
+the tier for that model.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
@@ -2550,6 +2553,12 @@ Gateway's separate greater-than-200K schedule must not replace the native one.
 GPT-6.1 Terra was reviewed on 2026-10-27 against the same OpenAI pricing page:
 half of GPT-6.1 Sol's Standard rates, with the same 5% cache-read rate and
 exclusive 272K whole-request boundary, and no Ultrafast tier.
+GPT-6.2 Astra and GPT-6.2 Sol were reviewed on 2026-11-18 against the same
+pricing page and their model pages: Astra $8 / $0.40 cached / $10 30-minute
+cache write / $40 output, Sol the same as GPT-6.1 Sol, both with the exclusive
+272K whole-request boundary (2x input and cache, 1.5x output). They replace
+GPT-6 Astra as defaults and Codex models; GPT-6 Astra keeps its built-in rate so
+deployments, Azure deployments and recorded usage that name it stay priced.
 The reviewed native Claude models have no
 long-context premium. Claude 1-hour native cache writes use 2x base input,
 rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant
@@ -2578,8 +2587,8 @@ bun run check:model-pricing
 ```
 
 That fetches [llm-prices.com](https://www.llm-prices.com/current-v1.json) and
-compares Standard short- and long-context rates for the allow-listed GPT-6.1,
-GPT-6, and GPT-5.6 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
+compares Standard short- and long-context rates for the allow-listed GPT-6.2,
+GPT-6.1, GPT-6, and GPT-5.6 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
 and update `defaultModelPricing` — not as automatic truth to import.
 
 Not covered by the llm-prices canary: cache-write rates, Azure SKU-specific

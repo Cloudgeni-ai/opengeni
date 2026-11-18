@@ -197,7 +197,7 @@ export function SubscriptionPlansPreview() {
               grantId: "00000000-0000-4000-8000-000000000002",
               label: "Monthly plan credit",
               remainingMicros: plan.creditRemainingMicros,
-              eligibleModelIds: ["gpt-6-luna", "azure-astra/gpt-6-astra"],
+              eligibleModelIds: ["gpt-6-luna", "azure-astra/gpt-6.2-astra"],
               planCredit: true,
             },
           ]

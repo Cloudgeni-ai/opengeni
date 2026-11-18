@@ -233,7 +233,7 @@ describe("default model precedence", () => {
 
   test("a connected ChatGPT/Codex subscription makes its default model the default", () => {
     expect(decide(hostedSettings(), { codex: true })).toEqual({
-      model: "codex/gpt-6-astra",
+      model: "codex/gpt-6.2-astra",
       reasoningEffort: "high",
       source: "subscription",
     });

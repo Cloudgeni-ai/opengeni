@@ -1091,8 +1091,8 @@ const SettingsSchema = z.object({
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
-  openaiModel: z.string().default("gpt-6-astra"),
-  openaiAllowedModels: z.string().default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
+  openaiModel: z.string().default("gpt-6.2-astra"),
+  openaiAllowedModels: z.string().default("gpt-6.2-astra,gpt-6.2-sol,gpt-6-sol,gpt-6-luna"),
   // Opengeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
@@ -5686,6 +5686,61 @@ export function configuredOpperOrganizationProductModelIds(settings: Settings): 
  * llm-prices.com as a ground-truth canary; it does not generate this table.
  */
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
+  // Reviewed 2026-11-18 against https://developers.openai.com/api/docs/pricing
+  // and https://developers.openai.com/api/docs/models/gpt-6.2-astra. Cached
+  // input is 5% of input; the cache write is the 30-minute rate (1.25x input).
+  // Requests with more than 272K input tokens double input and cache rates and
+  // pay 1.5x output for the whole request.
+  "gpt-6.2-astra": {
+    default: {
+      // OpenAI list price: $8 / $0.40 cached / $10 cache write / $40 output.
+      inputMicrosPerMillionTokens: 8_000_000,
+      cachedInputMicrosPerMillionTokens: 400_000,
+      cacheWriteMicrosPerMillionTokens: 10_000_000,
+      outputMicrosPerMillionTokens: 40_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 16_000_000,
+          cachedInputMicrosPerMillionTokens: 800_000,
+          cacheWriteMicrosPerMillionTokens: 20_000_000,
+          outputMicrosPerMillionTokens: 60_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  // Reviewed 2026-11-18 against https://developers.openai.com/api/docs/pricing
+  // and https://developers.openai.com/api/docs/models/gpt-6.2-sol. Same rates
+  // as GPT-6.1 Sol, with the same >272K whole-request schedule.
+  "gpt-6.2-sol": {
+    default: {
+      // OpenAI list price: $2 / $0.10 cached / $2.50 cache write / $10 output.
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 100_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 10_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 200_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
+          outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  // No longer a default or Codex model (GPT-6.2 Astra replaced it), but still
+  // priced: deployments that name it, Azure deployments of it, retained
+  // definitions of accepted turns and recorded usage keep a known rate.
   "gpt-6-astra": {
     default: {
       // OpenAI list price: $10 / $1 cached / $12.50 cache write / $50 output.
@@ -8778,11 +8833,24 @@ const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
  * observed from the provider's own usage readings, not priced here.
  */
 const ULTRAFAST_BILLING_MULTIPLIER_BPS = 60_000;
-/** Upstream slugs OpenAI serves at the Ultrafast tier. */
-const ULTRAFAST_UPSTREAM_SLUGS: readonly string[] = ["gpt-6-astra", "gpt-6.1-sol"];
+/**
+ * OpenAI's GPT-6.2 launch rate: Ultrafast is 3× Standard through 2027-02-28
+ * (Pacific time) and 6× from 2027-03-01
+ * (https://developers.openai.com/api/docs/pricing). The multiplier is part of
+ * the reviewed definition, so it moves to ULTRAFAST_BILLING_MULTIPLIER_BPS in a
+ * release before that date, not at runtime.
+ */
+const GPT62_LAUNCH_ULTRAFAST_BILLING_MULTIPLIER_BPS = 30_000;
+/** Upstream slugs OpenAI serves at the Ultrafast tier, with their price multiplier. */
+const ULTRAFAST_UPSTREAM_SLUGS: ReadonlyMap<string, number> = new Map([
+  ["gpt-6-astra", ULTRAFAST_BILLING_MULTIPLIER_BPS],
+  ["gpt-6.1-sol", ULTRAFAST_BILLING_MULTIPLIER_BPS],
+  ["gpt-6.2-astra", GPT62_LAUNCH_ULTRAFAST_BILLING_MULTIPLIER_BPS],
+  ["gpt-6.2-sol", GPT62_LAUNCH_ULTRAFAST_BILLING_MULTIPLIER_BPS],
+]);
 
 /**
- * Ultrafast for a model id (`gpt-6-astra` or `codex/gpt-6-astra`), when OpenAI
+ * Ultrafast for a model id (`gpt-6.2-astra` or `codex/gpt-6.2-astra`), when OpenAI
  * serves its slug at that tier. Codex accounts must still advertise the tier:
  * placement serves an Ultrafast turn only from an account whose live model
  * list includes it for that model.
@@ -8798,12 +8866,13 @@ function ultrafastLatencyModeForModel(modelId: string):
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
-  return ULTRAFAST_UPSTREAM_SLUGS.includes(slug)
+  const billingMultiplierBps = ULTRAFAST_UPSTREAM_SLUGS.get(slug);
+  return billingMultiplierBps !== undefined
     ? {
         id: "ultrafast",
         upstream: "supported",
         runnable: true,
-        billingMultiplierBps: ULTRAFAST_BILLING_MULTIPLIER_BPS,
+        billingMultiplierBps,
       }
     : undefined;
 }
@@ -8866,6 +8935,10 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "6.1 Sol";
     case "gpt-6.1-terra":
       return "6.1 Terra";
+    case "gpt-6.2-astra":
+      return "6.2 Astra";
+    case "gpt-6.2-sol":
+      return "6.2 Sol";
     default:
       return null;
   }
@@ -8974,9 +9047,18 @@ function builtinPromptCachingForModel(
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
-  return slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-")
+  return slug.startsWith("gpt-5.6-") || isBuiltinGpt6CapabilitySlug(slug)
     ? { upstream: "supported", runnable: true, mode: "implicit" }
     : undefined;
+}
+
+/**
+ * GPT-6 and GPT-6.2 slugs that get the built-in prompt-caching and hosted image
+ * declarations. GPT-6.1 is deliberately absent: its built-in definitions never
+ * carried them, and adding them would change their accepted definitions.
+ */
+function isBuiltinGpt6CapabilitySlug(slug: string): boolean {
+  return slug.startsWith("gpt-6-") || slug.startsWith("gpt-6.2-");
 }
 
 /** Reviewed direct-OpenAI text models that accept the hosted image tool. */
@@ -8984,7 +9066,7 @@ function builtinHostedImageGenerationForModel(settings: Settings, modelId: strin
   return (
     settings.openaiProvider === "openai" &&
     isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
-    (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("gpt-6-"))
+    (isBuiltinGpt56ModelId(modelId) || isBuiltinGpt6CapabilitySlug(modelId))
   );
 }
 

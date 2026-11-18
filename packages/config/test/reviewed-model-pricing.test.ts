@@ -5,6 +5,7 @@ import {
   configuredModelListPricingSchedules,
   configuredModelPricingSchedules,
   configuredModels,
+  defaultModelPricing,
   reviewedModelListPricing,
   getSettings,
   parseModelProvidersJson,
@@ -53,7 +54,8 @@ function catalogSettings() {
   let settings = getSettings({
     OPENGENI_ENV: "test",
     OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED: "true",
-    OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-6-astra,gpt-6-sol,gpt-6-luna,gpt-6.1-sol",
+    OPENGENI_OPENAI_ALLOWED_MODELS:
+      "gpt-6.2-astra,gpt-6.2-sol,gpt-6-astra,gpt-6-sol,gpt-6-luna,gpt-6.1-sol",
   });
   settings = withCodexCatalogProvider(settings);
   // Dynamic catalogs may contain newly reviewed models beyond the fallback.
@@ -151,7 +153,7 @@ describe("reviewed supported-model list prices", () => {
     expect(
       models.filter((model) => prices[model.id] === undefined).map((model) => model.id),
     ).toEqual([]);
-    expect(models.length).toBe(60);
+    expect(models.length).toBe(63);
     for (const model of models) {
       if (model.credentialSource.kind === "connected_subscription") {
         expect(model.billing).toEqual({
@@ -169,6 +171,8 @@ describe("reviewed supported-model list prices", () => {
     }
     expect(prices["codex/gpt-6.1-sol"]).toEqual(reviewedModelListPricing["gpt-6.1-sol"]);
     expect(prices["codex/gpt-6.1-terra"]).toEqual(reviewedModelListPricing["gpt-6.1-terra"]);
+    expect(prices["codex/gpt-6.2-astra"]).toEqual(defaultModelPricing["gpt-6.2-astra"]);
+    expect(prices["codex/gpt-6.2-sol"]).toEqual(defaultModelPricing["gpt-6.2-sol"]);
     expect(prices["supergrok/grok-4.7"]).toEqual(reviewedModelListPricing["grok-4.7"]);
   });
 
