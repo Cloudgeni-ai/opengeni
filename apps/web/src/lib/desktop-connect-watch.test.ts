@@ -82,4 +82,72 @@ describe("the desktop app finishes a connection the browser signed in to", () =>
     expect(desktopConnectAlreadyFinished("c1", storage)).toBe(true);
     expect(desktopConnectAlreadyFinished("c2", storage)).toBe(false);
   });
+
+  test("a connection the hand-back link already finished is not finished again", () => {
+    const watch = watching();
+    const fresh = [gmail("old", "revoked"), gmail("new", "active")];
+    expect(finishedDesktopConnection(watch, fresh, (id) => id === "new")).toBe(null);
+  });
+});
+
+describe("the watch only finishes the sign-in it started", () => {
+  const owned = (id: string, status: string, subjectId: string | null) => ({
+    ...gmail(id, status),
+    subjectId,
+  });
+  const watchAs = (
+    ownership: "personal" | "workspace",
+    connections: ReturnType<typeof owned>[] = [],
+    reconnectConnectionId: string | null = null,
+  ) =>
+    startDesktopConnectWatch({
+      itemId: "mcp:gmail",
+      providerDomain: "gmailmcp.googleapis.com",
+      mcpUrl: null,
+      ownership,
+      viewerSubjectId: "user:me",
+      reconnectConnectionId,
+      connections,
+    })!;
+
+  test("a teammate's new personal account is not mine", () => {
+    const watch = watchAs("personal");
+    expect(finishedDesktopConnection(watch, [owned("theirs", "active", "user:them")])).toBe(null);
+    expect(
+      finishedDesktopConnection(watch, [
+        owned("theirs", "active", "user:them"),
+        owned("mine", "active", "user:me"),
+      ])?.id,
+    ).toBe("mine");
+  });
+
+  test("a workspace connect takes only a workspace account", () => {
+    const watch = watchAs("workspace");
+    expect(finishedDesktopConnection(watch, [owned("mine", "active", "user:me")])).toBe(null);
+    expect(finishedDesktopConnection(watch, [owned("shared", "active", null)])?.id).toBe("shared");
+  });
+
+  test("a reconnect ignores another existing account that recovers meanwhile", () => {
+    const before = [
+      owned("target", "needs_reauth", "user:me"),
+      owned("other", "needs_reauth", "user:me"),
+    ];
+    const watch = watchAs("personal", before, "target");
+    expect(
+      finishedDesktopConnection(watch, [
+        owned("target", "needs_reauth", "user:me"),
+        owned("other", "active", "user:me"),
+      ]),
+    ).toBe(null);
+    expect(
+      finishedDesktopConnection(watch, [
+        owned("target", "active", "user:me"),
+        owned("other", "active", "user:me"),
+      ])?.id,
+    ).toBe("target");
+    // A reconnect the provider saved as a new account still counts.
+    expect(
+      finishedDesktopConnection(watch, [...before, owned("replacement", "active", "user:me")])?.id,
+    ).toBe("replacement");
+  });
 });

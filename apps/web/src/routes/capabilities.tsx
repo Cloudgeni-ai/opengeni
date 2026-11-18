@@ -1511,6 +1511,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       void refresh();
       return;
     }
+    if (outcome === "success" && connectionId) {
+      // The hand-back arrived first: finish here, and stop watching for it.
+      rememberDesktopConnectFinished(connectionId);
+      setDesktopWatch(null);
+    }
     if (outcome === "success") {
       void resumeOAuthConnect(
         itemId,
@@ -1732,6 +1737,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         const finished = finishedDesktopConnection(
           desktopWatch,
           await client.listConnections(workspaceId),
+          (id) => desktopConnectAlreadyFinished(id),
         );
         if (!finished || stopped) return;
         stopped = true;
@@ -1785,6 +1791,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
             : (item.connectionRef?.providerDomain ?? null),
         mcpUrl: plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null),
         ownership: action.ownership,
+        viewerSubjectId: context.accessContext?.subjectId ?? null,
+        reconnectConnectionId: action.type === "reconnect_oauth" ? action.connectionId : null,
         connections,
       }),
     );

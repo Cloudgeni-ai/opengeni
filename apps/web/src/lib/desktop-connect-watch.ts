@@ -11,6 +11,8 @@ type WatchedConnection = {
   id: string;
   providerDomain: string;
   status: string;
+  /** The person a personal connection belongs to; null for a workspace one. */
+  subjectId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -20,6 +22,10 @@ export type DesktopConnectWatch = {
   providerDomain: string | null;
   mcpUrl: string | null;
   ownership: ConnectionOwnership;
+  /** Who is connecting, to tell their personal connection from a teammate's. */
+  viewerSubjectId: string | null;
+  /** The account being signed in again, for a reconnect. */
+  reconnectConnectionId: string | null;
   /** Each connection's status when the sign-in started. */
   before: ReadonlyMap<string, string>;
   /** When to stop watching: a sign-in link lasts ten minutes. */
@@ -34,6 +40,8 @@ export function startDesktopConnectWatch(input: {
   providerDomain: string | null;
   mcpUrl: string | null;
   ownership: ConnectionOwnership;
+  viewerSubjectId?: string | null | undefined;
+  reconnectConnectionId?: string | null | undefined;
   connections: readonly WatchedConnection[];
   now?: number;
 }): DesktopConnectWatch | null {
@@ -43,27 +51,49 @@ export function startDesktopConnectWatch(input: {
     providerDomain: input.providerDomain,
     mcpUrl: input.mcpUrl,
     ownership: input.ownership,
+    viewerSubjectId: input.viewerSubjectId ?? null,
+    reconnectConnectionId: input.reconnectConnectionId ?? null,
     before: new Map(input.connections.map((connection) => [connection.id, connection.status])),
     until: (input.now ?? Date.now()) + DESKTOP_CONNECT_WATCH_MS,
   };
 }
 
 /**
- * The connection the watched sign-in produced: one for its provider that is
- * active now and was not before (new, or signed in again). Null until then.
+ * The connection the watched sign-in produced: one for its provider and owner
+ * (the workspace, or the person connecting) that is active now and was not
+ * before. A reconnect accepts only the account it signs in again or a new
+ * one, never another account that recovers meanwhile. Connections the app
+ * already finished are skipped. Null until then.
  */
 export function finishedDesktopConnection<Connection extends WatchedConnection>(
   watch: DesktopConnectWatch,
   connections: readonly Connection[],
+  alreadyFinished: (connectionId: string) => boolean = () => false,
 ): Connection | null {
   return (
     connections.find((connection) => {
       if (connection.status !== "active" || watch.before.get(connection.id) === "active")
         return false;
+      if (alreadyFinished(connection.id)) return false;
+      if (!ownedAsWatched(watch, connection)) return false;
+      if (
+        watch.reconnectConnectionId &&
+        connection.id !== watch.reconnectConnectionId &&
+        watch.before.has(connection.id)
+      )
+        return false;
       if (watch.providerDomain) return connection.providerDomain === watch.providerDomain;
       return connection.metadata?.mcpUrl === watch.mcpUrl;
     }) ?? null
   );
+}
+
+function ownedAsWatched(watch: DesktopConnectWatch, connection: WatchedConnection): boolean {
+  // Rows without an owner field can't be told apart; the provider match decides.
+  if (connection.subjectId === undefined) return true;
+  if (watch.ownership === "workspace") return connection.subjectId === null;
+  if (connection.subjectId === null) return false;
+  return watch.viewerSubjectId === null || connection.subjectId === watch.viewerSubjectId;
 }
 
 const FINISHED_KEY = "opengeni.desktopConnect.finished";
