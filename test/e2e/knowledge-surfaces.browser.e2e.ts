@@ -1516,13 +1516,14 @@ function lastLibraryRow(page: Page): Locator {
     .locator("[data-row-action]");
 }
 
-/** An entry or collection returns to its Library tab, not a page named Knowledge. */
+/** An entry or collection's back link, named for the section ("Knowledge"),
+ *  returns to the Library tab it came from. */
 async function returnToLibraryFromEntry(page: Page): Promise<void> {
   const detailUrl = new URL(page.url());
   expect(detailUrl.searchParams.get("entry")).not.toBeNull();
   const back = page
     .locator(contentPageSelector)
-    .getByRole("button", { name: "Library", exact: true });
+    .getByRole("button", { name: "Knowledge", exact: true });
   expect(await back.count()).toBe(1);
   await back.click();
   await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
