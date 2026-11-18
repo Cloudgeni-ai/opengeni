@@ -973,6 +973,13 @@ export function oauthResumeAction(
   // valid and must never be rewritten with a private UUID.
   if (item.enabled && item.connectionRef?.subjectScope === "subject") return "reconnect";
   if (item.enabled && item.connectionRef?.connectionId === connectionId) return "reconnect";
+  // Every eligible account is already included, the new one too.
+  if (
+    item.enabled &&
+    !item.connectionRef?.connectionId &&
+    item.connectionRef?.accountSelection === "all_eligible"
+  )
+    return "reconnect";
   return "enable";
 }
 
@@ -1071,6 +1078,11 @@ export function apiKeyConnectionRef(
 
 export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {
   return value === "workspace" || value === "personal" ? value : null;
+}
+
+/** What the sign-in callback did with the capability (`capability=` on the return). */
+export function oauthServerFinish(value: string | null): "enabled" | "on" | null {
+  return value === "enabled" || value === "on" ? value : null;
 }
 
 /** First one or two initials for the logo monogram fallback. */

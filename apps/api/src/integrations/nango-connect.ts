@@ -73,6 +73,7 @@ import {
   workspaceIntegrationsPath,
   type OAuthStartContext,
 } from "./oauth-client";
+import { finishCapabilityAfterConnect } from "./connect-capability-finish";
 import {
   OAUTH_BROWSER_MISMATCH_MESSAGE,
   oauthCallbackBrowserAccepted,
@@ -173,6 +174,8 @@ export type NangoConnectState = {
   returnPath: string;
   returnUrl?: string;
   connectAttemptId?: string;
+  /** The catalog capability the finish turns on (connect-capability-finish.ts). */
+  capabilityId?: string;
   encryptedExternalContinuation?: string;
   nonce: string;
   iat: number;
@@ -215,6 +218,7 @@ export function readNangoConnectState(settings: Settings, token: string): NangoC
     ...(text(payload.encryptedExternalContinuation, 16384)
       ? { encryptedExternalContinuation: text(payload.encryptedExternalContinuation, 16384)! }
       : {}),
+    ...(text(payload.capabilityId, 512) ? { capabilityId: text(payload.capabilityId, 512)! } : {}),
     nonce: required("nonce"),
     iat: typeof payload.iat === "number" ? payload.iat : 0,
     ...(binding ?? {}),
@@ -295,6 +299,9 @@ export async function startNangoConnect(
     returnPath,
     ...(context.payload.returnUrl ? { returnUrl: context.payload.returnUrl } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
+    ...(context.payload.capabilityId && !externalContinuation && !context.connectAttemptId
+      ? { capabilityId: context.payload.capabilityId }
+      : {}),
     ...(externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(
@@ -828,9 +835,20 @@ export async function completeNangoConnect(
     throw new HTTPException(422, { message: "The account could not be verified. Connect again." });
   }
   const grantedScopes = granted.scopes;
-  const success = (connection: ConnectionMetadata): NangoConnectCompletion => {
+  const success = async (connection: ConnectionMetadata): Promise<NangoConnectCompletion> => {
     if (state.returnUrl && (state.connectAttemptId || state.encryptedExternalContinuation))
       return { status: "complete", redirectTo: state.returnUrl, exactReturn: true };
+    // Turn on the capability this connect was for, so setup is done even if
+    // no page loads afterwards (connect-capability-finish.ts).
+    const capability =
+      state.capabilityId && !state.encryptedExternalContinuation
+        ? await finishCapabilityAfterConnect(deps, {
+            owner: state,
+            capabilityId: state.capabilityId,
+            ownership: state.ownership,
+            connection,
+          })
+        : null;
     return {
       status: "complete",
       exactReturn: false,
@@ -840,6 +858,7 @@ export async function completeNangoConnect(
           connectionId: connection.id,
           providerDomain: connection.providerDomain,
           ownership: state.ownership,
+          ...(capability ? { capability } : {}),
         }),
         false,
       ),
@@ -954,7 +973,7 @@ export async function completeNangoConnect(
   const result = outcome as Awaited<ReturnType<typeof persistNangoConnection>> | null;
   if (!result) throw new HTTPException(409, { message: "connection changed; try again" });
   await afterNangoConnectionStored(deps, state, integration, result, match.connectionId);
-  return success(result.connection);
+  return await success(result.connection);
 }
 
 async function afterNangoConnectionStored(

@@ -373,6 +373,9 @@ async function performCapabilityActionUntracked(
         // re-enables against it.
         ...(action.connectionId ? { connectionId: action.connectionId } : {}),
         ownership: action.ownership,
+        // The callback finishes setup here; an account kept in another
+        // workspace is signed in there, and this page finishes it.
+        ...(action.connectionWorkspaceId ? {} : { capabilityId: item.id }),
         returnPath,
       },
     );
@@ -393,6 +396,7 @@ async function performCapabilityActionUntracked(
       ...(providerDomain ? { providerDomain } : {}),
       newAccount: true,
       ownership: action.ownership,
+      capabilityId: item.id,
       returnPath: returnPathFor(item.id),
     });
     if (!response.authorizationUrl) {
@@ -483,6 +487,9 @@ async function performCapabilityActionUntracked(
       ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
       ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
       ownership: action.ownership,
+      // The callback turns the capability on, so setup is done even when no
+      // page loads after the sign-in (a closed tab, the desktop app).
+      capabilityId: persisted.id,
       returnPath,
     });
     if (!response.authorizationUrl) {

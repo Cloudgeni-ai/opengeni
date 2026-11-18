@@ -1749,6 +1749,9 @@ export type OAuthStartRequest = {
    * Never combined with connectionId. */
   newAccount?: true | undefined;
   ownership?: ConnectionOwnership | undefined;
+  /** The catalog capability this sign-in is for; the callback turns it on
+   * with the new account, so setup finishes even if no page loads afterwards. */
+  capabilityId?: string | undefined;
   oauthClient?:
     | {
         clientId: string;

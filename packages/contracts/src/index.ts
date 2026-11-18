@@ -15596,6 +15596,11 @@ export const OAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
        * active account for this provider. Never combined with connectionId. */
       newAccount: z.literal(true).optional(),
       ownership: ConnectionOwnership.optional(),
+      /** The catalog capability this sign-in is for. When it finishes, the
+       * callback turns the capability on with the new account (as the person
+       * who started it, with the same checks as enabling it), so setup is done
+       * even if no page loads afterwards. */
+      capabilityId: z.string().min(1).max(512).optional(),
       oauthClient: z
         .object({
           clientId: primitives.nonEmptyString,
