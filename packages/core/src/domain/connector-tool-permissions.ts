@@ -67,6 +67,7 @@ import {
   settingsWithMcpCapabilityServers,
   settingsWithApiIntegrationServers,
 } from "./capabilities";
+import { applyNangoBackendsToSettings, nangoBackendsFor } from "./nango-integrations";
 
 export class ConnectorConnectionRequiredError extends HTTPException {
   constructor() {
@@ -255,7 +256,13 @@ async function resolveTarget(input: Input) {
           ownServers: enabled,
         })
       : [];
-  const settings = settingsWithMcpCapabilityServers(input.settings, [...enabled, ...carried]);
+  // The definition a session runs with, including the integration backend
+  // switch: a Nango-backed connector binds its Nango accounts, so their
+  // approvals are kept and enforced under the same account as at runtime.
+  const settings = applyNangoBackendsToSettings(
+    settingsWithMcpCapabilityServers(input.settings, [...enabled, ...carried]),
+    await nangoBackendsFor(input.db, input.settings),
+  );
   const server = settings.mcpServers.find((candidate) => candidate.id === item.runtime.mcpServerId);
   if (!server || server.url !== item.endpointUrl)
     throw new HTTPException(409, { message: "Connector configuration is unavailable" });
