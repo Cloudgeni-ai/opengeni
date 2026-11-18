@@ -49,7 +49,7 @@ BEGIN
     RAISE EXCEPTION 'workspace_instruction_policy_get_or_create_snapshot anchor drifted';
   END IF;
   definition := replace(definition, anchor, anchor || $r$
-      -- Resolve governance as of the turn's start (migration 1453).
+      -- Resolve governance as of the turn's start (migration 1488).
       turn_accepted_at := coalesce(
         (
           SELECT min(earlier.created_at)
@@ -92,7 +92,7 @@ BEGIN
     RAISE EXCEPTION 'instruction-policy snapshot time is outside its attempt'
       USING ERRCODE = '23514';
   END IF;
-  -- Resolve governance as of the turn's start (migration 1453).
+  -- Resolve governance as of the turn's start (migration 1488).
   turn_accepted_at := coalesce(
     (
       SELECT min(earlier.created_at)
@@ -132,7 +132,7 @@ BEGIN
     RAISE EXCEPTION 'company_profile_get_or_create_snapshot anchor drifted';
   END IF;
   definition := replace(definition, anchor, anchor || $r$
-      -- Resolve governance as of the turn's start (migration 1453).
+      -- Resolve governance as of the turn's start (migration 1488).
       accepted_at := coalesce(
         (
           SELECT min(earlier.created_at)
@@ -175,7 +175,7 @@ BEGIN
     RAISE EXCEPTION 'company-profile snapshot time is outside its attempt'
       USING ERRCODE = '23514';
   END IF;
-  -- Resolve governance as of the turn's start (migration 1453).
+  -- Resolve governance as of the turn's start (migration 1488).
   accepted_at := coalesce(
     (
       SELECT min(earlier.created_at)
