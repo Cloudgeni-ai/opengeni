@@ -290,6 +290,8 @@ to back. 1361 grants it again and removes the check, now that a release containi
 1283 is the pinned previous production binary. 1475 created the organization-wide
 sandbox counts withheld, with the same caller check, and 1479 granted them and
 removed the check; 1479 ships in the release after the one that contains 1475.
+1486 created the unpaid sandbox fleet counts withheld and 1490 grants them; 1490
+ships in the release after the one that contains 1486.
 Pin only the binary production really runs
 (its healthz `deploymentRevision`), never one that merely reached staging.
 

@@ -16,16 +16,33 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 export const SIGNUP_NETWORK_POLICY_VERSION = "ip-velocity-v1";
 /** Migration 1368: a network used by a denied or currently held account. */
 export const SIGNUP_DENIED_NETWORK_POLICY_VERSION = "denied-network-v1";
+/**
+ * Migration 1489: a farm of new organizations sharing one non-public mail
+ * domain, a burst of setups within seconds, or a non-public domain a denied
+ * organization used.
+ */
+export const SIGNUP_EMAIL_CLUSTER_POLICY_VERSION = "email-cluster-v1";
+/**
+ * Migration 1491: a person's second or later additional organization within
+ * 24 hours of their first organization, while none of theirs pays.
+ */
+export const ADDITIONAL_ORGANIZATION_POLICY_VERSION = "additional-organization-v1";
 /** Detector holds listed by the network review and released by its rollback. */
 export const SIGNUP_NETWORK_HOLD_POLICY_VERSIONS = [
   SIGNUP_NETWORK_POLICY_VERSION,
   SIGNUP_DENIED_NETWORK_POLICY_VERSION,
+  SIGNUP_EMAIL_CLUSTER_POLICY_VERSION,
+  ADDITIONAL_ORGANIZATION_POLICY_VERSION,
 ] as const;
 export type SignupNetworkHoldPolicyVersion = (typeof SIGNUP_NETWORK_HOLD_POLICY_VERSIONS)[number];
 /** Plain review reason for each network hold rule. */
 export const SIGNUP_NETWORK_HOLD_REASONS: Record<SignupNetworkHoldPolicyVersion, string> = {
   "ip-velocity-v1": "Several new organizations from one network within the velocity window",
   "denied-network-v1": "Network used in the last 90 days by a denied or currently held account",
+  "email-cluster-v1":
+    "Several new organizations with one non-public mail domain or within seconds, or a mail domain a denied organization used",
+  "additional-organization-v1":
+    "A second or later additional organization within 24 hours of its owner's first organization",
 };
 export const PROMOTION_DETECTOR_ACTOR = "service:promotion-detector";
 /** SQLSTATE raised by the setup receipt trigger when the network rate limit refuses. */
@@ -73,6 +90,20 @@ export type SignupNetworkVelocitySettings = {
   deniedNetworkLookbackDays?: number;
   /** Migration 1471: velocity on owners' sign-in networks; "off" until set. Older databases omit it. */
   signInNetworkMode?: "off" | "observe" | "enforce";
+  /**
+   * Migration 1489: the email cluster legs, each with its own mode (domain
+   * observes, burst and denied domain enforce, until set). Older databases
+   * omit these.
+   */
+  emailDomainMode?: "off" | "observe" | "enforce";
+  emailDomainHoldThreshold?: number;
+  emailDomainWindowMinutes?: number;
+  burstMode?: "off" | "observe" | "enforce";
+  burstHoldThreshold?: number;
+  burstWindowSeconds?: number;
+  deniedDomainMode?: "off" | "observe" | "enforce";
+  deniedDomainHoldThreshold?: number;
+  deniedDomainLookbackDays?: number;
   operator: string | null;
   changedAt: string | null;
 };
@@ -88,6 +119,15 @@ export type SignupNetworkVelocityChanges = Partial<
     | "rateLimitMax"
     | "deniedNetworkMode"
     | "signInNetworkMode"
+    | "emailDomainMode"
+    | "emailDomainHoldThreshold"
+    | "emailDomainWindowMinutes"
+    | "burstMode"
+    | "burstHoldThreshold"
+    | "burstWindowSeconds"
+    | "deniedDomainMode"
+    | "deniedDomainHoldThreshold"
+    | "deniedDomainLookbackDays"
   >
 >;
 
@@ -146,7 +186,21 @@ export type SignupNetworkHoldAccount = {
    */
   signInGroup: string | null;
   signInGroupSize: number | null;
-  /** denied-network-v1 evidence; null for ip-velocity-v1 holds. */
+  /** email-cluster-v1 evidence; null for the network rules' holds. */
+  emailCluster: {
+    domainKind: string | null;
+    /** 16-hex reference of the keyed domain hash; never the domain. */
+    domainGroup: string | null;
+    domainGroupSize: number | null;
+    burstGroupSize: number | null;
+    /** Setups in the burst window sharing this one's domain group or signup network. */
+    relatedBurstGroupSize: number | null;
+    /** Setups in the burst window that can hold: through the same shared relay,
+     * or with the same domain group and the same signup network. */
+    enforceableBurstGroupSize: number | null;
+    deniedDomainAccounts: number | null;
+  } | null;
+  /** denied-network-v1 evidence; null for the other rules' holds. */
   deniedNetwork: {
     deniedAccounts: number | null;
     heldAccounts: number | null;
@@ -260,7 +314,7 @@ export async function listSignupNetworkHolds(
         left join opengeni_private.signup_network_sources s
           on s.data_schema = h.data_schema and s.account_id = d.account_id
         where d.decision = 'held' and d.actor = ${PROMOTION_DETECTOR_ACTOR}
-          and h.policy_version in (${SIGNUP_NETWORK_POLICY_VERSION}, ${SIGNUP_DENIED_NETWORK_POLICY_VERSION})
+          and h.policy_version = any(${`{${SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.join(",")}}`}::text[])
         order by coalesce(s.set_up_at, d.updated_at) desc, d.account_id limit ${limit + 1}`,
       );
       const selected = holds.slice(0, limit);
@@ -419,6 +473,7 @@ async function readHoldAccount(
   });
   const policyVersion = (hold.policy_version as string | null) ?? null;
   const deniedNetwork = policyVersion === SIGNUP_DENIED_NETWORK_POLICY_VERSION;
+  const emailCluster = policyVersion === SIGNUP_EMAIL_CLUSTER_POLICY_VERSION;
   const strings = (value: unknown) =>
     Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
   return {
@@ -429,13 +484,28 @@ async function readHoldAccount(
     decidedAt: iso(hold.updated_at)!,
     ruleId: (hold.rule_id as string | null) ?? null,
     policyVersion,
-    reason: SIGNUP_NETWORK_HOLD_REASONS[deniedNetwork ? "denied-network-v1" : "ip-velocity-v1"],
+    reason:
+      SIGNUP_NETWORK_HOLD_REASONS[
+        SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.find((version) => version === policyVersion) ??
+          "ip-velocity-v1"
+      ],
     addressGroup: typeof hold.address_hash === "string" ? hold.address_hash.slice(0, 16) : null,
     prefixGroup: typeof hold.prefix_hash === "string" ? hold.prefix_hash.slice(0, 16) : null,
     exactGroupSize: num(evidence.exactGroupSize),
     prefixGroupSize: num(evidence.prefixGroupSize),
     signInGroup: typeof evidence.signInGroup === "string" ? evidence.signInGroup : null,
     signInGroupSize: num(evidence.signInGroupSize),
+    emailCluster: emailCluster
+      ? {
+          domainKind: typeof evidence.domainKind === "string" ? evidence.domainKind : null,
+          domainGroup: typeof evidence.domainGroup === "string" ? evidence.domainGroup : null,
+          domainGroupSize: num(evidence.domainGroupSize),
+          burstGroupSize: num(evidence.burstGroupSize),
+          relatedBurstGroupSize: num(evidence.relatedBurstGroupSize),
+          enforceableBurstGroupSize: num(evidence.enforceableBurstGroupSize),
+          deniedDomainAccounts: num(evidence.deniedDomainAccounts),
+        }
+      : null,
     deniedNetwork: deniedNetwork
       ? {
           deniedAccounts: num(evidence.deniedAccounts),

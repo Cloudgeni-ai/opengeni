@@ -525,4 +525,36 @@ describe("free compute bounds (real PostgreSQL)", () => {
     expect(kept!.liveness).toBe("warm");
     expect(await drain("compute_closed")).toMatchObject({ drained: true });
   }, 60_000);
+
+  test("a turnless drain never cuts off someone using the box or a running command", async () => {
+    const org = await organization({ plan: "free" });
+    const group = crypto.randomUUID();
+    expect((await acquire(org, "viewer", { group })).role).toBe("spawner");
+    const epoch = await warm(org, group);
+    const drain = (target: string, expectedEpoch: number, quietForMs: number) =>
+      drainNoTurnLeaseForComputeBounds(db, {
+        ...org,
+        sandboxGroupId: target,
+        expectedEpoch,
+        reason: "compute_turnless",
+        quietForMs,
+        idleGraceMs: 60_000,
+      });
+    // Active within the idle window: kept.
+    expect(await drain(group, epoch, 3_600_000)).toEqual({
+      drained: false,
+      reason: "active_since_decision",
+    });
+    // A running command or Browser/ComputerSession holder: kept, never stopped.
+    const busy = crypto.randomUUID();
+    expect((await acquire(org, "interaction", { group: busy })).role).toBe("spawner");
+    const busyEpoch = await warm(org, busy);
+    expect(await drain(busy, busyEpoch, 0)).toEqual({ drained: false, reason: "compute_commands" });
+    const [running] = await admin<{ liveness: string; rotation_reason: string | null }[]>`
+      select liveness, rotation_reason from sandbox_leases
+      where workspace_id = ${org.workspaceId} and sandbox_group_id = ${busy}`;
+    expect(running).toEqual({ liveness: "warm", rotation_reason: null });
+    // Idle: drained.
+    expect(await drain(group, epoch, 0)).toMatchObject({ drained: true, mode: "drained" });
+  }, 60_000);
 });

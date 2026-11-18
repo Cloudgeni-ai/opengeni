@@ -9,6 +9,7 @@ import {
   organizationHasComputeBounds,
   planComputeBoundsDrains,
   unpaidSandboxFleetState,
+  youngOrganizationTurnless,
 } from "../src/activities/sandbox-compute-bounds";
 
 const observedAt = new Date("2026-11-17T12:00:00.000Z");
@@ -52,6 +53,84 @@ describe("free compute bounds: reaper decisions", () => {
       { idleDrainMs: 1_800_000 },
     );
     expect(decisions.map((decision) => decision.reason)).toEqual(["compute_closed"]);
+  });
+
+  test("only a young unpaid organization is read for the turnless bound", async () => {
+    const limits = { youngOrganizationAgeMs: 86_400_000, youngTurnlessBoxSeconds: 900 };
+    const now = observedAt.getTime();
+    // None of these reads the database.
+    const db = null as unknown as Parameters<typeof youngOrganizationTurnless>[0];
+    const young = new Date(now - 3_600_000);
+    expect(
+      await youngOrganizationTurnless(db, limits, {
+        accountId: "a",
+        unpaid: false,
+        createdAt: young,
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      await youngOrganizationTurnless(db, limits, {
+        accountId: "a",
+        unpaid: true,
+        createdAt: new Date(now - 2 * 86_400_000),
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      await youngOrganizationTurnless(db, limits, {
+        accountId: "a",
+        unpaid: true,
+        createdAt: null,
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      await youngOrganizationTurnless(
+        db,
+        { youngOrganizationAgeMs: 86_400_000 },
+        { accountId: "a", unpaid: true, createdAt: young, now },
+      ),
+    ).toBe(false);
+  });
+
+  test("a young organization that never started a turn has its turnless boxes drained once idle, never with commands running", () => {
+    const bounds = new Map([["org-a", { limit: free, boxSecondsToday: 900, turnlessYoung: true }]]);
+    const reasons = (leases: NoTurnWarmLease[]) =>
+      planComputeBoundsDrains(leases, bounds, {
+        idleDrainMs: 1_800_000,
+        turnlessIdleMs: 300_000,
+      }).map((decision) => decision.reason);
+    const idle = new Date(observedAt.getTime() - 300_000);
+    expect(reasons([lease({ lastActiveAt: idle, viewerHolders: 1, commandHolders: 0 })])).toEqual([
+      "compute_turnless",
+    ]);
+    // Someone still using it, or a running command or Browser/ComputerSession, keeps it.
+    expect(
+      reasons([
+        lease({
+          lastActiveAt: new Date(observedAt.getTime() - 299_000),
+          viewerHolders: 1,
+          commandHolders: 0,
+        }),
+      ]),
+    ).toEqual([]);
+    expect(reasons([lease({ lastActiveAt: idle, commandHolders: 1 })])).toEqual([]);
+    // A turn just queued keeps the box; a compute box keeps its own state.
+    expect(
+      reasons([lease({ lastActiveAt: idle, openSessionWork: true, commandHolders: 0 })]),
+    ).toEqual([]);
+    expect(reasons([lease({ lastActiveAt: idle, backend: "compute", commandHolders: 0 })])).toEqual(
+      [],
+    );
+    // Without the flag (it chatted, is older or pays), an active box stays.
+    expect(
+      planComputeBoundsDrains(
+        [lease({ lastActiveAt: observedAt })],
+        new Map([["org-a", { limit: free, boxSecondsToday: 900 }]]),
+        { idleDrainMs: 1_800_000 },
+      ),
+    ).toEqual([]);
   });
 
   test("a compute box drains only when its tier is closed, never for a spent day", () => {
@@ -100,7 +179,7 @@ describe("free compute bounds: reaper decisions", () => {
     ).toEqual(["compute_idle"]);
     expect(
       planComputeBoundsDrains(
-        [lease({ lastActiveAt: idle, openSessionWork: true })],
+        [lease({ lastActiveAt: idle, openSessionWork: true, commandHolders: 0 })],
         organizations,
         { idleDrainMs: 1_800_000 },
       ),

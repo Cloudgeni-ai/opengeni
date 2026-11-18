@@ -9,7 +9,14 @@
 // warm box no turn holds, whatever else holds it (a terminal, a process, a
 // Browser/ComputerSession, a viewer). For a tier with `idleDrainAllHolders`
 // it also drains such a box nobody used for the viewer idle window
-// (`compute_idle`), not only a viewer-only one.
+// (`compute_idle`), not only a viewer-only one. For an unpaid organization in
+// its first day (fleet limits) in which no turn was ever started, once it has
+// used the box time it gets before one (`youngTurnlessBoxSeconds`), it drains
+// such a box once nothing on it was active for `youngTurnlessIdleMs`
+// (`compute_turnless`): a desktop or viewer left open with no chat does not
+// stay warm, but someone still using it is not cut off, and a box running
+// commands or a Browser/ComputerSession is left alone. Starting a chat lifts
+// it.
 //
 // An in-flight turn is never interrupted: a box a turn holds is not listed.
 // Compute boxes are drained for a closed tier or a spent day only when no
@@ -21,6 +28,8 @@ import {
   drainNoTurnLeaseForComputeBounds,
   listNoTurnWarmLeasePeople,
   listNoTurnWarmLeases,
+  organizationBoxSecondsSince,
+  organizationHasAnyTurn,
   readOrganizationBoxSecondsToday,
   readSandboxFleetPressure,
   readSandboxUnpaidFleet,
@@ -33,6 +42,7 @@ import {
   sandboxFleetLimits,
   sandboxPlanLimits,
   UNPAID_SANDBOX_PLAN_TIERS,
+  sandboxPlanTierUnpaid,
   type SandboxFleetLimits,
 } from "@opengeni/config";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -48,6 +58,9 @@ import type { ControlActivityServices as ActivityServices } from "./types";
 export type OrganizationComputeBounds = {
   limit: SandboxPlanLimit;
   boxSecondsToday: number;
+  /** A young unpaid organization that never started a turn and used the box
+   * time it gets before one. */
+  turnlessYoung?: boolean;
 };
 
 export type ComputeBoundsDrainDecision = {
@@ -73,7 +86,7 @@ export function organizationHasComputeBounds(limit: SandboxPlanLimit): boolean {
 export function planComputeBoundsDrains(
   leases: readonly NoTurnWarmLease[],
   organizations: ReadonlyMap<string, OrganizationComputeBounds>,
-  options: { idleDrainMs: number },
+  options: { idleDrainMs: number; turnlessIdleMs?: number },
 ): ComputeBoundsDrainDecision[] {
   const drains: ComputeBoundsDrainDecision[] = [];
   for (const lease of leases) {
@@ -92,6 +105,15 @@ export function planComputeBoundsDrains(
       organization.boxSecondsToday >= limit.boxSecondsPerOrganizationPerDay
     ) {
       drains.push({ lease, reason: "compute_daily_budget" });
+      continue;
+    }
+    if (
+      organization.turnlessYoung === true &&
+      !lease.openSessionWork &&
+      lease.commandHolders === 0 &&
+      lease.observedAt.getTime() - lease.lastActiveAt.getTime() >= (options.turnlessIdleMs ?? 0)
+    ) {
+      drains.push({ lease, reason: "compute_turnless" });
       continue;
     }
     if (
@@ -121,9 +143,10 @@ export async function boundComputeBoundedWarmBoxes(
   const { db, settings, observability } = services;
   const result: ComputeBoundsResult = {
     inspected: 0,
-    drained: { compute_closed: 0, compute_daily_budget: 0, compute_idle: 0 },
+    drained: { compute_closed: 0, compute_daily_budget: 0, compute_idle: 0, compute_turnless: 0 },
   };
   const planLimits = sandboxPlanLimits(settings);
+  const fleetLimits = sandboxFleetLimits(settings);
   const concurrency = Math.max(1, options.concurrency ?? 8);
 
   // Workspaces by organization; Connected Machines are outside these bounds.
@@ -150,13 +173,22 @@ export async function boundComputeBoundedWarmBoxes(
       // bounds (daily box time, idle drain of every holder).
       const tierLimit = sandboxPlanLimitFor(planLimits, standing.tier);
       const limit = standing.paidHistory ? paidSandboxPlanLimit(tierLimit) : tierLimit;
-      if (!organizationHasComputeBounds(limit)) return;
+      const turnlessYoung = await youngOrganizationTurnless(db, fleetLimits, {
+        accountId,
+        unpaid:
+          sandboxPlanTierUnpaid(standing.tier, {
+            subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+          }) && !standing.paidHistory,
+        createdAt: standing.organizationCreatedAt,
+      });
+      if (!organizationHasComputeBounds(limit) && !turnlessYoung) return;
       organizations.set(accountId, {
         limit,
         boxSecondsToday:
           limit.boxSecondsPerOrganizationPerDay === undefined
             ? 0
             : await readOrganizationBoxSecondsToday(db, accountId),
+        turnlessYoung,
       });
     } catch (error) {
       observability.warn("sandbox reaper: compute-bounds plan read failed for organization", {
@@ -187,8 +219,9 @@ export async function boundComputeBoundedWarmBoxes(
   result.inspected = inventory.length;
 
   const idleDrainMs = settings.sandboxViewerIdleDrainMs;
+  const turnlessIdleMs = fleetLimits.youngTurnlessIdleMs ?? 0;
   await forEachLimited(
-    planComputeBoundsDrains(inventory, organizations, { idleDrainMs }),
+    planComputeBoundsDrains(inventory, organizations, { idleDrainMs, turnlessIdleMs }),
     concurrency,
     async ({ lease, reason }) => {
       try {
@@ -198,7 +231,7 @@ export async function boundComputeBoundedWarmBoxes(
           sandboxGroupId: lease.sandboxGroupId,
           expectedEpoch: lease.leaseEpoch,
           reason,
-          quietForMs: idleDrainMs,
+          quietForMs: reason === "compute_turnless" ? turnlessIdleMs : idleDrainMs,
           // A closed organization cannot re-arm its box: drain it in this
           // sweep rather than after the reconnect grace.
           idleGraceMs: reason === "compute_closed" ? 0 : settings.sandboxIdleGraceMs,
@@ -238,6 +271,27 @@ export async function boundComputeBoundedWarmBoxes(
     },
   );
   return result;
+}
+
+/** Whether an unpaid organization in its first day never started a turn
+ * and has used the box time it gets before one. */
+export async function youngOrganizationTurnless(
+  db: ActivityServices["db"],
+  limits: SandboxFleetLimits,
+  input: { accountId: string; unpaid: boolean; createdAt: Date | null; now?: number },
+): Promise<boolean> {
+  if (
+    !input.unpaid ||
+    input.createdAt === null ||
+    limits.youngTurnlessBoxSeconds === undefined ||
+    limits.youngOrganizationAgeMs === undefined ||
+    (input.now ?? Date.now()) - input.createdAt.getTime() >= limits.youngOrganizationAgeMs
+  ) {
+    return false;
+  }
+  const seconds = await organizationBoxSecondsSince(db, input.accountId, input.createdAt);
+  if (seconds < limits.youngTurnlessBoxSeconds) return false;
+  return !(await organizationHasAnyTurn(db, input.accountId));
 }
 
 async function forEachLimited<T>(

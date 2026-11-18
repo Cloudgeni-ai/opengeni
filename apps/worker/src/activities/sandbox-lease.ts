@@ -1447,7 +1447,8 @@ export function createSandboxLeaseActivities(
 
       // The plan's free-compute bounds over every holder kind: a closed plan,
       // a spent daily box-time budget, or (idleDrainAllHolders) a box no turn
-      // holds that nobody used for the idle window.
+      // holds that nobody used for the idle window, or a box of a young
+      // unpaid organization that never started a turn (youngTurnlessBoxSeconds).
       try {
         const bounds = await boundComputeBoundedWarmBoxes(
           { db, settings, observability },
@@ -1457,7 +1458,8 @@ export function createSandboxLeaseActivities(
         forceDrained +=
           bounds.drained.compute_closed +
           bounds.drained.compute_daily_budget +
-          bounds.drained.compute_idle;
+          bounds.drained.compute_idle +
+          bounds.drained.compute_turnless;
       } catch (error) {
         observability.warn("sandbox reaper: compute bounds failed", {
           error: errorMessage(error),

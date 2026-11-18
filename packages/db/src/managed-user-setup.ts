@@ -127,11 +127,18 @@ export async function setSignupNetworkSourceForSetup(
  * Empty for a replay of a committed setup or when detection is off.
  */
 export async function readSignupNetworkEvaluateAccounts(txDb: Database): Promise<string[]> {
-  const [evaluate] = await rawRows<{ ids: string | null }>(
+  // The network rules' list (1354, 1471, 1484), then the email cluster
+  // rule's (1489), each this organization first; duplicates once.
+  const [evaluate] = await rawRows<{ ids: string | null; email_ids: string | null }>(
     txDb,
-    sql`select pg_catalog.current_setting('opengeni.signup_network_evaluate_accounts', true) as ids`,
+    sql`select pg_catalog.current_setting('opengeni.signup_network_evaluate_accounts', true) as ids,
+      pg_catalog.current_setting('opengeni.signup_email_cluster_evaluate_accounts', true) as email_ids`,
   );
-  return (evaluate?.ids ?? "").split(",").filter((id) => /^[0-9a-f-]{36}$/u.test(id));
+  const ids = [
+    ...(evaluate?.ids ?? "").split(","),
+    ...(evaluate?.email_ids ?? "").split(","),
+  ].filter((id) => /^[0-9a-f-]{36}$/u.test(id));
+  return [...new Set(ids)];
 }
 
 /**
