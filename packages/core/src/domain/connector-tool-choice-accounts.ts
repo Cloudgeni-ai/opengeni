@@ -34,7 +34,9 @@ function verifiedAccountName(connection: ChoiceConnection): string | null {
 
 /**
  * The owner's connections of the same connector and verified provider account
- * under the other integration backend. An unverified account matches nothing.
+ * under the other integration backend, whatever their status: a login that is
+ * broken or signed out now still gets every change, so a reset made meanwhile
+ * never comes back when it works again. An unverified account matches nothing.
  */
 export function sameAccountOtherBackendConnections<T extends ConnectionMetadata>(
   connection: ChoiceConnection,
@@ -48,7 +50,6 @@ export function sameAccountOtherBackendConnections<T extends ConnectionMetadata>
       candidate.accountId === connection.accountId &&
       candidate.subjectId === connection.subjectId &&
       candidate.kind === connection.kind &&
-      (candidate.status === "active" || candidate.status === "needs_reauth") &&
       isNangoProviderDomain(candidate.providerDomain) !==
         isNangoProviderDomain(connection.providerDomain) &&
       sameConnectorProviderDomain(candidate.providerDomain, connection.providerDomain) &&

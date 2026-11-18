@@ -250,18 +250,24 @@ test("a Nango-backed connector's approvals load, save, are enforced and survive 
       ["send_message", "allow"],
     ]);
 
-    // Carried into Mia's Personal workspace, the same account and choices apply.
+    // The native login breaks meanwhile. Carried into Mia's Personal
+    // workspace, where only her Nango login is usable, the same account and
+    // choices apply.
+    await sql`update connections set status = 'error' where id = ${nativeGmail.id}`;
     const carried = await getConnectorToolPermissions(input(personal));
     expect(carried.connectionId).toBe(nangoGmail.id);
     expect(tool(carried, "create_draft")).toMatchObject({ permission: "block" });
+    // A change made while the native login is broken still reaches it.
+    await choose(nangoGmail.id, "send_message", "ask");
   } finally {
+    await sql`update connections set status = 'active' where id = ${nativeGmail.id}`;
     await switchGmail("native");
   }
 
   // Back on native: the native account has the choices made under Nango too.
   const back = await getConnectorToolPermissions(input(team));
   expect(back.connectionId).toBe(nativeGmail.id);
-  expect(tool(back, "send_message")).toMatchObject({ permission: "allow" });
+  expect(tool(back, "send_message")).toMatchObject({ permission: "ask", source: "tool" });
   expect(tool(back, "create_draft")).toMatchObject({ permission: "block" });
 }, 60_000);
 
