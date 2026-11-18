@@ -189,6 +189,7 @@ async function seedWarmBox(
   sandboxGroupId: string,
 ): Promise<void> {
   const acquired = await acquireLease(db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId,
     workspaceId,
     sandboxGroupId,
@@ -576,6 +577,7 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
     const sandboxGroupId = session.sandboxGroupId;
     // A turn holds the box warm (the spawner path).
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId,
@@ -598,6 +600,7 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
     });
     // A viewer also attaches (refcount 2: 1 turn + 1 viewer).
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId,

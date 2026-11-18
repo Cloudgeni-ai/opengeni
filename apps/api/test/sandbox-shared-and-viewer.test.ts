@@ -861,6 +861,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     // Both sessions acquire a holder on the GROUP lease (kind 'viewer' here just
     // to exercise the fan-in without an establish). Refcount counts BOTH.
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: a.sandboxGroupId,
@@ -871,6 +872,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       leaseTtlMs: 5_000,
     });
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: b.sandboxGroupId,
@@ -916,6 +918,7 @@ async function seedWarmBox(
   const sandboxGroupId = session.sandboxGroupId;
   // Spawner acquires (cold->warming), then commit warm with a (null) envelope.
   const acquired = await acquireLease(db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId,
     workspaceId,
     sandboxGroupId,
@@ -992,6 +995,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       sandboxBackend: "local",
     });
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,
@@ -1067,6 +1071,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     });
     // A fresh chat's first turn is still bringing its sandbox up.
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,
@@ -1659,6 +1664,7 @@ describe("P1.4 GATED live-Modal viewer-keep-warm (opt-in)", () => {
         box = await modalClient.create();
         const resumeState = await modalClient.serializeSessionState(box.state);
         const acquired = await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId,
           workspaceId,
           sandboxGroupId: session.sandboxGroupId,

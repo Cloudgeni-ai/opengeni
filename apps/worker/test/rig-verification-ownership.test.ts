@@ -2,11 +2,14 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing/settings";
+import { sandboxFleetLimits, sandboxPlanLimits } from "@opengeni/config";
 import type { Database, LeaseSnapshot } from "@opengeni/db";
 import type { Observability } from "@opengeni/observability";
 import type { EstablishedSandboxSession } from "@opengeni/runtime";
 import {
+  assertRigVerificationComputeAdmitted,
   RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE,
+  RigVerificationComputeUnavailableError,
   runWithOwnedRigVerificationSandbox,
   type RigVerificationActivityLifecycle,
   type RigVerificationOwnershipDependencies,
@@ -67,6 +70,8 @@ function established(instanceId = "sb-verifier"): EstablishedSandboxSession {
 type HarnessOptions = {
   ownersEnabled?: boolean;
   acquireRole?: "spawner" | "attached" | "rearmed" | "fenced";
+  /** Overrides the whole acquire result (for example a capacity fence). */
+  acquireResult?: Record<string, unknown>;
   establishErrorBeforeCreate?: Error;
   recordError?: Error;
   recordResult?: boolean;
@@ -89,6 +94,9 @@ function harness(options: HarnessOptions = {}) {
   const releaseGrace: number[] = [];
   const establishInputs: Array<Parameters<RigVerificationOwnershipDependencies["establish"]>[2]> =
     [];
+  const establishSettings: Array<Parameters<RigVerificationOwnershipDependencies["establish"]>[0]> =
+    [];
+  const acquireInputs: Array<Parameters<RigVerificationOwnershipDependencies["acquire"]>[1]> = [];
   const acquiredGroups: string[] = [];
   let uuidCalls = 0;
 
@@ -124,16 +132,19 @@ function harness(options: HarnessOptions = {}) {
     },
     acquire: async (_db, input) => {
       events.push("acquire");
+      acquireInputs.push(input);
       acquiredGroups.push(input.sandboxGroupId);
       expect(input.image).toBe(settings.modalImageRef);
       expect(input.rigVersionId).toBe(VERSION_ID);
+      if (options.acquireResult) return { lease: snapshot(), ...options.acquireResult };
       return {
         role: options.acquireRole ?? "spawner",
         lease: snapshot(),
       };
     },
-    establish: async (_settings, _envelope, establishOptions) => {
+    establish: async (establishWith, _envelope, establishOptions) => {
       events.push("establish:start");
+      establishSettings.push(establishWith);
       establishInputs.push(establishOptions);
       if (options.establishErrorBeforeCreate) throw options.establishErrorBeforeCreate;
       const created = established();
@@ -239,9 +250,77 @@ function harness(options: HarnessOptions = {}) {
     failEpochs,
     releaseGrace,
     establishInputs,
+    establishSettings,
+    acquireInputs,
     acquiredGroups,
   };
 }
+
+describe("rig verification compute bounds", () => {
+  test("the verification box is admitted under the plan, standing and fleet bounds", async () => {
+    const state = harness();
+    await expect(state.run(async () => true)).resolves.toBe(true);
+    expect(state.acquireInputs[0]!.sandboxPlanLimits).toEqual(sandboxPlanLimits(settings));
+    expect(state.acquireInputs[0]!.sandboxFleetLimits).toEqual(sandboxFleetLimits(settings));
+    // An organization of unknown or paid standing keeps the standard ceilings.
+    expect(state.establishSettings[0]!.sandboxResourceClass).toBe(settings.sandboxResourceClass);
+  });
+
+  test("a Free organization's verification box gets the unpaid resource ceilings", async () => {
+    const state = harness({ acquireResult: { role: "spawner", sandboxPlanTier: "free" } });
+    await expect(state.run(async () => true)).resolves.toBe(true);
+    expect(state.establishSettings[0]!.sandboxResourceClass).toBe("unpaid");
+    const paid = harness({
+      acquireResult: { role: "spawner", sandboxPlanTier: "free", sandboxPaidHistory: true },
+    });
+    await expect(paid.run(async () => true)).resolves.toBe(true);
+    expect(paid.establishSettings[0]!.sandboxResourceClass).toBe("standard");
+  });
+
+  test("an organization at its running-box limit fails clearly without creating a box", async () => {
+    const state = harness({
+      acquireResult: {
+        role: "fenced",
+        reason: "organization_sandbox_capacity",
+        organizationBoxLimit: 2,
+      },
+    });
+    const failure = state.run(async () => true);
+    await expect(failure).rejects.toBeInstanceOf(RigVerificationComputeUnavailableError);
+    await expect(failure).rejects.toThrow("already runs the 2 its plan allows");
+    expect(state.events[0]).toBe("acquire");
+    expect(state.events).not.toContain("establish:start");
+    expect(state.events).not.toContain("release");
+  });
+
+  test("a held or denied organization that has not paid is refused before any work", async () => {
+    const closed = async () =>
+      ({ tier: "restricted", paidHistory: false }) as Awaited<
+        ReturnType<typeof import("@opengeni/db").resolveSandboxComputeStanding>
+      >;
+    await expect(
+      assertRigVerificationComputeAdmitted(db, settings, ACCOUNT_ID, closed),
+    ).rejects.toBeInstanceOf(RigVerificationComputeUnavailableError);
+    // Free, a paid organization and a failed read are admitted
+    // (the lease admission still enforces the bounds).
+    const free = async () =>
+      ({ tier: "free", paidHistory: false }) as Awaited<
+        ReturnType<typeof import("@opengeni/db").resolveSandboxComputeStanding>
+      >;
+    const paying = async () =>
+      ({ tier: "pro", paidHistory: true }) as Awaited<
+        ReturnType<typeof import("@opengeni/db").resolveSandboxComputeStanding>
+      >;
+    const failing = async () => {
+      throw new Error("standing unavailable");
+    };
+    for (const resolve of [free, paying, failing]) {
+      await expect(
+        assertRigVerificationComputeAdmitted(db, settings, ACCOUNT_ID, resolve),
+      ).resolves.toBeUndefined();
+    }
+  });
+});
 
 describe("rig verification canonical lease ownership", () => {
   test("every run of the same target acquires its own new lease group", async () => {

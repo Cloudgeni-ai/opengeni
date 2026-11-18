@@ -68,6 +68,7 @@ async function warmGroup(
   const groupId = crypto.randomUUID();
   for (const holder of holders) {
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...ids,
       sandboxGroupId: groupId,
       kind: holder.kind,
@@ -237,6 +238,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     // the idle clock. A stale report is refused the same way.
     const reattach = (holderId: string, viewerInteractionAgeMs?: number) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ids,
         sandboxGroupId: groupId,
         kind: "viewer",
@@ -259,6 +261,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
         update sandbox_leases set liveness = 'cold', instance_id = null, expires_at = now()
         where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${groupId}`;
     const back = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...ids,
       sandboxGroupId: groupId,
       kind: "viewer",
@@ -429,6 +432,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${groupId}`;
     const reattach = (holderId: string) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ids,
         sandboxGroupId: groupId,
         kind: "viewer",
@@ -470,6 +474,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     ).toEqual({ drained: true, releasedViewers: 1 });
     const reattach = () =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ids,
         sandboxGroupId: groupId,
         kind: "viewer",
@@ -578,6 +583,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
       // Process holders come only from retained-process promotion; stand one
       // in by retyping a direct holder.
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ids,
         sandboxGroupId: groupId,
         kind: kind === "process" ? "direct" : kind,
@@ -593,6 +599,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
             and lease.sandbox_group_id = ${groupId}`;
       }
       const joined = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ids,
         sandboxGroupId: groupId,
         kind: "viewer",
@@ -606,6 +613,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     // A box nothing else holds is still refused.
     await expect(
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ids,
         sandboxGroupId: crypto.randomUUID(),
         kind: "viewer",

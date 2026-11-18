@@ -266,6 +266,7 @@ async function assertExpiredDrainFence(
   // The successor races after the reaper has converted the attributed warming
   // row to immediately-expired draining. It must not re-arm the old provider.
   const successor = await acquireLease(db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
     sandboxGroupId: ids.groupId,
@@ -334,6 +335,7 @@ async function assertExpiredDrainFence(
   });
 
   const next = await acquireLease(db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
     sandboxGroupId: ids.groupId,
@@ -468,6 +470,7 @@ describe("archive object publication binding and disposition", () => {
       sandboxGroupId: ids.groupId,
     };
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...scope,
       kind: "turn",
       holderId: attempt.holderId,
@@ -622,6 +625,7 @@ describe("archive object publication binding and disposition", () => {
       where id = ${f.source.id}`;
     expect(await releaseWorkspaceArchiveCapture(db, f.input)).toBe(true);
     const resumed = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...f.scope,
       kind: "turn",
       holderId: f.input.holderId,
@@ -682,6 +686,7 @@ describe("archive object publication binding and disposition", () => {
         if (operation === "acquire") {
           expect(
             await acquireLease(db, {
+              sandboxPlanLimits: "unbounded_test_fixture",
               ...f.scope,
               kind: "turn",
               holderId: "bounded-successor",
@@ -1045,6 +1050,7 @@ describe("an interrupted cold restore keeps the selected durable archive", () =>
         expect(reset?.resumeState?.sessionState).toEqual(f.sessionState);
 
         const next = await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...f.scope,
           kind: "turn",
           holderId: "turn-attempt:after-worker-death",
@@ -1081,6 +1087,7 @@ describe("an interrupted cold restore keeps the selected durable archive", () =>
         },
       });
       const next = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...f.scope,
         kind: "turn",
         holderId: "turn-attempt:after-lost-pointer",
@@ -1097,6 +1104,7 @@ describe("an interrupted cold restore keeps the selected durable archive", () =>
       const reset = await readLease(db, f.ids.workspaceId, f.ids.groupId);
       expect(reset).toMatchObject({ liveness: "cold", leaseEpoch: 4, resumeState: null });
       const next = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...f.scope,
         kind: "turn",
         holderId: "turn-attempt:first-box",
@@ -1118,6 +1126,7 @@ describe("Modal create outcome fencing", () => {
       sandboxGroupId: ids.groupId,
     };
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...identity,
       kind: "turn",
       holderId: "dead-create-owner",
@@ -1216,6 +1225,7 @@ describe("Modal create outcome fencing", () => {
       sandboxGroupId: ids.groupId,
     };
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...identity,
       kind: "turn",
       holderId: "unknown-create-owner",
@@ -1338,6 +1348,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       )`;
 
     const warming = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -1616,6 +1627,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -1633,6 +1645,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -1766,6 +1779,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
 
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -1784,6 +1798,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const results = await Promise.all(
       Array.from({ length: N }, (_, i) =>
         acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId,
           workspaceId,
           sandboxGroupId: groupId,
@@ -1807,6 +1822,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -1910,6 +1926,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const ownerHolderId = `turn-attempt:${ownerAttemptId}`;
     const siblingHolderId = `turn-attempt:${siblingAttemptId}`;
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -1934,6 +1951,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(committed.committed).toBe(true);
     const warmLeaseEpoch = committed.lease!.leaseEpoch;
     const siblingLease = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2063,6 +2081,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
     // First attach carries the claims -> recorded on the holder row.
     const first = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2095,6 +2114,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // A claimless re-acquire (a pre-0281 caller in the rolling window)
     // preserves the recorded claims instead of nulling them.
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2110,6 +2130,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
     // A newer mint after a revocation bump raises the recorded epoch...
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2124,6 +2145,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
     // ...and a stale lower claim can never lower it back (monotone evidence).
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2140,6 +2162,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // epoch) pair: the previous subject's higher epoch must not be carried.
     const otherSubject = `user:${crypto.randomUUID()}`;
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2172,6 +2195,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2226,6 +2250,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     };
     const first = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2279,6 +2304,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     ).toBe(archive);
 
     const successor = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2355,6 +2381,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     };
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2437,6 +2464,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     };
     const first = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2483,6 +2511,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
 
     const successor = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2518,6 +2547,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const { accountId, workspaceId, groupId } = await freshWorkspace();
 
     const old = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2543,6 +2573,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(afterRollback?.lease_epoch).toBe(1);
 
     const successor = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2613,6 +2644,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const old = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2639,6 +2671,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(reset?.lease_epoch).toBe(old.lease.leaseEpoch + 1);
 
     const successor = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2664,6 +2697,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const ids = await freshWorkspace();
     const old = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
@@ -2717,6 +2751,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const ids = await freshWorkspace();
     const old = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
@@ -2809,6 +2844,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const fresh = await freshWorkspace();
     const [r1, r2] = await Promise.all([
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: fresh.accountId,
         workspaceId: fresh.workspaceId,
         sandboxGroupId: fresh.groupId,
@@ -2818,6 +2854,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         leaseTtlMs: 45_000,
       }),
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: fresh.accountId,
         workspaceId: fresh.workspaceId,
         sandboxGroupId: fresh.groupId,
@@ -2838,6 +2875,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // S1 acquires (spawner) then commits warming->warm at expectedEpoch 0 -> epoch 1.
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2921,6 +2959,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3001,6 +3040,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
 
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3080,6 +3120,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3167,6 +3208,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3215,6 +3257,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3249,6 +3292,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
 
     const resumed = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3268,6 +3312,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3314,6 +3359,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3350,6 +3396,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
 
     const admission = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3379,6 +3426,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       })}
       where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     const reverseMismatch = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3405,6 +3453,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3437,6 +3486,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
 
     const admission = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3476,6 +3526,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       )`;
 
     const admission = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3510,6 +3561,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       )`;
 
     const admission = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3525,6 +3577,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3573,6 +3626,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
     let settled = false;
     const waiting = acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3617,6 +3671,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3800,6 +3855,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
     // A holder arrival wins availability without waiting for hold expiry.
     const rearmed = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -3911,6 +3967,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4016,6 +4073,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         and archive_capture_id = ${captureId}::uuid`;
 
     const fenced = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4093,6 +4151,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expect(lease).toMatchObject({ leaseEpoch: 6, instanceId: "sb-no-shell", liveness });
 
       const arrival = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
@@ -4114,6 +4173,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // reaper to save and end, and arrivals stay fenced while it drains.
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4170,6 +4230,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(draining?.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
     expect(
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
@@ -4216,6 +4277,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(claim.lease.rotationReason).toBe("teardown_claim");
     const controller = new AbortController();
     const waiting = acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4249,6 +4311,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4360,6 +4423,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4440,6 +4504,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4677,6 +4742,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       initialMessage: "direct release fixture",
     });
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4754,6 +4820,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4771,6 +4838,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       leaseTtlMs: 45_000,
     });
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -4817,6 +4885,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const wsB = await freshWorkspace();
     for (const ws of [wsA, wsB]) {
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: ws.accountId,
         workspaceId: ws.workspaceId,
         sandboxGroupId: ws.groupId,
@@ -4859,6 +4928,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const ids = await freshWorkspace();
     const initial = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
@@ -4967,6 +5037,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const ids = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
@@ -5028,6 +5099,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const wsA = await freshWorkspace();
     const wsB = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: wsA.accountId,
       workspaceId: wsA.workspaceId,
       sandboxGroupId: wsA.groupId,
@@ -5037,6 +5109,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       leaseTtlMs: 45_000,
     });
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: wsB.accountId,
       workspaceId: wsB.workspaceId,
       sandboxGroupId: wsB.groupId,
@@ -5075,6 +5148,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // Warm a box with a realistic resume envelope (providerState + sandboxId).
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5184,6 +5258,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5235,6 +5310,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5295,6 +5371,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(lease?.recovery.workspace.status).toBe("unrecoverable");
 
     const retry = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5327,6 +5404,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     const drainMissing = async (group: string, containerId: string, owned: boolean) => {
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: group,
@@ -5390,6 +5468,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(lease.resumeState).toMatchObject(envelope("docker-drain-old"));
 
     const owner = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5452,6 +5531,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       if (archived) {
         // A prior published box drained with a complete durable archive.
         await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...scope,
           kind: "turn",
           holderId: "archived-owner",
@@ -5513,6 +5593,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
       // The dying attempt wins the cold->warming election and records its box.
       const dying = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...scope,
         kind: "turn",
         holderId: "turn-attempt:dying",
@@ -5571,6 +5652,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
       // The replacement attempt arrives while the reaper owns the box.
       const waiting = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...scope,
         kind: "turn",
         holderId: "turn-attempt:replacement",
@@ -5618,6 +5700,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expect(generationAfter).toBe(generationBefore);
 
       const retry = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...scope,
         kind: "turn",
         holderId: "turn-attempt:replacement",
@@ -5654,6 +5737,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       const attempts = await Promise.all(
         ["first", "second"].map((holderId) =>
           acquireLease(db, {
+            sandboxPlanLimits: "unbounded_test_fixture",
             ...scope,
             kind: "turn",
             holderId,
@@ -5714,6 +5798,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       sandboxGroupId: ids.groupId,
     };
     const input = {
+      sandboxPlanLimits: "unbounded_test_fixture" as const,
       ...scope,
       kind: "turn" as const,
       holderId: "original",
@@ -5753,6 +5838,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5827,6 +5913,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       sourceWorkspaceGeneration: 0,
     });
     const blocked = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5884,6 +5971,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       }),
     ).toEqual({ wrote: false, archiveRevision: null });
     const successor = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -5901,6 +5989,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       const { accountId, workspaceId, groupId } = await freshWorkspace();
       const holderId = `late-capture-${fence}`;
       const acquired = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
@@ -6002,6 +6091,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6174,6 +6264,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6194,6 +6285,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6215,6 +6307,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     // A SECOND holder arrives on the warm box with the SAME image -> attach, box intact.
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6247,6 +6340,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       leaseTtlMs: 45_000,
     };
     const first = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...base,
       kind: "turn",
       holderId: "turn-1",
@@ -6266,6 +6360,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(committed.committed).toBe(true);
     const epoch = committed.lease!.leaseEpoch;
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...base,
       kind: "viewer",
       holderId: "keeper",
@@ -6280,6 +6375,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
     // The deployment pin changes while no turn runs, but a viewer holds the box.
     const second = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...base,
       kind: "turn",
       holderId: "turn-2",
@@ -6297,6 +6393,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     });
     const direct = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...base,
       kind: "direct",
       holderId: "direct-after-repin",
@@ -6306,6 +6403,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     for (const holderId of ["browser-session:after-repin", "computer-session:after-repin"]) {
       expect(
         await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...base,
           kind: "interaction",
           holderId,
@@ -6325,6 +6423,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
     expect(
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...base,
         kind: "turn",
         holderId: "stale-epoch",
@@ -6336,6 +6435,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // New groups use the new pin immediately, independently of the warm group.
     expect(
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...base,
         sandboxGroupId: crypto.randomUUID(),
         kind: "turn",
@@ -6356,6 +6456,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // An idle-grace arrival re-arms the same provider, not the newly selected pin.
     expect(
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...base,
         kind: "turn",
         holderId: "turn-3",
@@ -6385,6 +6486,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     ).toMatchObject({ status: "claimed" });
     expect(
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...base,
         kind: "turn",
         holderId: "capture-fenced",
@@ -6402,6 +6504,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...base,
         kind: "turn",
         holderId: "rotation-fenced",
@@ -6416,6 +6519,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect(
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...base,
         kind: "turn",
         holderId: "successor",
@@ -6433,6 +6537,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const arrivals = await Promise.all(
       Array.from({ length: 12 }, (_, index) =>
         acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId,
           workspaceId,
           sandboxGroupId: groupId,
@@ -6464,6 +6569,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // Warm on img-A, held by exactly ONE holder ("solo").
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6490,6 +6596,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // erase the only provider pointer or resume envelope; the reaper owns
     // snapshot + termination before a successor can stamp img-B.
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6549,6 +6656,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // Warm on img-A with a holder that STAYS on the box.
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6571,6 +6679,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // A DIFFERENT holder resolves a DIFFERENT image while "keeper" still holds -> refuse.
     await expect(
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
@@ -6595,6 +6704,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const base = {
+      sandboxPlanLimits: "unbounded_test_fixture" as const,
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6655,6 +6765,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const base = {
+      sandboxPlanLimits: "unbounded_test_fixture" as const,
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6691,6 +6802,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6712,6 +6824,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     // No image on this acquire -> attach, no conflict, image column unchanged.
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6733,6 +6846,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6753,6 +6867,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6779,6 +6894,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // SAME solo holder, SAME image, DIFFERENT rig -> capture-and-drain rotation.
     // The new rig is stamped only by a later cold successor.
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6821,6 +6937,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6842,6 +6959,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     await expect(
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
@@ -6855,6 +6973,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // Ambient image-pin continuity cannot weaken a required rig-version fence.
     await expect(
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
@@ -6880,6 +6999,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6900,6 +7020,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       leaseTtlMs: 45_000,
     });
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6929,6 +7050,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6950,6 +7072,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     // A rig-less acquire (no rigVersionId) attaches and leaves the rig column intact.
     const res = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -6986,6 +7109,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     };
 
     const initial = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -7044,6 +7168,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const acquires = await Promise.all(
       Array.from({ length: 24 }, (_, index) =>
         acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId,
           workspaceId,
           sandboxGroupId: groupId,
@@ -7192,6 +7317,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     };
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -7288,6 +7414,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       workspacePersistence: "snapshot_filesystem",
     };
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -7400,6 +7527,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-stale","workspace_persistence":"snapshot_filesystem"}',
     ).toString("base64");
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -7454,6 +7582,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const archiveSha256 = new Bun.CryptoHasher("sha256").update(nativeBytes).digest("hex");
     const capturedAt = "2030-03-17T17:46:49.000Z";
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -7515,6 +7644,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -7554,6 +7684,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -7727,6 +7858,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8017,6 +8149,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
       currentHolderId = `checkpoint-owner-${index + 1}`;
       const successor = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
@@ -8101,6 +8234,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       [currentArtifactId]: "current",
     });
     const successor = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8171,6 +8305,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
 
     const initial = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8213,6 +8348,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(lost.lease.resumeState).toMatchObject(envelope("docker-old"));
 
     const elected = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8283,6 +8419,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(secondLoss.status).toBe("marked");
     if (secondLoss.status !== "marked") throw new Error("second Docker loss fixture was stale");
     const retryOwner = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8341,6 +8478,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     });
     const initial = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8372,6 +8510,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect(lost.status).toBe("marked");
     const elected = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8430,6 +8569,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8539,6 +8679,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       sessionId: crypto.randomUUID(),
     });
     const holderInput = (holder: { holderId: string }, sessionId: string) => ({
+      sandboxPlanLimits: "unbounded_test_fixture" as const,
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -8640,6 +8781,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const sessionId = crypto.randomUUID();
     const live = await seedLiveCanonicalAttempt({ accountId, workspaceId, groupId, sessionId });
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,

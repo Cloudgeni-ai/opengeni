@@ -92,6 +92,7 @@ test("an agent's API-direct write to a private chat's cloud home is admitted for
 
   const firstRequestId = crypto.randomUUID();
   const initialLease = await acquireLease(client.db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId: account.id,
     workspaceId: workspace.id,
     sandboxGroupId,
@@ -148,6 +149,7 @@ test("an agent's API-direct write to a private chat's cloud home is admitted for
     const holderId = `direct:${requestId}`;
     if (requestId !== firstRequestId) {
       await acquireLease(client!.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: account.id,
         workspaceId: workspace.id,
         sandboxGroupId,

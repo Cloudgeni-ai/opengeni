@@ -520,6 +520,7 @@ describe("drain snapshot fallback", () => {
       };
       if (rearm === "arrival") {
         const acquired = await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...group,
           kind: "turn",
           holderId: `turn-${crypto.randomUUID()}`,

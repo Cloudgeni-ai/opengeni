@@ -107,6 +107,7 @@ async function warmGroup(
   for (const h of holders) {
     await withCreditDebitAttribution(attribution, () =>
       acquireLeaseUnscoped(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.groupId,
@@ -292,6 +293,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       } = paid,
     ) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ws,
         sandboxGroupId: ws.groupId,
         kind,
@@ -336,6 +338,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     await seedBalance(paidWs.accountId, -500);
     const paidAcquire = (kind: "turn" | "viewer" | "direct" | "interaction", holderId: string) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...paidWs,
         sandboxGroupId: paidWs.groupId,
         kind,
@@ -350,6 +353,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       );
       await expect(
         acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...paidWs,
           sandboxGroupId: paidWs.groupId,
           kind,
@@ -482,6 +486,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(
       (
         await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...ws,
           sandboxGroupId: ws.groupId,
           kind: "viewer",
@@ -543,6 +548,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(
       (
         await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...ws,
           sandboxGroupId: ws.groupId,
           kind: "viewer",
@@ -917,6 +923,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
 
     // Re-warm a new box on the same group through the real cold->warming->warm path.
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       sandboxGroupId: ws.groupId,
@@ -1074,6 +1081,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
 
     const acquireViewer = (holderId: string) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: ws.accountId,
         workspaceId: ws.workspaceId,
         sandboxGroupId: ws.groupId,
@@ -1123,6 +1131,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     const groupT = crypto.randomUUID();
     const viewer = (sandboxGroupId: string, holderId: string) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: ws.accountId,
         workspaceId: ws.workspaceId,
         sandboxGroupId,
@@ -1177,6 +1186,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
 
     // Without a limit, admission is unchanged.
     const unlimited = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       sandboxGroupId: crypto.randomUUID(),

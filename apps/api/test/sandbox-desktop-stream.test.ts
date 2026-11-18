@@ -132,6 +132,7 @@ async function seedWarmModalBox(
   });
   const sandboxGroupId = created.sandboxGroupId;
   const acquired = await acquireLease(db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId,
     workspaceId,
     sandboxGroupId,

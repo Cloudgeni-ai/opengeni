@@ -70,6 +70,7 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
     });
     const sandboxGroupId = session.sandboxGroupId;
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...workspace,
       sandboxGroupId,
       kind: "turn",

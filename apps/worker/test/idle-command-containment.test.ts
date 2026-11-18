@@ -509,6 +509,7 @@ describe("idle command containment", () => {
     await admin`delete from session_background_commands where id=${fixture.processId}`;
     const viewer = `viewer-${crypto.randomUUID()}`;
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...scope(fixture),
       kind: "viewer",
       holderId: viewer,
@@ -964,6 +965,7 @@ describe("idle command containment", () => {
       await idleFor(fixture, 31);
       const viewerId = `viewer-${crypto.randomUUID()}`;
       const viewer = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: fixture.accountId,
         workspaceId: fixture.workspaceId,
         sandboxGroupId: fixture.sandboxGroupId,
@@ -1117,6 +1119,7 @@ describe("idle command containment", () => {
       await idleFor(fixture, 31);
       expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
       const arrival = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: fixture.accountId,
         workspaceId: fixture.workspaceId,
         sandboxGroupId: fixture.sandboxGroupId,
@@ -1151,6 +1154,7 @@ describe("idle command containment", () => {
       const [enrolled, arrival] = await Promise.all([
         enrollRetainedCommandContainment(db, scope(fixture)),
         acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId: fixture.accountId,
           workspaceId: fixture.workspaceId,
           sandboxGroupId: fixture.sandboxGroupId,
