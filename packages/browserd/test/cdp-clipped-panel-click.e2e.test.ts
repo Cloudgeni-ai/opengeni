@@ -631,3 +631,55 @@ for (const [tag, kind] of [
     120_000,
   );
 }
+
+// A carousel that scrolls sideways inside a page column that clips its
+// overflow: the carousel's own box runs past the column's edge, so a card
+// beyond that edge lies inside the carousel's box yet shows nowhere. The
+// card is centered in the carousel and clicked; a card in a strip that clips
+// without scrolling is still refused.
+const CAROUSEL = fixture([
+  "<!doctype html><title>Carousel</title>",
+  "<style>",
+  "body{margin:0;font:14px sans-serif}",
+  "main{width:580px;overflow:clip}",
+  "#carousel{width:900px;overflow-x:auto;display:flex}",
+  "#carousel a{flex:0 0 150px;display:block;height:60px}",
+  "</style>",
+  '<main><div id="carousel">',
+  ...Array.from(
+    { length: 8 },
+    (_, index) => `<a href="#card-${index}" id="card-${index}">Card ${index}</a>`,
+  ),
+  "</div></main>",
+  "<script>",
+  "globalThis.log=[];",
+  'for (const card of document.querySelectorAll("#carousel a")) card.addEventListener("click",(event)=>{event.preventDefault();log.push(card.id)});',
+  "</script>",
+]);
+
+e2e(
+  "a carousel card past the edge of a column that clips the carousel is scrolled to and clicked",
+  async () => {
+    await withSession(CAROUSEL, async ({ evaluate, click }) => {
+      // Inside the carousel's own box, past the column's clipped edge.
+      expect(
+        await evaluate(
+          '(() => { const r = document.getElementById("card-4").getBoundingClientRect(); return r.left >= 580 && r.right <= 900; })()',
+        ),
+      ).toBe(true);
+      const result = await click({
+        type: "click",
+        locator: { kind: "role", role: "link", name: "Card 4", exact: true },
+      });
+      expect(result.error ?? null).toBeNull();
+      expect(result.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["card-4"]);
+      expect(
+        await evaluate(
+          '(() => { const r = document.getElementById("card-4").getBoundingClientRect(); return r.right <= 580; })()',
+        ),
+      ).toBe(true);
+    });
+  },
+  60_000,
+);
