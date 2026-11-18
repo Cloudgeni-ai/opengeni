@@ -1,5 +1,48 @@
 # @opengeni/core
 
+## 6.29.0
+
+### Patch Changes
+
+- c64d1e4: Follow-ups to one Nango connection per account.
+
+  - **Missing connections:** the Nango sweep now asks an active row to reconnect (`nango_connection_missing`) when Nango confirms its connection is gone (a 404 for that connection), for example after an older release deleted a shared connection during a rollout or rollback. A row whose account has another healthy connection that covers its scopes is moved onto that one instead. People whose only connection is gone are found through a new deployment-wide listing (migration 1487) once a later migration grants it; until then only people with a connection Nango lists for this deployment are visited. Too many missing connections at once (as with a wrong Nango environment), or a pass that could not plan everyone, marks none; the worker reports the former as `missingBreakerTripped`. When nothing listed carries this deployment's tag, the deployment-wide listing is not used.
+  - **Legacy duplicates keep running turns:** a legacy duplicate row moved onto the shared connection without its account key keeps its `authority_generation`, so turns already running on it keep working.
+  - **Scopes count as a grant only when confirmed:** a row's scopes count as a grant for sharing only when it carries `nangoScopesConfirmed` naming its own Nango connection (Nango reported them for that connection). Rows without reported scopes still carry the older `nangoScopesUnconfirmed` for the previous release during a rollout or rollback. Rows saved before the marker no longer move another organization's row onto their connection on their stored scopes; for such connections the scopes Nango reports count instead, so older duplicates still merge.
+  - **Deletes after commit:** the sweep deletes connections Nango can no longer refresh only after the rows' writes commit, under the person lock in a transaction that writes no connection rows.
+  - **Deployment tag mismatch:** a worker whose deployment tag matches none of the listed connections logs once that its tag is possibly mismatched.
+  - **Reconnect attempts:** reconnecting a Nango-backed account through `POST /v1/workspaces/:workspaceId/connect/attempts` with `reconnectAccountId` no longer answers 404 while the integration is served through Nango; the attempt starts Nango Connect. A reconnect must name the person's own account of that same integration.
+
+- 41414cf: Rig verification now takes a sandbox only within the organization's plan and fleet compute limits: an organization whose tier allows no running box (held or denied) is refused before a verification sandbox starts, and the verification records a failed outcome instead of retrying. Creating a sandbox environment, change or version is refused with 403 for a suspended organization. `acquireLease` now requires `sandboxPlanLimits`; a caller that must bypass the limits passes the named opt-out `"unbounded_test_fixture"`.
+- Updated dependencies [7b590d3]
+- Updated dependencies [59e5248]
+- Updated dependencies [c5a628c]
+- Updated dependencies [30bd11c]
+- Updated dependencies [6581a0f]
+- Updated dependencies [b34167e]
+- Updated dependencies [c64d1e4]
+- Updated dependencies [088561b]
+- Updated dependencies [60f6dea]
+- Updated dependencies [bdecc33]
+- Updated dependencies [41414cf]
+- Updated dependencies [7b590d3]
+- Updated dependencies [7b590d3]
+- Updated dependencies [ea75565]
+  - @opengeni/db@6.29.0
+  - @opengeni/config@6.29.0
+  - @opengeni/runtime@6.29.0
+  - @opengeni/codex@6.29.0
+  - @opengeni/capabilities@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/documents@6.29.0
+  - @opengeni/events@6.29.0
+  - @opengeni/storage@6.29.0
+  - @opengeni/contracts@6.29.0
+  - @opengeni/network@6.29.0
+  - @opengeni/observability@6.29.0
+  - @opengeni/tool-gateway@6.29.0
+  - @opengeni/vaults@6.29.0
+
 ## 6.28.0
 
 ### Patch Changes

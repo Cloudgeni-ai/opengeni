@@ -1,5 +1,71 @@
 # @opengeni/worker-bundle
 
+## 6.29.0
+
+### Patch Changes
+
+- 133d6b9: Decoding a sandbox image that an image-generation request references now copies its bytes with `new Uint8Array(buffer)` instead of `Uint8Array.from(buffer)`. Bun runs the latter element by element when the source is a Node Buffer, which used about 16 times the image size in transient memory. The image bytes are unchanged.
+- b34167e: Every Modal box now starts with its CPU and memory ceilings. A cold start without a durable admission callback (the desktop viewer, Channel A, rematerialization and rig verification) used the pinned Agents adapter's create, which sent only the reservation (0.125 cores, 128 MiB), no ceilings or egress allowlists, and skipped the create boundary that refuses a box without ceilings. It now takes Opengeni's bounded create, so these boxes get the tier's ceilings (2 cores / 4096 MiB unpaid, 16 cores / 32768 MiB otherwise) and fail closed when they are missing.
+
+  A box of an organization that review holds or denies is now stopped in the next reaper sweep. The closed-organization drain runs in every sweep's inventory instead of only in the maintenance pass after it, skips the reconnect grace, and also closes an unpaid organization whose self-serve owner or a viewer runs a held or denied one. Before, a denial took a maintenance pass, the 60 second grace and another sweep before the box was stopped.
+
+- c64d1e4: Follow-ups to one Nango connection per account.
+
+  - **Missing connections:** the Nango sweep now asks an active row to reconnect (`nango_connection_missing`) when Nango confirms its connection is gone (a 404 for that connection), for example after an older release deleted a shared connection during a rollout or rollback. A row whose account has another healthy connection that covers its scopes is moved onto that one instead. People whose only connection is gone are found through a new deployment-wide listing (migration 1487) once a later migration grants it; until then only people with a connection Nango lists for this deployment are visited. Too many missing connections at once (as with a wrong Nango environment), or a pass that could not plan everyone, marks none; the worker reports the former as `missingBreakerTripped`. When nothing listed carries this deployment's tag, the deployment-wide listing is not used.
+  - **Legacy duplicates keep running turns:** a legacy duplicate row moved onto the shared connection without its account key keeps its `authority_generation`, so turns already running on it keep working.
+  - **Scopes count as a grant only when confirmed:** a row's scopes count as a grant for sharing only when it carries `nangoScopesConfirmed` naming its own Nango connection (Nango reported them for that connection). Rows without reported scopes still carry the older `nangoScopesUnconfirmed` for the previous release during a rollout or rollback. Rows saved before the marker no longer move another organization's row onto their connection on their stored scopes; for such connections the scopes Nango reports count instead, so older duplicates still merge.
+  - **Deletes after commit:** the sweep deletes connections Nango can no longer refresh only after the rows' writes commit, under the person lock in a transaction that writes no connection rows.
+  - **Deployment tag mismatch:** a worker whose deployment tag matches none of the listed connections logs once that its tag is possibly mismatched.
+  - **Reconnect attempts:** reconnecting a Nango-backed account through `POST /v1/workspaces/:workspaceId/connect/attempts` with `reconnectAccountId` no longer answers 404 while the integration is served through Nango; the attempt starts Nango Connect. A reconnect must name the person's own account of that same integration.
+
+- 60f6dea: Plan-less organizations on a deployment without subscription plans are no longer bounded like Free, and turns parked at an organization's running-box limit no longer count as sandbox recoveries.
+
+  - **`none` without subscription plans:** with `OPENGENI_SUBSCRIPTION_PLANS_ENABLED` off, no organization ever gets a plan row, so `none` is every organization's ordinary tier. It is no longer unpaid: the default plan limits leave it unbounded (`DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS`), and none of the free compute bounds, unpaid fleet limits or unpaid Modal ceilings apply to it. With subscription plans on, `none` is still a self-serve organization waiting for Free enrollment and stays bounded like Free. Promotion decisions (`restricted`, linked restriction, suspension) apply either way. Operators can still bound `none` in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. New `sandboxPlanTierUnpaid`; `parseSandboxPlanLimitsJson` takes `{ subscriptionPlansEnabled }`, `settingsForSandboxPlanTier` reads `subscriptionPlansEnabled` from its settings, and `acquireLease` accepts `subscriptionPlansEnabled` (omitted means on).
+  - **Recovery cause `organization_limit`:** a turn parked because its organization already runs as many boxes as its plan allows counts in `opengeni_turn_recoveries_total` as `cause="organization_limit"` instead of `sandbox`, and `OpenGeniTurnRecoveryRatioHigh` excludes it like `route_change`.
+
+- 41414cf: Rig verification now takes a sandbox only within the organization's plan and fleet compute limits: an organization whose tier allows no running box (held or denied) is refused before a verification sandbox starts, and the verification records a failed outcome instead of retrying. Creating a sandbox environment, change or version is refused with 403 for a suspended organization. `acquireLease` now requires `sandboxPlanLimits`; a caller that must bypass the limits passes the named opt-out `"unbounded_test_fixture"`.
+- Updated dependencies [7b590d3]
+- Updated dependencies [59e5248]
+- Updated dependencies [c5a628c]
+- Updated dependencies [30bd11c]
+- Updated dependencies [6581a0f]
+- Updated dependencies [b34167e]
+- Updated dependencies [c64d1e4]
+- Updated dependencies [088561b]
+- Updated dependencies [60f6dea]
+- Updated dependencies [bdecc33]
+- Updated dependencies [41414cf]
+- Updated dependencies [7b590d3]
+- Updated dependencies [7b590d3]
+- Updated dependencies [ea75565]
+  - @opengeni/db@6.29.0
+  - @opengeni/config@6.29.0
+  - @opengeni/runtime@6.29.0
+  - @opengeni/codex@6.29.0
+  - @opengeni/capabilities@6.29.0
+  - @opengeni/core@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/documents@6.29.0
+  - @opengeni/events@6.29.0
+  - @opengeni/github@6.29.0
+  - @opengeni/storage@6.29.0
+  - @opengeni/sdk@6.29.0
+  - @opengeni/agent-proto@6.29.0
+  - @opengeni/codemode@6.29.0
+  - @opengeni/contracts@6.29.0
+  - @opengeni/decisions@6.29.0
+  - @opengeni/interaction@6.29.0
+  - @opengeni/jev@6.29.0
+  - @opengeni/network@6.29.0
+  - @opengeni/observability@6.29.0
+  - @opengeni/subscriptions@6.29.0
+  - @opengeni/tool-gateway@6.29.0
+  - @opengeni/vaults@6.29.0
+  - @opengeni/vaults-bitwarden@6.29.0
+  - @opengeni/vaults-keeper@6.29.0
+  - @opengeni/vaults-onepassword@6.29.0
+  - @opengeni/vaults-protonpass@6.29.0
+
 ## 6.28.0
 
 ### Minor Changes

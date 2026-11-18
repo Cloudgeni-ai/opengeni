@@ -1,5 +1,13 @@
 # @opengeni/codemode
 
+## 6.29.0
+
+### Patch Changes
+
+- @opengeni/sdk@6.29.0
+- @opengeni/contracts@6.29.0
+- @opengeni/tool-gateway@6.29.0
+
 ## 6.28.0
 
 ### Patch Changes

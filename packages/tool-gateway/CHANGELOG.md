@@ -1,5 +1,12 @@
 # @opengeni/tool-gateway
 
+## 6.29.0
+
+### Patch Changes
+
+- @opengeni/contracts@6.29.0
+- @opengeni/observability@6.29.0
+
 ## 6.28.0
 
 ### Patch Changes
