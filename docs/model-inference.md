@@ -60,9 +60,10 @@ OPENGENI_PUBLIC_DECISION_MODEL_ID=typesafe/jev-1.13
 OPENGENI_PUBLIC_DECISION_MODEL_API_KEY=<server-side credential>
 ```
 
-Optional `OPENGENI_PUBLIC_DECISION_MODEL_BASE_URL` and
-`OPENGENI_PUBLIC_DECISION_MODEL_AUTH` have the same provider and authentication
-semantics as the shared category, including Azure `deployment_identity`.
+Optional `OPENGENI_PUBLIC_DECISION_MODEL_BASE_URL`,
+`OPENGENI_PUBLIC_DECISION_MODEL_ENDPOINT` and
+`OPENGENI_PUBLIC_DECISION_MODEL_AUTH` have the same provider, endpoint and
+authentication semantics as the shared category, including Azure `deployment_identity`.
 Leave **all** public settings unset to retain the shared model. Setting any public
 field selects that category as a whole: it never inherits an agent key, base URL
 or authentication mode. Partial/missing configuration returns 503. The default

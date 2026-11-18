@@ -919,6 +919,27 @@ describe("decision selection", () => {
     ]);
     // Ties keep candidate (ranking) order.
     expect(selectFromJudgments(j(0.1, 0.1)).load).toEqual(["t0"]);
+    // A model's own threshold replaces the default for what loads.
+    expect(selectFromJudgments(j(0.9, 0.8, 0.6, 0.1)).load).toEqual(["t0", "t1", "t2"]);
+    expect(selectFromJudgments(j(0.9, 0.8, 0.6, 0.1), 0.7).load).toEqual(["t0", "t1"]);
+    expect(selectFromJudgments(j(0.6, 0.1), 0.7)).toMatchObject({ load: ["t0"], clear: false });
+  });
+  test("a selector's load threshold decides what a search loads", async () => {
+    const tools = [
+      candidate("tasks__get", "Get task details"),
+      candidate("tasks__history", "What changed on a task"),
+      candidate("tasks__list", "List tasks"),
+    ];
+    const table = { tasks__get: 0.9, tasks__history: 0.6, tasks__list: 0.05 };
+    const loaded = async (selector: ToolSelector) => {
+      const runtime = decisionRuntime(selector);
+      runtime.refresh(tools);
+      return (await runtime.prepareSearch({ query: "get task details" })).tools?.map((t) => t.name);
+    };
+    expect(await loaded(judge(table))).toEqual(["tasks__get", "tasks__history"]);
+    expect(await loaded(Object.assign(judge(table), { loadThreshold: 0.7 }))).toEqual([
+      "tasks__get",
+    ]);
   });
   test("a candidate the model declined to judge is shown first, never silently dropped", () => {
     const judgments = [

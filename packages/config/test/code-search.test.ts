@@ -130,7 +130,7 @@ describe("Jev and code_search settings", () => {
 
   test.each([
     ["no deployment identity", { AZURE_FEDERATED_TOKEN_FILE: undefined }],
-    ["a provider other than openai", { OPENGENI_DECISION_MODEL_PROVIDER: "openrouter" }],
+    ["the jev provider", { OPENGENI_DECISION_MODEL_PROVIDER: "jev" }],
     ["no resource base URL", { OPENGENI_DECISION_MODEL_BASE_URL: undefined }],
   ])("deployment identity with %s configures nothing", (_, override) => {
     const settings = withEnv(
@@ -142,7 +142,84 @@ describe("Jev and code_search settings", () => {
     expect(decisionModelConfiguration(settings)).toBeUndefined();
     expect(decisionModelConfiguration(settings, true)).toBeUndefined();
   });
+
+  // Azure AI Foundry serves the openrouter-shaped decisions API at its own path.
+  const foundryEndpoint =
+    "https://resource.services.ai.azure.test/providers/microsoft/v1/systemone";
+  const foundry = {
+    ...azureIdentity,
+    OPENGENI_DECISION_MODEL_PROVIDER: "openrouter",
+    OPENGENI_DECISION_MODEL_BASE_URL: undefined,
+    OPENGENI_DECISION_MODEL_ENDPOINT: foundryEndpoint,
+  };
+
+  test("an Azure AI Foundry decision model posts to its endpoint as the deployment identity", () => {
+    const settings = withEnv(defined(foundry), getSettings);
+    expect(decisionModelConfiguration(settings)).toEqual({
+      provider: "openrouter",
+      model: "configured-deployment",
+      endpoint: foundryEndpoint,
+      azureEntra: {
+        tenantId: "tenant-test",
+        clientId: "client-test",
+        federatedTokenFile: "/var/run/secrets/azure/tokens/token-test",
+      },
+    });
+  });
+
+  test("an explicit endpoint works with a key and is part of the explicit category", () => {
+    const keyed = withEnv(
+      {
+        OPENGENI_DECISION_MODEL_PROVIDER: "openrouter",
+        OPENGENI_DECISION_MODEL_ID: "configured-deployment",
+        OPENGENI_DECISION_MODEL_API_KEY: "decision-test-key",
+        OPENGENI_DECISION_MODEL_ENDPOINT: foundryEndpoint,
+      },
+      getSettings,
+    );
+    expect(decisionModelConfiguration(keyed)).toEqual({
+      provider: "openrouter",
+      model: "configured-deployment",
+      apiKey: "decision-test-key",
+      endpoint: foundryEndpoint,
+    });
+    // An endpoint alone is a partial explicit category: nothing, and no legacy fallback.
+    const partial = withEnv(
+      {
+        OPENGENI_DECISION_MODEL_ENDPOINT: foundryEndpoint,
+        OPENGENI_JEV_API_KEY: "legacy-test-key",
+      },
+      getSettings,
+    );
+    expect(decisionModelConfiguration(partial, true)).toBeUndefined();
+    // The Jev client posts to its own path, so an endpoint does not apply to it.
+    const jev = withEnv(
+      {
+        OPENGENI_DECISION_MODEL_PROVIDER: "jev",
+        OPENGENI_DECISION_MODEL_ID: "jev-latest",
+        OPENGENI_DECISION_MODEL_API_KEY: "decision-test-key",
+        OPENGENI_DECISION_MODEL_ENDPOINT: foundryEndpoint,
+      },
+      getSettings,
+    );
+    expect(decisionModelConfiguration(jev)).toBeUndefined();
+  });
+
+  test("the tool search load threshold is unset by default and must be a probability", () => {
+    expect(withEnv({}, getSettings).toolSearchLoadThreshold).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD: "0.7" }, getSettings).toolSearchLoadThreshold,
+    ).toBe(0.7);
+    for (const invalid of ["0", "1", "1.5", "-0.1", "high"])
+      expect(() =>
+        withEnv({ OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD: invalid }, getSettings),
+      ).toThrow();
+  });
 });
+
+function defined(env: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([, value]) => value)) as NodeJS.ProcessEnv;
+}
 
 function withEnv<T>(env: NodeJS.ProcessEnv, run: () => T): T {
   const original = process.env;

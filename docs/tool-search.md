@@ -26,7 +26,9 @@ call. This page describes what a search does and how a deployment configures it.
    call judges every candidate, with its full description, against the query, the
    separate requests and what this turn already loaded: will the agent need it to
    do what the query asks? That includes a tool a chosen tool needs called first,
-   for example to find an id it requires. Every candidate judged needed is loaded,
+   for example to find an id it requires. Every candidate judged needed (a
+   probability above 0.5, or the deployment's `OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD`)
+   is loaded,
    whatever the search's `limit`, which bounds only keyword results and listed
    suggestions. If none is, the most likely one is loaded anyway. When the choice
    was not clear, up to five next candidates are listed by name.
@@ -61,6 +63,7 @@ and then what the tool does.
 | Capability | Setting | Without it |
 | --- | --- | --- |
 | Selection | The decision-model category (`OPENGENI_DECISION_MODEL_*`), see [decision models](decision-models.md). | The strongest few candidates per request are loaded and the others are listed. |
+| Load threshold | `OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD`, a probability between 0 and 1 (exclusive). Decision models are calibrated differently, so measure your model with the harness below before changing it. | 0.5. |
 | Meaning ranking | The document embedding model Knowledge uses (`OPENGENI_DOCUMENT_EMBEDDING_*`, see [embedding](embedding.md)). There is no separate tool-search setting. | Keywords alone. |
 
 Meaning ranking is off when the embedding provider is the local `deterministic`

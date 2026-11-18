@@ -2280,7 +2280,7 @@ export class LazyToolRuntime {
         new Set(judgments.map((judgment) => judgment.name)).size !== judgments.length
       )
         throw new Error("Invalid decision model selection");
-      const selection = selectFromJudgments(judgments);
+      const selection = selectFromJudgments(judgments, this.decisionModel.loadThreshold);
       // Named tools are loaded whatever the judgments say; the selector
       // covers the query's other needs.
       chosen = [...new Set([...named, ...selection.load])];

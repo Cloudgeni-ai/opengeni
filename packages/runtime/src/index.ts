@@ -2663,6 +2663,11 @@ export type BuildAgentOptions = {
   /** Admitted decision provider; caller owns its accounting and cancellation. */
   toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
   /**
+   * The probability above which a tool search loads a judged candidate, for
+   * `toolSearchDecisionModel`'s calibration. Unset keeps the built-in 0.5.
+   */
+  toolSearchLoadThreshold?: number | undefined;
+  /**
    * Called when a tool search's decision model fails or misses its deadline
    * and the search falls back to keywords: the search result says only that
    * it fell back.
@@ -4609,10 +4614,10 @@ function maybeInstallLazyToolTransport(
       return names;
     },
     options.toolSearchDecisionModel
-      ? createToolSelector(
-          options.toolSearchDecisionModel,
-          options.onToolSelectionError ? { onError: options.onToolSelectionError } : {},
-        )
+      ? createToolSelector(options.toolSearchDecisionModel, {
+          ...(options.onToolSelectionError ? { onError: options.onToolSelectionError } : {}),
+          loadThreshold: options.toolSearchLoadThreshold,
+        })
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
     harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
