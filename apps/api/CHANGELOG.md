@@ -1,5 +1,42 @@
 # @opengeni/api-router
 
+## 6.29.1
+
+### Patch Changes
+
+- 825e714: Chats started for a person from Slack, Teams, a schedule or the API now freeze that person's name like chats started in the app, and the sidebar resolves older unlabeled chats to the person's name instead of showing an id fragment. Session list entries carry `agentId`, so agent chats show the agent's icon in the sidebar and chat switcher. Agents' Slack installs report `postsAsAgent`; when the Slack app lacks `chat:write.customize`, the Slack integration page and the agent's Slack row say replies show as Opengeni, with one Update action.
+- Updated dependencies [c6c1d63]
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [a641523]
+- Updated dependencies [4884618]
+- Updated dependencies [825e714]
+  - @opengeni/artifact-tool@6.29.1
+  - @opengeni/contracts@6.29.1
+  - @opengeni/core@6.29.1
+  - @opengeni/db@6.29.1
+  - @opengeni/config@6.29.1
+  - @opengeni/capabilities@6.29.1
+  - @opengeni/codemode@6.29.1
+  - @opengeni/codex@6.29.1
+  - @opengeni/decisions@6.29.1
+  - @opengeni/documents@6.29.1
+  - @opengeni/events@6.29.1
+  - @opengeni/github@6.29.1
+  - @opengeni/interaction@6.29.1
+  - @opengeni/observability@6.29.1
+  - @opengeni/runtime@6.29.1
+  - @opengeni/storage@6.29.1
+  - @opengeni/tool-gateway@6.29.1
+  - @opengeni/vaults@6.29.1
+  - @opengeni/vaults-bitwarden@6.29.1
+  - @opengeni/vaults-keeper@6.29.1
+  - @opengeni/vaults-onepassword@6.29.1
+  - @opengeni/vaults-protonpass@6.29.1
+  - @opengeni/agent-proto@6.29.1
+  - @opengeni/network@6.29.1
+  - @opengeni/xai-subscription@6.29.1
+
 ## 6.29.0
 
 ### Patch Changes
