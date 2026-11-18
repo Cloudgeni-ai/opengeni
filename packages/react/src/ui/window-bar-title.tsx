@@ -28,8 +28,9 @@ export interface WindowBarPlace {
 export const WindowBarPlaceContext = createContext<WindowBarPlace | null>(null);
 
 /**
- * Told whether a header below names the window bar, so a `DetailPage` drops
- * its back link only while its own header carries it into the bar's trail.
+ * Told whether a header below names the window bar with its page's list in
+ * the trail, so a `DetailPage` drops its back link only while the bar
+ * carries it.
  */
 export const WindowBarOwnerReportContext = createContext<((owns: boolean) => void) | null>(null);
 
@@ -56,6 +57,8 @@ export const PageHeaderWindowBarContext = createContext<{
   release(id: string): void;
   /** The header whose title the bar shows. */
   owner: string | null;
+  /** Whether the bar's trail shows that header's list (its page's back link). */
+  parentInTrail?: boolean | undefined;
 } | null>(null);
 
 /**
@@ -121,12 +124,13 @@ export function useWindowBarTitle(
   }, [id, set, text, fallback, copyable, place]);
   useIsomorphicLayoutEffect(() => () => release?.(id), [id, release]);
   const owns = windowBar?.owner === id;
+  const carriesBack = owns && windowBar?.parentInTrail === true;
   const report = useContext(WindowBarOwnerReportContext);
   useIsomorphicLayoutEffect(() => {
-    if (!report || !owns) return;
+    if (!report || !carriesBack) return;
     report(true);
     return () => report(false);
-  }, [report, owns]);
+  }, [report, carriesBack]);
   return owns;
 }
 

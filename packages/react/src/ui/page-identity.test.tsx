@@ -94,6 +94,20 @@ describe("page identity in the window bar", () => {
     );
   });
 
+  test("a back link the trail can't carry (it repeats the section) stays on the page", async () => {
+    await mount(
+      <windowBar.WindowBarPageTitle enabled section={{ label: "Workspace settings" }}>
+        <detail.DetailPage back={{ label: "Workspace settings", onClick: () => {} }}>
+          <detail.DetailPageHeader title="Secrets" />
+        </detail.DetailPage>
+      </windowBar.WindowBarPageTitle>,
+      (host) => {
+        expect(crumbs(host)).toEqual(["Workspace settings"]);
+        expect(host.querySelector(BACK_LINK)?.textContent).toContain("Workspace settings");
+      },
+    );
+  });
+
   test("without the bar (the web app), the detail page keeps its back link", async () => {
     await mount(
       <windowBar.WindowBarPageTitle enabled={false}>

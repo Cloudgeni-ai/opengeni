@@ -208,12 +208,13 @@ function Stacked({
                   {last && previousContent(revisions, index) === "" ? (
                     // The first version has nothing to compare with: its text,
                     // as it reads, not every line marked as added.
-                    <p
+                    <div
+                      role="group"
                       aria-label={`Text of: ${revision.summary}`}
-                      className="m-0 border-l-2 border-border pl-3 text-sm leading-6 break-words whitespace-pre-wrap text-fg-muted"
+                      className="border-l-2 border-border pl-3 text-sm leading-6 break-words whitespace-pre-wrap text-fg-muted"
                     >
                       {revision.content.trim()}
-                    </p>
+                    </div>
                   ) : (
                     <DiffView
                       before={previousContent(revisions, index)}

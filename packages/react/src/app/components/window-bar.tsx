@@ -325,21 +325,22 @@ export function WindowBarPageTitle({
     claims.find((claim) => claim.title && !claim.fallback) ?? claims.find((claim) => claim.title);
   const title = owner ? owner.title : fallbackTitle;
   const ownerId = owner?.id ?? null;
+  const parent = owner?.place?.parent ?? null;
+  const trail = windowBarTrail(
+    typeof title === "string" ? title : null,
+    owner?.place?.section ?? section,
+    parent,
+  );
+  // The page's back link may leave the page only when the trail carries it.
+  const parentInTrail = parent !== null && trail.includes(parent);
   const value = useMemo(
-    () => (enabled ? { ...registry, owner: ownerId } : null),
-    [enabled, ownerId, registry],
+    () => (enabled ? { ...registry, owner: ownerId, parentInTrail } : null),
+    [enabled, ownerId, parentInTrail, registry],
   );
   return (
     <PageHeaderWindowBarContext.Provider value={value}>
       {enabled && title != null && title !== "" ? (
-        <WindowBarTitle
-          copyable={owner?.copyable ?? false}
-          trail={windowBarTrail(
-            typeof title === "string" ? title : null,
-            owner?.place?.section ?? section,
-            owner?.place?.parent ?? null,
-          )}
-        >
+        <WindowBarTitle copyable={owner?.copyable ?? false} trail={trail}>
           {title}
         </WindowBarTitle>
       ) : null}
