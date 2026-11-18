@@ -207,8 +207,7 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
     await this.remote?.invalidateToolsCache();
   }
   async listTools() {
-    if (!this.remote)
-      return [...structuredClone(NANGO_DRIVE_READ_TOOLS), ...structuredClone(DRIVE_EXTRA_TOOLS)];
+    if (!this.remote) return nangoDriveTools();
     return mergeDriveMcpTools(await this.remote.listTools());
   }
   async callTool(
@@ -625,6 +624,11 @@ export function mergeDriveMcpTools<T extends { name: string }>(remote: T[]) {
       `Drive tool extension collision: ${collisions.map((tool) => tool.name).join(", ")}`,
     );
   return [...remote, ...structuredClone(DRIVE_EXTRA_TOOLS)];
+}
+
+/** Every tool Drive offers through Nango: the REST reads plus the extensions. */
+export function nangoDriveTools() {
+  return [...structuredClone(NANGO_DRIVE_READ_TOOLS), ...structuredClone(DRIVE_EXTRA_TOOLS)];
 }
 
 export const DRIVE_MCP_BRIDGE_ADAPTER: LocalMcpBridgeAdapter<

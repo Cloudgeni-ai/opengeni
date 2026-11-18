@@ -29,7 +29,7 @@ const fixtures = new Map<
     connections: ConnectionMetadata[];
     integrations: ApiIntegrationRuntime[];
     resolved: ResolveConnectionCredentialInput[];
-    policies: ConnectorActionPolicySnapshotEntry[];
+    policies: (ConnectorActionPolicySnapshotEntry & { workspaceId?: string })[];
   }
 >();
 mock.module("@opengeni/core", () => ({
@@ -68,7 +68,11 @@ mock.module("@opengeni/db", () => ({
       ? Promise.resolve(
           fixtures
             .get(args[0])!
-            .policies.filter((policy) => policy.connectionId === args[1].connectionId),
+            .policies.filter(
+              (policy) =>
+                policy.connectionId === args[1].connectionId &&
+                (policy.workspaceId ?? workspaceId) === args[1].workspaceId,
+            ),
         )
       : real.listConnectorToolPermissionPolicies(...args),
   buildConnectionTokenResolver: (...args: Parameters<typeof real.buildConnectionTokenResolver>) => {
@@ -161,7 +165,7 @@ function createFixture() {
     integrations: [] as ApiIntegrationRuntime[],
     connections: [shared, personal, foreign],
     resolved: [] as ResolveConnectionCredentialInput[],
-    policies: [] as ConnectorActionPolicySnapshotEntry[],
+    policies: [] as (ConnectorActionPolicySnapshotEntry & { workspaceId?: string })[],
   };
   fixtures.set(database, state);
   const settings = testSettings({
@@ -326,6 +330,46 @@ test("a saved Allow makes a connection's recommended-Ask tool callable from a Si
     expect(result.result.isError).not.toBe(true);
     expect(f.provider.calls).toHaveLength(1);
     expect(f.authorizations.at(-1)).toBe(`Bearer ${f.personal.id}`);
+  } finally {
+    await prepared.close();
+    f.close();
+  }
+});
+
+// A personal login's choices are kept in the workspace it was connected from
+// and follow it everywhere, as they do for an agent turn.
+test("a personal account's saved Allow applies from another workspace", async () => {
+  const f = createFixture();
+  f.settings.mcpServers[0]!.requireApproval = ["query_prometheus"];
+  const home = "99999999-9999-4999-8999-999999999999";
+  f.personal.workspaceId = home;
+  f.policies.push({
+    id: "88888888-8888-4888-8888-888888888889",
+    connectionId: f.personal.id,
+    serverId: "grafana",
+    toolName: "query_prometheus",
+    actionName: "*",
+    policy: "allow",
+    version: 1,
+    workspaceId: home,
+  });
+  const prepared = await prepareWorkspaceToolGatewayForGrant(f.deps, access);
+  try {
+    const bridge = createSiteToolBridge({
+      workspaceId,
+      artifactId,
+      siteVersionId: versionId,
+      requestedTools: [f.identity(f.shared), f.identity(f.personal)],
+      workspaceTools: { $catalog: async () => prepared.toolGatewayCatalog },
+      callTool: async () => {
+        throw new Error("not called");
+      },
+    });
+    const catalog = await bridge.catalog({ signal: new AbortController().signal });
+    expect(catalog.entries.map((entry) => [entry.identity, entry.approval])).toEqual([
+      [f.identity(f.personal), "policy"],
+      [f.identity(f.shared), "human"],
+    ]);
   } finally {
     await prepared.close();
     f.close();

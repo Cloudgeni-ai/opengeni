@@ -1,7 +1,8 @@
-import type {
-  ConnectionMetadata,
-  McpPersonalConnectionDelegation,
-  McpServerConnectionRef,
+import {
+  sameConnectorProviderDomain,
+  type ConnectionMetadata,
+  type McpPersonalConnectionDelegation,
+  type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
   getWorkspace,
@@ -68,14 +69,18 @@ function canonicalUrl(value: string): string {
   }
 }
 
-/** The same match the account binder applies, against one owned connection. */
+/**
+ * The same match the account binder applies, against one owned connection.
+ * An account from either integration backend counts as the connector's: the
+ * backend switch later points the carried connector at the one it serves.
+ */
 function refMatchesConnection(
   ref: McpServerConnectionRef,
   connection: ConnectionMetadata,
 ): boolean {
   return (
     ref.authoritySource !== "host" &&
-    ref.providerDomain.toLowerCase() === connection.providerDomain.toLowerCase() &&
+    sameConnectorProviderDomain(ref.providerDomain, connection.providerDomain) &&
     (!ref.kind || ref.kind === connection.kind) &&
     (!ref.connectionId || ref.connectionId === connection.id) &&
     (!ref.resource ||

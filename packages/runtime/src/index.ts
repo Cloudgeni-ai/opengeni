@@ -1,4 +1,9 @@
-export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+export {
+  isNangoDriveConfig,
+  isOfficialDriveMcpConfig,
+  mergeDriveMcpTools,
+  nangoDriveTools,
+} from "./drive-mcp";
 export {
   NANGO_PROXY_TRANSPORTS,
   sendWithCredential,

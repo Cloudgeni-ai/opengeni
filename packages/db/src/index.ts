@@ -101297,6 +101297,134 @@ export async function updateConnectorToolPermissionPolicies(
   );
 }
 
+/**
+ * Gives one connection the tool choices another connection of the same
+ * provider account holds (its counterpart under the other integration
+ * backend), each in its own login's home workspace. With `serverId`, only that
+ * connector's choices are mirrored: the target's are replaced by the source's,
+ * so a reset is mirrored too. Without it, everything is copied only when the
+ * target has no choices yet: a choice already made there wins. Copies keep who
+ * made each choice and when. Returns how many choices the target now carries
+ * from the source.
+ */
+export async function copyConnectorToolPermissionPolicies(
+  db: Database,
+  input: {
+    accountId: string;
+    subjectId: string;
+    from: { workspaceId: string; connectionId: string };
+    to: { workspaceId: string; connectionId: string };
+    serverId?: string;
+  },
+): Promise<number> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.to.workspaceId },
+    async (scoped) =>
+      scoped.transaction(async (tx) => {
+        // Both workspaces' choice locks, in a fixed order, so the source is
+        // read as last committed: an older edit's copy never lands after a
+        // newer one's.
+        for (const workspaceId of [
+          ...new Set([input.from.workspaceId, input.to.workspaceId]),
+        ].sort())
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`connector-tool-permissions:${workspaceId}`}, 0))`,
+          );
+        // The source login's home, read under that workspace's tenant scope
+        // inside this transaction (as a turn reads a followed login's choices).
+        const source = (
+          await withRlsContext(
+            tx,
+            { accountId: input.accountId, workspaceId: input.from.workspaceId },
+            async (home) =>
+              await home
+                .select()
+                .from(schema.connectorActionPolicies)
+                .where(
+                  and(
+                    eq(schema.connectorActionPolicies.workspaceId, input.from.workspaceId),
+                    eq(schema.connectorActionPolicies.connectionId, input.from.connectionId),
+                  ),
+                )
+                .orderBy(asc(schema.connectorActionPolicies.id)),
+            undefined,
+            "none",
+          )
+        ).filter((row) => input.serverId === undefined || row.serverId === input.serverId);
+        if (input.serverId === undefined && source.length === 0) return 0;
+        const existing = await tx
+          .select()
+          .from(schema.connectorActionPolicies)
+          .where(eq(schema.connectorActionPolicies.workspaceId, input.to.workspaceId));
+        const target = existing.filter(
+          (row) =>
+            row.connectionId === input.to.connectionId &&
+            (input.serverId === undefined || row.serverId === input.serverId),
+        );
+        if (input.serverId === undefined && target.length > 0) return 0;
+        if (existing.length - target.length + source.length > 2048)
+          throw new Error("The workspace tool permission limit has been reached");
+        const removed = target.length
+          ? await tx
+              .delete(schema.connectorActionPolicies)
+              .where(
+                inArray(
+                  schema.connectorActionPolicies.id,
+                  target.map((row) => row.id),
+                ),
+              )
+              .returning({ id: schema.connectorActionPolicies.id })
+          : [];
+        const inserted: { id: string }[] = [];
+        for (let offset = 0; offset < source.length; offset += 128)
+          inserted.push(
+            ...(await tx
+              .insert(schema.connectorActionPolicies)
+              .values(
+                source.slice(offset, offset + 128).map((row) => ({
+                  accountId: input.accountId,
+                  workspaceId: input.to.workspaceId,
+                  connectionId: input.to.connectionId,
+                  serverId: row.serverId,
+                  toolName: row.toolName,
+                  actionName: row.actionName,
+                  policy: row.policy,
+                  createdBySubjectId: row.createdBySubjectId,
+                  updatedBySubjectId: row.updatedBySubjectId,
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
+                })),
+              )
+              .returning({ id: schema.connectorActionPolicies.id })),
+          );
+        if (removed.length || inserted.length)
+          await tx.insert(schema.auditEvents).values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.to.workspaceId,
+                subjectId: input.subjectId,
+                action: "connector.action.preferences_replaced",
+                targetType: "connector_action_policy",
+                targetId: input.to.connectionId,
+                metadata: {
+                  ...(input.serverId !== undefined ? { serverId: input.serverId } : {}),
+                  policyIds: removed.map((row) => row.id),
+                  carriedPolicyIds: inserted.map((row) => row.id),
+                  carriedFromConnectionId: input.from.connectionId,
+                  reset: false,
+                },
+              },
+              "metadata",
+              "metadataCodecVersion",
+            ),
+          );
+        return inserted.length;
+      }),
+  );
+}
+
 /** Resolve only the selected immutable customer model connection; no deployment fallback. */
 export async function loadDirectModelProviderConnection(
   db: Database,
