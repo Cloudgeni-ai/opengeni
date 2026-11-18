@@ -706,6 +706,11 @@ export async function getSpendableCreditBalance(
   // This existing definer also refreshes structured abuse evidence. Run it
   // only for admission, never for settlement of an already-dispatched call.
   await withAccountRls(db, accountId, async (tx) => {
+    // A model-call admission: the signup checks record this organization's
+    // first use (migration 1492). Transaction-local.
+    await tx.execute(
+      sql`select pg_catalog.set_config('opengeni.signup_usage_admission', 'on', true)`,
+    );
     await tx.execute(sql`select free_plan_credit_eligible(${accountId}::uuid)`);
   });
   const balance = await getBillingBalance(db, accountId, policyRevision, settlementAt);

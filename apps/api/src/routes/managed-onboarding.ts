@@ -35,6 +35,7 @@ import {
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import {
   evaluateSignupNetworkAccountsAfterSetup,
+  requestSignupMailSignal,
   requestSignupNetworkSource,
   signupNetworkRateLimitError,
 } from "../auth/signup-network";
@@ -145,6 +146,8 @@ export function registerManagedOnboardingRoutes(
       // Keyed hashes only; the receipt trigger records them for a new
       // organization and applies the per-network rate limit (migration 1354).
       const signupNetwork = requestSignupNetworkSource(context, deps.settings);
+      // Bounded and failing open (migration 1492): only the flag is recorded.
+      const signupMailSignal = await requestSignupMailSignal(session.user.email, deps.settings);
       const { setup, evaluateAccountIds } =
         await completeSelfServiceOrganizationSetupWithSignupNetwork(deps.db, {
           authUserId: session.user.id,
@@ -157,6 +160,7 @@ export function registerManagedOnboardingRoutes(
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,
           signupNetwork,
+          signupMailSignal,
         });
       const completed = CompleteSelfServiceOrganizationSetupResponse.parse(setup);
       // Committed. Evaluate this organization and recent same-network ones,

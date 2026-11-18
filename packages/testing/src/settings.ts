@@ -25,6 +25,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     teamsAppName: "Opengeni",
     signupChallengeEnabled: false,
     signupChallengeHostnames: "",
+    signupDisposableMailDomains: "",
+    signupMailMxLookupTimeoutMs: 0,
     adminPasskeyStepUp: "off",
     decisionModelAuth: "api_key",
     serviceName: "opengeni",

@@ -132,6 +132,7 @@ import {
 } from "../auth/organization-user-setup";
 import {
   evaluateSignupNetworkAccountsAfterSetup,
+  requestSignupMailSignal,
   requestSignupNetworkSource,
   signupNetworkRateLimitError,
 } from "../auth/signup-network";
@@ -525,6 +526,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           deps.settings.productAccessMode === "managed" &&
           deps.settings.verifiedSignupTrialCreditsEnabled,
         signupNetwork: requestSignupNetworkSource(context, deps.settings),
+        signupMailSignal: await requestSignupMailSignal(session.user.email, deps.settings),
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
@@ -549,6 +551,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         subjectLabel: accountContactEmail(session.user.email) || session.user.name,
         ...payload,
         signupNetwork: requestSignupNetworkSource(context, deps.settings),
+        signupMailSignal: await requestSignupMailSignal(session.user.email, deps.settings),
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {

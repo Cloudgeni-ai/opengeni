@@ -11,6 +11,9 @@ import type { Context } from "hono";
 import { ApiHttpError } from "../http/api-error";
 import { requestSourceNetwork, trustedRequestSourceAddress } from "../http/request-source";
 
+/** The owner's disposable-inbox signal for a new organization (migration 1492). */
+export { signupMailSignal as requestSignupMailSignal } from "./signup-mail";
+
 /** User-facing refusal for the per-network rate limit on new self-serve organizations. */
 export const SIGNUP_NETWORK_RATE_LIMIT_MESSAGE =
   "Too many new organizations were created from your network in the last hour. Please try again later, or ask a teammate to invite you to their organization.";

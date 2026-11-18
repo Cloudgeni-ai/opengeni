@@ -40,7 +40,7 @@ export const SIGNUP_NETWORK_HOLD_REASONS: Record<SignupNetworkHoldPolicyVersion,
   "ip-velocity-v1": "Several new organizations from one network within the velocity window",
   "denied-network-v1": "Network used in the last 90 days by a denied or currently held account",
   "email-cluster-v1":
-    "Several new organizations with one non-public mail domain or within seconds, or a mail domain a denied organization used",
+    "A disposable mail inbox, several new unused organizations with one non-public mail domain, a burst within seconds, or a mail domain a denied organization used",
   "additional-organization-v1":
     "A second or later additional organization within 24 hours of its owner's first organization",
 };
@@ -104,6 +104,14 @@ export type SignupNetworkVelocitySettings = {
   deniedDomainMode?: "off" | "observe" | "enforce";
   deniedDomainHoldThreshold?: number;
   deniedDomainLookbackDays?: number;
+  /**
+   * Migration 1493: disposable mail and slow domain legs (both enforce until
+   * set). Older databases omit these.
+   */
+  disposableMailMode?: "off" | "observe" | "enforce";
+  slowDomainMode?: "off" | "observe" | "enforce";
+  slowDomainHoldThreshold?: number;
+  slowDomainWindowHours?: number;
   operator: string | null;
   changedAt: string | null;
 };
@@ -128,6 +136,10 @@ export type SignupNetworkVelocityChanges = Partial<
     | "deniedDomainMode"
     | "deniedDomainHoldThreshold"
     | "deniedDomainLookbackDays"
+    | "disposableMailMode"
+    | "slowDomainMode"
+    | "slowDomainHoldThreshold"
+    | "slowDomainWindowHours"
   >
 >;
 
@@ -199,6 +211,11 @@ export type SignupNetworkHoldAccount = {
      * or with the same domain group and the same signup network. */
     enforceableBurstGroupSize: number | null;
     deniedDomainAccounts: number | null;
+    /** Migration 1493: "disposable", "clear" or null (not checked). */
+    mailSignal: string | null;
+    slowDomainGroupSize: number | null;
+    /** Whether any organization of the slow domain group admitted a model call. */
+    slowDomainGroupUsed: boolean | null;
   } | null;
   /** denied-network-v1 evidence; null for the other rules' holds. */
   deniedNetwork: {
@@ -504,6 +521,10 @@ async function readHoldAccount(
           relatedBurstGroupSize: num(evidence.relatedBurstGroupSize),
           enforceableBurstGroupSize: num(evidence.enforceableBurstGroupSize),
           deniedDomainAccounts: num(evidence.deniedDomainAccounts),
+          mailSignal: typeof evidence.mailSignal === "string" ? evidence.mailSignal : null,
+          slowDomainGroupSize: num(evidence.slowDomainGroupSize),
+          slowDomainGroupUsed:
+            typeof evidence.slowDomainGroupUsed === "boolean" ? evidence.slowDomainGroupUsed : null,
         }
       : null,
     deniedNetwork: deniedNetwork
