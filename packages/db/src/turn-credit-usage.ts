@@ -11,6 +11,26 @@ const TERMINAL_TURN_EVENT_TYPES = [
 ] as const;
 
 /**
+ * A terminal turn event's payload without the `usage` migration 1495 attaches
+ * when the event is written. `usage` is accounting metadata, not content:
+ * code that proves a copy of an event's content (for example a child's final
+ * answer quoted to its parent) compares this projection.
+ */
+export function terminalTurnContentPayload(type: string, payload: unknown): unknown {
+  if (
+    !(TERMINAL_TURN_EVENT_TYPES as readonly string[]).includes(type) ||
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    !Object.hasOwn(payload, "usage")
+  ) {
+    return payload;
+  }
+  const { usage: _usage, ...content } = payload as Record<string, unknown>;
+  return content;
+}
+
+/**
  * Each turn's `usage` from its latest terminal event (written there by
  * migration 1495's trigger), in one read of the session_events
  * (workspace_id, turn_id, type) index. A turn without one (still running, or

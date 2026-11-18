@@ -15,6 +15,7 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { turnContentEvents } from "@opengeni/testing/assertions";
 import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -386,9 +387,11 @@ describe("assistant message events from a real agent turn", () => {
     });
     expect(result).toMatchObject({ status: "idle", attemptId });
     if (result.status === "unclaimed") throw new Error("User turn was not claimed");
-    return (
-      await listSessionEvents(client.db, grant.workspaceId!, session.id, { after: 0, limit: 200 })
-    ).filter((event) => event.turnId === result.turnId);
+    return turnContentEvents(
+      (
+        await listSessionEvents(client.db, grant.workspaceId!, session.id, { after: 0, limit: 200 })
+      ).filter((event) => event.turnId === result.turnId),
+    );
   }
 
   test("each message completes once with its phase and the final is not copied at settlement", async () => {

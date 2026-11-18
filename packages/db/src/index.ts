@@ -21,7 +21,7 @@ import {
   type OrganizationConnectorRow,
 } from "./organization-connectors";
 import { siteSessionAccessFilter } from "./site-session-access";
-import { withTurnUsage } from "./turn-credit-usage";
+import { terminalTurnContentPayload, withTurnUsage } from "./turn-credit-usage";
 export { turnUsageByTurn, withTurnUsage } from "./turn-credit-usage";
 import {
   decodeActivityXid,
@@ -81434,7 +81434,15 @@ async function acknowledgeConsumedChildLifecycleNotices(
     const sequences = evidence
       .filter((proof) => {
         const event = bySequence.get(proof.sequence);
-        return event?.type === proof.type && isDeepStrictEqual(event.payload, proof.payload);
+        // A final answer quotes the event's content, not the `usage` written
+        // with it; a bounded evidence copy carries `usage` on both sides.
+        return (
+          event?.type === proof.type &&
+          isDeepStrictEqual(
+            terminalTurnContentPayload(event.type, event.payload),
+            terminalTurnContentPayload(proof.type, proof.payload),
+          )
+        );
       })
       .map((event) => event.sequence);
     if (sequences.length > 0) proven.set(childId, sequences);
