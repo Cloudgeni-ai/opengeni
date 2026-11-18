@@ -15,6 +15,8 @@ export type ChatRecord = {
   title: string;
   /** The chat's avatar, drawn as the sidebar draws it; null when it has none. */
   avatar: SessionAvatar | null;
+  /** The agent the chat belongs to, whose icon shows when it has no avatar of its own. */
+  agentId: string | null;
   updatedAt: number;
   pinned: boolean;
   archived: boolean;
@@ -58,6 +60,7 @@ type StoredRecent = {
   title: string;
   at: number;
   avatar?: SessionAvatar | undefined;
+  agentId?: string | undefined;
   parentId?: string | undefined;
   parentTitle?: string | undefined;
 };
@@ -92,6 +95,7 @@ function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
         return [];
       }
       const avatar = storedAvatar(entry.avatar);
+      const agentId = typeof entry.agentId === "string" ? entry.agentId : undefined;
       const parentId = typeof entry.parentId === "string" ? entry.parentId : undefined;
       const parentTitle =
         parentId && typeof entry.parentTitle === "string" ? entry.parentTitle : undefined;
@@ -102,6 +106,7 @@ function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
           title: entry.title,
           at: entry.at,
           ...(avatar ? { avatar } : {}),
+          ...(agentId ? { agentId } : {}),
           ...(parentId ? { parentId } : {}),
           ...(parentTitle ? { parentTitle } : {}),
         },
@@ -156,6 +161,7 @@ function directory(subjectId: string): DirectoryState {
             workspaceId: item.workspaceId,
             title: item.title,
             avatar: item.avatar ?? null,
+            agentId: item.agentId ?? null,
             updatedAt: item.at,
             pinned: false,
             archived: false,
@@ -194,6 +200,7 @@ function persistRecent(subjectId: string, state: DirectoryState): void {
         title: record.title,
         at: record.updatedAt,
         ...(record.avatar ? { avatar: record.avatar } : {}),
+        ...(record.agentId ? { agentId: record.agentId } : {}),
         ...(record.parentId ? { parentId: record.parentId } : {}),
         ...(record.parentId && parentTitle ? { parentTitle } : {}),
       },
@@ -217,6 +224,7 @@ export function chatRecordFromRow(
     workspaceId: row.workspaceId,
     title: sessionDisplayTitle(row),
     avatar: row.avatar ?? null,
+    agentId: row.agentId ?? null,
     updatedAt: Date.parse(row.updatedAt) || 0,
     pinned: Boolean(row.pinned),
     archived: Boolean(row.archived),
@@ -296,6 +304,7 @@ export function rememberChats(subjectId: string, rows: readonly SessionListRow[]
         current.row &&
         current.title === next.title &&
         sameAvatar(current.avatar, next.avatar) &&
+        current.agentId === next.agentId &&
         current.updatedAt === next.updatedAt &&
         current.pinned === next.pinned &&
         current.archived === next.archived &&

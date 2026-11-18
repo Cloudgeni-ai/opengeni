@@ -1,3 +1,4 @@
+import { withPersonCreatorLabel } from "./session-creator-label";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
@@ -567,7 +568,13 @@ export async function createValidatedScheduledTask(input: {
     requestedPins,
     requestedPinsRequired,
   );
-  const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
+  // Frozen like a chat's creator: a person scheduling from Slack, Teams or an
+  // API call for them gets the label the app would freeze.
+  const grantCreationInitiator = scheduledTaskInitiatorForGrant(input.grant);
+  const labeledCreator = await withPersonCreatorLabel(input.db, grantCreationInitiator.initiator);
+  const creationInitiator = labeledCreator
+    ? { ...grantCreationInitiator, initiator: labeledCreator }
+    : grantCreationInitiator;
   const creatorLocked = "creatorLocked" in input.payload && input.payload.creatorLocked === true;
   if (creatorLocked && creationInitiator.actor)
     throw new HTTPException(422, {

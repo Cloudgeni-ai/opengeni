@@ -238,6 +238,7 @@ describe("chat switcher", () => {
     workspaceId: "w",
     title: id,
     avatar: null,
+    agentId: null,
     updatedAt: 1,
     pinned: false,
     archived: false,

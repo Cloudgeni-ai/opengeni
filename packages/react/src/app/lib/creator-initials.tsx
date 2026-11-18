@@ -90,24 +90,19 @@ export function machineCreatorLabel(createdBy: CreatorRef): string | null {
   return machine.name ? `${machine.name} · ${machine.hint}` : machine.hint;
 }
 
-function humanizeSubjectId(subjectId: string): string {
-  const withoutPrefix = subjectId.includes(":")
-    ? subjectId.slice(subjectId.indexOf(":") + 1)
-    : subjectId;
-  return withoutPrefix.trim();
-}
-
 /**
  * 1–2 letter monogram for a human creator; null for service/system creators
- * and unattributed legacy rows (the rail shows people, not machinery).
+ * and unattributed legacy rows (the rail shows people, not machinery). Null
+ * too for a person without a label: a subject id is an opaque identifier, and
+ * its first letters ("3B") name no one. `useResolvedCreator` fills a label in
+ * where the app knows the person.
  */
 export function creatorInitials(createdBy: CreatorRef): string | null {
   // An API key is not a person, even on older rows that froze it as a subject.
   if (createdBy.kind !== "subject" || creatorType(createdBy) !== "person") {
     return null;
   }
-  const label = createdBy.label?.trim();
-  const source = label && label.length > 0 ? label : humanizeSubjectId(createdBy.subjectId);
+  const source = createdBy.label?.trim() ?? "";
   if (source.length === 0) {
     return null;
   }

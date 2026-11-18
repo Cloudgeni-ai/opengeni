@@ -33,7 +33,10 @@ let directory: typeof import("../../lib/actions/chat-directory");
 let switcher: typeof import("../../lib/actions/chat-switcher");
 
 beforeAll(async () => {
-  mock.module("../../app-context", () => ({ useAppContext: () => ({ client }) }));
+  mock.module("../../app-context", () => ({
+    useAppContext: () => ({ client }),
+    useOptionalAppContext: () => ({ client }),
+  }));
   ChatSwitcher = (await import("./chat-switcher")).default as never;
   directory = await import("../../lib/actions/chat-directory");
   switcher = await import("../../lib/actions/chat-switcher");

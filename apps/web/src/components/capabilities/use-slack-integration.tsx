@@ -1,5 +1,6 @@
 import slackLogo from "@/assets/integration-logos/slack.png";
 import {
+  hasOpenGeniSlackBotIdentityScope,
   hasOpenGeniSlackReactionScope,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
@@ -155,6 +156,37 @@ export function canInstallOpenGeniSlackBot(
   // Members with connections:write connect their own Slack instead.
   return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
+
+/**
+ * Installing the Opengeni Slack app, or installing it again over an existing
+ * installation (`reconnectAccountId`), which asks Slack for every scope the
+ * app uses now. One request for every place that starts it.
+ */
+export function openGeniSlackBotConnectRequest(input: {
+  workspaceId: string;
+  transport: NativeConnectRequest["scope"]["transport"];
+  reconnectAccountId?: string | undefined;
+}): NativeConnectRequest {
+  return {
+    scope: { workspaceId: input.workspaceId, transport: input.transport },
+    providerId: "slack-bot",
+    displayName: "Opengeni Slack bot",
+    description: SLACK_APP_DESCRIPTION,
+    logoUrl: SLACK_LOGO_URL,
+    authorizeLabel: "Continue to Slack",
+    ownership: "workspace",
+    returnUrl: window.location.href,
+    idempotencyKey: crypto.randomUUID(),
+    ...(input.reconnectAccountId ? { reconnectAccountId: input.reconnectAccountId } : {}),
+  };
+}
+
+/** Copy for a Slack app that can't post as agents (no `chat:write.customize`). */
+export const SLACK_AGENT_IDENTITY_MISSING = {
+  title: "Replies show as Opengeni",
+  description: "Agents' names and icons show once Slack is updated.",
+  action: "Update",
+} as const;
 
 export function canManageSlackReactionSummon(
   accessContext: ReturnType<typeof useAppContext>["accessContext"],
@@ -546,18 +578,13 @@ export function useSlackIntegration({
       return;
     }
     botOperationPending.current = true;
-    setConnectRequest({
-      scope: { workspaceId, transport: connectTransport },
-      providerId: "slack-bot",
-      displayName: "Opengeni Slack bot",
-      description: SLACK_APP_DESCRIPTION,
-      logoUrl: SLACK_LOGO_URL,
-      authorizeLabel: "Continue to Slack",
-      ownership: "workspace",
-      returnUrl: window.location.href,
-      idempotencyKey: crypto.randomUUID(),
-      ...(botConnection ? { reconnectAccountId: botConnection.id } : {}),
-    });
+    setConnectRequest(
+      openGeniSlackBotConnectRequest({
+        workspaceId,
+        transport: connectTransport,
+        ...(botConnection ? { reconnectAccountId: botConnection.id } : {}),
+      }),
+    );
   }
 
   async function disconnectBot(): Promise<boolean> {
@@ -1045,7 +1072,22 @@ export function useSlackIntegration({
                       ? { action: { label: "Reconnect Slack", onClick: () => void installBot() } }
                       : {}),
                   }
-                : undefined
+                : !hasOpenGeniSlackBotIdentityScope(botConnection.grantedScopes)
+                  ? {
+                      tone: "waiting",
+                      title: SLACK_AGENT_IDENTITY_MISSING.title,
+                      description: SLACK_AGENT_IDENTITY_MISSING.description,
+                      ...(canMutateInstalledBot && !readOnly
+                        ? {
+                            action: {
+                              label: SLACK_AGENT_IDENTITY_MISSING.action,
+                              onClick: () => void installBot(),
+                              disabled: botBusy,
+                            },
+                          }
+                        : {}),
+                    }
+                  : undefined
           : undefined;
 
     return {
