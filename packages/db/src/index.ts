@@ -83239,8 +83239,10 @@ export async function claimSessionWorkForAttempt(
           );
           // Freeze governance only after this exact attempt is durably claimed,
           // while the claim transaction still owns the session/turn/attempt
-          // locks. Later policy or preference activation applies to a future
-          // attempt and can never move accepted queued/in-flight work.
+          // locks. Policies resolve as the turn starts running (a queued turn
+          // sees what was activated while it waited); once a turn has run,
+          // its later attempts keep that snapshot and later activation
+          // applies to the next turn.
           await tx.execute(sql`
             SELECT snapshot.id
             FROM workspace_instruction_policy_get_or_create_snapshot(
