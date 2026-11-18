@@ -6,6 +6,7 @@ import { CHECKOUT_RETURN_QUERY, readCheckoutPageReturn } from "../lib/credit-che
 import { usePage } from "../lib/navigation";
 import { hasAccountPermission } from "../lib/permissions";
 import type { PaymentRefusalCode } from "../lib/model-access";
+import { CardRequiredGate } from "./add-card";
 
 const CreditRequiredPrompt = lazy(() =>
   import("./credit-required-prompt").then((module) => ({
@@ -33,23 +34,27 @@ export function CreditRequiredGate(props: {
 }) {
   const { creditRequired, setCreditRequired, accessContext } = props;
   useCheckoutPageReturn();
-  if (!creditRequired) return null;
   return (
-    <Suspense fallback={null}>
-      <CreditRequiredPrompt
-        open
-        workspaceId={creditRequired.workspaceId}
-        accountId={creditRequired.accountId}
-        refusalCode={creditRequired.code ?? null}
-        canBuyCredits={
-          Boolean(creditRequired.accountId) &&
-          hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")
-        }
-        onOpenChange={(open) => {
-          if (!open) setCreditRequired(null);
-        }}
-      />
-    </Suspense>
+    <>
+      <CardRequiredGate accessContext={accessContext} />
+      {creditRequired ? (
+        <Suspense fallback={null}>
+          <CreditRequiredPrompt
+            open
+            workspaceId={creditRequired.workspaceId}
+            accountId={creditRequired.accountId}
+            refusalCode={creditRequired.code ?? null}
+            canBuyCredits={
+              Boolean(creditRequired.accountId) &&
+              hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")
+            }
+            onOpenChange={(open) => {
+              if (!open) setCreditRequired(null);
+            }}
+          />
+        </Suspense>
+      ) : null}
+    </>
   );
 }
 

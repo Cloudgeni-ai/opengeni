@@ -537,6 +537,18 @@ export function useSessionCapabilities(
                       : cause.message.includes("computers")
                         ? "computer_limit"
                         : null;
+                // A Free organization without a verified card: the app's
+                // card gate (app/components/add-card.tsx) offers Add a card.
+                if (
+                  cause.details?.code === "sandbox_card_required" &&
+                  typeof window !== "undefined"
+                ) {
+                  window.dispatchEvent(
+                    new CustomEvent("opengeni:card-required", {
+                      detail: { workspaceId, accountId: null },
+                    }),
+                  );
+                }
                 if (refusal === "viewer_idle") {
                   // The box was stopped while nobody used the page: wait for
                   // the person to interact, then attach again.

@@ -842,6 +842,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
+    "id": "confirmBillingCardVerification",
+    "method": "POST",
+    "path": "/v1/billing/card-verification/confirm",
+    "request": [
+      "ConfirmBillingCardVerificationRequest"
+    ],
+    "response": [
+      "BillingCardVerificationStatus"
+    ]
+  },
+  {
     "id": "confirmIdentityLink",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
@@ -993,6 +1004,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CreateBillingAutoTopUpSetupSessionResponse"
+    ]
+  },
+  {
+    "id": "createBillingCardVerificationSession",
+    "method": "POST",
+    "path": "/v1/billing/card-verification/setup",
+    "request": [
+      "CreateBillingCardVerificationSessionRequest"
+    ],
+    "response": [
+      "CreateBillingCardVerificationSessionResponse"
     ]
   },
   {
@@ -3325,6 +3347,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BillingAutoTopUpSettings"
+    ]
+  },
+  {
+    "id": "getBillingCardVerification",
+    "method": "GET",
+    "path": "/v1/billing/card-verification",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "BillingCardVerificationStatus"
     ]
   },
   {

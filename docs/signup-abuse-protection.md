@@ -483,6 +483,60 @@ other organizations aren't linked-restricted, and it doesn't trigger the
 linked-owner hold on their next organization. A manual operator denial or
 reviewer decision still follows the person as before.
 
+## Card verification
+
+Migration `1494_card_verification_gate.sql` adds a deployment-wide gate,
+off until an operator turns it on. While it is on, an unpaid organization
+(Free or plan-less, never bought credit, no Stripe subscription) needs a card
+its owner verified before it:
+
+- starts a sandbox box. Every box-start path goes through sandbox admission
+  (agent turns, terminals and commands, background processes,
+  Browser/ComputerSessions, viewers). A refusal has reason `card_required`
+  and code `sandbox_card_required`: an agent turn fails with it (not
+  retried), API surfaces answer 403 (viewers 429) with `details.code`. Joining
+  a box that is already running, and a Connected Machine, are never refused.
+- receives Free monthly credit (`free_plan_credit_eligible` and the
+  subscription maintenance inventory).
+
+Chat without a box keeps working. Paid, Enterprise and host-provisioned
+organizations, and organizations that bought credit, are never gated. It
+builds on the free compute bounds (fleet cap, daily box time, young
+organizations, additional-organization holds), which still apply after a card
+is verified.
+
+The owner adds a card through Stripe Checkout in setup mode (a SetupIntent,
+nothing is charged): `POST /v1/billing/card-verification/setup`, confirmed by
+the `checkout.session.completed` webhook or by the page Checkout returns to
+(`POST /v1/billing/card-verification/confirm`), whichever comes first. Both
+check the SetupIntent and card with Stripe and that the person still owns the
+organization, then record the card (`billing_card_verifications`: brand, last
+four digits and Stripe's card fingerprint). `GET /v1/billing/card-verification`
+says whether an organization needs one. The console shows one Add a card
+action where a box was refused and continues the refused chat once the card
+is added.
+
+One Free grant per card and per person: the first organization whose verified
+card reaches Free issuance claims the card's fingerprint and the owner who
+verified it (`opengeni_private.free_trial_card_claims`). Another organization
+with the same card, or verified by the same person, gets no Free credit.
+Another organization of the same owner inherits their card for sandboxes (when
+that owner acts), never for Free credit. Existing Free organizations without
+a card hit the gate at their next box start or Free grant; nothing is deleted,
+no ledger is rewritten, and the Free amount is unchanged.
+
+Switch it with the audited, revision-fenced network velocity setter
+(appends a `card_verification_gate_revisions` row; processes pick it up
+within 15 seconds):
+
+```sh
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --card-verification-mode enforce \
+  --revision <current-revision> --operator <operator-id> --reason 'Require a verified card'
+```
+
+Rollback: `--card-verification-mode off`. Recorded cards and claims stay; with
+the gate off nothing reads them.
+
 ## Funding and review
 
 `0981_promotion_funding_decisions.sql` adds account decisions: `eligible`,

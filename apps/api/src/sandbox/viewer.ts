@@ -313,7 +313,11 @@ export async function attachViewer(
       throw viewerRefusal(viewerBoxLimitMessage(error), "computer_limit");
     }
     if (error instanceof SandboxOrganizationBoxLimitError) {
-      throw viewerRefusal(error.message, "computer_limit");
+      throw viewerRefusal(
+        error.message,
+        "computer_limit",
+        error.reason === "card_required" ? { code: error.code } : undefined,
+      );
     }
     if (error instanceof SandboxPaidComputeAdmissionError) {
       throw new HTTPException(402, { message: error.message, cause: error });
@@ -1709,12 +1713,16 @@ export function viewerInteractionAgeFor(
  * clients branch on it, never on the message. */
 export type ViewerRefusalReason = "viewer_idle" | "computer_limit" | "warm_allowance";
 
-function viewerRefusal(message: string, reason: ViewerRefusalReason): ApiHttpError {
+function viewerRefusal(
+  message: string,
+  reason: ViewerRefusalReason,
+  extra?: { code: string },
+): ApiHttpError {
   return new ApiHttpError(429, {
     code: "limit_exceeded",
     message,
     retryable: false,
     outcomeUnknown: false,
-    details: { viewerRefusal: reason },
+    details: { viewerRefusal: reason, ...extra },
   });
 }

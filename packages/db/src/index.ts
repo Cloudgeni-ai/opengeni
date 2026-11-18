@@ -123,10 +123,16 @@ export {
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
 export * from "./subscription-plans";
 export * from "./billing-auto-top-up";
+export * from "./card-verification";
 export * from "./billing-auto-top-up-notifications";
 export { applyCreditLedgerEntry, applyCreditLedgerEntryOnce } from "./credit-ledger";
 export { getBillingCustomer } from "./billing-customer";
 import { beginPlanCreditSettlement } from "./subscription-plans";
+import {
+  readCardVerificationGate,
+  readCardVerificationInTransaction,
+  subjectVerifiedCardInTransaction,
+} from "./card-verification";
 export * from "./subscription-plan-maintenance";
 import {
   byokFeeFunding,
@@ -50022,7 +50028,11 @@ export class SandboxViewerBoxLimitError extends Error {
  * - `fleet_busy`: unpaid organizations together already run as many boxes as
  *   the fleet allows (`limit`), or the fleet is under pressure;
  * - `fleet_daily_budget`: unpaid organizations together used today's fleet
- *   box time (`limit` seconds), until the next UTC day.
+ *   box time (`limit` seconds), until the next UTC day;
+ * - `card_required`: the card verification gate is on and this unpaid
+ *   organization has no verified card (its own, or one its acting owner
+ *   verified in another organization they run); only starting a box that is
+ *   not running is refused, so joining a running box works.
  */
 export type SandboxOrganizationBoxLimitReason =
   | "running"
@@ -50033,7 +50043,8 @@ export type SandboxOrganizationBoxLimitReason =
   | "young_box_time"
   | "young_turnless"
   | "fleet_busy"
-  | "fleet_daily_budget";
+  | "fleet_daily_budget"
+  | "card_required";
 
 /** Refusals that come from the shared capacity of every unpaid organization
  * rather than the organization's own limits. */
@@ -50073,6 +50084,8 @@ export function sandboxOrganizationBoxLimitMessage(
       return "Free sandboxes are at capacity right now. Try again in a few minutes, or add credit or choose a paid plan to start one now.";
     case "fleet_daily_budget":
       return "Free sandboxes have reached today's limit. They start again after midnight UTC; add credit or choose a paid plan to start one now.";
+    case "card_required":
+      return "Sandboxes on the Free plan need a verified card. Add a card to continue; you won't be charged.";
   }
 }
 
@@ -50087,9 +50100,12 @@ export function sandboxOrganizationBoxLimitMessage(
 export class SandboxOrganizationBoxLimitError extends Error {
   readonly name = "SandboxOrganizationBoxLimitError";
   /** `sandbox_capacity_unpaid_busy` for the shared unpaid capacity, which
-   * frees later; `sandbox_compute_unavailable` for the organization's own
-   * bounds. */
-  readonly code: "sandbox_compute_unavailable" | "sandbox_capacity_unpaid_busy";
+   * frees later; `sandbox_card_required` until the owner verifies a card;
+   * `sandbox_compute_unavailable` for the organization's other bounds. */
+  readonly code:
+    | "sandbox_compute_unavailable"
+    | "sandbox_capacity_unpaid_busy"
+    | "sandbox_card_required";
 
   constructor(
     public readonly workspaceId: string,
@@ -50100,7 +50116,9 @@ export class SandboxOrganizationBoxLimitError extends Error {
     super(sandboxOrganizationBoxLimitMessage(reason, limit));
     this.code = SANDBOX_FLEET_REFUSAL_REASONS.includes(reason)
       ? "sandbox_capacity_unpaid_busy"
-      : "sandbox_compute_unavailable";
+      : reason === "card_required"
+        ? "sandbox_card_required"
+        : "sandbox_compute_unavailable";
   }
 }
 
@@ -50129,6 +50147,10 @@ export type SandboxComputeStanding = {
   personBoxSecondsToday: number;
   /** When the organization was created (null when unknown). */
   organizationCreatedAt: Date | null;
+  /** The card verification gate is on, the organization is bounded and
+   * neither it nor its acting owner (in another organization they run) has a
+   * verified card: starting a box is refused. */
+  cardRequired: boolean;
 };
 
 /** Called when a standing read failed and admission fell back (fails open):
@@ -50344,6 +50366,19 @@ export async function resolveSandboxComputeStanding(
       seconds: needsSeconds ? await organizationBoxSecondsToday(tx, input.accountId) : 0,
     };
   });
+  // Card verification gate (migration 1494): only a bounded organization,
+  // only while the switch is on. A failed read fails open.
+  let cardRequired = false;
+  if (own.bounded && (await readCardVerificationGate(db))) {
+    try {
+      cardRequired =
+        (await withAccountRls(db, input.accountId, (tx) =>
+          readCardVerificationInTransaction(tx, input.accountId),
+        )) === null;
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onFallback, error, "organization");
+    }
+  }
   const result: SandboxComputeStanding = {
     tier: own.standing.tier,
     paidHistory: own.standing.paidHistory,
@@ -50354,6 +50389,7 @@ export async function resolveSandboxComputeStanding(
     organizationBoxSecondsToday: own.seconds,
     personBoxSecondsToday: 0,
     organizationCreatedAt: own.standing.organizationCreatedAt,
+    cardRequired,
   };
   const subjectId = input.actingSubjectId ?? null;
   if (!own.restrictable || subjectId === null || !subjectId.startsWith("user:")) return result;
@@ -50373,6 +50409,11 @@ export async function resolveSandboxComputeStanding(
   }
   result.linkedRestricted = person.linkedRestricted;
   if (person.linkedRestricted) result.tier = "restricted";
+  // Another organization of the same owner inherits the card they verified
+  // for sandboxes (never for Free credit: one Free grant per card and person).
+  if (result.cardRequired && person.ownsOrganization && person.cardVerifiedElsewhere) {
+    result.cardRequired = false;
+  }
   result.personOwnsOrganization = person.ownsOrganization;
   result.personOtherRunningBoxes = person.otherRunningBoxes;
   result.personBoxSecondsToday =
@@ -50383,6 +50424,9 @@ export async function resolveSandboxComputeStanding(
 type SandboxPersonStanding = {
   linkedRestricted: boolean;
   ownsOrganization: boolean;
+  /** The person verified a card in another organization they own or
+   * administer. */
+  cardVerifiedElsewhere: boolean;
   otherRunningBoxes: number;
   otherBoxSecondsToday: number;
 };
@@ -50445,9 +50489,11 @@ async function readSandboxPersonStanding(
   const result: SandboxPersonStanding = {
     linkedRestricted: false,
     ownsOrganization: false,
+    cardVerifiedElsewhere: false,
     otherRunningBoxes: 0,
     otherBoxSecondsToday: 0,
   };
+  const cardGate = await readCardVerificationGate(db);
   const memberships = await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, subjectId);
     const [row] = await rawRows<{ result: unknown }>(
@@ -50478,6 +50524,13 @@ async function readSandboxPersonStanding(
     const organizationId = membership.organizationId as string;
     const owned = membership.role === "owner";
     const other = await withAccountRls(db, organizationId, async (tx) => {
+      if (
+        cardGate &&
+        !result.cardVerifiedElsewhere &&
+        (await subjectVerifiedCardInTransaction(tx, organizationId, subjectId))
+      ) {
+        result.cardVerifiedElsewhere = true;
+      }
       const standing = await resolveSandboxPlanStanding(tx, organizationId, input.limits);
       if (!sandboxPlanTierUnpaid(standing.tier, input) || standing.paidHistory) {
         return null;
@@ -52408,18 +52461,22 @@ async function acquireLeaseOnce(
           const refusal: SandboxOrganizationBoxLimitReason | null =
             planLimit.runningBoxesPerOrganization === 0
               ? "closed"
-              : standing !== null &&
-                  standing.bounded &&
-                  sandboxDailyBoxTimeSpent(planLimit, standing)
-                ? "daily_budget"
-                : sandboxYoungBoxTimeSpent(fleet)
-                  ? "young_box_time"
-                  : kind !== "turn" &&
-                      row.liveness !== "warm" &&
-                      row.liveness !== "warming" &&
-                      sandboxYoungTurnlessTimeSpent(fleet)
-                    ? "young_turnless"
-                    : null;
+              : standing?.cardRequired === true &&
+                  row.liveness !== "warm" &&
+                  row.liveness !== "warming"
+                ? "card_required"
+                : standing !== null &&
+                    standing.bounded &&
+                    sandboxDailyBoxTimeSpent(planLimit, standing)
+                  ? "daily_budget"
+                  : sandboxYoungBoxTimeSpent(fleet)
+                    ? "young_box_time"
+                    : kind !== "turn" &&
+                        row.liveness !== "warm" &&
+                        row.liveness !== "warming" &&
+                        sandboxYoungTurnlessTimeSpent(fleet)
+                      ? "young_turnless"
+                      : null;
           const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
           if (refusal !== null && !turnHeldWarm) {
             const inFlightTurn =
@@ -52437,7 +52494,7 @@ async function acquireLeaseOnce(
               throw new SandboxOrganizationBoxLimitError(
                 workspaceId,
                 sandboxGroupId,
-                refusal === "closed"
+                refusal === "closed" || refusal === "card_required"
                   ? 0
                   : refusal === "young_box_time"
                     ? (fleet?.limits.youngOrganizationBoxSeconds ?? 0)

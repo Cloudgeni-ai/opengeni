@@ -58,6 +58,7 @@ const { values } = parseArgs({
     // Disposable mail and slow domain legs (migration 1493).
     "disposable-mail-mode": { type: "string" },
     "slow-domain-mode": { type: "string" },
+    "card-verification-mode": { type: "string" },
     "slow-domain-threshold": { type: "string" },
     "slow-domain-window-hours": { type: "string" },
     rule: { type: "string" },
@@ -151,6 +152,12 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
       throw new Error(`--${flag} must be off, observe or enforce`);
     changes[key] = value;
   }
+  if (values["card-verification-mode"] !== undefined) {
+    const mode = values["card-verification-mode"];
+    if (mode !== "off" && mode !== "enforce")
+      throw new Error("--card-verification-mode must be off or enforce");
+    changes.cardVerificationMode = mode;
+  }
   const emailDomainThreshold = integer("email-domain-threshold", values["email-domain-threshold"]);
   if (emailDomainThreshold !== undefined) changes.emailDomainHoldThreshold = emailDomainThreshold;
   const emailDomainWindow = integer(
@@ -179,7 +186,7 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
   if (slowDomainWindow !== undefined) changes.slowDomainWindowHours = slowDomainWindow;
   if (Object.keys(changes).length === 0)
     throw new Error(
-      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days, --disposable-mail-mode, --slow-domain-mode, --slow-domain-threshold, --slow-domain-window-hours",
+      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days, --disposable-mail-mode, --slow-domain-mode, --slow-domain-threshold, --slow-domain-window-hours, --card-verification-mode",
     );
   return changes;
 }

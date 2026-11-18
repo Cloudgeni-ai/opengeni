@@ -9,6 +9,7 @@ import {
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
+export * from "./billing-card-verification";
 export * from "./secret-value";
 export * from "./citation-urls";
 export * from "./claude-cite-tags";
