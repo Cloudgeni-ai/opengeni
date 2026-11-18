@@ -19,10 +19,12 @@ import type { SandboxPlanLimit } from "@opengeni/config";
 import type { MeterableWarmLease, NoTurnWarmLease } from "@opengeni/db";
 import {
   drainNoTurnLeaseForComputeBounds,
+  listNoTurnWarmLeasePeople,
   listNoTurnWarmLeases,
   readOrganizationBoxSecondsToday,
   readSandboxFleetPressure,
   readSandboxUnpaidFleet,
+  resolveSandboxComputeStanding,
   resolveSandboxPlanStandingInWorkspace,
   sandboxPlanLimitFor,
 } from "@opengeni/db";
@@ -30,6 +32,7 @@ import {
   paidSandboxPlanLimit,
   sandboxFleetLimits,
   sandboxPlanLimits,
+  UNPAID_SANDBOX_PLAN_TIERS,
   type SandboxFleetLimits,
 } from "@opengeni/config";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -196,7 +199,9 @@ export async function boundComputeBoundedWarmBoxes(
           expectedEpoch: lease.leaseEpoch,
           reason,
           quietForMs: idleDrainMs,
-          idleGraceMs: settings.sandboxIdleGraceMs,
+          // A closed organization cannot re-arm its box: drain it in this
+          // sweep rather than after the reconnect grace.
+          idleGraceMs: reason === "compute_closed" ? 0 : settings.sandboxIdleGraceMs,
         });
         if (!outcome.drained) {
           observability.info("sandbox reaper: compute-bounded box kept", {
@@ -311,4 +316,122 @@ export async function observeUnpaidSandboxFleet(
     });
   }
   return state;
+}
+
+/**
+ * The closed half of the compute bounds, run by the sweep's inventory phase
+ * before it lists drainable boxes: a box of an organization that review just
+ * held or denied is drained (without the reconnect grace) and dispatched in
+ * the same sweep, instead of after a maintenance pass, the grace and another
+ * sweep. An organization is closed by its own tier or, when unpaid, when its
+ * self-serve owner or a person viewing its boxes runs another organization
+ * that review held or denied. Boxes a turn holds are left to the turn, as in
+ * the maintenance pass, and a read that fails leaves the organization to the
+ * next pass.
+ */
+export async function drainClosedComputeOrganizations(
+  services: Pick<ActivityServices, "db" | "settings" | "observability">,
+  warmLeases: readonly MeterableWarmLease[],
+  options: { concurrency?: number } = {},
+): Promise<{ inspected: number; drained: number }> {
+  const { db, settings, observability } = services;
+  const planLimits = sandboxPlanLimits(settings);
+  const concurrency = Math.max(1, options.concurrency ?? 8);
+  const workspacesByAccount = new Map<string, Set<string>>();
+  for (const lease of warmLeases) {
+    if (lease.backend === "selfhosted") continue;
+    const workspaces = workspacesByAccount.get(lease.accountId) ?? new Set<string>();
+    workspaces.add(lease.workspaceId);
+    workspacesByAccount.set(lease.accountId, workspaces);
+  }
+  const closed: OrganizationComputeBounds = {
+    limit: { ...sandboxPlanLimitFor(planLimits, "restricted"), runningBoxesPerOrganization: 0 },
+    boxSecondsToday: 0,
+  };
+  const organizations = new Map<string, OrganizationComputeBounds>();
+  const inventory: NoTurnWarmLease[] = [];
+  await forEachLimited([...workspacesByAccount], concurrency, async ([accountId, workspaces]) => {
+    try {
+      const standing = await resolveSandboxPlanStandingInWorkspace(db, {
+        accountId,
+        workspaceId: [...workspaces][0]!,
+        limits: planLimits,
+      });
+      const tierLimit = sandboxPlanLimitFor(planLimits, standing.tier);
+      const limit = standing.paidHistory ? paidSandboxPlanLimit(tierLimit) : tierLimit;
+      let isClosed = limit.runningBoxesPerOrganization === 0;
+      const unpaid = UNPAID_SANDBOX_PLAN_TIERS.includes(standing.tier) && !standing.paidHistory;
+      if (!isClosed && !unpaid) return;
+      const leases: NoTurnWarmLease[] = [];
+      for (const workspaceId of workspaces) {
+        leases.push(...(await listNoTurnWarmLeases(db, { accountId, workspaceId })));
+      }
+      if (leases.length === 0) return;
+      if (!isClosed) {
+        const people = new Set<string>();
+        for (const workspaceId of workspaces) {
+          for (const subject of await listNoTurnWarmLeasePeople(db, { accountId, workspaceId })) {
+            people.add(subject);
+          }
+        }
+        for (const subject of people) {
+          const person = await resolveSandboxComputeStanding(db, {
+            accountId,
+            limits: planLimits,
+            actingSubjectId: subject,
+            subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+          });
+          if (person.linkedRestricted) {
+            isClosed = true;
+            break;
+          }
+        }
+      }
+      if (!isClosed) return;
+      organizations.set(accountId, closed);
+      inventory.push(...leases);
+    } catch (error) {
+      observability.warn("sandbox reaper: closed compute read failed for organization", {
+        accountId,
+        error: errorMessage(error),
+      });
+    }
+  });
+  let drained = 0;
+  await forEachLimited(
+    planComputeBoundsDrains(inventory, organizations, { idleDrainMs: 0 }),
+    concurrency,
+    async ({ lease, reason }) => {
+      try {
+        const outcome = await drainNoTurnLeaseForComputeBounds(db, {
+          accountId: lease.accountId,
+          workspaceId: lease.workspaceId,
+          sandboxGroupId: lease.sandboxGroupId,
+          expectedEpoch: lease.leaseEpoch,
+          reason,
+          quietForMs: 0,
+          idleGraceMs: 0,
+        });
+        if (!outcome.drained) return;
+        drained += 1;
+        recordSandboxComputeBoundsDrain(observability, reason, outcome.mode);
+        observability.info("sandbox reaper: drained closed organization box", {
+          reason,
+          mode: outcome.mode,
+          accountId: lease.accountId,
+          workspaceId: lease.workspaceId,
+          sandboxGroupId: lease.sandboxGroupId,
+          leaseEpoch: lease.leaseEpoch,
+        });
+      } catch (error) {
+        observability.warn("sandbox reaper: closed organization box drain failed", {
+          accountId: lease.accountId,
+          workspaceId: lease.workspaceId,
+          sandboxGroupId: lease.sandboxGroupId,
+          error: errorMessage(error),
+        });
+      }
+    },
+  );
+  return { inspected: inventory.length, drained };
 }
