@@ -417,6 +417,16 @@ export async function installTeamsBot(
      * the same transaction, so the move either completes or changes nothing.
      */
     replaceInactive?: { installation: TeamsInstallation; audit: DisconnectAuditActor } | null;
+    /**
+     * This workspace's disconnected binding to another tenant, to remove in
+     * the same transaction, so the workspace connects to `tenantId` instead or
+     * changes nothing. The old tenant keeps no link, route, choice or pending
+     * delivery here and can no longer reach the workspace.
+     */
+    releaseWorkspaceInactive?: {
+      installation: TeamsInstallation;
+      audit: DisconnectAuditActor;
+    } | null;
   },
 ) {
   return withRlsContext(db, input, async (tx) => {
@@ -426,11 +436,32 @@ export async function installTeamsBot(
     await tx.execute(
       sql`insert into teams_bot_proofs(account_id,workspace_id,nonce) values(${input.accountId}::uuid,${input.workspaceId}::uuid,${input.nonce}::uuid)`,
     );
+    if (input.releaseWorkspaceInactive) {
+      const old = input.releaseWorkspaceInactive.installation;
+      if (old.tenant_id === input.tenantId || old.workspace_id !== input.workspaceId)
+        throw new Error("teams_installation_changed");
+      if (
+        !(await releaseInactiveTeamsInstallation(
+          tx,
+          old,
+          input.releaseWorkspaceInactive.audit,
+          "released_for_another_organization",
+        ))
+      )
+        throw new Error("teams_installation_changed");
+    }
     if (input.replaceInactive) {
       const old = input.replaceInactive.installation;
       if (old.tenant_id !== input.tenantId || old.workspace_id === input.workspaceId)
         throw new Error("teams_installation_changed");
-      if (!(await releaseInactiveTeamsInstallation(tx, old, input.replaceInactive.audit)))
+      if (
+        !(await releaseInactiveTeamsInstallation(
+          tx,
+          old,
+          input.replaceInactive.audit,
+          "released_by_tenant_administrator",
+        ))
+      )
         throw new Error("teams_installation_changed");
     }
     const rows = await rawRows<TeamsInstallation>(
@@ -469,16 +500,19 @@ export async function installTeamsBot(
 /**
  * Removes a disconnected tenant binding from its workspace, inside the
  * caller's transaction, so a verified tenant administrator can connect the
- * organization to another workspace. Deleting the installation also deletes
- * its account links, routes and their delivery records (sessions remain). The
- * removal is audited in the old workspace with what it removed. Returns false,
- * changing nothing, when the binding was reactivated or changed after `i` was
- * read.
+ * organization to another workspace, or the workspace's administrator can
+ * connect it to another organization. Deleting the installation also deletes
+ * its account links (with their chat choices and parked messages), routes and
+ * their delivery records; the tenant's chat context in the workspace goes too
+ * (sessions remain). The removal is audited in the old workspace with what it
+ * removed. Returns false, changing nothing, when the binding was reactivated
+ * or changed after `i` was read.
  */
 async function releaseInactiveTeamsInstallation(
   tx: Database,
   i: TeamsInstallation,
   audit: DisconnectAuditActor,
+  reason: "released_by_tenant_administrator" | "released_for_another_organization",
 ): Promise<boolean> {
   return teamsScoped(tx, i, async (scoped) => {
     const [held] = await rawRows<{ tenant_id: string }>(
@@ -493,6 +527,12 @@ async function releaseInactiveTeamsInstallation(
     await scoped.execute(
       sql`delete from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid`,
     );
+    await scoped.execute(
+      sql`delete from teams_bot_context_messages where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid`,
+    );
+    await scoped.execute(
+      sql`delete from teams_bot_context_cutoffs where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid`,
+    );
     await insertDisconnectAuditEventInScope(scoped, {
       accountId: i.account_id,
       workspaceId: i.workspace_id,
@@ -500,7 +540,7 @@ async function releaseInactiveTeamsInstallation(
       actor: audit,
       target: { type: "teams_bot_installation", id: i.tenant_id, provider: "microsoft_teams" },
       details: {
-        reason: "released_by_tenant_administrator",
+        reason,
         removedLinks: counts?.links ?? 0,
         removedRoutes: counts?.routes ?? 0,
       },

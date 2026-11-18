@@ -188,8 +188,9 @@ refused with `user_mismatch` and connects nothing.
 What self-serve cannot do: bind a tenant the person doesn't administer (the
 Microsoft sign-in must be the same Teams user and hold an administrator role in
 that tenant), replace, take over or move an active connection, or bind a
-workspace that is already bound to another tenant. Even two setups racing never
-rotate an active installation.
+workspace that is actively connected to another tenant
+(`workspace_linked_elsewhere`: disconnect the bot in that workspace first). Even
+two setups racing never rotate an active installation.
 
 What a tenant administrator can do with a connection that already exists:
 
@@ -210,6 +211,20 @@ What a tenant administrator can do with a connection that already exists:
   and the Microsoft administrator as `microsoft:<tenant ID>:<object ID>` (not
   the Opengeni identity in the new workspace). This keeps a binding left behind
   by a departed admin, consultant or trial from locking the organization out.
+
+What a workspace administrator can do when the workspace was connected to
+another tenant: after **Disconnect bot**, connect a different tenant through the
+normal self-serve setup (the new tenant's Teams or Global Administrator sign-in
+and tenant admission still apply; no Global Administrator of the old tenant is
+needed, because the workspace is theirs). The old tenant's binding is released
+in the install transaction exactly as for a move: its account links (with their
+chat choices and parked switch-card messages), routes, inbox and outbox, and its
+chat context in the workspace are deleted, so nothing leaks into the new
+tenant, and the old tenant gets the setup prompt again instead of reaching the
+workspace. The workspace gets a `connection.disconnected` audit record with
+reason `released_for_another_organization`, the removed counts, and the Opengeni
+administrator who completed setup. If the old tenant reconnects meanwhile, the
+release changes nothing and setup is refused with `connection_changed`.
 
 A setup proof is single-use (its nonce is recorded at install), and Microsoft
 codes are single-use and PKCE-bound.
@@ -319,6 +334,8 @@ Staging acceptance for self-serve, in the dedicated test tenant:
    link.
 7. After disconnecting, a Teams Administrator can reconnect only in the original
    workspace; a Global Administrator can move it to another shared workspace.
+   A workspace whose bot was disconnected can connect a different tenant; while
+   connected, it refuses with `workspace_linked_elsewhere`.
 8. A person without an administrator role opens their own account link, signs in
    to Microsoft with their Teams account and is linked.
 9. A workspace member opens someone else's account link and signs in to
@@ -890,8 +907,9 @@ person can't use (refused), and a reach limit set by an organization admin
 Each tenant/workspace binding stays fixed while active. Disconnect pauses that
 binding; reconnect uses the same tenant and workspace. With self-serve setup, a
 Global Administrator of the tenant can move a disconnected binding to another
-workspace (see Self-serve organization setup); nothing else transfers either
-side.
+workspace, and a workspace administrator can connect a disconnected workspace
+to a different tenant (see Self-serve organization setup); nothing else
+transfers either side.
 
 Remove the pilot/reviewer allowlists and keep broad switches false to close
 admission. Revoke a compromised credential at its Microsoft authority and rotate
