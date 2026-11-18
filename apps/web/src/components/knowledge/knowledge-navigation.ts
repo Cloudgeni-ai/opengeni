@@ -19,13 +19,55 @@ export interface KnowledgeNavigation {
   /** Opens one change waiting in Review; `replace` moves on without a new history entry. */
   openProposal: (key: string, options?: { replace?: boolean }) => void;
   /** Opens an entry's page; `from` is the tab its back link returns to. */
-  openEntry: (entryId: string, options?: { revision?: string; from?: KnowledgeTab }) => void;
-  openPage: (
-    page: KnowledgeSubpage,
-    extra?: { entry?: string; collection?: string; view?: KnowledgeTab },
-  ) => void;
+  openEntry: (entryId: string, options?: EntryLinkOptions) => void;
+  openPage: (page: KnowledgeSubpage, extra?: PageLinkOptions) => void;
   /** Replace the URL without adding history, for legacy links. */
   replace: (search: KnowledgeSearch) => void;
+}
+
+export interface EntryLinkOptions {
+  revision?: string;
+  from?: KnowledgeTab;
+  /** The agent whose page the entry was opened from, kept while you stay on it. */
+  agent?: string;
+}
+
+export interface PageLinkOptions {
+  entry?: string;
+  collection?: string;
+  view?: KnowledgeTab;
+  agent?: string;
+}
+
+export function entrySearch(entry: string, options: EntryLinkOptions = {}): KnowledgeSearch {
+  return {
+    entry,
+    ...(options.revision ? { revision: options.revision } : {}),
+    ...(options.from && options.from !== "library" ? { view: options.from } : {}),
+    ...(options.agent ? { agent: options.agent } : {}),
+  };
+}
+
+/**
+ * Another version of the entry you're on, or its Edit page and back, stays in
+ * the agent's context it was opened from ("Agents › <agent> › Memory").
+ */
+export function keepAgentContext(
+  current: KnowledgeSearch,
+  entryId: string,
+): Pick<EntryLinkOptions, "agent"> {
+  return current.agent && current.entry === entryId ? { agent: current.agent } : {};
+}
+
+export function pageSearch(page: KnowledgeSubpage, extra: PageLinkOptions = {}): KnowledgeSearch {
+  return {
+    page,
+    ...(extra.entry ? { entry: extra.entry } : {}),
+    ...(extra.collection ? { collection: extra.collection } : {}),
+    ...(extra.view && extra.view !== "library" ? { view: extra.view } : {}),
+    // The agent only means something on an entry's pages.
+    ...(extra.agent && extra.entry ? { agent: extra.agent } : {}),
+  };
 }
 
 export function useKnowledgeNavigation(workspaceId: string): KnowledgeNavigation {
@@ -52,22 +94,11 @@ export function useKnowledgeNavigation(workspaceId: string): KnowledgeNavigation
     [go],
   );
   const openEntry = useCallback(
-    (entry: string, options: { revision?: string; from?: KnowledgeTab } = {}) =>
-      go({
-        entry,
-        ...(options.revision ? { revision: options.revision } : {}),
-        ...(options.from && options.from !== "library" ? { view: options.from } : {}),
-      }),
+    (entry: string, options: EntryLinkOptions = {}) => go(entrySearch(entry, options)),
     [go],
   );
   const openPage = useCallback<KnowledgeNavigation["openPage"]>(
-    (page, extra = {}) =>
-      go({
-        page,
-        ...(extra.entry ? { entry: extra.entry } : {}),
-        ...(extra.collection ? { collection: extra.collection } : {}),
-        ...(extra.view && extra.view !== "library" ? { view: extra.view } : {}),
-      }),
+    (page, extra = {}) => go(pageSearch(page, extra)),
     [go],
   );
   const replace = useCallback((search: KnowledgeSearch) => go(search, true), [go]);

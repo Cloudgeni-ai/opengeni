@@ -4,6 +4,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 mock.module("@tanstack/react-router", () => ({
+  useNavigate: () => () => Promise.resolve(),
   Link: ({
     children,
     to,
