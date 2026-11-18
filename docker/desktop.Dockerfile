@@ -30,7 +30,7 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 FROM scratch AS chrome-assets
 
-ADD --checksum=sha256:4d740636b5c96f687798602c5aad6a5a270f44dd02e48db0638ae77aa4867b1b https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_157.0.8103.78-1_amd64.deb /google-chrome-stable.deb
+ADD --checksum=sha256:4696bce00b128f385a870ba2eb6eede61698f22374ea0d8e09af8a1c6543d397 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_158.0.8127.36-1_amd64.deb /google-chrome-stable.deb
 
 # The pinned rg builds the agent embeds and appends to every command's PATH,
 # with the static musl jq committed under agent/vendor/jq/. Pins equal
