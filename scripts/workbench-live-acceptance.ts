@@ -3572,7 +3572,7 @@ async function proveLivePauseCancellation(input: {
     },
     { timeout: 30_000 },
   );
-  await page.getByRole("button", { name: "Pause this workstream" }).click();
+  await page.getByRole("button", { name: "Pause this workstream", exact: true }).click();
   const pauseResponse = await pauseResponsePromise;
   if (pauseResponse.status() !== 200) {
     throw new Error(`live Pause returned HTTP ${pauseResponse.status()}`);
@@ -3705,7 +3705,16 @@ async function proveLivePauseCancellation(input: {
     throw new Error("Pause rendered misleading control-state copy while cancellation settled");
   }
   await stoppingState.waitFor({ state: "hidden", timeout: 5_000 });
-  await page.getByText("Paused here", { exact: true }).waitFor({ timeout: 5_000 });
+  // "Paused here" renders on two surfaces at once (the session header chip and
+  // the composer's pause banner), so bare text matching is ambiguous. Prove the
+  // paused state on the header chip by its exact accessible name, and on the
+  // composer by the Resume control this flow clicks next.
+  await page
+    .getByRole("button", { name: "Paused here. Open workstream controls", exact: true })
+    .waitFor({ timeout: 5_000 });
+  await page
+    .getByRole("button", { name: "Resume this workstream", exact: true })
+    .waitFor({ timeout: 5_000 });
 
   const pauseCustody: ControlFixtureCustody = {
     mode: "pause",
@@ -3746,7 +3755,7 @@ async function proveLivePauseCancellation(input: {
     },
     { timeout: 30_000 },
   );
-  await page.getByRole("button", { name: "Resume this workstream" }).click();
+  await page.getByRole("button", { name: "Resume this workstream", exact: true }).click();
   const resumeResponse = await resumeResponsePromise;
   if (resumeResponse.status() !== 200) {
     throw new Error(`live Resume returned HTTP ${resumeResponse.status()}`);
