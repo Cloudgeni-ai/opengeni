@@ -3705,15 +3705,15 @@ async function proveLivePauseCancellation(input: {
     throw new Error("Pause rendered misleading control-state copy while cancellation settled");
   }
   await stoppingState.waitFor({ state: "hidden", timeout: 5_000 });
-  // "Paused here" renders on two surfaces at once (the session header chip and
-  // the composer's pause banner), so bare text matching is ambiguous. Prove the
-  // paused state on the header chip by its exact accessible name, and on the
-  // composer by the Resume control this flow clicks next.
-  await page
-    .getByRole("button", { name: "Paused here. Open workstream controls", exact: true })
-    .waitFor({ timeout: 5_000 });
-  await page
-    .getByRole("button", { name: "Resume this workstream", exact: true })
+  // "Paused here" can render on more than one surface at once (for example a
+  // session header chip as well as the composer's pause banner), so a bare
+  // page-wide text match is ambiguous. Prove it inside the composer's pause
+  // banner: the row that holds the Resume control this flow clicks next.
+  const resumeControl = page.getByRole("button", { name: "Resume this workstream", exact: true });
+  await resumeControl.waitFor({ timeout: 5_000 });
+  await resumeControl
+    .locator("..")
+    .getByText("Paused here", { exact: true })
     .waitFor({ timeout: 5_000 });
 
   const pauseCustody: ControlFixtureCustody = {
