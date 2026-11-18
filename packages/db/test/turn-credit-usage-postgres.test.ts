@@ -211,6 +211,9 @@ describe("per-turn credit usage on terminal turn events", () => {
     );
     await usageRow(scope, turnId, "image_generation.cost", 5_000, "image-1");
     await usageRow(scope, turnId, "video_generation.cost", 700, "video-1");
+    // A video that failed and was refunded within the turn nets to nothing.
+    await usageRow(scope, turnId, "video_generation.cost", 900, "video-2");
+    await usageRow(scope, turnId, "video_generation.refund", 900, "video-2");
     // Tokens and provider costs are not credits.
     await usageRow(scope, turnId, "model.provider_cost", 99_999, `${turnId}:x`);
     // C commits with the terminal event, before its settlement runs.

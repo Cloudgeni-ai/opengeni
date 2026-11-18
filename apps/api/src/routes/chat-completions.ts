@@ -5,6 +5,7 @@ import {
   type ModelCallService,
   requireAccessGrant,
 } from "@opengeni/core";
+import { hidesCreditUsage } from "../http/credit-usage-audience";
 import type { Context, Hono } from "hono";
 import {
   chatCompletionChunk,
@@ -78,6 +79,8 @@ export function registerChatCompletionRoutes(
   app.post("/v1/workspaces/:workspaceId/chat/completions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    // A browser relayed through a session proxy never sees what the call cost.
+    const showCost = !hidesCreditUsage(c, grant);
     const service = deps.modelCalls;
     if (!service) return errorResponse(c, unavailable());
     let parsed: ReturnType<typeof parseChatCompletionRequest>;
@@ -115,7 +118,7 @@ export function registerChatCompletionRoutes(
             created,
             model: output.model,
             result: output.result,
-            creditsChargedMicros: output.creditsChargedMicros,
+            creditsChargedMicros: showCost ? output.creditsChargedMicros : null,
           }),
         );
       } catch (error) {
@@ -205,7 +208,10 @@ export function registerChatCompletionRoutes(
             created,
             model: output.model,
             choices: [],
-            usage: chatCompletionUsage(output.result.usage, output.creditsChargedMicros),
+            usage: chatCompletionUsage(
+              output.result.usage,
+              showCost ? output.creditsChargedMicros : null,
+            ),
           });
         }
         send("[DONE]");

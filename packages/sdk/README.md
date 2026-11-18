@@ -55,9 +55,10 @@ async function turnCostsInDollars(client: OpenGeniClient, workspaceId: string, s
 }
 ```
 
-Sub-agents are separate sessions and report on their own turns. The session
-proxy and `sessionEventsToSseStream` leave both fields out of what browsers
-receive. See [what a turn cost](../../docs/workspace-integrations.md#what-a-turn-cost).
+Sub-agents are separate sessions and report on their own turns. Opengeni
+leaves both fields out of what the session proxy relays, and
+`sessionEventsToSseStream` drops turn `usage` unless you pass
+`includeCreditUsage: true`. See [what a turn cost](../../docs/workspace-integrations.md#what-a-turn-cost).
 
 ## Task usage limits
 

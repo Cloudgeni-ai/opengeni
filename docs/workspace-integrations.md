@@ -490,18 +490,29 @@ webhook's `data.usage`, and on each turn from
   amounts.
 - It is computed when the turn's terminal event is written, from the durable
   usage and credit records, so it is the same after a worker restart or a
-  retried attempt. A charge settled after the turn ended (a video still
-  rendering, a title generated later) is not included.
+  retried attempt. A video is charged when it starts, so one still rendering
+  is included, net of any refund written before the turn ended; a later
+  refund, or a title generated after the turn, does not change the figure.
+- Not attributed to the turn: model calls that code in the agent's sandbox
+  makes through the model-call or chat-completions API (each reports its own
+  `usage.cost`), knowledge-search embeddings, and a response still in flight
+  when the turn is cancelled or superseded.
 - Only this session's own turn: sub-agents are separate sessions and report
   on their own turn events. To keep all of a request's cost on one turn, turn
   sub-agents off with `agent: { capabilities: { subagents: false } }` or
   `maxNestedAgentDepth: 0`.
 - Turns from before this field existed return `usage: null` and their events
   have no `usage`. The field is additive: payloads stay open objects.
-- End users never see it: the session proxy (`createSessionProxyHandler`,
-  `sessionEventsToSseStream`) and published Sites remove it, along with
-  `usage.cost` from chat completions. Server credentials (organization and
-  workspace API keys) and the Console see it.
+- End users never see it. Opengeni leaves it, and chat completions'
+  `usage.cost`, out of reads a session proxy relays (a server credential
+  asking for the chat projection, `Accept: application/json;
+  opengeni-session=chat`, which every `createSessionProxyHandler` sends), so
+  it holds for proxies on any SDK version. `afterForward` hooks therefore
+  don't see it either. `sessionEventsToSseStream` and
+  `proxySessionEventStream` remove it too (`includeCreditUsage: true` keeps
+  it for trusted consumers), and published Sites never carry it. Server
+  credentials reading the full projection (the default) and the Console see
+  it.
 
 For a single model call, chat completions return the same amount as
 OpenRouter's `usage.cost`; see [chat completions](chat-completions.md#billing).

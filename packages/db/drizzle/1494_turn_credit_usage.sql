@@ -20,8 +20,9 @@
 --   * the bring-your-own-key platform fee of each call (recorded charges, else
 --     its ledger row), as `other`;
 --   * `web_search.cost`, `image_generation.cost` and any other `.cost` usage row
---     of the turn (video generation goes to `other`), plus hosted searches
---     recorded with a response whose settlement is still owed.
+--     of the turn (video generation goes to `other`, net of a refund written
+--     before the turn ended), plus hosted searches recorded with a response
+--     whose settlement is still owed.
 -- Subscription and customer-key calls cost 0 credits apart from the fee.
 -- `creditsMicros` is null when a model call of the turn has no recorded price
 -- (never a false 0). `usage` is omitted when the transaction cannot read the
@@ -62,7 +63,8 @@ BEGIN
         CASE WHEN e.type = 'agent.model.usage' THEN e.payload ELSE e.payload -> 'rejectedPayload' END AS payload
       FROM session_events e
       WHERE e.workspace_id = NEW.workspace_id AND e.turn_id = NEW.turn_id AND e.session_id = NEW.session_id
-        AND (e.type = 'agent.model.usage'
+        AND ((e.type = 'agent.model.usage'
+            AND (e.turn_association IS NULL OR e.turn_association = 'current'))
           OR (e.type = 'turn.event.rejected_late' AND e.payload ->> 'rejectedType' = 'agent.model.usage'))
     ),
     calls AS (
@@ -72,11 +74,18 @@ BEGIN
       WHERE jsonb_typeof(payload) = 'object' AND jsonb_typeof(payload -> 'sourceKey') = 'string'
       ORDER BY payload ->> 'sourceKey', sequence
     ),
+    -- A refund (`video_generation.refund`) nets against its `.cost` row.
     costs AS (
-      SELECT u.event_type, u.source_resource_id, u.quantity::numeric AS quantity
+      SELECT
+        CASE WHEN u.event_type LIKE '%.refund'
+          THEN left(u.event_type, length(u.event_type) - length('.refund')) || '.cost'
+          ELSE u.event_type END AS event_type,
+        u.source_resource_id,
+        CASE WHEN u.event_type LIKE '%.refund' THEN -u.quantity::numeric ELSE u.quantity::numeric END AS quantity
       FROM usage_events u
       WHERE u.workspace_id = NEW.workspace_id AND u.turn_id = NEW.turn_id AND u.session_id = NEW.session_id
-        AND u.unit = 'usd_micros' AND u.event_type LIKE '%.cost'
+        AND u.unit = 'usd_micros'
+        AND (u.event_type LIKE '%.cost' OR (u.event_type LIKE '%.refund' AND u.event_type <> 'model.refund'))
     ),
     model_costs AS (
       SELECT source_resource_id, max(quantity) AS quantity FROM costs
@@ -143,11 +152,11 @@ BEGIN
     ),
     tools AS (
       SELECT
-        coalesce(sum(quantity) FILTER (WHERE event_type = 'web_search.cost'), 0) AS web_search,
-        coalesce(sum(quantity) FILTER (WHERE event_type = 'image_generation.cost'), 0) AS image_generation,
-        coalesce(sum(quantity) FILTER (
+        greatest(coalesce(sum(quantity) FILTER (WHERE event_type = 'web_search.cost'), 0), 0) AS web_search,
+        greatest(coalesce(sum(quantity) FILTER (WHERE event_type = 'image_generation.cost'), 0), 0) AS image_generation,
+        greatest(coalesce(sum(quantity) FILTER (
           WHERE event_type NOT IN ('model.cost', 'web_search.cost', 'image_generation.cost')
-        ), 0) AS other
+        ), 0), 0) AS other
       FROM costs
     )
     SELECT jsonb_build_object(
@@ -163,6 +172,7 @@ BEGIN
     ) INTO usage_value
     FROM totals t CROSS JOIN tools;
   EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'turn % credit usage was not attached (SQLSTATE %)', NEW.turn_id, SQLSTATE;
     usage_value := NULL;
   END;
   IF usage_value IS NOT NULL THEN

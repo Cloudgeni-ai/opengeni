@@ -25,9 +25,11 @@ export function answerCosts(events: readonly SessionEvent[]): {
 } {
   const turnCost = new Map<string, number>();
   const lastAnswer = new Map<string, { id: string; occurredAt: string }>();
+  const answerIds = new Set<string>();
   for (const event of events) {
     if (!event.turnId) continue;
     if (event.type === "agent.message.completed") {
+      answerIds.add(event.id);
       lastAnswer.set(event.turnId, { id: event.id, occurredAt: event.occurredAt });
     } else if (TURN_END_TYPES.has(event.type)) {
       const credits = record(record(event.payload)?.usage)?.creditsMicros;
@@ -44,7 +46,10 @@ export function answerCosts(events: readonly SessionEvent[]): {
       const cost = turnCost.get(item.turnId);
       const answer = lastAnswer.get(item.turnId);
       if (cost === undefined || !answer) return null;
-      return item.id === answer.id || item.occurredAt === answer.occurredAt ? cost : null;
+      // A row keyed by its event id matches only that event; the completion
+      // time is the fallback for rows keyed otherwise.
+      if (answerIds.has(item.id)) return item.id === answer.id ? cost : null;
+      return item.occurredAt === answer.occurredAt ? cost : null;
     },
   };
 }

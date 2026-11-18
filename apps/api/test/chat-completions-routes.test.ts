@@ -362,6 +362,31 @@ describe("chat completions route", () => {
     expect(chunks.slice(0, -1).every((chunk) => chunk.usage === null)).toBe(true);
   });
 
+  test("a browser relayed through a session proxy never sees usage.cost", async () => {
+    const { service } = fakeService(async (input) => {
+      await input.onTextDelta?.("Hei");
+      return { ...OUTPUT, creditsChargedMicros: 41_230 };
+    });
+    const relayed = async (body: Record<string, unknown>) =>
+      await app(service).request(URL, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "content-type": "application/json",
+          accept: "application/json, application/json; opengeni-session=chat",
+        },
+        body: JSON.stringify({ model: "m", messages: MESSAGES, ...body }),
+      });
+    const whole = (await (await relayed({})).json()) as { usage: Record<string, unknown> };
+    expect(whole.usage).toMatchObject({ total_tokens: 15 });
+    expect(whole.usage).not.toHaveProperty("cost");
+    const streamed = await (
+      await relayed({ stream: true, stream_options: { include_usage: true } })
+    ).text();
+    expect(streamed).toContain('"total_tokens":15');
+    expect(streamed).not.toContain('"cost"');
+  });
+
   test("a streamed call refused before any output is a plain JSON error", async () => {
     const { service } = fakeService(async () => {
       throw new ModelCallError({

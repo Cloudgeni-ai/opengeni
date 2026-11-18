@@ -20,10 +20,6 @@ import type {
 } from "./types";
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import { getSessionProxyWorkspaceGrant } from "./session-proxy-client";
-import {
-  stripCreditUsageFromEventStream,
-  stripCreditUsageFromJsonText,
-} from "./session-proxy-usage";
 import { normalizeMessageTimeZone } from "@opengeni/contracts/message-time-zone";
 import type { ExternalActorStatedMembership } from "@opengeni/contracts/external-identities";
 export {
@@ -1323,36 +1319,12 @@ function relayResponse(
   if (status === 204 || status === 205 || status === 304 || upstream.body === null) {
     return new Response(null, { status, headers });
   }
-  const contentType = upstream.headers.get("content-type") ?? "";
-  // The credits turns and completions charged are the product server's
-  // billing data, never the browser's (`session-proxy-usage.ts`).
-  if (/^text\/event-stream\b/i.test(contentType)) {
+  if (/^text\/event-stream\b/i.test(upstream.headers.get("content-type") ?? "")) {
     headers.set("Cache-Control", "no-cache, no-transform");
     headers.delete("content-length");
-    return new Response(
-      withHeartbeat(stripCreditUsageFromEventStream(upstream.body), heartbeatMs),
-      { status, headers },
-    );
-  }
-  if (/^application\/(?:[\w.+-]+\+)?json\b/i.test(contentType)) {
-    headers.delete("content-length");
-    return new Response(strippedJsonBody(upstream), { status, headers });
+    return new Response(withHeartbeat(upstream.body, heartbeatMs), { status, headers });
   }
   return new Response(upstream.body, { status, headers });
-}
-
-function strippedJsonBody(upstream: Response): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        const text = await upstream.text();
-        controller.enqueue(new TextEncoder().encode(stripCreditUsageFromJsonText(text)));
-        controller.close();
-      } catch (error) {
-        controller.error(error);
-      }
-    },
-  });
 }
 
 const HEARTBEAT = new TextEncoder().encode(": ping\n\n");

@@ -1252,8 +1252,8 @@ signature scheme, and SDK helpers.
 Each turn's terminal event, its webhook and the turns API carry the Opengeni
 credits the turn charged as `usage.creditsMicros`, and chat completions return
 `usage.cost`; read them with your server credentials to track cost per answer
-([what a turn cost](workspace-integrations.md#what-a-turn-cost)). The session
-proxy removes both before anything reaches the browser.
+([what a turn cost](workspace-integrations.md#what-a-turn-cost)). Opengeni leaves
+both out of what the session proxy relays to the browser.
 
 ### Model and runtime behavior
 
