@@ -7,9 +7,12 @@ export type SweepNangoConnectionsActivityResult = {
   listed: number;
   deleted: number;
   repointed: number;
+  /** Rows whose Nango connection was gone, now asking to reconnect. */
+  markedMissing: number;
   skippedPeople: number;
   deferredPeople: number;
   orphanBreakerTripped: boolean;
+  missingBreakerTripped: boolean;
 };
 
 function heartbeat(): void {
@@ -51,9 +54,11 @@ export function createNangoConnectionSweepActivities(
           listed: 0,
           deleted: 0,
           repointed: 0,
+          markedMissing: 0,
           skippedPeople: 0,
           deferredPeople: 0,
           orphanBreakerTripped: false,
+          missingBreakerTripped: false,
         };
       const summary = {
         skipped: false,
@@ -63,9 +68,11 @@ export function createNangoConnectionSweepActivities(
           result.deletedDuplicates.length +
           result.deletedBroken.length,
         repointed: result.repointed,
+        markedMissing: result.markedMissing,
         skippedPeople: result.skippedPeople,
         deferredPeople: result.deferredPeople,
         orphanBreakerTripped: result.orphanBreakerTripped,
+        missingBreakerTripped: result.missingBreakerTripped,
       };
       // People whose rows could not all be read keep their connections; say so.
       if (summary.skippedPeople > 0 || summary.deferredPeople > 0)
@@ -73,7 +80,13 @@ export function createNangoConnectionSweepActivities(
           skippedPeople: summary.skippedPeople,
           deferredPeople: summary.deferredPeople,
         });
-      if (summary.deleted > 0 || summary.repointed > 0 || summary.orphanBreakerTripped)
+      if (
+        summary.deleted > 0 ||
+        summary.repointed > 0 ||
+        summary.markedMissing > 0 ||
+        summary.orphanBreakerTripped ||
+        summary.missingBreakerTripped
+      )
         observability.info("Nango connection sweep", {
           ...summary,
           deletedOrphans: result.deletedOrphans.length,
