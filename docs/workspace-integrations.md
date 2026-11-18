@@ -491,8 +491,9 @@ webhook's `data.usage`, and on each turn from
 - It is computed when the turn's terminal event is written, from the durable
   usage and credit records, so it is the same after a worker restart or a
   retried attempt. A video is charged when it starts, so one still rendering
-  is included, net of any refund written before the turn ended; a later
-  refund, or a title generated after the turn, does not change the figure.
+  is included, net of the credits a refund written before the turn ended
+  returned; a later refund, or a title generated after the turn, does not
+  change the figure.
 - Not attributed to the turn: model calls that code in the agent's sandbox
   makes through the model-call or chat-completions API (each reports its own
   `usage.cost`), knowledge-search embeddings, and a response still in flight
@@ -504,15 +505,17 @@ webhook's `data.usage`, and on each turn from
 - Turns from before this field existed return `usage: null` and their events
   have no `usage`. The field is additive: payloads stay open objects.
 - End users never see it. Opengeni leaves it, and chat completions'
-  `usage.cost`, out of reads a session proxy relays (a server credential
-  asking for the chat projection, `Accept: application/json;
-  opengeni-session=chat`, which every `createSessionProxyHandler` sends), so
-  it holds for proxies on any SDK version. `afterForward` hooks therefore
-  don't see it either. `sessionEventsToSseStream` and
-  `proxySessionEventStream` remove it too (`includeCreditUsage: true` keeps
-  it for trusted consumers), and published Sites never carry it. Server
-  credentials reading the full projection (the default) and the Console see
-  it.
+  `usage.cost`, out of reads a session proxy relays: reads as an end user
+  (`asUser`) or with a server credential that ask for the chat projection
+  (`Accept: application/json; opengeni-session=chat`, which every
+  `createSessionProxyHandler` sends). `afterForward` hooks therefore don't see
+  it either; a hand-written relay must send that header too.
+  `sessionEventsToSseStream` and `proxySessionEventStream` remove it as well
+  (`includeCreditUsage: true` keeps it for trusted consumers), and published
+  Sites never carry it.
+- Read it on your server in the full projection, the default for the SDK
+  client and `asUser`; a client switched to `withSessionResponse("chat")`
+  doesn't get it. The Console shows it too.
 
 For a single model call, chat completions return the same amount as
 OpenRouter's `usage.cost`; see [chat completions](chat-completions.md#billing).

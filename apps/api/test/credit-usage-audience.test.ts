@@ -82,6 +82,14 @@ describe("credit usage audience", () => {
     // Opengeni's own app reads the chat projection as a signed-in person.
     expect(hidesCreditUsage(context(CHAT_ACCEPT), { principalKind: "human_session" })).toBe(false);
     expect(hidesCreditUsage(context(CHAT_ACCEPT), {})).toBe(false);
+    // A proxy relays as the product's end user (`asUser`): an external actor.
+    const endUser = {
+      principalKind: "human_session",
+      metadata: { externalActor: { source: "product", externalId: "u_42" } },
+    };
+    expect(hidesCreditUsage(context(CHAT_ACCEPT), endUser)).toBe(true);
+    // The product server reading as that user in the full projection keeps it.
+    expect(hidesCreditUsage(context("application/json"), endUser)).toBe(false);
   });
 
   test("relayed event pages and turns lose usage; everything else is unchanged", async () => {

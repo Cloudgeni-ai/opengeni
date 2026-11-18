@@ -214,6 +214,16 @@ describe("per-turn credit usage on terminal turn events", () => {
     // A video that failed and was refunded within the turn nets to nothing.
     await usageRow(scope, turnId, "video_generation.cost", 900, "video-2");
     await usageRow(scope, turnId, "video_generation.refund", 900, "video-2");
+    // One partly paid with plan credit that has no way back: only the
+    // ledger's refund nets, so 300 stays charged.
+    await usageRow(scope, turnId, "video_generation.cost", 900, "video-3");
+    await usageRow(scope, turnId, "video_generation.refund", 900, "video-3");
+    await withRlsContext(db(), scope, async (scoped) => {
+      await scoped.execute(sql`insert into credit_ledger_entries
+        (account_id, workspace_id, type, amount_micros, idempotency_key)
+        values (${scope.accountId}::uuid, ${scope.workspaceId}::uuid, 'video_generation_refund', 600,
+          'credit:video_generation_refund:video-3')`);
+    });
     // Tokens and provider costs are not credits.
     await usageRow(scope, turnId, "model.provider_cost", 99_999, `${turnId}:x`);
     // C commits with the terminal event, before its settlement runs.
@@ -231,9 +241,9 @@ describe("per-turn credit usage on terminal turn events", () => {
     ]);
 
     const expected = {
-      creditsMicros: 47_930,
+      creditsMicros: 48_230,
       tokens: { input: 18_200, output: 920 },
-      breakdown: { model: 40_100, webSearch: 2_130, imageGeneration: 5_000, other: 700 },
+      breakdown: { model: 40_100, webSearch: 2_130, imageGeneration: 5_000, other: 1_000 },
     };
     const payload = await terminalEvent(scope, turnId, "turn.completed");
     expect(payload).toEqual({ status: "completed", usage: expected });

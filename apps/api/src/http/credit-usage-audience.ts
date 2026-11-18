@@ -5,13 +5,14 @@ import type { Context, MiddlewareHandler } from "hono";
  * billing data. A product server reads them with its own credentials; the
  * person chatting in an embedded app never does.
  *
- * Requests a session proxy relays from a browser are made with the product's
- * server credential (an API key or a delegated service token) and ask for the
- * compact chat projection (every `@opengeni/sdk` session proxy adds
+ * Requests a session proxy relays from a browser are made as the product's
+ * end user (`asUser`, an external actor) or with its server credential (an API
+ * key or a delegated service token), and ask for the compact chat projection
+ * (every `@opengeni/sdk` session proxy adds
  * `Accept: application/json; opengeni-session=chat`). Those reads leave out a
- * turn's `usage` and chat completions' `usage.cost`, so no relay, whatever its
- * version, can hand them to a browser. Opengeni's own app signs in as a person
- * and keeps them, as does any server read in the full projection.
+ * turn's `usage` and chat completions' `usage.cost`. Opengeni's own app signs
+ * in as a person and keeps them, as does any server read in the full
+ * projection (the default), `asUser` included.
  */
 
 const CHAT_ACCEPT = "application/json; opengeni-session=chat";
@@ -28,13 +29,18 @@ const SERVER_CREDENTIALS: ReadonlySet<string> = new Set(["api_key", "configured_
 
 const hiddenFrom = new WeakSet<Request>();
 
-/** Whether this request is a browser read relayed with the product's server credential. */
-export function hidesCreditUsage(
-  c: Context,
-  grant: { principalKind?: string | undefined },
-): boolean {
+type CreditUsageGrant = {
+  principalKind?: string | undefined;
+  metadata?: { externalActor?: unknown } | null | undefined;
+};
+
+/** Whether this request is a browser read a product's session proxy relayed. */
+export function hidesCreditUsage(c: Context, grant: CreditUsageGrant): boolean {
   // People signed in to Opengeni (its own app and Console) and agents see it.
-  if (!grant.principalKind || !SERVER_CREDENTIALS.has(grant.principalKind)) return false;
+  const relayable =
+    isRecord(grant.metadata?.externalActor) ||
+    (grant.principalKind !== undefined && SERVER_CREDENTIALS.has(grant.principalKind));
+  if (!relayable) return false;
   c.header("Vary", "Accept", { append: true });
   return (c.req.header("accept") ?? "").split(",").some((value) => value.trim() === CHAT_ACCEPT);
 }
@@ -43,10 +49,7 @@ export function hidesCreditUsage(
  * Notes the request's audience; `stripCreditUsageForRelayedBrowsers` then
  * removes turn usage from what the route answers.
  */
-export function noteCreditUsageAudience(
-  c: Context,
-  grant: { principalKind?: string | undefined },
-): void {
+export function noteCreditUsageAudience(c: Context, grant: CreditUsageGrant): void {
   if (hidesCreditUsage(c, grant)) hiddenFrom.add(c.req.raw);
 }
 

@@ -74,14 +74,21 @@ BEGIN
       WHERE jsonb_typeof(payload) = 'object' AND jsonb_typeof(payload -> 'sourceKey') = 'string'
       ORDER BY payload ->> 'sourceKey', sequence
     ),
-    -- A refund (`video_generation.refund`) nets against its `.cost` row.
+    -- A refund (`video_generation.refund`) nets against its `.cost` row, by
+    -- the credits its ledger row returned (plan credit that has no way back
+    -- stays charged), else by the usage row.
     costs AS (
       SELECT
         CASE WHEN u.event_type LIKE '%.refund'
           THEN left(u.event_type, length(u.event_type) - length('.refund')) || '.cost'
           ELSE u.event_type END AS event_type,
         u.source_resource_id,
-        CASE WHEN u.event_type LIKE '%.refund' THEN -u.quantity::numeric ELSE u.quantity::numeric END AS quantity
+        CASE WHEN u.event_type LIKE '%.refund' THEN -coalesce((
+            SELECT l.amount_micros::numeric FROM credit_ledger_entries l
+            WHERE l.idempotency_key = 'credit:' || replace(u.event_type, '.', '_') || ':' || u.source_resource_id
+              AND l.account_id = NEW.account_id AND l.amount_micros >= 0
+          ), u.quantity::numeric)
+        ELSE u.quantity::numeric END AS quantity
       FROM usage_events u
       WHERE u.workspace_id = NEW.workspace_id AND u.turn_id = NEW.turn_id AND u.session_id = NEW.session_id
         AND u.unit = 'usd_micros'
