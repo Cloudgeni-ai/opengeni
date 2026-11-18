@@ -3947,7 +3947,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    noteCreditUsageAudience(c, await requireAccessGrant(c, deps, workspaceId, "sessions:read"));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    noteCreditUsageAudience(c, grant);
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const rawAfter = c.req.query("after");
@@ -4293,7 +4294,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/turns", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    noteCreditUsageAudience(c, await requireAccessGrant(c, deps, workspaceId, "sessions:read"));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    noteCreditUsageAudience(c, grant);
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     // Exact turn that most recently emitted durable `turn.started` — the same
