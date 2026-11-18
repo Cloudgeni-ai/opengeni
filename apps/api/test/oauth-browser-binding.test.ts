@@ -536,10 +536,14 @@ describe("the sign-in callback finishes setup, so no page has to load afterwards
       const item = (await created.json()) as { id?: string };
       expect(created.status, JSON.stringify(item)).toBe(201);
 
-      const connect = async (connectionId?: string) => {
+      const connect = async (connectionId?: string, desktop = false) => {
         const response = await app.request(`${workspace}/connections/oauth/start`, {
           method: "POST",
-          headers: { cookie: human.cookie, "content-type": "application/json" },
+          headers: {
+            cookie: human.cookie,
+            "content-type": "application/json",
+            ...(desktop ? { [OPENGENI_DESKTOP_APP_HEADER]: "macos" } : {}),
+          },
           body: JSON.stringify({
             providerDomain: "mcp.example.com",
             mcpUrl: mcp.url,
@@ -551,13 +555,16 @@ describe("the sign-in callback finishes setup, so no page has to load afterwards
         });
         const body = (await response.json()) as { state?: string };
         expect(response.status, JSON.stringify(body)).toBe(200);
-        const binding = bindingValue(response.headers.get("set-cookie"));
+        // The desktop app's consent finishes in the person's signed-in browser.
+        const cookie = desktop
+          ? human.cookie
+          : `${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${bindingValue(response.headers.get("set-cookie"))}`;
         const finished = await app.request(
           `${PUBLIC_BASE_URL}/v1/integrations/oauth/callback?${new URLSearchParams({
             code: "abc",
             state: body.state!,
           })}`,
-          { headers: { cookie: `${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${binding}` } },
+          { headers: { cookie } },
         );
         return new URL(finished.headers.get("location")!, PUBLIC_BASE_URL).searchParams;
       };
@@ -579,6 +586,11 @@ describe("the sign-in callback finishes setup, so no page has to load afterwards
       const again = await connect(first.get("connectionId")!);
       expect(again.get("integration_oauth"), again.toString()).toBe("success");
       expect(again.get("capability")).toBe("on");
+
+      // From the desktop app too, with no page loading in the app or the browser.
+      const desktop = await connect(first.get("connectionId")!, true);
+      expect(desktop.get("integration_oauth"), desktop.toString()).toBe("success");
+      expect(desktop.get("capability")).toBe("on");
     } finally {
       mcp.close();
       as.close();

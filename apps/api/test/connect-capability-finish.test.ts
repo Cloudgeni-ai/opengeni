@@ -9,13 +9,13 @@ import { connectCapabilityPlan } from "../src/integrations/connect-capability-fi
 
 const connection = { id: "conn-new", providerDomain: "gmailmcp.googleapis.com" };
 const active = (connectionRef: Record<string, unknown>) => ({
-  status: "active",
-  config: { connectionRef },
+  enabled: true,
+  connectionRef: connectionRef as never,
 });
 
 describe("connectCapabilityPlan", () => {
   test("a capability that is not on yet is turned on for every eligible account", () => {
-    expect(connectCapabilityPlan(null, connection, "personal")).toEqual({
+    expect(connectCapabilityPlan({ enabled: false }, connection, "personal")).toEqual({
       kind: "enable",
       payload: expect.objectContaining({
         connectionRef: {
@@ -27,7 +27,7 @@ describe("connectCapabilityPlan", () => {
       }),
     });
     expect(
-      connectCapabilityPlan({ status: "disabled", config: {} }, connection, "workspace"),
+      connectCapabilityPlan({ enabled: false, connectionRef: null }, connection, "workspace"),
     ).toMatchObject({
       kind: "enable",
       payload: { connectionRef: { subjectScope: "workspace", accountSelection: "all_eligible" } },
@@ -95,5 +95,60 @@ describe("connectCapabilityPlan", () => {
         },
       },
     });
+  });
+
+  test("an organization's or host's setup is left to the page, never rewritten", () => {
+    // An organization connector that reaches the workspace, pinned to its own account.
+    expect(
+      connectCapabilityPlan(
+        {
+          ...active({
+            connectionId: "org-conn",
+            providerDomain: "gmailmcp.googleapis.com",
+            subjectScope: "workspace",
+          }),
+          organizationManaged: true,
+        },
+        connection,
+        "workspace",
+      ),
+    ).toEqual({ kind: "leave" });
+    // Turned off in this workspace: turning it back on is the workspace's call.
+    expect(
+      connectCapabilityPlan({ enabled: false, organizationManaged: true }, connection, "workspace"),
+    ).toEqual({ kind: "leave" });
+    expect(
+      connectCapabilityPlan({ enabled: true, connectionRef: null }, connection, "workspace"),
+    ).toEqual({
+      kind: "leave",
+    });
+    expect(
+      connectCapabilityPlan(
+        active({
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          authoritySource: "host",
+        }),
+        connection,
+        "workspace",
+      ),
+    ).toEqual({ kind: "leave" });
+  });
+
+  test("an organization connector each person signs in to already includes the new account", () => {
+    expect(
+      connectCapabilityPlan(
+        {
+          ...active({
+            providerDomain: "gmailmcp.googleapis.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          }),
+          organizationManaged: true,
+        },
+        connection,
+        "personal",
+      ),
+    ).toEqual({ kind: "on" });
   });
 });

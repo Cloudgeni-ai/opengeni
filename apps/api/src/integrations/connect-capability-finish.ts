@@ -10,6 +10,7 @@
 import { EnableCapabilityRequest, type ConnectionOwnership } from "@opengeni/contracts";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import {
+  buildCapabilityCatalog,
   currentConnectOwnerGrant,
   enableCapability,
   hasIntegrationAdminPermission,
@@ -18,45 +19,54 @@ import {
   type ConnectOwner,
 } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
-import { getCapabilityInstallation, type Database } from "@opengeni/db";
+import type { Database } from "@opengeni/db";
 
 /**
  * What the callback did with the capability, carried back to the page as
  * `capability=<value>`:
  * - `enabled`: it turned the capability on, or pointed it at the new account;
  * - `on`: it was already on in a way that includes the new account;
- * - absent: it did not finish it, so the page enables it as before.
+ * - absent: it did not finish it, so the page decides as before.
  */
 export type ConnectCapabilityFinish = "enabled" | "on";
 
-type InstalledRef = {
-  connectionId?: unknown;
-  subjectScope?: unknown;
-  accountSelection?: unknown;
+type CatalogState = {
+  enabled: boolean;
+  /** Set up by the organization (`metadata.organizationConnector`); never rewritten here. */
+  organizationManaged?: boolean;
+  connectionRef?: {
+    connectionId?: string | undefined;
+    accountSelection?: "all_eligible" | undefined;
+    authoritySource?: "host" | undefined;
+    subjectScope?: "workspace" | "subject" | undefined;
+  } | null;
 };
 
 /**
  * What the page would do for this capability and account, decided from the
- * installation as it is now. Mirrors the web app's `oauthResumeAction`,
- * `catalogConnectionAccountSelection` and `oauthConnectionRef`.
+ * same catalog item the console reads (so an organization connector that
+ * already reaches the workspace counts as on). Mirrors the web app's
+ * `oauthResumeAction`, `catalogConnectionAccountSelection` and
+ * `oauthConnectionRef`. `leave` means it is on in a way the callback should
+ * not change (an organization or host setup), so the page decides as before.
  */
 export function connectCapabilityPlan(
-  installation: { status: string; config: Record<string, unknown> } | null,
+  item: CatalogState,
   connection: { id: string; providerDomain: string },
   ownership: ConnectionOwnership,
-): { kind: "on" } | { kind: "enable"; payload: EnableCapabilityRequest } {
-  const enabled = installation?.status === "active";
-  const raw = installation?.config.connectionRef;
-  const ref: InstalledRef | null = raw && typeof raw === "object" ? (raw as InstalledRef) : null;
-  if (enabled && ref) {
+): { kind: "on" } | { kind: "leave" } | { kind: "enable"; payload: EnableCapabilityRequest } {
+  const ref = item.connectionRef ?? null;
+  if (item.enabled) {
     // A per-person binding finds each person's own account by itself.
-    if (ref.subjectScope === "subject") return { kind: "on" };
-    if (ref.connectionId === connection.id) return { kind: "on" };
+    if (ref?.subjectScope === "subject") return { kind: "on" };
+    if (ref?.connectionId === connection.id) return { kind: "on" };
     // Every eligible account is already included, the new one too.
-    if (!ref.connectionId && ref.accountSelection === "all_eligible") return { kind: "on" };
+    if (ref && !ref.connectionId && ref.accountSelection === "all_eligible") return { kind: "on" };
+    if (!ref || ref.authoritySource === "host") return { kind: "leave" };
   }
+  if (item.organizationManaged) return { kind: "leave" };
   const accountSelection =
-    ref?.connectionId || (enabled && ref?.accountSelection !== "all_eligible")
+    ref?.connectionId || (item.enabled && ref?.accountSelection !== "all_eligible")
       ? undefined
       : ("all_eligible" as const);
   const connectionRef = accountSelection
@@ -82,7 +92,11 @@ export function connectCapabilityPlan(
 }
 
 export async function finishCapabilityAfterConnect(
-  deps: { db: Database; settings: Settings },
+  deps: {
+    db: Database;
+    settings: Settings;
+    mcpServerLogoStorage?: Parameters<typeof enableCapability>[0]["mcpServerLogoStorage"];
+  },
   input: {
     owner: ConnectOwner;
     capabilityId: string;
@@ -92,12 +106,27 @@ export async function finishCapabilityAfterConnect(
 ): Promise<ConnectCapabilityFinish | null> {
   const { db, settings } = deps;
   const { owner, capabilityId } = input;
+  const catalogItem = async (subjectId: string, accountId: string) => {
+    const item =
+      (
+        await buildCapabilityCatalog({
+          db,
+          workspaceId: owner.workspaceId,
+          settings,
+          subjectId,
+          accountId,
+        })
+      ).items.find((candidate) => candidate.id === capabilityId) ?? null;
+    return item ? { ...item, organizationManaged: !!item.metadata.organizationConnector } : null;
+  };
   try {
     const grant = await currentConnectOwnerGrant(db, owner);
     if (!grant) return null;
-    const installation = await getCapabilityInstallation(db, owner.workspaceId, capabilityId);
-    const plan = connectCapabilityPlan(installation, input.connection, input.ownership);
+    const item = await catalogItem(grant.subjectId, grant.accountId);
+    if (!item || item.kind !== "mcp") return null;
+    const plan = connectCapabilityPlan(item, input.connection, input.ownership);
     if (plan.kind === "on") return "on";
+    if (plan.kind === "leave") return null;
     // The enable route's own rules: integration admins change anything,
     // members turn on what is not on yet, and the personal setup permission
     // turns a reviewed OAuth integration on for personal accounts.
@@ -119,8 +148,14 @@ export async function finishCapabilityAfterConnect(
       settings,
       capabilityId,
       payload: plan.payload,
+      mcpServerLogoStorage: deps.mcpServerLogoStorage ?? null,
     });
-    return "enabled";
+    // Report it done only when it now includes this account (a create-only
+    // enable can leave an existing setup unchanged).
+    const after = await catalogItem(grant.subjectId, grant.accountId);
+    return after && connectCapabilityPlan(after, input.connection, input.ownership).kind === "on"
+      ? "enabled"
+      : null;
   } catch (error) {
     console.warn("[api] a finished sign-in could not turn on its capability", {
       workspaceId: owner.workspaceId,

@@ -103,6 +103,8 @@ type NangoDeps = {
   fetchImpl?: typeof fetch;
   /** The effective backend switch; defaults to the cached deployment setting. */
   nangoBackends?: () => Promise<ReadonlyMap<string, EffectiveNangoIntegration>>;
+  /** Stores a custom server's logo when the completion turns it on. */
+  mcpServerLogoStorage?: Parameters<typeof finishCapabilityAfterConnect>[0]["mcpServerLogoStorage"];
 };
 
 async function backendsFor(deps: NangoDeps) {
@@ -299,7 +301,13 @@ export async function startNangoConnect(
     returnPath,
     ...(context.payload.returnUrl ? { returnUrl: context.payload.returnUrl } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
-    ...(context.payload.capabilityId && !externalContinuation && !context.connectAttemptId
+    // Only a person's own sign-in (a browser-proven start) names a capability
+    // for the callback to turn on: the callback acts with that person's grant,
+    // which a narrower token or API key that started it never held.
+    ...(context.payload.capabilityId &&
+    context.browserBinding.browserProof !== "none" &&
+    !externalContinuation &&
+    !context.connectAttemptId
       ? { capabilityId: context.payload.capabilityId }
       : {}),
     ...(externalContinuation
@@ -841,7 +849,7 @@ export async function completeNangoConnect(
     // Turn on the capability this connect was for, so setup is done even if
     // no page loads afterwards (connect-capability-finish.ts).
     const capability =
-      state.capabilityId && !state.encryptedExternalContinuation
+      state.capabilityId && state.browserProof !== "none" && !state.encryptedExternalContinuation
         ? await finishCapabilityAfterConnect(deps, {
             owner: state,
             capabilityId: state.capabilityId,

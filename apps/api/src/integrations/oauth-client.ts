@@ -227,6 +227,8 @@ type OAuthClientDeps = {
   observability?: Observability | undefined;
   oauthStartDeadlineMs?: number | undefined;
   oauthCallbackDeadlineMs?: number | undefined;
+  /** Stores a custom server's logo when the callback turns it on. */
+  mcpServerLogoStorage?: Parameters<typeof finishCapabilityAfterConnect>[0]["mcpServerLogoStorage"];
 };
 
 export type OAuthStartContext = {
@@ -799,7 +801,13 @@ async function startMcpOAuthWithinDeadline(
         }
       : {}),
     returnPath,
-    ...(context.payload.capabilityId && !externalContinuation && !context.connectAttemptId
+    // Only a person's own sign-in (a browser-proven start) names a capability
+    // for the callback to turn on: the callback acts with that person's grant,
+    // which a narrower token or API key that started it never held.
+    ...(context.payload.capabilityId &&
+    context.browserBinding.browserProof !== "none" &&
+    !externalContinuation &&
+    !context.connectAttemptId
       ? { capabilityId: context.payload.capabilityId }
       : {}),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
@@ -1543,7 +1551,10 @@ async function completeMcpOAuthCallbackWithinDeadline(
     // Turn on the capability this sign-in was for, so setup is done even if
     // no page loads after this redirect (connect-capability-finish.ts).
     const capability =
-      state.capabilityId && !state.externalContinuation
+      state.capabilityId &&
+      state.browserProof &&
+      state.browserProof !== "none" &&
+      !state.externalContinuation
         ? await finishCapabilityAfterConnect(deps, {
             owner: state,
             capabilityId: state.capabilityId,
