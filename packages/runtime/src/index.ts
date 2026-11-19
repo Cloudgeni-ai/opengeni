@@ -1630,18 +1630,26 @@ function withoutInlineReasoning(text: string): string | null {
  * A response stopped by the output limit can end inside a word. Keep only
  * whole words before the shared automatic-title normalizer bounds the title.
  * SESSION_TITLE_NOT_YET (alone, possibly quoted or punctuated) is no title.
+ * A real title the model ends with a piece of it ("Files on the desktop_TITLE",
+ * "Files on the desktop NO_TITLE") keeps the title without the piece.
  */
 function normalizeGeneratedSessionTitle(
   text: string,
   stoppedAtOutputLimit: boolean,
 ): string | null {
-  const answer = withoutInlineReasoning(text);
-  if (answer === null) return null;
+  const raw = withoutInlineReasoning(text);
+  if (raw === null) return null;
+  if (raw.replace(/[^\p{L}\p{N}_]+/gu, "").toUpperCase() === SESSION_TITLE_NOT_YET) return null;
+  const answer = raw.replace(TRAILING_NOT_YET_FRAGMENT, "");
   if (answer.replace(/[^\p{L}\p{N}_]+/gu, "").toUpperCase() === SESSION_TITLE_NOT_YET) return null;
+  if (!/[\p{L}\p{N}]/u.test(answer)) return null;
   const complete =
     stoppedAtOutputLimit && !/\s$/u.test(answer) ? answer.replace(/\S+$/u, "") : answer;
   return normalizeAutomaticSessionTitle(complete);
 }
+
+/** A trailing "_TITLE", "NO_TITLE" or "_NO_TITLE" after a title, with any closing punctuation. */
+const TRAILING_NOT_YET_FRAGMENT = /[\s_]*(?:NO)?_TITLE[\s\p{P}]*$/u;
 
 /**
  * Run the compaction summarizer as one plain, tool-less, non-streaming model
