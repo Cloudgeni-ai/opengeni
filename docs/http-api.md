@@ -54,7 +54,7 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   organization's owners and admins: agents and their versions (`GET|POST`,
   `GET|PATCH /:agentId`, `PUT /:agentId/draft`, `GET /:agentId/versions[/:version]`,
   `POST /:agentId/publish`, `GET /:agentId/publish-operations`,
-  `GET /:agentId/movable-chats`, `POST /:agentId/archive`, owner-only
+  `GET /:agentId/movable-chats` (`agents:manage`), `POST /:agentId/archive`, owner-only
   `POST /:agentId/management`), code deploys (`GET /by-key/:key`,
   `PUT /by-key/:key/apply`), tool servers (`/tool-servers[/:key[/tools]]`),
   chats and usage per agent (`GET /:agentId/sessions|usage`, also

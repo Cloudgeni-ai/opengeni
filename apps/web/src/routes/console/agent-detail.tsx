@@ -129,6 +129,8 @@ export function ConsoleAgentRoute() {
   }
 
   const code = agent.managedBy === "code";
+  // An agent in team workspaces runs there too: only owners and admins publish it.
+  const canPublish = canEdit && (full || agent.workspaceIds.length === 0);
   const draftWaiting =
     agent.publishedVersion === null || agent.latestVersion > agent.publishedVersion;
 
@@ -156,7 +158,7 @@ export function ConsoleAgentRoute() {
         ]}
         actions={
           <>
-            {!code && draftWaiting && canEdit ? (
+            {!code && draftWaiting && canPublish ? (
               <Button size="sm" disabled={dirty} onClick={() => setPublishing(agent.latestVersion)}>
                 Publish v{agent.latestVersion}
               </Button>

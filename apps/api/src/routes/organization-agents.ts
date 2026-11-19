@@ -303,6 +303,9 @@ async function orgCaller(
  * Editors change Console-managed agents only. Owners and admins (and keys,
  * by permission) go on to the agent's own rules, which refuse Console edits of
  * a code-managed agent for everyone.
+ * An agent made available in team workspaces runs there too, so changing or
+ * publishing it is for owners and admins: Editors get 403
+ * `agent_in_team_workspaces`.
  */
 async function requireEditableByCaller(
   deps: ApiRouteDeps,
@@ -317,6 +320,13 @@ async function requireEditableByCaller(
       403,
       CONSOLE_ROLE_REQUIRED,
       "This agent is managed by code. Only organization owners and admins can switch it to Console.",
+    );
+  }
+  if (agent.workspaceIds.length > 0) {
+    throw httpError(
+      403,
+      "agent_in_team_workspaces",
+      "This agent is available in team workspaces. Only organization owners and admins can change or publish it.",
     );
   }
 }
@@ -409,11 +419,14 @@ async function toolCatalogFor(
  * deployment has none, or it cannot be started, the operation is marked
  * `failed` with `failureReason` (the version stays published; publish again
  * to retry) instead of staying `pending`. Returns the operation as it is now.
+ * With `keepPendingOnError` (the re-drive from a read), a start that throws
+ * leaves the operation `pending` for a later try instead.
  */
 async function startMove(
   deps: ApiRouteDeps,
   organizationId: string,
   operation: OrgAgentPublishOperation | null,
+  options: { keepPendingOnError?: boolean } = {},
 ): Promise<OrgAgentPublishOperation | null> {
   if (!operation || operation.status !== "pending") return operation;
   let reason: OrgAgentPublishMoveFailure = "move_unavailable";
@@ -426,11 +439,13 @@ async function startMove(
       });
       return operation;
     } catch (error) {
-      reason = "move_start_failed";
       deps.observability?.warn("org agent publish move did not start", {
         operationId: operation.id,
+        keptPending: options.keepPendingOnError === true,
         error: error instanceof Error ? error.message : String(error),
       });
+      if (options.keepPendingOnError) return operation;
+      reason = "move_start_failed";
     }
   }
   return (
@@ -449,7 +464,9 @@ const STALE_PENDING_MOVE_MS = 2 * 60_000;
  * Re-drives moves left `pending` when the API stopped between committing a
  * publish and starting its move. Starting is idempotent (the workflow id is
  * the operation id), so a move that is merely queued stays `pending`; one
- * that cannot start is marked `failed` as in `startMove`.
+ * whose start throws (the workflow service briefly down) also stays `pending`
+ * for the next listing. Only a deployment without a move workflow fails it
+ * (`move_unavailable`).
  */
 async function redriveStalePendingMoves(
   deps: ApiRouteDeps,
@@ -464,9 +481,19 @@ async function redriveStalePendingMoves(
       if (!Number.isFinite(createdAt) || now - createdAt < STALE_PENDING_MOVE_MS) {
         return operation;
       }
-      return (await startMove(deps, organizationId, operation)) ?? operation;
+      return (
+        (await startMove(deps, organizationId, operation, { keepPendingOnError: true })) ??
+        operation
+      );
     }),
   );
+}
+
+/** Whether the caller may change publishes: Editor or Full, or a key with `agents:manage`. */
+function canManageAgents(caller: Caller): boolean {
+  return caller.apiKey
+    ? hasPermission(caller.apiKey.permissions, "agents:manage")
+    : caller.access === "editor" || caller.access === "full";
 }
 
 function workspaceLimit(deps: ApiRouteDeps): number | null {
@@ -924,7 +951,11 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       uuidParam(c, "agentId"),
     );
     if (!listed) throw agentNotFound();
-    const operations = await redriveStalePendingMoves(deps, caller.organizationId, listed);
+    // Viewers and read-only keys only read; a caller who may publish also
+    // re-drives a move the API left pending.
+    const operations = canManageAgents(caller)
+      ? await redriveStalePendingMoves(deps, caller.organizationId, listed)
+      : listed;
     return c.json(ListOrgAgentPublishOperationsResponse.parse({ operations }));
   });
 
@@ -951,7 +982,8 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   }
 
   app.get(`${base}/:agentId/movable-chats`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
+    // For publishing (it counts chats people can't read in Console).
+    const caller = await orgCaller(c, deps, ["agents:read", "agents:manage"], "editor");
     const agentId = uuidParam(c, "agentId");
     const version = PositiveInt.safeParse(c.req.query("version"));
     if (!version.success) throw httpError(422, "validation_failed", "version is required");

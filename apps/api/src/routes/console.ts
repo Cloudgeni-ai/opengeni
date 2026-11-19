@@ -34,15 +34,10 @@ import {
   UpdateConsoleSettingsRequest,
   UpdateConsoleWorkspaceRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
-  type AccessContext,
   type ConsoleRange,
   type ConsoleReviewLevel,
 } from "@opengeni/contracts";
-import {
-  accountScopedApiKeyWorkspaceAuthority,
-  holdsOrganizationAdministration,
-  type ApiRouteDeps,
-} from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import {
   ConsoleCursorError,
   consoleSessionCounts,
@@ -86,39 +81,6 @@ function param(c: Context, name: string): string {
   const parsed = Id.safeParse(c.req.param(name));
   if (!parsed.success) throw new HTTPException(422, { message: `invalid ${name}` });
   return parsed.data;
-}
-
-export type ConsoleAdministrator = {
-  context: AccessContext;
-  subjectId: string;
-  label: string | null;
-};
-
-/**
- * Console is for the organization's owners and admins themselves. An API key
- * (organization, workspace or developer setup) and a product's end user are
- * refused even when they hold administrative permissions: keys build the
- * product, people review it.
- */
-export function requireConsoleAdministratorContext(
-  context: AccessContext,
-  organizationId: string,
-): ConsoleAdministrator {
-  if (
-    context.subjectId.startsWith("api_key:") ||
-    context.subjectId.startsWith("external_user:") ||
-    accountScopedApiKeyWorkspaceAuthority(context) !== null
-  ) {
-    throw new HTTPException(403, {
-      message: "Opengeni Console is for organization owners and admins",
-    });
-  }
-  if (!holdsOrganizationAdministration(context, organizationId)) {
-    throw new HTTPException(403, {
-      message: "Opengeni Console is for organization owners and admins",
-    });
-  }
-  return { context, subjectId: context.subjectId, label: context.subjectLabel ?? null };
 }
 
 /** The organization's managed workspaces, by id. */

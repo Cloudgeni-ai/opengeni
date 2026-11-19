@@ -170,7 +170,7 @@ Console.
 | Role | Who | Console |
 | --- | --- | --- |
 | Full | Organization owners and admins, always | Everything. Switching an agent between code and Console management is owner-only |
-| Editor | A member given it | Viewer, plus creating and editing agents (including pointing "Runs on" at an organization machine or Sandbox Environment whose reach covers the workspaces the agent works in), test chats, and publishing or rolling back Console-managed agents (also moving running chats) |
+| Editor | A member given it | Viewer, plus creating and editing agents (including pointing "Runs on" at an organization machine or Sandbox Environment whose reach covers the workspaces the agent works in), test chats, and publishing or rolling back Console-managed agents that aren't available in team workspaces (also moving running chats) |
 | Viewer | A member given it | Overview, Workspaces, Sessions with their detail and transcripts (under the review level) and cost, and Agents, versions, tool servers and an agent's sessions and usage, read-only |
 | None | Every other member (default) | Nothing (`403`) |
 
@@ -179,7 +179,10 @@ log), API keys, Members, Usage and billing, the organization name, tool server
 writes (they hold shared keys), end users' tool logins, code deploys
 (`apply`), an agent's workspaces and archiving. Editors can't create an agent
 for specific workspaces or edit a code-managed one. Refusals are `403` with
-`details.code: "console_role_required"`.
+`details.code: "console_role_required"`. An agent an owner or admin made
+available in team workspaces runs there too, so Editors can't save drafts of
+it, publish or roll it back (`403`, `details.code: "agent_in_team_workspaces"`);
+Console shows it read-only for them.
 
 An owner or admin sets a member's role on Console's Members page, or chooses
 one when inviting (`consoleRole` on `POST /v1/organizations/:id/invitations`,
@@ -223,14 +226,14 @@ members with a Console role.
 
 Roles are stored in `organization_console_roles` (migration 1508, one row
 per member or pending invitation, FORCE RLS on the account; the runtime may
-read, insert and update, never delete). Only a person signed in as themselves
+read, insert and update, never delete, and only from the account context: a
+workspace context of the organization reads roles but can't write them).
+Only a person signed in as themselves
 (not an API key, an end user, or an agent acting for a person) holds a
 Console role (`holdsOrganizationMemberConsoleStanding`). Every role change is
 audited as `member.console_role_changed`, and a Viewer's or Editor's session
 reads are audited exactly as an admin's. An invitation's Console role is
-written in the invitation's own transaction. Follow-up: limit the table's
-`WITH CHECK` to account-level contexts (today any runtime context of the
-organization may write a row; the API is what authorizes role writes).
+written in the invitation's own transaction.
 
 ## Audit log
 

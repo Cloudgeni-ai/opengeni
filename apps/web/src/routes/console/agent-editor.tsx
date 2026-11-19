@@ -133,7 +133,9 @@ export function AgentEditor({
   // available (team workspaces) is for owners and admins.
   const canEdit = useConsoleCan("editor");
   const full = useConsoleCan("full");
-  const readOnly = agent.managedBy === "code" || !canEdit;
+  // An agent in team workspaces runs there too: only owners and admins change it.
+  const teamLocked = !full && agent.workspaceIds.length > 0;
+  const readOnly = agent.managedBy === "code" || !canEdit || teamLocked;
   const base = useMemo(() => initialDefinition(agent), [agent]);
   const [definition, setDefinition] = useState<OrgAgentDefinition>(base);
   const [workspaceIds, setWorkspaceIds] = useState<string[]>(agent.workspaceIds);
@@ -224,6 +226,12 @@ export function AgentEditor({
 
   return (
     <div className="flex min-w-0 flex-col">
+      {teamLocked && canEdit && agent.managedBy === "console" ? (
+        <Notice tone="waiting" className="mt-6">
+          This agent is available in team workspaces. Only owners and admins can change or publish
+          it.
+        </Notice>
+      ) : null}
       <DetailSection title="Details">
         <FieldStack>
           <Field label="Name">
