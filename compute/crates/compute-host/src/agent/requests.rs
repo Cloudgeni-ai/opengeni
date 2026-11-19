@@ -1069,6 +1069,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 total: cpu.budget,
                 reserved: cpu.reserved,
                 free: cpu.free(),
+                vcpus: cpu.vcpus,
             }),
             disk: self.core.disk().map(|disk| {
                 let free = disk.free();

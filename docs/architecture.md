@@ -2218,6 +2218,7 @@ behind a generic 500, so its session lookups run through
 | `packages/vaults-bitwarden` | `@opengeni/vaults-bitwarden` | Bitwarden and Vaultwarden vault provider over the server's client API with the account's personal API key; decrypts locally, keeps no values, loaded only by dynamic import from the API and worker |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
+| `packages/cli` | `opengeni` | `opengeni` command-line interface (version, help; `agents deploy` reserved) |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
 | `packages/xai-subscription` | `@opengeni/xai-subscription` | SuperGrok/xAI subscription authentication and transport |
 | `packages/subscriptions` | `@opengeni/subscriptions` | Pure provider-neutral subscription policy: settings, eligibility, placement, failover order, quota model, adapter types |
@@ -2871,7 +2872,8 @@ existing Site HTTP channel with host-pinned `current` routes only and always
 with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
 
 Site SQL is the optional per-Site database next to it: one SQLite-backed
-Durable Object per Site in the Sites gateway Worker, reached only by the API
+Durable Object per Site in the Sites gateway Worker, stored in Cloudflare's EU
+jurisdiction (older databases move there on first use), reached only by the API
 through a signed internal gateway route. Postgres keeps the definitions
 (settings, migrations and named queries) so the database can be rebuilt; Site
 pages run only named queries with `:viewer` bound by the API. See

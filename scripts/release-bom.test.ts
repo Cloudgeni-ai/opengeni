@@ -188,6 +188,18 @@ describe("release BOM", () => {
     expect(() =>
       buildReleaseBom({ ...valid, packages: [...valid.packages, ...valid.packages] }),
     ).toThrow("duplicate package");
+    expect(() =>
+      buildReleaseBom({
+        ...valid,
+        packages: [...valid.packages, { ...valid.packages[0]!, name: "opengeni" }],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildReleaseBom({
+        ...valid,
+        packages: [{ ...valid.packages[0]!, name: "opengeni-web" }],
+      }),
+    ).toThrow("invalid release BOM package identity");
     expect(() => buildReleaseBom({ ...valid, images: [] })).toThrow("images must not be empty");
     expect(() => buildReleaseBom({ ...valid, images: valid.images.slice(0, -1) })).toThrow(
       "must contain exactly",

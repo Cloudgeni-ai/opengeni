@@ -13,6 +13,7 @@
 import {
   GetWorkspaceCaptureFileResponse,
   GetWorkspaceCaptureResponse,
+  WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES,
   WorkspaceCaptureDegradedReason,
   WorkspaceCaptureManifest,
   WorkspaceCaptureStats,
@@ -36,6 +37,9 @@ export type CaptureStoragePort = {
     key: string;
     expiresInSeconds?: number;
   }) => Promise<{ url: string; expiresAt: Date }>;
+  // Size probe without downloading. Optional because ObjectStorage declares it
+  // optional; every shipped provider implements it.
+  headObject?: (key: string) => Promise<{ ContentLength?: number } | null>;
 };
 
 type LoadedManifest = {
@@ -131,6 +135,28 @@ function manifestIdentity(row: WorkspaceCaptureRow): string {
 
 function signedUrl(signed: { url: string; expiresAt: Date }): { url: string; expiresAt: string } {
   return { url: signed.url, expiresAt: signed.expiresAt.toISOString() };
+}
+
+type ManifestSize = { kind: "missing" } | { kind: "known"; bytes: number } | { kind: "unknown" };
+
+// Learn how large a row's manifest blob is WITHOUT downloading it. Parsing is
+// synchronous: a large manifest blocks the API's event loop for as long as the
+// parse takes, so the decision to parse must come before the bytes do. The
+// row's size_bytes counts the manifest plus tree and after-images, so it is an
+// upper bound that settles the common small case with no storage round trip.
+async function manifestSize(
+  row: WorkspaceCaptureRow & { manifestKey: string },
+  storage: CaptureStoragePort,
+): Promise<ManifestSize> {
+  if (row.sizeBytes !== null && row.sizeBytes <= CAPTURE_INLINE_MANIFEST_MAX_BYTES) {
+    return { kind: "known", bytes: row.sizeBytes };
+  }
+  if (!storage.headObject) return { kind: "unknown" };
+  const head = await storage.headObject(row.manifestKey);
+  if (!head) return { kind: "missing" };
+  return typeof head.ContentLength === "number"
+    ? { kind: "known", bytes: head.ContentLength }
+    : { kind: "unknown" };
 }
 
 // Fetch + validate the manifest blob for a row. Returns null when the row has no
@@ -253,12 +279,13 @@ export async function serveWorkspaceCapture(
   if (row.state !== "available" || !row.manifestKey) return { available: false };
   const cachedResponse = cache?.getInlineResponse(row);
   if (cachedResponse) return cachedResponse;
-  // Validate every manifest before serving it, including the rare >2MB signed
-  // path. Previously that branch signed arbitrary bytes merely because they
-  // exceeded the inline cap, allowing a poison/mis-keyed blob to bypass both the
-  // schema and row-identity checks.
-  const loaded = await loadManifest(row, storage, cache);
-  if (!loaded) return { available: false };
+  const stats = WorkspaceCaptureStats.safeParse(row.stats);
+  if (!stats.success) {
+    console.warn(
+      `workspace capture read — row stats failed schema validation (session=${row.sessionId} rev=${row.revision})`,
+    );
+    return { available: false };
+  }
   const meta = {
     available: true as const,
     revision: row.revision,
@@ -266,34 +293,47 @@ export async function serveWorkspaceCapture(
     turnId: row.turnId,
     leaseEpoch: row.leaseEpoch,
     sizeBytes: row.sizeBytes ?? 0,
-    stats: loaded.stats,
+    stats: stats.data,
   };
-  if (loaded.byteLength <= CAPTURE_INLINE_MANIFEST_MAX_BYTES) {
-    const response = GetWorkspaceCaptureResponse.parse({
-      ...meta,
-      manifest: loaded.manifest,
-      manifestUrl: null,
+  const size = await manifestSize({ ...row, manifestKey: row.manifestKey }, storage);
+  if (size.kind === "missing") return { available: false };
+  if (size.kind === "unknown" || size.bytes > CAPTURE_INLINE_MANIFEST_MAX_BYTES) {
+    // Large manifests are handed to the client by signed URL and never
+    // downloaded or parsed here: the client validates schema, revision
+    // identity and stats against this metadata before using it.
+    const signed = await storage.createGetUrl({
+      key: row.manifestKey,
+      expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS,
     });
-    if (!response.available) {
-      throw new Error("validated inline capture response lost its available discriminator");
-    }
-    cache?.setInlineResponse(row, response);
-    return response;
+    await onSignedUrlIssued?.({
+      kind: "capture_manifest",
+      revision: row.revision,
+      expiresAt: signed.expiresAt.toISOString(),
+    });
+    return GetWorkspaceCaptureResponse.parse({
+      ...meta,
+      manifest: null,
+      manifestUrl: signedUrl(signed),
+    });
   }
-  const signed = await storage.createGetUrl({
-    key: row.manifestKey,
-    expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS,
-  });
-  await onSignedUrlIssued?.({
-    kind: "capture_manifest",
-    revision: row.revision,
-    expiresAt: signed.expiresAt.toISOString(),
-  });
-  return GetWorkspaceCaptureResponse.parse({
+  // Inline manifests are validated against the row before they are served.
+  const loaded = await loadManifest(row, storage, cache);
+  if (!loaded) return { available: false };
+  if (loaded.byteLength > CAPTURE_INLINE_MANIFEST_MAX_BYTES) {
+    // The blob changed size after the probe; never inline it.
+    return { available: false };
+  }
+  const response = GetWorkspaceCaptureResponse.parse({
     ...meta,
-    manifest: null,
-    manifestUrl: signedUrl(signed),
+    stats: loaded.stats,
+    manifest: loaded.manifest,
+    manifestUrl: null,
   });
+  if (!response.available) {
+    throw new Error("validated inline capture response lost its available discriminator");
+  }
+  cache?.setInlineResponse(row, response);
+  return response;
 }
 
 /**
@@ -310,7 +350,18 @@ export async function serveWorkspaceCaptureFile(
   storage: CaptureStoragePort,
   onSignedUrlIssued?: CaptureSignedUrlIssuanceRecorder,
 ): Promise<GetWorkspaceCaptureFileResponse> {
-  const loaded = row ? await loadManifest(row, storage) : null;
+  // Resolving one file needs the manifest's file index. Captures never publish
+  // a manifest above WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES; an older, larger one
+  // is not parsed here (the client opens the file live instead).
+  const size = row?.manifestKey
+    ? await manifestSize({ ...row, manifestKey: row.manifestKey }, storage)
+    : null;
+  const loaded =
+    row &&
+    size?.kind !== "missing" &&
+    !(size?.kind === "known" && size.bytes > WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES)
+      ? await loadManifest(row, storage)
+      : null;
   if (!loaded) {
     throw new HTTPException(404, { message: "capture not found" });
   }

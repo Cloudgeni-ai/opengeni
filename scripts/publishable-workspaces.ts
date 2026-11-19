@@ -15,6 +15,51 @@ export const ALL_DEP_FIELDS = [...PUBLISHED_DEP_FIELDS, "devDependencies"] as co
 
 type DepField = (typeof ALL_DEP_FIELDS)[number];
 
+/** The one unscoped npm name Opengeni publishes: the `opengeni` CLI. */
+export const OPENGENI_CLI_PACKAGE_NAME = "opengeni";
+
+const scopedPackageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9-]*$/u;
+
+/**
+ * Whether `name` is an npm name Opengeni publishes: an `@opengeni/*` package or
+ * the exact unscoped `opengeni` CLI. Other unscoped names are never admitted.
+ */
+export function isPublishedPackageName(name: unknown): name is string {
+  return (
+    typeof name === "string" &&
+    (name === OPENGENI_CLI_PACKAGE_NAME || scopedPackageNamePattern.test(name))
+  );
+}
+
+/**
+ * The published Opengeni package a module specifier imports (`@opengeni/sdk`
+ * for `@opengeni/sdk/artifacts`, `opengeni` for `opengeni`), or null. Any
+ * `@opengeni/` specifier names its scoped package, so callers still report an
+ * unknown or misspelled one.
+ */
+export function publishedPackageOfSpecifier(specifier: string): string | null {
+  const parts = specifier.split("/");
+  if (specifier.startsWith("@opengeni/")) return parts.slice(0, 2).join("/");
+  return parts[0] === OPENGENI_CLI_PACKAGE_NAME ? OPENGENI_CLI_PACKAGE_NAME : null;
+}
+
+/** File stem npm uses for a package's tarball: the name without its scope. */
+export function npmTarballStem(name: string): string {
+  return name.startsWith("@") ? name.slice(name.indexOf("/") + 1) : name;
+}
+
+/**
+ * Whether a package is published best-effort, outside the release contract.
+ * The unscoped `opengeni` CLI is: it is built, guarded and versioned in
+ * lockstep with the `@opengeni` packages, but a release that cannot write it
+ * (for example an npm token limited to the `@opengeni` scope) warns and
+ * continues. It is never part of release candidates, expected package sets,
+ * BOMs or canary cohorts.
+ */
+export function isBestEffortPublication(name: string): boolean {
+  return name === OPENGENI_CLI_PACKAGE_NAME;
+}
+
 export type PackageJson = Record<string, unknown> & {
   name?: string;
   version?: string;
@@ -108,10 +153,19 @@ export function publishableWorkspacePackages(root = repoRoot): WorkspacePackage[
   const ignored = changesetIgnoreSet(root);
   return workspacePackages(root).filter(
     (pkg) =>
-      pkg.name.startsWith("@opengeni/") &&
+      isPublishedPackageName(pkg.name) &&
       pkg.packageJson.private !== true &&
       !ignored.has(pkg.name),
   );
+}
+
+/**
+ * The packages every release must publish: the publishable packages without
+ * the best-effort ones. Release candidates, expected package sets, post-publish
+ * verification and canary cohorts use this set.
+ */
+export function releaseContractPackages(root = repoRoot): WorkspacePackage[] {
+  return publishableWorkspacePackages(root).filter((pkg) => !isBestEffortPublication(pkg.name));
 }
 
 export function workspaceDependencyNames(

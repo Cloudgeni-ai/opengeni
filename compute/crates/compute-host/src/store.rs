@@ -163,21 +163,25 @@ pub struct Claimed {
 
 /// The machine a memory image was saved from, which restoring it brings
 /// back whatever the sandbox is given now: a sandbox given another shape
-/// boots from its disk instead.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// boots from its disk instead, and so does one adopted by a host of
+/// another kind than the one the image was made on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MadeAt {
     /// Its virtual processors; `None` for a copy stored before they were
     /// recorded, taken to be the sandbox's.
     pub vcpus: Option<u8>,
     /// Its memory's length in bytes.
     pub memory_bytes: Option<u64>,
+    /// The runtime that made it ([`compute_engine::Engine::runtime`]),
+    /// which names the kind of host; `None` when the copy does not say.
+    pub runtime: Option<String>,
 }
 
 impl MadeAt {
     /// Whether an image made here differs from a VM of `config`. Only
     /// what it says counts: an unknown field is taken to match.
     #[must_use]
-    pub fn differs(self, config: &crate::protocol::SandboxConfig) -> bool {
+    pub fn differs(&self, config: &crate::protocol::SandboxConfig) -> bool {
         self.vcpus.is_some_and(|vcpus| vcpus != config.vcpus)
             || self
                 .memory_bytes
@@ -761,6 +765,10 @@ impl Store for Directory {
                         .then(|| read_vcpus(&stored.join(VCPUS)))
                         .transpose()?,
                     memory_bytes: Some(fs::metadata(stored.join("memory"))?.len()),
+                    runtime: names
+                        .contains(&RUNTIME)
+                        .then(|| fs::read_to_string(stored.join(RUNTIME)))
+                        .transpose()?,
                 }
             } else {
                 MadeAt::default()

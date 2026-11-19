@@ -7872,6 +7872,15 @@
     },
     {
       "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/live",
+      "sdk": [
+        "OpenGeniClient.createWorkspaceArtifactLiveTicket"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened",
       "sdk": [
         "OpenGeniClient.recordSiteOpened"
@@ -14923,6 +14932,7 @@
         "$.plan": "string! null",
         "$.reach": "ref(SubscriptionAccountReach)?",
         "$.scope": "ref(ResourceAuthorityScope)!",
+        "$.signedInAt": "string? null",
         "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
         "$.subject": "string!",
         "$.usage": "ref(ClaudeSubscriptionUsage)?",
@@ -20787,10 +20797,55 @@
     },
     "InboxItemStatus": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"dismissed\\\"\",\"\\\"open\\\"\",\"\\\"resolved\\\"\",\"\\\"withdrawn\\\"\"]"
+      }
+    },
+    "InboxNotice": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.body": "string!",
+        "$.choices": "array!",
+        "$.choices[]": "object",
+        "$.choices[].id": "string!",
+        "$.choices[].label": "string!",
+        "$.createdAt": "string!",
+        "$.eventSequence": "integer? null",
+        "$.facts": "array!",
+        "$.facts[]": "object",
+        "$.facts[].label": "string!",
+        "$.facts[].value": "string!",
+        "$.id": "string!",
+        "$.kind": "const!=[\"\\\"notification\\\"\"]",
+        "$.link": "object!",
+        "$.link.label": "string!",
+        "$.link.url": "string!",
+        "$.resolvedAt": "string! null",
+        "$.sender": "object! null",
+        "$.sender.label": "string!",
+        "$.sender.subjectId": "string!",
+        "$.serverQuestion": "object! null",
+        "$.serverQuestion.kind": "enum!=[\"\\\"confirm\\\"\",\"\\\"form\\\"\"]",
+        "$.serverQuestion.round": "integer!",
+        "$.serverQuestion.server": "string!",
+        "$.sessionAvailable": "const!=[\"false\"]",
+        "$.sessionId": "null!",
+        "$.sessionTitle": "string! null",
+        "$.snoozedUntil": "string! null",
+        "$.sourceKey": "string!",
+        "$.status": "ref(InboxItemStatus)!",
+        "$.subtitle": "string!",
+        "$.title": "string!",
+        "$.unread": "boolean!",
+        "$.updatedAt": "string!",
+        "$.urgency": "ref(NotificationUrgency)!",
+        "$.workspaceId": "string!"
       }
     },
     "InboxSettings": {
@@ -22807,6 +22862,8 @@
         "$.items": "array!",
         "$.items[]": "ref(InboxItem)",
         "$.needsYouCount": "integer!",
+        "$.notices": "array?",
+        "$.notices[]": "ref(InboxNotice)",
         "$.unreadCount": "integer!"
       }
     },
@@ -24608,7 +24665,8 @@
     },
     "NotificationUrgency": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"normal\\\"\",\"\\\"time_sensitive\\\"\"]"
@@ -31080,6 +31138,7 @@
         "$|op=insert.collection": "string!",
         "$|op=insert.data": "object!",
         "$|op=insert.data{}": "unknown",
+        "$|op=insert.idempotencyKey": "string?",
         "$|op=insert.key": "string?",
         "$|op=insert.op": "const!=[\"\\\"insert\\\"\"]",
         "$|op=put": "object",
@@ -37595,6 +37654,7 @@
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InboundEvent": "type",
       "InboundEventSummary": "type",
+      "InboxEntry": "type",
       "InboxItem": "type",
       "InboxItemChoice": "type",
       "InboxItemFact": "type",
@@ -37602,6 +37662,7 @@
       "InboxItemLink": "type",
       "InboxItemSender": "type",
       "InboxItemServerQuestion": "type",
+      "InboxNotice": "type",
       "InboxSettings": "type",
       "InboxTidyPolicy": "type",
       "InferenceFeatureAvailability": "type",
@@ -38850,6 +38911,7 @@
       "WorkspaceArtifactEvent": "type",
       "WorkspaceArtifactListOptions": "type",
       "WorkspaceArtifactListResponse": "type",
+      "WorkspaceArtifactLiveTicketResponse": "type",
       "WorkspaceArtifactMutationResponse": "type",
       "WorkspaceArtifactSourceBundle": "type",
       "WorkspaceArtifactSourceFile": "type",
@@ -40065,6 +40127,7 @@
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeEventMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isOpenGeniSiteDataChange": "value",
       "isSiteCatalogStaleError": "value",
       "isSiteHttpRequest": "value",
       "OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL": "value",
@@ -40079,6 +40142,7 @@
       "OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
       "OPENGENI_SITE_BRIDGE_VIEWER_METHOD": "value",
+      "OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD": "value",
       "OPENGENI_SITE_LOCAL_CODEMODE_PATH": "value",
       "OPENGENI_SITE_LOCATION_MAX_LENGTH": "value",
       "OpenGeniSiteAi": "type",
@@ -40097,6 +40161,7 @@
       "OpenGeniSiteClient": "type",
       "OpenGeniSiteClientOptions": "type",
       "OpenGeniSiteData": "type",
+      "OpenGeniSiteDataChange": "type",
       "OpenGeniSiteDataCollection": "type",
       "OpenGeniSiteDataError": "value",
       "OpenGeniSiteDataErrorCode": "type",
@@ -40153,6 +40218,7 @@
       "injectSiteBridgeBootstrap": "value",
       "isOpenGeniReservedSitePath": "value",
       "openGeniSiteBridgePortFromBootstrap": "value",
+      "OpenGeniSiteDataChange": "type",
       "openGeniSiteLocationHref": "value",
       "openGeniSiteLocationValue": "value",
       "OpenGeniSiteLocationValue": "type",
@@ -44216,6 +44282,7 @@
       "createVideoArtifactPlaybackSource",
       "createWorkspace",
       "createWorkspaceArtifact",
+      "createWorkspaceArtifactLiveTicket",
       "createWorkspaceClaudeCustomModel",
       "createWorkspaceGatewayCustomModel",
       "createWorkspaceInstructionPolicyDraft",
@@ -45071,6 +45138,7 @@
       "createSubscriptionPortalSession",
       "createVideoArtifactPlaybackSource",
       "createWorkspace",
+      "createWorkspaceArtifactLiveTicket",
       "createWorkspaceClaudeCustomModel",
       "createWorkspaceGatewayCustomModel",
       "createWorkspaceInstructionPolicyDraft",
@@ -45932,6 +46000,7 @@
       "createVideoArtifactPlaybackSource",
       "createWorkspace",
       "createWorkspaceArtifact",
+      "createWorkspaceArtifactLiveTicket",
       "createWorkspaceClaudeCustomModel",
       "createWorkspaceGatewayCustomModel",
       "createWorkspaceInstructionPolicyDraft",
@@ -46801,6 +46870,7 @@
     "SiteBridgeHost": [
       "close",
       "load",
+      "notifyDataChanged",
       "notifyLocation",
       "notifyToolReadiness"
     ],
@@ -47637,6 +47707,9 @@
       ],
       "createWorkspaceArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50543,6 +50616,9 @@
       "createWorkspaceArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -53170,6 +53246,9 @@
       ],
       "createWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -55979,6 +56058,9 @@
       "createWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -58604,6 +58686,9 @@
       ],
       "createWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -61352,6 +61437,9 @@
       ],
       "load": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Window\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"postMessage\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Pick\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "notifyDataChanged": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniSiteDataChange\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
       ],
       "notifyLocation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniSiteLocationValue\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"

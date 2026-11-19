@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
-import type { InboxItem, ListInboxResponse } from "@opengeni/sdk";
+import type { InboxItem, InboxNotice, ListInboxResponse } from "@opengeni/sdk";
 
 import { AccountStore } from "../src/main/accounts";
 import { autostartDesktopEntry } from "../src/main/linux-integration";
@@ -258,6 +258,32 @@ describe("inbox notifications", () => {
     };
     expect(inboxItemPath(item({}), paths)).toBe("/app/w1/chat/s1?moment=42");
     expect(inboxItemPath(item({ sessionAvailable: false }), paths)).toBe("/app/w1/notifications");
+  });
+
+  test("announces a notice about something other than a chat and opens its page", () => {
+    const notice: InboxNotice = {
+      ...item({}),
+      id: "n1",
+      sessionId: null,
+      sessionTitle: null,
+      kind: "notification",
+      title: "Sign in to Claude again",
+      subtitle: "person@example.test",
+      link: {
+        url: "https://console.example.test/workspaces/w1/organization?section=models&view=connect-org:claude_subscription&account=org:claude:c1",
+        label: "Sign in again",
+      },
+      eventSequence: null,
+      sessionAvailable: false,
+    };
+    const first = diffInbox(null, { ...inbox([]), notices: [] }, Date.now());
+    const second = diffInbox(first.seen, { ...inbox([]), notices: [notice] }, Date.now());
+    expect(second.announce.map((entry) => entry.id)).toEqual(["n1"]);
+    expect(notificationPlan(notice, null).subtitle).toBe("person@example.test");
+    expect(inboxItemPath(notice)).toBe(
+      "/workspaces/w1/organization?section=models&view=connect-org:claude_subscription&account=org:claude:c1",
+    );
+    expect(diffInbox(second.seen, inbox([]), Date.now()).retract).toEqual(["n1"]);
   });
 
   test("plain text for the banner", () => {

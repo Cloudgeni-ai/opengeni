@@ -685,9 +685,14 @@ export function unavailableMcpOperationalContext(input: {
    * written, so it does not promise any.
    */
   connected?: readonly { id: string; name?: string | undefined }[];
+  /**
+   * The integration setup tools this turn's agent has. Omitted names both, as
+   * before; otherwise the reconnect guidance names only tools the agent has.
+   */
+  setupTools?: { catalog: boolean; card: boolean };
 }): string | undefined {
   const unavailable = unavailableMcpConnectorsNotice(input);
-  const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? []);
+  const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? [], input.setupTools);
   const notice =
     unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
   if (!notice) return undefined;
@@ -734,6 +739,7 @@ function connectedMcpConnectorsLine(
  */
 function mcpAccountsNeedingReconnectNotice(
   accounts: readonly McpConnectorAccountNeedingReconnect[],
+  setupTools: { catalog: boolean; card: boolean } = { catalog: true, card: true },
 ): string | undefined {
   if (accounts.length === 0) return undefined;
   const listed = accounts.slice(0, UNAVAILABLE_MCP_NOTICE_MAX_LISTED);
@@ -754,7 +760,11 @@ function mcpAccountsNeedingReconnectNotice(
   return [
     "Accounts that need reconnecting: these accounts were connected for this chat's connectors but stopped working (their sign-in expired or was revoked), so their tools cannot use them until they are reconnected.",
     ...lines,
-    "When the person's request needs one of these accounts, tell them plainly that it was connected and stopped working, and when. To offer the fix, capability_catalog_search lists it under setup.reconnect and capability_authorization_request posts a card that reconnects that same account; a new Connect cannot replace it.",
+    // The card needs the catalog's capability ID for the account, so without
+    // the catalog the agent can only point the person to Connections.
+    setupTools.catalog && setupTools.card
+      ? "When the person's request needs one of these accounts, tell them plainly that it was connected and stopped working, and when. To offer the fix, capability_catalog_search lists it under setup.reconnect and capability_authorization_request posts a card that reconnects that same account; a new Connect cannot replace it."
+      : "When the person's request needs one of these accounts, tell them plainly that it was connected and stopped working, and when, and that reconnecting it in Connections fixes it; a new Connect cannot replace it.",
   ].join("\n");
 }
 

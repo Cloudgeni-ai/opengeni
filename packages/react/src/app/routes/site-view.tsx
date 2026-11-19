@@ -219,9 +219,18 @@ export function SiteViewRoute({
   // address; Publish and the publish form are for people who can publish.
   const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const publication = useSitePublicationLink({ client, workspaceId, siteId });
-  const toolBridge = useConsoleSiteToolBridge(workspaceId);
+  const consoleToolBridge = useConsoleSiteToolBridge(workspaceId);
   useRecordSiteOpened(client, workspaceId, siteId);
   const live = useSiteLiveVersion(client, workspaceId, siteId);
+  // The Site's frame hears its data change hints from this view's live connection.
+  const subscribeDataChanges = live.subscribeDataChanges;
+  const toolBridge = useCallback<typeof consoleToolBridge>(
+    (site) => {
+      const bridge = consoleToolBridge(site);
+      return bridge && site?.artifactId === siteId ? { ...bridge, subscribeDataChanges } : bridge;
+    },
+    [consoleToolBridge, siteId, subscribeDataChanges],
+  );
   const artifact = live.detail?.artifact;
   // The publish form, open for this Site; another Site starts without it.
   const siteKey = `${workspaceId}/${siteId}`;

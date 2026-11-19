@@ -1,5 +1,5 @@
 import { Notification, powerMonitor } from "electron";
-import type { InboxItem, OpenGeniClient } from "@opengeni/sdk";
+import type { InboxEntry, OpenGeniClient } from "@opengeni/sdk";
 
 import { actOnInboxItem } from "./inbox-actions";
 import { bannerText, diffInbox, notificationPlan, type InboxAction } from "./inbox-model";
@@ -11,7 +11,7 @@ export interface InboxNotifierDeps {
   accounts(): Array<{ id: string; label: string | null }>;
   client(accountId: string): Promise<OpenGeniClient | null>;
   /** Show the item's session (or the inbox) in the window. */
-  open(accountId: string, item: InboxItem): void;
+  open(accountId: string, item: InboxEntry): void;
   /** The account's credential was rejected. */
   unauthorized(accountId: string): void;
   /** What waits on the person across accounts. */
@@ -95,7 +95,7 @@ export class InboxNotifier {
   private announce(
     accountId: string,
     label: string | null,
-    item: InboxItem,
+    item: InboxEntry,
     state: AccountInbox,
   ): void {
     const plan = notificationPlan(item, label);
@@ -122,7 +122,7 @@ export class InboxNotifier {
     banner.show();
   }
 
-  private async act(accountId: string, item: InboxItem, action: InboxAction): Promise<void> {
+  private async act(accountId: string, item: InboxEntry, action: InboxAction): Promise<void> {
     const client = await this.deps.client(accountId);
     let handled = false;
     try {

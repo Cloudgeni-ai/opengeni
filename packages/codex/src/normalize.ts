@@ -17,7 +17,7 @@
 // schema 400s `Unknown parameter: 'input[N].status'` — observed live on a
 // portable SuperGrok → Codex switch. Pairing uses `call_id`, never `status`.
 
-import { preservesReplayStatus } from "./replay-status";
+import { replayedResponsesItem } from "@opengeni/network/responses-replay";
 
 const MINIMAL = "minimal";
 
@@ -74,7 +74,9 @@ export function normalizeCodexRequestBody(
     body.model = resolveModel(body.model);
   }
 
-  // Strip item ids and output-only status; preserve call_id and required status.
+  // Strip item ids and output-only status; preserve call_id and required status
+  // (`replayedResponsesItem`, shared with the WebSocket continuation check so
+  // the two can never disagree about what replay strips).
   // (This also covers tool_search items: the backend accepts an id-less
   // tool_search_call/output pair correlated by call_id — verified live — and
   // stripping the provider-stored `tsc_…` id here sanitizes BOTH replay paths.)
@@ -82,32 +84,13 @@ export function normalizeCodexRequestBody(
   // require their status on replay (`preservesReplayStatus`); stripping it 400s
   // `missing_required_parameter: input[N].status`. Never turn an absent status
   // into a fabricated completion. Other items keep the portable-history strip.
+  // A replayed tool_search_call must carry `arguments` as an OBJECT — the
+  // backend 400s a string ("Invalid type for 'input[N].arguments': expected
+  // an object", verified live). The live wire emits an object (the SDK's
+  // protocol schema is z.unknown() and round-trips it), so this only fires
+  // for a defensively-stringified row; unparseable strings fall back to {}.
   if (Array.isArray(body.input)) {
-    for (const item of body.input as unknown[]) {
-      if (!item || typeof item !== "object") {
-        continue;
-      }
-      const record = item as Record<string, unknown>;
-      if ("id" in record) {
-        delete record.id;
-      }
-      if ("status" in record && !preservesReplayStatus(record.type)) {
-        delete record.status;
-      }
-      // A replayed tool_search_call must carry `arguments` as an OBJECT — the
-      // backend 400s a string ("Invalid type for 'input[N].arguments': expected
-      // an object", verified live). The live wire emits an object (the SDK's
-      // protocol schema is z.unknown() and round-trips it), so this only fires
-      // for a defensively-stringified row; unparseable strings fall back to {}.
-      if (record.type === "tool_search_call" && typeof record.arguments === "string") {
-        try {
-          const parsed = JSON.parse(record.arguments) as unknown;
-          record.arguments = parsed && typeof parsed === "object" ? parsed : {};
-        } catch {
-          record.arguments = {};
-        }
-      }
-    }
+    body.input = (body.input as unknown[]).map(replayedResponsesItem);
   }
 
   // Drop hosted-MCP tool entries: the backend rejects them ("Unsupported tool
@@ -132,8 +115,8 @@ export function normalizeCodexRequestBody(
 
 /**
  * Copy-on-write form for model clients that may retain converted input items.
- * Only records the mutable normalizer can touch are copied; large content,
- * tools, and unchanged protocol items remain shared immutable values.
+ * Replayed items are already copied on write; large content, tools, and
+ * unchanged protocol items remain shared immutable values.
  */
 export function normalizedCodexRequestBody(
   body: Readonly<Record<string, unknown>>,
@@ -142,17 +125,6 @@ export function normalizedCodexRequestBody(
   const projected: Record<string, unknown> = { ...body };
   if (body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)) {
     projected.reasoning = { ...(body.reasoning as Record<string, unknown>) };
-  }
-  if (Array.isArray(body.input)) {
-    projected.input = body.input.map((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-      const record = item as Record<string, unknown>;
-      return "id" in record ||
-        "status" in record ||
-        (record.type === "tool_search_call" && typeof record.arguments === "string")
-        ? { ...record }
-        : item;
-    });
   }
   return normalizeCodexRequestBody(projected, resolveModel);
 }

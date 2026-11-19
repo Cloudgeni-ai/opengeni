@@ -1,8 +1,19 @@
 # Publish a Site app to the web: viewers, limits and audiences
 
 "Publish to the web" in SKILL.md covers the address, access and warnings.
-Read this when an invited or public Site uses Site Data, Site SQL, workspace
-tools or an embedded agent.
+Read this before publishing or sharing a Site that uses Site Data, Site SQL,
+workspace tools or an embedded agent.
+
+## Review who sees what
+
+Before publishing or sharing, review who can read and write each collection
+and SQL query, and where the data flows. Data fetched with a viewer's
+personal connection (such as their Gmail) stays with that viewer: never write
+it into shared collections or queries unless the user explicitly wants that.
+Site SQL rules are only as safe as their `:viewer` filters, so check each
+query. Then tell the user in plain words who sees what. An app that uses
+personal-account tools shows clear connect states from
+`site.tools.$readiness`, so it works for teammates who have not connected yet.
 
 ## Viewers, the embedded agent and limits
 

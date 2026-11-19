@@ -32,7 +32,7 @@ const MAX_RESULT_CHARS = 40_000;
 
 export { excelAddin, type ExcelAddin };
 
-const DESCRIPTION = [
+const DESCRIPTION_LINES = [
   "Run Office.js code live in an Excel workbook the person has open with the Excel add-in (Excel on the web, Windows or Mac).",
   "`code` is the body of an async function called inside Excel.run with `context` and `Excel`: queue operations on `context.workbook`, `load` every property you will read and `await context.sync()` before reading it, then `return` a small JSON-serializable result with only what you need. console.log output is returned too.",
   "Each `get…()` call returns a new unloaded object, so keep the one you loaded in a variable; a sheet's `name` must be loaded too, and range properties are plural (`values`, `formulas`).",
@@ -41,8 +41,19 @@ const DESCRIPTION = [
   "Omit `workbook` when one workbook is open; otherwise the error lists the open workbooks to choose from.",
   "To open chat files in Excel, pass their artifactIds in `files`: the code gets them as `files[i]` with `name` and `base64`, for `Excel.createWorkbook(files[0].base64)` (a new workbook) or `context.workbook.insertWorksheetsFromBase64(files[0].base64)` (sheets into this one).",
   "To give the person the workbook as a file, pass `saveCopyAs` with a file name: after the code runs, a copy of the whole workbook with its unsaved changes is saved to this chat as an .xlsx, and the result's `copy` gives the artifactId to link as [name](artifact:<artifactId>). `code` may then be omitted.",
-  `When someone works on a spreadsheet and no workbook is connected, offer the Excel add-in: capability_authorization_request with ${EXCEL_ADDIN_CAPABILITY_ID} shows its install card.`,
-].join(" ");
+];
+
+/** Offering the add-in's card, for an agent that has the card tool. */
+const ADDIN_CARD_LINE = `When someone works on a spreadsheet and no workbook is connected, offer the Excel add-in: capability_authorization_request with ${EXCEL_ADDIN_CAPABILITY_ID} shows its install card.`;
+
+/**
+ * excel_run's description. It names capability_authorization_request only for
+ * an agent that has it: the card tool comes with workspace connectors or
+ * administration, and excel_run with the browser capability alone.
+ */
+export function excelRunDescription(cardTool: boolean): string {
+  return [...DESCRIPTION_LINES, ...(cardTool ? [ADDIN_CARD_LINE] : [])].join(" ");
+}
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -159,12 +170,14 @@ export function registerExcelTools(input: {
   grant: AccessGrant;
   sessionId: string;
   authorize: () => Promise<void>;
+  /** Whether this session lists capability_authorization_request. */
+  cardTool: boolean;
 }): void {
   const { server, deps, grant, sessionId, authorize } = input;
   server.registerTool(
     "excel_run",
     {
-      description: DESCRIPTION,
+      description: excelRunDescription(input.cardTool),
       inputSchema: {
         code: z
           .string()

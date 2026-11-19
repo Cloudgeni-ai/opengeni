@@ -8,6 +8,7 @@ import {
   captureVerifiedWorkspaceArchive,
   describeNativeSnapshotArchive,
   inlineWorkspaceArchiveForRestore,
+  workspaceArchiveObjectRestoresFromSpool,
   parseWorkspaceArchiveDescriptor,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
@@ -601,7 +602,7 @@ describe("verified workspace archives", () => {
     expect(fake.counts()).toEqual({ probes: 1, captures: 0 });
   });
 
-  test("object-storage refs restore into verified inline bytes", async () => {
+  test("cold restore spools object-storage tars; only a host projection off Linux is inlined", async () => {
     const archive = new TextEncoder().encode("object-storage-tar");
     const capturedAt = 1_900_000_000_000;
     const sha256 = createHash("sha256").update(archive).digest("hex");
@@ -633,20 +634,41 @@ describe("verified workspace archives", () => {
       bytes: archive.length,
       backend: "s3-compatible",
     };
-    const restored = await inlineWorkspaceArchiveForRestore(
-      { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor },
-      async (requested) => (requested === key ? { bytes: archive } : null),
-    );
-    expect(restored.workspaceArchive).toBe(Buffer.from(archive).toString("base64"));
-    expect(readVerifiedWorkspaceArchive(restored.workspaceArchive, descriptor).bytes).toEqual(
-      archive,
-    );
+    // A portable tar is read by cold restore itself, through a verified disk
+    // spool: the caller never fetches it into the session state.
+    const portable = { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor };
+    expect(workspaceArchiveObjectRestoresFromSpool(portable)).toBe(true);
+    const unchanged = await inlineWorkspaceArchiveForRestore(portable, async () => {
+      throw new Error("a spooled archive must not be fetched whole");
+    });
+    expect(unchanged).toBe(portable);
 
-    await expect(
-      inlineWorkspaceArchiveForRestore(
-        { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor },
-        async () => null,
-      ),
-    ).rejects.toMatchObject({ code: "archive_object_missing" });
+    // A host-backed projection is restored natively from a spool on Linux; any
+    // other platform still inlines it.
+    const hostProjection = {
+      workspaceArchiveRef: ref,
+      workspaceArchiveMeta: {
+        ...descriptor,
+        workspace: { ...descriptor.workspace, projection: "sdk_local_archive_v1" as const },
+      },
+    };
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+    try {
+      expect(workspaceArchiveObjectRestoresFromSpool(hostProjection)).toBe(false);
+      const restored = await inlineWorkspaceArchiveForRestore(hostProjection, async (requested) =>
+        requested === key ? { bytes: archive } : null,
+      );
+      expect(restored.workspaceArchive).toBe(Buffer.from(archive).toString("base64"));
+      expect(
+        readVerifiedWorkspaceArchive(restored.workspaceArchive, hostProjection.workspaceArchiveMeta)
+          .bytes,
+      ).toEqual(archive);
+      await expect(
+        inlineWorkspaceArchiveForRestore(hostProjection, async () => null),
+      ).rejects.toMatchObject({ code: "archive_object_missing" });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 });

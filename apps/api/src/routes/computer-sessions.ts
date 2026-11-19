@@ -1789,11 +1789,27 @@ export function registerComputerSessionRoutes(
       if (sourceRead.status === "rejected") throw sourceRead.reason;
       let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
-        if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
+        const machineId = record.session.placement.sandboxId;
+        // Another agent chat that now works on the Desktop's machine (a
+        // child given the Desktop by its parent, say) reaches it by its own
+        // route when the chat that opened it has moved elsewhere.
+        const callerId = agentCallerSessionId(grant);
+        const caller =
+          sourceSession?.activeSandboxId !== machineId &&
+          callerId !== null &&
+          callerId !== record.sourceSessionId
+            ? await requireSourceSession(deps, workspaceId, callerId)
+            : null;
+        const routed = connectedDesktopRouteSession(machineId, sourceSession, caller);
+        if (!routed) {
           throw sourcePlacementElsewhereApiError(
             "computer_session",
             record.session.placement.sandboxId,
           );
+        }
+        if (routed !== sourceSession) {
+          await authorizeSourceSession(deps, grant, routed.id, authorizationOperation);
+          sourceSession = routed;
         }
       }
       if (record.session.lifecycle !== "active" || !record.session.controller) {
@@ -2099,6 +2115,26 @@ export function registerComputerSessionRoutes(
       computerSessionId: requireUuidParam(context, "computerSessionId"),
     };
   }
+}
+
+/** The chat whose route reaches a Desktop on Connected Machine `machineId`:
+ * the chat that opened it while that chat works there, or else the agent
+ * chat now using it from that machine. Null when neither works there. */
+export function connectedDesktopRouteSession<S extends { activeSandboxId?: string | null }>(
+  machineId: string,
+  source: S | null,
+  caller: S | null,
+): S | null {
+  if (source?.activeSandboxId === machineId) return source;
+  if (caller?.activeSandboxId === machineId) return caller;
+  return null;
+}
+
+/** The agent chat a grant acts for, or null for a person or service. */
+function agentCallerSessionId(grant: AccessGrant): string | null {
+  if (grant.principalKind !== "agent_attempt") return null;
+  const sessionId = grant.metadata?.["sessionId"];
+  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
 }
 
 function sourcePlacementElsewhereApiError(

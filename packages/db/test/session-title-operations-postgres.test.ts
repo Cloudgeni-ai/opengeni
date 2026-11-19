@@ -211,7 +211,7 @@ describe.skipIf(!enabled)("independent session title custody", () => {
           {},
           second,
         ),
-      ).toEqual({ applied: false, recovered: false });
+      ).toEqual({ applied: false, recovered: false, notApplied: "credential_changed" });
       const requests = subscriptionCoreRequests(provider);
       const request = await requests.reserveSubscriptionCoreOperationRequest(
         fixture.client.db,

@@ -633,19 +633,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       `not loaded this turn: ${unavailableMcpConnectorReasonText(connector.reason)}`,
     ]),
   );
-  const mcpAvailabilityNote = unavailableMcpOperationalContext({
-    connectors: unavailableMcpConnectors,
-    omittedCount: deps.unavailableMcpConnectors.omittedCount,
-    needsReconnect,
-    connected: connectedMcpConnectors({
-      servers: canonicalRunSettings.mcpServers,
-      tools: [...canonicalTurnTools, ...turnTools],
-      unavailableIds: preparationUnavailableMcpServers.keys(),
-      bindings: turn.mcpAccountBindings,
-      apiIntegrations,
-      brokenConnectionIds: new Set(brokenConnections.map((connection) => connection.connectionId)),
-    }),
-  });
   const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
@@ -778,11 +765,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   // Background-command tools need compute: the effective route of this turn,
   // a managed sandbox or an attached Connected Machine, not the durable home.
-  // `goal_resume` follows the goal frozen with the turn, as the goal context
-  // the model reads does, so a session that has never had a goal is not sent it.
+  // Goal tools never follow the session's goal state: a session's first goal
+  // would otherwise change the tool list and system prompt under every earlier
+  // request and re-read the whole history uncached.
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
-    ...(turn.goalSnapshot ? { sessionGoal: turn.goalSnapshot.state !== "none" } : {}),
   });
   const bundledSkillIds = bundledSkillSelectionForAgentConfig(
     session.bundledSkillIds,
@@ -834,6 +821,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ),
     startedUnattended,
   );
+  // Written after the selection, which its reconnect guidance follows.
+  const mcpAvailabilityNote = unavailableMcpOperationalContext({
+    connectors: unavailableMcpConnectors,
+    omittedCount: deps.unavailableMcpConnectors.omittedCount,
+    needsReconnect,
+    connected: connectedMcpConnectors({
+      servers: canonicalRunSettings.mcpServers,
+      tools: [...canonicalTurnTools, ...turnTools],
+      unavailableIds: preparationUnavailableMcpServers.keys(),
+      bindings: turn.mcpAccountBindings,
+      apiIntegrations,
+      brokenConnectionIds: new Set(brokenConnections.map((connection) => connection.connectionId)),
+    }),
+    // Reconnect guidance names only the setup tools this turn's agent has.
+    setupTools: {
+      catalog: selectedFirstPartyMcpTools.includes("capability_catalog_search"),
+      card: selectedFirstPartyMcpTools.includes("capability_authorization_request"),
+    },
+  });
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
     agentConfig: session.agent,

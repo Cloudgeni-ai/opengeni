@@ -77,6 +77,8 @@ export type CodexAccountStatus = {
   isActive: boolean;
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
+  /** When the account was last signed in (connected or reconnected); null when unknown. */
+  signedInAt: Date | null;
   lastError: string | null;
   // P2 cached usage (plaintext metadata; rides along on this metadata-only read
   // with ZERO provider calls and ZERO decrypts). null until the first refresh.

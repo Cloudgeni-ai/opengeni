@@ -112,10 +112,12 @@ async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
             receipt: receipt.clone(),
             memory: true,
             disk_bytes: CHUNK_BYTES,
-            // What it was saved with: its memory's length from its manifest.
+            // What it was saved with: its memory's length from its manifest,
+            // and the runtime that made it.
             made_at: MadeAt {
                 vcpus: Some(VCPUS),
                 memory_bytes: Some(CHUNK_BYTES),
+                runtime: Some(RUNTIME.to_owned()),
             },
         }
     );
