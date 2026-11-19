@@ -1480,6 +1480,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "permission": "sessions:create",
     "secretFields": [
+      "request.agent.toolServers[].headers",
       "request.mcpServers[].headers"
     ]
   },

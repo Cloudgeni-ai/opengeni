@@ -702,7 +702,7 @@ export async function refreshEndUserToolCredential(
 
   // 1. Lease (one short transaction).
   const leased = await scoped(async (tx) => {
-    const [row] = await rawRows<CredentialRow>(
+    const [row] = await rawRows<CredentialRow & { lease_until: string }>(
       tx,
       sql`update end_user_tool_credentials c
         set refresh_lease_until = now() + make_interval(secs => ${leaseMs / 1000}::double precision)
@@ -712,9 +712,11 @@ export async function refreshEndUserToolCredential(
           and c.expires_at is not null
           and c.expires_at <= ${input.refreshBefore.toISOString()}::timestamptz
           and (c.refresh_lease_until is null or c.refresh_lease_until <= now())
-        returning ${CREDENTIAL_COLUMNS}`,
+        returning ${CREDENTIAL_COLUMNS}, c.refresh_lease_until::text as lease_until`,
     );
-    if (row) return { outcome: "leased" as const, credential: mapCredential(row) };
+    if (row) {
+      return { outcome: "leased" as const, credential: mapCredential(row), lease: row.lease_until };
+    }
     const current = await readRow(tx);
     if (!current) return { outcome: "missing" as const };
     const credential = mapCredential(current);
@@ -765,6 +767,14 @@ export async function refreshEndUserToolCredential(
         : { outcome: "failed" as const, credential: mapCredential(written) };
     }
     // The row changed while the token request ran: what is stored now wins.
+    // Give back this lease (only if no one took over after it lapsed).
+    await tx.execute(
+      sql`update end_user_tool_credentials c set refresh_lease_until = null
+        where c.account_id = ${input.accountId}::uuid
+          and c.workspace_id = ${input.workspaceId}::uuid
+          and c.id = ${input.credentialId}::uuid
+          and c.refresh_lease_until::text = ${leased.lease}`,
+    );
     const current = await readRow(tx);
     if (!current) return { outcome: "missing" as const };
     return { outcome: "current" as const, credential: mapCredential(current) };

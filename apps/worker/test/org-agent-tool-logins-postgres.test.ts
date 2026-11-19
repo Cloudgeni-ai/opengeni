@@ -454,9 +454,12 @@ describe("organization agent tool server logins", () => {
     expect(outcome.outcome).toBe("current");
     if (outcome.outcome !== "current") throw new Error("unreachable");
     expect(outcome.credential.materialEncrypted).toBe(relogin);
-    const [row] = await shared.admin<{ material_encrypted: string; version: number }[]>`
-      select material_encrypted, version from end_user_tool_credentials where id = ${credentialId}`;
-    expect(row).toEqual({ material_encrypted: relogin, version: 2 });
+    const [row] = await shared.admin<
+      { material_encrypted: string; version: number; refresh_lease_until: Date | null }[]
+    >`select material_encrypted, version, refresh_lease_until from end_user_tool_credentials
+      where id = ${credentialId}`;
+    // The new login stays, and the lease is given back.
+    expect(row).toEqual({ material_encrypted: relogin, version: 2, refresh_lease_until: null });
 
     // A refused refresh marks the login and clears its lease.
     await shared.admin`update end_user_tool_credentials set expires_at = now() - interval '1 second'
