@@ -8,11 +8,14 @@ import {
   bootstrapWorkspace,
   createDb,
   disconnectTeamsBot,
+  enqueueTeamsMessage,
   getTeamsActor,
+  getTeamsChatChoice,
   getTeamsInstallation,
   installTeamsBot,
   linkTeamsActor,
   removeTeamsLink,
+  setTeamsChatChoice,
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -559,24 +562,252 @@ describe("Teams self-serve setup", () => {
     );
   }, 60_000);
 
-  test("a workspace connected to another organization can't start setup for a new one", async () => {
+  test("a workspace connected to another organization stays with it until the bot is disconnected", async () => {
     const provider = microsoft();
     const d = deps(provider);
     const admin = await person();
-    const tenantId = crypto.randomUUID();
-    const actorId = crypto.randomUUID();
-    const token = setupProof(tenantId, actorId);
+    const teamsAdmin = (oid: string) => ({ oid, wids: [TEAMS_ADMIN_ROLE_IDS.teamsAdministrator] });
+    const oldTenant = crypto.randomUUID();
+    const oldActor = crypto.randomUUID();
+    const first = setupProof(oldTenant, oldActor);
     await completeTeamsSetup(d, admin.grant, {
-      setupToken: token,
-      microsoft: await adminSignIn(provider, d, admin, token, {
-        oid: actorId,
-        wids: [TEAMS_ADMIN_ROLE_IDS.globalAdministrator],
-      }),
+      setupToken: first,
+      microsoft: await adminSignIn(provider, d, admin, first, teamsAdmin(oldActor)),
     });
-    const second = await refusal(
-      startTeamsSetupSignIn(d, admin.grant, setupProof(crypto.randomUUID(), actorId)),
-    );
-    expect(second).toMatchObject({ status: 409, reason: "workspace_linked_elsewhere" });
+    const old = (await getTeamsInstallation(client.db, oldTenant))!;
+    const workspaceId = admin.grant.workspaceId;
+    // The old organization's chat state in the workspace.
+    await setTeamsChatChoice(client.db, old, {
+      actorId: oldActor,
+      subjectId: admin.subject,
+      workspaceId,
+      agentId: null,
+    });
+    const routeId = `route:${crypto.randomUUID()}`;
+    await enqueueTeamsMessage(client.db, old, {
+      routeId,
+      actorId: oldActor,
+      subjectId: admin.subject,
+      personal: false,
+      channelId: "19:channel",
+      conversationId: "19:channel",
+      threadId: "message",
+      serviceUrl: "https://smba.trafficmanager.net/emea/",
+      botId: "28:bot",
+      eventId: `event:${crypto.randomUUID()}`,
+      payload: { text: "hello" },
+    });
+
+    // While it's active, the workspace can't start or complete setup for another organization.
+    const newTenant = crypto.randomUUID();
+    const newActor = crypto.randomUUID();
+    const blockedToken = setupProof(newTenant, newActor);
+    const message =
+      "This workspace is connected to another Teams organization. Disconnect the bot in this workspace first, then connect again, or choose another workspace.";
+    expect(await refusal(startTeamsSetupSignIn(d, admin.grant, blockedToken))).toEqual({
+      status: 409,
+      reason: "workspace_linked_elsewhere",
+      message,
+    });
+    // A sign-in started just before the old organization was reconnected is refused too.
+    await disconnectTeamsBot(client.db, old);
+    const signedIn = await adminSignIn(provider, d, admin, blockedToken, teamsAdmin(newActor));
+    await installTeamsBot(client.db, {
+      accountId: admin.grant.accountId,
+      workspaceId,
+      tenantId: oldTenant,
+      actorId: oldActor,
+      subjectId: admin.subject,
+      nonce: crypto.randomUUID(),
+      requireInactive: true,
+    });
+    expect(
+      await refusal(
+        completeTeamsSetup(d, admin.grant, { setupToken: blockedToken, microsoft: signedIn }),
+      ),
+    ).toEqual({ status: 409, reason: "workspace_linked_elsewhere", message });
+    expect(await getTeamsInstallation(client.db, newTenant)).toBeNull();
+    expect((await getTeamsInstallation(client.db, oldTenant))?.active).toBe(true);
+
+    // After "Disconnect bot", the workspace's administrator connects another
+    // organization (no Global Administrator needed: the workspace is theirs).
+    await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, oldTenant))!);
+    // Old-organization rows that disconnect itself leaves or that arrive
+    // after it: chat context and a parked switch card.
+    await shared.admin`insert into teams_bot_context_cutoffs(account_id,workspace_id,tenant_id,conversation_id,cutoff_at)
+      values(${admin.grant.accountId},${workspaceId},${oldTenant},'19:old',now())`;
+    await shared.admin`insert into teams_bot_context_messages(account_id,workspace_id,tenant_id,conversation_id,thread_id,message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at)
+      values(${admin.grant.accountId},${workspaceId},${oldTenant},'19:old','','m1',${oldActor},null,'old',false,false,now())`;
+    await shared.admin`insert into teams_bot_route_prompts(account_id,workspace_id,tenant_id,actor_id,subject_id,generation)
+      values(${admin.grant.accountId},${workspaceId},${oldTenant},${oldActor},${admin.subject},gen_random_uuid())`;
+    const [seeded] = await shared.admin<Array<Record<string, number>>>`select
+      (select count(*)::int from teams_bot_context_messages where tenant_id=${oldTenant}) context,
+      (select count(*)::int from teams_bot_route_prompts where tenant_id=${oldTenant}) prompts,
+      (select count(*)::int from teams_bot_inbox where route_id=${routeId}) inbox`;
+    expect(seeded).toEqual({ context: 1, prompts: 1, inbox: 1 });
+    const relinkToken = setupProof(newTenant, newActor);
+    const status = await completeTeamsSetup(d, admin.grant, {
+      setupToken: relinkToken,
+      microsoft: await adminSignIn(provider, d, admin, relinkToken, teamsAdmin(newActor)),
+      audit: { subjectId: admin.subject, source: "app", principalKind: "human_session" },
+    });
+    expect(status.installation).toMatchObject({ tenantId: newTenant, workspaceId, active: true });
+    const current = (await getTeamsInstallation(client.db, newTenant))!;
+    expect(await getTeamsActor(client.db, current, newActor)).toBe(admin.subject);
+
+    // Nothing of the old organization is left in the workspace, and it can't reach it.
+    expect(await getTeamsInstallation(client.db, oldTenant)).toBeNull();
+    const [left] = await shared.admin<Array<Record<string, number>>>`select
+      (select count(*)::int from teams_bot_links where tenant_id=${oldTenant}) links,
+      (select count(*)::int from teams_bot_chat_choices where tenant_id=${oldTenant}) choices,
+      (select count(*)::int from teams_bot_route_prompts where tenant_id=${oldTenant}) prompts,
+      (select count(*)::int from teams_bot_routes where tenant_id=${oldTenant}) routes,
+      (select count(*)::int from teams_bot_inbox where route_id=${routeId}) inbox,
+      (select count(*)::int from teams_bot_outbox where route_id=${routeId}) outbox,
+      (select count(*)::int from teams_bot_context_messages where tenant_id=${oldTenant}) context,
+      (select count(*)::int from teams_bot_context_cutoffs where tenant_id=${oldTenant}) cutoffs`;
+    expect(left).toEqual({
+      links: 0,
+      choices: 0,
+      prompts: 0,
+      routes: 0,
+      inbox: 0,
+      outbox: 0,
+      context: 0,
+      cutoffs: 0,
+    });
+    expect(
+      await getTeamsChatChoice(client.db, current, { actorId: oldActor, subjectId: admin.subject }),
+    ).toBeNull();
+    expect(await getTeamsActor(client.db, current, oldActor)).toBeNull();
+    const audit = await shared.admin<
+      Array<{ subject_id: string; metadata: Record<string, unknown> }>
+    >`select subject_id, metadata from audit_events
+      where target_id = ${oldTenant} and action = 'connection.disconnected'
+        and workspace_id = ${workspaceId}::uuid and metadata->>'reason' is not null`;
+    expect(audit).toEqual([
+      {
+        subject_id: admin.subject,
+        metadata: expect.objectContaining({
+          reason: "released_for_another_organization",
+          newTenantId: newTenant,
+          principalKind: "human_session",
+          removedLinks: 1,
+          removedRoutes: 1,
+        }),
+      },
+    ]);
+
+    // A disconnect read before the relink touches only the old binding,
+    // which is gone: the new organization stays connected with its messages.
+    const newRoute = `route:${crypto.randomUUID()}`;
+    await enqueueTeamsMessage(client.db, current, {
+      routeId: newRoute,
+      actorId: newActor,
+      subjectId: admin.subject,
+      personal: false,
+      channelId: "19:new",
+      conversationId: "19:new",
+      threadId: "message",
+      serviceUrl: "https://smba.trafficmanager.net/emea/",
+      botId: "28:bot",
+      eventId: `event:${crypto.randomUUID()}`,
+      payload: { text: "hello" },
+    });
+    await disconnectTeamsBot(client.db, old, {
+      audit: { subjectId: admin.subject, source: "app", principalKind: "human_session" },
+    });
+    expect(await getTeamsInstallation(client.db, newTenant)).toEqual(current);
+    expect(
+      await shared.admin`select state from teams_bot_inbox where route_id=${newRoute}`,
+    ).toEqual([{ state: "pending" }]);
+
+    // The old organization can't take the workspace back while the new one is connected.
+    const back = setupProof(oldTenant, oldActor);
+    expect(await refusal(startTeamsSetupSignIn(d, admin.grant, back))).toMatchObject({
+      status: 409,
+      reason: "workspace_linked_elsewhere",
+    });
+  }, 60_000);
+
+  test("releasing a workspace's disconnected binding loses cleanly to a racing reconnect", async () => {
+    const admin = await person();
+    const workspaceId = admin.grant.workspaceId;
+    const oldTenant = crypto.randomUUID();
+    const base = {
+      accountId: admin.grant.accountId,
+      workspaceId,
+      subjectId: admin.subject,
+      requireInactive: true,
+    };
+    const oldActor = crypto.randomUUID();
+    await installTeamsBot(client.db, {
+      ...base,
+      tenantId: oldTenant,
+      actorId: oldActor,
+      nonce: crypto.randomUUID(),
+    });
+    await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, oldTenant))!);
+    const left = (await getTeamsInstallation(client.db, oldTenant))!;
+    const audit = { subjectId: admin.subject, source: "app" as const, principalKind: "t" };
+    const newTenant = crypto.randomUUID();
+    const relink = () =>
+      installTeamsBot(client.db, {
+        ...base,
+        tenantId: newTenant,
+        actorId: crypto.randomUUID(),
+        nonce: crypto.randomUUID(),
+        releaseWorkspaceInactive: { installation: left, audit },
+      });
+
+    // The old organization reconnects while the release waits on its row.
+    let reconnected!: () => void;
+    const reconnect = new Promise<void>((resolve) => (reconnected = resolve));
+    let locked!: () => void;
+    const held = new Promise<void>((resolve) => (locked = resolve));
+    const holder = shared.admin.begin(async (tx) => {
+      await tx`select 1 from teams_bot_installations where tenant_id=${oldTenant} for update`;
+      locked();
+      await reconnect;
+      await tx`update teams_bot_installations set active=true,generation=gen_random_uuid() where tenant_id=${oldTenant}`;
+    });
+    await held;
+    const racing = relink();
+    racing.catch(() => undefined);
+    await Bun.sleep(300);
+    reconnected();
+    await holder;
+    await expect(racing).rejects.toThrow("teams_installation_changed");
+    expect((await getTeamsInstallation(client.db, oldTenant))?.active).toBe(true);
+    expect(await getTeamsInstallation(client.db, newTenant)).toBeNull();
+
+    // Without the release, the workspace's unique binding refuses the new
+    // organization, and the setup maps it to the same refusal.
+    await expect(
+      installTeamsBot(client.db, {
+        ...base,
+        tenantId: newTenant,
+        actorId: crypto.randomUUID(),
+        nonce: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      cause: { constraint_name: "teams_bot_installations_workspace_id_key" },
+    });
+    // A release naming another workspace's binding changes nothing.
+    const other = await person();
+    await expect(
+      installTeamsBot(client.db, {
+        ...base,
+        accountId: other.grant.accountId,
+        workspaceId: other.grant.workspaceId,
+        subjectId: other.subject,
+        tenantId: newTenant,
+        actorId: crypto.randomUUID(),
+        nonce: crypto.randomUUID(),
+        releaseWorkspaceInactive: { installation: left, audit },
+      }),
+    ).rejects.toThrow("teams_installation_changed");
+    expect(await getTeamsInstallation(client.db, newTenant)).toBeNull();
   }, 60_000);
 
   test("self-serve stays off by default and outside admitted tenants; an operator-approved installer proves only their identity", async () => {
