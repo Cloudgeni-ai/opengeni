@@ -43,7 +43,9 @@
 //   /console                                 → Opengeni Console (?org): Overview, for organization owners and admins
 //   /console/sessions[/:wsId/:sessionId]     → end users' sessions in managed workspaces (?workspace), one transcript
 //   /console/workspaces, /api-keys[/new]     → workspaces by kind; organization API keys
-//   /console/agents, /members, /usage, /settings → placeholders, members, spend by kind, review level + audit log
+//   /console/agents[/new|/:agentId]          → organization agents (?tab, ?session, ?from, ?to); without the flag a placeholder
+//   /console/tool-servers[/new|/:serverKey]  → the organization's tool servers
+//   /console/members, /usage, /settings      → members, spend by kind, review level + audit log
 //   (on a Console host, console.* or *.console.*, every app path opens a Console page; see lib/console-route.ts)
 //   /billing?checkout=success|cancelled      → Stripe return → default organization's billing
 //   /device?user_code=…                      → self-hosted enrollment approve page
@@ -113,6 +115,7 @@ import {
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import {
   consoleHostRedirectPath,
+  parseConsoleAgentSearch,
   parseConsoleMembersSearch,
   parseConsoleSearch,
   parseConsoleSessionsSearch,
@@ -396,8 +399,28 @@ const LazyConsoleNewApiKeyRoute = lazyRouteComponent(
   "ConsoleNewApiKeyRoute",
 );
 const LazyConsoleAgentsRoute = lazyRouteComponent(
-  () => import("@/routes/console/organization-pages"),
+  () => import("@/routes/console/agents"),
   "ConsoleAgentsRoute",
+);
+const LazyConsoleNewAgentRoute = lazyRouteComponent(
+  () => import("@/routes/console/agents"),
+  "ConsoleNewAgentRoute",
+);
+const LazyConsoleAgentRoute = lazyRouteComponent(
+  () => import("@/routes/console/agent-detail"),
+  "ConsoleAgentRoute",
+);
+const LazyConsoleToolServersRoute = lazyRouteComponent(
+  () => import("@/routes/console/tool-servers"),
+  "ConsoleToolServersRoute",
+);
+const LazyConsoleNewToolServerRoute = lazyRouteComponent(
+  () => import("@/routes/console/tool-servers"),
+  "ConsoleNewToolServerRoute",
+);
+const LazyConsoleToolServerRoute = lazyRouteComponent(
+  () => import("@/routes/console/tool-servers"),
+  "ConsoleToolServerRoute",
 );
 const LazyConsoleMembersRoute = lazyRouteComponent(
   () => import("@/routes/console/organization-pages"),
@@ -714,6 +737,32 @@ const consoleAgentsRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "agents",
   component: LazyConsoleAgentsRoute,
+});
+const consoleNewAgentRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "agents/new",
+  component: LazyConsoleNewAgentRoute,
+});
+const consoleAgentRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "agents/$agentId",
+  validateSearch: parseConsoleAgentSearch,
+  component: LazyConsoleAgentRoute,
+});
+const consoleToolServersRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "tool-servers",
+  component: LazyConsoleToolServersRoute,
+});
+const consoleNewToolServerRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "tool-servers/new",
+  component: LazyConsoleNewToolServerRoute,
+});
+const consoleToolServerRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "tool-servers/$serverKey",
+  component: LazyConsoleToolServerRoute,
 });
 const consoleMembersRoute = createRoute({
   getParentRoute: () => consoleRoute,
@@ -1317,6 +1366,11 @@ const routeTree = rootRoute.addChildren([
     consoleApiKeysRoute,
     consoleNewApiKeyRoute,
     consoleAgentsRoute,
+    consoleNewAgentRoute,
+    consoleAgentRoute,
+    consoleToolServersRoute,
+    consoleNewToolServerRoute,
+    consoleToolServerRoute,
     consoleMembersRoute,
     consoleUsageRoute,
     consoleSettingsRoute,

@@ -24095,6 +24095,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: primitives.optionalBoolean,
+    // Console agents (organization agents) are on for the caller's organization.
+    // Absent on older servers and when off.
+    orgAgents: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z

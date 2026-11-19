@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { isPublishedPackageName } from "./publishable-workspaces";
 import {
   RELEASE_IMAGE_ROLES,
   releaseImageNames,
@@ -33,7 +34,6 @@ export type ReleaseBom = {
   chart: ReleaseChartIdentity;
 };
 
-const packageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9._-]*$/;
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const sourceShaPattern = /^[0-9a-f]{40}$/;
 const integrityPattern = /^sha512-[A-Za-z0-9+/=]+$/;
@@ -72,7 +72,7 @@ export function buildReleaseBom(input: {
 
   for (const pkg of input.packages) {
     if (
-      !packageNamePattern.test(pkg.name) ||
+      !isPublishedPackageName(pkg.name) ||
       !versionPattern.test(pkg.version) ||
       !sourceShaPattern.test(pkg.gitHead) ||
       !integrityPattern.test(pkg.integrity)

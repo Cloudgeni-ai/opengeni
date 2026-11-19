@@ -2112,6 +2112,11 @@ export type Session = {
    * create. Omitted by older servers.
    */
   agentId?: string | null | undefined;
+  /**
+   * The organization agent (Console agents) this chat runs: key, version and
+   * what this chat changed. Null or omitted for every other chat.
+   */
+  orgAgent?: SessionOrgAgent | null | undefined;
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -4371,8 +4376,18 @@ export type CreateSessionRequest = {
    * One agent configuration: capabilities, identity, instructions alias and
    * renderer. Omission keeps today's behavior (a child inherits its parent's).
    * Children may only narrow. Requires the server's admission switch.
+   *
+   * Or an organization agent (Console agents): its key or id, or
+   * `{ ref, ...changes }`, where the other fields change settings for this
+   * chat only and `instructions` are added after the agent's. `agentId` keeps
+   * naming workspace agents only.
    */
-  agent?: AgentConfigRequest | undefined;
+  agent?: AgentConfigRequest | OrgAgentRef | OrgAgentSessionRequest | undefined;
+  /**
+   * `reject`: refuse the create (422 `agent_override_rejected`) when it would
+   * change the organization agent's settings. Default `allow`.
+   */
+  agentOverrides?: OrgAgentOverridesMode | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
@@ -12251,6 +12266,14 @@ export type AgentCapabilities =
   | ({ from: "all" | "none" } & AgentCapabilityToggles);
 
 export type AgentRenderer = "opengeni" | "markdown";
+
+/** An organization agent's key, or its id (a UUID). */
+export type OrgAgentRef = string;
+/** `agent: { ref, ... }` on session create: an organization agent plus this chat's changes. */
+export type OrgAgentSessionRequest = import("@opengeni/contracts").OrgAgentSessionRequestInput;
+export type OrgAgentOverridesMode = "allow" | "reject";
+/** The organization agent a chat runs (`Session.orgAgent`). */
+export type SessionOrgAgent = import("@opengeni/contracts").SessionOrgAgent;
 
 export type AgentConfigRequest = {
   capabilities?: AgentCapabilities | undefined;

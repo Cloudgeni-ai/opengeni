@@ -1965,6 +1965,8 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ...AGENTS_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
+  // 1502: refuses organization-agent chat claims from workers without that support.
+  "guard_org_agent_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
@@ -1997,6 +1999,8 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   ...AGENTS_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
+  // 1502: refuses organization-agent chat claims from workers without that support.
+  "guard_org_agent_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
@@ -2019,9 +2023,11 @@ export const FORCE_RLS_TABLES = [
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
+  "agent_publish_operations",
   "agent_revisions",
   "agent_run_states",
   "agent_slack_installs",
+  "agent_workspace_access",
   "agents",
   "api_keys",
   "attached_browser_devices",
@@ -2133,6 +2139,7 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
   "editable_artifacts",
+  "end_user_tool_credentials",
   "enrollment_token_redemptions",
   "enrollments",
   "event_deliveries",
@@ -2281,6 +2288,7 @@ export const FORCE_RLS_TABLES = [
   "organization_session_review_settings",
   "organization_shared_workspace_administration_capabilities",
   "organization_skill_reach",
+  "organization_tool_servers",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -2616,6 +2624,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "agent_run_states",
   // 1243_agents: the agent directory and its Slack installations.
   "agent_slack_installs",
+  "agent_workspace_access",
   "agents",
   "api_keys",
   "audit_events",
@@ -2665,6 +2674,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "document_chunks",
   "documents",
   "editable_artifact_replica_leases",
+  "end_user_tool_credentials",
   "enrollment_token_redemptions",
   "enrollments",
   "event_deliveries",
@@ -2727,6 +2737,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_service_accounts",
   "organization_session_review_settings",
   "organization_skill_reach",
+  "organization_tool_servers",
   "organization_webhook_deliveries",
   "organization_webhooks",
   "pr_review_app_registrations",
@@ -3064,6 +3075,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "agent_calls",
+  "agent_publish_operations",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",

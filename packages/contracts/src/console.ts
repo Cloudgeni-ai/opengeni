@@ -30,7 +30,7 @@ export type ConsoleWorkspaceKind = z.infer<typeof ConsoleWorkspaceKind>;
 
 /** How a workspace came to be managed by the product. */
 export const ConsoleManagedSource = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["api_key", "backfill", "console"]),
+  z.enum(["api_key", "backfill", "console", "console_test"]),
 );
 export type ConsoleManagedSource = z.infer<typeof ConsoleManagedSource>;
 
@@ -103,6 +103,8 @@ export const ConsoleSummary = /* @__PURE__ */ defineSchema(() =>
     endUsers: primitives.nonnegativeInteger,
     /** Set when the session counts stopped early on a very large organization. */
     countsTruncated: primitives.boolean,
+    /** Console agents are on for this organization. Absent on older servers and when off. */
+    orgAgents: primitives.optionalBoolean,
   }),
 );
 export type ConsoleSummary = z.infer<typeof ConsoleSummary>;
@@ -259,6 +261,18 @@ export const ConsoleAuditAction = /* @__PURE__ */ defineSchema(() =>
     "session.metadata_viewed",
     "settings.review_level_changed",
     "workspace.kind_changed",
+    "agent.created",
+    "agent.updated",
+    "agent.version_saved",
+    "agent.published",
+    "agent.archived",
+    "agent.management_changed",
+    "agent.deployed",
+    "tool_server.created",
+    "tool_server.updated",
+    "tool_server.deleted",
+    "tool_credential.written",
+    "tool_credential.deleted",
   ]),
 );
 export type ConsoleAuditAction = z.infer<typeof ConsoleAuditAction>;

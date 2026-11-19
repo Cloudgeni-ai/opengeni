@@ -184,6 +184,48 @@ API records it in `organization_end_user_labels` when it resolves an external
 actor (best effort, never failing the request), and migration 1377 backfilled
 existing identities. It is a label, never authority.
 
+## Agents
+
+Organizations with Console agents turned on (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`,
+off by default) get **Agents** and **Tool servers** in the Console nav. The
+pages call the public organization routes
+(`/v1/organizations/:organizationId/agents`, tool servers under
+`agents/tool-servers`; contracts in
+`packages/contracts/src/organization-agents.ts`) through
+`apps/web/src/lib/organization-agents.ts`; Console has no routes of its own.
+Those routes answer 404 while the flag is off, which is how Console knows.
+
+- **Agents** lists each agent with its key, who manages it (Console or
+  "Managed by code"), the published version and a waiting draft.
+- An agent's **Settings** tab edits Instructions, model, reasoning effort,
+  built-in tools, tool servers, workers ("Share instructions with workers")
+  and the workspaces it is available in besides every managed workspace.
+  Each tool server shows the tools it offers now: each tool on or off, "Ask
+  first" per tool, and what happens to tools the server adds later (Off, On,
+  or On, ask first). Save draft writes a new version; Publish makes it what
+  new chats run. "Export as YAML" downloads `<key>.yaml`, which deploys back
+  to the same config hash.
+- **Test** starts a chat on the newest version in the organization's Console
+  test workspace, with an optional pasted test token per tool server that
+  logs in each user, and shows it with the app's message timeline.
+- **Versions** lists each version's source (Console, Deploy or Chat), config
+  hash and creation, compares two versions (Instructions and settings), and
+  publishes or rolls back. "New chats only" is the default; "Also move running
+  chats" shows how many would move, and the operation's progress.
+- **Sessions** lists the agent's chats with their version; "Changed by this
+  chat" marks chats that added or overrode settings, and opening one shows
+  each change beside the agent's value, with a link to the session.
+- A code-managed agent opens read-only. An owner can switch it to Console
+  management (audited); code deploys of it are refused afterwards.
+
+**Tool servers** lists the organization's MCP servers (name, key, URL, login:
+each user's login, a shared key, or none). Shared key headers and an OAuth
+client secret are write-only. Each server shows the tools it offers now.
+
+In the app, a workspace's Agents page lists the organization agents available
+there under "Managed in Console", read-only, with "Open Console" for owners
+and admins.
+
 ## API
 
 All routes are under `/v1/organizations/:organizationId/console` and are
@@ -212,7 +254,7 @@ workspaces and sets `truncated: true` when there are more.
 A Console-specific
 onboarding for someone who has no organization yet (they get the app's
 organization setup, then land in Console), and Insights inside Console.
-Organization-level agents shared across managed workspaces, end-user opt-out,
+End-user opt-out,
 content masking, hiding managed workspaces in the app, time-boxed support
 access and compliance access are planned. A future compliance mode must cover
 only chats created after it is turned on.

@@ -19,9 +19,6 @@ const PERMISSION_ACTIONS: Readonly<Record<Permission, string>> = {
   "workspace:read": "open this workspace",
   "workspace:admin": "change this workspace's settings",
   "sessions:create": "start chats",
-  "agents:read": "view organization agents",
-  "agents:manage": "manage organization agents",
-  "tool_credentials:write": "save tool logins for users",
   "sessions:read": "view chats",
   "sessions:control": "control chats",
   "stream:view": "watch live screens",
@@ -64,6 +61,9 @@ const PERMISSION_ACTIONS: Readonly<Record<Permission, string>> = {
   "rigs:manage": "manage rigs",
   "artifacts:read": "open artifacts",
   "artifacts:publish": "publish artifacts",
+  "agents:read": "view Console agents",
+  "agents:manage": "manage Console agents",
+  "tool_credentials:write": "store end users' tool logins",
 };
 
 /** The plain sentence for a missing permission. */

@@ -83,13 +83,18 @@ export const ORG_AGENT_ERROR_CODES = [
   "agent_ref_conflict",
   /** Saving an agent version from inline config needs `agents:manage`. */
   "agents_manage_required",
+  /** A workspace named in the request is not one of this organization's shared workspaces. */
+  "workspace_not_found",
+  /** The tool server settings do not fit together (for example a shared key on a `per_user` server). */
+  "tool_server_invalid",
+  /** The version's settings are larger than an agent version can store. */
+  "agent_config_too_large",
 ] as const;
 export type OrgAgentErrorCode = (typeof ORG_AGENT_ERROR_CODES)[number];
 
 export const OrgAgentKey = /* @__PURE__ */ defineSchema(() =>
   z.string().regex(ORG_AGENT_KEY_PATTERN, {
-    message:
-      "Use 1 to 64 lowercase letters, digits, '-' or '_', starting with a letter or digit.",
+    message: "Use 1 to 64 lowercase letters, digits, '-' or '_', starting with a letter or digit.",
   }),
 );
 export type OrgAgentKey = z.infer<typeof OrgAgentKey>;
@@ -99,14 +104,12 @@ export const OrgToolServerKey = OrgAgentKey;
 export type OrgToolServerKey = z.infer<typeof OrgToolServerKey>;
 
 const ToolName = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(200));
-const ToolNames = /* @__PURE__ */ defineSchema(() => z.array(ToolName).max(ORG_AGENT_TOOL_NAMES_MAX));
+const ToolNames = /* @__PURE__ */ defineSchema(() =>
+  z.array(ToolName).max(ORG_AGENT_TOOL_NAMES_MAX),
+);
 
 export const OrgAgentName = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .trim()
-    .min(1, { message: "Give the agent a name." })
-    .max(ORG_AGENT_NAME_MAX_LENGTH),
+  z.string().trim().min(1, { message: "Give the agent a name." }).max(ORG_AGENT_NAME_MAX_LENGTH),
 );
 export const OrgAgentDescription = /* @__PURE__ */ defineSchema(() =>
   z.string().trim().max(ORG_AGENT_DESCRIPTION_MAX_LENGTH),
@@ -281,7 +284,10 @@ export function orgAgentFileToDefinition(file: OrgAgentFile): {
 }
 
 /** The agent file for a definition: the inverse of {@link orgAgentFileToDefinition}. */
-export function orgAgentDefinitionToFile(key: string, definition: OrgAgentDefinition): OrgAgentFile {
+export function orgAgentDefinitionToFile(
+  key: string,
+  definition: OrgAgentDefinition,
+): OrgAgentFile {
   const { toolServers, workers, ...settings } = definition.config;
   return {
     key,
@@ -458,6 +464,21 @@ export const SaveOrgAgentDraftRequest = /* @__PURE__ */ defineSchema(() =>
 export type SaveOrgAgentDraftRequest = z.input<typeof SaveOrgAgentDraftRequest>;
 
 /**
+ * The saved version. `created` is false when the definition equals an
+ * existing version (same config hash), which is returned instead.
+ */
+export const SaveOrgAgentDraftResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ agent: OrgAgent, version: OrgAgentVersion, created: z.boolean() }),
+);
+export type SaveOrgAgentDraftResponse = z.infer<typeof SaveOrgAgentDraftResponse>;
+
+/** `POST .../agents/:agentId/archive`. */
+export const ArchiveOrgAgentRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ expectedVersion: z.number().int().positive() }).strict(),
+);
+export type ArchiveOrgAgentRequest = z.input<typeof ArchiveOrgAgentRequest>;
+
+/**
  * `POST .../agents/:agentId/publish`. Publishing an older version is a
  * rollback. `moveRunningChats` also moves chats pinned to other versions to
  * this one (their prompt cache starts over); otherwise only new chats get it.
@@ -496,6 +517,12 @@ export const PublishOrgAgentResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ agent: OrgAgent, operation: OrgAgentPublishOperation }),
 );
 export type PublishOrgAgentResponse = z.infer<typeof PublishOrgAgentResponse>;
+export const ListOrgAgentPublishOperationsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ operations: z.array(OrgAgentPublishOperation) }),
+);
+export type ListOrgAgentPublishOperationsResponse = z.infer<
+  typeof ListOrgAgentPublishOperationsResponse
+>;
 
 /** Chats that would move if this publish also moved running chats. */
 export const OrgAgentMovableChatsResponse = /* @__PURE__ */ defineSchema(() =>
@@ -586,6 +613,23 @@ export const ListOrgAgentSessionsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ sessions: z.array(OrgAgentSessionEntry), nextCursor: z.string().nullable() }),
 );
 export type ListOrgAgentSessionsResponse = z.infer<typeof ListOrgAgentSessionsResponse>;
+export const ListOrgAgentSessionsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: z.string().min(1).max(512).optional(),
+    version: z.coerce.number().int().positive().optional(),
+  }),
+);
+export type ListOrgAgentSessionsQuery = z.infer<typeof ListOrgAgentSessionsQuery>;
+
+/** `GET .../usage?from=&to=`: defaults to the last 30 days; at most 366 days. */
+export const OrgAgentUsageQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
+  }),
+);
+export type OrgAgentUsageQuery = z.infer<typeof OrgAgentUsageQuery>;
 
 export const OrgAgentUsageResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -755,6 +799,54 @@ export const EndUserToolCredentialResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ credential: EndUserToolCredential }),
 );
 
+/* ------------------------------------------------- workspace and Console test */
+
+/**
+ * `GET /v1/workspaces/:workspaceId/organization-agents`: the published
+ * organization agents chats in this workspace can name (read-only).
+ */
+export const WorkspaceOrgAgent = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    key: OrgAgentKey,
+    name: z.string(),
+    description: z.string(),
+    managedBy: OrgAgentManagedBy,
+    publishedVersion: z.number().int().positive(),
+  }),
+);
+export type WorkspaceOrgAgent = z.infer<typeof WorkspaceOrgAgent>;
+export const ListWorkspaceOrgAgentsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ agents: z.array(WorkspaceOrgAgent) }),
+);
+export type ListWorkspaceOrgAgentsResponse = z.infer<typeof ListWorkspaceOrgAgentsResponse>;
+
+/** `POST .../agents/test-workspace`: the organization's Console test workspace. */
+export const OrgAgentTestWorkspaceResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ workspaceId: z.string().uuid(), created: z.boolean() }),
+);
+export type OrgAgentTestWorkspaceResponse = z.infer<typeof OrgAgentTestWorkspaceResponse>;
+
+/**
+ * `POST .../agents/:agentId/test-chats`: a chat with one version (drafts
+ * included) in the Console test workspace. `toolLogins` are bearer tokens for
+ * this chat only, by tool server key; never stored beyond the chat.
+ */
+export const CreateOrgAgentTestChatRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.number().int().positive(),
+      message: z.string().trim().min(1).max(100_000),
+      toolLogins: secretValue(z.record(OrgToolServerKey, z.string().min(1).max(16_384))).optional(),
+    })
+    .strict(),
+);
+export type CreateOrgAgentTestChatRequest = z.input<typeof CreateOrgAgentTestChatRequest>;
+export const CreateOrgAgentTestChatResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ workspaceId: z.string().uuid(), sessionId: z.string().uuid() }),
+);
+export type CreateOrgAgentTestChatResponse = z.infer<typeof CreateOrgAgentTestChatResponse>;
+
 /* --------------------------------------------------------- session create input */
 
 /** An organization agent's key, or its id (a UUID). */
@@ -809,6 +901,7 @@ export const OrgAgentSessionRequest = /* @__PURE__ */ defineSchema(() =>
   }).strict(),
 );
 export type OrgAgentSessionRequest = z.infer<typeof OrgAgentSessionRequest>;
+export type OrgAgentSessionRequestInput = z.input<typeof OrgAgentSessionRequest>;
 
 /**
  * The public `agent` field of session create: today's agent configuration
@@ -819,6 +912,7 @@ export const CreateSessionAgentField = /* @__PURE__ */ defineSchema(() =>
   z.union([AgentConfigRequest, OrgAgentRef, OrgAgentSessionRequest]),
 );
 export type CreateSessionAgentField = z.infer<typeof CreateSessionAgentField>;
+export type CreateSessionAgentFieldInput = z.input<typeof CreateSessionAgentField>;
 
 /** Whether a create names an organization agent (a string or an object with `ref`). */
 export function sessionAgentFieldNamesOrgAgent(agent: unknown): boolean {
@@ -832,7 +926,9 @@ export function sessionAgentFieldNamesOrgAgent(agent: unknown): boolean {
 }
 
 /** `allow` (default): the request may change the agent's settings. `reject`: 422 if it does. */
-export const OrgAgentOverridesMode = /* @__PURE__ */ defineSchema(() => z.enum(["allow", "reject"]));
+export const OrgAgentOverridesMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["allow", "reject"]),
+);
 export type OrgAgentOverridesMode = z.infer<typeof OrgAgentOverridesMode>;
 
 /** Client config feature flag (`/v1/client-config`). */
@@ -845,4 +941,38 @@ export const OrgToolServerUnavailableReason = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrgToolServerUnavailableReason = z.infer<typeof OrgToolServerUnavailableReason>;
 
-export const ORG_AGENT_PERMISSIONS = ["agents:read", "agents:manage", "tool_credentials:write"] as const;
+export const ORG_AGENT_PERMISSIONS = [
+  "agents:read",
+  "agents:manage",
+  "tool_credentials:write",
+] as const;
+
+/* ----------------------------------------------------- agent file JSON Schema */
+
+/**
+ * Where editors fetch the agent file JSON Schema. It ships in the `opengeni`
+ * npm package (`schemas/agent.schema.json`); use it in a YAML file with
+ * `# yaml-language-server: $schema=<this URL>`.
+ */
+export const ORG_AGENT_FILE_JSON_SCHEMA_URL =
+  "https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json" as const;
+
+/**
+ * The JSON Schema of an agent file (`agents/<key>.yaml`), generated from
+ * {@link OrgAgentFile} (input side: defaults are optional). The committed copy
+ * is regenerated by `scripts/generate-agent-file-schema.ts`.
+ */
+export function orgAgentFileJsonSchema(): Record<string, unknown> {
+  const { $schema, ...schema } = z.toJSONSchema(OrgAgentFile, { io: "input" }) as Record<
+    string,
+    unknown
+  >;
+  return {
+    $schema,
+    $id: ORG_AGENT_FILE_JSON_SCHEMA_URL,
+    title: "Opengeni agent",
+    description:
+      "One Opengeni organization agent (agents/<key>.yaml). Deploy with `npx opengeni agents deploy <dir>`.",
+    ...schema,
+  };
+}

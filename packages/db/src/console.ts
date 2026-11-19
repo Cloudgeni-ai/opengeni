@@ -319,6 +319,16 @@ async function insertAudit(tx: Database, input: AuditInput): Promise<string> {
   return row!.id;
 }
 
+/** Writes one audit row in the caller's transaction (account context of the organization). */
+export async function insertConsoleAuditEvent(
+  tx: Database,
+  input: ConsoleAuditInput,
+): Promise<string> {
+  return await insertAudit(tx, input);
+}
+
+export type ConsoleAuditInput = AuditInput;
+
 export async function recordConsoleAuditEvent(db: Database, input: AuditInput): Promise<string> {
   return await withAccountRls(db, input.accountId, (tx) => insertAudit(tx, input));
 }

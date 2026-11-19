@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json
+key: support
+name: Customer support
+description: Answers customer questions using the help center and billing.
+instructions: ./support.md
+model: gpt-5.5
+reasoningEffort: medium
+capabilities:
+  from: all
+  webSearch: true
+  subagents: true
+toolServers:
+  - server: helpdesk
+    tools:
+      mode: selected
+      enabled: [search_articles, create_ticket]
+    approval:
+      ask: [create_ticket]
+    eager: [search_articles]
+    newTools: on_with_approval
+  - server: billing
+    tools:
+      mode: all
+workers:
+  shareInstructions: true

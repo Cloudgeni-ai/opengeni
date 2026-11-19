@@ -15230,6 +15230,7 @@
         "$.mcpServers[].name": "string!",
         "$.models": "array!",
         "$.models[]": "ref(ClientModel)",
+        "$.orgAgents": "boolean?",
         "$.productAccessMode": "ref(ProductAccessMode)!",
         "$.sandboxFiles": "boolean?",
         "$.serverVersion": "string?",
@@ -16691,7 +16692,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
+        "$": "enum=[\"\\\"agent.archived\\\"\",\"\\\"agent.created\\\"\",\"\\\"agent.deployed\\\"\",\"\\\"agent.management_changed\\\"\",\"\\\"agent.published\\\"\",\"\\\"agent.updated\\\"\",\"\\\"agent.version_saved\\\"\",\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"tool_credential.deleted\\\"\",\"\\\"tool_credential.written\\\"\",\"\\\"tool_server.created\\\"\",\"\\\"tool_server.deleted\\\"\",\"\\\"tool_server.updated\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
       }
     },
     "ConsoleAuditEvent": {
@@ -16749,7 +16750,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\"]"
+        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\",\"\\\"console_test\\\"\"]"
       }
     },
     "ConsoleModelSpend": {
@@ -16886,6 +16887,7 @@
         "$.countsTruncated": "boolean!",
         "$.endUsers": "integer!",
         "$.managedSessions": "integer!",
+        "$.orgAgents": "boolean?",
         "$.organizationId": "string!",
         "$.range": "ref(ConsoleRange)!",
         "$.reviewLevel": "ref(ConsoleReviewLevel)!",

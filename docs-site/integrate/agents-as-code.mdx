@@ -1,0 +1,153 @@
+---
+title: "Console agents and agents as code"
+description: "Define an organization's agents once, in Console or as YAML in Git, and name them when a chat starts."
+icon: "robot"
+---
+
+A Console agent belongs to your organization. You set it up once (Instructions, model, built-ins, tool servers, which tools are on and which ask first) and every chat that names it runs it, in any workspace your organization manages. Settings are saved as numbered versions; one is published, and each chat stays on the version it started on until you publish with **Move running chats**.
+
+Console agents are turned on per organization. Ask Opengeni to enable them for yours.
+
+## Three ways to work
+
+| Setup         | Where it is edited                            | How it ships                                                |
+| ------------- | --------------------------------------------- | ----------------------------------------------------------- |
+| Console agent | Console: draft, test chat, publish, roll back | Publish in Console                                          |
+| Code agent    | `agents/<key>.yaml` in your repository        | `npx opengeni agents deploy`, the GitHub Action, or the API |
+| No agent      | Nothing changes                               | Chats work exactly as before                                |
+
+A code agent is read-only in Console ("Managed by code"). An organization owner can move it to Console; code deploys are then refused. **Export as YAML** in Console gives you a Console agent's file to move it into Git.
+
+## Name the agent when a chat starts
+
+{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
+
+```ts
+agent: "support";
+```
+
+A chat can change settings for itself. Extra `instructions` are added after the agent's, never replacing them:
+
+{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
+
+```ts
+agent: {
+  ref: "support",
+  instructions: "The customer is on the Pro plan.",
+  toolServers: [{ server: "crm", disableTools: ["delete_contact"] }],
+}
+```
+
+What a chat changed is shown in Console as **Changed by this chat**. Send `agentOverrides: "reject"` to refuse any change instead (422 `agent_override_rejected`). With the session proxy, name the agent in your `createSession` hook; an agent sent by the browser is dropped.
+
+Chats read back which agent and version they run in `session.orgAgent`.
+
+## Agent files
+
+One file per agent, named after its key:
+
+```yaml
+# yaml-language-server: $schema=https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json
+key: support
+name: Customer support
+description: Answers customer questions using the help center.
+instructions: ./support.md
+model: gpt-5.5
+reasoningEffort: medium
+capabilities: { from: all, browser: false }
+toolServers:
+  - server: helpdesk
+    tools: { mode: selected, enabled: [search_articles, create_ticket] }
+    approval: { ask: [create_ticket] }
+    eager: [search_articles]
+    newTools: off
+  - server: billing
+    tools: { mode: all }
+workers:
+  shareInstructions: false
+```
+
+The first line gives editors that use the YAML language server completion and checks from the [JSON Schema](https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json).
+
+| Field                                                       | Meaning                                                                                                  |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `key`                                                       | Lowercase letters, digits, `-` and `_`; must match the file name. Chats name the agent by it.            |
+| `name`                                                      | Shown in Console. Required.                                                                              |
+| `description`                                               | One line about what it is for.                                                                           |
+| `instructions`                                              | The Instructions, or a path to a `.md` file next to the YAML file.                                       |
+| `model`, `reasoningEffort`                                  | The model and effort; omitted uses the workspace default.                                                |
+| `capabilities`, `identity`, `renderer`, `titleInstructions` | As in [Configure the agent](/integrate/configure-the-agent).                                             |
+| `toolServers[].server`                                      | The key of a tool server in your organization.                                                           |
+| `toolServers[].tools`                                       | `mode: selected` with `enabled` tool names, or `mode: all`.                                              |
+| `toolServers[].approval.ask`                                | Tools that ask a person first, or `true` for all.                                                        |
+| `toolServers[].eager`                                       | Tools loaded before the first model request.                                                             |
+| `toolServers[].newTools`                                    | Tools the server adds later: `off` (default), `on`, or `on_with_approval`.                               |
+| `workers.shareInstructions`                                 | Workers a chat starts get the agent's Instructions too. They always get its tools, approvals and logins. |
+
+## Deploy
+
+```sh
+export OPENGENI_API_KEY=...            # an organization key with agents:manage
+export OPENGENI_ORGANIZATION_ID=...
+npx opengeni agents deploy agents --dry-run
+npx opengeni agents deploy agents --publish
+```
+
+Every file is checked first; nothing is deployed while one has a problem. Each agent prints one line: key, `created`, `updated` or `unchanged`, the version, whether it is published, and its config hash. Deploying unchanged files is a no-op. Add `--move-running-chats` with `--publish` to move running chats to the new version too, and `--json` for machine-readable output. `npx opengeni agents export <key> --out agents` writes an existing agent's file.
+
+From GitHub Actions:
+
+```yaml
+- uses: Cloudgeni-ai/opengeni/actions/agents-deploy@main
+  with:
+    directory: agents
+    publish: true
+    organization-id: ${{ vars.OPENGENI_ORGANIZATION_ID }}
+    api-key: ${{ secrets.OPENGENI_API_KEY }}
+```
+
+From code, with the SDK:
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk";
+import { defineAgent, organizationAgents } from "@opengeni/sdk/organization-agents";
+
+const support = defineAgent({
+  key: "support",
+  name: "Customer support",
+  instructions: "Help customers of Acme.",
+  toolServers: [{ server: "helpdesk", tools: { mode: "all" } }],
+});
+
+const client = new OpenGeniClient({
+  baseUrl: "https://app.opengeni.ai",
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
+const result = await organizationAgents(client, process.env.OPENGENI_ORGANIZATION_ID!).deploy(
+  support,
+  {
+    publish: true,
+  },
+);
+console.log(result.outcome, result.version);
+```
+
+## End users' own logins
+
+For a tool server that uses each person's own login, Opengeni asks, in order: your [credential provider](/integrate/host-managed-integrations), then the login you stored for that end user, then the headers the chat itself sent. It never falls back to a shared key. Store a login from your backend:
+
+```ts
+await organizationAgents(client, organizationId).toolCredentials.put(
+  workspaceId,
+  externalUserId,
+  "crm",
+  {
+    kind: "oauth",
+    accessToken,
+    refreshToken,
+    expiresAt,
+  },
+);
+```
+
+Logins are encrypted, refreshed before they expire, and never readable back.

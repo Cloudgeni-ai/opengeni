@@ -229,16 +229,6 @@ export type ManagedEmailTransport = {
 export type AppDependencies = {
   settings: Settings;
   /**
-   * Starts the control workflow that moves an organization agent's chats to
-   * the version a publish operation published ("move running chats").
-   * Repeating one operation is a no-op. Optional for embedded hosts.
-   */
-  orgAgentPublishMoveStarter?: (input: {
-    accountId: string;
-    agentId: string;
-    operationId: string;
-  }) => Promise<void>;
-  /**
    * Original deployment settings when `settings` is already overlaid with a
    * deployment/workspace catalog snapshot. Model-bearing request adapters set
    * this marker so core admission never feeds a synthetic reviewed provider
@@ -246,6 +236,16 @@ export type AppDependencies = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  /**
+   * Starts moving running chats for a Console agent publish with
+   * `moveRunningChats` (the operation row is `pending`). Unset leaves the
+   * operation pending.
+   */
+  orgAgentPublishMoveStarter?: (input: {
+    accountId: string;
+    agentId: string;
+    operationId: string;
+  }) => Promise<void>;
   /** Read-only host funding admission; unset uses the standalone billing ledger. */
   entitlements?: EntitlementsPort | null;
   /**

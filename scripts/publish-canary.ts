@@ -29,6 +29,7 @@ import {
 } from "./canary-publication-receipts";
 import { lockstepCanaryBase, retiredVersionSet } from "./release/lockstep-version";
 import {
+  isPublishedPackageName,
   publishableWorkspacePackages,
   repoRoot,
   topologicallySortedPackages,
@@ -971,8 +972,7 @@ export function parseCanaryCohort(
     if (
       !isObject(pkg) ||
       !onlyKeys(pkg, ["name", "version", "previousLatest", "integrity", "archiveBytes"]) ||
-      typeof pkg.name !== "string" ||
-      !/^@opengeni\/[a-z0-9][a-z0-9-]*$/.test(pkg.name) ||
+      !isPublishedPackageName(pkg.name) ||
       names.has(pkg.name) ||
       typeof pkg.version !== "string" ||
       !CANARY_VERSION_PATTERN.test(pkg.version) ||
