@@ -250,6 +250,7 @@ import {
   type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
+  rarelyUsedRuntimeToolsSearchable,
   type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
@@ -2704,6 +2705,14 @@ export type BuildAgentOptions = {
    * expose it, so nothing becomes unreachable. Omitted keeps today's rule.
    */
   toolRouterExpected?: boolean;
+  /**
+   * The session's frozen first-request tools revision
+   * (`sessions.first_request_tools_revision`). From revision 1, `list_models`
+   * and `privacy_facts` are found through tool search on a turn that expects
+   * the search router anyway. Omitted is revision 0: they stay in every
+   * request, byte-identical to earlier requests.
+   */
+  firstRequestToolsRevision?: number;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -4679,6 +4688,7 @@ function maybeInstallLazyToolTransport(
     },
     options.toolRouterExpected !== false,
     harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
+    rarelyUsedRuntimeToolsSearchable(options.firstRequestToolsRevision ?? 0),
   );
   const attemptTools = mcpServers.find(
     (server): server is AttemptDefinitionMcpServer => server instanceof AttemptDefinitionMcpServer,

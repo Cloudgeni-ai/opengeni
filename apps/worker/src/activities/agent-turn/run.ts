@@ -1984,6 +1984,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             promptToolAvailability: toolRuntime.promptToolAvailability,
             toolRouterInHistory: toolRuntime.toolRouterInHistory,
             toolRouterExpected: toolRuntime.toolRouterExpected,
+            firstRequestToolsRevision: toolRuntime.firstRequestToolsRevision,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,

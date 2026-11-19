@@ -48,6 +48,7 @@ import {
   listSandboxGroupRepositoryResources,
   settleSessionRepositoryCleanup,
   sessionHasToolRouterHistory,
+  settleSessionFirstRequestToolsRevision,
   recordNangoUsageEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -1387,6 +1388,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         sessionId: input.sessionId,
       })
     : false;
+  // Frozen per session, recorded before its first model request: whether
+  // list_models and privacy_facts are searchable rather than in every request.
+  const firstRequestToolsRevision = await settleSessionFirstRequestToolsRevision(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+  });
   const toolRouterExpected = turnToolRouterExpected({
     agentConfig: session.agent,
     routerInHistory: toolRouterInHistory,
@@ -1765,6 +1773,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         : promptToolAvailability,
     toolRouterInHistory,
     toolRouterExpected,
+    firstRequestToolsRevision,
     skillCatalog,
   };
 }

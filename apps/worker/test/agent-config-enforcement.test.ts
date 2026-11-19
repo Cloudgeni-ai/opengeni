@@ -166,6 +166,8 @@ type FixtureOptions = {
   productSignInNotAdmitted?: boolean;
   /** The goal frozen with the turn; omitted leaves it unknown. */
   goal?: "none" | "paused";
+  /** The session's frozen first-request tools revision; omitted is 0, an existing session. */
+  firstRequestToolsRevision?: number;
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -299,6 +301,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       : []),
     spyOn(db, "persistAttemptToolCatalog").mockImplementation(async (_db, catalog) => catalog),
     spyOn(db, "cancelQueuedCodemodeOperationsForAttempt").mockResolvedValue(0),
+    spyOn(db, "settleSessionFirstRequestToolsRevision").mockResolvedValue(
+      options.firstRequestToolsRevision ?? 0,
+    ),
   ];
   if (options.credentialRestrictionSource) {
     const createInteractionTools = runtimeExports.createFirstPartyInteractionAttemptToolDefinitions;
@@ -1315,6 +1320,92 @@ describe("effective-tools projection agrees with actual model preparation", () =
         },
       ),
     );
+    for (const entry of projection.tools) {
+      if (entry.visibility === "search") {
+        expect(captured.deferredNames).toContain(entry.name);
+        expect(captured.names).not.toContain(entry.name);
+      } else {
+        expect(captured.names).toContain(entry.name);
+      }
+    }
+  });
+
+  test("a new session finds list_models and privacy_facts through search; an existing one keeps them", async () => {
+    const existing = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      modelId: "gpt-5.6-sol",
+      lazy: true,
+    });
+    const created = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      modelId: "gpt-5.6-sol",
+      lazy: true,
+      firstRequestToolsRevision: 1,
+    });
+    const rarelyUsed = ["list_models", "privacy_facts"];
+    // An existing session (revision 0) sends both in its first request, as before.
+    for (const name of rarelyUsed) {
+      expect(existing.names).toContain(name);
+      expect(existing.deferredNames).not.toContain(name);
+    }
+    expect(existing.buildOptions).not.toHaveProperty("firstRequestToolsRevision");
+    // A new session's first request is the same request without them: no
+    // other tool and no instruction text changes.
+    expect(created.buildOptions.firstRequestToolsRevision).toBe(1);
+    for (const name of rarelyUsed) {
+      expect(created.names).not.toContain(name);
+      expect(created.deferredNames).toContain(name);
+    }
+    expect(created.request.tools).toEqual(
+      existing.request.tools.filter((entry) => !rarelyUsed.includes(toolName(entry))),
+    );
+    expect(created.request.systemInstructions).toBe(existing.request.systemInstructions);
+    expect(created.request.input).toEqual(existing.request.input);
+    // The removed bytes are the two serialized tool definitions.
+    const removed = existing.request.tools.filter((entry) => rarelyUsed.includes(toolName(entry)));
+    expect(removed.map(toolName).sort()).toEqual(rarelyUsed);
+    expect(JSON.stringify(existing.request.tools).length).toBeGreaterThan(
+      JSON.stringify(created.request.tools).length,
+    );
+  });
+
+  test("a new session keeps privacy_facts in the request when nothing else brings the router", async () => {
+    const captured = await captureWorkerRequest({
+      agent: agentConfig("none", "privacyFacts", true),
+      builtins: false,
+      hasSkills: false,
+      humanRecipient: false,
+      lazy: true,
+      firstRequestToolsRevision: 1,
+    });
+    expect(captured.names).toContain("privacy_facts");
+    expect(captured.names).not.toContain("tool_search");
+    expect(captured.deferredNames).toEqual([]);
+  });
+
+  test("the projection follows a new session's search visibility", async () => {
+    const captured = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      modelId: "gpt-5.6-sol",
+      lazy: true,
+      firstRequestToolsRevision: 1,
+    });
+    const projection = projectAgentEffectiveTools(
+      sessionEffectiveToolProjectionInput(
+        captured.session as Parameters<typeof sessionEffectiveToolProjectionInput>[0],
+        captured.turnTools,
+        {
+          settings: captured.settings,
+          humanInputEnabled: true,
+          hasWorkspaceSkills: true,
+          objectStorageAvailable: true,
+          mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
+          rarelyUsedToolsSearchableSessionIds: new Set([captured.session.id]),
+        },
+      ),
+    );
+    for (const name of ["list_models", "privacy_facts"])
+      expect(projection.tools.find((entry) => entry.name === name)?.visibility).toBe("search");
     for (const entry of projection.tools) {
       if (entry.visibility === "search") {
         expect(captured.deferredNames).toContain(entry.name);
