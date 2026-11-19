@@ -1,0 +1,8 @@
+key: fields
+name: ""
+temperature: 2
+toolServers:
+  - server: helpdesk
+    tools:
+      mode: some
+  - server: helpdesk

@@ -1,0 +1,6 @@
+key: duplicate
+name: Duplicate tool server
+instructions: ./missing.md
+toolServers:
+  - server: helpdesk
+  - server: helpdesk
