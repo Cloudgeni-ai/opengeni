@@ -434,15 +434,13 @@ export function RunsOnField({
   const loadError = compute.error ? "Couldn't load this organization's machines." : undefined;
   return (
     <FieldStack>
-      <Field label="Runs on">
-        <SelectMenu
-          aria-label="Runs on"
-          options={runsOnMenuOptions(suggested)}
-          value={choice}
-          disabled={disabled}
-          onValueChange={(next) => onChange(runsOnForChoice(next))}
-        />
-      </Field>
+      <SelectMenu
+        aria-label="Runs on"
+        options={runsOnMenuOptions(suggested)}
+        value={choice}
+        disabled={disabled}
+        onValueChange={(next) => onChange(runsOnForChoice(next))}
+      />
       {runsOn?.kind === "sandbox" ? (
         <Field label="Sandbox Environment" optional hint={loadError}>
           <SelectMenu

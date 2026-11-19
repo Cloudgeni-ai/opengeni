@@ -674,8 +674,8 @@ export const OrgAgentOverrideChange = /* @__PURE__ */ defineSchema(() =>
 /**
  * What a chat changed from its agent version, keyed by setting (`model`,
  * `reasoningEffort`, `instructions`, `capabilities`, `identity`, `renderer`,
- * `titleInstructions`, `toolServers.<key>`, `mcpServers.<id>`). Null or absent
- * when the chat changed nothing.
+ * `titleInstructions`, `toolServers.<key>`, `mcpServers.<id>`, `runsOn`). Null
+ * or absent when the chat changed nothing.
  */
 export const OrgAgentSessionOverrides = /* @__PURE__ */ defineSchema(() =>
   z.record(z.string(), OrgAgentOverrideChange),
