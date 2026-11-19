@@ -144,9 +144,9 @@ describe("tool rows", () => {
       "lookup_invoice",
       "refund",
     ]);
-    expect(withToolAsk(server({ approval: { ask: true } }), "refund", false, names).approval.ask).toEqual(
-      ["lookup_invoice", "void_invoice"],
-    );
+    expect(
+      withToolAsk(server({ approval: { ask: true } }), "refund", false, names).approval.ask,
+    ).toEqual(["lookup_invoice", "void_invoice"]);
     expect(withNewTools(server(), "on").newTools).toBe("on");
   });
 
@@ -173,7 +173,10 @@ describe("overrides", () => {
       "Instructions",
       "Tool server billing",
     ]);
-    expect(entries[0]).toMatchObject({ agent: "azure-sol/gpt-6.1-sol", chat: "anthropic/claude-opus-5.5" });
+    expect(entries[0]).toMatchObject({
+      agent: "azure-sol/gpt-6.1-sol",
+      chat: "anthropic/claude-opus-5.5",
+    });
     expect(entries[2]?.chat).toContain('"newTools": "on"');
     expect(hasOverrides(null)).toBe(false);
     expect(hasOverrides({})).toBe(false);
@@ -192,9 +195,9 @@ describe("labels", () => {
 
 describe("flag", () => {
   test("reads the organization list or the boolean", () => {
-    expect(orgAgentsEnabled({ orgAgentsAccountIds: [organizationId.toUpperCase()] }, organizationId)).toBe(
-      true,
-    );
+    expect(
+      orgAgentsEnabled({ orgAgentsAccountIds: [organizationId.toUpperCase()] }, organizationId),
+    ).toBe(true);
     expect(orgAgentsEnabled({ orgAgentsAccountIds: [] }, organizationId)).toBe(false);
     expect(orgAgentsEnabled({ orgAgents: true }, organizationId)).toBe(true);
     expect(orgAgentsEnabled({ orgAgents: true }, null)).toBe(false);

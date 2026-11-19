@@ -88,9 +88,8 @@ const { ConsoleAgentsRoute } = await import("./agents");
 const { ConsoleAgentRoute } = await import("./agent-detail");
 const { PublishDialog } = await import("./agent-versions");
 const { AgentSessions } = await import("./agent-sessions");
-const { ConsoleToolServersRoute, parseHeaderLines, toolServerChanges } = await import(
-  "./tool-servers"
-);
+const { ConsoleToolServersRoute, parseHeaderLines, toolServerChanges } =
+  await import("./tool-servers");
 const { ManagedInConsoleAgents } = await import("@/components/agents/managed-in-console-agents");
 const { orgAgentsApi } = await import("@/lib/organization-agents");
 
@@ -227,7 +226,11 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
     return {
       agents: [
         summary(),
-        summary({ id: "13131313-1313-4131-8131-131313131313", name: "Unpublished", publishedVersion: null }),
+        summary({
+          id: "13131313-1313-4131-8131-131313131313",
+          name: "Unpublished",
+          publishedVersion: null,
+        }),
       ],
     };
   }

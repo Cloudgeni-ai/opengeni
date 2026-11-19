@@ -218,7 +218,11 @@ function ToolServerFields({
       </Field>
       <Field
         label="Key"
-        hint={existing ? "Agents refer to the server by its key." : "Agents refer to the server by this. It can't change later."}
+        hint={
+          existing
+            ? "Agents refer to the server by its key."
+            : "Agents refer to the server by this. It can't change later."
+        }
         error={errors.key}
       >
         <TextInput
@@ -272,7 +276,9 @@ function ToolServerFields({
             className="font-mono"
             autoComplete="off"
             value={form.headers}
-            onChange={(event) => setForm((current) => ({ ...current, headers: event.target.value }))}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, headers: event.target.value }))
+            }
           />
         </Field>
       ) : null}
@@ -310,7 +316,11 @@ function ToolServerFields({
             <Field
               label="Client secret"
               optional
-              hint={existing?.oauthRefresh?.hasClientSecret ? "Stored. Leave empty to keep it." : undefined}
+              hint={
+                existing?.oauthRefresh?.hasClientSecret
+                  ? "Stored. Leave empty to keep it."
+                  : undefined
+              }
             >
               <TextInput
                 type="password"
@@ -394,7 +404,9 @@ export function ConsoleNewToolServerRoute() {
           });
           return false;
         } catch (error) {
-          throw new Error(`The tool server wasn't added. ${userErrorText(error)}`, { cause: error });
+          throw new Error(`The tool server wasn't added. ${userErrorText(error)}`, {
+            cause: error,
+          });
         }
       }}
     >
@@ -408,7 +420,10 @@ export function ConsoleToolServerRoute() {
   const api = useOrgAgentsApi();
   const navigate = useNavigate();
   const { serverKey = "" } = useParams({ strict: false }) as { serverKey?: string };
-  const loaded = useConsoleQuery((signal) => api.getToolServer(serverKey, signal), [api, serverKey]);
+  const loaded = useConsoleQuery(
+    (signal) => api.getToolServer(serverKey, signal),
+    [api, serverKey],
+  );
   const [form, setForm] = useState<ServerForm | null>(null);
   const [errors, setErrors] = useState<Partial<Record<keyof ServerForm, string>>>({});
   const [deleting, setDeleting] = useState(false);
@@ -470,7 +485,12 @@ export function ConsoleToolServerRoute() {
         }}
         footerStart={
           server ? (
-            <Button type="button" variant="ghost" className="text-danger" onClick={() => setDeleting(true)}>
+            <Button
+              type="button"
+              variant="ghost"
+              className="text-danger"
+              onClick={() => setDeleting(true)}
+            >
               <TrashIcon aria-hidden="true" />
               Delete
             </Button>
@@ -528,7 +548,13 @@ function LiveToolsPreview({ api, serverKey }: { api: OrgAgentsApi; serverKey: st
         <h2 id="live-tools" className="m-0 text-sm font-medium text-fg">
           Tools it offers now
         </h2>
-        <Button type="button" variant="ghost" size="sm" onClick={tools.reload} disabled={tools.loading}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={tools.reload}
+          disabled={tools.loading}
+        >
           <RefreshCwIcon aria-hidden="true" />
           Check again
         </Button>

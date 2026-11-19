@@ -70,7 +70,8 @@ export type ConsoleAgentSearch = {
 const AGENT_TABS = new Set<ConsoleAgentTab>(["settings", "test", "versions", "sessions"]);
 
 function positiveInteger(value: unknown): number | undefined {
-  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  const number =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isInteger(number) && number > 0 ? number : undefined;
 }
 

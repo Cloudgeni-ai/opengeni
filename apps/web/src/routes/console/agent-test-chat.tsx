@@ -57,7 +57,9 @@ export function perUserServers(
 ): OrgToolServer[] {
   const version = agent.draft ?? agent.published;
   const keys = new Set(version?.config.toolServers.map((server) => server.server) ?? []);
-  return (toolServers ?? []).filter((server) => server.authMode === "per_user" && keys.has(server.key));
+  return (toolServers ?? []).filter(
+    (server) => server.authMode === "per_user" && keys.has(server.key),
+  );
 }
 
 export function AgentTestChat({
@@ -154,9 +156,7 @@ export function AgentTestChat({
 
   return (
     <div className="flex min-w-0 flex-col gap-4 py-8">
-      {unsaved ? (
-        <Notice tone="waiting">Save draft to test your latest changes.</Notice>
-      ) : null}
+      {unsaved ? <Notice tone="waiting">Save draft to test your latest changes.</Notice> : null}
       {chat ? (
         <>
           <div className="flex items-center justify-between gap-3">

@@ -37,7 +37,9 @@ export function ManagedInConsoleAgents({ workspaceId }: { workspaceId: string })
     return () => controller.abort();
   }, [client, enabled, workspaceId]);
 
-  const published = agents.filter((agent) => agent.archivedAt === null && agent.publishedVersion !== null);
+  const published = agents.filter(
+    (agent) => agent.archivedAt === null && agent.publishedVersion !== null,
+  );
   if (!enabled || !accountId || published.length === 0) return null;
   const admin = administersOrganization({ accessContext, clientConfig, accountId });
 

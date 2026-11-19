@@ -42,7 +42,9 @@ function AgentsComing() {
 }
 
 /** "v3", "v3 · Draft v4", "Draft v1". */
-export function agentVersionText(agent: Pick<OrgAgentSummary, "publishedVersion" | "latestVersion">) {
+export function agentVersionText(
+  agent: Pick<OrgAgentSummary, "publishedVersion" | "latestVersion">,
+) {
   const draft =
     agent.publishedVersion === null || agent.latestVersion > agent.publishedVersion
       ? agent.latestVersion
@@ -138,7 +140,9 @@ function AgentsList() {
                       ) : (
                         `v${published}`
                       )}
-                      {draft !== null ? <MetaChip variant="outline">Draft v{draft}</MetaChip> : null}
+                      {draft !== null ? (
+                        <MetaChip variant="outline">Draft v{draft}</MetaChip>
+                      ) : null}
                     </span>
                   ),
                   updated: <RelativeTime date={agent.updatedAt} />,

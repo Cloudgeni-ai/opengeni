@@ -133,14 +133,18 @@ export function ConsoleAgentRoute() {
         chips={
           <>
             {code ? <MetaChip variant="soft">{MANAGED_BY_CODE}</MetaChip> : null}
-            {draftWaiting ? <MetaChip variant="outline">Draft v{agent.latestVersion}</MetaChip> : null}
+            {draftWaiting ? (
+              <MetaChip variant="outline">Draft v{agent.latestVersion}</MetaChip>
+            ) : null}
           </>
         }
         meta={[
           <span key="key" translate="no" className="font-mono">
             {agent.key}
           </span>,
-          agent.publishedVersion === null ? "Not published" : `Published v${agent.publishedVersion}`,
+          agent.publishedVersion === null
+            ? "Not published"
+            : `Published v${agent.publishedVersion}`,
           <RelativeTime key="updated" date={agent.updatedAt} prefix="Updated" />,
         ]}
         actions={
@@ -255,7 +259,9 @@ export function ConsoleAgentRoute() {
           if (!open) setManagement(null);
         }}
         destructive={false}
-        title={management === "console" ? "Manage this agent in Console?" : "Manage this agent by code?"}
+        title={
+          management === "console" ? "Manage this agent in Console?" : "Manage this agent by code?"
+        }
         description={
           management === "console"
             ? "You can then edit and publish it here. Code deploys of this agent are refused until an owner switches it back."

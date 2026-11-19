@@ -169,8 +169,7 @@ export function AgentEditor({
   );
 
   const definitionChanged = !sameDefinition(definition, base);
-  const reachChanged =
-    [...workspaceIds].sort().join() !== [...agent.workspaceIds].sort().join();
+  const reachChanged = [...workspaceIds].sort().join() !== [...agent.workspaceIds].sort().join();
   const dirty = definitionChanged || reachChanged;
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
 
@@ -375,7 +374,10 @@ export function AgentEditor({
               Discard
             </Button>
           ) : null}
-          <Button disabled={!dirty || saving || !definition.name.trim()} onClick={() => void save()}>
+          <Button
+            disabled={!dirty || saving || !definition.name.trim()}
+            onClick={() => void save()}
+          >
             {saving ? "Saving…" : "Save draft"}
           </Button>
         </div>
@@ -516,14 +518,18 @@ function ToolServerTools({
                 description={row.description}
                 checked={row.on}
                 disabled={readOnly}
-                onCheckedChange={(checked) => onChange(withToolOn(server, row.name, checked, names))}
+                onCheckedChange={(checked) =>
+                  onChange(withToolOn(server, row.name, checked, names))
+                }
               />
               <CheckboxField
                 label="Ask first"
                 className="shrink-0"
                 checked={row.ask}
                 disabled={readOnly || !row.on}
-                onCheckedChange={(checked) => onChange(withToolAsk(server, row.name, checked, names))}
+                onCheckedChange={(checked) =>
+                  onChange(withToolAsk(server, row.name, checked, names))
+                }
               />
             </li>
           ))}
@@ -543,4 +549,3 @@ function ToolServerTools({
     </section>
   );
 }
-

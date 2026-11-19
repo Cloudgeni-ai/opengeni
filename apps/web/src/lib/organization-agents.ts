@@ -80,7 +80,13 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
   const opts = (signal?: AbortSignal) => (signal ? { signal } : {});
   return {
     listAgents: (signal?: AbortSignal) =>
-      client.requestJson<ListOrgAgentsResponse>("GET", `${base}/agents`, undefined, {}, opts(signal)),
+      client.requestJson<ListOrgAgentsResponse>(
+        "GET",
+        `${base}/agents`,
+        undefined,
+        {},
+        opts(signal),
+      ),
     getAgent: async (idOrKey: string, signal?: AbortSignal) =>
       (
         await client.requestJson<{ agent: OrgAgent }>(
@@ -143,7 +149,11 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
         opts(options.signal),
       ),
     ensureTestWorkspace: () =>
-      client.requestJson<OrgAgentTestWorkspaceResponse>("POST", `${base}/agents/test-workspace`, {}),
+      client.requestJson<OrgAgentTestWorkspaceResponse>(
+        "POST",
+        `${base}/agents/test-workspace`,
+        {},
+      ),
     startTestChat: (id: string, request: OrgAgentTestChatRequest) =>
       client.requestJson<OrgAgentTestChatResponse>("POST", `${agent(id)}/test-chats`, request),
     listToolServers: (signal?: AbortSignal) =>
@@ -371,7 +381,9 @@ export function toolRows(
     const on =
       server.tools.mode === "all" || listed || (isNew && !listed && server.newTools !== "off");
     const ask =
-      askAll || askList.has(tool.name) || (isNew && !listed && server.newTools === "on_with_approval");
+      askAll ||
+      askList.has(tool.name) ||
+      (isNew && !listed && server.newTools === "on_with_approval");
     return { name: tool.name, description: tool.description, on, ask, isNew, gone: false };
   });
   for (const name of server.tools.mode === "selected" ? server.tools.enabled : []) {
@@ -402,8 +414,7 @@ export function withToolOn(
   on: boolean,
   liveNames: readonly string[],
 ): OrgAgentToolServerConfig {
-  const current =
-    server.tools.mode === "all" ? new Set(liveNames) : new Set(server.tools.enabled);
+  const current = server.tools.mode === "all" ? new Set(liveNames) : new Set(server.tools.enabled);
   if (on) current.add(name);
   else current.delete(name);
   const ask =

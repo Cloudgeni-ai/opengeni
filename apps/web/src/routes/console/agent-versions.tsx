@@ -70,7 +70,8 @@ export function usePublishOperation(
           if (!controller.signal.aborted) setOperation(next);
         },
         () => {
-          if (!controller.signal.aborted) setOperation((current) => (current ? { ...current } : current));
+          if (!controller.signal.aborted)
+            setOperation((current) => (current ? { ...current } : current));
         },
       );
     }, OPERATION_POLL_MS);
@@ -198,7 +199,10 @@ export function AgentVersions({
   const left = from ?? (right !== undefined ? previous(rows, right) : undefined);
   const before = rows.find((version) => version.version === left) ?? null;
   const after = rows.find((version) => version.version === right) ?? null;
-  const options = rows.map((version) => ({ value: String(version.version), label: `v${version.version}` }));
+  const options = rows.map((version) => ({
+    value: String(version.version),
+    label: `v${version.version}`,
+  }));
 
   return (
     <div className="flex min-w-0 flex-col">
@@ -325,7 +329,13 @@ function previous(rows: readonly OrgAgentVersion[], version: number): number | u
 }
 
 /** Instructions as text and the settings as JSON, each as a diff. */
-export function VersionDiff({ before, after }: { before: OrgAgentVersion; after: OrgAgentVersion }) {
+export function VersionDiff({
+  before,
+  after,
+}: {
+  before: OrgAgentVersion;
+  after: OrgAgentVersion;
+}) {
   const drift = catalogDrift(before, after);
   return (
     <div className="flex flex-col gap-4">
