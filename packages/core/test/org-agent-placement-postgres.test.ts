@@ -3,13 +3,16 @@
 // owner, FORCE RLS, restricted runtime login): a machine outside its reach is
 // refused and works once its reach includes the workspace, a Personal (Only
 // me) machine is refused whether the request names it, the person's own
-// default would pick it, or a worker would join its parent's box on it, and a
-// version keeps the machine it was saved with when another one takes its name.
+// default would pick it, or a worker would join its parent's box on it (also a
+// worker that inherits the agent without naming it), workers still join their
+// parent's organization machine or cloud box, and a version keeps the machine
+// it was saved with when another one takes its name.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   createDb,
+  createSandbox,
   createWorkspace,
   ensureManagedAccessForUser,
   getSession,
@@ -153,7 +156,18 @@ async function organization() {
     );
     return (await getSession(client.db, home, created.id))!;
   };
-  return { accountId, owner, home, second, grant, machine, agent, create };
+  /** Puts a chat on a box directly (the box's connection is not part of these tests). */
+  const placeOn = async (sessionId: string, backend: "selfhosted" | "modal", sandboxId: string) => {
+    await shared.admin`update sessions set sandbox_backend = ${backend},
+        active_sandbox_id = ${sandboxId}
+      where id = ${sessionId}`;
+  };
+  /** A grant acting from inside a chat: what a worker it starts is created with. */
+  const from = (parentId: string): AccessGrant => ({
+    ...grant,
+    metadata: { ...grant.metadata, sessionId: parentId },
+  });
+  return { accountId, owner, home, second, grant, machine, agent, create, placeOn, from };
 }
 
 async function refusal(promise: Promise<unknown>) {
@@ -247,13 +261,8 @@ describe("where an organization agent chat lands", () => {
     // The parent chat runs on the person's laptop (its connection is not
     // part of this test, so the route is written directly).
     const parent = await org.create({ sandboxBackend: "none" });
-    await shared.admin`update sessions set sandbox_backend = 'selfhosted',
-        active_sandbox_id = ${laptop.sandboxId}
-      where id = ${parent.id}`;
-    const fromParent: AccessGrant = {
-      ...org.grant,
-      metadata: { ...org.grant.metadata, sessionId: parent.id },
-    };
+    await org.placeOn(parent.id, "selfhosted", laptop.sandboxId);
+    const fromParent = org.from(parent.id);
     // A worker naming an organization agent, sharing by default or explicitly.
     for (const sandbox of [undefined, "shared" as const]) {
       expect(
@@ -263,6 +272,38 @@ describe("where an organization agent chat lands", () => {
     // Its own computer is fine.
     const own = await org.create({ agent: "helper", sandbox: "new" }, fromParent);
     expect(own.activeSandboxId).toBeNull();
+
+    // A worker of an organization agent chat inherits the agent without naming
+    // it, and the same rule.
+    const agentParent = await org.create({ agent: "helper", sandboxBackend: "none" });
+    expect(agentParent.orgAgent?.key).toBe("helper");
+    await org.placeOn(agentParent.id, "selfhosted", laptop.sandboxId);
+    expect(await refusal(org.create({}, org.from(agentParent.id)))).toEqual(PERSONAL);
+  }, 180_000);
+
+  test("a worker joins its parent's organization machine or cloud box", async () => {
+    const org = await organization();
+    await org.agent("helper");
+    const box = await org.machine("organization", org.home, "Build box");
+    const parent = await org.create({ agent: "helper", sandboxBackend: "none" });
+    await org.placeOn(parent.id, "selfhosted", box.sandboxId);
+    // Without naming the agent (inherited) and naming it: both join the box.
+    for (const body of [{}, { agent: "helper" }, { agent: "helper", sandbox: "shared" }]) {
+      expect(await attachedTo(org.create(body, org.from(parent.id)))).toBe(box.sandboxId);
+    }
+
+    // A cloud box is not a Connected Machine (no machine scope): not refused.
+    const cloud = await createSandbox(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.home,
+      kind: "modal",
+      name: "Cloud box",
+    });
+    const cloudParent = await org.create({ agent: "helper", sandboxBackend: "none" });
+    await org.placeOn(cloudParent.id, "modal", cloud.id);
+    for (const body of [{}, { agent: "helper" }]) {
+      expect(await attachedTo(org.create(body, org.from(cloudParent.id)))).toBe(cloud.id);
+    }
   }, 180_000);
 
   test("a version keeps its machine when another one takes its name", async () => {

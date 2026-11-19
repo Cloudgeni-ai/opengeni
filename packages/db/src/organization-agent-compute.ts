@@ -206,16 +206,6 @@ export async function orgAgentRunsOnProblem(
   return "problem" in resolved ? resolved.problem : null;
 }
 
-/** {@link orgAgentRunsOnProblem} in its own account-scoped transaction. */
-export async function checkOrgAgentRunsOn(
-  db: Database,
-  accountId: string,
-  runsOn: OrgAgentRunsOn | undefined,
-): Promise<OrgAgentRunsOnProblem | null> {
-  if (!runsOn || (runsOn.machine === undefined && runsOn.environment === undefined)) return null;
-  return await withAccountRls(db, accountId, (tx) => orgAgentRunsOnProblem(tx, accountId, runsOn));
-}
-
 /** {@link resolveOrgAgentRunsOn} in its own account-scoped transaction. */
 export async function resolveOrgAgentRunsOnInAccount(
   db: Database,

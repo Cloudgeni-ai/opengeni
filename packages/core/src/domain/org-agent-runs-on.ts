@@ -97,26 +97,32 @@ const PERSONAL_MACHINE_MESSAGE =
 /**
  * The final check on where an organization agent chat (named on create, or
  * inherited by a worker) lands, once placement is settled: the request's
- * machine, a default, or the parent's box a worker joins. A Personal machine is
- * refused, and so is a machine this caller can't read, because the create path
- * reads it with the same caller and could not attach it either.
+ * machine, a default, or the parent's box a worker joins. A Personal (Only me)
+ * machine is refused, and so is a target this caller can't read, because the
+ * create path reads it with the same caller and could not attach it either.
+ * Anything else passes: organization and workspace machines, and boxes that
+ * are not Connected Machines (a cloud sandbox has no machine scope).
  */
 export async function assertOrgAgentChatMachine(
-  deps: { db: Database; sandboxScope?: (sandboxId: string) => Promise<string | null> },
+  deps: {
+    db: Database;
+    /** Test seam: the target as `get_scoped_sandbox` reads it, or null when unreadable. */
+    readSandbox?: (sandboxId: string) => Promise<{ scope: string | null } | null>;
+  },
   access: { accountId: string; workspaceId: string; subjectId: string },
   sandboxId: string,
 ): Promise<void> {
-  const scope = deps.sandboxScope
-    ? await deps.sandboxScope(sandboxId)
-    : ((await getSandbox(deps.db, access, sandboxId))?.scope ?? null);
-  if (scope === null) {
+  const sandbox = deps.readSandbox
+    ? await deps.readSandbox(sandboxId)
+    : await getSandbox(deps.db, access, sandboxId);
+  if (!sandbox) {
     throw new OrgAgentRunsOnError(
       422,
       "runs_on_unavailable",
       "The machine this chat would run on isn't available in this workspace.",
     );
   }
-  if (scope === "user") {
+  if (sandbox.scope === "user") {
     throw new OrgAgentRunsOnError(422, "personal_machine_not_allowed", PERSONAL_MACHINE_MESSAGE);
   }
 }

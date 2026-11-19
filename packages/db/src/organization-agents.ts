@@ -568,6 +568,10 @@ async function insertAgent(
 ): Promise<{ row: AgentRow; configHash: string }> {
   const definition = parseDefinition(input.definition);
   assertConfigSize(definition);
+  // The per-key lock first (re-entrant for apply, which already holds it),
+  // then the organization lock: the order apply and inline saves use, so a
+  // Console create, a deploy and an inline save of one key serialize.
+  await lockKey(tx, `org-agent-key:${input.accountId}:${input.key}`);
   await lockKey(tx, `org-agents:${input.accountId}`);
   if (await selectAgentRow(tx, input.accountId, { key: input.key })) {
     throw new OrgAgentError(

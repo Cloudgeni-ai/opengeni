@@ -150,8 +150,15 @@ async function fixture() {
   const operationRow = async () =>
     (
       await shared.admin<
-        { status: string; moved_count: number; failed_count: number; finished_at: Date | null }[]
-      >`select status, moved_count, failed_count, finished_at from agent_publish_operations
+        {
+          status: string;
+          moved_count: number;
+          failed_count: number;
+          finished_at: Date | null;
+          failure_reason: string | null;
+        }[]
+      >`select status, moved_count, failed_count, finished_at, failure_reason
+        from agent_publish_operations
         where id = ${operation!.id}`
     )[0]!;
   return {
@@ -227,7 +234,12 @@ describe("publish move activities", () => {
       remainingDeferred: 0,
     });
     const finished = await f.operationRow();
-    expect(finished).toMatchObject({ status: "succeeded", moved_count: 4, failed_count: 0 });
+    expect(finished).toMatchObject({
+      status: "succeeded",
+      moved_count: 4,
+      failed_count: 0,
+      failure_reason: null,
+    });
     expect(finished.finished_at).toBeInstanceOf(Date);
     // A finished operation does not start again.
     expect(await activities.beginOrgAgentPublishMove(input)).toEqual({ proceed: false });
@@ -250,5 +262,16 @@ describe("publish move activities", () => {
         cursor: { workspaceIndex: 0, afterSessionId: null },
       }),
     ).toMatchObject({ done: true, superseded: true, moved: 0 });
+    // The workflow then finishes it as succeeded, recording why it stopped.
+    await activities.finishOrgAgentPublishMove({
+      ...input,
+      status: "succeeded",
+      remainingDeferred: 0,
+      failureReason: "superseded",
+    });
+    expect(await f.operationRow()).toMatchObject({
+      status: "succeeded",
+      failure_reason: "superseded",
+    });
   }, 180_000);
 });

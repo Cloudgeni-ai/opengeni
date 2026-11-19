@@ -778,6 +778,13 @@ start, the version stays published and the operation is `failed` with
 `failureReason`: `move_unavailable` (the deployment has no move workflow),
 `move_start_failed` (publish again to retry) or `superseded` (a later publish
 came before it started).
+If the API stops between saving a publish and starting its move, the
+operation stays `pending` until someone lists the agent's publish operations
+more than two minutes later: the listing starts the move again (starting is
+idempotent) or, when it cannot start, marks it `failed` as above. A later
+publish also ends it as `superseded`. A move that was already running when a
+later publish took over ends `succeeded` with `failureReason: superseded`;
+its counts show what it moved before it stopped.
 
 ### Access and rollout
 

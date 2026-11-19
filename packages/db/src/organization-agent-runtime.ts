@@ -374,9 +374,10 @@ export async function saveInlineOrgAgentVersion(
   },
 ): Promise<InlineOrgAgentVersionResult> {
   return await withOrgAgentScope(db, input, async (tx) => {
-    // Same lock order as apply (`org-agent-key`, then `org-agents` for a new
-    // agent), so an inline save and a deploy or Console create of the same key
-    // serialize instead of racing into the unique indexes.
+    // Same lock order as apply and Console create (`org-agent-key`, then
+    // `org-agents` for a new agent), so an inline save, a deploy and a Console
+    // create of the same key serialize instead of racing into the unique
+    // indexes.
     let agentKey: string | null = "key" in input.ref ? input.ref.key : null;
     if (agentKey === null) {
       const byId = await agentByRef(tx, input.accountId, input.ref);
@@ -933,6 +934,8 @@ export async function updateOrgAgentPublishOperation(
     status?: "running" | "succeeded" | "failed";
     moved?: number;
     failed?: number;
+    /** Why the operation ended early, e.g. `superseded` when a newer publish took over a running move. */
+    failureReason?: "superseded";
   },
 ): Promise<void> {
   const finished = input.status === "succeeded" || input.status === "failed";
@@ -943,6 +946,7 @@ export async function updateOrgAgentPublishOperation(
           failed_count = failed_count + ${input.failed ?? 0}::integer
           ${input.status ? sql`, status = ${input.status}` : sql``}
           ${finished ? sql`, finished_at = now()` : sql``}
+          ${input.failureReason ? sql`, failure_reason = ${input.failureReason}` : sql``}
         where account_id = ${input.accountId}::uuid and id = ${input.operationId}::uuid
           and status not in ('succeeded', 'failed')`,
     ),

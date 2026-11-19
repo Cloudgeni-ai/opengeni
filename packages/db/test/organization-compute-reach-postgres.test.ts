@@ -6,7 +6,6 @@ import {
 import postgres from "postgres";
 import {
   applyOrgAgent,
-  checkOrgAgentRunsOn,
   claimSessionWorkForAttempt,
   createDb,
   createOrgAgent,
@@ -24,6 +23,7 @@ import {
   listOrgAgentCompute,
   nestedPostgresSqlState,
   OrgAgentError,
+  resolveOrgAgentRunsOnInAccount,
   revokeScopedRig,
   saveOrgAgentDraft,
   updateOrganizationMachineReach,
@@ -669,27 +669,31 @@ describe("Runs on: organization machines and environments only", () => {
     expect(listed.machines.map((entry) => entry.id)).not.toContain(workspaceMachine.enrollmentId);
     expect(listed.environments.map((entry) => entry.id)).toEqual([rig.id]);
 
-    // Names, ids and sandbox ids of organization machines and environments resolve.
-    for (const runsOn of [
-      { kind: "machine" as const, machine: "build BOX" },
-      { kind: "machine" as const, machine: machine.enrollmentId },
-      { kind: "machine" as const, machine: machine.sandboxId },
-      { kind: "sandbox" as const, environment: "Python 3.13" },
-      { kind: "sandbox" as const },
-      { kind: "none" as const },
-    ]) {
-      expect(await checkOrgAgentRunsOn(client.db, org.accountId, runsOn)).toBeNull();
+    const resolve = (runsOn: Parameters<typeof resolveOrgAgentRunsOnInAccount>[2]) =>
+      resolveOrgAgentRunsOnInAccount(client.db, org.accountId, runsOn);
+    // Names, ids and sandbox ids of organization machines and environments
+    // resolve to the machine's enrollment id or the environment's id.
+    for (const ref of ["build BOX", machine.enrollmentId, machine.sandboxId]) {
+      expect(await resolve({ kind: "machine", machine: ref })).toEqual({
+        target: { machineId: machine.enrollmentId },
+      });
+    }
+    expect(await resolve({ kind: "sandbox", environment: "Python 3.13" })).toEqual({
+      target: { environmentId: rig.id },
+    });
+    for (const runsOn of [{ kind: "sandbox" as const }, { kind: "none" as const }, undefined]) {
+      expect(await resolve(runsOn)).toEqual({ target: null });
     }
     // A workspace machine (like a Personal one) is never an organization agent's.
     expect(
-      await checkOrgAgentRunsOn(client.db, org.accountId, {
+      await resolve({
         kind: "machine",
         machine: workspaceMachine.sandboxId,
       }),
-    ).toMatchObject({ code: "machine_not_found" });
-    expect(
-      await checkOrgAgentRunsOn(client.db, org.accountId, { kind: "sandbox", environment: "Nope" }),
-    ).toMatchObject({ code: "environment_not_found" });
+    ).toMatchObject({ problem: { code: "machine_not_found" } });
+    expect(await resolve({ kind: "sandbox", environment: "Nope" })).toMatchObject({
+      problem: { code: "environment_not_found" },
+    });
     // A Personal (Only me) machine: the create path sees its scope and refuses
     // it; saves never find it among the organization's.
     const personalMachine = await organizationMachine(org, { scope: "user", name: "My laptop" });
@@ -698,9 +702,9 @@ describe("Runs on: organization machines and environments only", () => {
     ).toBe("user");
     expect(listed.machines.map((entry) => entry.id)).not.toContain(personalMachine.enrollmentId);
     for (const ref of ["My laptop", personalMachine.sandboxId, personalMachine.enrollmentId]) {
-      expect(
-        await checkOrgAgentRunsOn(client.db, org.accountId, { kind: "machine", machine: ref }),
-      ).toMatchObject({ code: "machine_not_found" });
+      expect(await resolve({ kind: "machine", machine: ref })).toMatchObject({
+        problem: { code: "machine_not_found" },
+      });
     }
 
     // Create, draft and deploy (also a dry run) refuse them.
