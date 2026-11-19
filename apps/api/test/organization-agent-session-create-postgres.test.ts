@@ -304,12 +304,20 @@ describe("session create with an organization agent over HTTP", () => {
     expect([byId.status, byId.body.orgAgent?.id]).toEqual([202, agentId]);
     // An unknown key is refused, never a plain chat.
     const unknown = await call("POST", sessions(), { initialMessage: "hi", agent: "missing" });
-    expect([unknown.status, unknown.body.code, unknown.body.details?.code]).toEqual([404, "SESSION_CREATE_REJECTED", "agent_not_found"]);
+    expect([unknown.status, unknown.body.code, unknown.body.details?.code]).toEqual([
+      404,
+      "SESSION_CREATE_REJECTED",
+      "agent_not_found",
+    ]);
     // An agent with no published version yet.
     const unpublished = await call("POST", agents(), { key: "unpublished", name: "unpublished" });
     expect(unpublished.status).toBe(201);
     const refused = await call("POST", sessions(), { initialMessage: "hi", agent: "unpublished" });
-    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([409, "SESSION_CREATE_REJECTED", "agent_not_published"]);
+    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([
+      409,
+      "SESSION_CREATE_REJECTED",
+      "agent_not_published",
+    ]);
   }, 120_000);
 
   test("agent as { ref } with this chat's own instructions and settings", async () => {
@@ -356,7 +364,11 @@ describe("session create with an organization agent over HTTP", () => {
       model: "gpt-5.6-luna",
       agentOverrides: "reject",
     });
-    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([422, "SESSION_CREATE_REJECTED", "agent_override_rejected"]);
+    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([
+      422,
+      "SESSION_CREATE_REJECTED",
+      "agent_override_rejected",
+    ]);
     const accepted = await call("POST", sessions(), {
       initialMessage: "hi",
       agent: { ref: "strict" },
@@ -407,7 +419,11 @@ describe("session create with an organization agent over HTTP", () => {
       initialMessage: "hi",
       agent: { ref: agentId, version: 2 },
     });
-    expect([outside.status, outside.body.code, outside.body.details?.code]).toEqual([404, "SESSION_CREATE_REJECTED", "agent_not_found"]);
+    expect([outside.status, outside.body.code, outside.body.details?.code]).toEqual([
+      404,
+      "SESSION_CREATE_REJECTED",
+      "agent_not_found",
+    ]);
   }, 120_000);
 
   test("a keyed retry returns the original chat after a publish or archive", async () => {
@@ -606,20 +622,14 @@ describe("session create with an organization agent over HTTP", () => {
       const refused = await asLimited({
         agent: { ref: "noted", toolServers: [{ server: "notes", ...change }] },
       });
-      expect([refused.status, refused.body.details?.code]).toEqual([
-        403,
-        "agents_manage_required",
-      ]);
+      expect([refused.status, refused.body.details?.code]).toEqual([403, "agents_manage_required"]);
     }
     // Replacing the agent's server through mcpServers widens too.
     const replaced = await asLimited({
       agent: "noted",
       mcpServers: [{ id: "notes", url: "https://notes.example.com/mcp" }],
     });
-    expect([replaced.status, replaced.body.details?.code]).toEqual([
-      403,
-      "agents_manage_required",
-    ]);
+    expect([replaced.status, replaced.body.details?.code]).toEqual([403, "agents_manage_required"]);
     // A server of the chat's own under a new id needs mcp_servers:attach, as for any chat.
     const added = await asLimited({
       agent: "noted",

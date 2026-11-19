@@ -191,7 +191,11 @@ describe("organization agents end to end", () => {
       model: "gpt-5.6-luna",
       agentOverrides: "reject",
     });
-    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([422, "SESSION_CREATE_REJECTED", "agent_override_rejected"]);
+    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([
+      422,
+      "SESSION_CREATE_REJECTED",
+      "agent_override_rejected",
+    ]);
     const allowed = await call("POST", sessions(), {
       initialMessage: "Hello",
       agent: { ref: "strict" },

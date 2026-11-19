@@ -45987,13 +45987,14 @@ export async function ensureSessionAgentInstructions(
       db,
       {
         ...scope,
-        text: shared && current
-          ? agentInstructionsContextText({
-              kind: "revision",
-              revision: current.version,
-              instructions: current.instructions,
-            })
-          : null,
+        text:
+          shared && current
+            ? agentInstructionsContextText({
+                kind: "revision",
+                revision: current.version,
+                instructions: current.instructions,
+              })
+            : null,
         baselineText: agentInstructionsContextText(
           prompt.instructions === null
             ? { kind: "deleted" }
