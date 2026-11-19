@@ -235,7 +235,9 @@ keeps its stored value. They are never rejected: names are trimmed and cut to
 256 characters; an email is stored as given (trimmed), unless it has spaces or
 is longer than 320 characters, which drops it. They are not part of the
 identity: the same `externalId` and `source` are the same user whatever name
-is sent.
+is sent. A `null` or non-string value is ignored. A self-hosted API from before
+these fields existed rejects requests that carry them, so update the API before
+the product sends them.
 
 Console names an end user by display name, then email, then the product's id;
 the id shows on hover and can be copied on the session page. Workspace names
