@@ -11,6 +11,9 @@
 //   the person allowed it (press the button to see it).
 // gmail-approval: the same access for a tool set to Ask first: one approval
 // for the action, whose Approve asks Google first (?state=waiting).
+// gmail-pinned: the chat after the agent stopped on that card and more
+// messages came in: the card stays above the composer until it is done, and
+// the sidebar marks the chat as needing you (the orange dot).
 // gmail-fixed: the same tool on an account whose access is fixed (for example
 // managed by an integration platform): the stock row, with no action.
 // Open the card's setup dialog with its button to see the dialog.
@@ -36,6 +39,12 @@ import { AppContext } from "@opengeni/react/app/app-context";
 import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
 import { EventLog } from "./timeline-fixtures";
+import { AuthNeededRow } from "../src/components/auth-needed-row";
+import { buildTimeline } from "../src/timeline/projection";
+import { pendingConnectionCard } from "../src/timeline/pending-connection-card";
+import { SessionRowContent } from "../src/app/components/rail/session-row-content";
+import { summarizeRailRow } from "../src/app/lib/sessions-group";
+import { sessionStateLabel } from "../src/app/lib/session-rail";
 import { MockOpenGeniClient } from "./mock";
 import "./styles.css";
 
@@ -47,7 +56,8 @@ const service =
   serviceParam === "added" ||
   serviceParam === "gmail-step-up" ||
   serviceParam === "gmail-fixed" ||
-  serviceParam === "gmail-approval"
+  serviceParam === "gmail-approval" ||
+  serviceParam === "gmail-pinned"
     ? serviceParam
     : "calendar";
 const dark = params.get("theme") === "dark";
@@ -208,7 +218,7 @@ function events(): SessionEvent[] {
     log.push("user.message", { text: "Mark the newsletters in my inbox as read." });
     return log.events;
   }
-  if (service === "gmail-step-up" || service === "gmail-fixed") {
+  if (service === "gmail-step-up" || service === "gmail-fixed" || service === "gmail-pinned") {
     const fixed = service === "gmail-fixed";
     log.push("user.message", { text: "Mark the newsletters in my inbox as read." });
     const needed = {
@@ -234,6 +244,18 @@ function events(): SessionEvent[] {
       turn,
     );
     log.push("turn.completed", {}, turn);
+    if (service === "gmail-pinned") {
+      // Later updates would push the card out of view; it stays pinned.
+      const later = "turn-later";
+      log.push(
+        "agent.message.completed",
+        {
+          text: "The research agent finished: two emails need a reply from you (Boardy intro, Gemini retirement).",
+        },
+        later,
+      );
+      log.push("turn.completed", {}, later);
+    }
     return log.events;
   }
   log.push("user.message", {
@@ -270,9 +292,62 @@ function events(): SessionEvent[] {
   return log.events;
 }
 
+const NOW = Date.now();
+const RAIL = [
+  { id: "s-inbox", title: "Inbox cleanup", status: "idle", awaiting: true },
+  { id: "s-ideas", title: "Product ideas", status: "idle", awaiting: false },
+  { id: "s-audit", title: "API audit", status: "running", awaiting: false },
+].map((row) => ({
+  title: row.title,
+  session: {
+    id: row.id,
+    workspaceId: WORKSPACE_ID,
+    title: row.title,
+    status: row.status,
+    effectiveControl: { state: "active" },
+    unread: false,
+    createdAt: new Date(NOW - 3_600_000).toISOString(),
+    updatedAt: new Date(NOW - 120_000).toISOString(),
+    ...(row.awaiting ? { awaitingConnectionSince: new Date(NOW - 120_000).toISOString() } : {}),
+  } as never,
+}));
+
+/** The sidebar's rows, as the rail draws them. */
+function RailPreview() {
+  return (
+    <nav className="w-[260px] shrink-0 border-r border-border bg-surface px-2 py-4">
+      {RAIL.map(({ title, session }) => (
+        <div
+          key={title}
+          className="flex h-9 items-center gap-1 rounded-sm px-2 text-sm text-fg hover:bg-surface-raised"
+        >
+          <SessionRowContent
+            title={title}
+            stateLabel={sessionStateLabel(session)}
+            mobile={false}
+            summary={summarizeRailRow({ session, children: [], hasActiveDescendant: false })}
+            relativeTime="2m"
+          />
+        </div>
+      ))}
+    </nav>
+  );
+}
+
 function Preview() {
   const t = useOpenGeniText();
   const client = useMemo(() => new PreviewClient(), []);
+  // As the session page does: the card the agent waits on leaves the
+  // timeline and stays above the composer.
+  const allItems = useMemo(() => buildTimeline(t, events()), [t]);
+  const pinned = service === "gmail-pinned" ? pendingConnectionCard(allItems, () => true) : null;
+  const pinnedItems = allItems.filter((entry) => entry !== pinned);
+  const reconnect = () =>
+    recoveryState === "done"
+      ? Promise.resolve({ outcome: "done" as const })
+      : recoveryState === "waiting"
+        ? new Promise<never>(() => {})
+        : undefined;
   useEffect(() => {
     document.documentElement.setAttribute("data-og-theme", dark ? "dark" : "light");
     document.documentElement.classList.toggle("dark", dark);
@@ -309,9 +384,18 @@ function Preview() {
         }}
       >
         <AppContext.Provider value={context}>
-          <div className="og-root h-screen overflow-auto bg-bg text-fg">
-            <main className="mx-auto max-w-[760px] px-4 py-8" data-shot="">
+          <div className="og-root flex h-screen overflow-auto bg-bg text-fg">
+            {service === "gmail-pinned" ? <RailPreview /> : null}
+            <main className="mx-auto max-w-[760px] flex-1 px-4 py-8" data-shot="">
               <MessageTimeline
+                {...(service === "gmail-pinned" ? { items: pinnedItems } : {})}
+                trailingState={
+                  pinned ? (
+                    <div className="pb-1" data-pinned-connection-card="">
+                      <AuthNeededRow item={pinned} onReconnect={reconnect} />
+                    </div>
+                  ) : undefined
+                }
                 events={events()}
                 renderAuthNeeded={(entry: AuthNeededItem) => {
                   // The session's own choice: a recommendation card, or the
@@ -325,13 +409,7 @@ function Preview() {
                     />
                   ) : undefined;
                 }}
-                onReconnect={() =>
-                  recoveryState === "done"
-                    ? Promise.resolve({ outcome: "done" as const })
-                    : recoveryState === "waiting"
-                      ? new Promise<never>(() => {})
-                      : undefined
-                }
+                onReconnect={reconnect}
               />
               {service === "gmail-approval" ? (
                 <ApprovalSurface
