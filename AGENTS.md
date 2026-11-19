@@ -850,6 +850,18 @@ the PR.
   what changes on the wire and the possible quality, prompt-caching, behaviour
   or bug risks. Prompt-cache stability comes first: never change text an
   earlier request already sent.
+- Its description has a **Prefix impact** line, and the maintainer's approval
+  is recorded only when it does. Run
+  `bun test ./apps/worker/test/prompt-prefix-invariant.test.ts` on the head and
+  paste the pass/fail summary line. Then state the impact in one sentence:
+  either "no text an earlier request already sent changes, in any session
+  state", or which transition now changes which part (instructions, tools or
+  earlier items) and what that costs (for example "every live session pays one
+  cold prefix at deploy"). A change that makes the request depend on new
+  session or workspace state adds that state change to the harness's
+  `TRANSITIONS` in the same PR. Never add a `KNOWN_BREAKS` entry to make a
+  change pass; an entry exists only for a break already on main, and the PR
+  that fixes it removes the entry.
 - Only the maintainer approves it. He gives that approval in chat with his
   agent, never on GitHub. The agent then records it: an approving review (or,
   on a PR he authored, a review whose first line is `/approve-model-request`)

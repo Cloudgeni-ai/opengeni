@@ -8,6 +8,7 @@
 - [ ] `bun run test:unit` (process-isolated; plus full relevant real-service/browser suites)
 - [ ] Independent agent review of the current head; reviewer session and command/results evidence posted in a PR comment.
 - [ ] Any budget/threshold/skip/coverage relaxation is explicit, reviewer-confirmed, and labelled `test-policy-change` (or none).
+- [ ] Changes a model request path (CODEOWNERS model request section)? **Prefix impact:** `apps/worker/test/prompt-prefix-invariant.test.ts` result, and one sentence: no text an earlier request sent changes, or which transition changes what and its cost (AGENTS.md, "Model request changes").
 
 ## External API impact
 
