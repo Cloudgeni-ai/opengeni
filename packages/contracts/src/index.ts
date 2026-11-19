@@ -18646,9 +18646,30 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
 );
 export type InboxItem = z.infer<typeof InboxItem>;
 
+/**
+ * A notice about something other than a chat, such as a subscription account
+ * that needs signing in again: shaped like a notification item, with no
+ * session and always a link (an address in the web app). It is marked seen or
+ * dismissed like an item.
+ */
+export const InboxNotice = /* @__PURE__ */ defineSchema(() =>
+  InboxItem.extend({
+    sessionId: z.null(),
+    kind: z.literal("notification"),
+    link: z.object({ url: primitives.string, label: primitives.string }),
+    sessionAvailable: z.literal(false).default(false),
+  }),
+);
+export type InboxNotice = z.infer<typeof InboxNotice>;
+
 export const ListInboxResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(InboxItem),
+    /**
+     * Open notices about something other than a chat, newest first. Not
+     * counted in `needsYouCount` or `unreadCount`.
+     */
+    notices: z.array(InboxNotice).optional(),
     /** Organization billing notices are not chat items or workspace events. */
     billingNotifications: z.array(BillingCreditNotification).optional(),
     /** Open items that need the person (questions, approvals, paused goals). */

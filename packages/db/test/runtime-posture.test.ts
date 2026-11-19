@@ -4271,6 +4271,9 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "usage_events",
     "session_turns",
     "session_create_idempotency_guard",
+    "subscription_connections",
+    "organization_memberships",
+    "workspace_memberships",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4278,6 +4281,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "native_push_deliveries",
     "session_content_collections",
     "modal_inventory_read_capabilities",
+    "inbox_items",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -4366,6 +4370,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sandbox_unpaid_fleet_v1(uuid, boolean)",
       "sandbox_fleet_warm_boxes_v1()",
       "discard_refused_session_create_v1(uuid, uuid)",
+      "sync_subscription_relogin_notice_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4378,6 +4383,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "sandbox_fleet_warm_boxes_v1()",
       "discard_refused_session_create_v1(uuid, uuid)",
+      "sync_subscription_relogin_notice_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4479,7 +4485,8 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       (entry) =>
         entry.name !== "claim_native_push_deliveries_v2(uuid, integer, integer)" &&
         entry.name !== "ring_agent_call_v1(uuid, boolean)" &&
-        entry.name !== "end_agent_call_rings_v1(uuid)",
+        entry.name !== "end_agent_call_rings_v1(uuid)" &&
+        entry.name !== "sync_subscription_relogin_notice_v1(uuid)",
     );
     expect(eventViolations(beforeOutbox)).toEqual([]);
     const beforeRecordings = eventPosture(false);

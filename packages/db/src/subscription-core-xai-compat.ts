@@ -69,6 +69,7 @@ export function projectSubscriptionCoreXaiAccount(
     allocatorUpdatedAt: date(row.updated_at),
     expiresAt: date(row.expires_at),
     lastRefreshAt: date(row.last_refresh_at),
+    signedInAt: date(row.signed_in_at),
     lastError: row.last_error,
     quotaUsedPercent: window?.usedPercent ?? null,
     quotaResetAt: epoch(window?.resetsAt),

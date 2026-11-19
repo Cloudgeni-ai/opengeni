@@ -1,7 +1,7 @@
 // The inbox list and its state, without any of its UI, so the state is
 // shared (the app's badge and its Inbox screen) and tested on its own.
 import type { ChatClient } from "@opengeni/sdk";
-import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
+import type { InboxEntry, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 
@@ -14,19 +14,30 @@ export type NativeInboxClient = Pick<
   | "submitHumanInputResponse"
 >;
 
-type InboxState = { data: ListInboxResponse | null; error: unknown; loading: boolean };
+/**
+ * The inbox as the app shows it: items from chats and notices about something
+ * else (such as a subscription account that needs signing in again) in one
+ * list, newest first. The counts stay the API's counts of chat items.
+ */
+export type NativeInboxView = Omit<ListInboxResponse, "items" | "notices"> & {
+  items: InboxEntry[];
+};
 
-export function snoozedNow(item: InboxItem, now: number): boolean {
+type InboxState = { data: NativeInboxView | null; error: unknown; loading: boolean };
+
+export function snoozedNow(item: InboxEntry, now: number): boolean {
   return item.snoozedUntil !== null && Date.parse(item.snoozedUntil) > now;
 }
 
 /** Questions, approvals and paused goals wait on the person; notes and replies don't. */
-export function isNeedsYouKind(kind: InboxItem["kind"]): boolean {
+export function isNeedsYouKind(kind: InboxEntry["kind"]): boolean {
   return kind === "question" || kind === "approval" || kind === "goal_paused";
 }
 
 /** What waits on the person right now: needs-you items plus unread notes, unsnoozed. */
-export function nativeInboxAttentionCount(data: ListInboxResponse | null): number {
+export function nativeInboxAttentionCount(
+  data: NativeInboxView | ListInboxResponse | null,
+): number {
   if (!data) return 0;
   const now = Date.now();
   return data.items.filter(
@@ -38,7 +49,7 @@ export function nativeInboxAttentionCount(data: ListInboxResponse | null): numbe
  * An item as this app reads it. Servers from before rich notifications leave
  * out the subtitle, facts, link and moment; read those as empty.
  */
-function normalizeInboxItem(item: InboxItem): InboxItem {
+function normalizeInboxItem<Entry extends InboxEntry>(item: Entry): Entry {
   return {
     ...item,
     subtitle: item.subtitle ?? "",
@@ -75,7 +86,13 @@ export function useNativeInbox(
     const request = ++generation.current;
     try {
       const listed = await client.listInbox();
-      const data = { ...listed, items: listed.items.map(normalizeInboxItem) };
+      const { notices, ...rest } = listed;
+      const data: NativeInboxView = {
+        ...rest,
+        items: [...listed.items, ...(notices ?? [])]
+          .map(normalizeInboxItem)
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      };
       if (request === generation.current) setHeld({ client, data, error: null, loading: false });
     } catch (error) {
       if (request === generation.current)
@@ -98,7 +115,7 @@ export function useNativeInbox(
       subscription.remove();
     };
   }, [enabled, pollMs, refresh]);
-  const patch = useCallback((update: (items: InboxItem[]) => InboxItem[]) => {
+  const patch = useCallback((update: (items: InboxEntry[]) => InboxEntry[]) => {
     setHeld((current) =>
       current.data
         ? { ...current, data: { ...current.data, items: update(current.data.items) } }

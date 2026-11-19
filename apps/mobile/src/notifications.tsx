@@ -1,6 +1,6 @@
 import type {
+  InboxEntry,
   InboxSettings,
-  ListInboxResponse,
   NativePushDevice,
   NativePushRule,
   OpenGeniClient,
@@ -63,6 +63,11 @@ export interface PushData {
   eventType?: string;
   /** The session event the push is about; opening lands on it. */
   sequence?: number;
+  /**
+   * A notice about something other than a chat (such as a subscription
+   * account that needs signing in again): the web address a tap opens.
+   */
+  url?: string;
 }
 
 function sessionPath(data: PushData): string {
@@ -167,9 +172,13 @@ async function actOnNotification(
  * the person, and delivered notifications whose item was answered, decided or
  * withdrawn (here or anywhere else) leave Notification Center.
  */
-export async function syncInboxBadge(inbox: ListInboxResponse): Promise<void> {
+export async function syncInboxBadge(inbox: {
+  items: readonly InboxEntry[];
+  notices?: readonly InboxEntry[] | undefined;
+}): Promise<void> {
   const now = Date.now();
-  const awake = inbox.items.filter(
+  // Notices about something other than a chat count too while unread.
+  const awake = [...inbox.items, ...(inbox.notices ?? [])].filter(
     (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
   );
   const count = awake.filter(
@@ -521,7 +530,10 @@ export function NotificationRouting() {
 
   const open = useCallback(
     (data: PushData) => {
-      if (!data.sessionId) return;
+      if (!data.sessionId) {
+        if (data.url && /^https:\/\//iu.test(data.url)) void Linking.openURL(data.url);
+        return;
+      }
       const owner = data.subjectId
         ? accounts.find((each) => each.subjectId === data.subjectId && !each.signedOut)
         : account;

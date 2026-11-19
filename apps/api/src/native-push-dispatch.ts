@@ -35,7 +35,27 @@ export type NativePushSender = (
 export type NativePushPayload = ClaimedNativePushDelivery["payload"] & {
   secretQuestion?: boolean;
   secretUseApproval?: boolean;
+  /** A notice's `link` as an absolute web address the app opens on tap. */
+  url?: string;
 };
+
+/**
+ * Give a chat-less notice's push (1503) the absolute web address of its link,
+ * from the deployment's web address, so a tap opens it. Without a web address
+ * the push still shows; a tap then opens the app.
+ */
+export function withNativePushLinkUrls(
+  deliveries: ClaimedNativePushDelivery[],
+  webBaseUrl: string | undefined,
+): ClaimedNativePushDelivery[] {
+  const base = webBaseUrl?.replace(/\/+$/u, "");
+  return deliveries.map((delivery) => {
+    const link = delivery.payload.link;
+    if (!base || typeof link !== "string" || !/^\/(?![/\\])/u.test(link)) return delivery;
+    const payload: NativePushPayload = { ...delivery.payload, url: `${base}${link}` };
+    return { ...delivery, payload };
+  });
+}
 
 const SECRET_QUESTION_PUSH_BODY = "Open Opengeni to answer. The answer is saved to a vault.";
 
@@ -54,14 +74,18 @@ async function markSecretQuestionDeliveries(
   >();
   return await Promise.all(
     deliveries.map(async (delivery) => {
-      if (delivery.payload.eventType !== "session.humanInput.requested") return delivery;
+      if (
+        delivery.payload.eventType !== "session.humanInput.requested" ||
+        !delivery.payload.sessionId
+      )
+        return delivery;
       const key = `${delivery.payload.workspaceId}:${delivery.payload.sessionId}`;
       let lookup = secretSessions.get(key);
       if (!lookup) {
         lookup = listSessionHumanInputRequests(
           db,
           delivery.payload.workspaceId,
-          delivery.payload.sessionId,
+          delivery.payload.sessionId!,
           { status: "pending", limit: 20 },
         )
           .then((requests) => ({
@@ -168,9 +192,13 @@ export function nativePushInterruptionLevel(
   return "active";
 }
 
-/** What the app reads on tap: enough to open the session in the right account. */
-export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
+/**
+ * What the app reads on tap: enough to open the session in the right account,
+ * or for a notice about something other than a chat, the address to open.
+ */
+export function nativePushData(payload: NativePushPayload) {
   return {
+    ...(payload.url ? { url: payload.url } : {}),
     sessionId: payload.sessionId,
     workspaceId: payload.workspaceId,
     subjectId: payload.subjectId,
@@ -373,7 +401,8 @@ export function createApnsSender(input: {
             aps: {
               alert,
               sound: "default",
-              "thread-id": delivery.payload.sessionId,
+              // A chat-less notice (1503) groups with the other notices.
+              "thread-id": delivery.payload.sessionId ?? "notices",
               "interruption-level": nativePushInterruptionLevel(delivery.payload),
               ...(category ? { category } : {}),
             },
@@ -400,7 +429,15 @@ export function createApnsSender(input: {
           "apns-topic": delivery.appId,
           "apns-push-type": "alert",
           "apns-priority": "10",
-          "apns-collapse-id": `${delivery.payload.sessionId}:${delivery.payload.rule}`.slice(0, 64),
+          // Each chat-less notice (1503) shows on its own; one session's pushes collapse.
+          ...(delivery.payload.sessionId
+            ? {
+                "apns-collapse-id": `${delivery.payload.sessionId}:${delivery.payload.rule}`.slice(
+                  0,
+                  64,
+                ),
+              }
+            : {}),
           "content-type": "application/json",
         };
     return await new Promise<NativePushSendResult>((resolve) => {
@@ -546,13 +583,16 @@ export async function drainNativePushDeliveries(
 ): Promise<{ claimed: number; delivered: number }> {
   const senders = deps.senders ?? configuredNativePushSenders(deps.settings);
   const claimId = randomUUID();
-  const claimed = await markSecretQuestionDeliveries(
-    deps.db,
-    await claimNativePushDeliveries(deps.db, {
-      claimId,
-      limit: 32,
-      claimSeconds: CLAIM_SECONDS,
-    }),
+  const claimed = withNativePushLinkUrls(
+    await markSecretQuestionDeliveries(
+      deps.db,
+      await claimNativePushDeliveries(deps.db, {
+        claimId,
+        limit: 32,
+        claimSeconds: CLAIM_SECONDS,
+      }),
+    ),
+    deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
   );
   let delivered = 0;
   await Promise.all(

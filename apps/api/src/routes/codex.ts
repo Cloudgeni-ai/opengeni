@@ -110,6 +110,7 @@ export function codexAccountJson(
     active: row.isActive,
     expiresAt: row.expiresAt,
     lastRefreshAt: row.lastRefreshAt,
+    signedInAt: row.signedInAt ?? null,
     lastError: row.lastError,
     fiveHour: buildCodexUsageWindowFromCache(
       row.primaryUsedPercent,

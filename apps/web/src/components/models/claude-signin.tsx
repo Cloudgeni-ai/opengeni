@@ -52,6 +52,7 @@ export function ClaudeSignInPage({
   connectionScope = "workspace",
   reconnectAccountId,
   reconnectCredentialVersion,
+  reconnectAccountEmail,
   scopeChoice,
   onPendingChange,
 }: {
@@ -77,6 +78,8 @@ export function ClaudeSignInPage({
   connectionScope?: "workspace" | "user";
   reconnectAccountId?: string | undefined;
   reconnectCredentialVersion?: number | undefined;
+  /** The Claude account being signed in again, so the person signs in with that one. */
+  reconnectAccountEmail?: string | null | undefined;
   scopeChoice?: { scopeName: string; onChange(value: "workspace" | "user"): void } | undefined;
   onPendingChange?: ((pending: boolean) => void) | undefined;
 }) {
@@ -150,7 +153,11 @@ export function ClaudeSignInPage({
       backLabel={state.connected ? "Claude subscription" : undefined}
       headerAside={<ProviderTile provider="claude_subscription" />}
       title={state.connected ? "Reconnect Claude subscription" : "Connect Claude subscription"}
-      description="Use your Claude plan to pay for models."
+      description={
+        reconnectAccountEmail
+          ? `Sign in to Claude as ${reconnectAccountEmail}, then paste the code it shows.`
+          : "Use your Claude plan to pay for models."
+      }
       onClose={() => {
         reset();
         onClose();

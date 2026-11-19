@@ -122,6 +122,53 @@ test("Enable account shows Enabled or Disabled and still maps to the allocator",
   expect(text()).toContain("AccountDisabled");
   expect(text()).not.toContain("Paused");
 });
+test("shows how old the sign-in is and asks for a new one before Claude stops accepting it", async () => {
+  const day = 86_400_000;
+  let signedInAt = new Date(Date.now() - 26 * day - 60_000).toISOString();
+  const opened: unknown[] = [];
+  const client = {
+    listClaudeSubscriptionAccounts: async () => ({
+      accounts: [{ ...account, signedInAt }],
+      activeAccountId: id,
+      source: "workspace",
+      settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: id },
+    }),
+    getClaudeSubscriptionAccountUsage: async () => baseUsage,
+    refreshClaudeSubscriptionAccountUsage: async () => baseUsage,
+    getModelConnectionAccess: async () => null,
+  };
+  function Harness() {
+    pool = useClaude({
+      client: client as unknown as ChatClient<OpenGeniBrowserClient>,
+      canManage: true,
+      workspaceId,
+    });
+    return createElement(ClaudeAccountPage, {
+      claude: pool,
+      accountId: id,
+      places: { ...places, openConnect: (accountId?: string) => opened.push(accountId) },
+    });
+  }
+  await act(async () => root.render(createElement(Harness)));
+  const text = () => container.textContent ?? "";
+  expect(text()).toContain("Signed in 26 days ago");
+  expect(text()).toContain("Sign in to Claude again soon");
+  expect(text()).toContain("this one is 26 days old");
+  const signIn = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Sign in again",
+  )!;
+  await act(async () => signIn.click());
+  expect(opened).toEqual([id]);
+
+  // A recent sign-in only shows its age.
+  signedInAt = new Date(Date.now() - 3 * day).toISOString();
+  await act(async () => {
+    invalidateModelSettingsQueries(client);
+    await pool.refresh();
+  });
+  expect(text()).toContain("Signed in 3 days ago");
+  expect(text()).not.toContain("Sign in to Claude again soon");
+});
 for (const [organization, poll] of [
   [false, false],
   [true, false],

@@ -1327,6 +1327,8 @@ export type {
   AgentCallState,
   InboxItem,
   InboxItemChoice,
+  InboxEntry,
+  InboxNotice,
   InboxItemFact,
   InboxItemLink,
   InboxItemKind,
