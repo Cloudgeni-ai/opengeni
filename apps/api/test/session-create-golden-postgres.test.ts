@@ -49,7 +49,9 @@ class WorkflowStub implements SessionWorkflowClient {
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-session-create-golden");
   if (!shared && process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
-    throw new Error("[session-create-golden] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable");
+    throw new Error(
+      "[session-create-golden] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+    );
   }
   if (!shared) return;
   client = createDb(shared.appUrl);
@@ -145,7 +147,10 @@ function normalize(value: unknown, names: Map<string, string>): unknown {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, item]) => [key, VOLATILE_KEYS.has(key) ? "<volatile>" : normalize(item, names)]),
+        .map(([key, item]) => [
+          key,
+          VOLATILE_KEYS.has(key) ? "<volatile>" : normalize(item, names),
+        ]),
     );
   }
   return value;
@@ -307,7 +312,8 @@ describe("a create without an organization agent is unchanged", () => {
         .filter((column) => !(column in recorded.sessionRow))
         .sort();
       expect({ name, added }).toEqual({ name, added: ADDED_SESSION_COLUMNS });
-      for (const column of added) expect({ column, value: current.sessionRow[column] }).toEqual({ column, value: null });
+      for (const column of added)
+        expect({ column, value: current.sessionRow[column] }).toEqual({ column, value: null });
       const sessionRow = Object.fromEntries(
         Object.entries(current.sessionRow).filter(([column]) => column in recorded.sessionRow),
       );
