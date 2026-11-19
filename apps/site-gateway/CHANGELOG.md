@@ -1,5 +1,29 @@
 # @opengeni/site-gateway
 
+## 0.3.0
+
+### Minor Changes
+
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+- 443b97b: Store Site SQL databases in Cloudflare's EU jurisdiction. Databases created before this move to the EU on first use (or with `scripts/move-site-databases-to-eu.ts`), verified against the original before they switch; a database that cannot move keeps working from its original object, and original objects are never deleted automatically (a reset or rebuild erases their data). The API treats a "moving" 503 as retryable with nothing run and logs databases not yet in the EU.
+
+### Patch Changes
+
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/sdk@6.31.0
+
 ## 0.2.7
 
 ### Patch Changes

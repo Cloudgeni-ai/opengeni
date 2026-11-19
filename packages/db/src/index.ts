@@ -35137,7 +35137,7 @@ export async function deleteSessionTreeIfQuiescent(
                 .where(
                   and(
                     inArray(schema.sandboxRetainedProcesses.leaseId, leaseIds),
-                    eq(schema.sandboxRetainedProcesses.state, "active"),
+                    retainedProcessEvidenceKeptSql(sql`sandbox_retained_processes`),
                   ),
                 )
                 .for("update", { noWait: true }),
@@ -35160,6 +35160,13 @@ export async function deleteSessionTreeIfQuiescent(
             ) {
               return { status: "live_sandboxes" as const };
             }
+            await deleteSettledRetainedProcessesOfLeasesTx(
+              tx,
+              sql`(${sql.join(
+                leaseIds.map((id) => sql`${id}::uuid`),
+                sql`, `,
+              )})`,
+            );
             await tx.delete(schema.sandboxLeases).where(inArray(schema.sandboxLeases.id, leaseIds));
           }
 
@@ -60459,6 +60466,39 @@ export type ColdSandboxOfArchivedChats = {
 };
 
 /**
+ * True while a retained process row over alias `process` must stay: it still
+ * runs, or it is a supervised command whose output has not been captured yet
+ * (the database refuses to delete that evidence).
+ */
+function retainedProcessEvidenceKeptSql(process: SQL): SQL {
+  return sql`(${process}.state = 'active' or (${process}.provider_command ? 'supervision'
+    and ${process}.state <> 'lost'
+    and (${process}.supervision_receipt is null or not ${process}.supervision_output_captured)))`;
+}
+
+/**
+ * Delete the settled command records of sandboxes about to be forgotten, so
+ * their lease rows can go. A finished or lost process names the workspace
+ * write that started it, which deleting the lease removes; its background
+ * command and closed terminal name the process in turn. The caller has
+ * already checked that none of them still runs.
+ */
+async function deleteSettledRetainedProcessesOfLeasesTx(
+  tx: Database,
+  leaseIds: SQL,
+): Promise<void> {
+  const processIds = sql`(select process.id from sandbox_retained_processes process
+    where process.lease_id in ${leaseIds})`;
+  await tx.execute(
+    sql`delete from session_background_commands where retained_process_id in ${processIds}`,
+  );
+  await tx.execute(
+    sql`delete from sandbox_pty_sessions where retained_process_id in ${processIds}`,
+  );
+  await tx.execute(sql`delete from sandbox_retained_processes where lease_id in ${leaseIds}`);
+}
+
+/**
  * Cold sandboxes of a backend other than compute (a stopped Modal or Docker
  * box with its saved workspace) whose chats are all archived, by
  * {@link sandboxGroupOnlyOfArchivedChatsSql}'s rule, in key order after
@@ -60540,13 +60580,19 @@ export async function forgetColdSandboxOfArchivedChats(
                 or exists (select 1 from sandbox_workspace_mutation_admissions admission
                   where admission.lease_id in ${leaseIds} and admission.settled_at is null)
                 or exists (select 1 from sandbox_retained_processes process
-                  where process.lease_id in ${leaseIds} and process.state = 'active')
+                  where process.lease_id in ${leaseIds} and ${retainedProcessEvidenceKeptSql(sql`process`)})
+                or exists (select 1 from sandbox_retained_processes process
+                  join session_background_commands command
+                    on command.retained_process_id = process.id
+                  where process.lease_id in ${leaseIds}
+                    and command.state in ('running', 'stopping'))
                 or exists (select 1 from sandbox_pty_sessions pty
                   where pty.workspace_id = ${input.workspaceId}
                     and pty.sandbox_group_id = ${input.sandboxGroupId}
                     and pty.status = 'open')) as busy`,
           );
           if (state?.unused !== true || state.busy) return false;
+          await deleteSettledRetainedProcessesOfLeasesTx(tx, leaseIds);
           await tx.execute(sql`delete from sandbox_leases where id in ${leaseIds}`);
           return true;
         }),

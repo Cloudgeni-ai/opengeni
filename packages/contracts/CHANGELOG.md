@@ -1,5 +1,33 @@
 # @opengeni/contracts
 
+## 6.31.0
+
+### Minor Changes
+
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+### Patch Changes
+
+- c2fe398: Workspace captures no longer publish manifests above `WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES` (8 MiB): the largest diff hunks are dropped, branch comparisons first, and those files are marked truncated. The API now hands large manifests to the client by signed URL without downloading or parsing them, so a very large capture can no longer stall the server.
+- 9ecc26c: Agents with workspace connectors but without workspace admin can now show Connect cards (`capability_authorization_request`), for example to connect the person's own computer. Catalog search and custom MCP setup stay admin-only. Tool descriptions, notices and tool results name a setup tool only when the agent has it.
+- 047b487: A configured agent now always gets `goal_resume` and the goals sentence that names it. Before, both appeared only once the session had a goal, so a session's first goal changed the tool list and system prompt under every earlier request and the next turn re-read the whole history uncached.
+- cafa73f: Your own connector login now has one switch per workspace. Turning it on in "Where it works" for a workspace that hasn't turned that connector on also turns the connector on there, for each person's own account. This happens in the same request, as the connect card's "Use it here" does it. Where only an admin may turn the connector on, nothing changes: the request is refused with `details.code` `own_login_connector_needs_admin`, and the row says an admin has to turn it on. Turning a login off never turns its connector off.
+
+  Each reach row carries an optional `connectorOff` flag. A login that is on where its connector isn't (for example a standing grant) reads as off, with a line saying the switch turns the connector on too. My things doesn't count such a workspace as one where the login works.
+
+  The OAuth connect card now offers your one own login first, as "Use my <service> here", without asking "Who can use this connection?". Connecting a new account for everyone stays a secondary choice.
+
+- 890c910: Moving a session to another machine no longer rewrites the system prompt. The workspace root and filesystem layout reach the model as a `<opengeni_workspace_filesystem>` history item written before the turn that first sees a new layout, and `sandbox_swap` returns the new `workspaceRoot`, so the provider's prompt cache survives a swap.
+- 1f5ea5b: Prompt-cache diagnostics now fingerprint every provider transport, including the streamed request bodies of OpenAI, Azure OpenAI, Codex and xAI calls, which were never fingerprinted before. Two new warm-miss classes separate causes that `system_changed` and `unexplained` used to hide: `release_changed` (the tools or system prompt changed between two deployments) and `unobserved` (a call has no request fingerprint). The chart adds three alerts on the per-call classification: `OpenGeniPromptCachePrefixChanged`, `OpenGeniPromptCacheHistoryRewriteLossHigh` and `OpenGeniPromptCacheDiagnosticsBlind`.
+- 443b97b: Store Site SQL databases in Cloudflare's EU jurisdiction. Databases created before this move to the EU on first use (or with `scripts/move-site-databases-to-eu.ts`), verified against the original before they switch; a database that cannot move keeps working from its original object, and original objects are never deleted automatically (a reset or rebuild erases their data). The API treats a "moving" 503 as retryable with nothing run and logs databases not yet in the EU.
+- 46d677b: When a Claude, ChatGPT or SuperGrok subscription account stops accepting its sign-in, the person who connected it now gets one inbox notice and phone notification, for example "Sign in to Claude again", with the account's email. If that person can no longer manage the account, the organization's owners and admins get it instead. The notice's "Sign in again" opens that account's own sign-in step. For Claude, the step names the email to sign in as, and the person signs in with Claude and pastes the code. The notice goes away once the account works again, and a later lapse gets a new notice.
+
+  Each account's page shows how long ago it was signed in. A Claude account signed in 25 or more days ago shows a warning with "Sign in again" before Claude stops accepting the sign-in, which tends to happen around 28 to 30 days.
+
+  `GET /v1/inbox` returns these notices in a new optional `notices` list (`InboxNotice`: shaped like a notification item, with `sessionId: null` and always a `link`). `items`, `needsYouCount` and `unreadCount` are unchanged. Subscription account listings carry an optional `signedInAt`. A phone notification about something other than a chat carries the address to open in `url`.
+
 ## 6.30.1
 
 ## 6.30.0
