@@ -55,6 +55,7 @@ set_output() {
 }
 
 configure_apt() {
+  ensure_ubuntu_sources
   # Bound each request, and wait for a dpkg lock a killed attempt may have
   # left instead of failing at once. Few retries: a dead host costs the full
   # timeout on every retry of every file.
@@ -64,6 +65,45 @@ configure_apt() {
     'Acquire::https::Timeout "20";' \
     'DPkg::Lock::Timeout "60";' \
     | sudo tee "${APT_CONF_DIR}/99playwright-browsers-network" >/dev/null
+}
+
+# Some hosted runners start with no Ubuntu package source at all (apt sees
+# only third-party repositories), so every browser package is "not
+# available". Add the archive through the mirror list, which
+# prepare_mirrors then checks and extends with the fallback mirrors.
+APT_SOURCES_DIR="${PLAYWRIGHT_APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
+ensure_ubuntu_sources() {
+  local files=() file codename
+  for file in /etc/apt/sources.list "${APT_SOURCES_DIR}"/*.list "${APT_SOURCES_DIR}"/*.sources; do
+    [ -f "${file}" ] && files+=("${file}")
+  done
+  if [ "${#files[@]}" -gt 0 ] &&
+    grep -qsE '^[[:space:]]*(deb[[:space:]]|URIs:).*(ubuntu|mirror\+file)' "${files[@]}"; then
+    return 0
+  fi
+  if [ "$(dpkg --print-architecture 2>/dev/null)" != "amd64" ]; then
+    return 0
+  fi
+  # shellcheck source=/dev/null
+  codename="$(. /etc/os-release 2>/dev/null && [ "${ID:-}" = "ubuntu" ] && printf '%s' "${VERSION_CODENAME:-}")"
+  [ -n "${codename}" ] || return 0
+  echo "::warning::No Ubuntu package source is configured (${files[*]:-none}); adding the Ubuntu archive."
+  if [ ! -s "${APT_MIRRORS}" ]; then
+    printf '%s\n' "https://archive.ubuntu.com/ubuntu/" | sudo tee "${APT_MIRRORS}" >/dev/null
+  fi
+  printf '%s\n' \
+    "Types: deb" \
+    "URIs: mirror+file:${APT_MIRRORS}" \
+    "Suites: ${codename} ${codename}-updates ${codename}-backports" \
+    "Components: main restricted universe multiverse" \
+    "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg" \
+    "" \
+    "Types: deb" \
+    "URIs: http://security.ubuntu.com/ubuntu/" \
+    "Suites: ${codename}-security" \
+    "Components: main restricted universe multiverse" \
+    "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg" \
+    | sudo tee "${APT_SOURCES_DIR}/playwright-ubuntu.sources" >/dev/null
 }
 
 resolves() {
