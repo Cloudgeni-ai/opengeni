@@ -226,8 +226,8 @@ describe.each([
       (known ? test.failing : test)(
         `after ${placement.name}${known ? ` (known break: ${known})` : ""}`,
         async () => {
-          const first = await liveBox("/home/person");
-          const second = placement.moves ? await liveBox("/Users/person") : first;
+          const first = await liveBox("/home/user");
+          const second = placement.moves ? await liveBox("/Users/user") : first;
           const { api, model, bodies, system, conversation } = wire(["text", "text", "text"]);
           const conversationChat = liveChat(first, model, api);
           // A Connected Machine reports its own workspace root; each box has
