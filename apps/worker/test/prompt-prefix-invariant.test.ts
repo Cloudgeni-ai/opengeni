@@ -104,6 +104,16 @@ const KNOWN_BREAKS: Readonly<Record<string, string>> = {
   "the chat moves to another machine": "fixed by #7918",
   "the chat moves from a managed sandbox to a Connected Machine": "fixed by #7918",
   "the chat moves from a Connected Machine to a managed sandbox": "fixed by #7918",
+};
+
+/**
+ * Accepted changes: the request follows a real change in what the agent can
+ * do, at the cost of one cold request when it happens. Each is rare enough
+ * that a stable prefix is not worth offering a capability the turn lacks.
+ * They are not open bugs. An entry here is a design decision: add one only
+ * with that decision recorded, and remove it when the design changes.
+ */
+const ACCEPTED_CHANGES: Readonly<Record<string, string>> = {
   // Background-command tools and their sentence follow whether this turn has
   // compute (#3516), so attaching or detaching a machine changes both.
   "a Connected Machine is attached": "background-command tools follow compute",
@@ -111,9 +121,18 @@ const KNOWN_BREAKS: Readonly<Record<string, string>> = {
   // request_human_input follows the workspace setting at each turn.
   "the workspace turns off agent questions": "request_human_input follows the setting",
   // A learning mode set to Off drops its save guidance from the system prompt
-  // (prompt-tool-availability.ts), on the assumption the setting rarely changes.
+  // (prompt-tool-availability.ts).
   "the workspace turns Knowledge learning off": "learning modes render into the system prompt",
 };
+
+/** How a case is expected to end: passing, a known break or an accepted change. */
+function expectedBreak(...names: string[]): string | undefined {
+  for (const name of names) {
+    if (KNOWN_BREAKS[name]) return `known break: ${KNOWN_BREAKS[name]}`;
+    if (ACCEPTED_CHANGES[name]) return `accepted change: ${ACCEPTED_CHANGES[name]}`;
+  }
+  return undefined;
+}
 
 function firstDifference(previous: readonly string[], next: readonly string[]) {
   for (let index = 0; index < previous.length; index++) {
@@ -199,11 +218,10 @@ async function runTransition(wire: Wire, transition: Transition) {
 for (const wire of WIRES) {
   describe(`${wire.name}: a request repeats the previous request's prefix`, () => {
     for (const transition of TRANSITIONS) {
-      const known =
-        KNOWN_BREAKS[`${wire.name}: ${transition.name}`] ?? KNOWN_BREAKS[transition.name];
+      const known = expectedBreak(`${wire.name}: ${transition.name}`, transition.name);
       const run = known ? test.failing : test;
       run(
-        `after ${transition.name}${known ? ` (known break: ${known})` : ""}`,
+        `after ${transition.name}${known ? ` (${known})` : ""}`,
         async () => {
           expect(await runTransition(wire, transition)).toEqual([]);
         },
@@ -244,9 +262,9 @@ describe.each([
       },
     ] as const;
     for (const placement of placements) {
-      const known = KNOWN_BREAKS[`${name}: ${placement.name}`] ?? KNOWN_BREAKS[placement.name];
+      const known = expectedBreak(`${name}: ${placement.name}`, placement.name);
       (known ? test.failing : test)(
-        `after ${placement.name}${known ? ` (known break: ${known})` : ""}`,
+        `after ${placement.name}${known ? ` (${known})` : ""}`,
         async () => {
           const first = await liveBox(placement.from.root);
           const second = placement.to === placement.from ? first : await liveBox(placement.to.root);
