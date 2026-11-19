@@ -977,8 +977,10 @@ test("removing or offboarding an end user erases their Console agent tool logins
     (
       await shared.admin<{ workspace_id: string; subject: string }[]>`
         select workspace_id::text, end_user_subject_id as subject from end_user_tool_credentials
-        where account_id = ${f.accountId} order by workspace_id, end_user_subject_id`
-    ).map((row) => `${row.workspace_id === other.id ? "other" : "first"}:${row.subject}`);
+        where account_id = ${f.accountId}`
+    )
+      .map((row) => `${row.workspace_id === other.id ? "other" : "first"}:${row.subject}`)
+      .sort();
   const profiles = async () =>
     (
       await shared.admin<{ count: number }[]>`
