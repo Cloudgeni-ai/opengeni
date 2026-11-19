@@ -32,11 +32,10 @@ for (const size of [16, 32, 48, 128]) {
     .toFile(resolve(root, `icons/icon-${size}.png`));
 }
 // The icon of a tab an agent controls: a pointer, the same for every brand.
-// Opengeni's teal-to-peach glow (the theme's --og-glow colours), with a dark
-// edge for light tab strips.
+// Opengeni's ink, with a white edge that carries it on dark tab strips.
 await Bun.write(
   resolve(root, "icons/agent-cursor.svg"),
-  `${svg(26, 26, '<defs><linearGradient id="g" x1="0.2" y1="0" x2="0.8" y2="1"><stop offset="0" stop-color="#79d9c1"/><stop offset="0.55" stop-color="#79d9c1"/><stop offset="1" stop-color="#ffb787"/></linearGradient></defs><path d="M6 3.5 L6 21 L10.6 16.6 L13.7 23.2 L16.6 21.9 L13.6 15.4 L20 15.1 Z" fill="url(#g)" stroke="#16211e" stroke-width="1.8" stroke-linejoin="round" paint-order="stroke"/>')}\n`,
+  `${svg(26, 26, '<path d="M6 3.5 L6 21 L10.6 16.6 L13.7 23.2 L16.6 21.9 L13.6 15.4 L20 15.1 Z" fill="#111111" stroke="#ffffff" stroke-width="2" stroke-linejoin="round" paint-order="stroke"/>')}\n`,
 );
 await sharp(resolve(root, "icons/agent-cursor.svg"), { density: 300 })
   .resize(32, 32)
