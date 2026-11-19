@@ -1188,7 +1188,7 @@ export async function ensureOrgAgentTestWorkspace(
     await tx.execute(sql`insert into organization_managed_workspaces
         (account_id, workspace_id, source, marked_by_subject_id)
       values (${input.accountId}::uuid, ${workspace.id}::uuid, 'console_test',
-        ${input.actor.subjectId.slice(0, 1024)})`);
+        ${input.actor.subjectId.slice(0, 512)})`);
     await audit(tx, {
       accountId: input.accountId,
       actor: input.actor,
