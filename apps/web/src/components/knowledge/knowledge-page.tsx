@@ -54,6 +54,8 @@ import {
   type LibraryView,
 } from "./knowledge-library";
 import {
+  entrySearch,
+  keepAgentContext,
   useKnowledgeNavigation,
   type KnowledgeSearch,
   type KnowledgeTab,
@@ -288,7 +290,11 @@ export function KnowledgePage({
       }
     : null;
   const openEntry = (id: string, revision?: string) =>
-    nav.openEntry(id, { ...(revision ? { revision } : {}), from: tab });
+    nav.openEntry(id, {
+      ...(revision ? { revision } : {}),
+      from: tab,
+      ...keepAgentContext(search, id),
+    });
 
   const subpage = (() => {
     if (search.page === "instructions") {
@@ -367,15 +373,16 @@ export function KnowledgePage({
     }
     if (search.page === "edit" && search.entry && canEdit) {
       const entryId = search.entry;
+      const editAgent = keepAgentContext(search, entryId);
       return (
         <EntryEditPage
           workspaceId={workspaceId}
           entryId={entryId}
           canEdit={canEdit}
-          onClose={() => nav.openEntry(entryId)}
+          onClose={() => nav.openEntry(entryId, editAgent)}
           onSaved={() => {
             changed();
-            nav.replace({ entry: entryId });
+            nav.replace(entrySearch(entryId, editAgent));
           }}
         />
       );
@@ -394,7 +401,7 @@ export function KnowledgePage({
           {...(agentContext ? { section: agentContext.section } : {})}
           {...(agentContext?.title ? { title: agentContext.title } : {})}
           onOpenEntry={openEntry}
-          onEdit={(id) => nav.openPage("edit", { entry: id })}
+          onEdit={(id) => nav.openPage("edit", { entry: id, ...keepAgentContext(search, id) })}
           onAddInCollection={(collection) => nav.openPage("add", { collection })}
           onOpenReview={() => nav.showTab("review")}
           onChanged={changed}
