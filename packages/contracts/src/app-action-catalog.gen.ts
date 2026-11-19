@@ -252,6 +252,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "agentsPath",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents",
+    "request": [],
+    "query": [
+      "includeArchived"
+    ],
+    "response": []
+  },
+  {
     "id": "answerAgentCall",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/agent-calls/:callId/answer",
@@ -1632,6 +1642,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "credentialPath",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deactivatePreferenceRegistry",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/preferences/:preferenceId/deactivate",
@@ -2645,16 +2662,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "GET /v1/organizations/:organizationId/agents",
-    "method": "GET",
-    "path": "/v1/organizations/:organizationId/agents",
-    "request": [],
-    "query": [
-      "includeArchived"
-    ],
-    "response": []
-  },
-  {
     "id": "GET /v1/organizations/:organizationId/agents/:agentId",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/agents/:agentId",
@@ -2730,6 +2737,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "query": [
       "includeArchived"
     ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/compute",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/compute",
+    "request": [],
     "response": []
   },
   {
@@ -2929,13 +2943,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/credential-profile",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/credential-profile",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
     "request": [],
     "response": []
   },

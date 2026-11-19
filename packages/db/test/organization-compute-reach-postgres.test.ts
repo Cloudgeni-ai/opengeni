@@ -128,7 +128,11 @@ async function attachAllowed(org: Org, workspaceId: string, sandboxId: string) {
 
 async function organizationMachine(
   org: Org,
-  options: { scope?: "organization" | "workspace" | "user"; workspaceId?: string; name?: string } = {},
+  options: {
+    scope?: "organization" | "workspace" | "user";
+    workspaceId?: string;
+    name?: string;
+  } = {},
 ) {
   const workspaceId = options.workspaceId ?? org.home;
   return (await app.begin(async (tx) => {
@@ -221,7 +225,7 @@ describe("where an organization rig works", () => {
       homeWorkspaceId: org.home,
       allowedWorkspaceIds: null,
       allowPersonalWorkspaces: true,
-    allowManagedWorkspaces: false,
+      allowManagedWorkspaces: false,
     });
     for (const workspaceId of [org.home, org.second, org.third, org.personal]) {
       expect(await visibleRigIds(org, workspaceId)).toContain(rig.id);
@@ -244,7 +248,7 @@ describe("where an organization rig works", () => {
         homeWorkspaceId: org.home,
         allowedWorkspaceIds: [org.third],
         allowPersonalWorkspaces: false,
-      allowManagedWorkspaces: false,
+        allowManagedWorkspaces: false,
       },
     });
     expect(await visibleRigIds(org, org.home)).toContain(rig.id);
@@ -282,12 +286,28 @@ describe("where an organization rig works", () => {
       order by occurred_at`;
     expect(audit.map((row) => row.metadata)).toEqual([
       {
-        from: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true, allowManagedWorkspaces: false },
-        to: { allowedWorkspaceIds: [org.third], allowPersonalWorkspaces: false, allowManagedWorkspaces: false },
+        from: {
+          allowedWorkspaceIds: null,
+          allowPersonalWorkspaces: true,
+          allowManagedWorkspaces: false,
+        },
+        to: {
+          allowedWorkspaceIds: [org.third],
+          allowPersonalWorkspaces: false,
+          allowManagedWorkspaces: false,
+        },
       },
       {
-        from: { allowedWorkspaceIds: [org.third], allowPersonalWorkspaces: false, allowManagedWorkspaces: false },
-        to: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true, allowManagedWorkspaces: false },
+        from: {
+          allowedWorkspaceIds: [org.third],
+          allowPersonalWorkspaces: false,
+          allowManagedWorkspaces: false,
+        },
+        to: {
+          allowedWorkspaceIds: null,
+          allowPersonalWorkspaces: true,
+          allowManagedWorkspaces: false,
+        },
       },
     ]);
   }, 120_000);
@@ -320,7 +340,7 @@ describe("where an organization machine works", () => {
       homeWorkspaceId: org.home,
       allowedWorkspaceIds: null,
       allowPersonalWorkspaces: true,
-    allowManagedWorkspaces: false,
+      allowManagedWorkspaces: false,
     });
     expect(await attachAllowed(org, org.second, machine.sandboxId)).toBe(true);
 
@@ -333,7 +353,12 @@ describe("where an organization machine works", () => {
       ),
     ).toEqual({
       status: "updated",
-      reach: { homeWorkspaceId: org.home, allowedWorkspaceIds: [], allowPersonalWorkspaces: true, allowManagedWorkspaces: false },
+      reach: {
+        homeWorkspaceId: org.home,
+        allowedWorkspaceIds: [],
+        allowPersonalWorkspaces: true,
+        allowManagedWorkspaces: false,
+      },
     });
     expect(await visibleMachineIds(org, org.home)).toContain(machine.enrollmentId);
     expect(await visibleMachineIds(org, org.personal)).toContain(machine.enrollmentId);
@@ -384,7 +409,7 @@ describe("where an organization machine works", () => {
         homeWorkspaceId: org.home,
         allowedWorkspaceIds: [org.second],
         allowPersonalWorkspaces: true,
-      allowManagedWorkspaces: false,
+        allowManagedWorkspaces: false,
       },
     });
     expect(await visibleMachineIds(org, org.home)).toContain(machine.enrollmentId);
@@ -442,7 +467,7 @@ describe("every organization machine and rig, wherever it works", () => {
           homeWorkspaceId: org.home,
           allowedWorkspaceIds: [],
           allowPersonalWorkspaces: false,
-        allowManagedWorkspaces: false,
+          allowManagedWorkspaces: false,
         },
       },
     ]);
@@ -455,7 +480,7 @@ describe("every organization machine and rig, wherever it works", () => {
           homeWorkspaceId: org.home,
           allowedWorkspaceIds: [org.third],
           allowPersonalWorkspaces: false,
-        allowManagedWorkspaces: false,
+          allowManagedWorkspaces: false,
         },
       },
     ]);
@@ -547,7 +572,9 @@ describe("all product-managed workspaces", () => {
     for (const workspaceId of [before, later]) {
       expect(await visibleMachineIds(org, workspaceId)).toContain(machine.enrollmentId);
       expect(await visibleRigIds(org, workspaceId)).toContain(rig.id);
-      expect(await getSandbox(client.db, access(org, workspaceId), machine.sandboxId)).not.toBeNull();
+      expect(
+        await getSandbox(client.db, access(org, workspaceId), machine.sandboxId),
+      ).not.toBeNull();
       expect(await attachAllowed(org, workspaceId, machine.sandboxId)).toBe(true);
     }
     const attempt = await chatOnRig(org, later, rig.id, rig.activeVersion!.id);
@@ -567,9 +594,9 @@ describe("all product-managed workspaces", () => {
         (entry) => entry.id === machine.enrollmentId,
       )?.reach.allowManagedWorkspaces,
     ).toBe(true);
-    expect((await getRig(client.db, access(org, later), rig.id))?.reach?.allowManagedWorkspaces).toBe(
-      true,
-    );
+    expect(
+      (await getRig(client.db, access(org, later), rig.id))?.reach?.allowManagedWorkspaces,
+    ).toBe(true);
 
     // An update that leaves the switch out keeps it.
     await updateOrganizationMachineReach(
@@ -686,7 +713,10 @@ describe("Runs on: organization machines and environments only", () => {
       accountId: org.accountId,
       actor,
       key: "on-build-box",
-      definition: { name: "On build box", config: { runsOn: { kind: "machine", machine: "Build box" } } },
+      definition: {
+        name: "On build box",
+        config: { runsOn: { kind: "machine", machine: "Build box" } },
+      },
     });
     expect(agent.draft?.config.runsOn).toEqual({ kind: "machine", machine: "Build box" });
     expect(
@@ -707,7 +737,10 @@ describe("Runs on: organization machines and environments only", () => {
             accountId: org.accountId,
             key: "deployed",
             actor: { subjectId: "api_key:deploy", label: "Deploy key" },
-            definition: { name: "Deployed", config: { runsOn: { kind: "sandbox", environment: "Nope" } } },
+            definition: {
+              name: "Deployed",
+              config: { runsOn: { kind: "sandbox", environment: "Nope" } },
+            },
             publish: false,
             moveRunningChats: false,
             dryRun,

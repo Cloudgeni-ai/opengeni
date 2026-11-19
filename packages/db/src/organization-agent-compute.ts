@@ -14,7 +14,13 @@
  */
 import type { OrganizationComputeReach, OrgAgentRunsOn } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
-import { rawRows, withAccountRls, withoutSessionRlsActor, withRlsContext, type Database } from "./database";
+import {
+  rawRows,
+  withAccountRls,
+  withoutSessionRlsActor,
+  withRlsContext,
+  type Database,
+} from "./database";
 
 export type OrgComputeKind = "machine" | "rig";
 

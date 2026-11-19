@@ -237,7 +237,10 @@ describe("where an organization machine or rig works", () => {
     );
     expect(document.body.textContent).not.toContain("All product-managed workspaces");
     await submit();
-    expect(save).toHaveBeenCalledWith({ allowedWorkspaceIds: [OPS], allowPersonalWorkspaces: false });
+    expect(save).toHaveBeenCalledWith({
+      allowedWorkspaceIds: [OPS],
+      allowPersonalWorkspaces: false,
+    });
     await act(async () => root.unmount());
   });
 });

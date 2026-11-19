@@ -561,21 +561,24 @@ export function hasOverrides(overrides: OrgAgentSessionOverrides | null | undefi
 /** "Runs on" choices; `default` is an omitted `runsOn` (the workspace's usual placement). */
 export type RunsOnChoice = "default" | OrgAgentRunsOn["kind"];
 
-export const RUNS_ON_CHOICES: readonly { value: RunsOnChoice; label: string; description: string }[] =
-  [
-    {
-      value: "default",
-      label: "Workspace default",
-      description: "Chats run where other chats in the workspace do.",
-    },
-    { value: "none", label: "No computer", description: "Tools and API only." },
-    { value: "sandbox", label: "Cloud sandbox", description: "Each chat gets its own sandbox." },
-    {
-      value: "machine",
-      label: "Organization machine",
-      description: "Every chat runs on one machine.",
-    },
-  ];
+export const RUNS_ON_CHOICES: readonly {
+  value: RunsOnChoice;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "default",
+    label: "Workspace default",
+    description: "Chats run where other chats in the workspace do.",
+  },
+  { value: "none", label: "No computer", description: "Tools and API only." },
+  { value: "sandbox", label: "Cloud sandbox", description: "Each chat gets its own sandbox." },
+  {
+    value: "machine",
+    label: "Organization machine",
+    description: "Every chat runs on one machine.",
+  },
+];
 
 export function runsOnChoice(runsOn: OrgAgentRunsOn | undefined): RunsOnChoice {
   return runsOn?.kind ?? "default";

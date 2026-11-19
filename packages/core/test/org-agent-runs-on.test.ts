@@ -162,7 +162,10 @@ describe("Runs on at create", () => {
     );
     expect(placed.payload).toEqual({ message: "hi", sandboxBackend: "modal", rigId: PYTHON.id });
     expect(Object.keys(placed.overrides)).toEqual(["runsOn"]);
-    const none = await place({ kind: "sandbox", environment: PYTHON.id }, { sandboxBackend: "none" });
+    const none = await place(
+      { kind: "sandbox", environment: PYTHON.id },
+      { sandboxBackend: "none" },
+    );
     expect(none.payload).toEqual({ message: "hi", sandboxBackend: "none" });
   });
 
@@ -197,9 +200,9 @@ describe("Runs on shape", () => {
   test("machine needs a machine; environment is only for a cloud sandbox", () => {
     expect(OrgAgentRunsOn.safeParse({ kind: "machine" }).success).toBe(false);
     expect(OrgAgentRunsOn.safeParse({ kind: "none", machine: "x" }).success).toBe(false);
-    expect(OrgAgentRunsOn.safeParse({ kind: "machine", environment: "x", machine: "y" }).success).toBe(
-      false,
-    );
+    expect(
+      OrgAgentRunsOn.safeParse({ kind: "machine", environment: "x", machine: "y" }).success,
+    ).toBe(false);
     expect(OrgAgentRunsOn.safeParse({ kind: "sandbox", environment: "x" }).success).toBe(true);
     expect(OrgAgentRunsOn.safeParse({ kind: "cloud" }).success).toBe(false);
   });

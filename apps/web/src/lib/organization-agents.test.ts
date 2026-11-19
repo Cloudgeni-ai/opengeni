@@ -47,7 +47,8 @@ const definition = OrgAgentDefinition.parse({
   },
 });
 
-const DEFINITION_HASH_BEFORE_RUNS_ON = "sha256:3b192a9580de39f25b85e34be9e21e11cbb1c28140851bb680edc9f257e99779";
+const DEFINITION_HASH_BEFORE_RUNS_ON =
+  "sha256:3b192a9580de39f25b85e34be9e21e11cbb1c28140851bb680edc9f257e99779";
 
 function sha256(text: string) {
   return `sha256:${createHash("sha256").update(text).digest("hex")}`;

@@ -90,9 +90,8 @@ const { AgentSessions } = await import("./agent-sessions");
 const { ConsoleToolServersRoute, parseHeaderLines, toolServerChanges } =
   await import("./tool-servers");
 const { ManagedInConsoleAgents } = await import("@/components/agents/managed-in-console-agents");
-const { orgAgentsApi, computeOptionFor, runsOnForChoice } = await import(
-  "@/lib/organization-agents"
-);
+const { orgAgentsApi, computeOptionFor, runsOnForChoice } =
+  await import("@/lib/organization-agents");
 const { RunsOnField } = await import("./agent-editor");
 
 const at = "2026-11-18T10:00:00.000Z";
@@ -463,8 +462,9 @@ describe("Runs on", () => {
     const trigger = document.querySelector<HTMLButtonElement>('button[role="combobox"]')!;
     await act(async () => trigger.click());
     const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
-    expect(options.find((option) => option.textContent?.startsWith("No computer"))?.textContent)
-      .toContain("Suggested");
+    expect(
+      options.find((option) => option.textContent?.startsWith("No computer"))?.textContent,
+    ).toContain("Suggested");
     await act(async () =>
       options.find((option) => option.textContent?.startsWith("Organization machine"))!.click(),
     );
