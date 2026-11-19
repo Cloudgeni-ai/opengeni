@@ -90,7 +90,9 @@ const { AgentSessions } = await import("./agent-sessions");
 const { ConsoleToolServersRoute, parseHeaderLines, toolServerChanges } =
   await import("./tool-servers");
 const { ManagedInConsoleAgents } = await import("@/components/agents/managed-in-console-agents");
-const { orgAgentsApi } = await import("@/lib/organization-agents");
+const { orgAgentsApi, computeMenuOptions, computeOptionFor, runsOnForChoice, runsOnMenuOptions } =
+  await import("@/lib/organization-agents");
+const { RunsOnField } = await import("./agent-editor");
 
 const at = "2026-11-18T10:00:00.000Z";
 
@@ -140,6 +142,29 @@ function summary(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const buildBox = {
+  id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  sandboxId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  name: "Build box",
+  worksInManagedWorkspaces: true,
+};
+const designMac = {
+  id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  sandboxId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  name: "Design Mac",
+  worksInManagedWorkspaces: false,
+};
+const compute = {
+  machines: [buildBox, designMac],
+  environments: [
+    {
+      id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      name: "Python 3.13",
+      worksInManagedWorkspaces: true,
+    },
+  ],
+};
+
 let agentRecord: Record<string, unknown> = {};
 function agent(overrides: Record<string, unknown> = {}) {
   return {
@@ -186,6 +211,7 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
     };
   }
   if (method === "GET" && path === `${base}/agents/${agentId}`) return { agent: agentRecord };
+  if (method === "GET" && path === `${base}/agents/compute`) return compute;
   if (method === "GET" && path === `${base}/agents/tool-servers`)
     return { toolServers: [toolServer] };
   if (method === "GET" && path === `${base}/agents/tool-servers/billing/tools`) {
@@ -478,6 +504,109 @@ describe("Console agent editor", () => {
     await render(createElement(ConsoleAgentRoute));
     expect(text()).toContain("Managed by code");
     expect(text()).not.toContain("Manage in Console");
+  });
+});
+
+describe("Runs on", () => {
+  test("an agent on an organization machine names it and warns that chats share it", async () => {
+    agentRecord = agent({
+      draft: version(3, {
+        config: {
+          ...version(3).config,
+          runsOn: { kind: "machine", machine: buildBox.id },
+        },
+      }),
+    });
+    await render(createElement(ConsoleAgentRoute));
+    const page = text();
+    expect(page).toContain("Runs on");
+    expect(page).toContain("Organization machine");
+    expect(page).toContain("Build box");
+    expect(page).toContain(
+      "Every end customer's chats share this machine. Use it only when that is intended.",
+    );
+  });
+
+  test("omitted is the workspace default, and the suggestion follows the built-in tools", async () => {
+    await render(
+      createElement(RunsOnField, {
+        runsOn: undefined,
+        suggested: "none",
+        compute: { data: compute as never, error: null },
+        disabled: false,
+        onChange: () => undefined,
+      }),
+    );
+    expect(text()).toContain("Workspace default");
+    expect(text()).not.toContain("Machine");
+    const menu = runsOnMenuOptions("none");
+    expect(menu.map((option) => option.label)).toEqual([
+      "Workspace default",
+      "No computer",
+      "Cloud sandbox",
+      "Organization machine",
+    ]);
+    expect(
+      menu.filter((option) => option.meta === "Suggested").map((option) => option.value),
+    ).toEqual(["none"]);
+    expect(runsOnMenuOptions("sandbox").find((option) => option.meta)?.value).toBe("sandbox");
+  });
+
+  test("offers only machines that work in product-managed workspaces", async () => {
+    await render(
+      createElement(RunsOnField, {
+        runsOn: { kind: "machine" },
+        suggested: "sandbox",
+        compute: { data: compute as never, error: null },
+        disabled: false,
+        onChange: () => undefined,
+      }),
+    );
+    expect(text()).toContain("Choose a machine");
+    expect(text()).toContain("Every end customer's chats share this machine.");
+    expect(computeMenuOptions(compute.machines, undefined)).toEqual([
+      { value: buildBox.id, label: "Build box" },
+      {
+        value: designMac.id,
+        label: "Design Mac",
+        disabled: true,
+        disabledReason: "Not available in product-managed workspaces. Change where it can be used.",
+      },
+    ]);
+    // A name from code that matches nothing here still shows, and says so.
+    expect(computeMenuOptions(compute.machines, "Gone box").at(-1)).toEqual({
+      value: "Gone box",
+      label: "Gone box",
+      disabled: true,
+      disabledReason: "Not found in this organization.",
+    });
+    expect(computeMenuOptions(compute.machines, "build box")).toHaveLength(2);
+  });
+
+  test("a cloud sandbox can use a Sandbox Environment named in code", async () => {
+    await render(
+      createElement(RunsOnField, {
+        runsOn: { kind: "sandbox", environment: "python 3.13" },
+        suggested: "sandbox",
+        compute: { data: compute as never, error: null },
+        disabled: true,
+        onChange: () => undefined,
+      }),
+    );
+    expect(text()).toContain("Cloud sandbox");
+    expect(text()).toContain("Python 3.13");
+    expect(text()).not.toContain("share this machine");
+  });
+
+  test("references match by id, sandbox id or one name", () => {
+    expect(computeOptionFor(compute.machines, buildBox.sandboxId)).toEqual(buildBox);
+    expect(computeOptionFor(compute.machines, " build BOX ")).toEqual(buildBox);
+    expect(computeOptionFor(compute.machines, "Nope")).toBeNull();
+    expect(computeOptionFor([buildBox, { ...designMac, name: "Build box" }], "Build box")).toBe(
+      null,
+    );
+    expect(runsOnForChoice("default")).toBeUndefined();
+    expect(runsOnForChoice("none")).toEqual({ kind: "none" });
   });
 });
 

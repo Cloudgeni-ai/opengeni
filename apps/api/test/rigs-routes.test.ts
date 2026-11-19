@@ -720,9 +720,21 @@ describe("rig route permission matrix", () => {
         homeWorkspaceId: origin.workspaceId,
         allowedWorkspaceIds: [target.workspaceId],
         allowPersonalWorkspaces: false,
+        allowManagedWorkspaces: false,
       },
     });
     expect(await auditActions(origin.workspaceId, rig.id)).toContain("rig.reach.changed");
+    // "All product-managed workspaces"; leaving it out later keeps it.
+    const managed = await putReach(admin, rig.id, { ...onlyTarget, allowManagedWorkspaces: true });
+    expect(managed.status).toBe(200);
+    expect(
+      ((await managed.json()) as { reach: { allowManagedWorkspaces: boolean } }).reach,
+    ).toMatchObject({ allowManagedWorkspaces: true });
+    const kept = await putReach(admin, rig.id, onlyTarget);
+    expect(
+      ((await kept.json()) as { reach: { allowManagedWorkspaces: boolean } }).reach,
+    ).toMatchObject({ allowManagedWorkspaces: true });
+    await putReach(admin, rig.id, { ...onlyTarget, allowManagedWorkspaces: false });
 
     const read = async (workspace: { accountId: string; workspaceId: string }) =>
       await http.request(`/v1/workspaces/${workspace.workspaceId}/rigs/${rig.id}`, {
@@ -805,6 +817,7 @@ describe("rig route permission matrix", () => {
         homeWorkspaceId: origin.workspaceId,
         allowedWorkspaceIds: [third.workspaceId],
         allowPersonalWorkspaces: false,
+        allowManagedWorkspaces: false,
       },
     });
   });

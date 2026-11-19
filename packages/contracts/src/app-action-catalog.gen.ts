@@ -2740,6 +2740,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/organizations/:organizationId/agents/compute",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/compute",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:organizationId/agents/tool-servers",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/agents/tool-servers",

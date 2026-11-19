@@ -27,6 +27,7 @@ import {
   type SessionMcpServerInput,
 } from "@opengeni/contracts";
 import {
+  checkOrgAgentRunsOn,
   decryptEnvironmentValue,
   listOrgToolServersByKey,
   readEndUserToolCredential,
@@ -56,6 +57,14 @@ import {
   withoutUndefined,
   type MaterializedOrgToolServer,
 } from "./org-agent-config";
+import {
+  applyOrgAgentRunsOn,
+  OrgAgentRunsOnError,
+  type OrgAgentRunsOnDeps,
+} from "./org-agent-runs-on";
+
+type OrgAgentCreateGrant = Pick<AccessGrant, "accountId" | "subjectId" | "permissions"> &
+  Partial<Pick<AccessGrant, "metadata">>;
 
 /** A refused create: `details.code` is one of `ORG_AGENT_ERROR_CODES`. */
 export class OrgAgentSessionCreateError extends HTTPException {
@@ -101,6 +110,8 @@ export type OrgAgentSessionCreateDeps = {
   observability?: Observability | null;
   /** Test seam: the tools a server offers now, or null when unknown. */
   listToolServerTools?: OrgToolServerToolLister;
+  /** Test seams for Runs on (machine and environment lookups). */
+  runsOn?: Omit<OrgAgentRunsOnDeps, "db" | "settings">;
 };
 
 export type OrgToolServerToolLister = (input: {
@@ -124,7 +135,7 @@ export function orgAgentConfigHash(definition: OrgAgentDefinition): string {
  */
 export async function prepareOrgAgentSessionCreate(
   deps: OrgAgentSessionCreateDeps,
-  grant: Pick<AccessGrant, "accountId" | "subjectId" | "permissions">,
+  grant: OrgAgentCreateGrant,
   workspaceId: string,
   rawPayload: Record<string, unknown>,
 ): Promise<PreparedOrgAgentSessionCreate> {
@@ -143,7 +154,7 @@ export async function prepareOrgAgentSessionCreate(
 
 async function prepare(
   deps: OrgAgentSessionCreateDeps,
-  grant: Pick<AccessGrant, "accountId" | "subjectId" | "permissions">,
+  grant: OrgAgentCreateGrant,
   workspaceId: string,
   raw: Record<string, unknown>,
 ): Promise<PreparedOrgAgentSessionCreate> {
@@ -207,6 +218,14 @@ async function prepare(
         "tool_server_not_found",
         `This organization has no tool server ${missing.map((key) => `'${key}'`).join(", ")}.`,
       );
+    }
+    const runsOnProblem = await checkOrgAgentRunsOn(
+      deps.db,
+      grant.accountId,
+      definition.config.runsOn,
+    );
+    if (runsOnProblem) {
+      throw new OrgAgentSessionCreateError(422, runsOnProblem.code, runsOnProblem.message);
     }
     const saved = await saveInlineOrgAgentVersion(deps.db, {
       accountId: grant.accountId,
@@ -278,7 +297,7 @@ async function prepare(
 
 async function bind(
   deps: OrgAgentSessionCreateDeps,
-  grant: Pick<AccessGrant, "accountId" | "subjectId" | "permissions">,
+  grant: OrgAgentCreateGrant,
   workspaceId: string,
   raw: Record<string, unknown>,
   request: OrgAgentSessionRequest,
@@ -300,21 +319,38 @@ async function bind(
     liveTools: async (server, chatHeaders) =>
       await liveToolNames(deps, grant, workspaceId, server, chatHeaders),
   });
-  if (raw["agentOverrides"] === "reject" && plan.overrides) {
+  // Where the chat runs: the version's Runs on, with the request on top.
+  const placed = await applyOrgAgentRunsOn({
+    deps: { db: deps.db, settings: deps.settings, ...deps.runsOn },
+    grant,
+    workspaceId,
+    payload: plan.payload,
+    runsOn: config.runsOn,
+  }).catch((error: unknown) => {
+    if (error instanceof OrgAgentRunsOnError) {
+      throw new OrgAgentSessionCreateError(error.httpStatus, error.code, error.message);
+    }
+    throw error;
+  });
+  const overrides =
+    plan.overrides || Object.keys(placed.overrides).length > 0
+      ? { ...plan.overrides, ...placed.overrides }
+      : null;
+  if (raw["agentOverrides"] === "reject" && overrides) {
     throw new OrgAgentSessionCreateError(
       422,
       "agent_override_rejected",
-      `This request changes the agent's settings (${Object.keys(plan.overrides).sort().join(", ")}) and agentOverrides is "reject".`,
+      `This request changes the agent's settings (${Object.keys(overrides).sort().join(", ")}) and agentOverrides is "reject".`,
     );
   }
   return {
-    payload: plan.payload,
+    payload: placed.payload,
     binding: {
       agentId: agent.id,
       key: agent.key,
       version: version.version,
       promptVersion: version.version,
-      overrides: plan.overrides,
+      overrides,
     },
     agentServerIds: plan.agentServerIds,
   };

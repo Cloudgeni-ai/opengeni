@@ -4,6 +4,7 @@ import type {
   CreateOrgAgentRequest,
   CreateOrgToolServerRequest,
   EndUserToolCredential,
+  ListOrgAgentComputeResponse,
   ListOrgAgentSessionsResponse,
   ListOrgAgentsResponse,
   ListOrgAgentPublishOperationsResponse,
@@ -12,8 +13,10 @@ import type {
   OrgAgent,
   OrgAgentDefinitionInput,
   OrgAgentFileInput,
+  OrgAgentComputeOption,
   OrgAgentPublishOperation,
   OrgAgentResponse,
+  OrgAgentRunsOn,
   OrgAgentUsageResponse,
   OrgAgentVersion,
   OrgToolServer,
@@ -39,6 +42,7 @@ export type {
   CreateOrgAgentRequest,
   CreateOrgToolServerRequest,
   EndUserToolCredential,
+  ListOrgAgentComputeResponse,
   ListOrgAgentSessionsResponse,
   ListOrgAgentsResponse,
   ListOrgAgentVersionsResponse,
@@ -46,8 +50,10 @@ export type {
   OrgAgent,
   OrgAgentDefinitionInput,
   OrgAgentFileInput,
+  OrgAgentComputeOption,
   OrgAgentPublishOperation,
   OrgAgentResponse,
+  OrgAgentRunsOn,
   OrgAgentUsageResponse,
   OrgAgentVersion,
   OrgToolServer,
@@ -269,6 +275,17 @@ export async function getOrganizationAgentUsage(
   );
 }
 
+/**
+ * The organization machines and Sandbox Environments an agent's `runsOn` can
+ * name, with whether each works in product-managed workspaces.
+ */
+export async function listOrganizationAgentCompute(
+  client: Client,
+  organizationId: string,
+): Promise<ListOrgAgentComputeResponse> {
+  return await client.requestJson("GET", `${agentsPath(organizationId)}/compute`);
+}
+
 /* ---------------------------------------------------------- tool servers */
 
 export async function listOrganizationToolServers(
@@ -456,6 +473,8 @@ export function organizationAgents(client: Client, organizationId: string) {
       listOrganizationAgentSessions(client, organizationId, agentId, options),
     usage: (agentId: string, options?: Record<string, string | undefined>) =>
       getOrganizationAgentUsage(client, organizationId, agentId, options),
+    /** Machines and Sandbox Environments `runsOn` can name. */
+    compute: () => listOrganizationAgentCompute(client, organizationId),
     toolServers: {
       list: () => listOrganizationToolServers(client, organizationId),
       get: (key: string) => getOrganizationToolServer(client, organizationId, key),

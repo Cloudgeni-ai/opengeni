@@ -38,6 +38,7 @@ describe("agent file JSON Schema", () => {
         "name",
         "reasoningEffort",
         "renderer",
+        "runsOn",
         "titleInstructions",
         "toolServers",
         "workers",

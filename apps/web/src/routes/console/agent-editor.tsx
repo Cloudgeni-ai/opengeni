@@ -1,16 +1,19 @@
 // An agent's Settings tab: its Instructions, model, built-in tools, tool
-// servers (each tool on or off and "Ask first"), workers and where it is
-// available. Save draft writes a new version; Publish (the page header) makes
+// servers (each tool on or off and "Ask first"), where its chats run (Runs
+// on), workers and where it is available. Save draft writes a new version; Publish (the page header) makes
 // new chats use it. A code-managed agent shows the same settings read-only.
-import type {
-  OrgAgent,
-  OrgAgentDefinition,
-  OrgAgentNewToolsPolicy,
-  OrgAgentToolCatalog,
-  OrgAgentToolCatalogEntry,
-  OrgAgentToolServerConfig,
-  OrgToolServer,
-  ReasoningEffort,
+import {
+  suggestedOrgAgentRunsOnKind,
+  type ListOrgAgentComputeResponse,
+  type OrgAgent,
+  type OrgAgentDefinition,
+  type OrgAgentNewToolsPolicy,
+  type OrgAgentRunsOn,
+  type OrgAgentToolCatalog,
+  type OrgAgentToolCatalogEntry,
+  type OrgAgentToolServerConfig,
+  type OrgToolServer,
+  type ReasoningEffort,
 } from "@opengeni/contracts";
 import { PlugIcon, XIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -42,7 +45,12 @@ import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   NEW_TOOLS_OPTIONS,
+  computeMenuOptions,
+  computeOptionFor,
   definitionOfVersion,
+  runsOnChoice,
+  runsOnForChoice,
+  runsOnMenuOptions,
   newToolServerConfig,
   sameDefinition,
   toolRows,
@@ -51,7 +59,7 @@ import {
   withToolOn,
   type OrgAgentsApi,
 } from "@/lib/organization-agents";
-import { useConsole, useConsoleCan, useConsoleQuery } from "./console-shared";
+import { useConsole, useConsoleCan, useConsoleQuery, type ConsoleQuery } from "./console-shared";
 
 /** The newest version (draft or published): what the editor starts from. */
 export function newestVersion(agent: OrgAgent) {
@@ -164,6 +172,8 @@ export function AgentEditor({
           : requestFromDraft(draft, availability),
     });
 
+  const compute = useConsoleQuery((signal) => api.listCompute(signal), [api]);
+
   const teamWorkspaces = useConsoleQuery(
     (signal) =>
       client
@@ -175,6 +185,7 @@ export function AgentEditor({
   const definitionChanged = !sameDefinition(definition, base);
   const reachChanged = [...workspaceIds].sort().join() !== [...agent.workspaceIds].sort().join();
   const dirty = definitionChanged || reachChanged;
+  const runsOnIncomplete = config.runsOn?.kind === "machine" && !config.runsOn.machine;
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
 
   const save = async () => {
@@ -280,6 +291,16 @@ export function AgentEditor({
         />
       </DetailSection>
 
+      <DetailSection title="Runs on">
+        <RunsOnField
+          runsOn={config.runsOn}
+          suggested={suggestedOrgAgentRunsOnKind(config.capabilities)}
+          compute={compute}
+          disabled={readOnly}
+          onChange={(runsOn) => setConfig({ runsOn })}
+        />
+      </DetailSection>
+
       <DetailSection
         title="Tool servers"
         description="New tools a server adds later stay off unless you choose otherwise."
@@ -379,7 +400,7 @@ export function AgentEditor({
             </Button>
           ) : null}
           <Button
-            disabled={!dirty || saving || !definition.name.trim()}
+            disabled={!dirty || saving || !definition.name.trim() || runsOnIncomplete}
             onClick={() => void save()}
           >
             {saving ? "Saving…" : "Save draft"}
@@ -387,6 +408,80 @@ export function AgentEditor({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Where the agent's chats run: the workspace default (omitted), no computer, a
+ * cloud sandbox (optionally from a Sandbox Environment) or one organization
+ * machine. Only machines and environments that work in product-managed
+ * workspaces can be picked; the others say why.
+ */
+export function RunsOnField({
+  runsOn,
+  suggested,
+  compute,
+  disabled,
+  onChange,
+}: {
+  runsOn: OrgAgentRunsOn | undefined;
+  suggested: "none" | "sandbox";
+  compute: Pick<ConsoleQuery<ListOrgAgentComputeResponse>, "data" | "error">;
+  disabled: boolean;
+  onChange: (runsOn: OrgAgentRunsOn | undefined) => void;
+}) {
+  const choice = runsOnChoice(runsOn);
+  const environmentRef = runsOn?.kind === "sandbox" ? runsOn.environment : undefined;
+  const machineRef = runsOn?.kind === "machine" ? runsOn.machine : undefined;
+  const environment = computeOptionFor(compute.data?.environments, environmentRef);
+  const machine = computeOptionFor(compute.data?.machines, machineRef);
+  const loadError = compute.error ? "Couldn't load this organization's machines." : undefined;
+  return (
+    <FieldStack>
+      <SelectMenu
+        aria-label="Runs on"
+        options={runsOnMenuOptions(suggested)}
+        value={choice}
+        disabled={disabled}
+        onValueChange={(next) => onChange(runsOnForChoice(next))}
+      />
+      {runsOn?.kind === "sandbox" ? (
+        <Field label="Sandbox Environment" optional hint={loadError}>
+          <SelectMenu
+            aria-label="Sandbox Environment"
+            options={[
+              { value: "", label: "Default" },
+              ...computeMenuOptions(compute.data?.environments, environmentRef),
+            ]}
+            value={environment?.id ?? environmentRef ?? ""}
+            loading={!compute.data && !compute.error}
+            disabled={disabled}
+            onValueChange={(next) =>
+              onChange(next ? { kind: "sandbox", environment: next } : { kind: "sandbox" })
+            }
+          />
+        </Field>
+      ) : null}
+      {runsOn?.kind === "machine" ? (
+        <>
+          <Field label="Machine" hint={loadError}>
+            <SelectMenu
+              aria-label="Machine"
+              placeholder="Choose a machine"
+              options={computeMenuOptions(compute.data?.machines, machineRef)}
+              value={machine?.id ?? machineRef ?? null}
+              loading={!compute.data && !compute.error}
+              disabled={disabled}
+              emptyMessage="This organization has no organization machines."
+              onValueChange={(next) => onChange({ kind: "machine", machine: next })}
+            />
+          </Field>
+          <Notice tone="waiting">
+            Every end customer's chats share this machine. Use it only when that is intended.
+          </Notice>
+        </>
+      ) : null}
+    </FieldStack>
   );
 }
 

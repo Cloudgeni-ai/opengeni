@@ -90,6 +90,20 @@ export const ORG_AGENT_ERROR_CODES = [
   "tool_server_invalid",
   /** The version's settings are larger than an agent version can store. */
   "agent_config_too_large",
+  /**
+   * Runs on: no organization machine has this id or name. Personal (Only me)
+   * and workspace machines never run organization agents.
+   */
+  "machine_not_found",
+  /** Runs on: no organization sandbox environment has this id or name. */
+  "environment_not_found",
+  /** A chat with an organization agent named a Personal (Only me) machine. */
+  "personal_machine_not_allowed",
+  /**
+   * Runs on: the machine or sandbox environment does not work in this
+   * workspace, or this deployment has no cloud sandboxes.
+   */
+  "runs_on_unavailable",
 ] as const;
 export type OrgAgentErrorCode = (typeof ORG_AGENT_ERROR_CODES)[number];
 
@@ -184,6 +198,85 @@ export const OrgAgentWorkersConfig = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrgAgentWorkersConfig = z.infer<typeof OrgAgentWorkersConfig>;
 
+/** Where a chat with the agent runs: no computer, its own cloud sandbox, or one organization machine. */
+export const ORG_AGENT_RUNS_ON_KINDS = ["none", "sandbox", "machine"] as const;
+export const OrgAgentRunsOnKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(ORG_AGENT_RUNS_ON_KINDS),
+);
+export type OrgAgentRunsOnKind = z.infer<typeof OrgAgentRunsOnKind>;
+
+const ComputeRef = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(200));
+
+/**
+ * Runs on (`runsOn`). Omitted: chats are placed as any chat in that workspace
+ * is today (its default machine, else a cloud sandbox).
+ *
+ * - `none` (No computer): tools and API only; the chat has no sandbox
+ *   (`sandboxBackend: "none"`).
+ * - `sandbox` (Cloud sandbox): each chat gets its own isolated cloud sandbox,
+ *   optionally built from an organization sandbox environment
+ *   (`environment`: its name or id).
+ * - `machine` (Organization machine): every chat runs on one organization
+ *   Connected Machine (`machine`: its name, machine id or sandbox id), shared
+ *   by all chats. Personal (Only me) and workspace machines are refused.
+ *
+ * The machine or environment must work in the workspaces the agent's chats
+ * run in (its reach, for example "All product-managed workspaces"). A request
+ * may still pass `sandboxBackend`, `targetSandboxId` or `rigId` for one chat;
+ * the same reach and machine-access checks apply.
+ */
+export const OrgAgentRunsOn = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: OrgAgentRunsOnKind,
+      /** `sandbox` only: the organization sandbox environment's name or id. */
+      environment: ComputeRef.optional(),
+      /** `machine` only: the organization machine's name, machine id or sandbox id. */
+      machine: ComputeRef.optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.kind === "machine" && value.machine === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["machine"],
+          message: "Name the organization machine the agent runs on.",
+        });
+      }
+      if (value.kind !== "machine" && value.machine !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["machine"],
+          message: 'machine is only for kind "machine".',
+        });
+      }
+      if (value.kind !== "sandbox" && value.environment !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["environment"],
+          message: 'environment is only for kind "sandbox".',
+        });
+      }
+    }),
+);
+export type OrgAgentRunsOn = z.infer<typeof OrgAgentRunsOn>;
+
+/**
+ * What Console suggests when `runsOn` is omitted: `sandbox` when the built-ins
+ * that use a computer can be on (Browser or Workspace files, which includes
+ * omitted built-ins and `"all"`), otherwise `none`. A suggestion only:
+ * omitted `runsOn` always keeps today's placement.
+ */
+export function suggestedOrgAgentRunsOnKind(
+  capabilities: z.input<typeof AgentCapabilities> | undefined,
+): "none" | "sandbox" {
+  if (capabilities === undefined || capabilities === "all") return "sandbox";
+  if (capabilities === "none") return "none";
+  const startsOn = capabilities.from === "all";
+  const on = (value: boolean | undefined) => value ?? startsOn;
+  return on(capabilities.browser) || on(capabilities.workspaceFiles) ? "sandbox" : "none";
+}
+
 /** Settings of one agent version (Instructions are stored beside it). */
 export const OrgAgentVersionConfig = /* @__PURE__ */ defineSchema(() =>
   z
@@ -197,6 +290,8 @@ export const OrgAgentVersionConfig = /* @__PURE__ */ defineSchema(() =>
       titleInstructions: AgentTitleInstructions.nullable().optional(),
       toolServers: z.array(OrgAgentToolServerConfig).max(ORG_AGENT_TOOL_SERVERS_MAX).default([]),
       workers: OrgAgentWorkersConfig.default({ shareInstructions: false }),
+      /** Where chats run; omitted keeps today's placement (see {@link OrgAgentRunsOn}). */
+      runsOn: OrgAgentRunsOn.optional(),
     })
     .strict()
     .superRefine((config, context) => {
@@ -257,6 +352,7 @@ export const OrgAgentFile = /* @__PURE__ */ defineSchema(() =>
       titleInstructions: AgentTitleInstructions.nullable().optional(),
       toolServers: z.array(OrgAgentToolServerConfig).max(ORG_AGENT_TOOL_SERVERS_MAX).optional(),
       workers: OrgAgentWorkersConfig.optional(),
+      runsOn: OrgAgentRunsOn.optional(),
     })
     .strict(),
 );
@@ -578,8 +674,8 @@ export const OrgAgentOverrideChange = /* @__PURE__ */ defineSchema(() =>
 /**
  * What a chat changed from its agent version, keyed by setting (`model`,
  * `reasoningEffort`, `instructions`, `capabilities`, `identity`, `renderer`,
- * `titleInstructions`, `toolServers.<key>`, `mcpServers.<id>`). Null or absent
- * when the chat changed nothing.
+ * `titleInstructions`, `toolServers.<key>`, `mcpServers.<id>`, `runsOn`). Null
+ * or absent when the chat changed nothing.
  */
 export const OrgAgentSessionOverrides = /* @__PURE__ */ defineSchema(() =>
   z.record(z.string(), OrgAgentOverrideChange),
@@ -949,6 +1045,31 @@ export const ORG_AGENT_PERMISSIONS = [
   "agents:manage",
   "tool_credentials:write",
 ] as const;
+
+/**
+ * An organization machine or sandbox environment an agent can run on
+ * (`GET /v1/organizations/:organizationId/agents/compute`). Machines carry
+ * their sandbox id. `worksInManagedWorkspaces`: its reach includes every
+ * workspace the organization's product manages (every shared workspace, or
+ * "All product-managed workspaces"), which an agent's chats need.
+ */
+export const OrgAgentComputeOption = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    sandboxId: z.string().uuid().nullable().optional(),
+    name: z.string(),
+    worksInManagedWorkspaces: z.boolean(),
+  }),
+);
+export type OrgAgentComputeOption = z.infer<typeof OrgAgentComputeOption>;
+
+export const ListOrgAgentComputeResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    machines: z.array(OrgAgentComputeOption),
+    environments: z.array(OrgAgentComputeOption),
+  }),
+);
+export type ListOrgAgentComputeResponse = z.infer<typeof ListOrgAgentComputeResponse>;
 
 /* ----------------------------------------------------- agent file JSON Schema */
 

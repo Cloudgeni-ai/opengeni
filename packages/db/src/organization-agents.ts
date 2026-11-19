@@ -66,6 +66,7 @@ import {
   type Database,
 } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
+import { orgAgentRunsOnProblem } from "./organization-agent-compute";
 import { nestedPostgresSqlState } from "./persistence-errors";
 
 // ---------------------------------------------------------------------------
@@ -425,6 +426,21 @@ export async function getOrgAgentVersion(
 // ---------------------------------------------------------------------------
 // Validation shared by writes
 
+/**
+ * Refuses what a version cannot reference: unknown tool server keys, and a
+ * Runs on machine or sandbox environment that is not this organization's
+ * (Personal and workspace machines included).
+ */
+async function assertDefinitionReferences(
+  tx: Database,
+  accountId: string,
+  definition: OrgAgentDefinition,
+): Promise<void> {
+  await assertToolServersExist(tx, accountId, definition);
+  const problem = await orgAgentRunsOnProblem(tx, accountId, definition.config.runsOn);
+  if (problem) throw new OrgAgentError(422, problem.code, problem.message);
+}
+
 /** Refuses tool server keys this organization does not have (422, `details.missing`). */
 async function assertToolServersExist(
   tx: Database,
@@ -566,7 +582,7 @@ async function insertAgent(
       `An organization keeps at most ${ORG_AGENTS_PER_ORGANIZATION_MAX} agents.`,
     );
   }
-  await assertToolServersExist(tx, input.accountId, definition);
+  await assertDefinitionReferences(tx, input.accountId, definition);
   const workspaceIds = await assertOrganizationWorkspaces(
     tx,
     input.accountId,
@@ -721,7 +737,7 @@ export async function saveOrgAgentDraft(
         created: false,
       };
     }
-    await assertToolServersExist(tx, input.accountId, definition);
+    await assertDefinitionReferences(tx, input.accountId, definition);
     const revision = row.current_revision + 1;
     await insertRevision(tx, {
       accountId: input.accountId,
@@ -938,7 +954,7 @@ export async function applyOrgAgent(
       { forUpdate: true },
     );
     if (!existing) {
-      await assertToolServersExist(tx, input.accountId, definition);
+      await assertDefinitionReferences(tx, input.accountId, definition);
       if (input.expectedVersion !== undefined) throw notFound();
       if (input.dryRun) {
         return {
@@ -997,7 +1013,7 @@ export async function applyOrgAgent(
       throw versionConflict(existing.version);
     }
     const reused = await revisionWithHash(tx, input.accountId, existing.id, configHash);
-    if (reused === null) await assertToolServersExist(tx, input.accountId, definition);
+    if (reused === null) await assertDefinitionReferences(tx, input.accountId, definition);
     const version = reused ?? existing.current_revision + 1;
     const outcome: ApplyOrgAgentResponse["outcome"] = reused === null ? "updated" : "unchanged";
     const needsPublish = input.publish && existing.published_revision !== version;

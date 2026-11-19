@@ -43,6 +43,7 @@ import {
   CreateOrgAgentTestChatResponse,
   CreateOrgToolServerRequest,
   EndUserToolCredentialResponse,
+  ListOrgAgentComputeResponse,
   ListOrgAgentPublishOperationsResponse,
   ListOrgAgentSessionsQuery,
   ListOrgAgentSessionsResponse,
@@ -92,6 +93,7 @@ import {
   allWorkspacePermissions,
   applyOrgAgent,
   archiveOrgAgent,
+  computeReachIncludesManagedWorkspaces,
   ConsoleCursorError,
   countOrgAgentMovableChats,
   createOrgAgent,
@@ -110,6 +112,7 @@ import {
   grantWorkspaceAccess,
   insertWorkspaceMembershipIfAbsent,
   listOrgAgentChatWorkspaces,
+  listOrgAgentCompute,
   listOrgAgentPublishOperations,
   listOrgAgents,
   listOrgAgentSessions,
@@ -539,6 +542,25 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       includeArchived: c.req.query("includeArchived") === "true",
     });
     return c.json(ListOrgAgentsResponse.parse({ agents }));
+  });
+
+  // Runs on: the organization machines and sandbox environments an agent can
+  // name, and whether each works in the workspaces the product manages.
+  app.get(`${base}/compute`, async (c) => {
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
+    const compute = await listOrgAgentCompute(deps.db, caller.organizationId);
+    const option = (entry: (typeof compute.machines)[number]) => ({
+      id: entry.id,
+      sandboxId: entry.sandboxId,
+      name: entry.name,
+      worksInManagedWorkspaces: computeReachIncludesManagedWorkspaces(entry.reach),
+    });
+    return c.json(
+      ListOrgAgentComputeResponse.parse({
+        machines: compute.machines.map(option),
+        environments: compute.environments.map(option),
+      }),
+    );
   });
 
   app.post(base, async (c) => {

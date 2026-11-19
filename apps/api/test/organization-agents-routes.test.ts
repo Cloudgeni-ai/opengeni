@@ -345,6 +345,23 @@ describe("Console agents routes", () => {
     expect(created[1]!.actor_subject_id).toBe(`user:${fixture.userId}`);
   }, 120_000);
 
+  test("Runs on choices: the organization's machines and environments, with agents:read", async () => {
+    if (!fixture) return;
+    const listed = await call("GET", `${org()}/compute`, fixture.keys.agentsRead);
+    expect(listed).toEqual({ status: 200, body: { machines: [], environments: [] } });
+    const refused = await call("GET", `${org()}/compute`, fixture.keys.read);
+    expect([refused.status, refused.body.details?.permission]).toEqual([403, "agents:read"]);
+    // Not an agent id.
+    expect((await call("GET", `${org()}/compute`, fixture.cookie)).status).toBe(200);
+    // A Runs on that names no organization machine is refused on save.
+    const missing = await call("POST", org(), fixture.keys.full, {
+      key: "on-missing-box",
+      name: "On a missing box",
+      config: { runsOn: { kind: "machine", machine: "Missing box" } },
+    });
+    expect([missing.status, missing.body.details?.code]).toEqual([422, "machine_not_found"]);
+  }, 60_000);
+
   test("versions, publish and the owner-only management switch", async () => {
     if (!fixture) return;
     const { keys, cookie } = fixture;

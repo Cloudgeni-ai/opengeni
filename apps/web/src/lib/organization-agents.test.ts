@@ -47,6 +47,9 @@ const definition = OrgAgentDefinition.parse({
   },
 });
 
+const DEFINITION_HASH_BEFORE_RUNS_ON =
+  "sha256:3b192a9580de39f25b85e34be9e21e11cbb1c28140851bb680edc9f257e99779";
+
 function sha256(text: string) {
   return `sha256:${createHash("sha256").update(text).digest("hex")}`;
 }
@@ -74,6 +77,37 @@ describe("Export as YAML", () => {
   test("any change changes the hash", async () => {
     const changed = OrgAgentDefinition.parse({ ...definition, instructions: "Be very brief." });
     expect(await orgAgentConfigHash(changed)).not.toBe(await orgAgentConfigHash(definition));
+  });
+
+  test("Runs on round-trips, and an agent without it keeps its hash", async () => {
+    // The hash this definition had before Runs on existed: omitted stays omitted.
+    expect(await orgAgentConfigHash(definition)).toBe(DEFINITION_HASH_BEFORE_RUNS_ON);
+    for (const runsOn of [
+      { kind: "none" },
+      { kind: "sandbox" },
+      { kind: "sandbox", environment: "Python 3.13" },
+      { kind: "machine", machine: "Build box" },
+    ] as const) {
+      const placed = OrgAgentDefinition.parse({
+        ...definition,
+        config: { ...definition.config, runsOn },
+      });
+      const yaml = orgAgentYaml("support-desk", placed);
+      expect(yaml).toContain("runsOn:");
+      const back = parseOrgAgentYaml(yaml);
+      expect(back.definition.config.runsOn).toEqual(runsOn);
+      expect(await orgAgentConfigHash(back.definition)).toBe(await orgAgentConfigHash(placed));
+      expect(await orgAgentConfigHash(placed)).not.toBe(DEFINITION_HASH_BEFORE_RUNS_ON);
+    }
+    expect(orgAgentYaml("support-desk", definition)).not.toContain("runsOn");
+  });
+
+  test("an Organization machine not picked yet is a change, not an error", () => {
+    const incomplete = {
+      ...definition,
+      config: { ...definition.config, runsOn: { kind: "machine" as const } },
+    };
+    expect(sameDefinition(incomplete, definition)).toBe(false);
   });
 });
 

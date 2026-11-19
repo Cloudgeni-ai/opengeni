@@ -289,6 +289,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       homeWorkspaceId: rig.workspaceId,
       allowedWorkspaceIds: body.allowedWorkspaceIds,
       allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      allowManagedWorkspaces: body.allowManagedWorkspaces,
       subjectId: grant.subjectId,
     });
     return c.json(organizationComputeReachResponse(result, "sandbox environment"));

@@ -482,6 +482,7 @@ const MATRIX: Record<string, RouteCase> = {
     path: (f) => `${agents(f)}/test-workspace`,
   },
   [`GET ${A}`]: { need: "viewer", key: "allowed", path: (f) => agents(f) },
+  [`GET ${A}/compute`]: { need: "viewer", key: "allowed", path: (f) => `${agents(f)}/compute` },
   [`POST ${A}`]: { need: "editor", key: "allowed", path: (f) => agents(f), body: {} },
   [`GET ${A}/by-key/:key`]: {
     need: "viewer",
