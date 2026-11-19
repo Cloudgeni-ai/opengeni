@@ -617,6 +617,7 @@ toolServers:
     newTools: off
 workers:
   shareInstructions: false
+runsOn: { kind: sandbox }
 ```
 
 `key` must match the file name. `instructions` that name an existing `.md`
@@ -679,6 +680,45 @@ server's login comes from, in order:
 
 A `per_user` server never falls back to a shared key. Without a login the
 chat runs without that server and records `session.tool_server.unavailable`.
+
+### Runs on
+
+`runsOn` says where an agent's chats run:
+
+- `{ kind: none }`, **No computer**: tools and API only; the chat is created
+  with `sandboxBackend: "none"`.
+- `{ kind: sandbox, environment? }`, **Cloud sandbox**: each chat gets its own
+  isolated sandbox from the deployment's cloud backend, optionally built from
+  an organization Sandbox Environment (name or id). Refused with 422
+  `runs_on_unavailable` on a deployment without a cloud backend.
+- `{ kind: machine, machine }`, **Organization machine**: every chat runs on
+  one organization Connected Machine (name, machine id or sandbox id), shared
+  by all chats of all end customers.
+
+Omitted `runsOn` keeps today's placement for the workspace (its default
+machine, else a cloud sandbox). Console suggests Cloud sandbox when the
+built-ins that use a computer (Browser or Workspace files) can be on, else No
+computer (`suggestedOrgAgentRunsOnKind`); the suggestion is never applied on
+its own.
+
+The machine or environment must be an organization one whose reach includes
+the workspaces the chats run in: every shared workspace, or **All
+product-managed workspaces** (`allowManagedWorkspaces`, migration 1509), which
+also covers managed workspaces created later. Saving or deploying a version
+refuses a name that matches no organization machine or environment (422
+`machine_not_found` / `environment_not_found`); Personal (Only me) and
+workspace machines are never listed, so naming one is refused too. Reach is
+checked when a chat is created (422 `runs_on_unavailable`), because it can
+change after a version is saved. `GET /v1/organizations/:organizationId/agents/compute`
+lists the organization machines and environments with
+`worksInManagedWorkspaces`.
+
+A create may still pass `sandboxBackend`, `targetSandboxId` or `rigId` for one
+chat; the request has the final say, recorded as the `runsOn` override, and
+the usual machine-access and reach checks apply. A Personal machine is refused
+for an organization agent chat (422 `personal_machine_not_allowed`), also when
+the request names it. Workers a chat starts share its computer unless they ask
+for their own (`sandbox: "new"`).
 
 ### Workers, publish and moves
 

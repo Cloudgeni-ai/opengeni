@@ -13,6 +13,7 @@ import {
   type CreateOrgAgentTestChatRequest,
   type CreateOrgAgentTestChatResponse,
   type CreateOrgToolServerRequest,
+  type ListOrgAgentComputeResponse,
   type ListOrgAgentSessionsResponse,
   type ListOrgAgentPublishOperationsResponse,
   type ListOrgAgentVersionsResponse,
@@ -20,8 +21,10 @@ import {
   type ListOrgToolServersResponse,
   type ListWorkspaceOrgAgentsResponse,
   type OrgAgent,
+  type OrgAgentComputeOption,
   type OrgAgentDefinitionInput,
   type OrgAgentNewToolsPolicy,
+  type OrgAgentRunsOn,
   type OrgAgentSessionOverrides,
   type OrgAgentTestWorkspaceResponse,
   type OrgAgentToolCatalog,
@@ -154,6 +157,15 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
         `${agent(id)}/test-chats`,
         request,
       ),
+    /** Organization machines and Sandbox Environments "Runs on" can pick. */
+    listCompute: (signal?: AbortSignal) =>
+      client.requestJson<ListOrgAgentComputeResponse>(
+        "GET",
+        `${base}/agents/compute`,
+        undefined,
+        {},
+        opts(signal),
+      ),
     listToolServers: (signal?: AbortSignal) =>
       client.requestJson<ListOrgToolServersResponse>(
         "GET",
@@ -263,9 +275,17 @@ export function definitionOfVersion(
   });
 }
 
-/** Whether two definitions behave the same (same canonical JSON, so the same config hash). */
+/**
+ * Whether two definitions behave the same (same canonical JSON, so the same
+ * config hash). A definition being edited may be incomplete for a moment (an
+ * Organization machine not picked yet): that is a change, not an error.
+ */
 export function sameDefinition(left: OrgAgentDefinitionInput, right: OrgAgentDefinitionInput) {
-  return canonicalOrgAgentDefinitionJson(left) === canonicalOrgAgentDefinitionJson(right);
+  try {
+    return canonicalOrgAgentDefinitionJson(left) === canonicalOrgAgentDefinitionJson(right);
+  } catch {
+    return false;
+  }
 }
 
 /** `sha256:` + hex of the canonical JSON, as the server computes the config hash. */
@@ -535,3 +555,52 @@ export function overrideEntries(
 export function hasOverrides(overrides: OrgAgentSessionOverrides | null | undefined): boolean {
   return Boolean(overrides && Object.keys(overrides).length > 0);
 }
+
+/* ---------------------------------------------------------------- runs on */
+
+/** "Runs on" choices; `default` is an omitted `runsOn` (the workspace's usual placement). */
+export type RunsOnChoice = "default" | OrgAgentRunsOn["kind"];
+
+export const RUNS_ON_CHOICES: readonly { value: RunsOnChoice; label: string; description: string }[] =
+  [
+    {
+      value: "default",
+      label: "Workspace default",
+      description: "Chats run where other chats in the workspace do.",
+    },
+    { value: "none", label: "No computer", description: "Tools and API only." },
+    { value: "sandbox", label: "Cloud sandbox", description: "Each chat gets its own sandbox." },
+    {
+      value: "machine",
+      label: "Organization machine",
+      description: "Every chat runs on one machine.",
+    },
+  ];
+
+export function runsOnChoice(runsOn: OrgAgentRunsOn | undefined): RunsOnChoice {
+  return runsOn?.kind ?? "default";
+}
+
+/** The `runsOn` a choice saves; picking a kind keeps nothing from the previous kind. */
+export function runsOnForChoice(choice: RunsOnChoice): OrgAgentRunsOn | undefined {
+  return choice === "default" ? undefined : { kind: choice };
+}
+
+/**
+ * The machine or environment a `runsOn` reference names: by id (a machine
+ * also by its sandbox id), else by name, ignoring case, like the server.
+ */
+export function computeOptionFor(
+  options: readonly OrgAgentComputeOption[] | null | undefined,
+  ref: string | undefined,
+): OrgAgentComputeOption | null {
+  if (!ref || !options) return null;
+  const byId = options.find((option) => option.id === ref || option.sandboxId === ref);
+  if (byId) return byId;
+  const wanted = ref.trim().toLowerCase();
+  const named = options.filter((option) => option.name.trim().toLowerCase() === wanted);
+  return named.length === 1 ? named[0]! : null;
+}
+
+export const COMPUTE_NOT_IN_MANAGED_WORKSPACES =
+  "Not available in product-managed workspaces. Change where it can be used.";

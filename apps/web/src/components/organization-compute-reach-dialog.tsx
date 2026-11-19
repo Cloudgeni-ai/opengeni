@@ -10,7 +10,7 @@ import {
   workspaceReachSummary,
   type WorkspaceReach,
 } from "@opengeni/react/app/components/workspace-reach";
-import { FieldStack } from "@opengeni/react/ui/field";
+import { CheckboxField, FieldStack } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { Notice } from "@opengeni/react/ui/notice";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -21,8 +21,10 @@ import { useOrganizationWorkspaces } from "@/components/models/connect-audience"
    "Available in" for an organization machine or Sandbox Environment: every
    shared workspace of the organization or the ones picked, and members'
    Personal workspaces when switched on. The workspace it was connected from
-   or made in always has it, because that is where it lives. The organization
-   owner or an admin decides this. Chats and schedules in a workspace taken off
+   or made in always has it, because that is where it lives. "All
+   product-managed workspaces" adds every workspace the organization's product
+   manages, including ones it creates later (shown when the server reports the
+   setting). The organization owner or an admin decides this. Chats and schedules in a workspace taken off
    the list stop using it at their next turn, so the dialog says so before
    saving.
    -------------------------------------------------------------------------- */
@@ -41,18 +43,29 @@ export function reachDraft(reach: OrganizationComputeReach): WorkspaceReach {
   };
 }
 
-/** "All workspaces + Personal", "2 workspaces": the row value on the detail page. */
+/**
+ * "All workspaces + Personal", "2 workspaces + Product-managed": the row value
+ * on the detail page.
+ */
 export function organizationComputeReachSummary(reach: OrganizationComputeReach): string {
-  return workspaceReachSummary(reachDraft(reach), {
+  const summary = workspaceReachSummary(reachDraft(reach), {
     owner: "organization",
     personalWorkspaces: "choice",
     alwaysIncluded: [reach.homeWorkspaceId],
   });
+  return reach.allowManagedWorkspaces && reach.allowedWorkspaceIds !== null
+    ? `${summary} + Product-managed`
+    : summary;
 }
 
 /** Whether saving `next` takes it away from somewhere it works now. */
-export function reachNarrows(current: OrganizationComputeReach, next: WorkspaceReach): boolean {
+export function reachNarrows(
+  current: OrganizationComputeReach,
+  next: WorkspaceReach,
+  nextManaged: boolean = current.allowManagedWorkspaces ?? false,
+): boolean {
   if (current.allowPersonalWorkspaces && !next.personalWorkspaces) return true;
+  if (current.allowManagedWorkspaces && !nextManaged && next.workspaceIds !== null) return true;
   if (next.workspaceIds === null) return false;
   if (current.allowedWorkspaceIds === null) return true;
   const kept = new Set([...next.workspaceIds, current.homeWorkspaceId]);
@@ -85,19 +98,24 @@ export function OrganizationComputeReachDialog({
   save: (next: {
     allowedWorkspaceIds: string[] | null;
     allowPersonalWorkspaces: boolean;
+    allowManagedWorkspaces?: boolean;
   }) => Promise<OrganizationComputeReach>;
   onSaved?: ((reach: OrganizationComputeReach) => void) | undefined;
 }) {
   const [draft, setDraft] = useState<WorkspaceReach>(() => reachDraft(reach));
+  // Servers before the setting omit it; the choice then stays hidden.
+  const managedSupported = reach.allowManagedWorkspaces !== undefined;
+  const [managed, setManaged] = useState(reach.allowManagedWorkspaces ?? false);
   const [error, setError] = useState<unknown>(null);
   const organization = useOrganizationWorkspaces(client, organizationId, open);
   useEffect(() => {
     if (open) {
       setDraft(reachDraft(reach));
+      setManaged(reach.allowManagedWorkspaces ?? false);
       setError(null);
     }
   }, [open, reach]);
-  const narrows = reachNarrows(reach, draft);
+  const narrows = reachNarrows(reach, draft, managed);
   const noun = kind === "machine" ? "machine" : "Sandbox Environment";
 
   const submit = async () => {
@@ -109,6 +127,7 @@ export function OrganizationComputeReachDialog({
             ? null
             : draft.workspaceIds.filter((workspaceId) => workspaceId !== reach.homeWorkspaceId),
         allowPersonalWorkspaces: draft.personalWorkspaces,
+        ...(managedSupported ? { allowManagedWorkspaces: managed } : {}),
       });
       toast.success(
         `${name} is available in ${organizationComputeReachSummary(saved).toLowerCase()}`,
@@ -147,6 +166,14 @@ export function OrganizationComputeReachDialog({
           alwaysIncluded={{ [reach.homeWorkspaceId]: HOME_REASON[kind] }}
           personalWorkspaces="choice"
         />
+        {managedSupported && draft.workspaceIds !== null ? (
+          <CheckboxField
+            label="All product-managed workspaces"
+            description="Every workspace your product manages, including new ones."
+            checked={managed}
+            onCheckedChange={setManaged}
+          />
+        ) : null}
         {narrows ? (
           <Notice tone="info">
             Chats and schedules in the workspaces you take away stop using it from their next turn.

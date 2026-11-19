@@ -65,6 +65,7 @@ toolServers:
     tools: { mode: all }
 workers:
   shareInstructions: false
+runsOn: { kind: sandbox, environment: Python 3.13 }
 ```
 
 The first line gives editors that use the YAML language server completion and checks from the [JSON Schema](https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json).
@@ -83,6 +84,18 @@ The first line gives editors that use the YAML language server completion and ch
 | `toolServers[].eager`                                       | Tools loaded before the first model request.                                                             |
 | `toolServers[].newTools`                                    | Tools the server adds later: `off` (default), `on`, or `on_with_approval`.                               |
 | `workers.shareInstructions`                                 | Workers a chat starts get the agent's Instructions too. They always get its tools, approvals and logins. |
+| `runsOn`                                                    | Where chats run; omitted keeps the workspace's usual placement. See below.                               |
+
+### Runs on
+
+| `runsOn`                                  | Chats run                                                                                                                  |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `{ kind: none }`                          | With no computer: tools and API only.                                                                                      |
+| `{ kind: sandbox }`                       | Each in its own cloud sandbox.                                                                                             |
+| `{ kind: sandbox, environment: <name> }`  | Each in its own cloud sandbox built from an organization Sandbox Environment (name or id).                                 |
+| `{ kind: machine, machine: <name> }`      | All on one organization machine (name or id), shared by every end customer's chats. Use it only when that is intended.      |
+
+The machine or Sandbox Environment must be your organization's and available in the workspaces your product manages: set **Available in** to all workspaces or **All product-managed workspaces**. A deploy that names an unknown machine or environment fails with `machine_not_found` or `environment_not_found`; Personal (Only me) machines can't be used. A chat can still pass `sandboxBackend`, `targetSandboxId` or `rigId`; that is recorded as a change by the chat, and a Personal machine is refused (`personal_machine_not_allowed`).
 
 ## Deploy
 

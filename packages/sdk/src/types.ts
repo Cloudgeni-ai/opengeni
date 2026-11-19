@@ -9143,20 +9143,25 @@ export type Rig = {
  * Where an organization machine or rig works: always in the workspace it was
  * connected from or made in (`homeWorkspaceId`), plus every shared workspace
  * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
- * members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on, and every
+ * workspace the organization's product manages (including ones it creates
+ * later) when `allowManagedWorkspaces` is on. Older servers omit that field.
  */
 export type OrganizationComputeReach = {
   homeWorkspaceId: string;
   allowedWorkspaceIds: string[] | null;
   allowPersonalWorkspaces: boolean;
+  allowManagedWorkspaces?: boolean | undefined;
 };
 
 /** PUT .../machines/:enrollmentId/reach and PUT .../rigs/:rigId/reach body:
  * an organization owner or admin changes where an organization machine or rig
- * works. The ids are the organization's shared workspaces. */
+ * works. The ids are the organization's shared workspaces.
+ * `allowManagedWorkspaces` omitted keeps the current setting. */
 export type UpdateOrganizationComputeReachRequest = {
   allowedWorkspaceIds: string[] | null;
   allowPersonalWorkspaces: boolean;
+  allowManagedWorkspaces?: boolean | undefined;
 };
 
 export type OrganizationComputeReachResponse = {
