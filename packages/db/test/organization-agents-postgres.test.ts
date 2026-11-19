@@ -27,6 +27,7 @@ import {
   decodeEndUserToolCredentialMaterial,
   ensureExternalIdentity,
   ensureOrgAgentTestWorkspace,
+  failPendingOrgAgentPublishOperation,
   findOrgAgentTestWorkspace,
   getEndUserToolCredential,
   getOrgAgent,
@@ -282,6 +283,21 @@ describe("organization agents: versions and publishing", () => {
     const operations = await listOrgAgentPublishOperations(app.db, org.accountId, agent.id);
     expect(operations!.map((operation) => operation.status)).toEqual(["pending", "succeeded"]);
 
+    // A move that could not start is marked failed with its reason, once.
+    const failed = await failPendingOrgAgentPublishOperation(app.db, {
+      accountId: org.accountId,
+      operationId: rollback.operation.id,
+      reason: "move_start_failed",
+    });
+    expect(failed).toMatchObject({ status: "failed", failureReason: "move_start_failed" });
+    expect(failed!.finishedAt).not.toBeNull();
+    const again = await failPendingOrgAgentPublishOperation(app.db, {
+      accountId: org.accountId,
+      operationId: rollback.operation.id,
+      reason: "move_unavailable",
+    });
+    expect(again).toMatchObject({ status: "failed", failureReason: "move_start_failed" });
+
     const [rollbackAudit] = await shared.admin<{ detail: Record<string, unknown> }[]>`
       select detail from organization_console_audit_events
       where account_id = ${org.accountId} and action = 'agent.published'
@@ -293,6 +309,24 @@ describe("organization agents: versions and publishing", () => {
       "agent.published",
       "agent.published",
     ]);
+    // A move that already began is left to the move workflow.
+    const running = await publishOrgAgent(app.db, {
+      accountId: org.accountId,
+      agentId: agent.id,
+      actor,
+      version: 2,
+      moveRunningChats: true,
+      expectedVersion: rollback.agent.rowVersion,
+    });
+    await shared.admin`update agent_publish_operations set status = 'running'
+      where id = ${running.operation.id}`;
+    expect(
+      await failPendingOrgAgentPublishOperation(app.db, {
+        accountId: org.accountId,
+        operationId: running.operation.id,
+        reason: "move_start_failed",
+      }),
+    ).toMatchObject({ status: "running", failureReason: null });
   }, 120_000);
 
   test("apply by key: dry run, create, unchanged, update and publish, and 409s", async () => {
@@ -344,6 +378,15 @@ describe("organization agents: versions and publishing", () => {
     const back = await apply("One.", { publish: true });
     expect(back).toMatchObject({ outcome: "unchanged", version: 1, published: true });
     expect(back.operation).toMatchObject({ fromVersion: 2, toVersion: 1 });
+    // The earlier move that never started will not run after this publish.
+    const applyOperations = await listOrgAgentPublishOperations(
+      app.db,
+      org.accountId,
+      created.agent!.id,
+    );
+    expect(
+      applyOperations!.find((operation) => operation.id === updated.operation!.id),
+    ).toMatchObject({ status: "failed", failureReason: "superseded" });
 
     // Code agents are not edited or published from Console.
     const draft = await refusal(

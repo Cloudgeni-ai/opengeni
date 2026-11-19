@@ -741,6 +741,11 @@ version (or an older one, a rollback) changes what new chats run.
 `moveRunningChats` also moves chats on other versions; a moved chat gets the
 new Instructions as a history item at its next turn
 (`sessions.agent_prompt_version` trails `agent_version` until then).
+The publish operation is `pending` until the move runs. When the move cannot
+start, the version stays published and the operation is `failed` with
+`failureReason`: `move_unavailable` (the deployment has no move workflow),
+`move_start_failed` (publish again to retry) or `superseded` (a later publish
+came before it started).
 
 ### Access and rollout
 

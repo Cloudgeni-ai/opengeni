@@ -106,6 +106,7 @@ import {
   ensureExternalIdentity,
   ensureOrgAgentTestWorkspace,
   externalIdentityReadGranted,
+  failPendingOrgAgentPublishOperation,
   getConsoleReviewSettings,
   getEndUserToolCredential,
   getOrgAgent,
@@ -140,6 +141,7 @@ import {
   WorkspaceNotFoundError,
   type Database,
   type OrgAgentActor,
+  type OrgAgentPublishMoveFailure,
 } from "@opengeni/db";
 import { configuredStaticUsageLimits } from "@opengeni/config";
 import type { Context, Hono } from "hono";
@@ -354,25 +356,42 @@ async function toolCatalogFor(
   }
 }
 
-/** Hands a `moveRunningChats` publish to the move workflow; without one it stays pending. */
+/**
+ * Hands a `moveRunningChats` publish to the move workflow. When this
+ * deployment has none, or it cannot be started, the operation is marked
+ * `failed` with `failureReason` (the version stays published; publish again
+ * to retry) instead of staying `pending`. Returns the operation as it is now.
+ */
 async function startMove(
   deps: ApiRouteDeps,
   organizationId: string,
   operation: OrgAgentPublishOperation | null,
-): Promise<void> {
-  if (!operation || operation.status !== "pending" || !deps.orgAgentPublishMoveStarter) return;
-  try {
-    await deps.orgAgentPublishMoveStarter({
-      accountId: organizationId,
-      agentId: operation.agentId,
-      operationId: operation.id,
-    });
-  } catch (error) {
-    deps.observability?.warn("org agent publish move did not start", {
-      operationId: operation.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
+): Promise<OrgAgentPublishOperation | null> {
+  if (!operation || operation.status !== "pending") return operation;
+  let reason: OrgAgentPublishMoveFailure = "move_unavailable";
+  if (deps.orgAgentPublishMoveStarter) {
+    try {
+      await deps.orgAgentPublishMoveStarter({
+        accountId: organizationId,
+        agentId: operation.agentId,
+        operationId: operation.id,
+      });
+      return operation;
+    } catch (error) {
+      reason = "move_start_failed";
+      deps.observability?.warn("org agent publish move did not start", {
+        operationId: operation.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
+  return (
+    (await failPendingOrgAgentPublishOperation(deps.db, {
+      accountId: organizationId,
+      operationId: operation.id,
+      reason,
+    })) ?? operation
+  );
 }
 
 function workspaceLimit(deps: ApiRouteDeps): number | null {
@@ -654,9 +673,9 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         toolCatalog,
       }),
     );
-    await startMove(deps, caller.organizationId, result.operation);
+    const operation = await startMove(deps, caller.organizationId, result.operation);
     return c.json(
-      ApplyOrgAgentResponse.parse(result),
+      ApplyOrgAgentResponse.parse({ ...result, operation }),
       result.outcome === "created" && !dryRun ? 201 : 200,
     );
   });
@@ -750,8 +769,8 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         expectedVersion: request.expectedVersion,
       }),
     );
-    await startMove(deps, caller.organizationId, result.operation);
-    return c.json(PublishOrgAgentResponse.parse(result));
+    const operation = await startMove(deps, caller.organizationId, result.operation);
+    return c.json(PublishOrgAgentResponse.parse({ ...result, operation }));
   });
 
   app.get(`${base}/:agentId/publish-operations`, async (c) => {

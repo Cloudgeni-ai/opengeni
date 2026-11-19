@@ -783,14 +783,15 @@ type OperationRow = {
   status: OrgAgentPublishOperation["status"];
   moved_count: number;
   failed_count: number;
+  failure_reason: string | null;
   created_by_subject_id: string | null;
   created_at: Date | string;
   finished_at: Date | string | null;
 };
 
 const OPERATION_COLUMNS = sql.raw(`id::text as id, agent_id::text as agent_id, from_revision,
-  to_revision, move_running_chats, status, moved_count, failed_count, created_by_subject_id,
-  created_at, finished_at`);
+  to_revision, move_running_chats, status, moved_count, failed_count, failure_reason,
+  created_by_subject_id, created_at, finished_at`);
 
 function mapOperation(row: OperationRow): OrgAgentPublishOperation {
   return {
@@ -802,6 +803,7 @@ function mapOperation(row: OperationRow): OrgAgentPublishOperation {
     status: row.status,
     movedCount: num(row.moved_count),
     failedCount: num(row.failed_count),
+    failureReason: row.failure_reason,
     createdBySubjectId: row.created_by_subject_id,
     createdAt: iso(row.created_at),
     finishedAt: isoOrNull(row.finished_at),
@@ -826,6 +828,13 @@ async function publishLocked(
     );
   }
   await bumpAgent(tx, input.accountId, input.row.id, sql`published_revision = ${input.version}`);
+  // An earlier move that never started (the API stopped before starting it)
+  // will not run now: this publish decides the version. Publishes of one
+  // agent are serialized by its row lock.
+  await tx.execute(sql`update agent_publish_operations
+    set status = 'failed', failure_reason = 'superseded', finished_at = now()
+    where account_id = ${input.accountId}::uuid and agent_id = ${input.row.id}::uuid
+      and status = 'pending'`);
   const [operation] = await rawRows<OperationRow>(
     tx,
     sql`insert into agent_publish_operations (account_id, agent_id, from_revision, to_revision,
@@ -903,19 +912,29 @@ export async function listOrgAgentPublishOperations(
   });
 }
 
-export async function getOrgAgentPublishOperation(
+export type OrgAgentPublishMoveFailure = "move_unavailable" | "move_start_failed";
+
+/**
+ * A `moveRunningChats` operation whose move could not start: marked `failed`
+ * with the reason, unless the move already began. Returns the operation as it
+ * is now (null when it is gone). The version stays published.
+ */
+export async function failPendingOrgAgentPublishOperation(
   db: Database,
-  accountId: string,
-  operationId: string,
+  input: { accountId: string; operationId: string; reason: OrgAgentPublishMoveFailure },
 ): Promise<OrgAgentPublishOperation | null> {
-  const [row] = await withAccountRls(db, accountId, (tx) =>
-    rawRows<OperationRow>(
+  return await withOrgAgentsScope(db, { accountId: input.accountId }, async (tx) => {
+    await tx.execute(sql`update agent_publish_operations
+      set status = 'failed', failure_reason = ${input.reason}, finished_at = now()
+      where account_id = ${input.accountId}::uuid and id = ${input.operationId}::uuid
+        and status = 'pending'`);
+    const [row] = await rawRows<OperationRow>(
       tx,
       sql`select ${OPERATION_COLUMNS} from agent_publish_operations
-        where account_id = ${accountId}::uuid and id = ${operationId}::uuid`,
-    ),
-  );
-  return row ? mapOperation(row) : null;
+        where account_id = ${input.accountId}::uuid and id = ${input.operationId}::uuid`,
+    );
+    return row ? mapOperation(row) : null;
+  });
 }
 
 // ---------------------------------------------------------------------------

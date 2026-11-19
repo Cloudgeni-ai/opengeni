@@ -36,6 +36,9 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
 let settings: Settings | null = null;
+/** The routes' dependencies, to swap the publish move starter per test. */
+let routeDeps: { orgAgentPublishMoveStarter?: ApiRouteDeps["orgAgentPublishMoveStarter"] } | null =
+  null;
 
 type Fixture = {
   userId: string;
@@ -150,6 +153,7 @@ function buildApp(): Hono {
   registerWorkspaceRoutes(hono, deps);
   registerSessionRoutes(hono, deps);
   registerOrganizationAgentRoutes(hono, deps);
+  routeDeps = deps;
   return hono;
 }
 
@@ -711,6 +715,62 @@ describe("Console agents routes", () => {
     });
     expect(fullMove.status).toBe(200);
     expect((await call("DELETE", `${org()}/tool-servers/limited-crm`, keys.full)).status).toBe(204);
+  }, 120_000);
+
+  test("a publish that moves running chats fails clearly when the move cannot start", async () => {
+    if (!fixture || !routeDeps) return;
+    const deps = routeDeps;
+    const { keys } = fixture;
+    const created = await call("POST", org(), keys.full, {
+      key: "mover",
+      name: "Mover",
+      instructions: "One.",
+    });
+    const agentId = created.body.agent.id as string;
+    let rowVersion = created.body.agent.rowVersion as number;
+    const publish = async () => {
+      const reply = await call("POST", `${org()}/${agentId}/publish`, keys.full, {
+        version: 1,
+        moveRunningChats: true,
+        expectedVersion: rowVersion,
+      });
+      expect(reply.status).toBe(200);
+      expect(reply.body.agent.publishedVersion).toBe(1);
+      rowVersion = reply.body.agent.rowVersion;
+      return reply.body.operation as Record<string, unknown>;
+    };
+
+    // No move workflow in this deployment.
+    expect(await publish()).toMatchObject({ status: "failed", failureReason: "move_unavailable" });
+    const started: string[] = [];
+    try {
+      deps.orgAgentPublishMoveStarter = async () => {
+        throw new Error("workflow service unavailable");
+      };
+      expect(await publish()).toMatchObject({
+        status: "failed",
+        failureReason: "move_start_failed",
+      });
+      deps.orgAgentPublishMoveStarter = async (input) => {
+        started.push(input.operationId);
+      };
+      const ok = await publish();
+      expect(ok).toMatchObject({ status: "pending", failureReason: null });
+      expect(started).toEqual([ok.id as string]);
+    } finally {
+      delete deps.orgAgentPublishMoveStarter;
+    }
+    const operations = await call("GET", `${org()}/${agentId}/publish-operations`, keys.agentsRead);
+    expect(
+      operations.body.operations.map((operation: Record<string, unknown>) => [
+        operation.status,
+        operation.failureReason,
+      ]),
+    ).toEqual([
+      ["pending", null],
+      ["failed", "move_start_failed"],
+      ["failed", "move_unavailable"],
+    ]);
   }, 120_000);
 
   test("workspaces list their published organization agents; the test workspace is created once", async () => {

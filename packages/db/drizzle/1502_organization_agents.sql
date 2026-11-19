@@ -202,6 +202,8 @@ CREATE TABLE agent_publish_operations (
   status text NOT NULL DEFAULT 'pending',
   moved_count integer NOT NULL DEFAULT 0,
   failed_count integer NOT NULL DEFAULT 0,
+  -- Why a move never ran: move_unavailable, move_start_failed or superseded.
+  failure_reason text,
   created_by_subject_id text,
   created_at timestamptz NOT NULL DEFAULT now(),
   finished_at timestamptz,
@@ -212,6 +214,7 @@ CREATE TABLE agent_publish_operations (
     AND to_revision > 0
     AND status IN ('pending', 'running', 'succeeded', 'failed')
     AND moved_count >= 0 AND failed_count >= 0
+    AND (failure_reason IS NULL OR char_length(failure_reason) BETWEEN 1 AND 64)
     AND (created_by_subject_id IS NULL OR char_length(created_by_subject_id) BETWEEN 1 AND 1024)
   )
 );
