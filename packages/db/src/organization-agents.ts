@@ -56,6 +56,7 @@ import {
   decodeConsoleSessionCursor,
   encodeConsoleCursor,
   insertConsoleAuditEvent,
+  readConsoleEndUsers,
 } from "./console";
 import {
   rawRows,
@@ -1364,10 +1365,19 @@ type AgentSessionRow = {
   status: string;
   agent_version: number;
   agent_overrides: unknown;
+  owner_subject_id: string | null;
+  created_by_subject_id: string | null;
   created_at: Date | string;
   updated_at: Date | string;
   updated_us: string;
 };
+
+/** The end user a chat belongs to, by the same rule as Console's session list. */
+function agentSessionEndUserSubject(row: AgentSessionRow): string | null {
+  if (row.owner_subject_id?.startsWith("external_user:")) return row.owner_subject_id;
+  if (row.created_by_subject_id?.startsWith("external_user:")) return row.created_by_subject_id;
+  return null;
+}
 
 /**
  * Newest-first reviewable root chats of one agent across the given (managed)
@@ -1395,7 +1405,8 @@ export async function listOrgAgentSessions(
         ...(await rawRows<AgentSessionRow>(
           tx,
           sql`select s.id::text as id, s.workspace_id::text as workspace_id, s.title, s.status,
-              s.agent_version, s.agent_overrides, s.created_at, s.updated_at,
+              s.agent_version, s.agent_overrides, s.owner_subject_id, s.created_by_subject_id,
+              s.created_at, s.updated_at,
               (extract(epoch from s.updated_at) * 1000000)::bigint::text as updated_us
             from sessions s
             where s.account_id = ${input.accountId}::uuid and s.workspace_id = ${workspaceId}::uuid
@@ -1420,17 +1431,36 @@ export async function listOrgAgentSessions(
     });
     const page = candidates.slice(0, input.limit);
     const last = page.at(-1);
+    await scopeWorkspace(tx, null);
+    const endUsers = await readConsoleEndUsers(
+      tx,
+      input.accountId,
+      page.map(agentSessionEndUserSubject).filter((value) => value !== null),
+    );
     return {
-      sessions: page.map((row) => ({
-        id: row.id,
-        workspaceId: row.workspace_id,
-        title: input.includeContent ? row.title : null,
-        status: row.status,
-        agentVersion: row.agent_version,
-        overrides: presentableOverrides(row.agent_overrides, input.includeContent),
-        createdAt: iso(row.created_at),
-        updatedAt: iso(row.updated_at),
-      })),
+      sessions: page.map((row) => {
+        const subject = agentSessionEndUserSubject(row);
+        const label = subject ? endUsers.get(subject) : undefined;
+        return {
+          id: row.id,
+          workspaceId: row.workspace_id,
+          title: input.includeContent ? row.title : null,
+          status: row.status,
+          agentVersion: row.agent_version,
+          overrides: presentableOverrides(row.agent_overrides, input.includeContent),
+          endUser: subject
+            ? {
+                subjectId: subject,
+                externalId: label?.externalId ?? null,
+                source: label?.source ?? null,
+                displayName: label?.displayName ?? null,
+                email: label?.email ?? null,
+              }
+            : null,
+          createdAt: iso(row.created_at),
+          updatedAt: iso(row.updated_at),
+        };
+      }),
       nextCursor:
         candidates.length > input.limit && last
           ? encodeConsoleCursor({ u: last.updated_us, i: last.id })

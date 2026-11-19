@@ -25,6 +25,7 @@ import {
   deleteEndUserToolCredential,
   deleteOrgToolServer,
   decodeEndUserToolCredentialMaterial,
+  ensureExternalIdentity,
   ensureOrgAgentTestWorkspace,
   findOrgAgentTestWorkspace,
   getEndUserToolCredential,
@@ -34,6 +35,7 @@ import {
   listAgentsMissingFromSlack,
   listOrgAgentPublishOperations,
   listOrgAgents,
+  listOrgAgentSessions,
   listOrgAgentsForWorkspace,
   listOrgAgentVersions,
   listOrgToolServers,
@@ -42,6 +44,8 @@ import {
   orgAgentReachableInWorkspace,
   publishOrgAgent,
   putEndUserToolCredential,
+  rememberEndUserLabel,
+  resetRememberedEndUserLabels,
   saveOrgAgentDraft,
   setOrgAgentManagement,
   submitHumanPromptInTransaction,
@@ -545,6 +549,65 @@ describe("organization agents: versions and publishing", () => {
       });
     expect(await count(2)).toBe(2);
     expect(await count(1)).toBe(1);
+  }, 120_000);
+
+  test("an agent's sessions name their end user", async () => {
+    resetRememberedEndUserLabels();
+    const org = await organization();
+    const agent = await createOrgAgent(app.db, {
+      accountId: org.accountId,
+      actor,
+      key: "named",
+      definition: definition("One."),
+    });
+    const identity = await ensureExternalIdentity(app.db, {
+      accountId: org.accountId,
+      source: "default",
+      externalId: "email|66b45b2c",
+    });
+    await rememberEndUserLabel(app.db, {
+      accountId: org.accountId,
+      subjectId: identity.subjectId,
+      source: "default",
+      externalId: "email|66b45b2c",
+      displayName: "Ingrid Nilsen",
+      email: "ingrid@acme.no",
+    });
+    const chat = async (subjectId: string | null) => {
+      const session = await createSession(app.db, {
+        accountId: org.accountId,
+        workspaceId: org.managed,
+        initialMessage: "",
+        resources: [],
+        metadata: {},
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none",
+      });
+      await shared.admin`update sessions set agent_id = ${agent.id}, agent_version = 1,
+        agent_prompt_version = 1, created_by_subject_id = ${subjectId} where id = ${session.id}`;
+      return session.id;
+    };
+    const named = await chat(identity.subjectId);
+    const internal = await chat(null);
+    const listed = await listOrgAgentSessions(app.db, {
+      accountId: org.accountId,
+      agentId: agent.id,
+      workspaceIds: [org.managed],
+      limit: 10,
+      cursor: null,
+      includeContent: false,
+    });
+    const byId = new Map(listed.sessions.map((session) => [session.id, session.endUser]));
+    expect(byId.get(named)).toEqual({
+      subjectId: identity.subjectId,
+      externalId: "email|66b45b2c",
+      source: "default",
+      displayName: "Ingrid Nilsen",
+      email: "ingrid@acme.no",
+    });
+    expect(byId.get(internal)).toBeNull();
   }, 120_000);
 
   test("the Console test workspace is created once and marked console_test", async () => {

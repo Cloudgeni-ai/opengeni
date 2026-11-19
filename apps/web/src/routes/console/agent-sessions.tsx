@@ -15,7 +15,7 @@ import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 
 import { hasOverrides, overrideEntries, type OrgAgentsApi } from "@/lib/organization-agents";
-import { ConsoleLoadError, useConsole, useConsoleQuery } from "./console-shared";
+import { ConsoleLoadError, EndUserName, useConsole, useConsoleQuery } from "./console-shared";
 import { sessionStatus } from "./sessions";
 
 export const CHANGED_BY_CHAT = "Changed by this chat";
@@ -70,6 +70,7 @@ export function AgentSessions({
             label="Sessions"
             nameLabel="Session"
             columns={[
+              { id: "user", label: "End user", width: 176 },
               { id: "version", label: "Version", width: 80 },
               { id: "status", label: "Status", width: 112 },
               { id: "updated", label: "Updated", width: 112 },
@@ -85,6 +86,7 @@ export function AgentSessions({
                   ) : null
                 }
                 cells={{
+                  user: <EndUserName endUser={session.endUser} />,
                   version: `v${session.agentVersion}`,
                   status: sessionStatus(session.status),
                   updated: <RelativeTime date={session.updatedAt} />,
