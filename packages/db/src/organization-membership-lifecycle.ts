@@ -42,7 +42,9 @@ import {
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
+import { applyInvitationConsoleRole, clearConsoleMemberRole } from "./console-roles";
 import type { Database } from "./database";
+import { eraseEndUserToolData } from "./end-user-tool-data";
 import { revokePersonalApiKeysForOwner } from "./personal-api-keys";
 import {
   rawRows,
@@ -546,6 +548,16 @@ export async function removeWorkspaceMember(
         },
       );
     }
+    // A removed end user's stored tool logins for this workspace go with the
+    // membership (Console agents). Their profile stays: it is organization-wide.
+    await eraseEndUserToolData(txDb, {
+      accountId: input.accountId,
+      subjectId: input.targetSubjectId,
+      workspaceId: input.workspaceId,
+      includeProfile: false,
+      actorSubjectId: input.actorSubjectId,
+      reason: "workspace_member_removed",
+    });
     if (organizationAdministrationCapabilityId) {
       await txDb.execute(
         sql`select close_organization_shared_workspace_administration_capability(
@@ -1180,6 +1192,17 @@ export async function acceptOrganizationInvitation(
           ) as result`,
       );
       if (!row) throw new Error("Organization invitation acceptance returned no result");
+      // Their Console role becomes the invitation's (none when it carried
+      // none), in this transaction, once per invitation.
+      const subjectId = (row.result as { membership?: { subjectId?: unknown } } | null)?.membership
+        ?.subjectId;
+      if (typeof subjectId === "string" && subjectId.startsWith("user:")) {
+        await applyInvitationConsoleRole(scopedDb, {
+          accountId: input.organizationId,
+          invitationId: input.invitationId,
+          subjectId,
+        });
+      }
       return row.result;
     }),
   );
@@ -1230,6 +1253,33 @@ export async function updateOrganizationMember(
         await revokePersonalApiKeysForOwner(tx as unknown as Database, {
           accountId: member.organizationId,
           ownerSubjectId: member.subjectId,
+        });
+      // A Console role belongs to a member with their current organization
+      // role: a new role or leaving resets it, in this transaction, so it
+      // can't outlive the change (docs/opengeni-console.md, "Roles").
+      if (
+        (transition.kind === "change_role" || transition.kind === "offboard") &&
+        member.subjectId.startsWith("user:")
+      ) {
+        await clearConsoleMemberRole(tx as unknown as Database, {
+          accountId: member.organizationId,
+          subjectId: member.subjectId,
+          actorSubjectId: input.actorSubjectId,
+          actorLabel: null,
+          reason:
+            transition.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
+        });
+      }
+      // An offboarded end user's stored tool logins (every workspace) and
+      // display profile are erased with them (Console agents).
+      if (transition.kind === "offboard" && member.status === "revoked")
+        await eraseEndUserToolData(tx as unknown as Database, {
+          accountId: member.organizationId,
+          subjectId: member.subjectId,
+          workspaceId: null,
+          includeProfile: true,
+          actorSubjectId: input.actorSubjectId,
+          reason: "organization_member_offboarded",
         });
       return member;
     }),

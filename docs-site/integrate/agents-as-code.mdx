@@ -96,7 +96,7 @@ The first line gives editors that use the YAML language server completion and ch
 | `{ kind: sandbox, environment: <name> }` | Each in its own cloud sandbox built from an organization Sandbox Environment (name or id).                             |
 | `{ kind: machine, machine: <name> }`     | All on one organization machine (name or id), shared by every end customer's chats. Use it only when that is intended. |
 
-The machine or Sandbox Environment must be your organization's and available in the workspaces your product manages: set **Available in** to all workspaces or **All product-managed workspaces**. A deploy that names an unknown machine or environment fails with `machine_not_found` or `environment_not_found`; Personal (Only me) machines can't be used. A chat can still pass `sandboxBackend`, `targetSandboxId` or `rigId`; that is recorded as a change by the chat, and a Personal machine is refused (`personal_machine_not_allowed`).
+The machine or Sandbox Environment must be your organization's and available in the workspaces your product manages: set **Available in** to all workspaces or **All product-managed workspaces**. A deploy that names an unknown machine or environment fails with `machine_not_found` or `environment_not_found`; Personal (Only me) machines can't be used. A chat can still pass `sandboxBackend`, `targetSandboxId` or `rigId`; that is recorded as a change by the chat. A Personal machine never runs these chats, whether a request, a default or a worker's parent chat puts it there (`personal_machine_not_allowed`). A deployed version keeps the machine or environment by id, so renaming it or adding another with the same name doesn't move the agent.
 
 ## Deploy
 

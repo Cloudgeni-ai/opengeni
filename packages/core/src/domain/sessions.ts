@@ -8,7 +8,11 @@ import type {
 } from "@opengeni/db";
 import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
 import { sessionAgentFieldNamesOrgAgent } from "@opengeni/contracts";
-import { prepareOrgAgentSessionCreate, type PreparedOrgAgentSessionCreate } from "./org-agents";
+import {
+  prepareOrgAgentSessionCreate,
+  refuseOrgAgentChatMachine,
+  type PreparedOrgAgentSessionCreate,
+} from "./org-agents";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
@@ -3222,6 +3226,8 @@ async function createSessionForRequestInFileScope(
   // default ("Your default machine") places the chats they start themselves
   // ahead of the workspace default; automations and agent-created chats follow
   // the workspace default, and an unusable personal choice falls back to it.
+  // An organization agent chat never takes a person's own default: it can be
+  // their Personal (Only me) machine.
   if (
     !parentSession &&
     !payload.targetSandboxId &&
@@ -3229,7 +3235,10 @@ async function createSessionForRequestInFileScope(
     (payload.sandbox === undefined || payload.sandbox === "new")
   ) {
     const memberDefault =
-      !retainedKeyedShellExecution && !creationInitiator.actor && replayManagedHumanSubjectId
+      !retainedKeyedShellExecution &&
+      !creationInitiator.actor &&
+      !orgAgent &&
+      replayManagedHumanSubjectId
         ? await resolveMemberExecutionDefault(db, unresolvedDeps.settings, {
             accountId: grant.accountId,
             workspaceId,
@@ -4293,6 +4302,20 @@ async function createSessionForRequestInFileScope(
         workingDir: payload.workingDir ?? null,
       }
     : inheritedActiveTarget;
+  // A Personal (Only me) machine never runs an organization agent chat, named
+  // on create or inherited by a worker, wherever the machine came from: the
+  // request, a default, or the parent's box a worker joins.
+  if (effectiveSeedTarget && (orgAgent || parentSession?.orgAgent)) {
+    await refuseOrgAgentChatMachine(
+      db,
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: personalResourceSubjectId ?? grant.subjectId ?? "",
+      },
+      effectiveSeedTarget.sandboxId,
+    );
+  }
   if (
     effectiveSandboxBackend === "selfhosted" &&
     effectiveSeedTarget === null &&

@@ -391,6 +391,10 @@ export function auditActionText(action: ConsoleAuditAction): string {
       return "Removed an end user's tool login";
     case "member.console_role_changed":
       return "Changed a member's Console role";
+    case "member.console_test_access_granted":
+      return "Got test chat access";
+    case "member.console_test_access_removed":
+      return "Lost test chat access";
   }
 }
 

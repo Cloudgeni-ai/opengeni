@@ -949,3 +949,87 @@ test("keyed permission updates widen, narrow, and replay without teardown", asyn
     }),
   ).rejects.toMatchObject({ status: 404 });
 }, 180_000);
+
+test("removing or offboarding an end user erases their Console agent tool logins and profile", async () => {
+  const f = await fixture();
+  await f.add();
+  const other = await createWorkspace(db.db, { accountId: f.accountId, name: "Other customer" });
+  await shared.admin`insert into organization_managed_workspaces (account_id, workspace_id, source)
+    values (${f.accountId}, ${f.workspace.id}, 'api_key'), (${f.accountId}, ${other.id}, 'api_key')
+    on conflict (workspace_id) do nothing`;
+  const [server] = await shared.admin<{ id: string }[]>`
+    insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
+    values (${f.accountId}, 'crm', 'CRM', 'https://crm.example.com/mcp', 'per_user')
+    returning id::text as id`;
+  const someoneElse = `external_user:${crypto.randomUUID()}`;
+  for (const [workspaceId, subjectId] of [
+    [f.workspace.id, f.identity.subjectId],
+    [other.id, f.identity.subjectId],
+    [f.workspace.id, someoneElse],
+  ] as const) {
+    await shared.admin`insert into end_user_tool_credentials (account_id, workspace_id,
+        end_user_subject_id, tool_server_id, kind, material_encrypted)
+      values (${f.accountId}, ${workspaceId}, ${subjectId}, ${server!.id}, 'headers', 'sealed')`;
+  }
+  await shared.admin`insert into organization_end_user_profiles (account_id, subject_id, display_name, email)
+    values (${f.accountId}, ${f.identity.subjectId}, 'Ingrid', 'ingrid@example.com')`;
+  const logins = async () =>
+    (
+      await shared.admin<{ workspace_id: string; subject: string }[]>`
+        select workspace_id::text, end_user_subject_id as subject from end_user_tool_credentials
+        where account_id = ${f.accountId}`
+    )
+      .map((row) => `${row.workspace_id === other.id ? "other" : "first"}:${row.subject}`)
+      .sort();
+  const profiles = async () =>
+    (
+      await shared.admin<{ count: number }[]>`
+        select count(*)::int as count from organization_end_user_profiles
+        where account_id = ${f.accountId}`
+    )[0]!.count;
+
+  // Leaving one workspace takes that workspace's logins; the profile stays.
+  await f.service.removeWorkspaceMember(f.workspace.id, f.identity.subjectId);
+  expect(await logins()).toEqual([`first:${someoneElse}`, `other:${f.identity.subjectId}`].sort());
+  expect(await profiles()).toBe(1);
+
+  // Offboarding takes the logins everywhere and the profile.
+  const { membershipAuthorizationRevision } = (await f.service.lookupExternalIdentity(
+    f.accountId,
+    f.reference,
+  )) as { membershipAuthorizationRevision: number };
+  await f.service.updateExternalIdentityMembership(
+    f.accountId,
+    f.identity.organizationMembershipId,
+    {
+      kind: "offboard",
+      expectedAuthorizationRevision: membershipAuthorizationRevision,
+      operationId: crypto.randomUUID(),
+    },
+  );
+  expect(await logins()).toEqual([`first:${someoneElse}`]);
+  expect(await profiles()).toBe(0);
+  const audits = await shared.admin<{ workspace_id: string | null; detail: any }[]>`
+    select workspace_id::text, detail from organization_console_audit_events
+    where account_id = ${f.accountId} and action = 'tool_credential.deleted' order by created_at`;
+  expect(audits.map((row) => [row.workspace_id, row.detail])).toEqual([
+    [
+      f.workspace.id,
+      {
+        endUserSubjectId: f.identity.subjectId,
+        reason: "workspace_member_removed",
+        removedLogins: 1,
+        profileRemoved: false,
+      },
+    ],
+    [
+      null,
+      {
+        endUserSubjectId: f.identity.subjectId,
+        reason: "organization_member_offboarded",
+        removedLogins: 1,
+        profileRemoved: true,
+      },
+    ],
+  ]);
+}, 180_000);

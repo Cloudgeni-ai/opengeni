@@ -55,26 +55,29 @@ export const END_USER_EMAIL_MAX = 320;
  * Console shows beside the product's own id. Display only, never authority:
  * the identity is `externalId` and `source` alone. Details are stored when
  * sent (the latest wins) and an omitted one keeps its stored value. They are
- * never rejected: {@link normalizeEndUserProfile} trims and bounds them.
+ * never rejected: any value is accepted here, and
+ * {@link normalizeEndUserProfile} trims and bounds text and ignores anything
+ * else (`null`, numbers, objects). The other fields stay strict.
  */
 export const ExternalIdentityReferenceWithProfile = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       externalId,
       source: source.default("default"),
-      /** Name shown in Console, for example "Ada Lovelace". */
-      displayName: z.string().optional(),
-      /** Email shown in Console. Not verified; stored as given. */
-      email: z.string().optional(),
+      /** Name shown in Console, for example "Ada Lovelace". Non-text values are ignored. */
+      displayName: z.unknown().optional(),
+      /** Email shown in Console. Not verified; stored as given. Non-text values are ignored. */
+      email: z.unknown().optional(),
     })
     .strict(),
 );
 export type ExternalIdentityReferenceWithProfile = z.infer<
   typeof ExternalIdentityReferenceWithProfile
 >;
-export type ExternalIdentityReferenceWithProfileInput = z.input<
-  typeof ExternalIdentityReferenceWithProfile
->;
+export type ExternalIdentityReferenceWithProfileInput = Omit<
+  z.input<typeof ExternalIdentityReferenceWithProfile>,
+  "displayName" | "email"
+> & { displayName?: string | null; email?: string | null };
 
 /** Display details for an end user; each field present only when usable. */
 export type EndUserProfile = { displayName?: string; email?: string };

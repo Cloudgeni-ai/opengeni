@@ -341,6 +341,25 @@ test("end-user display details: the latest wins, omitted fields keep, and Consol
     displayName: "Ada King",
     email: "ada@analytical.engine",
   });
+  // Another API replica stores a different name; sending the same name again
+  // from this process wins again (nothing here remembers what it last wrote).
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: ada,
+    source: "default",
+    externalId: "auth0|ada",
+    displayName: "Ada King",
+  });
+  await shared.admin`update organization_end_user_profiles set display_name = 'Other replica'
+    where account_id = ${accountId} and subject_id = ${ada}`;
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: ada,
+    source: "default",
+    externalId: "auth0|ada",
+    displayName: "Ada King",
+  });
+  expect(await read(ada)).toMatchObject({ displayName: "Ada King" });
   await rememberEndUserLabel(client.db, {
     accountId,
     subjectId: grace,

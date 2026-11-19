@@ -20,6 +20,7 @@ import {
   withoutSessionRlsActor,
   type Database,
 } from "./database";
+import { parseOrgAgentRunsOnTarget, type OrgAgentRunsOnTarget } from "./organization-agent-compute";
 
 /** The transaction setting that makes organization agents visible (migration 1502). */
 export const ORG_AGENTS_VISIBILITY_SETTING = "opengeni.org_agents_v1";
@@ -99,6 +100,12 @@ export type OrgAgentRuntimeVersion = {
   toolCatalog: unknown;
   configHash: string | null;
   source: string | null;
+  /**
+   * The machine or sandbox environment `runsOn` named when the version was
+   * saved (`agent_revisions.runs_on_target`), by id; null for a version saved
+   * before Runs on pinned ids or without a machine/environment.
+   */
+  runsOnTarget: OrgAgentRunsOnTarget | null;
 };
 
 /** Where an organization agent can run: the workspace's managed marker and access row. */
@@ -150,10 +157,11 @@ type VersionRow = {
   tool_catalog: unknown;
   config_hash: string | null;
   source: string | null;
+  runs_on_target: unknown;
 };
 
 const VERSION_COLUMNS = sql`r.agent_id::text as agent_id, r.revision, r.name, r.description,
-  r.instructions, r.config, r.tool_catalog, r.config_hash, r.source`;
+  r.instructions, r.config, r.tool_catalog, r.config_hash, r.source, r.runs_on_target`;
 
 function mapVersion(row: VersionRow): OrgAgentRuntimeVersion {
   return {
@@ -166,6 +174,7 @@ function mapVersion(row: VersionRow): OrgAgentRuntimeVersion {
     toolCatalog: row.tool_catalog,
     configHash: row.config_hash,
     source: row.source,
+    runsOnTarget: parseOrgAgentRunsOnTarget(row.runs_on_target),
   };
 }
 
@@ -352,6 +361,8 @@ export async function saveInlineOrgAgentVersion(
     definition: { name: string; description: string; instructions: string; config: unknown };
     toolCatalog: unknown;
     configHash: string;
+    /** The ids `runsOn` resolved to (`resolveOrgAgentRunsOnInAccount`). */
+    runsOnTarget?: OrgAgentRunsOnTarget | null;
     subjectId: string | null;
     /** Shown in Console's audit log beside the subject. */
     actorLabel?: string | null;
@@ -466,6 +477,7 @@ async function insertInlineVersion(
     definition: { name: string; description: string; instructions: string; config: unknown };
     toolCatalog: unknown;
     configHash: string;
+    runsOnTarget?: OrgAgentRunsOnTarget | null;
     subjectId: string | null;
   },
   agentId: string,
@@ -475,13 +487,14 @@ async function insertInlineVersion(
     tx,
     sql`insert into agent_revisions as r (agent_id, account_id, workspace_id, revision, name,
         description, instructions, first_message, config, tool_catalog, source, config_hash,
-        created_by_subject_id)
+        created_by_subject_id, runs_on_target)
       values (${agentId}::uuid, ${input.accountId}::uuid, null, ${revision}::integer,
         ${input.definition.name}, ${input.definition.description},
         ${input.definition.instructions}, '',
         ${JSON.stringify(input.definition.config)}::jsonb,
         ${JSON.stringify(input.toolCatalog ?? {})}::jsonb, 'inline', ${input.configHash},
-        ${input.subjectId})
+        ${input.subjectId},
+        ${input.runsOnTarget ? JSON.stringify(input.runsOnTarget) : null}::jsonb)
       returning ${VERSION_COLUMNS}`,
   );
   if (!row) throw new Error("Organization agent version insert returned nothing");

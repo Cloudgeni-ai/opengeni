@@ -80,6 +80,12 @@ export const ORG_AGENT_ERROR_CODES = [
   "workspace_not_managed",
   /** Only an organization owner can change who manages an agent. */
   "agent_management_requires_owner",
+  /**
+   * The change reaches every workspace of the organization (tool servers, or
+   * moving running chats to a published version): it needs an organization
+   * key for all workspaces, not one limited to selected workspaces.
+   */
+  "organization_key_workspace_limited",
   /** A create names both `agentId` (a workspace agent) and an organization agent. */
   "agent_ref_conflict",
   /**
@@ -611,6 +617,14 @@ export const OrgAgentPublishOperation = /* @__PURE__ */ defineSchema(() =>
     createdBySubjectId: z.string().nullable(),
     createdAt: z.string(),
     finishedAt: z.string().nullable(),
+    /**
+     * Why a `moveRunningChats` operation is `failed` without moving anything:
+     * `move_unavailable` (this deployment cannot move chats),
+     * `move_start_failed` (the move could not be started; publish again to
+     * retry) or `superseded` (a later publish came first). The version is
+     * published either way; only running chats stayed where they were.
+     */
+    failureReason: z.string().nullable().optional(),
   }),
 );
 export type OrgAgentPublishOperation = z.infer<typeof OrgAgentPublishOperation>;
@@ -1034,21 +1048,11 @@ export const OrgAgentOverridesMode = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrgAgentOverridesMode = z.infer<typeof OrgAgentOverridesMode>;
 
-/** Client config feature flag (`/v1/client-config`). */
-export const ORG_AGENTS_CLIENT_FEATURE = "orgAgents" as const;
-
-/** Warning a chat records when a tool server is attached without a login. */
-export const ORG_TOOL_SERVER_UNAVAILABLE_EVENT = "session.tool_server.unavailable" as const;
+/** Why a chat recorded `session.tool_server.unavailable` for a tool server. */
 export const OrgToolServerUnavailableReason = /* @__PURE__ */ defineSchema(() =>
   z.enum(["missing_credentials", "credentials_expired"]),
 );
 export type OrgToolServerUnavailableReason = z.infer<typeof OrgToolServerUnavailableReason>;
-
-export const ORG_AGENT_PERMISSIONS = [
-  "agents:read",
-  "agents:manage",
-  "tool_credentials:write",
-] as const;
 
 /**
  * An organization machine or sandbox environment an agent can run on

@@ -7,128 +7,14 @@ import {
   ApplyOrgAgentRequest,
   type ApplyOrgAgentResponse,
   canonicalOrgAgentDefinitionJson,
-  OrgAgentDefinition,
-  type OrgAgentResponse,
 } from "@opengeni/contracts/organization-agents";
 import { loadAgentDirectory, loadAgentFile } from "../src/agent-files";
+import { decodeError } from "../src/api";
 import { CLI_EXIT, runCli } from "../src/index";
+import { FAKE_API_ROUTES, fakeApi, ORG_AGENTS_BASE } from "./fake-api";
 
 const fixtures = join(import.meta.dir, "fixtures");
 const ORG = "1f0e2d3c-4b5a-4968-8776-655443322110";
-
-type Recorded = { method: string; url: string; headers: Record<string, string>; body: unknown };
-
-/** An in-memory `PUT .../agents/by-key/:key/apply` and `GET .../agents/:key`. */
-function fakeApi(options: { managedInConsole?: string[] } = {}) {
-  const requests: Recorded[] = [];
-  const agents = new Map<
-    string,
-    { versions: { hash: string; definition: unknown }[]; published: number | null }
-  >();
-  const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
-    const url = new URL(input);
-    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({
-      method: init?.method ?? "GET",
-      url: input,
-      headers: Object.fromEntries(new Headers(init?.headers).entries()),
-      body,
-    });
-    const apply = url.pathname.match(
-      /^\/v1\/organizations\/([^/]+)\/agents\/by-key\/([^/]+)\/apply$/u,
-    );
-    if (apply && init?.method === "PUT") {
-      const key = decodeURIComponent(apply[2]!);
-      if (options.managedInConsole?.includes(key)) {
-        return Response.json(
-          {
-            error: {
-              code: "agent_managed_in_console",
-              message: "This agent is managed in Console.",
-            },
-          },
-          { status: 409 },
-        );
-      }
-      const request = ApplyOrgAgentRequest.parse(body);
-      const {
-        publish,
-        moveRunningChats: _move,
-        dryRun,
-        expectedVersion: _expected,
-        ...definition
-      } = request;
-      const hash = `sha256:${createHash("sha256").update(canonicalOrgAgentDefinitionJson(definition)).digest("hex")}`;
-      const existing = agents.get(key);
-      const same = existing?.versions.findIndex((version) => version.hash === hash) ?? -1;
-      const outcome = !existing ? "created" : same >= 0 ? "unchanged" : "updated";
-      let version: number | null = same >= 0 ? same + 1 : (existing?.versions.length ?? 0) + 1;
-      if (!dryRun) {
-        const record = existing ?? { versions: [], published: null };
-        if (same < 0) record.versions.push({ hash, definition });
-        if (publish) record.published = version;
-        agents.set(key, record);
-      } else if (outcome !== "unchanged") {
-        version = null;
-      }
-      const response: ApplyOrgAgentResponse = {
-        outcome,
-        dryRun,
-        configHash: hash,
-        version,
-        published: dryRun ? false : agents.get(key)?.published === version,
-        agent: null,
-        operation: null,
-      };
-      return Response.json(response);
-    }
-    const get = url.pathname.match(/^\/v1\/organizations\/([^/]+)\/agents\/([^/]+)$/u);
-    if (get) {
-      const key = decodeURIComponent(get[2]!);
-      const record = agents.get(key);
-      if (!record)
-        return Response.json(
-          { error: { code: "agent_not_found", message: "Not found." } },
-          { status: 404 },
-        );
-      const latest = record.versions.length;
-      const versionOf = (number: number) => {
-        const definition = OrgAgentDefinition.parse(record.versions[number - 1]!.definition);
-        return {
-          version: number,
-          ...definition,
-          toolCatalog: null,
-          source: "deploy" as const,
-          configHash: record.versions[number - 1]!.hash,
-          createdBySubjectId: null,
-          createdAt: "2026-11-19T10:00:00.000Z",
-          publishedAt: record.published === number ? "2026-11-19T10:00:00.000Z" : null,
-        };
-      };
-      const response: OrgAgentResponse = {
-        agent: {
-          id: "5d3c2b1a-0f9e-4d8c-8b7a-6f5e4d3c2b1a",
-          key,
-          name: "x",
-          description: "",
-          managedBy: "code",
-          publishedVersion: record.published,
-          latestVersion: latest,
-          rowVersion: 1,
-          archivedAt: null,
-          createdAt: "2026-11-19T10:00:00.000Z",
-          updatedAt: "2026-11-19T10:00:00.000Z",
-          published: record.published ? versionOf(record.published) : null,
-          draft: record.published === latest ? null : versionOf(latest),
-          workspaceIds: [],
-        },
-      };
-      return Response.json(response);
-    }
-    return Response.json({ error: { code: "not_found", message: "No route." } }, { status: 404 });
-  };
-  return { fetch, requests, agents };
-}
 
 async function cli(argv: string[], api: ReturnType<typeof fakeApi>, cwd = fixtures) {
   let stdout = "";
@@ -279,6 +165,16 @@ describe("opengeni agents deploy", () => {
     expect(result.stdout).toContain("support\tfailed\t'support' is managed in Console");
     expect(result.stdout).toContain("triage\tcreated");
     expect(result.stderr).toContain("1 of 2 agents failed.");
+
+    // --json reports the specific code from the envelope's details, not `conflict`.
+    const json = await cli(["agents", "deploy", "agents", "--json"], api);
+    expect(json.exitCode).toBe(CLI_EXIT.failed);
+    const parsed = JSON.parse(json.stdout) as {
+      agents: { key: string; ok?: boolean; code?: string; status?: number; error?: string }[];
+    };
+    const support = parsed.agents.find((agent) => agent.key === "support");
+    expect(support).toMatchObject({ code: "agent_managed_in_console", status: 409 });
+    expect(support?.error).toContain("is managed in Console");
   });
 
   test("invalid files are all reported and nothing is sent", async () => {
@@ -349,6 +245,72 @@ describe("opengeni agents export", () => {
     const missing = await cli(["agents", "export", "nobody"], api);
     expect(missing.exitCode).toBe(1);
     expect(missing.stderr).toContain("agent 'nobody' was not found");
+  });
+
+  test("reads the agent by key from GET .../agents/by-key/<key>", async () => {
+    const api = fakeApi();
+    await cli(["agents", "deploy", "agents", "--publish"], api);
+    const before = api.requests.length;
+    const exported = await cli(["agents", "export", "support"], api);
+    expect(exported.exitCode).toBe(0);
+    expect(api.requests.slice(before).map((request) => `${request.method} ${request.url}`)).toEqual(
+      [`GET https://opengeni.test/v1/organizations/${ORG}/agents/by-key/support`],
+    );
+
+    // The id route refuses a key, as the API does; the CLI must never use it for one.
+    const byId = await api.fetch(`https://opengeni.test/v1/organizations/${ORG}/agents/support`);
+    expect(byId.status).toBe(422);
+  });
+});
+
+describe("the fake API matches the real one", () => {
+  test("every route the fake serves is registered by the API", () => {
+    const source = readFileSync(
+      join(
+        import.meta.dir,
+        "..",
+        "..",
+        "..",
+        "apps",
+        "api",
+        "src",
+        "routes",
+        "organization-agents.ts",
+      ),
+      "utf8",
+    );
+    expect(source).toContain(`const base = "${ORG_AGENTS_BASE}";`);
+    for (const route of FAKE_API_ROUTES) {
+      expect(source).toContain(`app.${route.method.toLowerCase()}(\`\${base}${route.suffix}\``);
+    }
+  });
+
+  test("errors are read from the real envelope, preferring details.code", () => {
+    const real = decodeError(
+      409,
+      JSON.stringify({
+        error: {
+          status: 409,
+          code: "conflict",
+          message: "This agent is managed in Console.",
+          retryable: false,
+          requestId: "req_1",
+          details: { code: "agent_managed_in_console" },
+        },
+      }),
+    );
+    expect([real.code, real.envelopeCode, real.message]).toEqual([
+      "agent_managed_in_console",
+      "conflict",
+      "This agent is managed in Console.",
+    ]);
+    const withoutDetails = decodeError(
+      404,
+      JSON.stringify({ error: { code: "not_found", message: "x" } }),
+    );
+    expect([withoutDetails.code, withoutDetails.envelopeCode]).toEqual(["not_found", "not_found"]);
+    expect(decodeError(502, "Bad gateway").code).toBeUndefined();
+    expect(decodeError(502, "Bad gateway").message).toBe("Bad gateway");
   });
 });
 

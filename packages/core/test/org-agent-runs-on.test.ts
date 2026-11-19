@@ -10,6 +10,7 @@ import type { OrgComputeEntry } from "@opengeni/db";
 
 import {
   applyOrgAgentRunsOn,
+  assertOrgAgentChatMachine,
   OrgAgentRunsOnError,
   type OrgAgentRunsOnDeps,
 } from "../src/domain/org-agent-runs-on";
@@ -64,7 +65,10 @@ const grant = { accountId: ACCOUNT, subjectId: "external_user:kontali:42" };
 async function place(
   runsOn: OrgAgentRunsOn | undefined,
   payload: Record<string, unknown> = {},
-  options: Parameters<typeof deps>[0] & { metadata?: Record<string, unknown> } = {},
+  options: Parameters<typeof deps>[0] & {
+    metadata?: Record<string, unknown>;
+    target?: { machineId?: string; environmentId?: string };
+  } = {},
 ) {
   return await applyOrgAgentRunsOn({
     deps: deps(options),
@@ -72,6 +76,7 @@ async function place(
     workspaceId: WORKSPACE,
     payload: { message: "hi", ...payload },
     runsOn,
+    ...(options.target ? { target: options.target } : {}),
   });
 }
 
@@ -193,6 +198,70 @@ describe("Runs on at create", () => {
     );
     expect(placed.payload).toEqual({ message: "hi" });
     expect(placed.overrides).toEqual({});
+  });
+
+  test("the id saved with the version wins over the written name", async () => {
+    // "Build box" was renamed to "Other box"'s name, or a second "Build box"
+    // appeared: the saved id still picks the machine the version was saved with.
+    const placed = await place(
+      { kind: "machine", machine: "Build box" },
+      {},
+      { target: { machineId: OTHER_BOX.id } },
+    );
+    expect(placed.payload["targetSandboxId"]).toBe(OTHER_BOX.sandboxId);
+    const rig = await place(
+      { kind: "sandbox", environment: "Old name" },
+      {},
+      { target: { environmentId: PYTHON.id } },
+    );
+    expect(rig.payload["rigId"]).toBe(PYTHON.id);
+  });
+
+  test("a saved id that was removed falls back to the written name", async () => {
+    const gone = "12121212-1212-4212-8212-121212121212";
+    const placed = await place(
+      { kind: "machine", machine: "Build box" },
+      {},
+      { target: { machineId: gone } },
+    );
+    expect(placed.payload["targetSandboxId"]).toBe(BUILD_BOX.sandboxId);
+    expect(
+      await refusal(
+        place({ kind: "machine", machine: "Gone box" }, {}, { target: { machineId: gone } }),
+      ),
+    ).toBe("machine_not_found");
+    expect(
+      await refusal(
+        place(
+          { kind: "sandbox", environment: "Gone environment" },
+          {},
+          { target: { environmentId: gone } },
+        ),
+      ),
+    ).toBe("environment_not_found");
+  });
+});
+
+describe("where an organization agent chat finally lands", () => {
+  const access = { accountId: ACCOUNT, workspaceId: WORKSPACE, subjectId: "user:1" };
+  const check = (scope: string | null) =>
+    assertOrgAgentChatMachine(
+      { db: {} as never, sandboxScope: async () => scope },
+      access,
+      BUILD_BOX.sandboxId!,
+    );
+
+  test("organization and workspace machines pass", async () => {
+    await check("organization");
+    await check("workspace");
+  });
+
+  test("a Personal machine is refused", async () => {
+    expect(await refusal(check("user"))).toBe("personal_machine_not_allowed");
+  });
+
+  test("a machine the caller can't read is refused", async () => {
+    expect(await refusal(check(null))).toBe("runs_on_unavailable");
   });
 });
 

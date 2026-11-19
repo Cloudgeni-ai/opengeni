@@ -184,12 +184,32 @@ for specific workspaces or edit a code-managed one. Refusals are `403` with
 An owner or admin sets a member's role on Console's Members page, or chooses
 one when inviting (`consoleRole` on `POST /v1/organizations/:id/invitations`,
 `none`, `viewer` or `editor`; refused for owner and admin invitations); a
-Console-only invitee gets no workspace access. The invitation's role becomes
-the member's when they accept. Changing a member's organization role or
-offboarding them resets their Console role to none. An Editor who runs test
-chats becomes a member of the organization's Console test workspace; that
-membership is removed when they stop being Editor. The app's People page
-shows "Console: Viewer" or "Console: Editor" next to such members.
+Console-only invitee gets no workspace access. Only a pending invitation to
+join as a member takes a role. Accepting an invitation sets the member's
+Console role to the invitation's, or to none when it carried none, in the
+acceptance's transaction (once: a replayed acceptance never overwrites a
+later change). Changing a member's organization role or offboarding them
+resets their Console role to none in the same transaction. Every role write
+for a person takes a per-person lock and checks they are still a member under
+it, so a concurrent offboarding is never overtaken.
+
+A person who runs test chats (an Editor, owner or admin) becomes a member of
+the organization's Console test workspace with only `workspace:read`,
+`sessions:create`, `sessions:read` and `sessions:control`: never
+`workspace:admin`, members, API keys, secrets or connections, so never
+`agents:manage`, and nothing they could create there outlives them. Every
+membership there is Console-granted (the workspace exists only for test
+chats); a new or narrowed one is audited as
+`member.console_test_access_granted`. It is removed, with a
+`member.console_test_access_removed` row in the same transaction, whenever
+their Console access drops below Editor: a Console role set below Editor, an
+owner or admin made a member, or offboarding, whatever role was stored. If
+the removal fails the request answers a retryable `503`
+(`console_access_cleanup_failed`) and repeating it (the same `operationId`
+for a member change) finishes it. Any chat started in the test workspace also
+needs Editor access (or an organization key) at that moment, so a membership
+left behind starts nothing. The app's People page shows "Console: Viewer" or
+"Console: Editor" next to such members.
 
 Roles are stored in `organization_console_roles` (migration 1508, one row
 per member or pending invitation, FORCE RLS on the account; the runtime may
@@ -206,8 +226,8 @@ Every session detail open writes `session.transcript_viewed` (full) or
 before the response is returned; a transcript events read writes
 `session.transcript_viewed` too, unless the same reader already has one for that
 session from the last ten minutes, with the reader, workspace, session and end
-user. Review level changes, workspace kind changes and Console role changes
-are also logged. The
+user. Review level changes, workspace kind changes, Console role changes and
+Console test workspace access are also logged. The
 runtime role may only insert and read the log. Owners and admins read it in
 Console Settings.
 
@@ -235,7 +255,9 @@ keeps its stored value. They are never rejected: names are trimmed and cut to
 256 characters; an email is stored as given (trimmed), unless it has spaces or
 is longer than 320 characters, which drops it. They are not part of the
 identity: the same `externalId` and `source` are the same user whatever name
-is sent.
+is sent. A `null` or non-string value is ignored. A self-hosted API from before
+these fields existed rejects requests that carry them, so update the API before
+the product sends them.
 
 Console names an end user by display name, then email, then the product's id;
 the id shows on hover and can be copied on the session page. Workspace names

@@ -1,4 +1,5 @@
 import { prepareAgentChatCreate } from "../agent-chats";
+import { requireConsoleTestChatStanding } from "./console-roles";
 import {
   noteCreditUsageAudience,
   stripCreditUsageForRelayedBrowsers,
@@ -14,7 +15,7 @@ import {
   MissingPermissionRefusal,
   OrgAgentSessionCreateError,
 } from "@opengeni/core";
-import { UnsupportedLatencyModeError } from "@opengeni/config";
+import { orgAgentsEnabledForAccount, UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
@@ -872,6 +873,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         422,
       );
+    }
+    // A chat in the Console test workspace needs Editor access (or an
+    // organization key) when it starts, not just a membership there, so a
+    // membership left behind starts nothing. Organizations without Console
+    // agents never reach this.
+    if (orgAgentsEnabledForAccount(deps.settings, grant.accountId)) {
+      await requireConsoleTestChatStanding(deps, c, { accountId: grant.accountId, workspaceId });
     }
     let session: Session;
     try {

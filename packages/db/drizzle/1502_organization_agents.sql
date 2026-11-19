@@ -27,6 +27,9 @@
 --   The shared key and OAuth client secret are encrypted by the application.
 -- - end_user_tool_credentials: one end user's login per managed workspace and
 --   tool server, encrypted by the application, never returned by the API.
+--   A workspace context sees its own rows; the account context sees the
+--   organization's rows, so moving a tool server to another origin and
+--   offboarding an end user delete their logins in every workspace at once.
 -- - agent_workspace_access: workspaces an organization agent is available in
 --   besides the organization's managed workspaces.
 -- - agent_publish_operations: each publish or rollback, and whether it moved
@@ -202,6 +205,8 @@ CREATE TABLE agent_publish_operations (
   status text NOT NULL DEFAULT 'pending',
   moved_count integer NOT NULL DEFAULT 0,
   failed_count integer NOT NULL DEFAULT 0,
+  -- Why a move never ran: move_unavailable, move_start_failed or superseded.
+  failure_reason text,
   created_by_subject_id text,
   created_at timestamptz NOT NULL DEFAULT now(),
   finished_at timestamptz,
@@ -212,6 +217,7 @@ CREATE TABLE agent_publish_operations (
     AND to_revision > 0
     AND status IN ('pending', 'running', 'succeeded', 'failed')
     AND moved_count >= 0 AND failed_count >= 0
+    AND (failure_reason IS NULL OR char_length(failure_reason) BETWEEN 1 AND 64)
     AND (created_by_subject_id IS NULL OR char_length(created_by_subject_id) BETWEEN 1 AND 1024)
   )
 );
@@ -237,10 +243,11 @@ REVOKE ALL ON TABLE agent_publish_operations FROM PUBLIC;
 CREATE POLICY account_isolation ON organization_tool_servers
   USING (opengeni_private.account_rls_visible(account_id))
   WITH CHECK (opengeni_private.account_rls_visible(account_id));
--- One managed workspace's rows.
-CREATE POLICY workspace_isolation ON end_user_tool_credentials
-  USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
-  WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+-- A workspace context reads its own rows; the account context reads every row
+-- of the organization (deleting logins across workspaces).
+CREATE POLICY account_isolation ON end_user_tool_credentials
+  USING (opengeni_private.optional_workspace_rls_visible(account_id, workspace_id))
+  WITH CHECK (opengeni_private.optional_workspace_rls_visible(account_id, workspace_id));
 -- The account reads every row; a workspace reads its own.
 CREATE POLICY account_isolation ON agent_workspace_access
   USING (opengeni_private.optional_workspace_rls_visible(account_id, workspace_id))
@@ -332,4 +339,5 @@ ALTER TABLE organization_console_audit_events
     'agent.archived', 'agent.management_changed', 'agent.deployed',
     'tool_server.created', 'tool_server.updated', 'tool_server.deleted',
     'tool_credential.written', 'tool_credential.deleted',
-    'member.console_role_changed')) NOT VALID;
+    'member.console_role_changed', 'member.console_test_access_granted',
+    'member.console_test_access_removed')) NOT VALID;

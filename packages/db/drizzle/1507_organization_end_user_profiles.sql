@@ -10,6 +10,8 @@
 -- (1377), which Console already reads without the runtime reading
 -- external_identities. The latest value sent wins; a field the product leaves
 -- out keeps its stored value. Display only, never authority.
+-- Offboarding the end user deletes their row (personal data), so the runtime
+-- also holds DELETE.
 --
 -- Why a table of its own: external_identities is an authority table (lifecycle
 -- gated RLS and statement triggers that re-arm usage allowances on UPDATE), and
@@ -48,7 +50,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     -- Exact grants, whatever the owner's default privileges gave the runtime.
     REVOKE ALL ON organization_end_user_profiles FROM opengeni_app;
-    GRANT SELECT, INSERT, UPDATE ON organization_end_user_profiles TO opengeni_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON organization_end_user_profiles TO opengeni_app;
   END IF;
 END
 $opengeni_end_user_profile_grants$;

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   agentFileToDefinition,
   defineAgent,
+  isOrgAgentRef,
   OpenGeniClient,
   organizationAgents,
   type CreateSessionRequest,
@@ -203,5 +204,19 @@ describe("organization agents", () => {
       overrides: { model: { agent: "gpt-5.4", chat: "gpt-5.5" } },
     };
     expect([byKey, withChanges, today, orgAgent]).toHaveLength(4);
+  });
+
+  test("isOrgAgentRef narrows the session agent field", () => {
+    const inline: CreateSessionRequest["agent"] = { instructions: "Be brief." };
+    expect(isOrgAgentRef(inline)).toBe(false);
+    expect(isOrgAgentRef(undefined)).toBe(false);
+    expect(isOrgAgentRef(null)).toBe(false);
+    expect(isOrgAgentRef("support")).toBe(true);
+    expect(isOrgAgentRef({ ref: "support", instructions: "Also be kind." })).toBe(true);
+    const agent: CreateSessionRequest["agent"] = inline;
+    if (agent !== undefined && !isOrgAgentRef(agent)) {
+      // Narrowed to the inline config: its fields are readable without a cast.
+      expect(agent.instructions).toBe("Be brief.");
+    }
   });
 });

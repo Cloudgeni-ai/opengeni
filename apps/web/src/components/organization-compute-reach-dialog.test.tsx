@@ -25,8 +25,12 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     ) : null,
 }));
 
-const { OrganizationComputeReachDialog, organizationComputeReachSummary, reachNarrows } =
-  await import("./organization-compute-reach-dialog");
+const {
+  MANAGED_DESCRIPTION,
+  OrganizationComputeReachDialog,
+  organizationComputeReachSummary,
+  reachNarrows,
+} = await import("./organization-compute-reach-dialog");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -219,7 +223,30 @@ describe("where an organization machine or rig works", () => {
     await act(async () => root.unmount());
   });
 
+  test("a machine's product-managed choice says every end customer's chats share it", async () => {
+    const { root } = await render(
+      <OrganizationComputeReachDialog
+        open
+        onOpenChange={() => undefined}
+        client={client}
+        kind="machine"
+        name="Build box"
+        reach={reach([], false, false)}
+        organizationId="org"
+        organizationName="Acme"
+        hereId={HOME}
+        save={mock(async () => reach([], false, true))}
+      />,
+    );
+    expect(document.body.textContent).toContain("All product-managed workspaces");
+    expect(document.body.textContent).toContain(MANAGED_DESCRIPTION.machine);
+    expect(MANAGED_DESCRIPTION.machine).toContain("share this machine");
+    await act(async () => root.unmount());
+  });
+
   test("an older server's reach has no product-managed choice and saves without it", async () => {
+    // (The switch shows whenever the server reports the setting, as every
+    // current server does; see the test above.)
     const save = mock(async () => reach([OPS], false));
     const { root } = await render(
       <OrganizationComputeReachDialog

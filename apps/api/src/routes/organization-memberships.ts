@@ -68,7 +68,6 @@ import {
 } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
-  applyInvitationConsoleRole,
   bindPendingOrganizationInvitationsForVerifiedEmail,
   claimOrganizationUserSetupDelivery,
   createAdditionalManagedOrganizationWithSignupNetwork,
@@ -120,7 +119,10 @@ import {
   isAgentActingAsPerson,
   organizationSettingsPermission,
 } from "../http/acting-person";
-import { requireConsoleAccess, resetConsoleRoleAfterMembershipChange } from "./console-roles";
+import {
+  requireConsoleAccess,
+  revokeConsoleTestAccessAfterMembershipChange,
+} from "./console-roles";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { hasRecentManagedSignIn } from "./managed-sign-in-methods";
 import {
@@ -1267,19 +1269,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         invitationId,
         expectedRevision: payload.expectedRevision,
       });
-      // The Console role the invitation carried becomes theirs, once.
-      try {
-        await applyInvitationConsoleRole(deps.db, {
-          accountId: invitation.organizationId,
-          invitationId,
-          subjectId,
-        });
-      } catch (error) {
-        deps.observability?.warn("invitation console role was not applied", {
-          organizationId: invitation.organizationId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
       // A returning member's saved messages may be waiting for this.
       await releaseMembershipBlocksInOrganization(admissionReleaseDeps(deps), {
         accountId: invitation.organizationId,
@@ -1413,14 +1402,17 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         });
       }
       if (payload.kind === "change_role" || payload.kind === "offboard") {
-        // A Console role belongs to a member: a new organization role or
-        // leaving resets it (docs/opengeni-console.md, "Roles").
-        await resetConsoleRoleAfterMembershipChange(deps, {
+        // The change's transaction reset their Console role; Console test
+        // workspace access goes too unless they are still an owner or admin
+        // (docs/opengeni-console.md, "Roles"). A failure is a retryable 503;
+        // the same operationId repeats it.
+        await revokeConsoleTestAccessAfterMembershipChange(deps, {
           organizationId,
           subjectId: member.subjectId,
           actorSubjectId: subjectId,
-          actorLabel: null,
           reason: payload.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
+          organizationRole:
+            payload.kind === "offboard" || member.status === "revoked" ? null : member.role,
         });
       }
       return context.json(member);
