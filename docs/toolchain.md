@@ -19,7 +19,8 @@ Specialized build boundaries remain explicit:
 - `apps/web` uses Vite/Rolldown because TanStack Router and Tailwind provide supported Vite
   plugins and Opengeni's payload budgets depend on custom Rolldown chunk groups;
 - Temporal owns the deterministic workflow webpack bundle consumed by its Worker API;
-- `packages/ogtool` uses Bun's bundler for its portable all-in-one CommonJS executable.
+- `packages/ogtool` and `packages/cli` use Bun's bundler for their portable all-in-one CommonJS
+  executables.
 
 The one intentional package-manager exception is the registry transport inside
 `bun run release:publish`. Bun launches the local Changesets CLI, while Changesets invokes

@@ -3,12 +3,29 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { checkDocSnippets, extractDocSnippets } from "./check-doc-snippets";
+import {
+  checkDocSnippets,
+  extractDocSnippets,
+  isReportedDiagnostic,
+  packagePaths,
+} from "./check-doc-snippets";
 
 const check = (file: string, text: string) =>
   checkDocSnippets(extractDocSnippets(file, text)).findings;
 
 describe("doc snippet drift check", () => {
+  test("resolves and reports the unscoped opengeni package like @opengeni packages", () => {
+    const missing = (name: string) =>
+      `Cannot find module '${name}' or its corresponding type declarations.`;
+    expect(isReportedDiagnostic(2307, missing("@opengeni/sdk"))).toBe(true);
+    expect(isReportedDiagnostic(2307, missing("opengeni"))).toBe(true);
+    expect(isReportedDiagnostic(2307, missing("opengeni-web"))).toBe(false);
+    expect(isReportedDiagnostic(2307, missing("react"))).toBe(false);
+    expect(packagePaths(join(import.meta.dir, ".."))["opengeni"]?.[0]).toEndWith(
+      "packages/cli/src/index.ts",
+    );
+  });
+
   test("extracts indented MDX fences and honors the skip marker", () => {
     const snippets = extractDocSnippets(
       "guide.mdx",

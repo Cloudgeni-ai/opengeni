@@ -675,8 +675,12 @@ describe("immutable origin receipts and archives", () => {
         { name: "@opengeni/private", version: "1.0.0", private: true },
       ],
       ["packages/ignored/package.json", { name: "@opengeni/ignored", version: "1.0.0" }],
+      ["packages/cli/package.json", { name: "opengeni", version: "1.0.0" }],
+      ["apps/web/package.json", { name: "opengeni-web", version: "1.0.0" }],
+      ["packages/other/package.json", { name: "left-pad", version: "1.0.0" }],
     ] as const)
       files.set(path, bytes(manifest));
+    // The best-effort unscoped CLI is never part of a canary cohort.
     expect(sourceCohort(files).map((p) => p.name)).toEqual(["@opengeni/z", "@opengeni/a"]);
   });
 });
