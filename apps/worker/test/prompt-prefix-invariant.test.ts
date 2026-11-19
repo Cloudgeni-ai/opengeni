@@ -193,7 +193,8 @@ async function runTransition(wire: Wire, transition: Transition) {
 for (const wire of WIRES) {
   describe(`${wire.name}: a request repeats the previous request's prefix`, () => {
     for (const transition of TRANSITIONS) {
-      const known = KNOWN_BREAKS[`${wire.name}: ${transition.name}`] ?? KNOWN_BREAKS[transition.name];
+      const known =
+        KNOWN_BREAKS[`${wire.name}: ${transition.name}`] ?? KNOWN_BREAKS[transition.name];
       const run = known ? test.failing : test;
       run(
         `after ${transition.name}${known ? ` (known break: ${known})` : ""}`,
@@ -213,47 +214,50 @@ for (const wire of WIRES) {
 describe.each([
   ["anthropic", claudeModel],
   ["responses", responsesModel],
-] as const)("%s: a request repeats the previous request's prefix when the chat's machine changes", (name, wire) => {
-  const placements = [
-    { name: "the sandbox restarts on the same machine", moves: false },
-    { name: "the chat moves to another machine", moves: true },
-  ] as const;
-  for (const placement of placements) {
-    const known = KNOWN_BREAKS[`${name}: ${placement.name}`] ?? KNOWN_BREAKS[placement.name];
-    (known ? test.failing : test)(
-      `after ${placement.name}${known ? ` (known break: ${known})` : ""}`,
-      async () => {
-        const first = await liveBox("/home/person");
-        const second = placement.moves ? await liveBox("/Users/person") : first;
-        const { api, model, bodies, system, conversation } = wire(["text", "text", "text"]);
-        const conversationChat = liveChat(first, model, api);
-        // A Connected Machine reports its own workspace root; each box has
-        // its own, so a move lands on another root as it does in production.
-        const on = (box: typeof first) => ({
-          box,
-          build: {
-            activeSandboxBackend: "selfhosted" as const,
-            sandboxWorkspaceRoot: box.session.state.manifest!.root!,
-          },
-        });
-        await conversationChat.turn("Hello.", on(first));
-        await conversationChat.turn("What is the status?", on(first));
-        await conversationChat.turn("And now?", on(second));
-        expect(bodies).toHaveLength(3);
-        const breaks: string[] = [];
-        if (system(bodies[1]) !== system(bodies[2])) {
-          const at = charDifference(system(bodies[1]), system(bodies[2]));
-          breaks.push(
-            `system prompt changed at character ${at}:\n  before: ${clip(system(bodies[1]), at)}\n  after:  ${clip(system(bodies[2]), at)}`,
-          );
-        }
-        const previous = conversation(bodies[1]).map((item) => JSON.stringify(item));
-        const next = conversation(bodies[2]).map((item) => JSON.stringify(item));
-        const item = firstDifference(previous, next);
-        if (item >= 0) breaks.push(`conversation item ${item} changed`);
-        expect(breaks).toEqual([]);
-      },
-      60_000,
-    );
-  }
-});
+] as const)(
+  "%s: a request repeats the previous request's prefix when the chat's machine changes",
+  (name, wire) => {
+    const placements = [
+      { name: "the sandbox restarts on the same machine", moves: false },
+      { name: "the chat moves to another machine", moves: true },
+    ] as const;
+    for (const placement of placements) {
+      const known = KNOWN_BREAKS[`${name}: ${placement.name}`] ?? KNOWN_BREAKS[placement.name];
+      (known ? test.failing : test)(
+        `after ${placement.name}${known ? ` (known break: ${known})` : ""}`,
+        async () => {
+          const first = await liveBox("/home/person");
+          const second = placement.moves ? await liveBox("/Users/person") : first;
+          const { api, model, bodies, system, conversation } = wire(["text", "text", "text"]);
+          const conversationChat = liveChat(first, model, api);
+          // A Connected Machine reports its own workspace root; each box has
+          // its own, so a move lands on another root as it does in production.
+          const on = (box: typeof first) => ({
+            box,
+            build: {
+              activeSandboxBackend: "selfhosted" as const,
+              sandboxWorkspaceRoot: box.session.state.manifest!.root!,
+            },
+          });
+          await conversationChat.turn("Hello.", on(first));
+          await conversationChat.turn("What is the status?", on(first));
+          await conversationChat.turn("And now?", on(second));
+          expect(bodies).toHaveLength(3);
+          const breaks: string[] = [];
+          if (system(bodies[1]) !== system(bodies[2])) {
+            const at = charDifference(system(bodies[1]), system(bodies[2]));
+            breaks.push(
+              `system prompt changed at character ${at}:\n  before: ${clip(system(bodies[1]), at)}\n  after:  ${clip(system(bodies[2]), at)}`,
+            );
+          }
+          const previous = conversation(bodies[1]).map((item) => JSON.stringify(item));
+          const next = conversation(bodies[2]).map((item) => JSON.stringify(item));
+          const item = firstDifference(previous, next);
+          if (item >= 0) breaks.push(`conversation item ${item} changed`);
+          expect(breaks).toEqual([]);
+        },
+        60_000,
+      );
+    }
+  },
+);

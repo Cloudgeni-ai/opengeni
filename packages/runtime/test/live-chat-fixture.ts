@@ -50,9 +50,13 @@ export async function liveBox(root?: string) {
   // own home directory. Only the reported root differs: no command runs here.
   if (root && session.state.manifest) {
     const manifest = session.state.manifest;
-    session.state.manifest = Object.assign(Object.create(Object.getPrototypeOf(manifest)), manifest, {
-      root,
-    });
+    session.state.manifest = Object.assign(
+      Object.create(Object.getPrototypeOf(manifest)),
+      manifest,
+      {
+        root,
+      },
+    );
   }
   sessions.push(session);
   const addSkill = async (name: string) => {

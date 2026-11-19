@@ -623,7 +623,7 @@ export function prefixChat(wire: Wire) {
       effectiveMaxNestedAgentDepth: 3,
     } as unknown as BuildTurnAgentDeps["session"];
     const human = trigger.kind === "message";
-    const turn = {
+    const turnRow = {
       id: turnId,
       executionGeneration: 1,
       reasoningEffort: "medium",
@@ -660,7 +660,7 @@ export function prefixChat(wire: Wire) {
         db: {} as BuildTurnAgentDeps["db"],
         cancellationSignal: undefined,
         connectionCredentials: undefined,
-        turn,
+        turn: turnRow,
         session,
         fileAuthoritySubjectId: null,
         capabilitySettings: settings,
@@ -679,7 +679,7 @@ export function prefixChat(wire: Wire) {
         objectStorage: null,
         observability,
         media: {} as BuildTurnAgentDeps["media"],
-        turn,
+        turn: turnRow,
         session,
         fileAuthoritySubjectId: null,
         capabilitySettings: settings,
@@ -716,7 +716,7 @@ export function prefixChat(wire: Wire) {
         observability,
         objectStorage: {} as NonNullable<BuildTurnAgentDeps["objectStorage"]>,
         media: {} as BuildTurnAgentDeps["media"],
-        turn,
+        turn: turnRow,
         session,
         runSettings: settings,
         capabilitySettings: settings,
