@@ -12,7 +12,8 @@ import { createApiKey, createDb, createWorkspace, listSessionEvents } from "@ope
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { startTestMcpServer, type TestMcpServer } from "@opengeni/testing/mcp";
 import { startTestServices, type TestServices } from "@opengeni/testing/compose";
 import { testSettings } from "@opengeni/testing/settings";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
@@ -30,6 +31,9 @@ const noopWorkflowClient: SessionWorkflowClient = {
   triggerScheduledTask: async () => undefined,
 };
 
+/** Tool servers must use https; the test's MCP server is local, so its https URL is routed to it. */
+const TOOL_SERVER_URL = "https://tools.org-agents-e2e.test/mcp";
+
 describe("organization agents end to end", () => {
   let services: TestServices;
   let dbClient: ReturnType<typeof createDb>;
@@ -40,6 +44,8 @@ describe("organization agents end to end", () => {
   let accountId: string;
   let workspaceId: string;
   let authorization: string;
+  let mcp: TestMcpServer;
+  const originalFetch = globalThis.fetch;
   /** Server-side failures, shown with a failed assertion. */
   const serverErrors: unknown[] = [];
 
@@ -90,9 +96,21 @@ describe("organization agents end to end", () => {
       observability,
     });
     server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    mcp = startTestMcpServer();
+    const routed = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.startsWith(TOOL_SERVER_URL)) return originalFetch(input, init);
+      const target = mcp.url + url.slice(TOOL_SERVER_URL.length);
+      return input instanceof Request
+        ? originalFetch(new Request(target, input), init)
+        : originalFetch(target, init);
+    }) as typeof fetch;
+    globalThis.fetch = Object.assign(routed, { preconnect: originalFetch.preconnect });
   }, 180_000);
 
   afterAll(async () => {
+    globalThis.fetch = originalFetch;
+    mcp?.close();
     server?.stop(true);
     await bus?.close();
     await dbClient?.close();
@@ -223,5 +241,71 @@ describe("organization agents end to end", () => {
     const prompt = await runTurn(chat.body.workspaceId, chat.body.sessionId);
     expect(prompt).toContain("Draft rules.");
     expect(prompt).not.toContain("Published rules.");
+  }, 180_000);
+
+  test("the agent's tool server asks first; the chat resumes after the decision", async () => {
+    await admin`insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
+      values (${accountId}, 'crm', 'CRM', ${TOOL_SERVER_URL}, 'none')`;
+    const created = await call("POST", agents(), {
+      key: "crm-agent",
+      name: "CRM agent",
+      instructions: "Look things up in the CRM.",
+      config: {
+        model: "scripted-model",
+        toolServers: [{ server: "crm", tools: { mode: "all" }, approval: { ask: true } }],
+      },
+    });
+    expect(created.status).toBe(201);
+    expect(
+      (
+        await call("POST", `${agents()}/${created.body.agent.id}/publish`, {
+          version: 1,
+          expectedVersion: created.body.agent.rowVersion,
+        })
+      ).status,
+    ).toBe(200);
+    const chat = await call("POST", sessions(), { initialMessage: "search", agent: "crm-agent" });
+    expect(chat.status).toBe(202);
+    const sessionId = chat.body.id as string;
+    const [server] = await admin<{ server_id: string; url: string }[]>`
+      select server_id, url from session_mcp_servers where session_id = ${sessionId}`;
+    expect(server).toMatchObject({ server_id: "crm", url: TOOL_SERVER_URL });
+
+    const model = new ScriptedModel([
+      {
+        id: "org-approval-1",
+        output: [functionCall("crm__search_documents", { query: "renewals" }, "call-org-1")],
+      },
+      { id: "org-approval-2", outputText: "Found it." },
+    ]);
+    const runtime = createProductionAgentRuntime({ model });
+    runtime.generateSessionTitle = async () => ({ title: null, usage: null });
+    const turn = (trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string }) =>
+      createWorkerActivities({ settings, db: dbClient.db, bus, runtime }).runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId,
+        workspaceId,
+        sessionId,
+        trigger,
+        workflowId: `session-${sessionId}-${trigger.kind}`,
+        workflowRunId: crypto.randomUUID(),
+      });
+    expect((await turn({ kind: "next" })).status).toBe("requires_action");
+    expect(mcp.calls).toEqual([]);
+    const decided = await call("POST", `${sessions()}/${sessionId}/events`, {
+      type: "user.approvalDecision",
+      payload: { approvalId: "call-org-1", decision: "approve" },
+    });
+    expect(decided.status).toBeLessThan(300);
+    const [decision] = await admin<{ id: string }[]>`
+      select id from session_events where session_id = ${sessionId}
+        and type = 'user.approvalDecision' order by sequence desc limit 1`;
+    // The resumed turn attaches pending updates through the worker's second
+    // claim site, which declares the organization agent protocol too.
+    expect((await turn({ kind: "approval", triggerEventId: decision!.id })).status).toBe("idle");
+    expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "renewals" } }]);
+    const [attempts] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_turn_attempts where session_id = ${sessionId}`;
+    expect(attempts!.count).toBeGreaterThanOrEqual(2);
   }, 180_000);
 });

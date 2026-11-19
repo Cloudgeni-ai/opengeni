@@ -1176,6 +1176,10 @@ below.
   only when the version's `workers.shareInstructions` is on (NULL means no
   agent layer). Tools, approvals and per-chat logins come with the parent's MCP
   server snapshot as for every child chat.
+- **Forks.** A fork copies `agent_id`, `agent_version`, `agent_prompt_version`
+  and `agent_overrides` with the rest of the source row, and the agent's tool
+  servers with its MCP servers, so it runs the same version with the same
+  changes (`packages/db/test/session-fork-agent-parity-postgres.test.ts`).
 - **Pinning.** The worker reads `agent_version` once per turn: the first
   attempt records it in the turn's metadata (`opengeniOrgAgentVersion`) and
   retries reuse it, with the prompt version in `opengeniAgentPromptRevision`.

@@ -1152,13 +1152,16 @@ describe("organization agent chats: claim gate", () => {
     expect(state!.attempts).toBe(0);
     expect(state!.status).not.toBe("failed");
 
-    // With the protocol declared in the claiming transaction, the same work is claimed.
-    await withWorkspaceSubjectSessionActivityRls(app.db, workspaceId, subjectId, async (tx) => {
-      await tx.execute(drizzleSql`select set_config('opengeni.org_agent_protocol_v1', '1', true)`);
-      expect(await claimSessionWorkForAttempt(tx, workspaceId, claimInput(pinned))).toMatchObject({
-        action: "claimed",
-      });
-    });
+    // The worker declares the protocol through the claim itself, as
+    // apps/worker/src/activities/agent-turn/claim.ts does: the claim sets the
+    // setting from `orgAgentProtocol` for its own transaction (replacing any
+    // value an enclosing transaction left), so the same work is claimed.
+    expect(
+      await claimSessionWorkForAttempt(app.db, workspaceId, {
+        ...claimInput(pinned),
+        orgAgentProtocol: 1,
+      }),
+    ).toMatchObject({ action: "claimed" });
 
     // Chats without an organization agent are unaffected.
     const plain = await chat(false);
