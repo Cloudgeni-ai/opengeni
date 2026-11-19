@@ -64,11 +64,11 @@ test("the backfill marks product workspaces only", async () => {
   const start = migration.indexOf("DO $opengeni_console_backfill$");
   const marker = "$opengeni_console_backfill$;";
   const end = migration.indexOf(marker, start) + marker.length;
-  // 1377 ran long before 1510 made marker writes need an account-only
+  // 1377 ran long before 1511 made marker writes need an account-only
   // context (the backfill sets each workspace's context while it marks it).
-  // Replay it as it ran: without 1510's guard, which is put back after.
+  // Replay it as it ran: without 1511's guard, which is put back after.
   const guard = await Bun.file(
-    new URL("../drizzle/1510_organization_compute_managed_reach.sql", import.meta.url),
+    new URL("../drizzle/1511_organization_compute_managed_reach.sql", import.meta.url),
   ).text();
   const guardPolicies = [
     ...guard.matchAll(/CREATE POLICY (account_only_\w+) ON organization_managed_workspaces[^;]*;/g),

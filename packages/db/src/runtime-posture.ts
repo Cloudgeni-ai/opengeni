@@ -1984,7 +1984,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ...AGENTS_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
-  // 1503: refuses organization-agent chat claims from workers without that support.
+  // 1504: refuses organization-agent chat claims from workers without that support.
   "guard_org_agent_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
@@ -2018,7 +2018,7 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   ...AGENTS_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
-  // 1503: refuses organization-agent chat claims from workers without that support.
+  // 1504: refuses organization-agent chat claims from workers without that support.
   "guard_org_agent_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
@@ -2744,7 +2744,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_codex_rotation_settings",
   "organization_connectors",
   "organization_credential_providers",
-  // 1508: end-user display name and email; erased when the end user is offboarded.
+  // 1509: end-user display name and email; erased when the end user is offboarded.
   "organization_end_user_profiles",
   "organization_identity_issuers",
   "organization_managed_workspaces",
@@ -3131,7 +3131,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "interaction_operations",
   "interaction_resource_operations",
   "network_routes",
-  // 1509: a member's Console role; 'none' clears it, never deleted.
+  // 1510: a member's Console role; 'none' clears it, never deleted.
   "organization_console_roles",
   "scheduled_task_runs",
   "scheduled_tasks",

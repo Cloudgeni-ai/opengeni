@@ -1,6 +1,6 @@
 /**
  * Console roles of organization members (`organization_console_roles`,
- * migration 1509). Owners and admins are always full in Console and have no
+ * migration 1510). Owners and admins are always full in Console and have no
  * row; a member's role is `none` (no row), `viewer` or `editor`. A row names a
  * member by their `user:` subject, or a pending invitation whose role becomes
  * the member's when they accept it.

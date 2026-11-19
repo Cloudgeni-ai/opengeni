@@ -2163,7 +2163,7 @@ sets it (`null` means every shared workspace) and answers `{ reach }`, the same
 shape the machine list reports as `reach` for organization machines
 (`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`,
 `allowManagedWorkspaces`). `allowManagedWorkspaces` (**All product-managed
-workspaces** in the picker, migration 1510) adds every workspace the
+workspaces** in the picker, migration 1511) adds every workspace the
 organization's product manages (`organization_managed_workspaces`), including
 ones it creates later, without listing them; omitted keeps the current value.
 So a client that predates the setting (an older SDK or UI) leaves it on when

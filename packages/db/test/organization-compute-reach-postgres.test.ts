@@ -642,7 +642,7 @@ describe("all product-managed workspaces", () => {
 describe("who can mark a workspace managed", () => {
   // The marker decides machine and rig reach, organization agents and stored
   // end-user logins, so runtime code inside one workspace can't mark, change
-  // or unmark it (1510); the account-level writers still can.
+  // or unmark it (1511); the account-level writers still can.
   async function inWorkspace<T>(
     org: Org,
     workspaceId: string,

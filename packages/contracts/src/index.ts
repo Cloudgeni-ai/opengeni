@@ -12839,7 +12839,7 @@ export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
  * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
  * members' Personal workspaces when `allowPersonalWorkspaces` is on, and every
  * workspace the organization's product manages (including ones it creates
- * later) when `allowManagedWorkspaces` is on (migration 1510; servers before
+ * later) when `allowManagedWorkspaces` is on (migration 1511; servers before
  * it omit the field). Only organization machines and rigs have it.
  */
 export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>

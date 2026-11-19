@@ -4,7 +4,7 @@
  *
  * Organization agents and their versions are hidden by a restrictive RLS
  * policy unless the transaction sets `opengeni.org_agents_v1 = 1` (migration
- * 1503). That is a visibility rule, not a security boundary: callers check
+ * 1504). That is a visibility rule, not a security boundary: callers check
  * permissions and reach before they use anything read here. Every helper sets
  * the setting for its own statements and restores the previous value.
  *
@@ -22,7 +22,7 @@ import {
 } from "./database";
 import { parseOrgAgentRunsOnTarget, type OrgAgentRunsOnTarget } from "./organization-agent-compute";
 
-/** The transaction setting that makes organization agents visible (migration 1503). */
+/** The transaction setting that makes organization agents visible (migration 1504). */
 export const ORG_AGENTS_VISIBILITY_SETTING = "opengeni.org_agents_v1";
 
 /** Run `fn` with organization agents visible in this transaction, then restore the setting. */

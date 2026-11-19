@@ -5581,7 +5581,7 @@ export const sessions = pgTable(
     // NULL is a legacy chat (instructions already in `instructions`): never
     // add the agent layer to it.
     agentPromptRevision: integer("agent_prompt_revision"),
-    // Migration 1503: the organization agent version this chat runs (with
+    // Migration 1504: the organization agent version this chat runs (with
     // agentId), the version whose Instructions are in its system prompt (NULL:
     // no agent layer, a worker without shared Instructions) and what the chat
     // changed from the version ({setting: {agent, chat}}). NULL for every
