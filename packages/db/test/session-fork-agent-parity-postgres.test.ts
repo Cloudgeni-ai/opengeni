@@ -197,6 +197,8 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   input_wait_until: { why: "its own waits", expected: fresh(null) },
   input_wait_reason: { why: "its own waits", expected: fresh(null) },
   input_wait_set_at: { why: "its own waits", expected: fresh(null) },
+  awaiting_connection_since: { why: "its own connection cards", expected: fresh(null) },
+  awaiting_connection_keys: { why: "its own connection cards", expected: fresh(null) },
   admission_block: { why: "its own admission", expected: fresh(null) },
   content_archive_state: { why: "its own archive", expected: fresh(null) },
   content_archive_started_at: { why: "its own archive", expected: fresh(null) },
@@ -392,7 +394,9 @@ async function configuredSource(org: Org) {
     title_source = 'user', description = 'Owns the release checklist',
     search_records_as_input = true,
     agent_id = ${crypto.randomUUID()}, agent_prompt_revision = 1,
-    avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
+    avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })},
+    awaiting_connection_since = now(),
+    awaiting_connection_keys = array['connection-card:00000000000000aa']
     where id = ${session.id}`;
   return session.id;
 }

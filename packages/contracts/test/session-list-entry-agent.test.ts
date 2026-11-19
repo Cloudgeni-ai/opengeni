@@ -22,4 +22,12 @@ describe("session list entries", () => {
   test("leave agentId out for older rows that never sent it", () => {
     expect("agentId" in sessionListEntry(input())).toBe(false);
   });
+
+  test("carry when the agent started waiting on a connection card", () => {
+    const since = "2026-11-19T14:00:00.000Z";
+    expect(
+      sessionListEntry(input({ awaitingConnectionSince: since })).awaitingConnectionSince,
+    ).toBe(since);
+    expect(sessionListEntry(input()).awaitingConnectionSince).toBeUndefined();
+  });
 });

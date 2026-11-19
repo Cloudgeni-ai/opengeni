@@ -38,6 +38,7 @@ import { userErrorText } from "../../../ui/api-error";
 import {
   DESCENDANT_REQUEST_EVENT_LIMIT,
   DESCENDANT_REQUEST_EVENT_TYPES,
+  awaitsConnection,
   descendantRequestActivity,
   subSessionsNeedYouLabel,
 } from "../../lib/descendant-requests";
@@ -249,7 +250,10 @@ function DescendantRequestItem({
   // settling (here, on the sub-session's page or by an agent). The tree still
   // shows the sub-session waiting until it is re-read, so say nothing for the
   // rest of that wait; a new wait has a new start time.
-  const waitKey = session.requiresActionSince ?? `sequence:${session.lastSequence}`;
+  const waitKey =
+    session.requiresActionSince ??
+    session.awaitingConnectionSince ??
+    `sequence:${session.lastSequence}`;
   const [handledWait, setHandledWait] = useState<string | null>(null);
   useEffect(() => {
     if (hasRequest) setHandledWait(waitKey);
@@ -400,11 +404,16 @@ function DescendantRequestItem({
       </div>
     );
   }
-  // Waiting on something only its own page can take (a reconnect, a sign-in):
-  // say so once both reads are in, and point there.
+  // Waiting on something only its own page can take (a connection card, a
+  // sign-in): say so once both reads are in, and point there.
   const loaded = !humanInput.loading && (activity.data !== null || activity.error !== null);
   // A sub-session kept up while it resumes waits on nobody once it has no request.
-  if (!loaded || handledWait === waitKey || session.status !== "requires_action") return null;
+  if (
+    !loaded ||
+    handledWait === waitKey ||
+    (session.status !== "requires_action" && !awaitsConnection(session))
+  )
+    return null;
   return (
     <div
       data-descendant-request={sessionId}
