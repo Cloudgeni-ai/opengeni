@@ -275,7 +275,11 @@ function mapToolServer(row: ToolServerRow): OrgToolServerRuntime {
     name: row.name,
     url: row.url,
     authMode:
-      row.auth_mode === "shared_key" ? "shared_key" : row.auth_mode === "none" ? "none" : "per_user",
+      row.auth_mode === "shared_key"
+        ? "shared_key"
+        : row.auth_mode === "none"
+          ? "none"
+          : "per_user",
     sharedHeadersEncrypted: row.shared_headers_encrypted,
     oauthRefresh:
       refresh &&
@@ -465,6 +469,68 @@ export async function readSessionOrgAgentState(
   };
 }
 
+/** What a child chat records when its parent runs an organization agent. */
+export type InheritedSessionOrgAgent = {
+  agentId: string;
+  version: number;
+  /** Null unless the version's `workers.shareInstructions` is on: no agent layer. */
+  promptVersion: number | null;
+  overrides: Record<string, { agent: unknown; chat: unknown }> | null;
+};
+
+/** Whether a version config shares the agent's Instructions with worker chats. */
+export function orgAgentConfigSharesInstructions(config: unknown): boolean {
+  if (!config || typeof config !== "object") return false;
+  const workers = (config as Record<string, unknown>)["workers"];
+  return Boolean(
+    workers &&
+    typeof workers === "object" &&
+    (workers as Record<string, unknown>)["shareInstructions"] === true,
+  );
+}
+
+/**
+ * The organization agent a child chat inherits from its parent, read in the
+ * create transaction: the parent's agent and version, and the version's
+ * Instructions only when it shares them with workers. Null when the parent
+ * runs no organization agent (every other chat).
+ */
+export async function inheritedSessionOrgAgentInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; parentSessionId: string },
+): Promise<InheritedSessionOrgAgent | null> {
+  const [parent] = await rawRows<{
+    agent_id: string | null;
+    agent_version: number | null;
+    agent_overrides: unknown;
+  }>(
+    tx,
+    sql`select s.agent_id::text as agent_id, s.agent_version, s.agent_overrides
+      from sessions s
+      where s.workspace_id = ${input.workspaceId}::uuid
+        and s.id = ${input.parentSessionId}::uuid`,
+  );
+  if (!parent?.agent_id || parent.agent_version === null || parent.agent_version === undefined)
+    return null;
+  const version = Number(parent.agent_version);
+  const row = await withOrgAgentsVisible(tx, () =>
+    readOrgAgentVersionInTransaction(tx, {
+      accountId: input.accountId,
+      agentId: parent.agent_id!,
+      version,
+    }),
+  );
+  return {
+    agentId: parent.agent_id,
+    version,
+    promptVersion: row && orgAgentConfigSharesInstructions(row.config) ? version : null,
+    overrides:
+      parent.agent_overrides && typeof parent.agent_overrides === "object"
+        ? (parent.agent_overrides as InheritedSessionOrgAgent["overrides"])
+        : null,
+  };
+}
+
 /** Keys of these organization agents, read in an existing scoped transaction. */
 export async function readOrgAgentKeysInTransaction(
   tx: Database,
@@ -562,48 +628,51 @@ export async function refreshEndUserToolCredential(
   | { outcome: "refreshed" | "current" | "failed"; credential: EndUserToolCredentialRow }
 > {
   return await withoutSessionRlsActor(() =>
-    withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (tx) => {
-      const [row] = await rawRows<CredentialRow>(
-        tx,
-        sql`select ${CREDENTIAL_COLUMNS}
+    withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        const [row] = await rawRows<CredentialRow>(
+          tx,
+          sql`select ${CREDENTIAL_COLUMNS}
           from end_user_tool_credentials c
           where c.account_id = ${input.accountId}::uuid
             and c.workspace_id = ${input.workspaceId}::uuid
             and c.id = ${input.credentialId}::uuid
           for update skip locked`,
-      );
-      if (!row) {
-        const [exists] = await rawRows<{ found: number }>(
-          tx,
-          sql`select 1 as found from end_user_tool_credentials c
+        );
+        if (!row) {
+          const [exists] = await rawRows<{ found: number }>(
+            tx,
+            sql`select 1 as found from end_user_tool_credentials c
             where c.workspace_id = ${input.workspaceId}::uuid
               and c.id = ${input.credentialId}::uuid`,
-        );
-        return { outcome: exists ? ("locked" as const) : ("missing" as const) };
-      }
-      const current = mapCredential(row);
-      if (!current.expiresAt || current.expiresAt > input.refreshBefore)
-        return { outcome: "current" as const, credential: current };
-      let refreshed: { materialEncrypted: string; expiresAt: Date | null } | null = null;
-      try {
-        refreshed = await input.refresh(current);
-      } catch {
-        refreshed = null;
-      }
-      if (!refreshed) {
-        const [failed] = await rawRows<CredentialRow>(
-          tx,
-          sql`update end_user_tool_credentials c
+          );
+          return { outcome: exists ? ("locked" as const) : ("missing" as const) };
+        }
+        const current = mapCredential(row);
+        if (!current.expiresAt || current.expiresAt > input.refreshBefore)
+          return { outcome: "current" as const, credential: current };
+        let refreshed: { materialEncrypted: string; expiresAt: Date | null } | null = null;
+        try {
+          refreshed = await input.refresh(current);
+        } catch {
+          refreshed = null;
+        }
+        if (!refreshed) {
+          const [failed] = await rawRows<CredentialRow>(
+            tx,
+            sql`update end_user_tool_credentials c
             set refresh_failed_at = now(), updated_at = now()
             where c.workspace_id = ${input.workspaceId}::uuid
               and c.id = ${input.credentialId}::uuid
             returning ${CREDENTIAL_COLUMNS}`,
-        );
-        return { outcome: "failed" as const, credential: mapCredential(failed ?? row) };
-      }
-      const [updated] = await rawRows<CredentialRow>(
-        tx,
-        sql`update end_user_tool_credentials c
+          );
+          return { outcome: "failed" as const, credential: mapCredential(failed ?? row) };
+        }
+        const [updated] = await rawRows<CredentialRow>(
+          tx,
+          sql`update end_user_tool_credentials c
           set material_encrypted = ${refreshed.materialEncrypted},
             expires_at = ${refreshed.expiresAt ? refreshed.expiresAt.toISOString() : null}::timestamptz,
             refresh_failed_at = null, version = c.version + 1, updated_at = now(),
@@ -611,10 +680,11 @@ export async function refreshEndUserToolCredential(
           where c.workspace_id = ${input.workspaceId}::uuid
             and c.id = ${input.credentialId}::uuid
           returning ${CREDENTIAL_COLUMNS}`,
-      );
-      if (!updated) throw new Error("End-user tool login refresh lost its row");
-      return { outcome: "refreshed" as const, credential: mapCredential(updated) };
-    }),
+        );
+        if (!updated) throw new Error("End-user tool login refresh lost its row");
+        return { outcome: "refreshed" as const, credential: mapCredential(updated) };
+      },
+    ),
   );
 }
 

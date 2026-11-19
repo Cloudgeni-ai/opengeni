@@ -47,6 +47,19 @@ export {
   type AgentToolCallOutcome,
   type AgentToolMetricFamily,
 } from "./agent-tool-metrics";
+export {
+  ORG_AGENT_CREDENTIAL_OUTCOMES,
+  ORG_AGENT_CREDENTIAL_SOURCES,
+  ORG_AGENT_PUBLISH_MOVE_OUTCOMES,
+  ORG_AGENT_RESOLVE_OUTCOMES,
+  recordOrgAgentCredentialSource,
+  recordOrgAgentPublishMove,
+  recordOrgAgentResolve,
+  type OrgAgentCredentialOutcome,
+  type OrgAgentCredentialSource,
+  type OrgAgentPublishMoveOutcome,
+  type OrgAgentResolveOutcome,
+} from "./org-agent-metrics";
 export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 import {

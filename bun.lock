@@ -449,6 +449,21 @@
         "typescript": "7.0.2",
       },
     },
+    "packages/cli": {
+      "name": "opengeni",
+      "version": "6.30.1",
+      "bin": {
+        "opengeni": "./dist/bin/opengeni.cjs",
+      },
+      "dependencies": {
+        "@opengeni/contracts": "workspace:*",
+        "yaml": "2.9.0",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.0",
+        "typescript": "7.0.2",
+      },
+    },
     "packages/codemode": {
       "name": "@opengeni/codemode",
       "version": "6.13.0",
@@ -4392,6 +4407,8 @@
     "openapi-fetch": ["openapi-fetch@0.14.1", "", { "dependencies": { "openapi-typescript-helpers": "^0.0.15" } }, "sha512-l7RarRHxlEZYjMLd/PR0slfMVse2/vvIAGm75/F7J6MlQ8/b9uUQmUF2kCPrQhJqMXSxmYWObVgeYXbFYzZR+A=="],
 
     "openapi-typescript-helpers": ["openapi-typescript-helpers@0.0.15", "", {}, "sha512-opyTPaunsklCBpTK8JGef6mfPhLSnyy5a0IN9vKtx3+4aExf+KxEqYwIy3hqkedXIB97u357uLMJsOnm3GVjsw=="],
+
+    "opengeni": ["opengeni@workspace:packages/cli"],
 
     "opengeni-web": ["opengeni-web@workspace:apps/web"],
 

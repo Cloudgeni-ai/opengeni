@@ -5588,7 +5588,8 @@ export const sessions = pgTable(
     // other chat.
     agentVersion: integer("agent_version"),
     agentPromptVersion: integer("agent_prompt_version"),
-    agentOverrides: jsonb("agent_overrides").$type<Record<string, { agent: unknown; chat: unknown }>>(),
+    agentOverrides:
+      jsonb("agent_overrides").$type<Record<string, { agent: unknown; chat: unknown }>>(),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),

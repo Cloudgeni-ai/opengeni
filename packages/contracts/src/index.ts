@@ -155,6 +155,7 @@ export const HostMcpCreateSelections = /* @__PURE__ */ defineSchema(() =>
 );
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { SessionOrgAgent } from "./organization-agents";
 import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
 import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
@@ -17238,6 +17239,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * ordinary chat. Fixed at create. Omitted by older servers.
      */
     agentId: primitives.uuid.nullable().optional(),
+    /**
+     * The organization (Console) agent version this chat runs and what the
+     * chat changed from it; null or omitted for every other chat.
+     */
+    orgAgent: SessionOrgAgent.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -17911,6 +17917,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // A repository was attached to the chat after it started, such as one the
     // agent asked for and a person approved. The next turn clones it.
     "session.resources.added",
+    // An organization agent's tool server is attached without a usable login
+    // for this turn (`reason`: missing_credentials or credentials_expired).
+    "session.tool_server.unavailable",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -18197,6 +18206,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "turn.failed",
     "tool.auth_needed",
     "credential.auth_needed",
+    "session.tool_server.unavailable",
     "rig.setup.failed",
     "sandbox.operation.failed",
     "recording.failed",

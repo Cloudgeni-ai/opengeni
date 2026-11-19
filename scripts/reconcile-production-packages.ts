@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { isPublishedPackageName } from "./publishable-workspaces";
 
 const repository = "Cloudgeni-ai/opengeni";
 
@@ -30,8 +31,7 @@ export function candidatePackages(value: unknown, sourceSha: string): string[] {
   return candidate.packages.map((pkg: { name: string; version: string }) => {
     if (
       !pkg ||
-      typeof pkg.name !== "string" ||
-      !/^@opengeni\/[a-z0-9-]+$/.test(pkg.name) ||
+      !isPublishedPackageName(pkg.name) ||
       typeof pkg.version !== "string" ||
       !/^\d+\.\d+\.\d+$/.test(pkg.version) ||
       seen.has(pkg.name)
