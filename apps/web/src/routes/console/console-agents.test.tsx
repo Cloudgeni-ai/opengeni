@@ -461,6 +461,7 @@ describe("Runs on", () => {
     expect(text()).not.toContain("Machine");
     const trigger = document.querySelector<HTMLButtonElement>('button[role="combobox"]')!;
     await act(async () => trigger.click());
+    await settle();
     const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
     expect(
       options.find((option) => option.textContent?.startsWith("No computer"))?.textContent,
@@ -486,6 +487,7 @@ describe("Runs on", () => {
       ...document.querySelectorAll<HTMLButtonElement>('button[role="combobox"]'),
     ].find((button) => button.textContent?.includes("Choose a machine"))!;
     await act(async () => machinePicker.click());
+    await settle();
     const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
     const mac = options.find((option) => option.textContent?.startsWith("Design Mac"))!;
     expect(mac.textContent).toContain("Not available in product-managed workspaces.");
