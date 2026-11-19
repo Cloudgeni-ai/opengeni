@@ -10,6 +10,11 @@ export const FILESYSTEM_DISCONTINUITY_PROTOCOL = 4 as const;
  * it cannot claim a chat bound to an agent revision (migration 1276). */
 export const AGENT_INSTRUCTIONS_PROTOCOL = 1 as const;
 
+/** This build pins organization agent versions, delivers their Instructions
+ * and resolves their tool server logins; a worker without it cannot claim a
+ * chat that runs an organization agent version (migration 1502). */
+export const ORG_AGENT_PROTOCOL = 1 as const;
+
 export async function recoveryAwareSessionInstructions(
   db: Database,
   workspaceId: string,
