@@ -89,6 +89,7 @@ export const TRANSITIONS: readonly Transition[] = [
   { name: "the chat gets a title", before: { titled: false }, after: { titled: true } },
   { name: "the chat is switched to work unattended", after: { unattendedNow: true } },
   { name: "the workspace turns off agent questions", after: { humanInputEnabled: false } },
+  { name: "the workspace turns Knowledge learning off", after: { knowledgeLearning: "off" } },
 ];
 
 /**
@@ -107,6 +108,9 @@ const KNOWN_BREAKS: Readonly<Record<string, string>> = {
   "the Connected Machine is detached": "background-command tools follow compute",
   // request_human_input follows the workspace setting at each turn.
   "the workspace turns off agent questions": "request_human_input follows the setting",
+  // A learning mode set to Off drops its save guidance from the system prompt
+  // (prompt-tool-availability.ts), on the assumption the setting rarely changes.
+  "the workspace turns Knowledge learning off": "learning modes render into the system prompt",
 };
 
 function firstDifference(previous: readonly string[], next: readonly string[]) {

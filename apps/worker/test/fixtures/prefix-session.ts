@@ -386,6 +386,8 @@ export type SessionState = {
   titled: boolean;
   /** The workspace lets agents ask people questions. */
   humanInputEnabled: boolean;
+  /** Knowledge learning mode; Off drops the save guidance from the prompt. */
+  knowledgeLearning: "automatic" | "off";
 };
 
 export const INITIAL_STATE: SessionState = {
@@ -401,6 +403,7 @@ export const INITIAL_STATE: SessionState = {
   toolRouterInHistory: false,
   titled: true,
   humanInputEnabled: true,
+  knowledgeLearning: "automatic",
 };
 
 /** What starts a turn. */
@@ -691,6 +694,11 @@ export function prefixChat(wire: Wire) {
         resolvedModel,
         lazyToolTransport: "generic_dispatch",
         ...policy,
+        learningModes: {
+          knowledge: state.knowledgeLearning,
+          instructions: "automatic",
+          skills: "automatic",
+        },
         sandboxArtifactRuntime: { available: false, environment: {} },
         groupBoxBackend: "none",
         ...(state.machineAttached ? { activeSandboxBackend: "selfhosted" as const } : {}),
