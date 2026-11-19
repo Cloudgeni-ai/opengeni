@@ -12,7 +12,6 @@ import { Button } from "@opengeni/react/ui/button";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
-import { MetaChip } from "@opengeni/react/ui/meta-chip";
 
 import { listWorkspaceOrgAgents } from "@/lib/organization-agents";
 
@@ -60,7 +59,6 @@ export function ManagedInConsoleAgents({ workspaceId }: { workspaceId: string })
             key={agent.id}
             leading={<LogoTile name={agent.name} icon={<BotIcon />} />}
             title={agent.name}
-            titleAddon={<MetaChip variant="soft">{MANAGED_IN_CONSOLE}</MetaChip>}
             description={agent.description || undefined}
           />
         ))}

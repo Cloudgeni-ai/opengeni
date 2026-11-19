@@ -86,7 +86,7 @@ export function AgentSessions({
                 }
                 cells={{
                   version: `v${session.agentVersion}`,
-                  status: sessionStatus(session.status as never),
+                  status: sessionStatus(session.status),
                   updated: <RelativeTime date={session.updatedAt} />,
                 }}
                 onOpen={() => onSelect(session.id)}
