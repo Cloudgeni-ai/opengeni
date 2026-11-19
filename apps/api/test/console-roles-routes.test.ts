@@ -34,6 +34,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { sha256Hex } from "@opengeni/contracts/values";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import { ApiHttpError } from "../src/http/api-error";
 import { organizationApiKeyPermissions } from "../src/routes/api-keys";
 import { registerConsoleRoutes } from "../src/routes/console";
@@ -118,6 +119,7 @@ function buildApp(): Hono {
     ),
   });
   const hono = new Hono();
+  // The partial app renders errors the way the API's onError does.
   hono.onError((error, c) => {
     if (error instanceof ApiHttpError) {
       return c.json(
@@ -128,6 +130,10 @@ function buildApp(): Hono {
     if (error instanceof HTTPException) {
       const details = (error as { details?: unknown }).details ?? {};
       return c.json({ code: "http_error", message: error.message, details }, error.status);
+    }
+    // As the API's onError: a request the contract refuses is 422.
+    if (error instanceof z.ZodError) {
+      return c.json({ code: "validation_failed", message: "invalid request", details: {} }, 422);
     }
     return c.json({ code: "internal_error", message: String(error) }, 500);
   });
