@@ -206,7 +206,10 @@ describe("organization agents end to end", () => {
       version: 2,
       message: "Try it",
     });
-    expect(chat.status).toBe(201);
+    expect({ status: chat.status, error: chat.status === 201 ? null : chat.body }).toEqual({
+      status: 201,
+      error: null,
+    });
     const prompt = await runTurn(chat.body.workspaceId, chat.body.sessionId);
     expect(prompt).toContain("Draft rules.");
     expect(prompt).not.toContain("Published rules.");
