@@ -1183,20 +1183,21 @@ describe("agent configuration reaches the production model request", () => {
   );
 });
 
-// goal_resume acts only on an existing goal, so a configured session whose
-// frozen goal is none is not sent it; any goal, or an unknown one, keeps it.
-describe("goal_resume follows the session's goal", () => {
+// A session's first goal must not change the tool list or the system prompt
+// under earlier requests: that re-reads the whole history uncached. Every goal
+// state, including none, sends goal_resume and its guidance.
+describe("goal_resume never follows the session's goal", () => {
   const resume = "opengeni__goal_resume";
-  test("a configured session without a goal has no goal_resume or its guidance", async () => {
-    const captured = await captureWorkerRequest({ agent: agentConfig("all"), goal: "none" });
-    expect(captured.names).toContain("opengeni__goal_set");
-    expect(captured.names).toContain("opengeni__goal_pause");
-    expect(captured.names).not.toContain(resume);
-    expect(captured.request.systemInstructions).not.toContain("goal_resume");
+  test("a configured session's tools and prompt are identical before and after its first goal", async () => {
+    const before = await captureWorkerRequest({ agent: agentConfig("all"), goal: "none" });
+    const after = await captureWorkerRequest({ agent: agentConfig("all"), goal: "paused" });
+    expect(before.names).toContain(resume);
+    expect(before.request.systemInstructions).toContain("goal_resume");
+    expect(after.names).toEqual(before.names);
+    expect(after.request.systemInstructions).toBe(before.request.systemInstructions);
   });
 
   test.each([
-    ["a paused goal", { agent: agentConfig("all"), goal: "paused" }],
     ["an unknown goal", { agent: agentConfig("all") }],
     ["a legacy session without a goal", { agent: null, goal: "none" }],
   ] as const)("%s keeps goal_resume", async (_label, options) => {
