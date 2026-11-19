@@ -46,6 +46,7 @@ import {
   ApplyOrgAgentResponse,
   ArchiveOrgAgentRequest,
   CreateOrgAgentRequest,
+  CONSOLE_TEST_CHAT_SUBJECT_PREFIX,
   CreateOrgAgentTestChatRequest,
   CreateOrgAgentTestChatResponse,
   CreateOrgToolServerRequest,
@@ -465,8 +466,6 @@ function workspaceLimit(deps: ApiRouteDeps): number | null {
   return configuredStaticUsageLimits(deps.settings).maxWorkspacesPerAccount ?? null;
 }
 
-const CONSOLE_TEST_CHAT_SUBJECT_PREFIX = "console-test:";
-
 /**
  * The service principal one tester's Console test chats run as and are
  * started by (`sessions.created_by_*`): one per person (or organization key), never a person and never a
@@ -490,7 +489,10 @@ export const CONSOLE_TEST_CHAT_PERMISSIONS: readonly Permission[] = Object.freez
  * authorization on every request and never stored: their test chat
  * principal in the Console test workspace, explicit permissions (no
  * `workspace:admin`, so never `agents:manage`), with the tester recorded as
- * context only. No one gets a workspace membership.
+ * context only. No one gets a workspace membership. The chat's agent holds at
+ * most these permissions too (an explicit grant narrows the agent's), and
+ * test chats are created with `agentAccess: "session"`, so one tester's agent
+ * never reaches another tester's chats.
  */
 function consoleTestChatGrant(caller: Caller, workspaceId: string): AccessGrant {
   const subjectId = consoleTestChatSubjectId(caller.context.subjectId);
@@ -1072,6 +1074,11 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         workspaceId,
         {
           initialMessage: request.message,
+          // Every tester's chats share the test workspace: the agent reaches
+          // only its own chat tree and keeps no Memory another tester's chat
+          // could read.
+          agentAccess: "session",
+          memoryScope: "off",
           agent: {
             ref: agentId,
             version: request.version,

@@ -20,6 +20,7 @@
  */
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
+  isConsoleTestChatSubject,
   normalizeCredentialProviderMcpUrl,
   type OrgToolServerUnavailableReason,
   type ToolRef,
@@ -82,7 +83,12 @@ export type OrgAgentToolLoginsInput = {
    * only for its creator, or for a turn no person started (an API key, a
    * schedule, a worker); another person's turn never uses them.
    */
-  chat?: { sessionId: string; turnStarterSubjectId: string | null | undefined };
+  chat?: {
+    sessionId: string;
+    turnStarterSubjectId: string | null | undefined;
+    /** Who started this turn (`turn.initiator.subjectId`), person or not. */
+    turnInitiatorSubjectId?: string | null | undefined;
+  };
   mcpServers: readonly McpServerSetting[];
   turnTools: readonly ToolRef[];
   /** Whether the workspace credential provider supplies this server's login. */
@@ -130,13 +136,18 @@ export function orgAgentEndUserSubject(
  */
 async function orgAgentChatHeadersAllowed(input: OrgAgentToolLoginsInput): Promise<boolean> {
   const starter = input.chat?.turnStarterSubjectId;
-  if (!isPersonSubject(starter)) return true;
-  if (!input.chat) return false;
+  if (!input.chat) return !isPersonSubject(starter);
   const owners = await readSessionLoginOwners(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.chat.sessionId,
   });
+  // A Console test chat's headers are its tester's: they run only for turns
+  // that tester's own test chat principal started.
+  if (owners && isConsoleTestChatSubject(owners.creatorSubjectId)) {
+    return input.chat.turnInitiatorSubjectId === owners.creatorSubjectId;
+  }
+  if (!isPersonSubject(starter)) return true;
   return (
     owners !== null && (owners.creatorSubjectId === starter || owners.scopeSubjectId === starter)
   );

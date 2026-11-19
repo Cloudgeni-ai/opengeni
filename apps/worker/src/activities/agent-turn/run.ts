@@ -1719,6 +1719,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             chat: {
               sessionId: input.sessionId,
               turnStarterSubjectId: turn.initiatingHumanSubjectId,
+              turnInitiatorSubjectId: turn.initiator.subjectId,
             },
             mcpServers: runSettings.mcpServers,
             turnTools,

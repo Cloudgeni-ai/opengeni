@@ -14,7 +14,12 @@
 // the app), and losing Editor access takes test chats away at once.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import type { AccessContext, Permission } from "@opengeni/contracts";
+import {
+  signDelegatedAccessToken,
+  type AccessContext,
+  type AccessGrant,
+  type Permission,
+} from "@opengeni/contracts";
 import { hasPermission } from "@opengeni/core";
 import type {
   ApiRouteDeps,
@@ -23,6 +28,7 @@ import type {
   SessionWorkflowClient,
 } from "@opengeni/core";
 import {
+  claimSessionWorkForAttempt,
   createApiKey,
   createDb,
   createOrganizationApiKey,
@@ -44,6 +50,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { ApiHttpError } from "../src/http/api-error";
 import { organizationApiKeyPermissions, registerApiKeyRoutes } from "../src/routes/api-keys";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerConsoleRoutes } from "../src/routes/console";
 import {
   CONSOLE_TEST_CHAT_PERMISSIONS,
@@ -60,6 +67,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
 let settings: Settings | null = null;
+let routeDeps: ApiRouteDeps | null = null;
 
 type Person = {
   userId: string;
@@ -205,6 +213,7 @@ function buildApp(): Hono {
       },
     } as never,
   } as unknown as ApiRouteDeps;
+  routeDeps = deps;
   registerWorkspaceRoutes(hono, deps);
   registerApiKeyRoutes(hono, deps);
   registerSessionRoutes(hono, deps);
@@ -1493,6 +1502,150 @@ describe("Console roles: Console test chats", () => {
       expect(await stateFingerprint(accountId)).toBe(before);
     }
   }, 300_000);
+
+  /** A live agent attempt on a test chat, as the worker runs it: its token and its tools. */
+  async function testChatAgent(sessionId: string) {
+    const workspaceId = await testWorkspaceId();
+    const [row] = await shared!.admin<{ permissions: Permission[] }[]>`
+      select first_party_mcp_permissions as permissions from sessions where id = ${sessionId}`;
+    const permissions = row!.permissions;
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client!.db, workspaceId, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`turn not claimed: ${claimed.reason}`);
+    const tools = ["session_get", "session_events", "sessions_list", "session_queue_message"];
+    const claims = {
+      sessionId,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      firstPartyMcpTools: tools,
+    };
+    const grant: AccessGrant = {
+      accountId: fixture!.accountId,
+      workspaceId,
+      subjectId: `worker:${sessionId}`,
+      permissions,
+      principalKind: "agent_attempt",
+      metadata: claims,
+    };
+    const bearer = `Bearer ${await signDelegatedAccessToken(settings!.delegationSecret!, {
+      accountId: fixture!.accountId,
+      workspaceId,
+      subjectId: `worker:${sessionId}`,
+      permissions,
+      principalKind: "agent_attempt",
+      ...claims,
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    } as Parameters<typeof signDelegatedAccessToken>[1])}`;
+    const server = await buildOpenGeniMcpServer(routeDeps!, grant, {
+      workspaceMemoryEnabled: false,
+    });
+    const tool = async (name: string, args: Record<string, unknown>) => {
+      const handler = (
+        server as unknown as {
+          _registeredTools?: Record<
+            string,
+            { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+          >;
+        }
+      )._registeredTools?.[name]?.handler;
+      if (!handler) throw new Error(`tool not registered: ${name}`);
+      try {
+        const result = (await handler(args, {})) as {
+          isError?: boolean;
+          content?: { text?: string }[];
+        };
+        return { ok: result.isError !== true, text: result.content?.[0]?.text ?? "" };
+      } catch (error) {
+        return { ok: false, text: String(error) };
+      }
+    };
+    return { workspaceId, permissions, bearer, tool };
+  }
+
+  test("test chats reach only their own tree, so one tester's agent never reaches another's", async () => {
+    if (!fixture || !shared) return;
+    const { testChats } = fixture;
+    for (const name of ["owner", "admin", "editor", "key"] as const) {
+      const [row] = await shared.admin<{ agent_access: string; memory_scope: string }[]>`
+        select agent_access, memory_scope from sessions where id = ${testChats[name]!}`;
+      expect([name, row?.agent_access, row?.memory_scope]).toEqual([name, "session", "off"]);
+    }
+    // The admin's test chat's agent goes after the Editor's test chat.
+    const mine = testChats.admin!;
+    const theirs = testChats.editor!;
+    const agent = await testChatAgent(mine);
+    // It holds no more than the test chat principal does.
+    expect([...agent.permissions].sort()).toEqual([...CONSOLE_TEST_CHAT_PERMISSIONS].sort());
+    const eventsOf = async (sessionId: string) =>
+      (
+        await shared!.admin<{ count: number }[]>`
+          select count(*)::int as count from session_events where session_id = ${sessionId}`
+      )[0]!.count;
+    const before = { events: await eventsOf(theirs), state: await stateFingerprint(fixture.accountId) };
+    const app = (method: string, suffix: string, body?: unknown) =>
+      call(method, `/v1/workspaces/${agent.workspaceId}/sessions${suffix}`, { authorization: agent.bearer }, body);
+    // Its own chat works; the other tester's chat is not there, through HTTP...
+    expect((await app("GET", `/${mine}`)).status).toBe(200);
+    expect((await app("GET", `/${theirs}`)).status).toBe(404);
+    expect((await app("GET", `/${theirs}/events`)).status).toBe(404);
+    expect(
+      (
+        await app("POST", `/${theirs}/events`, {
+          type: "user.message",
+          payload: { text: "from another tester's agent" },
+        })
+      ).status,
+    ).toBe(404);
+    const listed = await app("GET", "");
+    expect(listed.status).toBe(200);
+    expect((listed.body as unknown as { id: string }[]).map((row) => row.id)).not.toContain(theirs);
+    // ...and through its session tools.
+    expect((await agent.tool("session_get", { sessionId: mine })).ok).toBe(true);
+    for (const [name, args] of [
+      ["session_get", { sessionId: theirs }],
+      ["session_events", { sessionId: theirs }],
+      [
+        "session_queue_message",
+        { sessionId: theirs, text: "from another tester's agent", idempotencyKey: crypto.randomUUID() },
+      ],
+    ] as const) {
+      expect([name, (await agent.tool(name, args)).ok]).toEqual([name, false]);
+    }
+    const page = await agent.tool("sessions_list", { limit: 100 });
+    expect(page.ok).toBe(true);
+    expect(page.text).not.toContain(theirs);
+    expect({
+      events: await eventsOf(theirs),
+      state: await stateFingerprint(fixture.accountId),
+    }).toEqual(before);
+  }, 120_000);
+
+  test("nobody can name a test chat principal as a service initiator to plant a test chat", async () => {
+    if (!fixture) return;
+    const workspaceId = await testWorkspaceId();
+    const before = await stateFingerprint(fixture.accountId);
+    const planted = await call(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions`,
+      {
+        ...fixture.key,
+        // Any name under the prefix (a real tester's, when short enough).
+        "x-opengeni-service-initiator": consoleTestChatSubjectId("user:planted"),
+      },
+      { initialMessage: "hi", agent: { ref: fixture.agentId, version: 1 } },
+    );
+    expect(planted.status).toBe(422);
+    expect(planted.body.message).toContain("reserved console-test: prefix");
+    expect(await stateFingerprint(fixture.accountId)).toBe(before);
+  }, 60_000);
 
   test("an offboarded Editor loses test chats", async () => {
     if (!fixture) return;

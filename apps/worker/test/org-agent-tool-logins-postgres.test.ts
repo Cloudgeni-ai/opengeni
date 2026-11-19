@@ -525,6 +525,63 @@ describe("organization agent tool server logins", () => {
     }
   }, 180_000);
 
+  test("a Console test chat's headers run only for its own tester's principal", async () => {
+    const f = await fixture();
+    const owner = "console-test:user:alice";
+    const chat = await createSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "service", subjectId: owner },
+      orgAgent: { agentId: f.agentId, version: 1, promptVersion: 1, overrides: null },
+    });
+    const resolve = async (turnInitiatorSubjectId: string | null) => {
+      const published: OrgToolServerUnavailable[] = [];
+      const result = await resolveOrgAgentToolLogins({
+        db: client.db,
+        settings,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        orgAgent: { agentId: f.agentId, version: 1 },
+        endUserSubjectId: null,
+        // No person starts a test chat's turns.
+        chat: { sessionId: chat.id, turnStarterSubjectId: null, turnInitiatorSubjectId },
+        mcpServers: [
+          {
+            id: "chatonly",
+            name: "CHATONLY",
+            url: url("chatonly"),
+            cacheToolsList: false,
+            headers: { "X-Chat": "alice-test-login" },
+          },
+        ],
+        turnTools: [{ kind: "mcp", id: "chatonly" }],
+        providerManaged: () => false,
+        publishUnavailable: async (payload) => {
+          published.push(payload);
+        },
+      });
+      return { headers: result!.mcpServers[0]?.headers ?? null, published };
+    };
+    expect(await resolve(owner)).toEqual({
+      headers: { "X-Chat": "alice-test-login" },
+      published: [],
+    });
+    // Another tester's principal (or anything else) never runs Alice's login.
+    for (const initiator of ["console-test:user:bob", "api_key:backend", "user:alice", null]) {
+      expect(await resolve(initiator)).toEqual({
+        headers: null,
+        published: [{ serverKey: "chatonly", name: "CHATONLY", reason: "missing_credentials" }],
+      });
+    }
+  }, 180_000);
+
   test("OAuth refresh holds a lease, not a row lock, during the token request", async () => {
     const f = await fixture();
     const credentialId = await f.storeLogin(

@@ -966,6 +966,18 @@ export const CreateOrgAgentTestChatResponse = /* @__PURE__ */ defineSchema(() =>
 export type CreateOrgAgentTestChatResponse = z.infer<typeof CreateOrgAgentTestChatResponse>;
 
 /**
+ * The subject prefix of a tester's Console test chat principal
+ * (`console-test:<tester>`). Reserved for the server: no caller can name a
+ * service initiator with it.
+ */
+export const CONSOLE_TEST_CHAT_SUBJECT_PREFIX = "console-test:";
+
+/** Whether a subject is a Console test chat principal. */
+export function isConsoleTestChatSubject(subjectId: string | null | undefined): boolean {
+  return typeof subjectId === "string" && subjectId.startsWith(CONSOLE_TEST_CHAT_SUBJECT_PREFIX);
+}
+
+/**
  * `GET .../agents/:agentId/test-chats/:sessionId`: one of the caller's own
  * test chats. Test chats belong to the person (or key) who started them; no
  * one is a member of the test workspace, so these routes are the only way in.
