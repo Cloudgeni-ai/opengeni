@@ -107,6 +107,7 @@ const PERMISSIONS: Permission[] = [
   "workspace:read",
   "sessions:create",
   "sessions:read",
+  "sessions:control",
   "mcp_servers:attach",
 ];
 
@@ -232,13 +233,13 @@ async function plainCreates(): Promise<Record<string, Snapshot>> {
         model: "scripted-model",
         instructions: "Answer briefly.",
         metadata: { team: "ops" },
-        mcpApprovalPolicies: { "team-notes": true },
         mcpServers: [
           {
             id: "team-notes",
             name: "Team notes",
             url: "https://mcp.example.com/notes",
             allowedTools: ["search"],
+            requireApproval: true,
           },
         ],
       },
