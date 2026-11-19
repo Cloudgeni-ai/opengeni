@@ -837,6 +837,8 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     };
     const headers = new Headers(c.req.raw.headers);
     headers.delete("content-length");
+    // The inner response is read here; the outer response is compressed once.
+    headers.delete("accept-encoding");
     headers.set("content-type", "application/json");
     const url = new URL(`/v1/workspaces/${workspaceId}/sessions`, c.req.url);
     const response = await app.request(url.toString(), {
