@@ -56,13 +56,17 @@ async function organization() {
       values (${invitationId}, ${accountId}, ${`${crypto.randomUUID()}@example.test`}, 'member',
         'pending', ${membershipId}, now() + interval '1 hour')`;
   });
-  return { accountId, invitationId, owner };
+  return { accountId, invitationId, owner, personal };
 }
 
-async function asAccount<T>(accountId: string, run: (sql: postgres.TransactionSql) => Promise<T>) {
+async function asAccount<T>(
+  accountId: string,
+  run: (sql: postgres.TransactionSql) => Promise<T>,
+  workspaceId = "",
+) {
   return (await appSql.begin(async (sql) => {
     await sql`select set_config('opengeni.account_id', ${accountId}, true),
-      set_config('opengeni.workspace_id', '', true),
+      set_config('opengeni.workspace_id', ${workspaceId}, true),
       set_config('opengeni.subject_id', '', true)`;
     return await run(sql);
   })) as T;
@@ -149,6 +153,47 @@ describe("organization_console_roles", () => {
       select relrowsecurity, relforcerowsecurity from pg_class
       where oid = 'organization_console_roles'::regclass`;
     expect(posture).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+  });
+
+  test("a workspace context of the organization reads roles but never writes them", async () => {
+    const a = await organization();
+    const member = `user:${crypto.randomUUID()}`;
+    await asAccount(
+      a.accountId,
+      (sql) =>
+        sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
+        values (${a.accountId}, ${member}, 'viewer', ${a.owner})`,
+    );
+    const inWorkspace = <T>(run: (sql: postgres.TransactionSql) => Promise<T>) =>
+      asAccount(a.accountId, run, a.personal);
+    expect(
+      (
+        await inWorkspace(
+          (sql) => sql`select role from organization_console_roles where subject_id = ${member}`,
+        )
+      ).map((row) => row.role),
+    ).toEqual(["viewer"]);
+    expect(
+      await sqlState(() =>
+        inWorkspace(
+          (sql) =>
+            sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
+            values (${a.accountId}, ${`user:${crypto.randomUUID()}`}, 'editor', ${a.owner})`,
+        ),
+      ),
+    ).toBe("42501");
+    const updated = await inWorkspace(
+      (sql) => sql`update organization_console_roles set role = 'editor'
+        where subject_id = ${member} returning id`,
+    );
+    expect(updated).toHaveLength(0);
+    // The account context (every writer) still writes them.
+    const accountUpdate = await asAccount(
+      a.accountId,
+      (sql) => sql`update organization_console_roles set role = 'editor'
+        where subject_id = ${member} returning role`,
+    );
+    expect(accountUpdate.map((row) => row.role)).toEqual(["editor"]);
   });
 
   test("the CHECK refuses malformed rows", async () => {

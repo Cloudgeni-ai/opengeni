@@ -667,7 +667,7 @@ const MATRIX: Record<string, RouteCase> = {
     path: (f) => `${agents(f)}/${f.agentId}/publish-operations`,
   },
   [`GET ${A}/:agentId/movable-chats`]: {
-    need: "viewer",
+    need: "editor",
     key: "allowed",
     ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}/movable-chats?version=1`,
@@ -750,6 +750,8 @@ function keyNeeds(route: string): Permission[] {
   if (path === WORKSPACE_AGENTS) return ["workspace:read"];
   // Test chats are for whoever may test: agents:manage, reads included.
   if (path.includes("/test-chats")) return ["agents:manage"];
+  // Counting the chats a publish would move is for publishing.
+  if (path.endsWith("/movable-chats")) return ["agents:read", "agents:manage"];
   if (path === CREDENTIALS) {
     return method === "GET" ? ["agents:read"] : ["tool_credentials:write"];
   }
@@ -1195,6 +1197,97 @@ describe("Console roles: reads, writes and lifecycle", () => {
       workspaceIds: [teamWorkspaceId],
     });
     expect([reach.status, reach.body.details?.code]).toEqual([403, "console_role_required"]);
+  }, 60_000);
+
+  test("Editors don't change or publish an agent available in team workspaces", async () => {
+    if (!fixture) return;
+    const { people, teamWorkspaceId } = fixture;
+    const created = await call("POST", agents(fixture), people.editor.headers, {
+      key: "editor-team",
+      name: "Editor team",
+      instructions: "One.",
+    });
+    expect(created.status).toBe(201);
+    const agentId = created.body.agent.id as string;
+    let rowVersion = created.body.agent.rowVersion as number;
+    // Without team workspaces an Editor saves and publishes it.
+    const draft = await call("PUT", `${agents(fixture)}/${agentId}/draft`, people.editor.headers, {
+      name: "Editor team",
+      instructions: "Two.",
+      expectedVersion: rowVersion,
+    });
+    expect(draft.status).toBe(201);
+    rowVersion = draft.body.agent.rowVersion;
+    const published = await call(
+      "POST",
+      `${agents(fixture)}/${agentId}/publish`,
+      people.editor.headers,
+      { version: 2, expectedVersion: rowVersion },
+    );
+    expect(published.status).toBe(200);
+    rowVersion = published.body.agent.rowVersion;
+
+    // An admin makes it available in a team workspace.
+    const shared = await call("PATCH", `${agents(fixture)}/${agentId}`, people.admin.headers, {
+      workspaceIds: [teamWorkspaceId],
+      expectedVersion: rowVersion,
+    });
+    expect(shared.status).toBe(200);
+    rowVersion = shared.body.agent.rowVersion;
+    const refused = (reply: { status: number; body: Record<string, any> }) => [
+      reply.status,
+      reply.body.details?.code,
+    ];
+    const inTeam = [403, "agent_in_team_workspaces"];
+    expect(
+      refused(
+        await call("PUT", `${agents(fixture)}/${agentId}/draft`, people.editor.headers, {
+          name: "Editor team",
+          instructions: "Three.",
+          expectedVersion: rowVersion,
+        }),
+      ),
+    ).toEqual(inTeam);
+    // Neither a rollback nor a move.
+    expect(
+      refused(
+        await call("POST", `${agents(fixture)}/${agentId}/publish`, people.editor.headers, {
+          version: 1,
+          expectedVersion: rowVersion,
+        }),
+      ),
+    ).toEqual(inTeam);
+    expect(
+      refused(
+        await call("POST", `${agents(fixture)}/${agentId}/publish`, people.editor.headers, {
+          version: 2,
+          moveRunningChats: true,
+          expectedVersion: rowVersion,
+        }),
+      ),
+    ).toEqual(inTeam);
+    const unchanged = await call("GET", `${agents(fixture)}/${agentId}`, people.admin.headers);
+    expect(unchanged.body.agent).toMatchObject({
+      publishedVersion: 2,
+      latestVersion: 2,
+      rowVersion,
+    });
+
+    // Owners and admins (Full) still do.
+    const adminDraft = await call(
+      "PUT",
+      `${agents(fixture)}/${agentId}/draft`,
+      people.admin.headers,
+      { name: "Editor team", instructions: "Three.", expectedVersion: rowVersion },
+    );
+    expect(adminDraft.status).toBe(201);
+    const rollback = await call(
+      "POST",
+      `${agents(fixture)}/${agentId}/publish`,
+      people.owner.headers,
+      { version: 1, expectedVersion: adminDraft.body.agent.rowVersion },
+    );
+    expect(rollback.status).toBe(200);
   }, 60_000);
 
   test("a new organization role resets the Console role", async () => {

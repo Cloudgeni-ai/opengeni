@@ -252,6 +252,17 @@ CREATE POLICY account_isolation ON end_user_tool_credentials
 CREATE POLICY account_isolation ON agent_workspace_access
   USING (opengeni_private.optional_workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.optional_workspace_rls_visible(account_id, workspace_id));
+-- Which workspaces an agent reaches (and with it the agent's shared keys and
+-- the end users' stored logins there) is decided by the organization: only the
+-- account context writes rows. Deleting a workspace still removes its rows
+-- through the foreign key, which row security does not apply to.
+CREATE POLICY account_only_insert ON agent_workspace_access AS RESTRICTIVE
+  FOR INSERT WITH CHECK (opengeni_private.current_workspace_id() IS NULL);
+CREATE POLICY account_only_update ON agent_workspace_access AS RESTRICTIVE
+  FOR UPDATE USING (opengeni_private.current_workspace_id() IS NULL)
+  WITH CHECK (opengeni_private.current_workspace_id() IS NULL);
+CREATE POLICY account_only_delete ON agent_workspace_access AS RESTRICTIVE
+  FOR DELETE USING (opengeni_private.current_workspace_id() IS NULL);
 CREATE POLICY account_isolation ON agent_publish_operations
   USING (opengeni_private.account_rls_visible(account_id))
   WITH CHECK (opengeni_private.account_rls_visible(account_id));

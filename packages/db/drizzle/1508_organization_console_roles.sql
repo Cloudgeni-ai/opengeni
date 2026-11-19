@@ -10,8 +10,9 @@
 -- Visibility, not authorization: the API checks that the caller is an owner
 -- or admin of the organization before every write and resolves a reader's
 -- role itself. Rows are visible to the organization's account context only
--- (and its workspace contexts, through account_rls_visible); the runtime may
--- read, insert and update them, never delete (setting 'none' clears a role).
+-- (and its workspace contexts, through account_rls_visible, which may read
+-- but never write them); the runtime may read, insert and update them, never
+-- delete (setting 'none' clears a role).
 -- A Console role never grants access to app workspaces.
 --
 -- Rolling: a new table the previous release never reads or writes;
@@ -48,6 +49,15 @@ REVOKE ALL ON TABLE organization_console_roles FROM PUBLIC;
 CREATE POLICY account_isolation ON organization_console_roles
   USING (opengeni_private.account_rls_visible(account_id))
   WITH CHECK (opengeni_private.account_rls_visible(account_id));
+-- Only the account context writes roles (every writer runs there); a
+-- workspace context of the organization may read them.
+CREATE POLICY account_only_insert ON organization_console_roles AS RESTRICTIVE
+  FOR INSERT WITH CHECK (opengeni_private.current_workspace_id() IS NULL);
+CREATE POLICY account_only_update ON organization_console_roles AS RESTRICTIVE
+  FOR UPDATE USING (opengeni_private.current_workspace_id() IS NULL)
+  WITH CHECK (opengeni_private.current_workspace_id() IS NULL);
+CREATE POLICY account_only_delete ON organization_console_roles AS RESTRICTIVE
+  FOR DELETE USING (opengeni_private.current_workspace_id() IS NULL);
 
 DO $organization_console_roles_grants$
 BEGIN

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessContext } from "@opengeni/contracts";
 import { hasPermission } from "@opengeni/core";
-import { consoleWindow, requireConsoleAdministratorContext } from "../src/routes/console";
+import { consoleWindow } from "../src/routes/console";
 import {
   consoleAccessCovers,
   requireConsoleAccessForContext,
@@ -33,35 +33,59 @@ function context(subjectId: string, permissions: string[], role?: string): Acces
 }
 
 describe("Opengeni Console authority", () => {
-  test("an organization administrator may open Console", () => {
-    const admin = requireConsoleAdministratorContext(
+  // None of these callers needs a stored Console role, so the database is never read.
+  const noDb = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("the database must not be read here");
+      },
+    },
+  ) as Parameters<typeof requireConsoleAccessForContext>[0]["db"];
+
+  test("an organization administrator may open Console", async () => {
+    const admin = await requireConsoleAccessForContext(
+      { db: noDb },
       context("user:admin", ["account:admin"]),
       organizationId,
+      "full",
     );
-    expect(admin.subjectId).toBe("user:admin");
+    expect(admin).toMatchObject({ subjectId: "user:admin", access: "full" });
   });
 
-  test("API keys and a product's end users never may, even with admin permissions", () => {
+  test("API keys and a product's end users never may, even with admin permissions", async () => {
     for (const subjectId of [
       "api_key:22222222-2222-4222-8222-222222222222",
       "external_user:33333333-3333-4333-8333-333333333333",
     ]) {
-      expect(() =>
-        requireConsoleAdministratorContext(context(subjectId, ["account:admin"]), organizationId),
-      ).toThrow("owners and admins");
+      await expect(
+        requireConsoleAccessForContext(
+          { db: noDb },
+          context(subjectId, ["account:admin"]),
+          organizationId,
+          "viewer",
+        ),
+      ).rejects.toMatchObject({ status: 403 });
     }
   });
 
-  test("members and other organizations are refused", () => {
-    expect(() =>
-      requireConsoleAdministratorContext(context("user:member", ["account:read"]), organizationId),
-    ).toThrow("owners and admins");
-    expect(() =>
-      requireConsoleAdministratorContext(
+  test("people without Console standing and other organizations are refused", async () => {
+    await expect(
+      requireConsoleAccessForContext(
+        { db: noDb },
+        context("user:member", ["account:read"]),
+        organizationId,
+        "viewer",
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      requireConsoleAccessForContext(
+        { db: noDb },
         context("user:admin", ["account:admin"]),
         "44444444-4444-4444-8444-444444444444",
+        "viewer",
       ),
-    ).toThrow("owners and admins");
+    ).rejects.toMatchObject({ status: 403 });
   });
 
   test("ranges are rolling windows ending now", () => {

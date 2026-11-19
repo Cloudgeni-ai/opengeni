@@ -802,10 +802,13 @@ start, the version stays published and the operation is `failed` with
 `move_start_failed` (publish again to retry) or `superseded` (a later publish
 came before it started).
 If the API stops between saving a publish and starting its move, the
-operation stays `pending` until someone lists the agent's publish operations
-more than two minutes later: the listing starts the move again (starting is
-idempotent) or, when it cannot start, marks it `failed` as above. A later
-publish also ends it as `superseded`. A move that was already running when a
+operation stays `pending` until someone who may publish (Editor or Full, or a
+key with `agents:manage`) lists the agent's publish operations more than two
+minutes later: the listing starts the move again (starting is idempotent).
+When the start fails it stays `pending` for the next listing; only a
+deployment without a move workflow marks it `failed` (`move_unavailable`).
+Viewers' and read-only keys' listings only read. A later publish also ends
+it as `superseded`. A move that was already running when a
 later publish took over ends `succeeded` with `failureReason: superseded`;
 its counts show what it moved before it stopped.
 
@@ -847,7 +850,8 @@ are on per organization (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`, see
   `tool_credentials:write` (full organization keys hold them through
   `workspace:admin`; explicit keys get `agents:read` from a `:read` preset), and
   the organization's people by Console role: owners and admins everything,
-  Editors read and edit Console-managed agents (test chats, publish), Viewers
+  Editors read and edit Console-managed agents (test chats, publish) except
+  ones available in team workspaces (403 `agent_in_team_workspaces`), Viewers
   read, other members nothing (see
   [Console roles](opengeni-console.md#roles)). Only an owner (never a key) switches an agent between Console and
   code management; afterwards Console edits of a code agent answer 409

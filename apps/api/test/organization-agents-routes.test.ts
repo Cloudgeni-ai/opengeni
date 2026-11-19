@@ -434,11 +434,10 @@ describe("Console agents routes", () => {
     const one = await call("GET", `${org()}/${agentId}/versions/1`, keys.agentsRead);
     expect(one.body.version.instructions).toBe("One.");
     expect((await call("GET", `${org()}/${agentId}/versions/9`, keys.agentsRead)).status).toBe(404);
-    const movable = await call(
-      "GET",
-      `${org()}/${agentId}/movable-chats?version=1`,
-      keys.agentsRead,
-    );
+    // Counting the chats a publish would move is for keys that may publish.
+    const movablePath = `${org()}/${agentId}/movable-chats?version=1`;
+    expect((await call("GET", movablePath, keys.agentsRead)).status).toBe(403);
+    const movable = await call("GET", movablePath, keys.agentsManage);
     expect(movable).toEqual({ status: 200, body: { count: 0 } });
     const operations = await call("GET", `${org()}/${agentId}/publish-operations`, keys.agentsRead);
     expect(operations.body.operations.length).toBe(1);
@@ -839,26 +838,41 @@ describe("Console agents routes", () => {
       ["failed", "move_unavailable"],
     ]);
 
-    // The API stopped between the publish and starting its move: listing
-    // re-drives a stale pending move, and fails it when it cannot start.
+    // The API stopped between the publish and starting its move: a listing
+    // by someone who may publish re-drives the stale pending move; a start
+    // error leaves it pending, and only a missing move workflow fails it.
     const pendingId = operations.body.operations[0].id as string;
     await shared!.admin`update agent_publish_operations
       set created_at = now() - interval '5 minutes' where id = ${pendingId}`;
     const byId = (body: { operations: Array<Record<string, unknown>> }) =>
       body.operations.find((operation) => operation.id === pendingId);
+    const list = async (headers: Record<string, string>) =>
+      byId((await call("GET", `${org()}/${agentId}/publish-operations`, headers)).body);
     const restarted: string[] = [];
     try {
       deps.orgAgentPublishMoveStarter = async (input) => {
         restarted.push(input.operationId);
       };
-      const listed = await call("GET", `${org()}/${agentId}/publish-operations`, keys.agentsRead);
-      expect(byId(listed.body)).toMatchObject({ status: "pending", failureReason: null });
+      // A read-only key only reads.
+      expect(await list(keys.agentsRead)).toMatchObject({ status: "pending" });
+      expect(restarted).toEqual([]);
+      expect(await list(keys.agentsManage)).toMatchObject({
+        status: "pending",
+        failureReason: null,
+      });
       expect(restarted).toEqual([pendingId]);
+      deps.orgAgentPublishMoveStarter = async () => {
+        throw new Error("workflow service briefly unavailable");
+      };
+      expect(await list(keys.agentsManage)).toMatchObject({
+        status: "pending",
+        failureReason: null,
+      });
     } finally {
       delete deps.orgAgentPublishMoveStarter;
     }
-    const swept = await call("GET", `${org()}/${agentId}/publish-operations`, keys.agentsRead);
-    expect(byId(swept.body)).toMatchObject({
+    expect(await list(keys.agentsRead)).toMatchObject({ status: "pending" });
+    expect(await list(keys.agentsManage)).toMatchObject({
       status: "failed",
       failureReason: "move_unavailable",
     });
