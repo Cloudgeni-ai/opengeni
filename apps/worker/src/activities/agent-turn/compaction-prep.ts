@@ -449,10 +449,12 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           ...(cancellationSignal ? { signal: cancellationSignal } : {}),
           ...(portableNeedsAgentPrefix ? { preparedRequest: preparedPortableRequest() } : {}),
         });
-      if (portableNeedsAgentPrefix)
-        summarize.withheldWireHistory = () =>
-          remotePrefix.agent ? takeWithheldCompactionInput(remotePrefix.agent) : undefined;
     }
+    // Every route that sends the agent's prepared prefix (Responses and
+    // Anthropic Messages) can extend the withheld ordinary request.
+    if (portableNeedsAgentPrefix)
+      summarize.withheldWireHistory = () =>
+        remotePrefix.agent ? takeWithheldCompactionInput(remotePrefix.agent) : undefined;
     return summarize;
   };
   // Prompt-cache prefix for remote_v2 MUST match ordinary turns:

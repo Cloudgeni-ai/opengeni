@@ -28,13 +28,24 @@ const SDK_LINE_EXTENSIONS: ReadonlyArray<readonly [line: string, addition: strin
 ];
 
 /**
+ * Stands in for the SDK's filesystem section, which Opengeni turns off
+ * (`filesystemInstructions: false`): that section names the active machine's
+ * root, so moving a session to another machine rewrote the system prompt and
+ * invalidated the whole cached history. The layout itself is a history item.
+ */
+const FILESYSTEM_SECTION =
+  "# Filesystem\n" +
+  "You have access to a filesystem. The latest <opengeni_workspace_filesystem> block in the conversation gives the active workspace's layout and root; a later tool result that moves the session to another machine supersedes it.";
+
+/**
  * The sandbox agent's base instructions: the SDK default without its line
  * telling agents to look for AGENTS.md files. That line sends every agent,
  * even one writing a document into an empty sandbox, to scan for AGENTS.md
  * first, which costs a model step and usually finds nothing; an agent cannot
  * tell up front whether it is in a code repository. The remaining lines on how
  * to follow repository instructions an agent does meet stay, and two lines
- * gain a clause (see `SDK_LINE_EXTENSIONS`). The text is static, so it never
+ * gain a clause (see `SDK_LINE_EXTENSIONS`). A static filesystem section
+ * closes it (see `FILESYSTEM_SECTION`). The text is static, so it never
  * varies within a session.
  */
 export function sandboxBaseInstructions(): string {
@@ -56,5 +67,5 @@ export function sandboxBaseInstructions(): string {
     lines[index] = `${line}${addition}`;
     text = lines.join("\n");
   }
-  return text;
+  return `${text.trimEnd()}\n\n${FILESYSTEM_SECTION}\n`;
 }

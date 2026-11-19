@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WorkspaceCaptureRow } from "@opengeni/db";
 import type { WorkspaceCaptureManifest } from "@opengeni/contracts";
+import { WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import {
   CAPTURE_INLINE_FILE_MAX_BYTES,
@@ -183,12 +184,19 @@ function makeRow(overrides: Partial<WorkspaceCaptureRow> = {}): WorkspaceCapture
 // In-memory storage: byte map for reads, a stub signer that records the key.
 function fakeStorage(
   objects: Record<string, Uint8Array>,
-): CaptureStoragePort & { reads: string[]; signed: string[] } {
+): CaptureStoragePort & { reads: string[]; signed: string[]; heads: string[] } {
   const reads: string[] = [];
   const signed: string[] = [];
+  const heads: string[] = [];
   return {
     reads,
     signed,
+    heads,
+    async headObject(key) {
+      heads.push(key);
+      const bytes = objects[key];
+      return bytes ? { ContentLength: bytes.byteLength } : null;
+    },
     async getObjectBytes(key) {
       reads.push(key);
       const bytes = objects[key];
@@ -370,7 +378,7 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     const big = new TextEncoder().encode(JSON.stringify(manifest));
     expect(big.byteLength).toBeGreaterThan(CAPTURE_INLINE_MANIFEST_MAX_BYTES);
     const storage = fakeStorage({ [MANIFEST_KEY]: big });
-    const res = await serveWorkspaceCapture(makeRow(), storage);
+    const res = await serveWorkspaceCapture(makeRow({ sizeBytes: big.byteLength + 12 }), storage);
     expect(res.available).toBe(true);
     if (!res.available) throw new Error("unreachable");
     expect(res.manifest).toBeNull();
@@ -386,7 +394,8 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     const big = new TextEncoder().encode(JSON.stringify(manifest));
     const storage = fakeStorage({ [MANIFEST_KEY]: big });
     const recorded: Array<{ kind: string; revision: number; expiresAt: string }> = [];
-    const res = await serveWorkspaceCapture(makeRow(), storage, undefined, async (fact) => {
+    const bigRow = makeRow({ sizeBytes: big.byteLength + 12 });
+    const res = await serveWorkspaceCapture(bigRow, storage, undefined, async (fact) => {
       recorded.push(fact);
     });
     expect(res.available).toBe(true);
@@ -396,7 +405,7 @@ describe("serveWorkspaceCapture (manifest response)", () => {
 
     // Fail closed: no recorded fact, no bearer capability.
     const failing = serveWorkspaceCapture(
-      makeRow(),
+      bigRow,
       fakeStorage({ [MANIFEST_KEY]: big }),
       undefined,
       async () => {
@@ -423,11 +432,39 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(inlineRecorded).toEqual([]);
   });
 
-  test("malformed manifest above the inline cap is never signed", async () => {
+  test("a manifest above the inline cap is signed without being downloaded or parsed", async () => {
+    // Parsing is synchronous: downloading and validating a large manifest here
+    // blocked the API event loop for as long as the parse took. The size is
+    // probed instead, and the client validates what it downloads.
     const big = new Uint8Array(CAPTURE_INLINE_MANIFEST_MAX_BYTES + 1);
     const storage = fakeStorage({ [MANIFEST_KEY]: big });
-    const res = await serveWorkspaceCapture(makeRow(), storage);
+    const res = await serveWorkspaceCapture(makeRow({ sizeBytes: null }), storage);
+    expect(res.available).toBe(true);
+    if (!res.available) throw new Error("unreachable");
+    expect(res.manifest).toBeNull();
+    expect(res.manifestUrl?.url).toContain(MANIFEST_KEY);
+    expect(res.stats).toEqual(baseStats());
+    expect(storage.heads).toEqual([MANIFEST_KEY]);
+    expect(storage.reads).toEqual([]);
+    expect(storage.signed).toEqual([MANIFEST_KEY]);
+  });
+
+  test("a row whose size bounds the manifest below the inline cap skips the size probe", async () => {
+    const manifest = makeManifest([fileEntry({})]);
+    const storage = fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)),
+    });
+    const res = await serveWorkspaceCapture(makeRow({ sizeBytes: 4096 }), storage);
+    expect(res.available).toBe(true);
+    expect(storage.heads).toEqual([]);
+    expect(storage.reads).toEqual([MANIFEST_KEY]);
+  });
+
+  test("a manifest missing from storage is unavailable without being signed", async () => {
+    const storage = fakeStorage({});
+    const res = await serveWorkspaceCapture(makeRow({ sizeBytes: 50_000_000 }), storage);
     expect(res).toEqual({ available: false });
+    expect(storage.heads).toEqual([MANIFEST_KEY]);
     expect(storage.signed).toEqual([]);
   });
 });
@@ -463,6 +500,15 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
   test("path not in the manifest → 404", async () => {
     const storage = storageWith([fileEntry({ path: "src/app.ts" })]);
     expect(await expect404(serveWorkspaceCaptureFile(makeRow(), "nope.ts", storage))).toBe(404);
+  });
+
+  test("a manifest above the published capture bound is never downloaded → 404", async () => {
+    const oversized = new Uint8Array(WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES + 1);
+    const storage = fakeStorage({ [MANIFEST_KEY]: oversized });
+    const row = makeRow({ sizeBytes: oversized.byteLength });
+    expect(await expect404(serveWorkspaceCaptureFile(row, "src/app.ts", storage))).toBe(404);
+    expect(storage.heads).toEqual([MANIFEST_KEY]);
+    expect(storage.reads).toEqual([]);
   });
 
   test("deleted file → 404", async () => {

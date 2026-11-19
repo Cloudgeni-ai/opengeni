@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { FetchLike } from "./index";
+import { replayedResponsesItem } from "./responses-replay";
 
 // Capture the module's bootstrap context, not a chat request. Socket I/O and
 // idle timers outlive turns and must not pin the opener's execution context.
@@ -206,6 +207,11 @@ export type ResponsesWebSocketEndpoint = {
   beta?: string;
   /** HTTP-only body fields left out of `response.create` (WebSocket mode always streams). */
   httpOnlyFields?: readonly string[];
+  /**
+   * Provider request headers that, like {@link PER_REQUEST_HEADERS}, stay off
+   * the handshake and out of the connection's identity (lower case).
+   */
+  perRequestHeaders?: readonly string[];
   /**
    * Give each conversation (see {@link withResponsesConversation}) its own
    * connection, and leave requests outside a conversation on HTTP. Needed
@@ -460,26 +466,29 @@ function fingerprint(value: unknown): string {
 }
 
 /**
- * Recognize only demonstrated SDK round-trip equivalences. Unknown item types
- * and fields compare exactly; a missed optimization is preferable to changing
- * model context. In particular phase and hosted-call status remain significant.
- * A replayed tool_search_call loses its provider id and its "completed" status
- * (the Codex normalizer strips both), exactly like a function call.
+ * An item as replay sends it back, for comparing a response's output with the
+ * input that replays it. Both sides go through {@link replayedResponsesItem},
+ * the same normalization the Codex request normalizer applies on replay, so an
+ * item of any type that differs only in what replay strips (its provider id,
+ * its output-only status) continues the chain. Without this, every response
+ * with an item the check did not know (a hosted web search, image generation,
+ * an MCP call) ended the chain, and the next request resent the full input,
+ * which the backend renders differently from the chain it holds, so that
+ * request missed the prompt cache from the first differing item onwards.
+ *
+ * Everything replay keeps still compares exactly: content, arguments, actions,
+ * results, phase and a status the Responses input schema requires, so a real
+ * difference still sends the full request. Beyond replay, only demonstrated SDK
+ * round-trip equivalences are recognized: an empty reasoning summary and empty
+ * output-text annotations and logprobs, which the SDK drops.
  */
 function modelVisibleItem(item: unknown): string {
-  if (!item || typeof item !== "object" || Array.isArray(item)) return fingerprint(item);
-  const type = (item as Record<string, unknown>).type;
-  if (
-    type !== "message" &&
-    type !== "function_call" &&
-    type !== "reasoning" &&
-    type !== "tool_search_call"
-  )
-    return fingerprint(item);
+  const replayed = replayedResponsesItem(item);
+  if (!replayed || typeof replayed !== "object" || Array.isArray(replayed))
+    return fingerprint(replayed);
+  const type = (replayed as Record<string, unknown>).type;
   const visible: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(item as Record<string, unknown>)) {
-    if (key === "id") continue;
-    if (key === "status" && value === "completed") continue;
+  for (const [key, value] of Object.entries(replayed as Record<string, unknown>)) {
     if (key === "summary" && type === "reasoning" && Array.isArray(value) && value.length === 0)
       continue;
     visible[key] =
@@ -800,7 +809,8 @@ export function responsesTransport(
   const identity = (url: string, headers: HeadersInit | undefined) => {
     const handshake: Record<string, string> = {};
     for (const [name, value] of new Headers(headers).entries()) {
-      if (!isPerRequestHeader(name)) handshake[name] = value;
+      if (!isPerRequestHeader(name) && !endpoint.perRequestHeaders?.includes(name))
+        handshake[name] = value;
     }
     if (endpoint.beta) handshake["openai-beta"] = endpoint.beta;
     const wsUrl = url.replace(/^https:/, "wss:");

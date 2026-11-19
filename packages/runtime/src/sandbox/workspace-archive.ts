@@ -25,6 +25,11 @@ import {
   fingerprintHostWorkspace,
   type HostWorkspaceRootIdentity,
 } from "./host-archive-spool";
+import {
+  captureWorkspaceTarStreamToSpool,
+  workspaceTarStreamSession,
+  type WorkspaceTarStreamSession,
+} from "./workspace-tar-stream";
 
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
@@ -51,9 +56,11 @@ export type VerifiedWorkspaceArchivePayload =
   | VerifiedWorkspaceArchive
   | VerifiedHostWorkspaceArchive;
 
-/** Host-backed portable archives can go directly to object storage without an
- * intermediate whole-document string or buffer. Existing inline/provider APIs
- * retain their compatibility path when disk-backed publication is unavailable. */
+/** Archives bound for object storage never pass through one whole in-memory
+ * buffer: host-backed workspaces are read from disk into a private spool, and
+ * a remote session that can stream its tar (`WorkspaceTarStreamSession`)
+ * streams it into one. Without object storage, or for a provider without a
+ * stream, the inline/provider compatibility path is unchanged. */
 export async function captureWorkspaceArchiveForStorage(
   session: unknown,
   capturedAtMs: number,
@@ -63,6 +70,17 @@ export async function captureWorkspaceArchiveForStorage(
   const target = session as WorkspaceSession;
   await target.assertWorkspaceCaptureAuthority?.();
   const root = hostBackedWorkspaceRoot(target);
+  const stream = objectStorageAvailable && !root ? workspaceTarStreamSession(session) : null;
+  if (stream) {
+    return await withSandboxProviderCapture(
+      session,
+      async () =>
+        await captureWorkspaceArchiveExclusive(session, capturedAtMs, options, (capture) =>
+          captureStreamedOrVerifiedWorkspaceArchive(session, stream, capturedAtMs, capture),
+        ),
+      options.signal,
+    );
+  }
   if (
     process.platform !== "linux" ||
     !root ||
@@ -342,14 +360,33 @@ function verifyDecodedWorkspaceArchive(
   };
 }
 
-/** Fetch object-storage tar bytes into the in-memory restore envelope. Legacy
- * inline base64 is left unchanged. Both payloads must agree when both exist. */
+/**
+ * Whether cold restore reads this envelope's object-storage archive itself,
+ * through a verified disk spool (`loadHostWorkspaceArchive`), instead of the
+ * caller inlining it. Every portable tar does; a host-backed projection only on
+ * Linux, where it is restored natively.
+ */
+export function workspaceArchiveObjectRestoresFromSpool(
+  sessionState: Record<string, unknown>,
+): boolean {
+  if (!parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) return false;
+  const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
+  return (
+    descriptor?.version === 1 &&
+    (descriptor.workspace.projection !== "sdk_local_archive_v1" || process.platform === "linux")
+  );
+}
+
+/** Fetch an object-storage archive that cold restore does not spool itself
+ * (see `workspaceArchiveObjectRestoresFromSpool`) into the in-memory restore
+ * envelope; spooled archives are returned unchanged. Legacy inline base64 is
+ * left unchanged. Both payloads must agree when both exist. */
 export async function inlineWorkspaceArchiveForRestore(
   sessionState: Record<string, unknown>,
   getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array } | null>,
 ): Promise<Record<string, unknown>> {
   const ref = parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef);
-  if (!ref) return sessionState;
+  if (!ref || workspaceArchiveObjectRestoresFromSpool(sessionState)) return sessionState;
   const object = await getObjectBytes(ref.key);
   if (!object) {
     throw new WorkspaceArchiveIntegrityError(
@@ -1203,23 +1240,26 @@ export async function captureVerifiedWorkspaceArchive(
 ): Promise<VerifiedWorkspaceArchive> {
   return await withSandboxProviderCapture(
     session,
-    async () => await captureVerifiedWorkspaceArchiveExclusive(session, capturedAtMs, options),
+    async () =>
+      await captureWorkspaceArchiveExclusive(session, capturedAtMs, options, (capture) =>
+        captureVerifiedWorkspaceArchiveWithManifestExclusions(session, capturedAtMs, capture),
+      ),
     options?.signal,
   );
 }
 
-async function captureVerifiedWorkspaceArchiveExclusive(
+/** Runs one capture (`capture`) under the caller's options. Paths the caller
+ * leaves out widen the manifest's ephemeral paths for exactly this capture,
+ * which leaves them out of both the tar and its fingerprint. */
+async function captureWorkspaceArchiveExclusive<T extends VerifiedWorkspaceArchivePayload>(
   session: unknown,
   capturedAtMs: number,
-  options?: WorkspaceArchiveCaptureOptions,
-): Promise<VerifiedWorkspaceArchive> {
+  options: WorkspaceArchiveCaptureOptions | undefined,
+  capture: (options: WorkspaceArchiveCaptureOptions | undefined) => Promise<T>,
+): Promise<T> {
   const omitPaths = normalizedOmitPaths(options?.omitPaths);
   if (omitPaths.length === 0) {
-    return await captureVerifiedWorkspaceArchiveWithManifestExclusions(
-      session,
-      capturedAtMs,
-      options,
-    );
+    return await capture(options);
   }
   // The SDK and the fingerprint both read the manifest's ephemeral paths, so
   // widening them for this one capture leaves the same paths out of the tar
@@ -1242,16 +1282,12 @@ async function captureVerifiedWorkspaceArchiveExclusive(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const { omitPaths: _omitted, ...captureOptions } = options ?? { requestId: "" };
-    const capture = captureVerifiedWorkspaceArchiveWithManifestExclusions(
-      session,
-      capturedAtMs,
-      options ? captureOptions : undefined,
-    );
+    const running = capture(options ? captureOptions : undefined);
     const boundMs = options?.providerTimeoutMs;
     const archive =
       boundMs !== undefined && Number.isFinite(boundMs) && boundMs > 0
         ? await Promise.race([
-            capture,
+            running,
             new Promise<never>((_resolve, reject) => {
               timer = setTimeout(() => {
                 const error = new WorkspaceArchiveIntegrityError(
@@ -1261,11 +1297,12 @@ async function captureVerifiedWorkspaceArchiveExclusive(
                 // The bound ends only the wait: the tar keeps reading inside
                 // the box until its command returns. The caller keeps this
                 // lease's capture slot until then, so a retry never starts a
-                // second tar next to it.
+                // second tar next to it. A spool it still produces is
+                // nobody's, so it is removed as soon as it lands.
                 captureStillRunning.set(
                   error,
-                  capture.then(
-                    () => undefined,
+                  running.then(
+                    async (late) => await disposeWorkspaceArchive(late).catch(() => undefined),
                     () => undefined,
                   ),
                 );
@@ -1273,14 +1310,15 @@ async function captureVerifiedWorkspaceArchiveExclusive(
               }, boundMs);
             }),
           ])
-        : await capture;
-    if (archive.kind !== "tar" || archive.descriptor.version !== 1) {
+        : await running;
+    if (archive.kind === "provider_snapshot" || archive.descriptor.version !== 1) {
+      await disposeWorkspaceArchive(archive);
       throw new WorkspaceArchiveIntegrityError(
         "native_snapshot_fallback_unverified",
         "a workspace capture that leaves paths out returned a native snapshot",
       );
     }
-    return { ...archive, descriptor: { ...archive.descriptor, omittedPaths: omitPaths } };
+    return { ...archive, descriptor: { ...archive.descriptor, omittedPaths: omitPaths } } as T;
   } finally {
     if (timer) clearTimeout(timer);
     if (ownProperty) manifest.ephemeralPersistencePaths = configured;
@@ -1337,12 +1375,7 @@ async function captureVerifiedWorkspaceArchiveWithManifestExclusions(
     );
   }
   const configuredPersistence = target.state?.workspacePersistence;
-  const configuredTarFallback = workspaceFingerprintExcludes(target).length > 0;
-  const expectsNativeSnapshot =
-    !portableTar &&
-    typeof configuredPersistence === "string" &&
-    configuredPersistence !== "tar" &&
-    !configuredTarFallback;
+  const expectsNativeSnapshot = captureExpectsNativeSnapshot(target, options);
   const before = expectsNativeSnapshot ? null : await fingerprintSandboxWorkspace(target);
   const bytes = portableTar
     ? await target.persistWorkspaceTar!()
@@ -1400,6 +1433,78 @@ async function captureVerifiedWorkspaceArchiveWithManifestExclusions(
     descriptor,
     kind: "tar",
   };
+}
+
+/** A provider configured for native snapshots returns a small receipt, not a
+ * tar, unless paths are left out (a native snapshot cannot leave them out). */
+function captureExpectsNativeSnapshot(
+  target: WorkspaceSession,
+  options: WorkspaceArchiveCaptureOptions | undefined,
+): boolean {
+  const configuredPersistence = target.state?.workspacePersistence;
+  return (
+    options?.strategy !== "portable_tar" &&
+    typeof configuredPersistence === "string" &&
+    configuredPersistence !== "tar" &&
+    workspaceFingerprintExcludes(target).length === 0
+  );
+}
+
+/**
+ * The tar capture of a session that streams its workspace tar: the same
+ * before/after fingerprint contract as `captureVerifiedWorkspaceArchive`, with
+ * the tar written to a private disk spool on this host as it streams instead
+ * of returned as one buffer. A native-snapshot receipt keeps the ordinary path.
+ */
+async function captureStreamedOrVerifiedWorkspaceArchive(
+  session: unknown,
+  stream: WorkspaceTarStreamSession,
+  capturedAtMs: number,
+  options?: WorkspaceArchiveCaptureOptions,
+): Promise<VerifiedWorkspaceArchivePayload> {
+  const target = session as WorkspaceSession;
+  if (captureExpectsNativeSnapshot(target, options)) {
+    return await captureVerifiedWorkspaceArchiveWithManifestExclusions(
+      session,
+      capturedAtMs,
+      options,
+    );
+  }
+  await target.assertWorkspaceCaptureAuthority?.();
+  const before = await fingerprintSandboxWorkspace(target);
+  const spool = await captureWorkspaceTarStreamToSpool(stream);
+  try {
+    if (spool.byteSize === 0) {
+      throw new WorkspaceArchiveIntegrityError(
+        "archive_base64_invalid",
+        "sandbox workspace persistence returned an empty archive",
+        { retryable: true },
+      );
+    }
+    const after = await fingerprintSandboxWorkspace(target);
+    if (!fingerprintsEqual(before, after)) {
+      throw new WorkspaceArchiveIntegrityError(
+        "workspace_changed_during_capture",
+        "workspace changed while its durable archive was being captured",
+        { retryable: true },
+      );
+    }
+    return {
+      kind: "host_spool",
+      spool,
+      descriptor: {
+        version: 1,
+        revision: `wa1:${String(capturedAtMs).padStart(13, "0")}:${spool.sha256}`,
+        archiveSha256: spool.sha256,
+        archiveBytes: spool.byteSize,
+        capturedAt: new Date(capturedAtMs).toISOString(),
+        workspace: before,
+      },
+    };
+  } catch (error) {
+    await spool.dispose().catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function verifyRestoredWorkspace(
