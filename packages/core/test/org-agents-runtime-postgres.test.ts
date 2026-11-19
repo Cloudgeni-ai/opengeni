@@ -304,7 +304,12 @@ describe("session create with an organization agent", () => {
     expect(changed.binding.version).toBe(2);
     // Each save is in Console's audit log; a reused version adds nothing.
     const audit = await shared.admin<
-      { action: string; workspace_id: string; actor_subject_id: string; detail: Record<string, unknown> }[]
+      {
+        action: string;
+        workspace_id: string;
+        actor_subject_id: string;
+        detail: Record<string, unknown>;
+      }[]
     >`
       select action, workspace_id::text as workspace_id, actor_subject_id, detail
       from organization_console_audit_events
@@ -336,11 +341,9 @@ describe("session create with an organization agent", () => {
     ]);
     // A published Console agent is edited in Console only.
     await org.agent("console-agent", [{ instructions: "Hi." }]);
-    expect(
-      await refusal(
-        org.prepare({ agent: { ref: "console-agent", config } }, manage),
-      ),
-    ).toEqual({ status: 409, code: "agent_managed_in_console" });
+    expect(await refusal(org.prepare({ agent: { ref: "console-agent", config } }, manage))).toEqual(
+      { status: 409, code: "agent_managed_in_console" },
+    );
     expect(
       await refusal(
         org.prepare(

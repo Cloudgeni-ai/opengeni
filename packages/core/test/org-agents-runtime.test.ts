@@ -295,7 +295,10 @@ describe("organization agent session create plan", () => {
     expect([...own.agentServerIds].sort()).toEqual(["crm", "docs"]);
     // With organization agents:manage the same widening is applied and recorded.
     const widened = await plan(
-      { ref: "support", toolServers: [{ server: "crm", tools: { mode: "all" }, approval: { ask: [] } }] },
+      {
+        ref: "support",
+        toolServers: [{ server: "crm", tools: { mode: "all" }, approval: { ask: [] } }],
+      },
       {},
       { mayWiden: true },
     );

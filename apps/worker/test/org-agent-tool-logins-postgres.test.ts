@@ -353,7 +353,12 @@ describe("organization agent tool server logins", () => {
       { serverKey: "stored", name: "STORED", reason: "missing_credentials" },
     ]);
     // Bob's own login is used once he has one; Alice's never.
-    await f.storeLogin("stored", { kind: "headers", headers: { "X-Api-Key": "bob-key" } }, null, BOB);
+    await f.storeLogin(
+      "stored",
+      { kind: "headers", headers: { "X-Api-Key": "bob-key" } },
+      null,
+      BOB,
+    );
     const bobAgain = await resolve(orgAgentEndUserSubject(END_USER, BOB));
     expect(bobAgain.result.mcpServers[0]?.headers).toEqual({ "X-Api-Key": "bob-key" });
     const alice = await resolve(orgAgentEndUserSubject(END_USER, END_USER));

@@ -276,16 +276,7 @@ async function prepare(
         );
       default:
         version = saved.version;
-        return await bind(
-          deps,
-          grant,
-          workspaceId,
-          raw,
-          request,
-          saved.agent,
-          version,
-          authority,
-        );
+        return await bind(deps, grant, workspaceId, raw, request, saved.agent, version, authority);
     }
   }
   if (!agent) throw notFound();

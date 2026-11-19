@@ -467,7 +467,8 @@ describe("session create with an organization agent over HTTP", () => {
 
   test("without agents:manage a chat may only narrow the agent's tool servers", async () => {
     if (!fixture) return;
-    await shared!.admin`insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
+    await shared!
+      .admin`insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
       values (${fixture.accountId}, 'notes', 'Notes', 'https://notes.example.com/mcp', 'none')
       on conflict do nothing`;
     const created = await call("POST", agents(), {
