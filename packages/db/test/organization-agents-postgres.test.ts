@@ -903,7 +903,7 @@ describe("organization agents: visibility gate, isolation and grants", () => {
     expect(grants).toEqual({
       agent_publish_operations: ["INSERT", "SELECT", "UPDATE"],
       agent_revisions: ["INSERT", "SELECT"],
-      agent_workspace_access: ["DELETE", "INSERT", "SELECT"],
+      agent_workspace_access: ["DELETE", "INSERT", "SELECT", "UPDATE"],
       end_user_tool_credentials: ["DELETE", "INSERT", "SELECT", "UPDATE"],
       organization_tool_servers: ["DELETE", "INSERT", "SELECT", "UPDATE"],
     });

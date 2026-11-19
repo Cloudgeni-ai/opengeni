@@ -254,7 +254,7 @@ BEGIN
       agent_workspace_access, agent_publish_operations FROM opengeni_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON organization_tool_servers TO opengeni_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON end_user_tool_credentials TO opengeni_app;
-    GRANT SELECT, INSERT, DELETE ON agent_workspace_access TO opengeni_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON agent_workspace_access TO opengeni_app;
     GRANT SELECT, INSERT, UPDATE ON agent_publish_operations TO opengeni_app;
   END IF;
 END
