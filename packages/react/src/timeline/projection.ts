@@ -2271,6 +2271,7 @@ export function buildTimeline(
   markRepeatedMachineRequests(items);
   markRepeatedAccessRequests(items);
   markFinishedAuthCards(items);
+  dropRepeatedAccessRequests(items);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2742,6 +2743,21 @@ function markFinishedAuthCards(items: TimelineItem[]): void {
     const through = key === null ? undefined : finishedThrough.get(key);
     if (through !== undefined && index <= through) item.setupFinished = true;
   });
+}
+
+/**
+ * Earlier copies of a repeated access request leave the timeline, so no
+ * renderer (the stock row or a host's) shows them and they don't hold an
+ * older turn open.
+ */
+function dropRepeatedAccessRequests(items: TimelineItem[]): void {
+  let kept = 0;
+  for (const item of items) {
+    if (item.kind === "auth-needed" && item.askedAgainLater && accessRequestKey(item) !== null)
+      continue;
+    items[kept++] = item;
+  }
+  items.length = kept;
 }
 
 /**

@@ -4372,43 +4372,41 @@ describe("buildTimeline", () => {
     // Only the latest copy of the same ask stays a card; other access or
     // another account is a separate request.
     expect(cards([first, retried, otherAccess, otherAccount, askedAgain])).toEqual([
-      [first.id, true, false],
-      [retried.id, true, false],
       [otherAccess.id, false, false],
       [otherAccount.id, false, false],
       [askedAgain.id, false, false],
     ]);
-    // The person allowed it from the latest card: that card and its earlier
-    // copies are finished; the other requests are not.
-    const finished = event(
-      "system.update.delivered",
-      {
-        historyItemId: "history-1",
-        count: 1,
-        members: [
-          {
-            id: "update-1",
-            kind: "capability_setup_completed",
-            classification: "success",
-            sourceId: askedAgain.id,
-            summary: "The person finished setting up Gmail from your request.",
-          },
-        ],
-      },
-      { turnId: "turn-3" },
-    );
+    // The person allowed it from the latest card: that card is finished; the
+    // other requests are not.
+    const finishedFrom = (card: SessionEvent) =>
+      event(
+        "system.update.delivered",
+        {
+          historyItemId: "history-1",
+          count: 1,
+          members: [
+            {
+              id: "update-1",
+              kind: "capability_setup_completed",
+              classification: "success",
+              sourceId: card.id,
+              summary: "The person finished setting up Gmail from your request.",
+            },
+          ],
+        },
+        { turnId: "turn-3" },
+      );
+    const finished = finishedFrom(askedAgain);
     expect(cards([first, retried, otherAccess, otherAccount, askedAgain, finished])).toEqual([
-      [first.id, true, true],
-      [retried.id, true, true],
       [otherAccess.id, false, false],
       [otherAccount.id, false, false],
       [askedAgain.id, false, true],
     ]);
     // Asked again after that (the access is still missing): the new card is live.
     const later = stepUp("turn-4");
-    expect(cards([first, askedAgain, finished, later]).slice(-1)).toEqual([
-      [later.id, false, false],
-    ]);
+    expect(cards([first, askedAgain, finished, later])).toEqual([[later.id, false, false]]);
+    // Finished from the only card there was: it stays, saying so.
+    expect(cards([first, finishedFrom(first)])).toEqual([[first.id, false, true]]);
   });
 
   test("a Chrome setup card keeps its purpose and repeats separately from machine requests", () => {

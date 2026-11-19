@@ -383,6 +383,8 @@ export function ToolActionReviewCard({
   pendingLabel,
   rejectLabel,
   bare,
+  notice,
+  approvingLabel,
 }: {
   review: ToolActionReview;
   onApprove?: (() => void) | undefined;
@@ -394,6 +396,10 @@ export function ToolActionReviewCard({
   rejectLabel?: string | undefined;
   /** Render without card chrome, e.g. inside an expanded timeline row. */
   bare?: boolean | undefined;
+  /** One short line about what approving involves, under the facts. */
+  notice?: string | undefined;
+  /** The approve button's words while it works, instead of "Approving…". */
+  approvingLabel?: string | undefined;
 }) {
   const t = useOpenGeniText();
   // The host's words for the action, its fields, the reason and the button.
@@ -466,7 +472,9 @@ export function ToolActionReviewCard({
                 busy={submitting === "approve"}
                 onClick={onApprove}
               >
-                {submitting === "approve" ? t("toolActionReview.approving") : review.approveLabel}
+                {submitting === "approve"
+                  ? (approvingLabel ?? t("toolActionReview.approving"))
+                  : review.approveLabel}
               </DecisionButton>
             ) : null}
           </DecisionActions>
@@ -490,6 +498,14 @@ export function ToolActionReviewCard({
         onViewDetails={onViewDetails}
         showStatusDetail={review.status !== "pending"}
       />
+      {actionable && notice ? (
+        <p
+          className="m-0 mt-2 text-og-xs leading-relaxed text-og-fg-subtle"
+          data-og-review-notice=""
+        >
+          {notice}
+        </p>
+      ) : null}
       {!actionable && detailsLink ? <div className="mt-2">{detailsLink}</div> : null}
     </ToolReviewFrame>
   );

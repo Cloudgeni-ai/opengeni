@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectAttempt, ConnectNavigation } from "@opengeni/connect";
-import { ConnectionStepUpNotFinishedError, runConnectionStepUp } from "./connection-step-up";
+import {
+  ConnectionStepUpNotFinishedError,
+  runConnectionStepUp,
+  stepUpFromCard,
+} from "./connection-step-up";
 
 const MODIFY = "https://www.googleapis.com/auth/gmail.modify";
 
@@ -144,6 +148,139 @@ describe("runConnectionStepUp", () => {
     await expect(running).rejects.toThrow("pressed again");
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(h.cancels).toEqual(["attempt-1"]);
+    expect(h.closed()).toBeGreaterThan(0);
+  });
+
+  test("pressing again while the attempt is still starting cancels it once it exists", async () => {
+    const h = harness([attempt({ revision: 1 })]);
+    const press = new AbortController();
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => (started = resolve));
+    const begin = h.transport.begin;
+    h.transport.begin = async (workspaceId, input) => {
+      press.abort(new Error("pressed again"));
+      await gate;
+      return begin(workspaceId, input);
+    };
+    const running = runConnectionStepUp({
+      transport: h.transport,
+      workspaceId: "workspace-1",
+      begin: h.begin,
+      window: h.window,
+      signal: press.signal,
+    });
+    started();
+    await expect(running).rejects.toThrow("pressed again");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.opened).toEqual([]);
+    expect(h.cancels).toEqual(["attempt-1"]);
+    expect(h.closed()).toBe(1);
+  });
+
+  test("an attempt it could no longer follow is cancelled, not left pending", async () => {
+    const h = harness([]);
+    h.transport.get = async () => {
+      throw new Error("network down");
+    };
+    await expect(
+      runConnectionStepUp({
+        transport: h.transport,
+        workspaceId: "workspace-1",
+        begin: h.begin,
+        window: h.window,
+      }),
+    ).rejects.toThrow("network down");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.cancels).toEqual(["attempt-1"]);
+    expect(h.closed()).toBe(1);
+  });
+});
+
+describe("stepUpFromCard", () => {
+  const account = {
+    id: "conn-1",
+    providerId: "gmail",
+    ownership: "personal" as const,
+    label: "kari@example.com",
+  };
+  function card(
+    h: ReturnType<typeof harness>,
+    target: Parameters<typeof stepUpFromCard>[0]["findTarget"],
+  ) {
+    const continued: string[] = [];
+    const run = stepUpFromCard({
+      connectionId: "conn-1",
+      scopes: [MODIFY],
+      window: h.window,
+      transport: h.transport as never,
+      findTarget: target,
+      returnUrl: "https://app.example/workspaces/w/sessions/s",
+      continueAfterSetup: async () => {
+        continued.push("conn-1");
+      },
+    });
+    return { run, continued };
+  }
+
+  test("allowed: asks that exact account's provider for the card's access, then the agent carries on", async () => {
+    const h = harness([attempt({ revision: 2, state: "complete", nextAction: { type: "none" } })]);
+    const { run, continued } = card(h, async () => ({
+      account,
+      workspaceId: "workspace-1",
+      via: "native",
+    }));
+    expect(await run).toEqual({ status: "allowed" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.begins).toEqual([
+      expect.objectContaining({
+        providerId: "gmail",
+        reconnectAccountId: "conn-1",
+        requestedScopes: [MODIFY],
+        finishInPopup: true,
+      }),
+    ]);
+    expect(h.opened).toHaveLength(1);
+    expect(continued).toEqual(["conn-1"]);
+    expect(h.closed()).toBeGreaterThan(0);
+  });
+
+  test("an account held by a connector, or not found, is handed back with the window closed", async () => {
+    for (const target of [
+      async () => ({ account, workspaceId: "workspace-1", via: "connector" as const }),
+      async () => null,
+    ]) {
+      const h = harness([]);
+      const { run, continued } = card(h, target);
+      expect(await run).toEqual({ status: "not_handled" });
+      expect(h.begins).toEqual([]);
+      expect(continued).toEqual([]);
+      expect(h.closed()).toBe(1);
+    }
+  });
+
+  test("a step the card can't finish goes to the dialog with the same request, not a new one", async () => {
+    const chooser = attempt({
+      state: "account_selection",
+      nextAction: { type: "select_account", accounts: [] },
+    } as Partial<ConnectAttempt>);
+    const h = harness([], chooser);
+    const { run, continued } = card(h, async () => ({
+      account,
+      workspaceId: "workspace-1",
+      via: "native",
+    }));
+    const outcome = await run;
+    expect(outcome.status).toBe("resume_in_dialog");
+    if (outcome.status !== "resume_in_dialog") return;
+    expect(h.begins).toEqual([
+      expect.objectContaining({ idempotencyKey: outcome.request.idempotencyKey }),
+    ]);
+    expect(outcome.request).toMatchObject({
+      reconnectAccountId: "conn-1",
+      requestedScopes: [MODIFY],
+      finishInPopup: true,
+    });
+    expect(continued).toEqual([]);
     expect(h.closed()).toBeGreaterThan(0);
   });
 });

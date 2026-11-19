@@ -11,6 +11,7 @@ import { dequal } from "dequal";
 import { ChevronLeftIcon, ChevronRightIcon, LoaderCircleIcon, ShieldCheckIcon } from "lucide-react";
 import { OpenGeniApiError, toolReviewDetails, type ToolActionReview } from "@opengeni/sdk";
 import type { PendingApproval } from "../approvals";
+import { accessNeededWording } from "../auth-needed-presentation";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import {
@@ -35,6 +36,9 @@ import type {
   McpElicitationAnswer,
   McpElicitationContent,
 } from "@opengeni/contracts/mcp-elicitation-model";
+
+/** Access an action's account lacks, which approving asks its provider for first. */
+export type ToolReviewAccessNeeded = NonNullable<ToolActionReview["accessNeeded"]>;
 
 export type ApprovalSurfaceMessages = {
   title: string;
@@ -79,6 +83,17 @@ export type ApprovalSurfaceProps = {
     | ((approval: PendingApproval) => Promise<ToolActionReview | null | undefined>)
     | undefined;
   loadDetails?: ToolReviewDetailsLoader | undefined;
+  /**
+   * The action's account lacks access it needs (`review.accessNeeded`):
+   * approving first asks the provider for it. Called synchronously in the
+   * Approve click, so a host can open the provider's window there. Resolve
+   * `true` to approve this one call now, `false` to leave it waiting (the
+   * person didn't allow it, or the host continues the setup elsewhere).
+   * Without it, Approve only approves.
+   */
+  onAllowAccess?:
+    | ((access: ToolReviewAccessNeeded, approval: PendingApproval) => Promise<boolean>)
+    | undefined;
   onViewDetails?: ((review: ToolActionReview, path: string) => void) | undefined;
   selectedApprovalId?: string | null | undefined;
   onSelectedApprovalChange?: ((id: string) => void) | undefined;
@@ -148,7 +163,8 @@ export function bulkApprovalDecisions(
   const saved = outcome.review;
   if (saved.status !== "pending") return { approve: false, reject: false };
   return {
-    approve: saved.availableActions.includes("approve"),
+    // Access its account lacks is asked for on the action's own card.
+    approve: saved.availableActions.includes("approve") && !saved.accessNeeded,
     reject: saved.availableActions.includes("reject"),
   };
 }
@@ -166,6 +182,7 @@ export function ApprovalSurface({
   renderApproval,
   loadReview,
   loadDetails,
+  onAllowAccess,
   onViewDetails,
   selectedApprovalId,
   onSelectedApprovalChange,
@@ -177,6 +194,8 @@ export function ApprovalSurface({
   const [pending, setPending] = useState<{
     id: string;
     decision: "approve" | "reject";
+    /** Waiting for the provider's consent page before approving. */
+    consent?: string | undefined;
   } | null>(null);
   const pendingRef = useRef<string | null>(null);
   const [decisionError, setDecisionError] = useState<{ cause: unknown } | null>(null);
@@ -366,12 +385,23 @@ export function ApprovalSurface({
     approval: PendingApproval,
     decision: "approve" | "reject",
     answer?: McpElicitationAnswer,
+    access?: { needed: ToolReviewAccessNeeded; consent: string },
   ) => {
     if (responding || pendingRef.current || bulkRef.current || decidedBy(approval)) return;
     pendingRef.current = approval.id;
-    setPending({ id: approval.id, decision });
+    const consentFirst = decision === "approve" && access && onAllowAccess ? access : undefined;
+    setPending({ id: approval.id, decision, consent: consentFirst?.consent });
     setDecisionError(null);
     try {
+      // Synchronously in the click: the host may open the provider's window.
+      if (consentFirst && !(await onAllowAccess!(consentFirst.needed, approval))) {
+        if (pendingRef.current === approval.id) {
+          pendingRef.current = null;
+          setPending(null);
+        }
+        return;
+      }
+      if (consentFirst) setPending({ id: approval.id, decision });
       await (decision === "approve"
         ? answer
           ? onApprove(approval, answer)
@@ -586,8 +616,10 @@ export function ApprovalSurface({
             custom={renderApproval?.(approval)}
             onViewDetails={onViewDetails}
             submitting={pending?.id === approval.id ? pending.decision : decidedBy(approval)}
+            consentPending={pending?.id === approval.id ? pending.consent : undefined}
+            allowsAccess={Boolean(onAllowAccess)}
             disabled={bulkBusy || decidedBy(approval) !== null}
-            onApprove={() => void decide(approval, "approve")}
+            onApprove={(access) => void decide(approval, "approve", undefined, access)}
             onAnswer={(content) =>
               approval.elicitation
                 ? void decide(approval, "approve", {
@@ -641,6 +673,8 @@ function ApprovalRequest({
   custom,
   onViewDetails,
   onAnswer,
+  consentPending,
+  allowsAccess,
   ...actions
 }: {
   approval: PendingApproval;
@@ -650,8 +684,12 @@ function ApprovalRequest({
   custom: ReactNode;
   onViewDetails: ApprovalSurfaceProps["onViewDetails"];
   submitting: "approve" | "reject" | null;
+  /** The provider whose consent page is open before approving. */
+  consentPending: string | undefined;
+  /** Approving can ask the provider for access the account lacks. */
+  allowsAccess: boolean;
   disabled: boolean;
-  onApprove: () => void;
+  onApprove: (access?: { needed: ToolReviewAccessNeeded; consent: string }) => void;
   onAnswer: (content: McpElicitationContent) => void;
   onReject: () => void;
 }) {
@@ -892,6 +930,10 @@ function ApprovalRequest({
     );
   const saved = loaded ?? fallback;
   const review = answer ? { ...saved, approveLabel: answer.approve } : saved;
+  const access =
+    allowsAccess && review.accessNeeded
+      ? { needed: review.accessNeeded, ...accessNeededWording(t, review.accessNeeded) }
+      : undefined;
   if (detailPath !== null)
     return (
       <ToolActionReviewDetails
@@ -952,6 +994,15 @@ function ApprovalRequest({
       <ToolActionReviewCard
         review={review}
         {...actions}
+        onApprove={() =>
+          actions.onApprove(access ? { needed: access.needed, consent: access.consent } : undefined)
+        }
+        notice={access?.line}
+        approvingLabel={
+          consentPending
+            ? t("messageTimeline.waitingForConsent", { consent: consentPending })
+            : undefined
+        }
         pendingLabel={messages.title}
         rejectLabel={answer?.reject ?? messages.reject}
         onViewDetails={

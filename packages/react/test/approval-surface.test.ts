@@ -612,6 +612,120 @@ describe("ApprovalSurface", () => {
   });
 });
 
+describe("ApprovalSurface: an action whose account lacks access", () => {
+  const modify = "https://www.googleapis.com/auth/gmail.modify";
+  const accessNeeded = {
+    providerDomain: "gmailmcp.googleapis.com",
+    connectionId: "conn-1",
+    scopes: [modify],
+  };
+  const settle = async () => {
+    for (let index = 0; index < 4; index++) await act(async () => await Promise.resolve());
+  };
+  const approveButton = () =>
+    [...mounted!.container.querySelectorAll("button")].find((button) =>
+      /Approve|Waiting/.test(button.textContent ?? ""),
+    );
+
+  test("one Approve asks Google first, in the click, then approves only this call", async () => {
+    const order: string[] = [];
+    const consent = deferred<boolean>();
+    let calledInClick = false;
+    let clicking = false;
+    const other = { ...approval, id: "approval-2", arguments: { projectId: "project-2" } };
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval, other],
+        loadReview: async (value: PendingApproval) => ({
+          ...savedReview(),
+          id: value.id,
+          ...(value.id === approval.id ? { accessNeeded } : {}),
+        }),
+        onAllowAccess: (access) => {
+          calledInClick = clicking;
+          order.push(`allow:${access.connectionId}:${access.scopes.join(" ")}`);
+          return consent.promise;
+        },
+        onApprove: async (value) => {
+          order.push(`approve:${value.id}`);
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    expect(mounted.container.textContent).toContain(
+      "Google will ask you to allow Opengeni to organize your Gmail (one time).",
+    );
+    await act(async () => {
+      clicking = true;
+      approveButton()!.click();
+      clicking = false;
+      await Promise.resolve();
+    });
+    // The provider's window opens in the click itself, or the browser blocks it.
+    expect(calledInClick).toBe(true);
+    expect(approveButton()?.textContent).toContain("Waiting for Google");
+    expect(order).toEqual([`allow:conn-1:${modify}`]);
+    consent.resolve(true);
+    await settle();
+    // Allowing the access approves this one call: the other still waits.
+    expect(order).toEqual([`allow:conn-1:${modify}`, "approve:approval-1"]);
+  });
+
+  test("access the person didn't allow leaves the action waiting, unapproved", async () => {
+    let approved = 0;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: async () => false,
+        onApprove: async () => {
+          approved += 1;
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(approved).toBe(0);
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("approve all leaves it out, so its access is asked on its own card", async () => {
+    const approved: string[] = [];
+    const items = ["a", "b", "c"].map((id) => ({ ...approval, id, arguments: { projectId: id } }));
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: items,
+        loadReview: async (value: PendingApproval) => ({
+          ...savedReview(),
+          id: value.id,
+          ...(value.id === "a" ? { accessNeeded } : {}),
+        }),
+        onAllowAccess: async () => true,
+        onApprove: async (value) => {
+          approved.push(value.id);
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    const all = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Approve all 2",
+    );
+    expect(all).not.toBeUndefined();
+    await act(async () => {
+      all!.click();
+    });
+    await settle();
+    expect(approved).toEqual(["b", "c"]);
+  });
+});
+
 describe("ApprovalSurface: approve or decline all", () => {
   const item = (id: string): PendingApproval => ({
     id,

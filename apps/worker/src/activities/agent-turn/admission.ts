@@ -142,17 +142,21 @@ export function shouldPublishToolAuthNeededForTurn(
  * Remembers which connection cards a turn already posted. A tool that hits
  * the same missing or lapsed access again in the same turn (the agent
  * retried, or ran several calls that need it) reuses the card already in the
- * chat instead of posting an identical one. Agent capability requests are
- * never folded together. `post` publishes only a first ask, and forgets it
- * when publishing fails so a later call can try again.
+ * chat instead of posting an identical one. Agent capability requests and
+ * host cards are never folded together. A repeat waits for the first card;
+ * when that one failed to post, the repeat posts it.
  */
 export function createToolAuthNeededCardLedger(): {
   post(payload: ToolAuthNeededPayload, publish: () => Promise<void>): Promise<void>;
 } {
-  const posted = new Set<string>();
+  const posted = new Map<string, Promise<void>>();
   return {
     async post(payload, publish) {
-      if (payload.capability || payload.setupRequest) return await publish();
+      // Agent requests are their own cards; a host's card carries a freshly
+      // minted sign-in link, so each one is posted.
+      if (payload.capability || payload.setupRequest || payload.authoritySource === "host") {
+        return await publish();
+      }
       const key = JSON.stringify([
         payload.serverId,
         payload.providerDomain.trim().toLowerCase(),
@@ -160,14 +164,22 @@ export function createToolAuthNeededCardLedger(): {
         payload.reason,
         [...new Set(payload.scopes ?? [])].sort(),
         payload.resource ?? null,
-        payload.authoritySource ?? null,
       ]);
-      if (posted.has(key)) return;
-      posted.add(key);
+      const earlier = posted.get(key);
+      if (earlier) {
+        try {
+          await earlier;
+          return;
+        } catch {
+          // That card never posted: this ask posts it.
+        }
+      }
+      const current = publish();
+      posted.set(key, current);
       try {
-        await publish();
+        await current;
       } catch (error) {
-        posted.delete(key);
+        if (posted.get(key) === current) posted.delete(key);
         throw error;
       }
     },

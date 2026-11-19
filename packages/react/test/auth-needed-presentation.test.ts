@@ -152,7 +152,7 @@ describe("authNeededPresentation", () => {
     // as connecting it to this chat).
     expect(view.title).toBe("Allow Opengeni to organize your Gmail");
     expect(view.reasonLine).toBe(
-      "This includes marking mail as read, labeling and archiving it. You allow this once for your Gmail account, in every chat.",
+      "This includes marking mail as read, labeling and archiving it. Your approval settings still decide what runs without asking.",
     );
     // The button says where it goes: Google's consent page.
     expect(view.actionLabel).toBe("Allow in Google");
@@ -181,7 +181,7 @@ describe("authNeededPresentation", () => {
     );
     expect(generic.title).toBe("Allow Opengeni more access to Linear");
     expect(generic.reasonLine).toBe(
-      "Linear needs your approval for one more kind of action. You allow this once for your Linear account, in every chat.",
+      "Linear will ask you for one more kind of access. Your approval settings still decide what runs without asking.",
     );
     expect(generic.actionLabel).toBe("Allow in Linear");
     // Other cards keep their own words and are not step-ups.

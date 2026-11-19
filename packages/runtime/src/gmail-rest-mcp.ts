@@ -66,6 +66,8 @@ const MUTATION_TOOLS = new Set([
  * The account was connected with less access than this tool needs. The person
  * is asked in the chat to allow more, through the same connect card.
  */
+/** Tools whose review composes the email, which needs the tool's own access. */
+const GMAIL_COMPOSE_REVIEW_TOOLS = ["send_draft", "send_message", "create_draft", "update_draft"];
 const GMAIL_MORE_ACCESS_NEEDED =
   "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; until they do, calling it again fails the same way.";
 const GMAIL_NOT_AVAILABLE_FOR_CONNECTION =
@@ -535,9 +537,43 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<Partial<import("@opengeni/contracts").ToolReviewContext>> {
+    // Access the person can allow is asked with the action itself: approving
+    // first asks Google for it, so there is one decision, not a card first.
+    const accessNeeded = await this.reviewAccessNeed(toolName);
+    if (!accessNeeded) return await this.reviewFacts(toolName, args, true);
+    // The email preview needs that access; the card shows the call's fields.
+    if (GMAIL_COMPOSE_REVIEW_TOOLS.includes(toolName)) return { accessNeeded };
+    return { ...(await this.reviewFacts(toolName, args, false)), accessNeeded };
+  }
+
+  /**
+   * The scopes this tool still needs on the pinned account, when the person
+   * can grant them (a native sign-in Opengeni can ask Google again for), or
+   * null. A fixed-access or host-owned account is refused as before.
+   */
+  private async reviewAccessNeed(
+    toolName: string,
+  ): Promise<import("@opengeni/contracts").ToolReviewAccessNeeded | null> {
+    const result = await this.resolveAccount(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
+    const scopeNeed = result.grantedScopes
+      ? gmailToolScopeNeed(toolName, result.grantedScopes)
+      : null;
+    if (!scopeNeed || result.proxy || result.authoritySource === "host") return null;
+    return {
+      providerDomain: this.options.connectionRef.providerDomain,
+      connectionId: result.connectionId,
+      scopes: [...scopeNeed],
+    };
+  }
+
+  private async reviewFacts(
+    toolName: string,
+    args: Record<string, unknown>,
+    checkAccess: boolean,
+  ): Promise<Partial<import("@opengeni/contracts").ToolReviewContext>> {
     // Ask for missing access before the person is asked to approve the action.
-    await this.resolveForTool(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
-    if (["send_draft", "send_message", "create_draft", "update_draft"].includes(toolName)) {
+    if (checkAccess) await this.resolveForTool(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
+    if (GMAIL_COMPOSE_REVIEW_TOOLS.includes(toolName)) {
       const raw =
         toolName === "send_draft"
           ? await this.readDraftRaw(requiredId(args.draftId, "draftId"), toolName)
@@ -1759,6 +1795,16 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     destinationUrl: string,
     forceRefresh: boolean,
   ): Promise<Extract<ResolveCredentialResult, { status: "ok" }>> {
+    const result = await this.resolveAccount(toolName, destinationUrl, forceRefresh);
+    return await this.checkToolGrant(toolName, result);
+  }
+
+  /** Resolve and pin the account's credential, without checking its grant. */
+  private async resolveAccount(
+    toolName: string,
+    destinationUrl: string,
+    forceRefresh: boolean,
+  ): Promise<Extract<ResolveCredentialResult, { status: "ok" }>> {
     const result = await this.options.resolveCredential({
       workspaceId: this.options.workspaceId,
       serverId: this.options.serverId,
@@ -1778,6 +1824,14 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       throw new GmailRestAuthError("Gmail account changed during this tool session");
     }
     this.pinnedConnectionId = result.connectionId;
+    return result;
+  }
+
+  /** Refuse a tool its account's grant doesn't cover, asking for the access in the chat. */
+  private async checkToolGrant(
+    toolName: string,
+    result: Extract<ResolveCredentialResult, { status: "ok" }>,
+  ): Promise<Extract<ResolveCredentialResult, { status: "ok" }>> {
     // A host-supplied credential may not report grants; Google then decides.
     const scopeNeed = result.grantedScopes
       ? gmailToolScopeNeed(toolName, result.grantedScopes)

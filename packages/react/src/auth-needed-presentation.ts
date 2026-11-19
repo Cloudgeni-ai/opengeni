@@ -95,6 +95,32 @@ function consentName(scopes: readonly string[]): string | null {
   return null;
 }
 
+/**
+ * How an approval names access its account still lacks: who asks for it (the
+ * consent page's owner, "Google") and the line saying so ("Google will ask you
+ * to allow Opengeni to organize your Gmail (one time).").
+ */
+export function accessNeededWording(
+  t: OpenGeniText,
+  access: { providerDomain: string; scopes: readonly string[] },
+): { consent: string; line: string } {
+  const provider = providerLabel(t, access.providerDomain);
+  const consent = consentName(access.scopes) ?? provider;
+  const known = [...new Set(access.scopes.flatMap((scope) => ADDITIONAL_ACCESS[scope] ?? []))];
+  return {
+    consent,
+    line:
+      known.length > 0
+        ? t("approvalSurface.consentAsksFirst", {
+            consent,
+            access: known
+              .map((entry) => t(entry.action, { provider }))
+              .join(t("messageTimeline.accessJoin")),
+          })
+        : t("approvalSurface.consentAsksFirstMoreAccess", { consent, provider }),
+  };
+}
+
 /** Service names for connection identities whose domain says nothing to a person. */
 const KNOWN_PROVIDER_NAMES: Record<string, string> = {
   "gmailmcp.googleapis.com": "Gmail",
@@ -184,8 +210,9 @@ export function authNeededPresentation(
                   })
                 : t("messageTimeline.allowProductMoreProviderAccess", { provider })
               : `${actionLabel} ${provider}`;
-  // A step-up says what the new kind of action includes, and that allowing
-  // it is a one-time decision for the account, not for this chat.
+  // A step-up says what the new kind of action includes, and that the
+  // person's approval settings still decide what runs without asking: the
+  // provider's permission is what Opengeni can do, not what runs on its own.
   const reasonLine =
     recommendation?.rationale ??
     item.setupRequest?.rationale ??
@@ -193,8 +220,8 @@ export function authNeededPresentation(
       ? [
           ...(access.length > 0
             ? access.map((entry) => t(entry.includes))
-            : [t("messageTimeline.accessOneMoreKindOfAction", { provider })]),
-          t("messageTimeline.accessAppliesToAccount", { provider }),
+            : [t("messageTimeline.accessOneMoreKindOfAction", { consent })]),
+          t("messageTimeline.accessApprovalSettingsStillDecide"),
         ].join(" ")
       : authReasonLine(t, item.reason));
   const hostManaged = item.authoritySource === "host";

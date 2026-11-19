@@ -9,14 +9,23 @@
 // account). The agent hit it twice: the chat shows one card.
 //   ?state=waiting|done shows the card while Google's page is open, or after
 //   the person allowed it (press the button to see it).
+// gmail-approval: the same access for a tool set to Ask first: one approval
+// for the action, whose Approve asks Google first (?state=waiting).
 // gmail-fixed: the same tool on an account whose access is fixed (for example
 // managed by an integration platform): the stock row, with no action.
 // Open the card's setup dialog with its button to see the dialog.
 import { useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import type { ConnectTransport } from "@opengeni/connect";
-import type { CapabilityCatalogItem, SessionEvent } from "@opengeni/sdk";
 import {
+  toolReviewAction,
+  toolReviewFields,
+  type CapabilityCatalogItem,
+  type SessionEvent,
+  type ToolActionReview,
+} from "@opengeni/sdk";
+import {
+  ApprovalSurface,
   MessageTimeline,
   OpenGeniProvider,
   sessionAuthRecommendation,
@@ -35,7 +44,10 @@ const SESSION_ID = "session-connect";
 const params = new URLSearchParams(window.location.search);
 const serviceParam = params.get("service");
 const service =
-  serviceParam === "added" || serviceParam === "gmail-step-up" || serviceParam === "gmail-fixed"
+  serviceParam === "added" ||
+  serviceParam === "gmail-step-up" ||
+  serviceParam === "gmail-fixed" ||
+  serviceParam === "gmail-approval"
     ? serviceParam
     : "calendar";
 const dark = params.get("theme") === "dark";
@@ -138,9 +150,64 @@ class PreviewClient extends MockOpenGeniClient {
   }
 }
 
+const MODIFY = "https://www.googleapis.com/auth/gmail.modify";
+const APPROVAL_ARGS = {
+  messageIds: Array.from({ length: 12 }, (_, index) => `m-${index + 1}`),
+  removeLabelIds: ["UNREAD"],
+};
+const APPROVAL = {
+  id: "call-mark-read",
+  name: "mcp_gmail__batch_modify_messages",
+  arguments: APPROVAL_ARGS,
+};
+/** The saved review the server returns for that call, as it builds it. */
+function approvalReview(): ToolActionReview {
+  const context = { kind: "gmail" as const, accountLabel: "kari@example.com" };
+  return {
+    version: 1,
+    id: APPROVAL.id,
+    actionDigest: "digest",
+    revision: "1",
+    status: "pending",
+    ...toolReviewAction("batch_modify_messages", APPROVAL_ARGS, context),
+    toolName: "batch_modify_messages",
+    accountLabel: context.accountLabel,
+    samples: [
+      {
+        id: "m-1",
+        title: "Daily standup notes",
+        subtitle: "Native",
+        provenance: "provider_metadata",
+      },
+      {
+        id: "m-2",
+        title: "Your sign-in code",
+        subtitle: "Vercel",
+        provenance: "provider_metadata",
+      },
+    ],
+    ...toolReviewFields(APPROVAL_ARGS, context, "batch_modify_messages"),
+    reason: "This action is set to Ask first.",
+    reasonCode: "asks_by_setting",
+    createdAt: "2026-11-19T12:00:00.000Z",
+    updatedAt: "2026-11-19T12:00:00.000Z",
+    availableActions: ["approve", "reject"],
+    accessNeeded: {
+      providerDomain: "gmailmcp.googleapis.com",
+      connectionId: "conn-gmail-1",
+      scopes: [MODIFY],
+    },
+    detailsAvailable: true,
+  };
+}
+
 function events(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-connect";
+  if (service === "gmail-approval") {
+    log.push("user.message", { text: "Mark the newsletters in my inbox as read." });
+    return log.events;
+  }
   if (service === "gmail-step-up" || service === "gmail-fixed") {
     const fixed = service === "gmail-fixed";
     log.push("user.message", { text: "Mark the newsletters in my inbox as read." });
@@ -152,7 +219,7 @@ function events(): SessionEvent[] {
       ...(fixed
         ? { reason: "unsupported_auth", accountReason: "account_scope_fixed" }
         : { reason: "insufficient_scope" }),
-      scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+      scopes: [MODIFY],
     };
     log.push("tool.auth_needed", needed, turn);
     // The agent retried the same tool before reading the answer.
@@ -266,6 +333,19 @@ function Preview() {
                       : undefined
                 }
               />
+              {service === "gmail-approval" ? (
+                <ApprovalSurface
+                  approvals={[APPROVAL]}
+                  loadReview={async () => approvalReview()}
+                  onAllowAccess={() =>
+                    recoveryState === "waiting"
+                      ? new Promise<boolean>(() => {})
+                      : Promise.resolve(true)
+                  }
+                  onApprove={() => new Promise<void>(() => {})}
+                  onReject={() => undefined}
+                />
+              ) : null}
             </main>
           </div>
         </AppContext.Provider>
