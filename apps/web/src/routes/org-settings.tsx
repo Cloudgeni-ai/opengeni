@@ -19,7 +19,10 @@ import {
   useOptionalOrganizationDirectory,
 } from "@/components/organization/organization-directory";
 import { useOrganizationNavigation } from "@/components/organization/organization-nav";
-import { OrganizationPeoplePage } from "@/components/organization/people-page";
+import {
+  OrganizationPeoplePage,
+  type ConsoleRolesView,
+} from "@/components/organization/people-page";
 import { OrganizationSecurityPage } from "@/components/organization/security-page";
 import { OrganizationWorkspacesPage } from "@/components/organization/workspaces-page";
 import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
@@ -58,6 +61,7 @@ import {
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@opengeni/react/app/lib/workspace-deletion";
 import type { OrganizationMembershipRole } from "@opengeni/react/app/types";
+import { useConsoleMemberRoles } from "@/lib/console-access";
 
 const CheckoutCreditsCelebration = lazy(async () => {
   const module =
@@ -385,6 +389,16 @@ export function OrgSettingsRoute({
     (actorRole === "owner" || actorRole === "admin");
   const connectorPage =
     integrationsAdministrator && connectors !== undefined && connectors.kind !== "list";
+  // People shows a small "Console: Viewer" label for members with a Console role.
+  const memberRoles = useConsoleMemberRoles(
+    client,
+    accountId || null,
+    section === "people" && integrationsAdministrator,
+  );
+  const appConsoleRoles = useMemo<ConsoleRolesView | undefined>(
+    () => (memberRoles.data ? { mode: "app", roles: memberRoles.data.roles } : undefined),
+    [memberRoles.data],
+  );
   // Models is for owners and admins, account administrators (a key or service
   // with account:admin) and signed-in members; anyone else gets a plain refusal.
   const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
@@ -463,6 +477,7 @@ export function OrgSettingsRoute({
               invitation={invitation}
               view={organizationView === "invite" ? "invite" : undefined}
               canManageBilling={canManageBilling}
+              consoleRoles={appConsoleRoles}
             />
           ) : null}
 

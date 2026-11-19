@@ -10,7 +10,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { Popover as PopoverPrimitive } from "radix-ui";
-import { useId, useMemo, useState } from "react";
+import { createContext, useContext, useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
@@ -104,6 +104,118 @@ import {
    their access to each shared workspace; Invite people is its own page.
    -------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------------------
+   Console roles (docs/opengeni-console.md, "Roles"). In Console the list has
+   a Console column (owners and admins read Full), a member's or pending
+   invitation's page sets it, and Invite picks one. In the app a member with a
+   Console role shows a small "Console: Viewer" label next to their role.
+   -------------------------------------------------------------------------- */
+
+export type ConsoleRoleValue = "none" | "viewer" | "editor";
+
+export type ConsoleRoleEntry = {
+  subjectId: string | null;
+  invitationId: string | null;
+  role: ConsoleRoleValue;
+};
+
+export type ConsoleRolesView = {
+  /** "console": the Console column, pickers and invite choice; "app": the label only. */
+  mode: "console" | "app";
+  /** The roles set in the organization; null while unknown. */
+  roles: readonly ConsoleRoleEntry[] | null;
+  /** Saves one role (Console only). */
+  setRole?:
+    | ((
+        target: { subjectId: string } | { invitationId: string },
+        role: ConsoleRoleValue,
+      ) => Promise<void>)
+    | undefined;
+};
+
+const ConsoleRolesContext = createContext<ConsoleRolesView | null>(null);
+
+const CONSOLE_ROLE_LABELS: Record<ConsoleRoleValue | "full", string> = {
+  full: "Full",
+  editor: "Editor",
+  viewer: "Viewer",
+  none: "None",
+};
+
+const CONSOLE_ROLE_OPTIONS = [
+  {
+    id: "viewer" as const,
+    label: "Viewer",
+    description: "Sees sessions, costs and agents.",
+  },
+  {
+    id: "editor" as const,
+    label: "Editor",
+    description: "Also creates, tests and publishes agents.",
+  },
+];
+
+/** Owners and admins are Full; a member has the role set for them, else None. */
+export function memberConsoleRole(
+  roles: readonly ConsoleRoleEntry[] | null,
+  member: Pick<OrganizationMember, "role" | "subjectId">,
+): ConsoleRoleValue | "full" {
+  if (member.role !== "member") return "full";
+  return roles?.find((entry) => entry.subjectId === member.subjectId)?.role ?? "none";
+}
+
+export function invitationConsoleRole(
+  roles: readonly ConsoleRoleEntry[] | null,
+  invitation: Pick<OrganizationInvitation, "role" | "id">,
+): ConsoleRoleValue | "full" {
+  if (invitation.role !== "member") return "full";
+  return roles?.find((entry) => entry.invitationId === invitation.id)?.role ?? "none";
+}
+
+function ConsoleRolePicker({
+  name,
+  value,
+  target,
+}: {
+  name: string;
+  value: ConsoleRoleValue;
+  target: { subjectId: string } | { invitationId: string };
+}) {
+  const view = useContext(ConsoleRolesContext);
+  const headingId = useId();
+  if (!view?.setRole) return null;
+  const setRole = view.setRole;
+  return (
+    <DetailSection
+      title={<span id={headingId}>Console role</span>}
+      description="Saves as soon as you pick one."
+    >
+      <RoleSelect<"viewer" | "editor">
+        variant="list"
+        aria-labelledby={headingId}
+        roles={CONSOLE_ROLE_OPTIONS}
+        value={value === "none" ? null : value}
+        noAccessLabel="None"
+        noAccessDescription="No Console access."
+        subjectName={name}
+        onValueChange={async (role) => {
+          const next: ConsoleRoleValue = role ?? "none";
+          if (next === value) return;
+          try {
+            await setRole(target, next);
+            toast.success(`${name}'s Console role is ${CONSOLE_ROLE_LABELS[next]}`);
+          } catch (error) {
+            toast.error(`Couldn't change ${name}'s Console role`, {
+              description: userErrorText(error),
+            });
+            throw error;
+          }
+        }}
+      />
+    </DetailSection>
+  );
+}
+
 type Confirm =
   | { kind: "suspend"; member: OrganizationMember }
   | { kind: "remove"; member: OrganizationMember }
@@ -116,6 +228,7 @@ export function OrganizationPeoplePage({
   view,
   canManageBilling,
   hideEndUsers = false,
+  consoleRoles,
 }: {
   workspaceId: string;
   person?: string;
@@ -128,6 +241,8 @@ export function OrganizationPeoplePage({
    * hold an organization membership but aren't people on the team.
    */
   hideEndUsers?: boolean;
+  /** Members' Console roles: Console's column and pickers, or the app's label. */
+  consoleRoles?: ConsoleRolesView | undefined;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
@@ -147,7 +262,7 @@ export function OrganizationPeoplePage({
   } else page = <PeopleList nav={nav} actions={actions} hideEndUsers={hideEndUsers} />;
 
   return (
-    <>
+    <ConsoleRolesContext.Provider value={consoleRoles ?? null}>
       {page}
       <PeopleConfirm
         confirm={confirm}
@@ -156,7 +271,7 @@ export function OrganizationPeoplePage({
           if (person || invitation) nav.openSection("people");
         }}
       />
-    </>
+    </ConsoleRolesContext.Provider>
   );
 }
 
@@ -425,7 +540,26 @@ function WorkspaceChips({
   );
 }
 
-function RoleCell({ role, soleOwner }: { role: OrganizationMembershipRole; soleOwner?: boolean }) {
+function RoleCell({
+  role,
+  soleOwner,
+  consoleRole,
+}: {
+  role: OrganizationMembershipRole;
+  soleOwner?: boolean;
+  /** The app's small label for a member with a Console role. */
+  consoleRole?: ConsoleRoleValue | "full" | undefined;
+}) {
+  if (!soleOwner && (consoleRole === "viewer" || consoleRole === "editor")) {
+    return (
+      <span className="flex min-w-0 flex-col">
+        <span className="text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
+        <span className="min-w-0 truncate text-xs text-fg-subtle">
+          Console: {CONSOLE_ROLE_LABELS[consoleRole]}
+        </span>
+      </span>
+    );
+  }
   return (
     <span className="flex min-w-0 items-center gap-x-1.5">
       <span className="shrink-0 text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
@@ -457,6 +591,12 @@ const COLUMNS: RowListColumn[] = [
   { id: "workspaces", label: "Workspaces", width: 256, hideLabel: true },
 ];
 
+const CONSOLE_COLUMNS: RowListColumn[] = [
+  { id: "role", label: "Role", width: 112, hideLabel: true },
+  { id: "console", label: "Console", width: 96 },
+  { id: "workspaces", label: "Workspaces", width: 224, hideLabel: true },
+];
+
 function PeopleList({
   nav,
   actions,
@@ -467,6 +607,11 @@ function PeopleList({
   hideEndUsers: boolean;
 }) {
   const directory = useOrganizationDirectory();
+  const consoleRoles = useContext(ConsoleRolesContext);
+  const inConsole = consoleRoles?.mode === "console";
+  const columns = inConsole ? CONSOLE_COLUMNS : COLUMNS;
+  const appConsoleRole = (member: OrganizationMember) =>
+    consoleRoles?.mode === "app" ? memberConsoleRole(consoleRoles.roles, member) : undefined;
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PeopleFilter>("all");
   const members = directory.members.value.filter(
@@ -555,7 +700,7 @@ function PeopleList({
         </ToolbarSummary>
       ) : null}
       {loading ? (
-        <RowList columns={COLUMNS} label="People" busy flush>
+        <RowList columns={columns} label="People" busy flush>
           <ListRowSkeleton count={4} />
         </RowList>
       ) : total === 0 ? (
@@ -585,7 +730,7 @@ function PeopleList({
         />
       ) : (
         <RowList
-          columns={COLUMNS}
+          columns={columns}
           label={`People in ${directory.overview.value?.organization.name ?? "the organization"}`}
           nameLabel="Person"
           flush
@@ -617,8 +762,17 @@ function PeopleList({
                         <RoleCell
                           role={member.role}
                           soleOwner={isSoleOwner(member, directory.members.value)}
+                          consoleRole={appConsoleRole(member)}
                         />
                       ),
+                      ...(inConsole
+                        ? {
+                            console:
+                              CONSOLE_ROLE_LABELS[
+                                memberConsoleRole(consoleRoles?.roles ?? null, member)
+                              ],
+                          }
+                        : {}),
                       workspaces: (
                         <WorkspaceChips name={name} grants={member.sharedWorkspaceAccess} />
                       ),
@@ -655,6 +809,14 @@ function PeopleList({
                 }
                 cells={{
                   role: <RoleCell role={invitation.role} />,
+                  ...(inConsole
+                    ? {
+                        console:
+                          CONSOLE_ROLE_LABELS[
+                            invitationConsoleRole(consoleRoles?.roles ?? null, invitation)
+                          ],
+                      }
+                    : {}),
                   workspaces: (
                     <WorkspaceChips
                       name={name}
@@ -1048,6 +1210,9 @@ function PersonPage({
             }}
           />
         </DetailSection>
+        {member.role === "member" && member.status === "active" ? (
+          <ConsoleRolePickerFor member={member} name={name} />
+        ) : null}
         <DetailSection
           title="Workspace access"
           description="One role per shared workspace. Saves right away."
@@ -1056,6 +1221,38 @@ function PersonPage({
         </DetailSection>
       </DetailPageBody>
     </DetailPage>
+  );
+}
+
+function ConsoleRolePickerFor({ member, name }: { member: OrganizationMember; name: string }) {
+  const view = useContext(ConsoleRolesContext);
+  if (view?.mode !== "console" || !view.roles) return null;
+  const value = memberConsoleRole(view.roles, member);
+  return (
+    <ConsoleRolePicker
+      name={name}
+      value={value === "full" ? "none" : value}
+      target={{ subjectId: member.subjectId }}
+    />
+  );
+}
+
+function ConsoleRolePickerForInvitation({
+  invitation,
+  name,
+}: {
+  invitation: OrganizationInvitation;
+  name: string;
+}) {
+  const view = useContext(ConsoleRolesContext);
+  if (view?.mode !== "console" || !view.roles) return null;
+  const value = invitationConsoleRole(view.roles, invitation);
+  return (
+    <ConsoleRolePicker
+      name={name}
+      value={value === "full" ? "none" : value}
+      target={{ invitationId: invitation.id }}
+    />
   );
 }
 
@@ -1171,6 +1368,9 @@ function InvitationPage({
         >
           <p className="text-sm text-fg">{ORGANIZATION_ROLE_LABELS[invitation.role]}</p>
         </DetailSection>
+        {invitation.role === "member" ? (
+          <ConsoleRolePickerForInvitation invitation={invitation} name={name} />
+        ) : null}
         <DetailSection
           title="Workspace access"
           description="Where they can work once they join. Invitations give access as Member."
@@ -1216,6 +1416,9 @@ function InvitePage({
   const [emails, setEmails] = useState<string[]>([]);
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
+  const consoleRoles = useContext(ConsoleRolesContext);
+  const pickConsoleRole = consoleRoles?.mode === "console" && Boolean(consoleRoles.setRole);
+  const [consoleRole, setConsoleRole] = useState<ConsoleRoleValue>("viewer");
   const [showErrors, setShowErrors] = useState(false);
   const [seatLimitError, setSeatLimitError] = useState<{
     message: string;
@@ -1277,7 +1480,14 @@ function InvitePage({
         if (!canInviteOrganizationRole(directory.actorRole, role)) {
           throw new Error("Only owners can invite owners and admins.");
         }
-        const result = await directory.invite({ emails, role, workspaceIds });
+        const result = await directory.invite({
+          emails,
+          role,
+          workspaceIds,
+          ...(pickConsoleRole && role === "member" && consoleRole !== "none"
+            ? { consoleRole }
+            : {}),
+        });
         if (result.sent.length > 0) {
           toast.success(
             result.sent.length === 1
@@ -1352,6 +1562,25 @@ function InvitePage({
             ))}
           </ChoiceCards>
         </Field>
+        {pickConsoleRole && role === "member" ? (
+          <Field label="Console role" group>
+            <ChoiceCards
+              value={consoleRole}
+              onValueChange={(value) => setConsoleRole(value as ConsoleRoleValue)}
+              aria-label="Console role"
+            >
+              {CONSOLE_ROLE_OPTIONS.map((option) => (
+                <ChoiceCard
+                  key={option.id}
+                  value={option.id}
+                  title={option.label}
+                  description={option.description}
+                />
+              ))}
+              <ChoiceCard value="none" title="None" description="No Console access." />
+            </ChoiceCards>
+          </Field>
+        ) : null}
         {workspaces.length > 0 ? (
           <Field
             label="Give access as Member to:"

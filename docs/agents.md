@@ -723,8 +723,10 @@ are on per organization (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`, see
 - Who: organization keys with `agents:read`, `agents:manage` and
   `tool_credentials:write` (full organization keys hold them through
   `workspace:admin`; explicit keys get `agents:read` from a `:read` preset), and
-  the organization's owners and admins. Other members have no access, as in
-  Console. Only an owner (never a key) switches an agent between Console and
+  the organization's people by Console role: owners and admins everything,
+  Editors read and edit Console-managed agents (test chats, publish), Viewers
+  read, other members nothing (see
+  [Console roles](opengeni-console.md#roles)). Only an owner (never a key) switches an agent between Console and
   code management; afterwards Console edits of a code agent answer 409
   `agent_managed_by_code` and deploys to a Console agent 409
   `agent_managed_in_console`.

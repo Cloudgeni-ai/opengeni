@@ -2775,6 +2775,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/organizations/:organizationId/console/access",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/access",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/console/member-roles",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/member-roles",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -8355,6 +8369,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/organizations/:organizationId/agents/by-key/:key/apply",
     "request": [
       "ApplyOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/organizations/:organizationId/console/member-roles",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/member-roles",
+    "request": [
+      "SetConsoleMemberRoleRequest"
     ],
     "response": []
   },

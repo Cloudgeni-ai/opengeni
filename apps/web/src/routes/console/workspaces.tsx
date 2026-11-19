@@ -22,6 +22,7 @@ import {
   formatMicros,
   rangeLabel,
   useConsole,
+  useConsoleCan,
   useConsoleQuery,
   WorkspaceName,
 } from "./console-shared";
@@ -35,6 +36,9 @@ export function workspaceKindLabel(kind: ConsoleWorkspaceKind): string {
 
 export function ConsoleWorkspacesRoute() {
   const { client, organizationId, search } = useConsole();
+  // Viewers and Editors read workspaces and their cost; only owners and admins
+  // mark them and see the keys that created them.
+  const full = useConsoleCan("full");
   const navigate = useNavigate();
   const [range, setRange] = useState<ConsoleRange>("30d");
   const [kind, setKind] = useState<KindFilter>("all");
@@ -45,8 +49,8 @@ export function ConsoleWorkspacesRoute() {
     [client, organizationId, range, kind],
   );
   const keys = useConsoleQuery(
-    () => client.listOrganizationApiKeys(organizationId),
-    [client, organizationId],
+    async () => (full ? await client.listOrganizationApiKeys(organizationId) : []),
+    [client, organizationId, full],
   );
   const keyNames = useMemo(
     () => new Map((keys.data ?? []).map((key) => [key.id, key.name])),
@@ -145,11 +149,13 @@ export function ConsoleWorkspacesRoute() {
                   }
                 : {})}
               menu={
-                <DropdownMenuItem onSelect={() => setSwitching(workspace)}>
-                  {workspace.kind === "managed"
-                    ? "Mark as team workspace"
-                    : "Mark as managed by product"}
-                </DropdownMenuItem>
+                full ? (
+                  <DropdownMenuItem onSelect={() => setSwitching(workspace)}>
+                    {workspace.kind === "managed"
+                      ? "Mark as team workspace"
+                      : "Mark as managed by product"}
+                  </DropdownMenuItem>
+                ) : undefined
               }
             />
           ))}

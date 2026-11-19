@@ -18,9 +18,11 @@ import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { ORG_AGENT_KEY_PATTERN } from "@opengeni/contracts";
 import { agentKeyFromName } from "@/lib/organization-agents";
 import {
+  ConsoleForbidden,
   ConsoleLoadError,
   ConsolePage,
   useConsole,
+  useConsoleCan,
   useConsoleQuery,
   useOrgAgentsApi,
   useOrgAgentsEnabled,
@@ -62,6 +64,7 @@ function AgentsList() {
   const api = useOrgAgentsApi();
   const navigate = useNavigate();
   const agents = useConsoleQuery((signal) => api.listAgents(signal), [api]);
+  const canEdit = useConsoleCan("editor");
   const rows = (agents.data?.agents ?? []).filter((agent) => agent.archivedAt === null);
   const create = () => void navigate({ to: "/console/agents/new", search });
   const open = (agent: OrgAgentSummary) =>
@@ -78,7 +81,7 @@ function AgentsList() {
         icon={<BotIcon />}
         description="Your product starts chats with an agent by its key. Publish to update new chats."
         actions={
-          rows.length > 0 ? (
+          rows.length > 0 && canEdit ? (
             <Button onClick={create}>
               <PlusIcon aria-hidden="true" />
               New agent
@@ -97,10 +100,12 @@ function AgentsList() {
           title="No agents yet"
           description="Set up an agent once and start every chat with it, or deploy one from code."
           action={
-            <Button onClick={create}>
-              <PlusIcon aria-hidden="true" />
-              New agent
-            </Button>
+            canEdit ? (
+              <Button onClick={create}>
+                <PlusIcon aria-hidden="true" />
+                New agent
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -159,6 +164,14 @@ function AgentsList() {
 
 /** New agent: name, key and description. Settings come on the agent's page. */
 export function ConsoleNewAgentRoute() {
+  return useConsoleCan("editor") ? (
+    <NewAgentForm />
+  ) : (
+    <ConsoleForbidden title="Your Console role is Viewer" />
+  );
+}
+
+function NewAgentForm() {
   const { search } = useConsole();
   const api = useOrgAgentsApi();
   const navigate = useNavigate();

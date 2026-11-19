@@ -82,7 +82,7 @@ mock.module("@opengeni/react/app/app-context", () => ({
 }));
 
 const { ConsoleContext } = await import("./console-shared");
-const { consoleNavSections } = await import("./shell");
+const { consoleDestinationFullOnly, consoleNavSections } = await import("./shell");
 const { ConsoleAgentsRoute } = await import("./agents");
 const { ConsoleAgentRoute } = await import("./agent-detail");
 const { PublishDialog } = await import("./agent-versions");
@@ -267,6 +267,8 @@ async function settle() {
   }
 }
 
+let consoleAccess: "viewer" | "editor" | "full" = "full";
+
 async function render(node: ReactNode) {
   container = document.createElement("div");
   document.body.append(container);
@@ -283,6 +285,7 @@ async function render(node: ReactNode) {
             organizationLabel: "Kontali",
             search: { org: organizationId },
             appWorkspaceId: workspaceId,
+            access: consoleAccess,
           },
         },
         node,
@@ -320,6 +323,7 @@ afterAll(() => {
 
 beforeEach(async () => {
   if (root) await act(async () => root.unmount());
+  consoleAccess = "full";
   document.body.innerHTML = "";
   navigate.mockClear();
   requestJson.mockClear();
@@ -338,6 +342,83 @@ describe("Console nav", () => {
     expect(labels(false)).not.toContain("Agents");
     expect(labels(false)).not.toContain("Tool servers");
     expect(labels(false)).toContain("Sessions");
+  });
+
+  test("Viewers and Editors see Overview, Sessions, Agents, Tool servers and Workspaces only", () => {
+    for (const access of ["viewer", "editor"] as const) {
+      const labels = consoleNavSections(true, access).flatMap((section) =>
+        section.items.map((item) => item.label),
+      );
+      expect(labels).toEqual(["Overview", "Sessions", "Agents", "Tool servers", "Workspaces"]);
+    }
+    const full = consoleNavSections(true, "full").flatMap((section) =>
+      section.items.map((item) => item.label),
+    );
+    expect(full).toEqual(
+      expect.arrayContaining([
+        "API keys",
+        "Members",
+        "Settings",
+        "Workspaces",
+        "Usage and billing",
+      ]),
+    );
+  });
+
+  test("knows the pages for owners and admins only", () => {
+    expect(consoleDestinationFullOnly("/console/members")).toBe(true);
+    expect(consoleDestinationFullOnly("/console/api-keys")).toBe(true);
+    expect(consoleDestinationFullOnly("/console/settings")).toBe(true);
+    expect(consoleDestinationFullOnly("/console/workspaces")).toBe(false);
+    expect(consoleDestinationFullOnly("/console/usage")).toBe(true);
+    expect(consoleDestinationFullOnly("/console/agents")).toBe(false);
+    expect(consoleDestinationFullOnly("/console/tool-servers")).toBe(false);
+    expect(consoleDestinationFullOnly("/console/sessions")).toBe(false);
+  });
+});
+
+describe("Console roles", () => {
+  test("a Viewer reads agents without New agent, Save draft, Publish or Test", async () => {
+    consoleAccess = "viewer";
+    await render(createElement(ConsoleAgentsRoute));
+    expect(text()).toContain("Support desk");
+    expect(text()).not.toContain("New agent");
+    await act(async () => root.unmount());
+    document.body.innerHTML = "";
+    await render(createElement(ConsoleAgentRoute));
+    const page = text();
+    expect(page).toContain("Be brief. (v3)");
+    expect(page).not.toContain("Publish v3");
+    expect(page).not.toContain("Save draft");
+    expect([...document.querySelectorAll("a")].map((link) => link.textContent)).not.toContain(
+      "Test",
+    );
+    const fields = [...document.querySelectorAll("textarea, input:not([role=switch])")];
+    expect(fields.length).toBeGreaterThan(0);
+    expect(
+      fields.filter(
+        (element) =>
+          !(element as HTMLInputElement).readOnly && !(element as HTMLInputElement).disabled,
+      ),
+    ).toEqual([]);
+  });
+
+  test("an Editor edits, tests and publishes a Console agent", async () => {
+    consoleAccess = "editor";
+    await render(createElement(ConsoleAgentRoute));
+    const page = text();
+    expect(page).toContain("Publish v3");
+    expect([...document.querySelectorAll("a")].map((link) => link.textContent)).toContain("Test");
+    const textarea = [...document.querySelectorAll("textarea")];
+    expect(textarea.length).toBeGreaterThan(0);
+    expect(textarea.some((element) => element.readOnly || element.disabled)).toBe(false);
+  });
+
+  test("an Editor sees tool servers without Add tool server", async () => {
+    consoleAccess = "editor";
+    await render(createElement(ConsoleToolServersRoute));
+    expect(text()).toContain("Billing");
+    expect(text()).not.toContain("Add tool server");
   });
 });
 

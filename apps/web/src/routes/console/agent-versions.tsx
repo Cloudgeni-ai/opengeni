@@ -23,7 +23,7 @@ import {
   versionSourceLabel,
   type OrgAgentsApi,
 } from "@/lib/organization-agents";
-import { ConsoleLoadError, formatCount, useConsoleQuery } from "./console-shared";
+import { ConsoleLoadError, formatCount, useConsoleCan, useConsoleQuery } from "./console-shared";
 
 export const MOVE_COST_NOTE = "Moving breaks the prompt cache and can raise cost slightly.";
 
@@ -195,7 +195,8 @@ export function AgentVersions({
     [api, agent.id, agent.latestVersion, agent.publishedVersion],
   );
   const rows = [...(versions.data?.versions ?? [])].sort((a, b) => b.version - a.version);
-  const editable = agent.managedBy === "console";
+  const canEdit = useConsoleCan("editor");
+  const editable = agent.managedBy === "console" && canEdit;
   const newest = rows[0]?.version;
   const right = to ?? newest;
   const left = from ?? (right !== undefined ? previous(rows, right) : undefined);
