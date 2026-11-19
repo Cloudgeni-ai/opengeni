@@ -539,6 +539,21 @@ describe("workflow timeout contract", () => {
         "http://security.ubuntu.com/ubuntu/\tpriority:3\n",
     );
     expect(down.stdout).toContain("apt mirror archive.ubuntu.com does not resolve");
+
+    // Primaries that resolve but accept no connections are dropped the same
+    // way, so apt never spends its budget timing out on them.
+    const silent = await runPlaywrightInstall({
+      dryRun: ["libb", "-"],
+      apt: [0, 0],
+      install: [0],
+      unreachable: ["archive.ubuntu.com", "security.ubuntu.com"],
+    });
+    expect(silent.exitCode).toBe(0);
+    expect(silent.mirrors).toBe(
+      "https://mirrors.edge.kernel.org/ubuntu/\tpriority:0\n" +
+        "https://mirrors.mit.edu/ubuntu/\tpriority:0\n",
+    );
+    expect(silent.stdout).toContain("apt mirror security.ubuntu.com does not resolve or answer");
     expect(down.calls.filter((call) => call === "apt download fonts-a libb")).toHaveLength(4);
     expect(down.calls.filter((call) => call === "apt update")).toHaveLength(4);
     expect(down.calls.filter((call) => call.includes("bun install-deps chromium"))).toHaveLength(4);
@@ -638,6 +653,7 @@ async function runPlaywrightInstall(options: {
   debs?: string[];
   ldd?: string;
   unresolvable?: string[];
+  unreachable?: string[];
   save?: boolean;
   noDebCache?: boolean;
   onlyShell?: boolean;
@@ -676,6 +692,7 @@ async function runPlaywrightInstall(options: {
         (options.mirrorPresent ? "https://mirrors.edge.kernel.org/ubuntu/\tpriority:10\n" : ""),
     );
     await writeFile(join(dir, "unresolvable"), `${(options.unresolvable ?? []).join("\n")}\n`);
+    await writeFile(join(dir, "unreachable"), `${(options.unreachable ?? []).join("\n")}\n`);
     for (const [name, values] of [
       ["dry-run", options.dryRun],
       ["deps", options.deps ?? []],
@@ -730,6 +747,11 @@ async function runPlaywrightInstall(options: {
       dpkg: ['[ "$1" = --print-architecture ] && echo amd64'],
       ldd: [`cat ${dir}/ldd-output`],
       getent: [`grep -qxF "$2" ${dir}/unresolvable && exit 2; echo "127.0.0.1 $2"`],
+      // A host that resolves but accepts no connections; never the network.
+      curl: [
+        'url="${*: -1}"; host=$(sed -E "s#^[a-z+]+://([^/:]+).*#\\1#" <<<"$url")',
+        `grep -qxF "$host" ${dir}/unreachable && exit 28; exit 0`,
+      ],
       sleep: [`echo "sleep $*" >> ${log}`],
     };
     for (const [name, body] of Object.entries(scripts)) {
@@ -769,6 +791,9 @@ async function runPlaywrightInstall(options: {
           PLAYWRIGHT_APT_MIRRORS: mirrors,
           PLAYWRIGHT_BROWSERS_PATH: join(dir, "browsers"),
           PLAYWRIGHT_DEBS_SAVE: options.save ? "true" : "false",
+          // The parallel prefetch is best effort ahead of the apt download
+          // these fakes model; it is exercised against a real archive instead.
+          PLAYWRIGHT_PARALLEL_PREFETCH: "false",
         },
         stdout: "pipe",
         stderr: "pipe",
