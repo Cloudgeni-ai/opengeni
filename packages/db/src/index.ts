@@ -99,6 +99,7 @@ export * from "./organization-slack-bots";
 export * from "./slack-agents";
 export * from "./agents";
 export * from "./organization-agents";
+export { WorkspaceNotFoundError } from "./database";
 export * from "./slack-agent-proposals";
 export * from "./slack-agent-updates";
 export * from "./voice-transcription-settlement";
