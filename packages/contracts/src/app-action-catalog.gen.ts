@@ -1673,6 +1673,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "DELETE /v1/organizations/:organizationId/agents/tool-servers/:key",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key",
+    "request": [],
+    "query": [
+      "expectedVersion"
+    ],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -1702,6 +1712,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultSummary"
     ],
     "permission": "connections:write"
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "request": [],
+    "response": []
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
@@ -2628,6 +2645,115 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/organizations/:organizationId/agents",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents",
+    "request": [],
+    "query": [
+      "includeArchived"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId",
+    "request": [],
+    "query": [
+      "includeArchived"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/movable-chats",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/movable-chats",
+    "request": [],
+    "query": [
+      "version"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/publish-operations",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/publish-operations",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/sessions",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/sessions",
+    "request": [
+      "ListOrgAgentSessionsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "version"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/usage",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/usage",
+    "request": [
+      "OrgAgentUsageQuery"
+    ],
+    "query": [
+      "from",
+      "to"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/versions",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/versions",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/versions/:version",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/versions/:version",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/by-key/:key",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/by-key/:key",
+    "request": [],
+    "query": [
+      "includeArchived"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/tool-servers",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/tool-servers/:key",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/tool-servers/:key/tools",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key/tools",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:organizationId/codex/accounts",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/codex/accounts",
@@ -2807,6 +2933,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/enrollments",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/enrollments",
@@ -2942,6 +3075,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "sessions:create"
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/organization-agents",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/organization-agents",
+    "request": [],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/organization-vaults",
@@ -7098,6 +7239,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "PATCH /v1/organizations/:organizationId/agents/:agentId",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/agents/:agentId",
+    "request": [
+      "UpdateOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PATCH /v1/organizations/:organizationId/agents/tool-servers/:key",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key",
+    "request": [
+      "UpdateOrgToolServerRequest"
+    ],
+    "response": [],
+    "secretFields": [
+      "request.oauthRefresh.clientSecret",
+      "request.sharedHeaders"
+    ]
+  },
+  {
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -7251,6 +7414,71 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/console-sign-in/authorize",
     "request": [],
     "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents",
+    "request": [
+      "CreateOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/archive",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/archive",
+    "request": [
+      "ArchiveOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/management",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/management",
+    "request": [
+      "SetOrgAgentManagementRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/publish",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/publish",
+    "request": [
+      "PublishOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats",
+    "request": [
+      "CreateOrgAgentTestChatRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/test-workspace",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/test-workspace",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/tool-servers",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers",
+    "request": [
+      "CreateOrgToolServerRequest"
+    ],
+    "response": [],
+    "secretFields": [
+      "request.oauthRefresh.clientSecret",
+      "request.sharedHeaders"
+    ]
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
@@ -8110,6 +8338,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "PUT /v1/organizations/:organizationId/agents/:agentId/draft",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/draft",
+    "request": [
+      "SaveOrgAgentDraftRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/organizations/:organizationId/agents/by-key/:key/apply",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/agents/by-key/:key/apply",
+    "request": [
+      "ApplyOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "PUT /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -8164,6 +8410,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CredentialProfileInput"
     ],
     "response": []
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "request": [
+      "PutEndUserToolCredentialRequest"
+    ],
+    "response": [],
+    "secretFields": [
+      "request.accessToken",
+      "request.headers",
+      "request.refreshToken"
+    ]
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
