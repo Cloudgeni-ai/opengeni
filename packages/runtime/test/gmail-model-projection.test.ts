@@ -20,7 +20,7 @@ import {
   modelToolResultFits,
   modelToolTextBudgetBytes,
   wrapAttemptToolExecute,
-} from "../src/tool-result-spill";
+} from "../src/model-tool-result-store";
 import { syntheticGmailFetch, syntheticInboxPage } from "./fixtures/gmail-mailbox";
 
 type Card = Record<string, unknown> & { plaintextBody?: string | null };
@@ -87,7 +87,10 @@ describe("Gmail model-visible projection", () => {
       pageSize: 50,
       messageFormat: "FULL_CONTENT",
     });
-    const projected = projectGmailToolResultForModel("search_messages", result);
+    // Sized for a 10,000-token policy; bodies grow with the budget (below).
+    const projected = projectGmailToolResultForModel("search_messages", result, {
+      maxTextBytes: modelToolTextBudgetBytes(10_000),
+    });
     const value = structured(projected);
     expect(JSON.parse((projected.content[0] as { text: string }).text)).toEqual(value);
     expect(value.nextPageToken).toBe("next-page");
@@ -329,10 +332,11 @@ describe("Gmail model-visible projection", () => {
 
     const htmlOnly = await exact(server, "get_message", { messageId: page[8]!.id });
     expect(structured(htmlOnly).plaintextBody).toBeNull();
-    // The fixture's HTML-only message is mostly markup and over the default
+    // The fixture's HTML-only message is mostly markup and over a 10,000-token
     // budget, so the model reads its text instead of a middle-cut HTML string.
-    expect(modelTextBytes(htmlOnly)).toBeGreaterThan(modelToolTextBudgetBytes());
-    const htmlProjected = projectGmailToolResultForModel("get_message", htmlOnly);
+    const budget = { maxTextBytes: modelToolTextBudgetBytes(10_000) };
+    expect(modelTextBytes(htmlOnly)).toBeGreaterThan(budget.maxTextBytes);
+    const htmlProjected = projectGmailToolResultForModel("get_message", htmlOnly, budget);
     const { htmlBody: _html, ...htmlKept } = structured(htmlOnly);
     expect(structured(htmlProjected)).toEqual({
       ...htmlKept,
@@ -472,9 +476,13 @@ describe("Gmail projection at the per-caller seam", () => {
     const spills: unknown[] = [];
     const execute = wrapAttemptToolExecute(
       async () => result,
-      async (input) => {
-        spills.push(input);
-        throw new Error("must not spill");
+      {
+        store: async (input) => {
+          spills.push(input);
+          throw new Error("must not store");
+        },
+        inlineMaxBytes: () => modelToolTextBudgetBytes() + 512,
+        readers: () => ({ reader: "listed", shell: false }),
       },
       { serverId: "gmail", toolName: "search_messages" },
       (value) =>
@@ -567,9 +575,13 @@ describe("Gmail projection at the per-caller seam", () => {
           }),
           complete: async () => {},
         },
-        spillOversizedModelToolResult: async ({ serializedBytes }) => {
-          spills.push(serializedBytes);
-          throw new Error("must not spill");
+        modelToolResultStore: {
+          store: async ({ text }) => {
+            spills.push(Buffer.byteLength(text, "utf8"));
+            throw new Error("must not store");
+          },
+          inlineMaxBytes: () => policyTokens * 4,
+          readers: () => ({ reader: "listed", shell: false }),
         },
         // Read per call: the projection is sized to the current model's policy.
         modelToolOutputTruncationTokens: () => policyTokens,

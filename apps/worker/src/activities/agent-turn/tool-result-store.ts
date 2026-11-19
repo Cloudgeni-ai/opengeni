@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import {
-  TOOL_RESULT_SPILL_MEDIA_TYPE,
   TOOL_RESULT_SPILL_MOUNT_PATH,
+  TOOL_RESULT_STORED_MEDIA_TYPE,
   sandboxShellPath,
-  toolResultSpillFilename,
   toolResultSpillSandboxPath,
-  type AttemptToolResult as AttemptToolResultValue,
+  toolResultStoredFilename,
   type FileAsset,
-  type ToolResultSpilledReceipt,
 } from "@opengeni/contracts";
 import {
   completeFileUpload,
@@ -18,13 +16,16 @@ import {
   prepareGeneratedWorkspaceFile,
   type Database,
 } from "@opengeni/db";
+import { modelToolOutputInlineMaxBytes } from "@opengeni/codex";
 import type { Observability } from "@opengeni/observability";
 import {
   materializeSandboxFileDownloads,
-  spilledModelToolResult,
   type CodemodeTokenWriterSession,
+  type ModelToolResultStore,
   type SandboxFileDownload,
-  type SpilledToolResultReaders,
+  type StoredToolResult,
+  type StoredToolResultKey,
+  type StoredToolResultReaders,
   type TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
@@ -33,43 +34,10 @@ import { objectStorageForSandboxDownloads } from "./file-resources";
 import type { ResumedTurnSandbox } from "../../sandbox-resume";
 
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
+/** Stored texts this attempt keeps in memory for repeated reads. */
+const READ_CACHE_ENTRIES = 4;
 
-export type ToolResultSpillReceipt = ToolResultSpilledReceipt;
-
-/**
- * Which readers of a spilled copy this turn's model has: a shell whenever
- * compute is attached (the same fact that attaches the sandbox tools), and
- * the Files download tool when one of the turn's tool refs selects the `files`
- * server without narrowing that tool away and the deployment's server allows it.
- */
-export function spilledToolResultReadersForTurn(input: {
-  tools: ReadonlyArray<{ kind: string; id: string; allowedTools?: readonly string[] | undefined }>;
-  mcpServers: ReadonlyArray<{ id: string; allowedTools?: readonly string[] | undefined }>;
-  sandboxBackend: Settings["sandboxBackend"];
-}): SpilledToolResultReaders {
-  const allows = (allowedTools: readonly string[] | undefined) =>
-    allowedTools === undefined || allowedTools.includes("files_get_download_url");
-  const files = input.mcpServers.find((server) => server.id === "files");
-  return {
-    shell: input.sandboxBackend !== "none",
-    fileDownload:
-      files !== undefined &&
-      allows(files.allowedTools) &&
-      input.tools.some(
-        (tool) => tool.kind === "mcp" && tool.id === "files" && allows(tool.allowedTools),
-      ),
-  };
-}
-
-/**
- * Where the spilled copy is for the shell of this attempt:
- * - `materialized`: copied into the live sandbox;
- * - `deferred`: this attempt has a sandbox route but no live sandbox yet;
- * - `unavailable`: no shell has it (no sandbox route, or the copy failed).
- */
-type SpillMaterialization = "materialized" | "deferred" | "unavailable";
-
-export type ToolResultSpillDeps = {
+export type ToolResultStoreDeps = {
   db: Database;
   objectStorage: ObjectStorage | null;
   observability: Observability;
@@ -86,12 +54,6 @@ export type ToolResultSpillDeps = {
   getSetupBoxSession: () => unknown;
   getSdkOwnedSandboxSession: () => unknown;
   getSandboxGroupId: () => string | null;
-  /**
-   * The turn's lazy sandbox boundary, when the attempt has one. A spill that
-   * finds no live sandbox joins it (as a shell command would), so the receipt
-   * names a path only once the copy is really there.
-   */
-  getTurnSandboxProvisioner: () => { get(): Promise<unknown> } | null;
   runWorkspaceMutation: <T>(
     sandbox: ResumedTurnSandbox,
     operation: string,
@@ -99,32 +61,44 @@ export type ToolResultSpillDeps = {
   ) => Promise<T>;
 };
 
-export class ToolResultSpill {
-  readonly receiptsCreatedThisTurn = new Map<string, ToolResultSpillReceipt>();
+/**
+ * The attempt's store for tool results larger than the model may see inline.
+ * The full model-visible text becomes a workspace File (one per result,
+ * idempotent across retries of the same call), readable by byte offset with
+ * `tool_result_read` whether or not the session has a sandbox. When a
+ * sandbox is already running, a copy is also written there so the shell can
+ * search it; the store never starts a sandbox for that.
+ */
+export class ToolResultStore implements ModelToolResultStore {
+  private currentReaders: StoredToolResultReaders = { reader: "none", shell: false };
   private materializationCache: { instanceId: string; fileIds: Set<string> } | null = null;
+  private readonly readCache = new Map<string, Buffer>();
 
-  constructor(private readonly deps: ToolResultSpillDeps) {}
+  constructor(private readonly deps: ToolResultStoreDeps) {}
 
-  spill = async (input: {
-    operationId: string;
-    result: AttemptToolResultValue;
-    /** The model's tools for opening the copy; undefined names both readers. */
-    readers?: SpilledToolResultReaders;
-  }): Promise<AttemptToolResultValue> => {
+  inlineMaxBytes = (): number =>
+    modelToolOutputInlineMaxBytes(this.deps.getModelRunSettings().modelToolOutputTruncationTokens);
+
+  readers = (): StoredToolResultReaders => this.currentReaders;
+
+  /** Set once the attempt knows which tools its model has. */
+  setReaders(readers: StoredToolResultReaders): void {
+    this.currentReaders = readers;
+  }
+
+  store = async (input: { key: StoredToolResultKey; text: string }): Promise<StoredToolResult> => {
     const { objectStorage } = this.deps;
     if (!objectStorage) {
-      throw new Error("Oversized tool-result spill requires configured object storage");
+      throw new Error("Storing a large tool result requires configured object storage");
     }
-    const result = input.result;
-    const bytes = Buffer.from(JSON.stringify(result) ?? "null");
+    const bytes = Buffer.from(input.text, "utf8");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const identity = toolResultSpillIdentity({
+    const identity = toolResultStoreIdentity({
       workspaceId: this.deps.workspaceId,
       attemptId: this.deps.attemptId,
-      operationId: input.operationId,
+      key: input.key,
     });
-    const filename = toolResultSpillFilename(input.operationId);
-    const intendedSandboxPath = toolResultSpillSandboxPath(filename);
+    const filename = toolResultStoredFilename(identity.fileId);
     const objectKey = `workspaces/${this.deps.workspaceId}/files/${identity.fileId}/tool-results/${filename}`;
     const prepared = await prepareGeneratedWorkspaceFile(this.deps.db, {
       accountId: this.deps.accountId,
@@ -133,7 +107,7 @@ export class ToolResultSpill {
       uploadId: identity.uploadId,
       filename,
       safeFilename: filename,
-      contentType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+      contentType: TOOL_RESULT_STORED_MEDIA_TYPE,
       sizeBytes: bytes.byteLength,
       sha256,
       bucket: objectStorage.bucket,
@@ -145,60 +119,51 @@ export class ToolResultSpill {
       if (!(await objectStorage.fileExists(file))) {
         await objectStorage.putObject({
           key: objectKey,
-          contentType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+          contentType: TOOL_RESULT_STORED_MEDIA_TYPE,
           body: bytes,
           sha256,
         });
       }
       file = await completeFileUpload(this.deps.db, this.deps.workspaceId, identity.uploadId);
     }
-    // Registered first so a sandbox start this spill triggers copies it too.
-    this.receiptsCreatedThisTurn.set(file.id, {
-      type: "tool_result_spilled",
-      sandboxPath: intendedSandboxPath,
-      fileId: file.id,
+    this.remember(file.id, bytes);
+    const copied = await this.copyIntoLiveSandbox(file);
+    return {
+      resultId: file.id,
       byteSize: file.sizeBytes,
-      mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
-    });
-    let materialization = await this.materializeFile(file);
-    if (materialization === "deferred") {
-      materialization = await this.materializeAfterSandboxStart(file);
-    }
-    return spilledModelToolResult(
-      {
-        type: "tool_result_spilled",
-        sandboxPath: materialization === "materialized" ? this.placedShellPath(filename) : null,
-        fileId: file.id,
-        byteSize: file.sizeBytes,
-        mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
-      },
-      input.readers,
-    );
+      sandboxPath: copied ? this.placedShellPath(filename) : null,
+    };
   };
 
   /**
-   * The only model-readable copy of an oversized result is the sandbox file,
-   * so a spill joins the turn's lazy sandbox instead of promising a later copy
-   * that may never happen (no sandbox in this turn, or a failed copy). Without
-   * a lazy boundary (the SDK-owned session appears only with the first shell
-   * command) the receipt says `null`.
+   * The bytes of one stored tool result of this workspace, or null when the
+   * id names no stored tool result. Results stored before this store (exact
+   * JSON over 1 MiB) are read the same way.
    */
-  private async materializeAfterSandboxStart(file: FileAsset): Promise<SpillMaterialization> {
-    const provisioner = this.deps.getTurnSandboxProvisioner();
-    if (!provisioner) return "unavailable";
-    try {
-      await provisioner.get();
-    } catch (error) {
-      this.deps.observability.warn("Tool result spill could not start the turn sandbox", {
-        errorClass: error instanceof Error ? error.name : "UnknownError",
-        errorCode: "worker_operation_failed",
-        origin: "worker",
-      });
-      return "unavailable";
+  readBytes = async (resultId: string): Promise<Buffer | null> => {
+    const cached = this.readCache.get(resultId);
+    if (cached) return cached;
+    const { objectStorage } = this.deps;
+    if (!objectStorage) return null;
+    const file = await getFile(this.deps.db, this.deps.workspaceId, resultId);
+    if (!file || file.status !== "ready" || !file.objectKey.includes("/tool-results/")) {
+      return null;
     }
-    // The start already copied it (`materializeDeferred`); this is a cache hit
-    // or a retry of a failed copy.
-    return (await this.materializeFile(file)) === "materialized" ? "materialized" : "unavailable";
+    const object = await objectStorage.getObjectBytes(file.objectKey);
+    if (!object) return null;
+    const bytes = Buffer.from(object.bytes);
+    this.remember(resultId, bytes);
+    return bytes;
+  };
+
+  private remember(resultId: string, bytes: Buffer): void {
+    this.readCache.delete(resultId);
+    this.readCache.set(resultId, bytes);
+    while (this.readCache.size > READ_CACHE_ENTRIES) {
+      const oldest = this.readCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.readCache.delete(oldest);
+    }
   }
 
   /** The copy's absolute path in the placement it was just written to, so the
@@ -214,37 +179,25 @@ export class ToolResultSpill {
       : sandboxShellPath(toolResultSpillSandboxPath(filename));
   }
 
-  materializeDeferred = async (): Promise<void> => {
-    for (const receipt of this.receiptsCreatedThisTurn.values()) {
-      const file = await getFile(this.deps.db, this.deps.workspaceId, receipt.fileId);
-      if (file) await this.materializeFile(file);
-    }
-  };
-
-  private async materializeFile(file: FileAsset): Promise<SpillMaterialization> {
-    if (this.deps.getSandboxFileDownloadBackend() === "none") return "unavailable";
+  /** Copy into a sandbox that is already running; false when none is or the copy failed. */
+  private async copyIntoLiveSandbox(file: FileAsset): Promise<boolean> {
+    if (this.deps.getSandboxFileDownloadBackend() === "none") return false;
     try {
       const sandbox = this.deps.getResolvedSandbox();
       const setupBoxSession = this.deps.getSetupBoxSession();
       if (sandbox && setupBoxSession) {
-        return (await this.materializeInSandbox(file, sandbox, setupBoxSession))
-          ? "materialized"
-          : "unavailable";
+        return await this.materializeInSandbox(file, sandbox, setupBoxSession);
       }
       const sdkOwned = this.deps.getSdkOwnedSandboxSession();
-      if (sdkOwned) {
-        return (await this.writeDownload(sdkOwned, await this.prepareDownload(file)))
-          ? "materialized"
-          : "unavailable";
-      }
-      return "deferred";
+      if (sdkOwned) return await this.writeDownload(sdkOwned, await this.prepareDownload(file));
+      return false;
     } catch (error) {
-      this.deps.observability.warn("Tool result spill sandbox materialization failed", {
+      this.deps.observability.warn("Stored tool result sandbox copy failed", {
         errorClass: error instanceof Error ? error.name : "UnknownError",
         errorCode: "worker_operation_failed",
         origin: "worker",
       });
-      return "unavailable";
+      return false;
     }
   }
 
@@ -271,9 +224,9 @@ export class ToolResultSpill {
       };
     }
     if (this.materializationCache.fileIds.has(file.id)) return true;
-    await this.deps.runWorkspaceMutation(sandbox, "toolResultSpillMaterialization", async () => {
+    await this.deps.runWorkspaceMutation(sandbox, "toolResultStoreMaterialization", async () => {
       const ok = await this.writeDownload(session, download);
-      if (!ok) throw new Error("Tool result spill sandbox copy failed");
+      if (!ok) throw new Error("Stored tool result sandbox copy failed");
     });
     this.materializationCache.fileIds.add(file.id);
     const sandboxGroupId = this.deps.getSandboxGroupId();
@@ -293,7 +246,7 @@ export class ToolResultSpill {
   private async prepareDownload(file: FileAsset): Promise<SandboxFileDownload> {
     const { objectStorage } = this.deps;
     if (!objectStorage) {
-      throw new Error("Oversized tool-result spill requires configured object storage");
+      throw new Error("Storing a large tool result requires configured object storage");
     }
     const settings = this.deps.getModelRunSettings();
     const downloadStorage = objectStorageForSandboxDownloads(
@@ -331,18 +284,26 @@ export class ToolResultSpill {
   }
 }
 
-export function toolResultSpillIdentity(input: {
+/**
+ * Deterministic File and upload ids for one result, so a retried store of the
+ * same call in the same attempt reuses its File.
+ */
+export function toolResultStoreIdentity(input: {
   workspaceId: string;
   attemptId: string;
-  operationId: string;
+  key: StoredToolResultKey;
 }): { fileId: string; uploadId: string } {
+  const keyValue =
+    input.key.kind === "operation" ? input.key.operationId.toLowerCase() : input.key.callId;
   const digest = createHash("sha256")
-    .update("opengeni-tool-result-spill-v1\0")
+    .update("opengeni-tool-result-store-v1\0")
     .update(input.workspaceId)
     .update("\0")
     .update(input.attemptId)
     .update("\0")
-    .update(input.operationId.toLowerCase())
+    .update(input.key.kind)
+    .update("\0")
+    .update(keyValue)
     .digest("hex");
   return {
     fileId: uuidFromDigest(digest, 0),

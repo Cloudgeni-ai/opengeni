@@ -1713,7 +1713,7 @@ on menu changes the machine, not the folder. Historical attachments are not
 restaged automatically; retrieve them explicitly through Files or attach them
 to a new message when needed.
 
-While a machine still reports `/` (an older agent without a usable home), staging an attachment, spilled tool result or generated
+While a machine still reports `/` (an older agent without a usable home), staging an attachment, stored tool result copy or generated
 image into it usually still fails. When the turn's effective backend is a
 Connected Machine and its working directory is `/`, any failed staging command
 gets a reason that says the filesystem root is often not writable (read-only on

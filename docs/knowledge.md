@@ -223,7 +223,7 @@ contract passes through unchanged. The model call's history item and timeline
 event record the compact copy the model received; past tool outputs are never
 re-rendered. MCP transport bounds the exact result to 1 MiB before this
 projection, so compaction only shrinks results that already fit; a result that
-is still over 1 MiB for the model spills its exact bytes like any tool. Tests in
+is still larger than the model's inline size is stored and shown as a view like any tool's. Tests in
 `packages/runtime/test/knowledge-model-projection.test.ts` cover exact Codemode
 results, non-mutating model projection, and the unchanged save-preparation shape.
 

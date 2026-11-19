@@ -8,15 +8,22 @@
  * - `codex-rs/utils/output-truncation/src/lib.rs`
  * - `codex-rs/core/src/context_manager/history.rs`
  *
- * The live gpt-5.6 model catalog declares a 10,000-token truncation policy.
- * Codex applies a 1.2x allowance before serializing a function-call output, so
- * the effective textual payload budget is 12,000 approximate tokens. Images,
- * files, and encrypted content are preserved; textual content shares one
- * sequential budget and carries an explicit head/tail truncation marker.
+ * Opengeni's tool-output policy is the number of approximate tokens (four
+ * UTF-8 bytes each) one tool result may show inline: 25,000 tokens, 100,000
+ * bytes, by default. A newly produced result over that size never reaches
+ * this module whole: the tool-result store keeps the full text and the model
+ * receives a view that fits (see `@opengeni/runtime` model-tool-result-store).
+ * This truncation is the safety net behind that store, applied with Codex's
+ * 1.2x serialization allowance on top of the policy, so a stored-result view
+ * or an inline result within the policy is never cut here. Images, files, and
+ * encrypted content are preserved; textual content shares one sequential
+ * budget and carries an explicit head/tail truncation marker.
  *
  * This module deliberately has no database or Agents SDK dependency. Both the
  * runtime request seam and the database history boundary call the same pure
  * function, so replayed conversation truth is identical to live model input.
+ * Raising the policy never changes an item already bounded under a smaller
+ * one: a bounded value is within the larger budget and is returned unchanged.
  */
 
 import { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
@@ -102,10 +109,19 @@ export function canonicalizePersistedHistoryItem<T extends ModelHistoryItem>(
   return boundModelToolOutputItem(omitOutputOnlyHistoryItemFields(item), policyTokens);
 }
 
+/**
+ * The upstream Codex catalog's 10,000-token policy (gpt-5.6), the default
+ * before results were stored. Codex models never go below it, so history
+ * bounded under it is never cut further on replay.
+ */
 export const CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS = 10_000;
 export const CODEX_TOOL_OUTPUT_SERIALIZATION_ALLOWANCE = 1.2;
-export const DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS =
-  CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS;
+/**
+ * Default inline tool-output policy: 25,000 approximate tokens, 100,000 UTF-8
+ * bytes, the same as Claude Code's default MCP output limit. A larger result
+ * is stored whole and shown as a view that fits.
+ */
+export const DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS = 25_000;
 
 const APPROX_BYTES_PER_TOKEN = 4;
 // Twelve decimal digits already describe ~4 TB at four bytes/token, far beyond
@@ -173,6 +189,17 @@ export function modelToolOutputSerializationBudgetTokens(
   policyTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 ): number {
   return Math.ceil(Math.max(0, policyTokens) * CODEX_TOOL_OUTPUT_SERIALIZATION_ALLOWANCE);
+}
+
+/**
+ * UTF-8 bytes of text one tool result may show inline under a policy (four
+ * bytes per approximate token): 100,000 bytes for the default policy. A
+ * result over this is stored whole and shown as a view of this size.
+ */
+export function modelToolOutputInlineMaxBytes(
+  policyTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): number {
+  return Math.max(0, policyTokens) * APPROX_BYTES_PER_TOKEN;
 }
 
 export function approximateTokenCount(value: string): number {

@@ -1066,10 +1066,12 @@ const SettingsSchema = z.object({
   // Model-catalog auto-compact limit. When present it is clamped to
   // 90% of the raw window, matching Codex core's auto_compact_token_limit().
   contextAutoCompactThresholdTokens: z.coerce.number().int().positive().optional(),
-  // Provider-neutral fallback for canonical model-facing tool-result text.
-  // The current stable Codex catalog policy is 10k tokens; the truncator adds
-  // Codex's 1.2x JSON serialization allowance when applying it.
-  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(10_000),
+  // Provider-neutral fallback for how much tool-result text one result shows
+  // inline: 25k approximate tokens, 100,000 UTF-8 bytes (Claude Code's default
+  // MCP output limit). A larger result is stored whole and the model reads the
+  // rest by offset. The request-time safety truncation adds Codex's 1.2x
+  // serialization allowance on top, so it never cuts a result within this.
+  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(25_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -10215,7 +10217,14 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
           effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
           autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
-          toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+          // Codex models show tool output inline up to the deployment policy
+          // like every other model; larger results are stored and read by
+          // offset. Never below the 10k-token policy their history was
+          // bounded under, so replayed items are never cut further.
+          toolOutputTruncationTokens: Math.max(
+            settings.modelToolOutputTruncationTokens,
+            CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+          ),
         };
       }),
   };

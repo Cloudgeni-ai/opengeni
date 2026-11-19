@@ -48,6 +48,7 @@ import {
   listSandboxGroupRepositoryResources,
   settleSessionRepositoryCleanup,
   sessionHasToolRouterHistory,
+  sessionListsToolResultReader,
   recordNangoUsageEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -76,6 +77,7 @@ import { createMcpOperationReadStore } from "../mcp-operation-store";
 import { createMcpOperationObserverResolver } from "../mcp-operation-observer";
 import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
+import { createToolResultReadAttemptToolDefinition } from "./tool-result-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import {
@@ -122,7 +124,7 @@ import {
   recordToolPreparationPhase,
   recordTurnStartupPhase,
 } from "../../observability-metrics";
-import { ToolResultSpill, spilledToolResultReadersForTurn } from "./tool-result-spill";
+import { ToolResultStore } from "./tool-result-store";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { turnToolRouterExpected } from "./tool-router-expectation";
@@ -132,6 +134,7 @@ import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
+  TOOL_RESULT_READ_TOOL_NAME,
   type AgentLearningDefaults,
   type ResourceRef,
   type Permission,
@@ -232,7 +235,7 @@ export type PrepareTurnToolRuntimeDeps = {
   attempt: AttemptIdentityState;
   sandboxState: SandboxRuntimeState;
   media: ReturnType<typeof createTurnMediaArtifacts>;
-  toolResultSpill: ToolResultSpill;
+  toolResultStore: ToolResultStore;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
@@ -542,7 +545,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     attempt,
     sandboxState,
     media,
-    toolResultSpill,
+    toolResultStore,
     turn,
     session,
     installedApiIntegrations,
@@ -1380,13 +1383,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   // Frozen per turn: router history, the prepared refs, the first-party
   // selection and the function tools. Decides whether anything is deferred.
-  const toolRouterInHistory = session.agent
-    ? await sessionHasToolRouterHistory(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-      })
-    : false;
+  const [toolRouterInHistory, toolResultReaderListed] = await Promise.all([
+    session.agent
+      ? sessionHasToolRouterHistory(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        })
+      : Promise.resolve(false),
+    sessionListsToolResultReader(db, input.workspaceId, input.sessionId),
+  ]);
   const toolRouterExpected = turnToolRouterExpected({
     agentConfig: session.agent,
     routerInHistory: toolRouterInHistory,
@@ -1409,6 +1415,38 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolRouterExpected || !routerInstallable
       ? titleToolPlan.remoteFirstPartyMcpTools
       : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
+  // `tool_result_read` reads tool results too large to show whole. A session
+  // created since migration 1502 lists it from its first request. An earlier
+  // session's tool list must stay as its requests sent it, so the reader joins
+  // only as a deferred tool behind its search router, and not at all without
+  // one (the shell copy, when a sandbox runs, is then its only reader). The
+  // router decision above never counts the reader.
+  const searchRouterPresent =
+    toolRouterExpected &&
+    routerInstallable &&
+    (lazyToolTransport !== undefined || (Boolean(session.agent) && toolRouterInHistory));
+  const toolResultReader: "listed" | "searchable" | "none" =
+    !attemptToolFamilies.allowsFunctionTool(TOOL_RESULT_READ_TOOL_NAME)
+      ? "none"
+      : toolResultReaderListed
+        ? "listed"
+        : searchRouterPresent
+          ? "searchable"
+          : "none";
+  toolResultStore.setReaders({
+    reader: toolResultReader,
+    shell: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+  });
+  const attemptToolDefinitionsWithReader =
+    toolResultReader === "none"
+      ? attemptToolDefinitions
+      : [
+          ...attemptToolDefinitions,
+          createToolResultReadAttemptToolDefinition({
+            read: toolResultStore.readBytes,
+            inlineMaxBytes: toolResultStore.inlineMaxBytes,
+          }),
+        ];
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -1629,16 +1667,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           // is read from the machine its ledger names, never the current one.
           return (await lookAtLedgerCommand?.(commandId)) ?? false;
         },
-        spillOversizedModelToolResult: async ({ operationId, result }) =>
-          await toolResultSpill.spill({
-            operationId,
-            result,
-            readers: spilledToolResultReadersForTurn({
-              tools: turnTools,
-              mcpServers: runSettings.mcpServers,
-              sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
-            }),
-          }),
+        modelToolResultStore: toolResultStore,
         modelToolOutputTruncationTokens: () =>
           eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,
@@ -1667,7 +1696,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         firstPartyTools: remoteFirstPartyMcpTools,
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
-        attemptToolDefinitions,
+        attemptToolDefinitions: attemptToolDefinitionsWithReader,
         connectorActionPolicy,
         attemptConnectorActionBindings,
       }),
@@ -1757,6 +1786,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     preparationIndependentToolNames: [
       ...titleToolPlan.preparationIndependentToolNames,
       "skill_read",
+      ...(toolResultReader === "listed" ? [TOOL_RESULT_READ_TOOL_NAME] : []),
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
     promptToolAvailability:
