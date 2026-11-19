@@ -102,6 +102,8 @@ const KNOWN_BREAKS: Readonly<Record<string, string>> = {
   "the first goal is set": "fixed by #7919",
   // The system prompt's last line names the machine's workspace root.
   "the chat moves to another machine": "fixed by #7918",
+  "the chat moves from a managed sandbox to a Connected Machine": "fixed by #7918",
+  "the chat moves from a Connected Machine to a managed sandbox": "fixed by #7918",
   // Background-command tools and their sentence follow whether this turn has
   // compute (#3516), so attaching or detaching a machine changes both.
   "a Connected Machine is attached": "background-command tools follow compute",
@@ -213,39 +215,58 @@ for (const wire of WIRES) {
 
 // Where a chat runs is the other half of its state: a sandbox restarts, or the
 // chat moves to another machine. These cases run real boxes (the runtime's
-// live-chat fixture), each with its own workspace root, on the Claude and
-// Responses wire adapters.
+// live-chat fixture), each with its own backend and workspace root, on the
+// Claude and Responses wire adapters.
 describe.each([
   ["anthropic", claudeModel],
   ["responses", responsesModel],
 ] as const)(
   "%s: a request repeats the previous request's prefix when the chat's machine changes",
   (name, wire) => {
+    // Each side is where a turn runs: its sandbox backend and workspace root.
+    // A managed sandbox and a Connected Machine render different resources.
+    const managed = { backend: "docker", root: "/workspace" } as const;
+    const machine = { backend: "selfhosted", root: "/home/user" } as const;
+    const otherMachine = { backend: "selfhosted", root: "/Users/user" } as const;
     const placements = [
-      { name: "the sandbox restarts on the same machine", moves: false },
-      { name: "the chat moves to another machine", moves: true },
+      { name: "the sandbox restarts on the same machine", from: machine, to: machine },
+      { name: "the chat moves to another machine", from: machine, to: otherMachine },
+      { name: "the managed sandbox restarts", from: managed, to: managed },
+      {
+        name: "the chat moves from a managed sandbox to a Connected Machine",
+        from: managed,
+        to: machine,
+      },
+      {
+        name: "the chat moves from a Connected Machine to a managed sandbox",
+        from: machine,
+        to: managed,
+      },
     ] as const;
     for (const placement of placements) {
       const known = KNOWN_BREAKS[`${name}: ${placement.name}`] ?? KNOWN_BREAKS[placement.name];
       (known ? test.failing : test)(
         `after ${placement.name}${known ? ` (known break: ${known})` : ""}`,
         async () => {
-          const first = await liveBox("/home/user");
-          const second = placement.moves ? await liveBox("/Users/user") : first;
+          const first = await liveBox(placement.from.root);
+          const second = placement.to === placement.from ? first : await liveBox(placement.to.root);
           const { api, model, bodies, system, conversation } = wire(["text", "text", "text"]);
           const conversationChat = liveChat(first, model, api);
-          // A Connected Machine reports its own workspace root; each box has
-          // its own, so a move lands on another root as it does in production.
-          const on = (box: typeof first) => ({
+          // Each box reports its own workspace root, so a move lands on another
+          // root and backend as it does in production.
+          const on = (
+            box: typeof first,
+            side: (typeof placement)["from"] | (typeof placement)["to"],
+          ) => ({
             box,
             build: {
-              activeSandboxBackend: "selfhosted" as const,
+              activeSandboxBackend: side.backend,
               sandboxWorkspaceRoot: box.session.state.manifest!.root!,
             },
           });
-          await conversationChat.turn("Hello.", on(first));
-          await conversationChat.turn("What is the status?", on(first));
-          await conversationChat.turn("And now?", on(second));
+          await conversationChat.turn("Hello.", on(first, placement.from));
+          await conversationChat.turn("What is the status?", on(first, placement.from));
+          await conversationChat.turn("And now?", on(second, placement.to));
           expect(bodies).toHaveLength(3);
           const breaks: string[] = [];
           if (system(bodies[1]) !== system(bodies[2])) {
