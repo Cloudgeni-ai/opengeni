@@ -4269,6 +4269,8 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "sandbox_leases",
     "sandbox_lease_holders",
     "usage_events",
+    "session_turns",
+    "session_create_idempotency_guard",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4363,6 +4365,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "nango_live_connection_owners_v1(text, text, text, integer)",
       "sandbox_unpaid_fleet_v1(uuid, boolean)",
       "sandbox_fleet_warm_boxes_v1()",
+      "discard_refused_session_create_v1(uuid, uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4375,6 +4378,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "sandbox_fleet_warm_boxes_v1()",
+      "discard_refused_session_create_v1(uuid, uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

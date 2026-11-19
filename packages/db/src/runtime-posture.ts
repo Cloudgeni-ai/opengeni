@@ -114,6 +114,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "nango_live_connection_owners_v1(text, text, text, integer)",
   "sandbox_unpaid_fleet_v1(uuid, boolean)",
   "sandbox_fleet_warm_boxes_v1()",
+  "discard_refused_session_create_v1(uuid, uuid)",
 ] as const;
 
 /**
@@ -160,6 +161,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1486 withheld the unpaid sandbox fleet counts and 1490 granted them.
  * 1492 withholds the managed warm box count; until it is granted, fleet
  * pressure reads the warm count of every lease, self-hosted ones included.
+ * 1501 withholds the discard of a refused keyed session create; until it is
+ * granted, such a shell stays (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -172,6 +175,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "sandbox_fleet_warm_boxes_v1()",
+  "discard_refused_session_create_v1(uuid, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -314,6 +318,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "sandbox_fleet_warm_boxes_v1()": [
     "sandbox_leases",
     "opengeni_private.modal_inventory_read_capabilities",
+  ],
+  "discard_refused_session_create_v1(uuid, uuid)": [
+    "sessions",
+    "session_events",
+    "session_turns",
+    "session_create_idempotency_guard",
   ],
 };
 
