@@ -142,10 +142,39 @@ test("a connection card notice marks the idle chat as needing the person until i
   ]);
   expect((await state()).keys).toEqual([cardA]);
   expect(await inboxStatus(cardA)).toBe("open");
+  // The turn that message starts.
+  const turnId = crypto.randomUUID();
+  const triggerId = crypto.randomUUID();
+  const [next] = await shared.admin<Array<{ sequence: number; position: number }>>`
+    select session_row.last_sequence + 1 as sequence,
+      (select coalesce(max(turn_row.position), 0)::int + 1 from session_turns turn_row
+        where turn_row.session_id = session_row.id) as position
+    from sessions session_row where session_row.id = ${session.id}::uuid`;
+  await shared.admin`insert into session_turns (
+    id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+    status, position, prompt, model, reasoning_effort, sandbox_backend
+  ) values (${turnId}, ${grant.accountId}, ${workspaceId}, ${session.id}, ${triggerId},
+    'connection-card-wait-test', 'running', ${next!.position}, 'Go on', 'test-model',
+    'medium', 'none')`;
+  await shared.admin`insert into session_events (
+    id, account_id, workspace_id, session_id, turn_id, sequence, type, payload
+  ) values (${triggerId}, ${grant.accountId}, ${workspaceId}, ${session.id}, ${turnId},
+    ${next!.sequence}, 'user.message', '{"text":"Go on"}')`;
+  await shared.admin`update sessions set last_sequence = ${next!.sequence}
+    where id = ${session.id}::uuid`;
+  expect((await state()).keys).toEqual([cardA]);
   await appendSessionEvents(client.db, workspaceId, session.id, [
-    { type: "turn.started", payload: {} },
+    { type: "turn.started", payload: {}, turnId },
   ]);
   expect(await state()).toEqual({ since: null, keys: null });
   expect(await inboxStatus(cardA)).toBe("withdrawn");
   expect(await inboxStatus("report-ready")).toBe("open");
+  // The same turn resuming (after an approval or an answer) doesn't post its
+  // cards again, so it leaves a card posted since waiting.
+  await post(cardB);
+  await appendSessionEvents(client.db, workspaceId, session.id, [
+    { type: "turn.started", payload: {}, turnId },
+  ]);
+  expect((await state()).keys).toEqual([cardB]);
+  expect(await inboxStatus(cardB)).toBe("open");
 });

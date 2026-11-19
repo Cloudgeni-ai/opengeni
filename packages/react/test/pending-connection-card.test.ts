@@ -35,4 +35,16 @@ describe("the connection card kept above the composer", () => {
     expect(pendingConnectionCard([card("c1")], () => false)).toBeNull();
     expect(pendingConnectionCard([said("a1")], actionable)).toBeNull();
   });
+
+  test("only a card the agent waits on, as its notice is: not one from preparing the turn", () => {
+    expect(pendingConnectionCard([card("c1", { toolName: null })], actionable)).toBeNull();
+    expect(
+      pendingConnectionCard([card("c1", { providerDomain: "opengeni" })], actionable),
+    ).toBeNull();
+    const request = card("c1", {
+      toolName: null,
+      capability: { id: "mcp:linear", name: "Linear" } as AuthNeededItem["capability"],
+    });
+    expect(pendingConnectionCard([request], actionable)?.id).toBe("c1");
+  });
 });

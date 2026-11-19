@@ -13,8 +13,8 @@
 -- * sessions.awaiting_connection_since: when the oldest of them was posted
 --   (kept while any stays open); null when none is open.
 -- * An AFTER INSERT trigger on session_events maintains both: a posted
---   notice adds its key, a withdrawn one removes it, and `turn.started`
---   clears them: once the agent works again (the person wrote, the card's
+--   notice adds its key, a withdrawn one removes it, and a turn's first
+--   `turn.started` clears them: once the agent works again (the person wrote, the card's
 --   setup continued it, or anything else woke it) it no longer waits, and a
 --   card it still needs is posted again by that turn. A failure
 --   is a warning and never aborts the event's transaction. Imported
@@ -48,6 +48,14 @@ DECLARE
 BEGIN
   BEGIN
     IF NEW.type = 'turn.started' THEN
+      -- Only a turn's first start: a resume after an approval or an answer
+      -- continues the same turn, whose cards are not posted again.
+      IF NEW.turn_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM session_events earlier
+        WHERE earlier.workspace_id = NEW.workspace_id AND earlier.turn_id = NEW.turn_id
+          AND earlier.type = 'turn.started' AND earlier.id <> NEW.id) THEN
+        RETURN NULL;
+      END IF;
       UPDATE sessions SET awaiting_connection_since = NULL, awaiting_connection_keys = NULL
       WHERE workspace_id = NEW.workspace_id AND id = NEW.session_id
         AND (awaiting_connection_keys IS NOT NULL OR awaiting_connection_since IS NOT NULL);
@@ -136,6 +144,14 @@ DECLARE
 BEGIN
   BEGIN
     IF NEW.type = 'turn.started' THEN
+      -- Only a turn's first start: a resume after an approval or an answer
+      -- continues the same turn, whose cards are not posted again.
+      IF NEW.turn_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM session_events earlier
+        WHERE earlier.workspace_id = NEW.workspace_id AND earlier.turn_id = NEW.turn_id
+          AND earlier.type = 'turn.started' AND earlier.id <> NEW.id) THEN
+        RETURN NULL;
+      END IF;
       -- The agent works again: it no longer waits on the chat's connection
       -- cards, and one it still needs is posted again by this turn.
       UPDATE opengeni_private.inbox_items item

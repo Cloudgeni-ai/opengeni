@@ -34,6 +34,8 @@ function fnv1a64(value: string): string {
 }
 
 type NoticeCard = Pick<ToolAuthNeededPayload, "providerDomain"> & {
+  /** The tool call that needed it; absent for a card found preparing the turn. */
+  toolName?: string | null | undefined;
   connectionId?: string | null | undefined;
   capability?: { id: string; name?: string | undefined } | null | undefined;
   setupRequest?: { name?: string | undefined; endpointUrl?: string | undefined } | null | undefined;
@@ -68,14 +70,18 @@ function serviceName(card: NoticeCard): string {
 }
 
 /**
- * The notice announcing a card the person can act on, or null for a card that
- * only explains something unavailable (it asks nothing of them).
+ * The notice announcing a card the agent waits on, or null for one it doesn't:
+ * a card that only explains something unavailable, one found while preparing
+ * the turn (no tool call needed it; it would announce itself every turn) and
+ * Opengeni's own permissions, which are settings rather than a connection.
  */
 export function connectionCardNotice(
   card: NoticeCard & { reason: string | null },
 ): SessionNotificationPostedPayload | null {
-  if (!card.capability && !card.setupRequest && !ACTIONABLE_REASONS.has(card.reason ?? "")) {
-    return null;
+  if (!card.capability && !card.setupRequest) {
+    if (!ACTIONABLE_REASONS.has(card.reason ?? "")) return null;
+    if (!card.toolName?.trim()) return null;
+    if (card.providerDomain.trim().toLowerCase() === "opengeni") return null;
   }
   const name = serviceName(card);
   const title =

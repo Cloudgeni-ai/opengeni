@@ -8,6 +8,7 @@ import {
 
 const stepUp = {
   providerDomain: "gmailmcp.googleapis.com",
+  toolName: "batch_modify_messages",
   reason: "insufficient_scope",
   connectionId: "11111111-1111-4111-8111-111111111111",
 };
@@ -41,5 +42,23 @@ describe("connection card notices", () => {
 
   test("a card that only explains something unavailable asks nothing of the person", () => {
     expect(connectionCardNotice({ ...stepUp, reason: "unsupported_auth" })).toBeNull();
+  });
+
+  test("only a card the agent waits on is announced, never one from preparing the turn", () => {
+    // Found while preparing the turn: no call needed it, so it would announce
+    // itself again every turn.
+    expect(connectionCardNotice({ ...stepUp, toolName: undefined })).toBeNull();
+    // Opengeni's own permissions are settings, not a connection to make.
+    expect(
+      connectionCardNotice({ ...stepUp, providerDomain: "opengeni", reason: "insufficient_scope" }),
+    ).toBeNull();
+    // An agent's request is announced whatever tool posted it.
+    expect(
+      connectionCardNotice({
+        providerDomain: "linear.app",
+        reason: "missing_connection",
+        capability: { id: "mcp:linear", name: "Linear" },
+      }),
+    ).not.toBeNull();
   });
 });

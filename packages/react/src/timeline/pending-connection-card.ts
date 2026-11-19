@@ -16,7 +16,18 @@ export function pendingConnectionCard(
     if (item.kind === "user-message") return null;
     if (item.kind !== "auth-needed") continue;
     if (item.setupFinished || item.askedAgainLater || !actionable(item)) return null;
-    return item;
+    return waitedOn(item) ? item : null;
   }
   return null;
+}
+
+/**
+ * A card the agent waits on, as its inbox notice is (`connectionCardNotice`
+ * in @opengeni/contracts): an agent's request, or one a tool call needed. A
+ * card found while preparing the turn, or about Opengeni's own permissions,
+ * stays in the timeline only.
+ */
+function waitedOn(item: AuthNeededItem): boolean {
+  if (item.capability || item.setupRequest) return true;
+  return Boolean(item.toolName?.trim()) && item.providerDomain.trim().toLowerCase() !== "opengeni";
 }
