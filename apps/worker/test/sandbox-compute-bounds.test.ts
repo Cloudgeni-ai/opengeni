@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ToolCallError } from "@openai/agents";
 import { DEFAULT_SANDBOX_PLAN_LIMITS } from "@opengeni/config";
 import type { Database, NoTurnWarmLease } from "@opengeni/db";
 import {
@@ -237,6 +238,21 @@ describe("free compute bounds: turns refused by the plan", () => {
       expect(payload.error).toBe(refusal.message);
       expect(isLazySandboxProvisionRetryable(wrapped)).toBe(false);
     }
+  });
+
+  test("a box refused inside a tool call keeps its code (card gate, daily budget)", () => {
+    for (const reason of ["card_required", "daily_budget"] as const) {
+      const refusal = new SandboxOrganizationBoxLimitError("ws", "group", 0, reason);
+      // The agents SDK keeps the tool's failure on `.error`, not `.cause`.
+      const wrapped = new ToolCallError(`Failed to run function tools: ${refusal}`, refusal);
+      const payload = agentRunFailurePayload(wrapped);
+      expect(payload.code).toBe(refusal.code);
+      expect(payload.retryable).toBe(false);
+      expect(payload.error).toBe(refusal.message);
+    }
+    expect(new SandboxOrganizationBoxLimitError("ws", "group", 0, "card_required").code).toBe(
+      "sandbox_card_required",
+    );
   });
 
   test("a closed tier and a spent day explain themselves", () => {

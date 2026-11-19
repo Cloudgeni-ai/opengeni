@@ -2332,18 +2332,22 @@ export function findSandboxBackendNotServedError(
   return null;
 }
 
-/** A plan compute-bound refusal anywhere in an error's cause chain. */
+/**
+ * A plan compute-bound refusal anywhere in an error's cause graph: `cause`
+ * chains, AggregateError members, and the agents SDK's ToolCallError
+ * (`.error`), since a lazily started box is refused inside a tool call.
+ */
 export function findSandboxOrganizationBoxLimitError(
   error: unknown,
 ): SandboxOrganizationBoxLimitError | null {
-  const seen = new Set<unknown>();
-  for (let current = error; current && typeof current === "object";) {
-    if (current instanceof SandboxOrganizationBoxLimitError) return current;
-    if (seen.has(current) || seen.size >= 16) return null;
-    seen.add(current);
-    current = (current as { cause?: unknown }).cause;
-  }
-  return null;
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  return (
+    nodes.find(
+      (node): node is SandboxOrganizationBoxLimitError =>
+        node instanceof SandboxOrganizationBoxLimitError,
+    ) ?? null
+  );
 }
 
 /**
