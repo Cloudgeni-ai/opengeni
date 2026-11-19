@@ -2704,6 +2704,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/events",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/events",
+    "request": [
+      "OrgAgentTestChatEventsQuery"
+    ],
+    "query": [
+      "after",
+      "limit"
+    ],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:organizationId/agents/:agentId/usage",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/agents/:agentId/usage",
@@ -7484,6 +7504,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "secretFields": [
       "request.toolLogins"
     ]
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/messages",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/messages",
+    "request": [
+      "SendOrgAgentTestChatMessageRequest"
+    ],
+    "response": []
   },
   {
     "id": "POST /v1/organizations/:organizationId/agents/test-workspace",
