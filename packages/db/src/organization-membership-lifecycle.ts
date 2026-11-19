@@ -42,6 +42,7 @@ import {
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
+import { applyInvitationConsoleRole, clearConsoleMemberRole } from "./console-roles";
 import type { Database } from "./database";
 import { eraseEndUserToolData } from "./end-user-tool-data";
 import { revokePersonalApiKeysForOwner } from "./personal-api-keys";
@@ -1191,6 +1192,17 @@ export async function acceptOrganizationInvitation(
           ) as result`,
       );
       if (!row) throw new Error("Organization invitation acceptance returned no result");
+      // Their Console role becomes the invitation's (none when it carried
+      // none), in this transaction, once per invitation.
+      const subjectId = (row.result as { membership?: { subjectId?: unknown } } | null)?.membership
+        ?.subjectId;
+      if (typeof subjectId === "string" && subjectId.startsWith("user:")) {
+        await applyInvitationConsoleRole(scopedDb, {
+          accountId: input.organizationId,
+          invitationId: input.invitationId,
+          subjectId,
+        });
+      }
       return row.result;
     }),
   );
@@ -1242,6 +1254,22 @@ export async function updateOrganizationMember(
           accountId: member.organizationId,
           ownerSubjectId: member.subjectId,
         });
+      // A Console role belongs to a member with their current organization
+      // role: a new role or leaving resets it, in this transaction, so it
+      // can't outlive the change (docs/opengeni-console.md, "Roles").
+      if (
+        (transition.kind === "change_role" || transition.kind === "offboard") &&
+        member.subjectId.startsWith("user:")
+      ) {
+        await clearConsoleMemberRole(tx as unknown as Database, {
+          accountId: member.organizationId,
+          subjectId: member.subjectId,
+          actorSubjectId: input.actorSubjectId,
+          actorLabel: null,
+          reason:
+            transition.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
+        });
+      }
       // An offboarded end user's stored tool logins (every workspace) and
       // display profile are erased with them (Console agents).
       if (transition.kind === "offboard" && member.status === "revoked")

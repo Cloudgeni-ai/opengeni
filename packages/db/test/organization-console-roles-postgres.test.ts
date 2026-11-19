@@ -300,4 +300,90 @@ describe("organization_console_roles", () => {
       ["viewer", "none"],
     ]);
   });
+
+  test("accepting an invitation without a Console role resets a leftover one, once", async () => {
+    const a = await organization();
+    const returning = `user:${crypto.randomUUID()}`;
+    // A role left from an earlier membership.
+    await setConsoleMemberRole(app.db, {
+      accountId: a.accountId,
+      target: { subjectId: returning },
+      role: "editor",
+      actorSubjectId: a.owner,
+      actorLabel: null,
+    });
+    expect(
+      await applyInvitationConsoleRole(app.db, {
+        accountId: a.accountId,
+        invitationId: a.invitationId,
+        subjectId: returning,
+      }),
+    ).toBe("none");
+    expect(await getConsoleMemberRole(app.db, a.accountId, returning)).toBe("none");
+    // A replayed acceptance leaves a role set afterwards alone.
+    await setConsoleMemberRole(app.db, {
+      accountId: a.accountId,
+      target: { subjectId: returning },
+      role: "viewer",
+      actorSubjectId: a.owner,
+      actorLabel: null,
+    });
+    expect(
+      await applyInvitationConsoleRole(app.db, {
+        accountId: a.accountId,
+        invitationId: a.invitationId,
+        subjectId: returning,
+      }),
+    ).toBeNull();
+    expect(await getConsoleMemberRole(app.db, a.accountId, returning)).toBe("viewer");
+    const reasons = await shared.admin<{ detail: Record<string, unknown> }[]>`
+      select detail from organization_console_audit_events
+      where account_id = ${a.accountId} and action = 'member.console_role_changed'
+      order by created_at, id`;
+    expect(reasons.map((row) => [row.detail.to, row.detail.reason ?? null])).toEqual([
+      ["editor", null],
+      ["none", "invitation_accepted"],
+      ["viewer", null],
+    ]);
+  });
+
+  test("a role write's check runs after its lock, so a concurrent clear isn't overtaken", async () => {
+    const a = await organization();
+    const member = `user:${crypto.randomUUID()}`;
+    let releaseCheck!: () => void;
+    const checkHeld = new Promise<void>((resolve) => (releaseCheck = resolve));
+    let checking!: () => void;
+    const checkStarted = new Promise<void>((resolve) => (checking = resolve));
+    // The write holds the person's lock while its check runs ...
+    const write = setConsoleMemberRole(app.db, {
+      accountId: a.accountId,
+      target: { subjectId: member },
+      role: "editor",
+      actorSubjectId: a.owner,
+      actorLabel: null,
+      verifyTarget: async () => {
+        checking();
+        await checkHeld;
+      },
+    });
+    await checkStarted;
+    // ... so a clear (an offboarding) waits for it and runs after.
+    let cleared = false;
+    const clear = clearConsoleMemberRole(app.db, {
+      accountId: a.accountId,
+      subjectId: member,
+      actorSubjectId: a.owner,
+      actorLabel: null,
+      reason: "member_offboarded",
+    }).then((from) => {
+      cleared = true;
+      return from;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(cleared).toBe(false);
+    releaseCheck();
+    await write;
+    expect(await clear).toBe("editor");
+    expect(await getConsoleMemberRole(app.db, a.accountId, member)).toBe("none");
+  });
 });

@@ -92,7 +92,6 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  allWorkspacePermissions,
   applyOrgAgent,
   archiveOrgAgent,
   computeReachIncludesManagedWorkspaces,
@@ -112,8 +111,7 @@ import {
   getOrgAgent,
   getOrgAgentVersion,
   getOrgToolServer,
-  grantWorkspaceAccess,
-  insertWorkspaceMembershipIfAbsent,
+  grantConsoleTestWorkspaceAccess,
   listOrgAgentChatWorkspaces,
   listOrgAgentCompute,
   listOrgAgentPublishOperations,
@@ -151,6 +149,7 @@ import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 import {
   CONSOLE_ROLE_REQUIRED,
+  CONSOLE_TEST_WORKSPACE_PERMISSIONS,
   consoleAccessCovers,
   consoleRoleRefusal,
   resolveConsoleAccess,
@@ -413,24 +412,19 @@ async function ensureTestWorkspace(deps: ApiRouteDeps, caller: Caller) {
           maxWorkspacesPerAccount: workspaceLimit(deps),
         }),
     });
-    // People who test agents work in it as its owners; keys reach it through
-    // their organization authority.
+    // People who test agents start and read chats in it, nothing more
+    // (CONSOLE_TEST_WORKSPACE_PERMISSIONS: no workspace:admin, members, keys,
+    // secrets or connections, so never agents:manage); a broader membership
+    // is narrowed, and a new or changed one is audit-logged. Keys reach it
+    // through their organization authority.
     if (!caller.apiKey) {
-      const membership = {
+      await grantConsoleTestWorkspaceAccess(deps.db, {
         accountId: caller.organizationId,
         workspaceId: result.workspaceId,
         subjectId: caller.context.subjectId,
-        role: "owner",
-        permissions: allWorkspacePermissions,
-      };
-      if (result.created) {
-        await grantWorkspaceAccess(deps.db, {
-          ...membership,
-          ...(caller.context.subjectLabel ? { subjectLabel: caller.context.subjectLabel } : {}),
-        });
-      } else {
-        await insertWorkspaceMembershipIfAbsent(deps.db, membership);
-      }
+        subjectLabel: caller.context.subjectLabel ?? null,
+        permissions: CONSOLE_TEST_WORKSPACE_PERMISSIONS,
+      });
     }
     return result;
   } catch (error) {

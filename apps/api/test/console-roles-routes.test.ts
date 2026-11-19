@@ -1,15 +1,20 @@
 // Console roles (docs/opengeni-console.md, "Roles") against a real database:
 // the authorization matrix of EVERY Console route and every organization
 // agent route for people (owner, admin, member without a Console role,
-// Viewer, Editor) and an organization API key. The routes are enumerated from
-// the router, so a new Console or organization agent route without a row in
-// the matrix (and so without a decided role check) fails this test. Also: the
-// invitation that carries a Console role, setting roles, the audit rows a
-// Viewer's session reads leave, Editors and code-managed agents, and the
-// reset when a member's organization role changes.
+// Viewer, Editor), a full organization API key and narrow keys each missing
+// agents:read, agents:manage or tool_credentials:write. The routes are
+// enumerated from the router, so a new Console or organization agent route
+// without a row in the matrix (and so without a decided role check) fails
+// this test, and every refused call is checked to have changed nothing. Also:
+// the invitation that carries a Console role, setting roles, the audit rows a
+// Viewer's session reads leave, Editors and code-managed agents, the reset
+// when a member's organization role changes, and the Console test workspace:
+// its membership only starts and reads chats, is gone (with audit rows) the
+// moment Console access drops, and can't mint keys or add members.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import type { AccessContext } from "@opengeni/contracts";
+import type { AccessContext, Permission } from "@opengeni/contracts";
+import { hasPermission } from "@opengeni/core";
 import type {
   ApiRouteDeps,
   ManagedEmailDeliveryResult,
@@ -19,6 +24,7 @@ import type {
 import {
   createApiKey,
   createDb,
+  createOrganizationApiKey,
   createSession,
   createWorkspace,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -36,8 +42,9 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { ApiHttpError } from "../src/http/api-error";
-import { organizationApiKeyPermissions } from "../src/routes/api-keys";
+import { organizationApiKeyPermissions, registerApiKeyRoutes } from "../src/routes/api-keys";
 import { registerConsoleRoutes } from "../src/routes/console";
+import { CONSOLE_TEST_WORKSPACE_PERMISSIONS } from "../src/routes/console-roles";
 import { registerOrganizationAgentRoutes } from "../src/routes/organization-agents";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 import { registerSessionRoutes } from "../src/routes/sessions";
@@ -57,6 +64,19 @@ type Person = {
   headers: Record<string, string>;
 };
 type CallerName = "owner" | "admin" | "none" | "viewer" | "editor" | "key";
+/** Organization keys in explicit permission mode, each missing something. */
+const NARROW_KEYS = {
+  "key without agents:manage": ["agents:read", "sessions:read", "workspace:read"],
+  "key without agents:read": ["agents:manage", "tool_credentials:write", "workspace:read"],
+  "key without tool_credentials:write": [
+    "agents:read",
+    "agents:manage",
+    "sessions:read",
+    "sessions:create",
+    "workspace:read",
+  ],
+} as const satisfies Record<string, readonly Permission[]>;
+type NarrowKeyName = keyof typeof NARROW_KEYS;
 type Fixture = {
   accountId: string;
   managedWorkspaceId: string;
@@ -64,6 +84,7 @@ type Fixture = {
   agentId: string;
   people: Record<Exclude<CallerName, "key">, Person>;
   key: Record<string, string>;
+  narrowKeys: Record<NarrowKeyName, Record<string, string>>;
 };
 let fixture: Fixture | null = null;
 const users = new Map<string, { authSessionId: string; userId: string; email: string }>();
@@ -179,6 +200,7 @@ function buildApp(): Hono {
     } as never,
   } as unknown as ApiRouteDeps;
   registerWorkspaceRoutes(hono, deps);
+  registerApiKeyRoutes(hono, deps);
   registerSessionRoutes(hono, deps);
   registerOrganizationAgentRoutes(hono, deps);
   registerConsoleRoutes(hono, deps);
@@ -315,6 +337,22 @@ async function provisionFixture(): Promise<Fixture> {
     permissions: organizationApiKeyPermissions,
     credentialKind: "organization",
   });
+  const narrowKeys = {} as Record<NarrowKeyName, Record<string, string>>;
+  for (const [name, permissions] of Object.entries(NARROW_KEYS) as [
+    NarrowKeyName,
+    readonly Permission[],
+  ][]) {
+    const narrow = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createOrganizationApiKey(client.db, {
+      accountId,
+      name,
+      prefix: narrow.slice(0, 14),
+      keyHash: await sha256Hex(narrow),
+      permissions: [...permissions],
+      policy: { preset: "custom", permissions: [...permissions], workspaceScope: { kind: "all" } },
+    });
+    narrowKeys[name] = { authorization: `Bearer ${narrow}` };
+  }
   const agent = await call("POST", `/v1/organizations/${accountId}/agents`, owner.headers, {
     key: "matrix",
     name: "Matrix",
@@ -327,9 +365,10 @@ async function provisionFixture(): Promise<Fixture> {
     accountId,
     managedWorkspaceId: managed.id,
     teamWorkspaceId: team.id,
-    agentId: agent.body.id,
+    agentId: agent.body.agent.id,
     people: { owner, admin, none, viewer, editor },
     key: { authorization: `Bearer ${token}` },
+    narrowKeys,
   };
 }
 
@@ -356,7 +395,8 @@ async function auditRows(action: string, actorSubjectId?: string) {
  * permission gets: `allowed`, or refused because the route is for people
  * (`people_only`) or for the owner (`owner_only`).
  */
-type Need = "any" | "viewer" | "editor" | "full" | "owner";
+/** `workspace`: an app workspace route for its members, never reached through Console access. */
+type Need = "any" | "viewer" | "editor" | "full" | "owner" | "workspace";
 type KeyOutcome = "allowed" | "people_only" | "owner_only";
 type RouteCase = {
   need: Need;
@@ -370,6 +410,7 @@ const C = "/v1/organizations/:organizationId/console";
 const A = "/v1/organizations/:organizationId/agents";
 const CREDENTIALS =
   "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey";
+const WORKSPACE_AGENTS = "/v1/workspaces/:workspaceId/organization-agents";
 const missingId = "99999999-9999-4999-8999-999999999999";
 const console_ = (f: Fixture) => `/v1/organizations/${f.accountId}/console`;
 const agents = (f: Fixture) => `/v1/organizations/${f.accountId}/agents`;
@@ -570,7 +611,32 @@ const MATRIX: Record<string, RouteCase> = {
   [`PUT ${CREDENTIALS}`]: { need: "full", key: "allowed", path: credentials, body: {} },
   [`GET ${CREDENTIALS}`]: { need: "full", key: "allowed", path: credentials },
   [`DELETE ${CREDENTIALS}`]: { need: "full", key: "allowed", path: credentials },
+  // The agents a workspace can use: workspace access, never a Console role.
+  [`GET ${WORKSPACE_AGENTS}`]: {
+    need: "workspace",
+    key: "allowed",
+    path: (f) => `/v1/workspaces/${f.managedWorkspaceId}/organization-agents`,
+  },
 };
+
+/**
+ * What an organization key needs for a route: reads `agents:read` (and
+ * `sessions:read` for an agent's chats), writes `agents:manage`, stored
+ * end-user logins `tool_credentials:write` to change, and the workspace list
+ * `workspace:read`.
+ */
+function keyNeeds(route: string): Permission[] {
+  const [method, path] = route.split(" ") as [string, string];
+  if (path === WORKSPACE_AGENTS) return ["workspace:read"];
+  if (path === CREDENTIALS) {
+    return method === "GET" ? ["agents:read"] : ["tool_credentials:write"];
+  }
+  if (method !== "GET") return ["agents:manage"];
+  if (path.endsWith("/sessions") || path.endsWith("/usage")) {
+    return ["agents:read", "sessions:read"];
+  }
+  return ["agents:read"];
+}
 
 /** Routes under Console's prefixes that are deliberately not Console routes. */
 const NOT_CONSOLE = new Set<string>([]);
@@ -582,7 +648,13 @@ const RANK: Record<Exclude<CallerName, "key">, number> = {
   admin: 3,
   owner: 4,
 };
-const NEED_RANK: Record<Need, number> = { any: 0, viewer: 1, editor: 2, full: 3, owner: 4 };
+const NEED_RANK: Record<Exclude<Need, "workspace">, number> = {
+  any: 0,
+  viewer: 1,
+  editor: 2,
+  full: 3,
+  owner: 4,
+};
 
 function consoleRouteKeys(): string[] {
   return [
@@ -594,12 +666,53 @@ function consoleRouteKeys(): string[] {
             route.path.startsWith(C) ||
             route.path === A ||
             route.path.startsWith(`${A}/`) ||
-            route.path.includes("/tool-credentials/"),
+            route.path.includes("/tool-credentials/") ||
+            route.path === WORKSPACE_AGENTS,
         )
         .map((route) => `${route.method} ${route.path}`)
         .filter((key) => !NOT_CONSOLE.has(key)),
     ),
   ].sort();
+}
+
+/** Everything a Console or organization agent route could change in the organization. */
+const FINGERPRINT_TABLES = [
+  "agents",
+  "agent_revisions",
+  "agent_publish_operations",
+  "agent_workspace_access",
+  "organization_tool_servers",
+  "end_user_tool_credentials",
+  "organization_console_roles",
+  "organization_console_audit_events",
+  "organization_managed_workspaces",
+  "workspace_memberships",
+  "api_keys",
+  "sessions",
+] as const;
+
+async function stateFingerprint(accountId: string): Promise<string> {
+  const parts: string[] = [];
+  for (const table of FINGERPRINT_TABLES) {
+    // A key's last use is bookkeeping of the call itself, not a change.
+    const [row] = await shared!.admin.unsafe<{ hash: string }[]>(
+      `select md5(coalesce(string_agg(r, ',' order by r), '')) as hash
+        from (select (to_jsonb(t) - 'last_used_at')::text as r from ${table} t
+          where account_id = $1) rows`,
+      [accountId],
+    );
+    parts.push(`${table}=${row!.hash}`);
+  }
+  return parts.join(" ");
+}
+
+function changedTables(before: string, after: string): string {
+  const was = new Set(before.split(" "));
+  return after
+    .split(" ")
+    .filter((part) => !was.has(part))
+    .map((part) => part.split("=")[0])
+    .join(", ");
 }
 
 describe("Console roles: authorization matrix", () => {
@@ -611,30 +724,57 @@ describe("Console roles: authorization matrix", () => {
   test("people get exactly their Console role's routes; keys keep their permissions", async () => {
     if (!fixture) return;
     const failures: string[] = [];
+    const callers = [
+      "owner",
+      "admin",
+      "none",
+      "viewer",
+      "editor",
+      "key",
+      ...(Object.keys(NARROW_KEYS) as NarrowKeyName[]),
+    ] as const;
     for (const [route, spec] of Object.entries(MATRIX)) {
       const method = route.split(" ")[0]!;
-      for (const caller of ["owner", "admin", "none", "viewer", "editor", "key"] as const) {
-        const reply = await call(method, spec.path(fixture), headersOf(caller), spec.body);
+      for (const caller of callers) {
+        const narrow = caller in NARROW_KEYS ? (caller as NarrowKeyName) : null;
+        const headers = narrow ? fixture.narrowKeys[narrow] : headersOf(caller as CallerName);
+        const before = await stateFingerprint(fixture.accountId);
+        const reply = await call(method, spec.path(fixture), headers, spec.body);
         const code = reply.body.details?.code;
+        const allowed = () => reply.status !== 401 && reply.status !== 403 && reply.status < 500;
         let ok: boolean;
         let expected: string;
-        if (caller === "key") {
-          if (spec.key === "allowed") {
-            expected = "allowed";
-            ok = reply.status !== 401 && reply.status !== 403 && reply.status < 500;
+        if (narrow || caller === "key") {
+          const held: readonly Permission[] = narrow ? NARROW_KEYS[narrow] : ["agents:manage"];
+          const missing = narrow
+            ? keyNeeds(route).filter((permission) => !held.includes(permission))
+            : [];
+          if (spec.key === "people_only") {
+            expected = "403 console_role_required";
+            ok = reply.status === 403 && code === "console_role_required";
+          } else if (missing.length > 0) {
+            expected = `403 (missing ${missing.join(", ")})`;
+            ok = reply.status === 403;
           } else if (spec.key === "owner_only") {
             expected = "403 agent_management_requires_owner";
             ok = reply.status === 403 && code === "agent_management_requires_owner";
           } else {
-            expected = "403 console_role_required";
-            ok = reply.status === 403 && code === "console_role_required";
+            expected = "allowed";
+            ok = allowed();
           }
+        } else if (spec.need === "workspace") {
+          // Workspace members only: nobody here is one of the managed
+          // workspace, and no Console level (Full included) stands in for it.
+          expected = "403/404 (no workspace access)";
+          ok = reply.status === 403 || reply.status === 404;
         } else if (
           spec.need === "any" ||
-          (spec.need === "owner" ? caller === "owner" : RANK[caller] >= NEED_RANK[spec.need])
+          (spec.need === "owner"
+            ? caller === "owner"
+            : RANK[caller as Exclude<CallerName, "key">] >= NEED_RANK[spec.need])
         ) {
           expected = "allowed";
-          ok = reply.status !== 401 && reply.status !== 403 && reply.status < 500;
+          ok = allowed();
         } else if (spec.need === "owner" && caller === "admin") {
           expected = "403 agent_management_requires_owner";
           ok = reply.status === 403 && code === "agent_management_requires_owner";
@@ -647,10 +787,19 @@ describe("Console roles: authorization matrix", () => {
             `${route} as ${caller}: expected ${expected}, got ${reply.status} ${JSON.stringify(reply.body).slice(0, 200)}`,
           );
         }
+        // A refused call changes nothing.
+        if (reply.status === 401 || reply.status === 403 || reply.status === 404) {
+          const after = await stateFingerprint(fixture.accountId);
+          if (after !== before) {
+            failures.push(
+              `${route} as ${caller}: refused, but changed ${changedTables(before, after)}`,
+            );
+          }
+        }
       }
     }
     expect(failures).toEqual([]);
-  }, 300_000);
+  }, 600_000);
 
   test("Console access says what each person has", async () => {
     if (!fixture) return;
@@ -787,6 +936,39 @@ describe("Console roles: reads, writes and lifecycle", () => {
       )?.role,
     ).toBe("viewer");
   }, 60_000);
+
+  test("a Console role goes only on a pending invitation to join as a member", async () => {
+    if (!fixture) return;
+    const { accountId, people } = fixture;
+    const invite = async (role: "member" | "admin") => {
+      const invited = await call(
+        "POST",
+        `/v1/organizations/${accountId}/invitations`,
+        people.owner.headers,
+        {
+          email: `console-roles-${crypto.randomUUID()}@example.test`,
+          role,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          operationId: crypto.randomUUID(),
+        },
+      );
+      expect(invited.status).toBe(201);
+      return invited.body.id as string;
+    };
+    const put = (invitationId: string) =>
+      call("PUT", `${console_(fixture!)}/member-roles`, people.owner.headers, {
+        invitationId,
+        role: "viewer",
+      });
+    const asAdmin = await put(await invite("admin"));
+    expect([asAdmin.status, asAdmin.body.details?.code]).toEqual([
+      422,
+      "console_role_not_applicable",
+    ]);
+    const missing = await put(missingId);
+    expect([missing.status, missing.body.details?.code]).toEqual([404, "invitation_not_found"]);
+    expect((await put(await invite("member"))).status).toBe(200);
+  }, 120_000);
 
   test("owners and admins set members' Console roles, never owners' or admins'", async () => {
     if (!fixture) return;
@@ -932,5 +1114,288 @@ describe("Console roles: reads, writes and lifecycle", () => {
       (row) => row.detail.subjectId === temp.subjectId && row.detail.to === "none",
     );
     expect(reset.map((row) => row.detail.reason)).toEqual(["organization_role_changed"]);
+  }, 120_000);
+});
+
+describe("Console roles: the Console test workspace", () => {
+  /** The person's membership of the organization's Console test workspace, if any. */
+  async function testMembership(subjectId: string) {
+    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
+    if (!workspaceId) return null;
+    const [row] = await shared!.admin<{ role: string; permissions: string[] }[]>`
+      select role, permissions from workspace_memberships
+      where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
+    return row ?? null;
+  }
+
+  /** A membership left behind, as if an earlier removal had failed. */
+  async function leaveMembershipBehind(subjectId: string) {
+    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${fixture!.accountId}, ${workspaceId}, ${subjectId}, 'member',
+        ${CONSOLE_TEST_WORKSPACE_PERMISSIONS as string[]})
+      on conflict do nothing`;
+    expect(await testMembership(subjectId)).not.toBeNull();
+  }
+
+  const testChat = (who: Person) =>
+    call("POST", `${agents(fixture!)}/${fixture!.agentId}/test-chats`, who.headers, {
+      version: 1,
+      message: "hi",
+    });
+
+  /** Starting a draft chat in the test workspace directly, as the person. */
+  async function directDraftChat(who: Person) {
+    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
+    return await call("POST", `/v1/workspaces/${workspaceId}/sessions`, who.headers, {
+      initialMessage: "hi",
+      agent: { ref: fixture!.agentId, version: 1 },
+    });
+  }
+
+  const refusedForRole = (reply: Reply) =>
+    reply.status === 403 && reply.body.details?.code === "console_role_required";
+
+  test("membership there only starts and reads chats: never workspace:admin or agents:manage", async () => {
+    if (!fixture || !client || !shared) return;
+    const temp = await person("narrow");
+    await inviteAndAccept(fixture.accountId, fixture.people.owner, temp, "member", "editor");
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status,
+    ).toBeLessThan(300);
+    const row = await testMembership(temp.subjectId);
+    expect(row?.role).toBe("member");
+    expect([...row!.permissions].sort()).toEqual([...CONSOLE_TEST_WORKSPACE_PERMISSIONS].sort());
+    const permissions = row!.permissions as Permission[];
+    for (const mode of ["legacy", "explicit", undefined] as const) {
+      expect(hasPermission(permissions, "agents:manage", mode)).toBe(false);
+      expect(hasPermission(permissions, "workspace:admin", mode)).toBe(false);
+      expect(hasPermission(permissions, "tool_credentials:write", mode)).toBe(false);
+      expect(hasPermission(permissions, "mcp_servers:attach", mode)).toBe(false);
+      expect(hasPermission(permissions, "secrets:read", mode)).toBe(false);
+    }
+    // An older, broader membership is narrowed the next time they test.
+    const workspaceId = await findOrgAgentTestWorkspace(client.db, fixture.accountId);
+    await shared.admin`update workspace_memberships set role = 'owner',
+        permissions = ${["workspace:read", "workspace:admin", "sessions:create"]}
+      where workspace_id = ${workspaceId} and subject_id = ${temp.subjectId}`;
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status,
+    ).toBeLessThan(300);
+    expect((await testMembership(temp.subjectId))?.role).toBe("member");
+  }, 120_000);
+
+  test("an Editor there can't mint keys or add members, and nothing outlives the demotion", async () => {
+    if (!fixture || !client || !shared) return;
+    const { accountId, people } = fixture;
+    const probe = await person("probe");
+    await inviteAndAccept(accountId, people.owner, probe, "member", "editor");
+    const bystander = await person("bystander");
+    const bystanderMembership = await inviteAndAccept(accountId, people.owner, bystander, "member");
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, probe.headers)).status,
+    ).toBeLessThan(300);
+    const workspaceId = (await findOrgAgentTestWorkspace(client.db, accountId))!;
+    const keys = `/v1/workspaces/${workspaceId}/api-keys`;
+    const minted = await call("POST", keys, probe.headers, {
+      name: "probe",
+      permissions: ["workspace:read"],
+    });
+    expect(minted.status).toBe(403);
+    expect((await call("GET", keys, probe.headers)).status).toBe(403);
+    const added = await call("POST", `/v1/workspaces/${workspaceId}/members`, probe.headers, {
+      organizationMembershipId: bystanderMembership.membershipId,
+      role: "owner",
+      permissions: ["workspace:admin"],
+    });
+    expect(added.status).toBe(403);
+    // An Editor's own chats there are fine, with or without an agent.
+    const plain = await call("POST", `/v1/workspaces/${workspaceId}/sessions`, probe.headers, {
+      initialMessage: "hi",
+    });
+    expect(plain.status).toBe(202);
+    const granted = (await auditRows("member.console_test_access_granted", probe.subjectId)).map(
+      (row) => row.detail.subjectId,
+    );
+    expect(granted).toEqual([probe.subjectId]);
+
+    const lowered = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+      subjectId: probe.subjectId,
+      role: "viewer",
+    });
+    expect(lowered.status).toBe(200);
+    expect(await testMembership(probe.subjectId)).toBeNull();
+    expect(await testMembership(bystander.subjectId)).toBeNull();
+    const [{ count }] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from api_keys where workspace_id = ${workspaceId}`;
+    expect(count).toBe(0);
+    const removed = (await auditRows("member.console_test_access_removed", people.owner.subjectId))
+      .filter((row) => row.detail.subjectId === probe.subjectId)
+      .map((row) => row.detail.reason);
+    expect(removed).toEqual(["console_role_changed"]);
+    // Setting the same role again finds nothing to remove and logs nothing.
+    await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+      subjectId: probe.subjectId,
+      role: "viewer",
+    });
+    expect(
+      (await auditRows("member.console_test_access_removed", people.owner.subjectId)).filter(
+        (row) => row.detail.subjectId === probe.subjectId,
+      ),
+    ).toHaveLength(1);
+    // A membership left behind starts no chat there, with or without an agent.
+    await leaveMembershipBehind(probe.subjectId);
+    const leftover = await call("POST", `/v1/workspaces/${workspaceId}/sessions`, probe.headers, {
+      initialMessage: "hi",
+    });
+    expect({ status: leftover.status, refused: refusedForRole(leftover) }).toEqual({
+      status: 403,
+      refused: true,
+    });
+  }, 300_000);
+
+  test("a demoted admin and a demoted Editor lose test chats at once", async () => {
+    if (!fixture || !client || !shared) return;
+    const { accountId, people } = fixture;
+    const exAdmin = await person("ex-admin");
+    const adminMembership = await inviteAndAccept(accountId, people.owner, exAdmin, "admin");
+    const exEditor = await person("ex-editor");
+    await inviteAndAccept(accountId, people.owner, exEditor, "member", "editor");
+
+    for (const who of [exAdmin, exEditor]) {
+      const before = await testChat(who);
+      expect([before.status, JSON.stringify(before.body).slice(0, 200)]).toEqual([
+        201,
+        expect.any(String),
+      ]);
+      expect(await testMembership(who.subjectId)).not.toBeNull();
+      const direct = await directDraftChat(who);
+      expect([direct.status, JSON.stringify(direct.body).slice(0, 200)]).toEqual([
+        202,
+        expect.any(String),
+      ]);
+    }
+
+    const demoted = await call(
+      "PATCH",
+      `/v1/organizations/${accountId}/members/${adminMembership.membershipId}`,
+      people.owner.headers,
+      {
+        kind: "change_role",
+        role: "member",
+        expectedAuthorizationRevision: adminMembership.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(demoted.status).toBe(200);
+    const lowered = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+      subjectId: exEditor.subjectId,
+      role: "viewer",
+    });
+    expect(lowered.status).toBe(200);
+
+    for (const who of [exAdmin, exEditor]) {
+      expect(await testMembership(who.subjectId)).toBeNull();
+      const viaConsole = await testChat(who);
+      expect([viaConsole.status, viaConsole.body.details?.code]).toEqual([
+        403,
+        "console_role_required",
+      ]);
+      // Without a membership the workspace itself refuses them.
+      const direct = await directDraftChat(who);
+      expect([403, 404]).toContain(direct.status);
+      // A membership left behind is not enough: the chat needs Editor now.
+      await leaveMembershipBehind(who.subjectId);
+      const leftover = await directDraftChat(who);
+      expect({ status: leftover.status, refused: refusedForRole(leftover) }).toEqual({
+        status: 403,
+        refused: true,
+      });
+    }
+  }, 300_000);
+
+  test("access drops remove the membership whatever was stored, and a repeat finishes the job", async () => {
+    if (!fixture || !client || !shared) return;
+    const { accountId, people } = fixture;
+    // A member with no stored role but a membership left behind: setting None removes it.
+    const leftover = await person("leftover");
+    await inviteAndAccept(accountId, people.owner, leftover, "member");
+    await leaveMembershipBehind(leftover.subjectId);
+    const none = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+      subjectId: leftover.subjectId,
+      role: "none",
+    });
+    expect(none.status).toBe(200);
+    expect(await testMembership(leftover.subjectId)).toBeNull();
+
+    // A demotion repeated with its operationId removes a membership left behind.
+    const admin = await person("repeat-admin");
+    const membership = await inviteAndAccept(accountId, people.owner, admin, "admin");
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, admin.headers)).status,
+    ).toBeLessThan(300);
+    const demotion = {
+      kind: "change_role",
+      role: "member",
+      expectedAuthorizationRevision: membership.authorizationRevision,
+      operationId: crypto.randomUUID(),
+    };
+    const path = `/v1/organizations/${accountId}/members/${membership.membershipId}`;
+    expect((await call("PATCH", path, people.owner.headers, demotion)).status).toBe(200);
+    expect(await testMembership(admin.subjectId)).toBeNull();
+    await leaveMembershipBehind(admin.subjectId);
+    const repeated = await call("PATCH", path, people.owner.headers, demotion);
+    expect(repeated.status).toBe(200);
+    expect(await testMembership(admin.subjectId)).toBeNull();
+
+    // Promotion keeps it: owners and admins stay full.
+    const editor = await person("promoted");
+    const editorMembership = await inviteAndAccept(
+      accountId,
+      people.owner,
+      editor,
+      "member",
+      "editor",
+    );
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, editor.headers)).status,
+    ).toBeLessThan(300);
+    const promoted = await call(
+      "PATCH",
+      `/v1/organizations/${accountId}/members/${editorMembership.membershipId}`,
+      people.owner.headers,
+      {
+        kind: "change_role",
+        role: "admin",
+        expectedAuthorizationRevision: editorMembership.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(promoted.status).toBe(200);
+    expect(await testMembership(editor.subjectId)).not.toBeNull();
+  }, 300_000);
+
+  test("offboarding removes it", async () => {
+    if (!fixture || !client || !shared) return;
+    const { accountId, people } = fixture;
+    const leaving = await person("leaving");
+    const membership = await inviteAndAccept(accountId, people.owner, leaving, "member", "editor");
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, leaving.headers)).status,
+    ).toBeLessThan(300);
+    expect(await testMembership(leaving.subjectId)).not.toBeNull();
+    const offboarded = await call(
+      "PATCH",
+      `/v1/organizations/${accountId}/members/${membership.membershipId}`,
+      people.owner.headers,
+      {
+        kind: "offboard",
+        expectedAuthorizationRevision: membership.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(offboarded.status).toBe(200);
+    expect(await testMembership(leaving.subjectId)).toBeNull();
   }, 120_000);
 });
