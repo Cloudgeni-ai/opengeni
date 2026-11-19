@@ -31,6 +31,11 @@
  * - Changing who manages an agent (`POST .../management`) is for the
  *   organization's owner only; an API key is refused with
  *   `agent_management_requires_owner`.
+ * - Test chats run in the Console test workspace as the tester's own test
+ *   chat principal (`consoleTestChatGrant`); nobody becomes a member there.
+ *   `GET .../test-chats/:sessionId[/events]` and `POST .../messages` serve
+ *   only the caller's own test chats (Editor or more, or the key that
+ *   started them); everyone else gets 404 `test_chat_not_found`.
  *
  * When Console agents are off for the organization
  * (OPENGENI_ORG_AGENTS_ACCOUNT_IDS), every route answers 404.
@@ -57,6 +62,8 @@ import {
   OrgAgentKey,
   OrgAgentMovableChatsResponse,
   OrgAgentResponse,
+  OrgAgentTestChatEventsQuery,
+  OrgAgentTestChatResponse,
   OrgAgentTestWorkspaceResponse,
   OrgAgentUsageQuery,
   OrgAgentUsageResponse,
@@ -69,10 +76,13 @@ import {
   PutEndUserToolCredentialRequest,
   SaveOrgAgentDraftRequest,
   SaveOrgAgentDraftResponse,
+  SendOrgAgentTestChatMessageRequest,
+  SESSION_EVENT_RAW_DELTA_TYPES,
   SetOrgAgentManagementRequest,
   UpdateOrgAgentRequest,
   UpdateOrgToolServerRequest,
   type AccessContext,
+  type AccessGrant,
   type ConsoleAccessLevel,
   type ErrorCode,
   type OrgAgentDefinition as OrgAgentDefinitionValue,
@@ -80,14 +90,17 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import {
+  acceptSessionUserMessage,
   accountScopedApiKeyWorkspaceAuthority,
   captureOrgAgentToolCatalog,
+  createSessionForRequest,
   hasPermission,
   listOrgToolServerToolsByKey,
   MissingPermissionRefusal,
   organizationWorkspaceInScope,
   requireAccessContext,
   requireAccessGrant,
+  resolveWorkspaceCatalogSettings,
   type AccountScopedApiKeyWorkspaceAuthority,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -106,12 +119,14 @@ import {
   ensureOrgAgentTestWorkspace,
   externalIdentityReadGranted,
   failPendingOrgAgentPublishOperation,
+  findOrgAgentTestWorkspace,
   getConsoleReviewSettings,
   getEndUserToolCredential,
   getOrgAgent,
   getOrgAgentVersion,
   getOrgToolServer,
-  grantConsoleTestWorkspaceAccess,
+  getSession,
+  getSessionAuthorityProjection,
   listOrgAgentChatWorkspaces,
   listOrgAgentCompute,
   listOrgAgentPublishOperations,
@@ -120,6 +135,7 @@ import {
   listOrgAgentsForWorkspace,
   listOrgAgentVersions,
   listOrgToolServers,
+  listSessionEventPage,
   lockExternalWorkspaceMembershipLifecycle,
   lockExternalWorkspaceMembershipLifecycleShared,
   nestedPostgresSqlState,
@@ -136,6 +152,7 @@ import {
   updateOrgToolServer,
   withAccountRls,
   WorkspaceLimitExceededError,
+  withConsoleSessionRead,
   WorkspaceNotFoundError,
   type Database,
   type OrgAgentActor,
@@ -145,16 +162,17 @@ import { configuredStaticUsageLimits } from "@opengeni/config";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { recordAcceptedApiAdmission } from "../admission-trace";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 import {
   CONSOLE_ROLE_REQUIRED,
-  CONSOLE_TEST_WORKSPACE_PERMISSIONS,
   consoleAccessCovers,
   consoleRoleRefusal,
   resolveConsoleAccess,
   type ConsoleAccess,
 } from "./console-roles";
+import { commandConflictResponse, sessionCreateErrorResponse } from "./sessions";
 
 const Uuid = z.string().uuid();
 const PositiveInt = z.coerce.number().int().positive();
@@ -400,6 +418,67 @@ function workspaceLimit(deps: ApiRouteDeps): number | null {
   return configuredStaticUsageLimits(deps.settings).maxWorkspacesPerAccount ?? null;
 }
 
+const CONSOLE_TEST_CHAT_SUBJECT_PREFIX = "console-test:";
+
+/**
+ * The service principal one tester's Console test chats run as and are
+ * owned by: one per person (or organization key), never a person and never a
+ * member of any workspace. Its chats are read and continued only through the
+ * test-chats routes, by that tester while they may test agents.
+ */
+export function consoleTestChatSubjectId(testerSubjectId: string): string {
+  return `${CONSOLE_TEST_CHAT_SUBJECT_PREFIX}${testerSubjectId}`;
+}
+
+/** What a test chat principal holds in the Console test workspace: its own chats, nothing else. */
+export const CONSOLE_TEST_CHAT_PERMISSIONS: readonly Permission[] = Object.freeze([
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+]);
+
+/**
+ * The grant a tester's test chat runs with, built from the caller's Console
+ * authorization on every request and never stored: their test chat
+ * principal in the Console test workspace, explicit permissions (no
+ * `workspace:admin`, so never `agents:manage`), with the tester recorded as
+ * context only. No one gets a workspace membership.
+ */
+function consoleTestChatGrant(caller: Caller, workspaceId: string): AccessGrant {
+  const subjectId = consoleTestChatSubjectId(caller.context.subjectId);
+  const label = (caller.actor.label?.trim() || "Console test chat").slice(0, 250);
+  return {
+    accountId: caller.organizationId,
+    workspaceId,
+    subjectId,
+    subjectLabel: label,
+    permissions: [...CONSOLE_TEST_CHAT_PERMISSIONS],
+    permissionMode: "explicit",
+    principalKind: "service",
+    serviceInitiator: { kind: "service", subjectId, label },
+    serviceInitiatorContext: { consoleTesterSubjectId: caller.context.subjectId.slice(0, 1024) },
+  };
+}
+
+/** The test workspace's model catalog, as the workspace's own routes resolve it. */
+async function withWorkspaceCatalogSettings(
+  deps: ApiRouteDeps,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
+): Promise<ApiRouteDeps> {
+  const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+  return {
+    ...deps,
+    catalogSourceSettings,
+    settings: (
+      await resolveWorkspaceCatalogSettings(deps.db, catalogSourceSettings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+      })
+    ).settings,
+  };
+}
+
 async function ensureTestWorkspace(deps: ApiRouteDeps, caller: Caller) {
   try {
     const result = await ensureOrgAgentTestWorkspace(deps.db, {
@@ -412,20 +491,9 @@ async function ensureTestWorkspace(deps: ApiRouteDeps, caller: Caller) {
           maxWorkspacesPerAccount: workspaceLimit(deps),
         }),
     });
-    // People who test agents start and read chats in it, nothing more
-    // (CONSOLE_TEST_WORKSPACE_PERMISSIONS: no workspace:admin, members, keys,
-    // secrets or connections, so never agents:manage); a broader membership
-    // is narrowed, and a new or changed one is audit-logged. Keys reach it
-    // through their organization authority.
-    if (!caller.apiKey) {
-      await grantConsoleTestWorkspaceAccess(deps.db, {
-        accountId: caller.organizationId,
-        workspaceId: result.workspaceId,
-        subjectId: caller.context.subjectId,
-        subjectLabel: caller.context.subjectLabel ?? null,
-        permissions: CONSOLE_TEST_WORKSPACE_PERMISSIONS,
-      });
-    }
+    // Nobody becomes a member here, the caller included: test chats run as
+    // the tester's own service principal (consoleTestChatGrant) and are
+    // read and continued only through the test-chats routes.
     return result;
   } catch (error) {
     if (error instanceof WorkspaceLimitExceededError) {
@@ -921,44 +989,112 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     if (!inScope(caller, workspaceId)) {
       throw new HTTPException(403, { message: "workspace is outside organization key scope" });
     }
-    // Through the ordinary session create, as the caller, so every create
-    // rule (credits, models, limits, organization agent resolution) applies.
+    // The ordinary session create, as the tester's own test chat principal,
+    // so every create rule (credits, models, limits, organization agent
+    // resolution) applies. Logins pasted here are this chat's own.
     const logins = Object.entries(request.toolLogins ?? {});
-    const body = {
-      initialMessage: request.message,
-      agent: {
-        ref: agentId,
-        version: request.version,
-        ...(logins.length > 0
-          ? {
-              toolServers: logins.map(([server, token]) => ({
-                server,
-                headers: { Authorization: `Bearer ${token}` },
-              })),
-            }
-          : {}),
-      },
-    };
-    const headers = new Headers(c.req.raw.headers);
-    headers.delete("content-length");
-    // The inner response is read here; the outer response is compressed once.
-    headers.delete("accept-encoding");
-    headers.set("content-type", "application/json");
-    const url = new URL(`/v1/workspaces/${workspaceId}/sessions`, c.req.url);
-    const response = await app.request(url.toString(), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) return response;
-    const created = (await response.json()) as { id?: unknown };
-    if (typeof created.id !== "string") {
-      throw new HTTPException(502, { message: "session create returned no id" });
+    const grant = consoleTestChatGrant(caller, workspaceId);
+    let created: { id: string };
+    try {
+      created = await createSessionForRequest(
+        await withWorkspaceCatalogSettings(deps, grant),
+        grant,
+        workspaceId,
+        {
+          initialMessage: request.message,
+          agent: {
+            ref: agentId,
+            version: request.version,
+            ...(logins.length > 0
+              ? {
+                  toolServers: logins.map(([server, token]) => ({
+                    server,
+                    headers: { Authorization: `Bearer ${token}` },
+                  })),
+                }
+              : {}),
+          },
+        },
+      );
+    } catch (error) {
+      return sessionCreateErrorResponse(c, error);
     }
     return c.json(
       CreateOrgAgentTestChatResponse.parse({ workspaceId, sessionId: created.id }),
       201,
     );
+  });
+
+  /**
+   * One of the caller's own test chats of this agent, or 404: a test chat is
+   * its tester's alone (owned by their test chat principal), whatever the
+   * caller's Console access. Console review of the test workspace stays the
+   * audited Console session routes.
+   */
+  async function ownTestChat(c: Context) {
+    const caller = await orgCaller(c, deps, ["agents:manage"], "editor");
+    const agentId = uuidParam(c, "agentId");
+    const sessionId = uuidParam(c, "sessionId");
+    const notFound = () => httpError(404, "test_chat_not_found", "Test chat not found.");
+    const workspaceId = await findOrgAgentTestWorkspace(deps.db, caller.organizationId);
+    if (!workspaceId || !inScope(caller, workspaceId)) throw notFound();
+    const grant = consoleTestChatGrant(caller, workspaceId);
+    const authority = await getSessionAuthorityProjection(deps.db, workspaceId, sessionId);
+    if (authority?.ownerSubjectId !== grant.subjectId) throw notFound();
+    const session = await getSession(deps.db, workspaceId, sessionId);
+    if (!session || session.orgAgent?.id !== agentId) throw notFound();
+    return { caller, grant, workspaceId, session };
+  }
+
+  app.get(`${base}/:agentId/test-chats/:sessionId`, async (c) => {
+    const { workspaceId, session } = await ownTestChat(c);
+    return c.json(
+      OrgAgentTestChatResponse.parse({
+        workspaceId,
+        sessionId: session.id,
+        agentId: session.orgAgent!.id,
+        version: session.orgAgent?.version ?? null,
+        status: session.status,
+      }),
+    );
+  });
+
+  app.get(`${base}/:agentId/test-chats/:sessionId/events`, async (c) => {
+    const { workspaceId, session } = await ownTestChat(c);
+    const query = parseRequestQuery(OrgAgentTestChatEventsQuery, c.req.query(), {
+      status: 422,
+      message: "invalid test chat event query",
+    });
+    const page = await withConsoleSessionRead(() =>
+      listSessionEventPage(deps.db, workspaceId, session.id, {
+        after: query.after ?? 0,
+        limit: query.limit ?? 500,
+        direction: "after",
+        payloadMode: "full",
+        toolOutputPreview: true,
+        defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES,
+      }),
+    );
+    return c.json({ events: page.events, hasMore: page.hasMore, nextAfter: page.nextAfter });
+  });
+
+  app.post(`${base}/:agentId/test-chats/:sessionId/messages`, async (c) => {
+    const { grant, workspaceId, session } = await ownTestChat(c);
+    const request = await parseRequestJson(c, SendOrgAgentTestChatMessageRequest);
+    let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
+    try {
+      result = await acceptSessionUserMessage(
+        await withWorkspaceCatalogSettings(deps, grant),
+        grant,
+        workspaceId,
+        session.id,
+        { text: request.message },
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+    recordAcceptedApiAdmission(deps.observability, result);
+    return c.json(result.accepted, 202);
   });
 
   // ---------------------------------------------------------------- workspaces

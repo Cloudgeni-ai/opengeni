@@ -89,8 +89,7 @@ function productionRoute() {
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
       SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources,
       defaultAgentChatVisibility, prepareAgentChatCreate, compactSessionResponse,
-      withoutOrgAgentFieldsForPreflight, orgAgentsEnabledForAccount,
-      requireConsoleTestChatStanding } = ports;
+      withoutOrgAgentFieldsForPreflight } = ports;
     ${code}
     return handler;
   `,
@@ -164,11 +163,6 @@ function routeFixture() {
     prepareAgentChatCreate: async () => undefined,
     // No organization agent in this payload: the early check reads it unchanged.
     withoutOrgAgentFieldsForPreflight,
-    // Console agents are off for this organization: no Console test chat check.
-    orgAgentsEnabledForAccount: () => false,
-    requireConsoleTestChatStanding: async () => {
-      throw new Error("Unexpected Console test chat check");
-    },
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;

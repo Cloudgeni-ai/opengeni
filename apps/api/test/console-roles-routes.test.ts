@@ -8,9 +8,10 @@
 // this test, and every refused call is checked to have changed nothing. Also:
 // the invitation that carries a Console role, setting roles, the audit rows a
 // Viewer's session reads leave, Editors and code-managed agents, the reset
-// when a member's organization role changes, and the Console test workspace:
-// its membership only starts and reads chats, is gone (with audit rows) the
-// moment Console access drops, and can't mint keys or add members.
+// when a member's organization role changes, and Console test chats: nobody
+// becomes a member of the test workspace, a test chat is its tester's alone
+// (another Editor or the owner can't read or continue it through Console or
+// the app), and losing Editor access takes test chats away at once.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import type { AccessContext, Permission } from "@opengeni/contracts";
@@ -44,8 +45,11 @@ import { z } from "zod";
 import { ApiHttpError } from "../src/http/api-error";
 import { organizationApiKeyPermissions, registerApiKeyRoutes } from "../src/routes/api-keys";
 import { registerConsoleRoutes } from "../src/routes/console";
-import { CONSOLE_TEST_WORKSPACE_PERMISSIONS } from "../src/routes/console-roles";
-import { registerOrganizationAgentRoutes } from "../src/routes/organization-agents";
+import {
+  CONSOLE_TEST_CHAT_PERMISSIONS,
+  consoleTestChatSubjectId,
+  registerOrganizationAgentRoutes,
+} from "../src/routes/organization-agents";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
@@ -85,6 +89,8 @@ type Fixture = {
   people: Record<Exclude<CallerName, "key">, Person>;
   key: Record<string, string>;
   narrowKeys: Record<NarrowKeyName, Record<string, string>>;
+  /** Each caller's own test chat of the agent, for those who may test (others: none). */
+  testChats: Partial<Record<CallerName | NarrowKeyName, string>>;
 };
 let fixture: Fixture | null = null;
 const users = new Map<string, { authSessionId: string; userId: string; email: string }>();
@@ -361,14 +367,36 @@ async function provisionFixture(): Promise<Fixture> {
   if (agent.status !== 201) {
     throw new Error(`agent create failed: ${agent.status} ${JSON.stringify(agent.body)}`);
   }
+  const agentId = agent.body.agent.id as string;
+  // Everyone who may test starts one test chat of their own.
+  const testers: [CallerName | NarrowKeyName, Record<string, string>][] = [
+    ["owner", owner.headers],
+    ["admin", admin.headers],
+    ["editor", editor.headers],
+    ["key", { authorization: `Bearer ${token}` }],
+    ["key without agents:read", narrowKeys["key without agents:read"]],
+    ["key without tool_credentials:write", narrowKeys["key without tool_credentials:write"]],
+  ];
+  const testChats: Fixture["testChats"] = {};
+  for (const [name, headers] of testers) {
+    const started = await call("POST", `/v1/organizations/${accountId}/agents/${agentId}/test-chats`, headers, {
+      version: 1,
+      message: `hi from ${name}`,
+    });
+    if (started.status !== 201) {
+      throw new Error(`test chat failed for ${name}: ${started.status} ${JSON.stringify(started.body)}`);
+    }
+    testChats[name] = started.body.sessionId as string;
+  }
   return {
     accountId,
     managedWorkspaceId: managed.id,
     teamWorkspaceId: team.id,
-    agentId: agent.body.agent.id,
+    agentId,
     people: { owner, admin, none, viewer, editor },
     key: { authorization: `Bearer ${token}` },
     narrowKeys,
+    testChats,
   };
 }
 
@@ -401,9 +429,14 @@ type KeyOutcome = "allowed" | "people_only" | "owner_only";
 type RouteCase = {
   need: Need;
   key: KeyOutcome;
-  /** The concrete request: chosen so an allowed call changes nothing (422/404) or only reads. */
-  path: (f: Fixture) => string;
+  /**
+   * The concrete request for a caller: chosen so an allowed call changes
+   * nothing (a refused body or a missing record) or only reads.
+   */
+  path: (f: Fixture, caller: string) => string;
   body?: unknown;
+  /** The exact status an allowed caller gets (any of them, when a list). */
+  ok: number | readonly number[];
 };
 
 const C = "/v1/organizations/:organizationId/console";
@@ -414,72 +447,88 @@ const WORKSPACE_AGENTS = "/v1/workspaces/:workspaceId/organization-agents";
 const missingId = "99999999-9999-4999-8999-999999999999";
 const console_ = (f: Fixture) => `/v1/organizations/${f.accountId}/console`;
 const agents = (f: Fixture) => `/v1/organizations/${f.accountId}/agents`;
+/** The caller's own test chat, or a missing one for callers who may not test. */
+const testChatPath = (f: Fixture, caller: string) =>
+  `${agents(f)}/${f.agentId}/test-chats/${f.testChats[caller as CallerName] ?? missingId}`;
 const credentials = (f: Fixture) =>
   `/v1/workspaces/${f.managedWorkspaceId}/end-users/matrix-user/tool-credentials/missing-server`;
 
 const MATRIX: Record<string, RouteCase> = {
   // Console (src/routes/console.ts, console-roles.ts): people only.
-  [`GET ${C}/access`]: { need: "any", key: "people_only", path: (f) => `${console_(f)}/access` },
+  [`GET ${C}/access`]: { need: "any", key: "people_only", ok: 200,
+    path: (f) => `${console_(f)}/access` },
   [`GET ${C}/summary`]: {
     need: "viewer",
     key: "people_only",
+    ok: 200,
     path: (f) => `${console_(f)}/summary`,
   },
   [`GET ${C}/workspaces`]: {
     need: "viewer",
     key: "people_only",
+    ok: 200,
     path: (f) => `${console_(f)}/workspaces`,
   },
   [`PUT ${C}/workspaces/:workspaceId`]: {
     need: "full",
     key: "people_only",
+    ok: 422,
     path: (f) => `${console_(f)}/workspaces/${f.teamWorkspaceId}`,
     body: {},
   },
   [`GET ${C}/sessions`]: {
     need: "viewer",
     key: "people_only",
+    ok: 200,
     path: (f) => `${console_(f)}/sessions`,
   },
   [`GET ${C}/workspaces/:workspaceId/sessions/:sessionId`]: {
     need: "viewer",
     key: "people_only",
+    ok: 404,
     path: (f) => `${console_(f)}/workspaces/${f.managedWorkspaceId}/sessions/${missingId}`,
   },
   [`GET ${C}/workspaces/:workspaceId/sessions/:sessionId/events`]: {
     need: "viewer",
     key: "people_only",
+    ok: 404,
     path: (f) => `${console_(f)}/workspaces/${f.managedWorkspaceId}/sessions/${missingId}/events`,
   },
   [`GET ${C}/settings`]: {
     need: "full",
     key: "people_only",
+    ok: 200,
     path: (f) => `${console_(f)}/settings`,
   },
   [`PUT ${C}/settings`]: {
     need: "full",
     key: "people_only",
+    ok: 422,
     path: (f) => `${console_(f)}/settings`,
     body: {},
   },
   [`GET ${C}/audit-log`]: {
     need: "full",
     key: "people_only",
+    ok: 200,
     path: (f) => `${console_(f)}/audit-log`,
   },
   [`GET ${C}/api-keys`]: {
     need: "full",
     key: "people_only",
+    ok: 200,
     path: (f) => `${console_(f)}/api-keys`,
   },
   [`GET ${C}/member-roles`]: {
     need: "full",
     key: "people_only",
+    ok: 200,
     path: (f) => `${console_(f)}/member-roles`,
   },
   [`PUT ${C}/member-roles`]: {
     need: "full",
     key: "people_only",
+    ok: 422,
     path: (f) => `${console_(f)}/member-roles`,
     body: {},
   },
@@ -488,133 +537,183 @@ const MATRIX: Record<string, RouteCase> = {
   [`GET ${A}/tool-servers`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/tool-servers`,
   },
   [`POST ${A}/tool-servers`]: {
     need: "full",
     key: "allowed",
+    ok: 422,
     path: (f) => `${agents(f)}/tool-servers`,
     body: {},
   },
   [`GET ${A}/tool-servers/:key`]: {
     need: "viewer",
     key: "allowed",
+    ok: 404,
     path: (f) => `${agents(f)}/tool-servers/missing-server`,
   },
   [`PATCH ${A}/tool-servers/:key`]: {
     need: "full",
     key: "allowed",
+    ok: 404,
     path: (f) => `${agents(f)}/tool-servers/missing-server`,
     body: {},
   },
   [`DELETE ${A}/tool-servers/:key`]: {
     need: "full",
     key: "allowed",
+    ok: 404,
     path: (f) => `${agents(f)}/tool-servers/missing-server`,
   },
   [`GET ${A}/tool-servers/:key/tools`]: {
     need: "viewer",
     key: "allowed",
+    ok: 404,
     path: (f) => `${agents(f)}/tool-servers/missing-server/tools`,
   },
   [`POST ${A}/test-workspace`]: {
     need: "editor",
     key: "allowed",
+    ok: [200, 201],
     path: (f) => `${agents(f)}/test-workspace`,
   },
-  [`GET ${A}`]: { need: "viewer", key: "allowed", path: (f) => agents(f) },
-  [`GET ${A}/compute`]: { need: "viewer", key: "allowed", path: (f) => `${agents(f)}/compute` },
-  [`POST ${A}`]: { need: "editor", key: "allowed", path: (f) => agents(f), body: {} },
+  [`GET ${A}`]: { need: "viewer", key: "allowed", ok: 200,
+    path: (f) => agents(f) },
+  [`GET ${A}/compute`]: { need: "viewer", key: "allowed", ok: 200,
+    path: (f) => `${agents(f)}/compute` },
+  [`POST ${A}`]: { need: "editor", key: "allowed", ok: 422,
+    path: (f) => agents(f), body: {} },
   [`GET ${A}/by-key/:key`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/by-key/matrix`,
   },
   [`PUT ${A}/by-key/:key/apply`]: {
     need: "full",
     key: "allowed",
+    ok: 422,
     path: (f) => `${agents(f)}/by-key/matrix/apply`,
     body: {},
   },
   [`GET ${A}/:agentId`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}`,
   },
   [`PATCH ${A}/:agentId`]: {
     need: "full",
     key: "allowed",
+    ok: 422,
     path: (f) => `${agents(f)}/${f.agentId}`,
     body: {},
   },
   [`PUT ${A}/:agentId/draft`]: {
     need: "editor",
     key: "allowed",
+    ok: 422,
     path: (f) => `${agents(f)}/${f.agentId}/draft`,
     body: {},
   },
   [`GET ${A}/:agentId/versions`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}/versions`,
   },
   [`GET ${A}/:agentId/versions/:version`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}/versions/1`,
   },
   [`POST ${A}/:agentId/publish`]: {
     need: "editor",
     key: "allowed",
+    ok: 422,
     path: (f) => `${agents(f)}/${f.agentId}/publish`,
     body: {},
   },
   [`GET ${A}/:agentId/publish-operations`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}/publish-operations`,
   },
   [`GET ${A}/:agentId/movable-chats`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}/movable-chats`,
   },
   [`POST ${A}/:agentId/management`]: {
     need: "owner",
     key: "owner_only",
+    ok: 422,
     path: (f) => `${agents(f)}/${f.agentId}/management`,
     body: {},
   },
   [`POST ${A}/:agentId/archive`]: {
     need: "full",
     key: "allowed",
+    ok: 422,
     path: (f) => `${agents(f)}/${f.agentId}/archive`,
     body: {},
   },
   [`GET ${A}/:agentId/sessions`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}/sessions`,
   },
   [`GET ${A}/:agentId/usage`]: {
     need: "viewer",
     key: "allowed",
+    ok: 200,
     path: (f) => `${agents(f)}/${f.agentId}/usage`,
   },
   [`POST ${A}/:agentId/test-chats`]: {
     need: "editor",
     key: "allowed",
+    ok: 422,
     path: (f) => `${agents(f)}/${f.agentId}/test-chats`,
     body: {},
   },
+  // A tester's own test chat: Editors and up (keys by agents:manage), each
+  // on their own chat; someone else's is 404 (see the test chat tests).
+  [`GET ${A}/:agentId/test-chats/:sessionId`]: {
+    need: "editor",
+    key: "allowed",
+    ok: 200,
+    path: (f, caller) => testChatPath(f, caller),
+  },
+  [`GET ${A}/:agentId/test-chats/:sessionId/events`]: {
+    need: "editor",
+    key: "allowed",
+    ok: 200,
+    path: (f, caller) => `${testChatPath(f, caller)}/events`,
+  },
+  [`POST ${A}/:agentId/test-chats/:sessionId/messages`]: {
+    need: "editor",
+    key: "allowed",
+    ok: 422,
+    path: (f, caller) => `${testChatPath(f, caller)}/messages`,
+    body: {},
+  },
   // End users' stored tool logins: owners and admins among people.
-  [`PUT ${CREDENTIALS}`]: { need: "full", key: "allowed", path: credentials, body: {} },
-  [`GET ${CREDENTIALS}`]: { need: "full", key: "allowed", path: credentials },
-  [`DELETE ${CREDENTIALS}`]: { need: "full", key: "allowed", path: credentials },
+  [`PUT ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 422,
+    path: credentials, body: {} },
+  [`GET ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 404,
+    path: credentials },
+  [`DELETE ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 404,
+    path: credentials },
   // The agents a workspace can use: workspace access, never a Console role.
   [`GET ${WORKSPACE_AGENTS}`]: {
     need: "workspace",
     key: "allowed",
+    ok: 200,
     path: (f) => `/v1/workspaces/${f.managedWorkspaceId}/organization-agents`,
   },
 };
@@ -628,6 +727,8 @@ const MATRIX: Record<string, RouteCase> = {
 function keyNeeds(route: string): Permission[] {
   const [method, path] = route.split(" ") as [string, string];
   if (path === WORKSPACE_AGENTS) return ["workspace:read"];
+  // Test chats are for whoever may test: agents:manage, reads included.
+  if (path.includes("/test-chats")) return ["agents:manage"];
   if (path === CREDENTIALS) {
     return method === "GET" ? ["agents:read"] : ["tool_credentials:write"];
   }
@@ -739,9 +840,10 @@ describe("Console roles: authorization matrix", () => {
         const narrow = caller in NARROW_KEYS ? (caller as NarrowKeyName) : null;
         const headers = narrow ? fixture.narrowKeys[narrow] : headersOf(caller as CallerName);
         const before = await stateFingerprint(fixture.accountId);
-        const reply = await call(method, spec.path(fixture), headers, spec.body);
+        const reply = await call(method, spec.path(fixture, caller), headers, spec.body);
         const code = reply.body.details?.code;
-        const allowed = () => reply.status !== 401 && reply.status !== 403 && reply.status < 500;
+        const okStatuses: readonly number[] = typeof spec.ok === "number" ? [spec.ok] : spec.ok;
+        const allowed = () => okStatuses.includes(reply.status);
         let ok: boolean;
         let expected: string;
         if (narrow || caller === "key") {
@@ -759,7 +861,7 @@ describe("Console roles: authorization matrix", () => {
             expected = "403 agent_management_requires_owner";
             ok = reply.status === 403 && code === "agent_management_requires_owner";
           } else {
-            expected = "allowed";
+            expected = `allowed (${okStatuses.join("/")})`;
             ok = allowed();
           }
         } else if (spec.need === "workspace") {
@@ -773,7 +875,7 @@ describe("Console roles: authorization matrix", () => {
             ? caller === "owner"
             : RANK[caller as Exclude<CallerName, "key">] >= NEED_RANK[spec.need])
         ) {
-          expected = "allowed";
+          expected = `allowed (${okStatuses.join("/")})`;
           ok = allowed();
         } else if (spec.need === "owner" && caller === "admin") {
           expected = "403 agent_management_requires_owner";
@@ -1074,29 +1176,12 @@ describe("Console roles: reads, writes and lifecycle", () => {
     expect([reach.status, reach.body.details?.code]).toEqual([403, "console_role_required"]);
   }, 60_000);
 
-  test("leaving Editor removes the Console test workspace access; a new organization role resets the Console role", async () => {
-    if (!fixture || !client || !shared) return;
+  test("a new organization role resets the Console role", async () => {
+    if (!fixture || !client) return;
     const { people, accountId } = fixture;
     const temp = await person("temp");
     const membership = await inviteAndAccept(accountId, people.owner, temp, "member", "editor");
     expect(await getConsoleMemberRole(client.db, accountId, temp.subjectId)).toBe("editor");
-    const testWorkspace = await call("POST", `${agents(fixture)}/test-workspace`, temp.headers);
-    expect(testWorkspace.status).toBeLessThan(300);
-    const workspaceId = await findOrgAgentTestWorkspace(client.db, accountId);
-    const memberships = async () =>
-      (
-        await shared!.admin<{ count: number }[]>`
-          select count(*)::int as count from workspace_memberships
-          where workspace_id = ${workspaceId} and subject_id = ${temp.subjectId}`
-      )[0]!.count;
-    expect(await memberships()).toBe(1);
-    const lowered = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
-      subjectId: temp.subjectId,
-      role: "viewer",
-    });
-    expect(lowered.status).toBe(200);
-    expect(await memberships()).toBe(0);
-
     const promoted = await call(
       "PATCH",
       `/v1/organizations/${accountId}/members/${membership.membershipId}`,
@@ -1115,166 +1200,199 @@ describe("Console roles: reads, writes and lifecycle", () => {
     );
     expect(reset.map((row) => row.detail.reason)).toEqual(["organization_role_changed"]);
   }, 120_000);
+
+  test("an invitation and its Console role are one write, and a replay adds neither", async () => {
+    if (!fixture) return;
+    const { accountId, people } = fixture;
+    const body = {
+      email: `console-roles-${crypto.randomUUID()}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      operationId: crypto.randomUUID(),
+      consoleRole: "editor",
+    };
+    const first = await call("POST", `/v1/organizations/${accountId}/invitations`, people.owner.headers, body);
+    expect(first.status).toBe(201);
+    const replay = await call("POST", `/v1/organizations/${accountId}/invitations`, people.owner.headers, body);
+    expect([replay.status, replay.body.id]).toEqual([201, first.body.id]);
+    const listed = await call("GET", `${console_(fixture)}/member-roles`, people.owner.headers);
+    expect(
+      (listed.body.roles as { invitationId: string | null; role: string }[])
+        .filter((entry) => entry.invitationId === first.body.id)
+        .map((entry) => entry.role),
+    ).toEqual(["editor"]);
+    const audited = (await auditRows("member.console_role_changed")).filter(
+      (row) => row.detail.invitationId === first.body.id,
+    );
+    expect(audited).toHaveLength(1);
+  }, 60_000);
 });
 
-describe("Console roles: the Console test workspace", () => {
-  /** The person's membership of the organization's Console test workspace, if any. */
-  async function testMembership(subjectId: string) {
-    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
-    if (!workspaceId) return null;
-    const [row] = await shared!.admin<{ role: string; permissions: string[] }[]>`
-      select role, permissions from workspace_memberships
-      where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
-    return row ?? null;
-  }
+describe("Console roles: Console test chats", () => {
+  const testChatUrl = (agentId: string, sessionId: string) =>
+    `${agents(fixture!)}/${agentId}/test-chats/${sessionId}`;
 
-  /** A membership left behind, as if an earlier removal had failed. */
-  async function leaveMembershipBehind(subjectId: string) {
-    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
-    await shared!.admin`
-      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-      values (${fixture!.accountId}, ${workspaceId}, ${subjectId}, 'member',
-        ${CONSOLE_TEST_WORKSPACE_PERMISSIONS as string[]})
-      on conflict do nothing`;
-    expect(await testMembership(subjectId)).not.toBeNull();
-  }
-
-  const testChat = (who: Person) =>
-    call("POST", `${agents(fixture!)}/${fixture!.agentId}/test-chats`, who.headers, {
+  const startTestChat = (who: Record<string, string>, message = "hi") =>
+    call("POST", `${agents(fixture!)}/${fixture!.agentId}/test-chats`, who, {
       version: 1,
-      message: "hi",
+      message,
     });
 
-  /** Starting a draft chat in the test workspace directly, as the person. */
-  async function directDraftChat(who: Person) {
+  async function testWorkspaceId(): Promise<string> {
     const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
-    return await call("POST", `/v1/workspaces/${workspaceId}/sessions`, who.headers, {
-      initialMessage: "hi",
-      agent: { ref: fixture!.agentId, version: 1 },
-    });
+    if (!workspaceId) throw new Error("no Console test workspace");
+    return workspaceId;
   }
 
-  const refusedForRole = (reply: Reply) =>
-    reply.status === 403 && reply.body.details?.code === "console_role_required";
+  /** Every way into someone's test chat: the test chat routes and the app's session routes. */
+  async function probeTestChat(who: Record<string, string>, sessionId: string) {
+    const workspaceId = await testWorkspaceId();
+    const app = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    const console = testChatUrl(fixture!.agentId, sessionId);
+    return {
+      consoleRead: (await call("GET", console, who)).status,
+      consoleEvents: (await call("GET", `${console}/events`, who)).status,
+      consoleSend: (await call("POST", `${console}/messages`, who, { message: "mine now" })).status,
+      appRead: (await call("GET", app, who)).status,
+      appEvents: (await call("GET", `${app}/events`, who)).status,
+      appSend: (
+        await call("POST", `${app}/events`, who, {
+          type: "user.message",
+          payload: { text: "mine now" },
+        })
+      ).status,
+    };
+  }
 
-  test("membership there only starts and reads chats: never workspace:admin or agents:manage", async () => {
-    if (!fixture || !client || !shared) return;
-    const temp = await person("narrow");
-    await inviteAndAccept(fixture.accountId, fixture.people.owner, temp, "member", "editor");
-    expect(
-      (await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status,
-    ).toBeLessThan(300);
-    const row = await testMembership(temp.subjectId);
-    expect(row?.role).toBe("member");
-    expect([...row!.permissions].sort()).toEqual([...CONSOLE_TEST_WORKSPACE_PERMISSIONS].sort());
-    const permissions = row!.permissions as Permission[];
-    for (const mode of ["legacy", "explicit", undefined] as const) {
-      expect(hasPermission(permissions, "agents:manage", mode)).toBe(false);
-      expect(hasPermission(permissions, "workspace:admin", mode)).toBe(false);
-      expect(hasPermission(permissions, "tool_credentials:write", mode)).toBe(false);
-      expect(hasPermission(permissions, "mcp_servers:attach", mode)).toBe(false);
-      expect(hasPermission(permissions, "secrets:read", mode)).toBe(false);
+  test("nobody becomes a member of the test workspace; each chat is its tester's principal's", async () => {
+    if (!fixture || !shared) return;
+    const workspaceId = await testWorkspaceId();
+    const [{ count }] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from workspace_memberships where workspace_id = ${workspaceId}`;
+    expect(count).toBe(0);
+    for (const name of ["owner", "admin", "editor"] as const) {
+      const sessionId = fixture.testChats[name]!;
+      const [row] = await shared.admin<{ owner_subject_id: string; visibility: string }[]>`
+        select owner_subject_id, visibility from sessions where id = ${sessionId}`;
+      expect([name, row?.owner_subject_id]).toEqual([
+        name,
+        consoleTestChatSubjectId(fixture.people[name].subjectId),
+      ]);
     }
-    // An older, broader membership is narrowed the next time they test.
-    const workspaceId = await findOrgAgentTestWorkspace(client.db, fixture.accountId);
-    await shared.admin`update workspace_memberships set role = 'owner',
-        permissions = ${["workspace:read", "workspace:admin", "sessions:create"]}
-      where workspace_id = ${workspaceId} and subject_id = ${temp.subjectId}`;
-    expect(
-      (await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status,
-    ).toBeLessThan(300);
-    expect((await testMembership(temp.subjectId))?.role).toBe("member");
-  }, 120_000);
+    // The principal holds its own chats and nothing that administers anything.
+    for (const mode of ["legacy", "explicit", undefined] as const) {
+      const held = [...CONSOLE_TEST_CHAT_PERMISSIONS];
+      expect(hasPermission(held, "agents:manage", mode)).toBe(false);
+      expect(hasPermission(held, "workspace:admin", mode)).toBe(false);
+      expect(hasPermission(held, "api_keys:manage", mode)).toBe(false);
+      expect(hasPermission(held, "members:manage", mode)).toBe(false);
+    }
+  }, 60_000);
 
-  test("an Editor there can't mint keys or add members, and nothing outlives the demotion", async () => {
-    if (!fixture || !client || !shared) return;
-    const { accountId, people } = fixture;
-    const probe = await person("probe");
-    await inviteAndAccept(accountId, people.owner, probe, "member", "editor");
+  test("a tester reads and continues their own test chat", async () => {
+    if (!fixture) return;
+    const { people, agentId, testChats } = fixture;
+    const url = testChatUrl(agentId, testChats.editor!);
+    const read = await call("GET", url, people.editor.headers);
+    expect([read.status, read.body.sessionId, read.body.agentId]).toEqual([
+      200,
+      testChats.editor,
+      agentId,
+    ]);
+    const events = await call("GET", `${url}/events`, people.editor.headers);
+    expect(events.status).toBe(200);
+    expect(
+      (events.body.events as { type: string; payload: { text?: string } }[]).find(
+        (event) => event.type === "user.message",
+      )?.payload.text,
+    ).toBe("hi from editor");
+    const sent = await call("POST", `${url}/messages`, people.editor.headers, {
+      message: "and again",
+    });
+    expect(sent.status).toBe(202);
+  }, 60_000);
+
+  test("nobody else reads or continues a test chat, through Console or the app", async () => {
+    if (!fixture) return;
+    const { accountId, people, testChats } = fixture;
+    const otherEditor = await person("other-editor");
+    await inviteAndAccept(accountId, people.owner, otherEditor, "member", "editor");
+    const refused = {
+      consoleRead: 404,
+      consoleEvents: 404,
+      consoleSend: 404,
+      appRead: 403,
+      appEvents: 403,
+      appSend: 403,
+    };
+    // Another Editor and the owner on the Editor's chat; the Editor on the owner's.
+    for (const [who, sessionId] of [
+      [otherEditor.headers, testChats.editor!],
+      [people.owner.headers, testChats.editor!],
+      [people.admin.headers, testChats.owner!],
+      [people.editor.headers, testChats.owner!],
+      [people.editor.headers, testChats.key!],
+    ] as const) {
+      const before = await stateFingerprint(accountId);
+      expect(await probeTestChat(who, sessionId)).toEqual(refused);
+      expect(await stateFingerprint(accountId)).toBe(before);
+    }
+    // A chat of another agent isn't this agent's test chat either.
+    const other = await call("POST", agents(fixture), people.owner.headers, {
+      key: `other-${crypto.randomUUID().slice(0, 8)}`,
+      name: "Other",
+      instructions: "Hi.",
+    });
+    expect(other.status).toBe(201);
+    const elsewhere = await call(
+      "GET",
+      testChatUrl(other.body.agent.id, testChats.editor!),
+      people.editor.headers,
+    );
+    expect(elsewhere.status).toBe(404);
+  }, 300_000);
+
+  test("Editors get nothing else in the test workspace: no keys, members or other chats", async () => {
+    if (!fixture) return;
+    const { people, accountId } = fixture;
     const bystander = await person("bystander");
     const bystanderMembership = await inviteAndAccept(accountId, people.owner, bystander, "member");
-    expect(
-      (await call("POST", `${agents(fixture)}/test-workspace`, probe.headers)).status,
-    ).toBeLessThan(300);
-    const workspaceId = (await findOrgAgentTestWorkspace(client.db, accountId))!;
-    const keys = `/v1/workspaces/${workspaceId}/api-keys`;
-    const minted = await call("POST", keys, probe.headers, {
+    const workspaceId = await testWorkspaceId();
+    const before = await stateFingerprint(accountId);
+    const minted = await call("POST", `/v1/workspaces/${workspaceId}/api-keys`, people.editor.headers, {
       name: "probe",
       permissions: ["workspace:read"],
     });
     expect(minted.status).toBe(403);
-    expect((await call("GET", keys, probe.headers)).status).toBe(403);
-    const added = await call("POST", `/v1/workspaces/${workspaceId}/members`, probe.headers, {
+    const added = await call("POST", `/v1/workspaces/${workspaceId}/members`, people.editor.headers, {
       organizationMembershipId: bystanderMembership.membershipId,
       role: "owner",
       permissions: ["workspace:admin"],
     });
     expect(added.status).toBe(403);
-    // An Editor's own chats there are fine, with or without an agent.
-    const plain = await call("POST", `/v1/workspaces/${workspaceId}/sessions`, probe.headers, {
+    const plain = await call("POST", `/v1/workspaces/${workspaceId}/sessions`, people.editor.headers, {
       initialMessage: "hi",
     });
-    expect(plain.status).toBe(202);
-    const granted = (await auditRows("member.console_test_access_granted", probe.subjectId)).map(
-      (row) => row.detail.subjectId,
-    );
-    expect(granted).toEqual([probe.subjectId]);
-
-    const lowered = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
-      subjectId: probe.subjectId,
-      role: "viewer",
-    });
-    expect(lowered.status).toBe(200);
-    expect(await testMembership(probe.subjectId)).toBeNull();
-    expect(await testMembership(bystander.subjectId)).toBeNull();
-    const [{ count }] = await shared.admin<{ count: number }[]>`
-      select count(*)::int as count from api_keys where workspace_id = ${workspaceId}`;
-    expect(count).toBe(0);
-    const removed = (await auditRows("member.console_test_access_removed", people.owner.subjectId))
-      .filter((row) => row.detail.subjectId === probe.subjectId)
-      .map((row) => row.detail.reason);
-    expect(removed).toEqual(["console_role_changed"]);
-    // Setting the same role again finds nothing to remove and logs nothing.
-    await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
-      subjectId: probe.subjectId,
-      role: "viewer",
-    });
-    expect(
-      (await auditRows("member.console_test_access_removed", people.owner.subjectId)).filter(
-        (row) => row.detail.subjectId === probe.subjectId,
-      ),
-    ).toHaveLength(1);
-    // A membership left behind starts no chat there, with or without an agent.
-    await leaveMembershipBehind(probe.subjectId);
-    const leftover = await call("POST", `/v1/workspaces/${workspaceId}/sessions`, probe.headers, {
-      initialMessage: "hi",
-    });
-    expect({ status: leftover.status, refused: refusedForRole(leftover) }).toEqual({
-      status: 403,
-      refused: true,
-    });
-  }, 300_000);
+    expect(plain.status).toBe(403);
+    const listed = await call("GET", `/v1/workspaces/${workspaceId}/sessions`, people.editor.headers);
+    expect(listed.status).toBe(403);
+    expect(await stateFingerprint(accountId)).toBe(before);
+  }, 120_000);
 
   test("a demoted admin and a demoted Editor lose test chats at once", async () => {
-    if (!fixture || !client || !shared) return;
+    if (!fixture) return;
     const { accountId, people } = fixture;
     const exAdmin = await person("ex-admin");
     const adminMembership = await inviteAndAccept(accountId, people.owner, exAdmin, "admin");
     const exEditor = await person("ex-editor");
     await inviteAndAccept(accountId, people.owner, exEditor, "member", "editor");
-
+    const chats = new Map<Person, string>();
     for (const who of [exAdmin, exEditor]) {
-      const before = await testChat(who);
-      expect([before.status, JSON.stringify(before.body).slice(0, 200)]).toEqual([
-        201,
-        expect.any(String),
-      ]);
-      expect(await testMembership(who.subjectId)).not.toBeNull();
-      const direct = await directDraftChat(who);
-      expect([direct.status, JSON.stringify(direct.body).slice(0, 200)]).toEqual([
-        202,
-        expect.any(String),
-      ]);
+      const started = await startTestChat(who.headers);
+      expect(started.status).toBe(201);
+      chats.set(who, started.body.sessionId as string);
+      const own = await call("GET", testChatUrl(fixture.agentId, started.body.sessionId), who.headers);
+      expect(own.status).toBe(200);
     }
 
     const demoted = await call(
@@ -1296,95 +1414,29 @@ describe("Console roles: the Console test workspace", () => {
     expect(lowered.status).toBe(200);
 
     for (const who of [exAdmin, exEditor]) {
-      expect(await testMembership(who.subjectId)).toBeNull();
-      const viaConsole = await testChat(who);
-      expect([viaConsole.status, viaConsole.body.details?.code]).toEqual([
-        403,
-        "console_role_required",
-      ]);
-      // Without a membership the workspace itself refuses them.
-      const direct = await directDraftChat(who);
-      expect([403, 404]).toContain(direct.status);
-      // A membership left behind is not enough: the chat needs Editor now.
-      await leaveMembershipBehind(who.subjectId);
-      const leftover = await directDraftChat(who);
-      expect({ status: leftover.status, refused: refusedForRole(leftover) }).toEqual({
-        status: 403,
-        refused: true,
+      const sessionId = chats.get(who)!;
+      const before = await stateFingerprint(accountId);
+      const again = await startTestChat(who.headers);
+      expect([again.status, again.body.details?.code]).toEqual([403, "console_role_required"]);
+      expect(await probeTestChat(who.headers, sessionId)).toEqual({
+        consoleRead: 403,
+        consoleEvents: 403,
+        consoleSend: 403,
+        appRead: 403,
+        appEvents: 403,
+        appSend: 403,
       });
+      expect(await stateFingerprint(accountId)).toBe(before);
     }
   }, 300_000);
 
-  test("access drops remove the membership whatever was stored, and a repeat finishes the job", async () => {
-    if (!fixture || !client || !shared) return;
-    const { accountId, people } = fixture;
-    // A member with no stored role but a membership left behind: setting None removes it.
-    const leftover = await person("leftover");
-    await inviteAndAccept(accountId, people.owner, leftover, "member");
-    await leaveMembershipBehind(leftover.subjectId);
-    const none = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
-      subjectId: leftover.subjectId,
-      role: "none",
-    });
-    expect(none.status).toBe(200);
-    expect(await testMembership(leftover.subjectId)).toBeNull();
-
-    // A demotion repeated with its operationId removes a membership left behind.
-    const admin = await person("repeat-admin");
-    const membership = await inviteAndAccept(accountId, people.owner, admin, "admin");
-    expect(
-      (await call("POST", `${agents(fixture)}/test-workspace`, admin.headers)).status,
-    ).toBeLessThan(300);
-    const demotion = {
-      kind: "change_role",
-      role: "member",
-      expectedAuthorizationRevision: membership.authorizationRevision,
-      operationId: crypto.randomUUID(),
-    };
-    const path = `/v1/organizations/${accountId}/members/${membership.membershipId}`;
-    expect((await call("PATCH", path, people.owner.headers, demotion)).status).toBe(200);
-    expect(await testMembership(admin.subjectId)).toBeNull();
-    await leaveMembershipBehind(admin.subjectId);
-    const repeated = await call("PATCH", path, people.owner.headers, demotion);
-    expect(repeated.status).toBe(200);
-    expect(await testMembership(admin.subjectId)).toBeNull();
-
-    // Promotion keeps it: owners and admins stay full.
-    const editor = await person("promoted");
-    const editorMembership = await inviteAndAccept(
-      accountId,
-      people.owner,
-      editor,
-      "member",
-      "editor",
-    );
-    expect(
-      (await call("POST", `${agents(fixture)}/test-workspace`, editor.headers)).status,
-    ).toBeLessThan(300);
-    const promoted = await call(
-      "PATCH",
-      `/v1/organizations/${accountId}/members/${editorMembership.membershipId}`,
-      people.owner.headers,
-      {
-        kind: "change_role",
-        role: "admin",
-        expectedAuthorizationRevision: editorMembership.authorizationRevision,
-        operationId: crypto.randomUUID(),
-      },
-    );
-    expect(promoted.status).toBe(200);
-    expect(await testMembership(editor.subjectId)).not.toBeNull();
-  }, 300_000);
-
-  test("offboarding removes it", async () => {
-    if (!fixture || !client || !shared) return;
+  test("an offboarded Editor loses test chats", async () => {
+    if (!fixture) return;
     const { accountId, people } = fixture;
     const leaving = await person("leaving");
     const membership = await inviteAndAccept(accountId, people.owner, leaving, "member", "editor");
-    expect(
-      (await call("POST", `${agents(fixture)}/test-workspace`, leaving.headers)).status,
-    ).toBeLessThan(300);
-    expect(await testMembership(leaving.subjectId)).not.toBeNull();
+    const started = await startTestChat(leaving.headers);
+    expect(started.status).toBe(201);
     const offboarded = await call(
       "PATCH",
       `/v1/organizations/${accountId}/members/${membership.membershipId}`,
@@ -1396,6 +1448,14 @@ describe("Console roles: the Console test workspace", () => {
       },
     );
     expect(offboarded.status).toBe(200);
-    expect(await testMembership(leaving.subjectId)).toBeNull();
+    expect(await getConsoleMemberRole(client!.db, accountId, leaving.subjectId)).toBe("none");
+    const url = testChatUrl(fixture.agentId, started.body.sessionId);
+    for (const reply of [
+      await call("GET", url, leaving.headers),
+      await call("POST", `${url}/messages`, leaving.headers, { message: "still here?" }),
+      await startTestChat(leaving.headers),
+    ]) {
+      expect([401, 403]).toContain(reply.status);
+    }
   }, 120_000);
 });

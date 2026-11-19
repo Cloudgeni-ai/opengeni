@@ -1,14 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessContext } from "@opengeni/contracts";
+import { hasPermission } from "@opengeni/core";
 import { consoleWindow, requireConsoleAdministratorContext } from "../src/routes/console";
 import {
-  CONSOLE_ACCESS_CLEANUP_FAILED,
   consoleAccessCovers,
   requireConsoleAccessForContext,
-  revokeConsoleTestAccessAfterMembershipChange,
   resolveConsoleAccess,
-  revokeConsoleTestWorkspaceAccess,
 } from "../src/routes/console-roles";
+import {
+  CONSOLE_TEST_CHAT_PERMISSIONS,
+  consoleTestChatSubjectId,
+} from "../src/routes/organization-agents";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 
@@ -102,41 +104,18 @@ describe("Opengeni Console authority", () => {
     expect(consoleAccessCovers("full", "full")).toBe(true);
   });
 
-  test("a Console test workspace access removal that fails is a retryable 503, never silent", async () => {
-    const failing = new Proxy(
-      {},
-      {
-        get() {
-          throw new Error("database unavailable");
-        },
-      },
-    );
-    const errors: string[] = [];
-    const deps = {
-      db: failing,
-      observability: { error: (message: string) => errors.push(message), warn: () => undefined },
-    } as unknown as Parameters<typeof revokeConsoleTestWorkspaceAccess>[0];
-    const expected = {
-      status: 503,
-      retryable: true,
-      details: { code: CONSOLE_ACCESS_CLEANUP_FAILED },
-    };
-    await expect(
-      revokeConsoleTestWorkspaceAccess(deps, {
-        organizationId,
-        subjectId: "user:someone",
-        actorSubjectId: "user:admin",
-      }),
-    ).rejects.toMatchObject(expected);
-    await expect(
-      revokeConsoleTestAccessAfterMembershipChange(deps, {
-        organizationId,
-        subjectId: "user:someone",
-        actorSubjectId: "user:admin",
-        reason: "organization_role_changed",
-        organizationRole: "member",
-      }),
-    ).rejects.toMatchObject(expected);
-    expect(errors.length).toBe(2);
+  test("a test chat runs as the tester's own service principal, which never manages anything", () => {
+    expect(consoleTestChatSubjectId("user:editor")).toBe("console-test:user:editor");
+    expect(consoleTestChatSubjectId("user:editor")).not.toBe(consoleTestChatSubjectId("user:other"));
+    for (const mode of ["explicit", "legacy"] as const) {
+      for (const permission of [
+        "agents:manage",
+        "workspace:admin",
+        "api_keys:manage",
+        "members:manage",
+      ] as const) {
+        expect(hasPermission([...CONSOLE_TEST_CHAT_PERMISSIONS], permission, mode)).toBe(false);
+      }
+    }
   });
 });

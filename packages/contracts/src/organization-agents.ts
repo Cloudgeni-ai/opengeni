@@ -10,6 +10,7 @@ import {
 import { ConsoleEndUser } from "./console";
 import { ReasoningEffort } from "./reasoning-effort";
 import { secretValue } from "./secret-value";
+import { SessionStatus } from "./session-topology-primitives";
 
 /**
  * Console agents (organization agents, docs/agents.md "Console agents").
@@ -963,6 +964,37 @@ export const CreateOrgAgentTestChatResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ workspaceId: z.string().uuid(), sessionId: z.string().uuid() }),
 );
 export type CreateOrgAgentTestChatResponse = z.infer<typeof CreateOrgAgentTestChatResponse>;
+
+/**
+ * `GET .../agents/:agentId/test-chats/:sessionId`: one of the caller's own
+ * test chats. Test chats belong to the person (or key) who started them; no
+ * one is a member of the test workspace, so these routes are the only way in.
+ */
+export const OrgAgentTestChatResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    version: z.number().int().positive().nullable(),
+    status: SessionStatus,
+  }),
+);
+export type OrgAgentTestChatResponse = z.infer<typeof OrgAgentTestChatResponse>;
+
+/** `GET .../test-chats/:sessionId/events`: the chat's events after `after`, oldest first. */
+export const OrgAgentTestChatEventsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    after: z.coerce.number().int().min(0).optional(),
+    limit: z.coerce.number().int().min(1).max(1_000).optional(),
+  }),
+);
+export type OrgAgentTestChatEventsQuery = z.infer<typeof OrgAgentTestChatEventsQuery>;
+
+/** `POST .../test-chats/:sessionId/messages`: the next message in the caller's test chat. */
+export const SendOrgAgentTestChatMessageRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ message: z.string().trim().min(1).max(100_000) }).strict(),
+);
+export type SendOrgAgentTestChatMessageRequest = z.input<typeof SendOrgAgentTestChatMessageRequest>;
 
 /* --------------------------------------------------------- session create input */
 

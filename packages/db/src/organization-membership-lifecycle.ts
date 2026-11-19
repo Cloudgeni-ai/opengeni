@@ -20,6 +20,7 @@ import {
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationWorkspaceMemberResponse,
+  type ConsoleMemberRole,
   type CreateAdditionalOrganizationResponse as CreateAdditionalOrganizationResponseType,
   type CreateOrganizationResponse as CreateOrganizationResponseType,
   type OrganizationAdministrationMember as OrganizationAdministrationMemberType,
@@ -42,7 +43,11 @@ import {
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
-import { applyInvitationConsoleRole, clearConsoleMemberRole } from "./console-roles";
+import {
+  applyInvitationConsoleRole,
+  clearConsoleMemberRole,
+  setConsoleMemberRole,
+} from "./console-roles";
 import type { Database } from "./database";
 import { eraseEndUserToolData } from "./end-user-tool-data";
 import { revokePersonalApiKeysForOwner } from "./personal-api-keys";
@@ -1133,9 +1138,16 @@ export async function createOrganizationInvitation(
     initialWorkspaceIds?: string[];
     role: OrganizationMembershipRole;
     expiresAt: string;
+    /**
+     * The Console role the person gets when they accept (members only; the
+     * caller checked that the actor may set it). Written in the invitation's
+     * own transaction, so the invitation never exists without it.
+     */
+    consoleRole?: Exclude<ConsoleMemberRole, "none">;
   },
 ): Promise<OrganizationInvitationType> {
-  const command = { action: "invite", ...input };
+  const { consoleRole, ...rest } = input;
+  const command = { action: "invite", ...rest };
   const result = await withRlsContext(
     db,
     { accountId: input.organizationId, workspaceId: null },
@@ -1148,6 +1160,16 @@ export async function createOrganizationInvitation(
         ) as result`,
       );
       if (!row) throw new Error("Organization invitation command returned no result");
+      const invitationId = (row.result as { id?: unknown } | null)?.id;
+      if (consoleRole && typeof invitationId === "string") {
+        await setConsoleMemberRole(scopedDb, {
+          accountId: input.organizationId,
+          target: { invitationId },
+          role: consoleRole,
+          actorSubjectId: input.actorSubjectId,
+          actorLabel: null,
+        });
+      }
       return row.result;
     },
   );

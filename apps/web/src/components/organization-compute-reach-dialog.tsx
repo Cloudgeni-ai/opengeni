@@ -72,11 +72,15 @@ export function reachNarrows(
   return current.allowedWorkspaceIds.some((workspaceId) => !kept.has(workspaceId));
 }
 
-/** The managed-workspaces switch: a machine is one computer every end customer's chats share. */
+/**
+ * The managed-workspaces switch: a machine is one computer every end
+ * customer's chats share, and Console Editors can run their agents (and test
+ * chats) on what reaches those workspaces.
+ */
 export const MANAGED_DESCRIPTION = {
   machine:
-    "Every workspace your product manages, including new ones. All end customers' chats there share this machine.",
-  rig: "Every workspace your product manages, including new ones.",
+    "Every workspace your product manages, including new ones. All end customers' chats there share this machine, and Console Editors can run agents on it.",
+  rig: "Every workspace your product manages, including new ones. Console Editors can run agents on it.",
 } as const;
 
 export function OrganizationComputeReachDialog({

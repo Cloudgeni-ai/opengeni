@@ -10,12 +10,11 @@
  * rows, and the API resolves a reader's role before every Console read. Every
  * change is written to the Console audit log in the same transaction.
  */
-import type { ConsoleMemberRole, ConsoleMemberRoleEntry, Permission } from "@opengeni/contracts";
+import type { ConsoleMemberRole, ConsoleMemberRoleEntry } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { insertConsoleAuditEvent } from "./console";
-import { rawRows, withAccountRls, withWorkspaceRls, type Database } from "./database";
+import { rawRows, withAccountRls, type Database } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
-import { grantWorkspaceAccess } from "./workspace-membership-access";
 
 export type ConsoleRoleTarget = { subjectId: string } | { invitationId: string };
 
@@ -297,87 +296,4 @@ export async function applyInvitationConsoleRole(
     });
     return role;
   });
-}
-
-/**
- * Gives a person Console test chat access: membership of the organization's
- * Console test workspace (`organization_managed_workspaces.source =
- * 'console_test'`) with exactly `permissions`, narrowing a broader row. Every
- * membership there is Console-granted: the workspace exists only for Console
- * test chats. A new or changed membership is audit-logged
- * (`member.console_test_access_granted`); an unchanged one writes nothing.
- */
-export async function grantConsoleTestWorkspaceAccess(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    subjectLabel: string | null;
-    permissions: readonly Permission[];
-  },
-): Promise<{ changed: boolean }> {
-  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
-    const [existing] = await rawRows<{ role: string; permissions: string[] }>(
-      tx,
-      sql`select role, permissions from workspace_memberships
-        where workspace_id = ${input.workspaceId}::uuid and subject_id = ${input.subjectId}
-        for update`,
-    );
-    const wanted = [...input.permissions].sort();
-    const held = existing ? [...existing.permissions].sort() : null;
-    const same =
-      existing?.role === "member" &&
-      held !== null &&
-      held.length === wanted.length &&
-      held.every((permission, index) => permission === wanted[index]);
-    if (same) return { changed: false };
-    await grantWorkspaceAccess(tx, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
-      role: "member",
-      permissions: [...input.permissions],
-      ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-    });
-    await withAccountRls(tx, input.accountId, (accountTx) =>
-      insertConsoleAuditEvent(accountTx, {
-        accountId: input.accountId,
-        actorSubjectId: input.subjectId,
-        actorLabel: input.subjectLabel,
-        action: "member.console_test_access_granted",
-        workspaceId: input.workspaceId,
-        sessionId: null,
-        detail: {
-          subjectId: input.subjectId,
-          ...(existing ? { narrowedFrom: { role: existing.role } } : {}),
-        },
-      }),
-    );
-    return { changed: true };
-  });
-}
-
-/** Audit row for a removed Console test workspace membership (in the removal's transaction). */
-export async function recordConsoleTestWorkspaceAccessRemoved(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    actorSubjectId: string;
-    reason: string;
-  },
-): Promise<void> {
-  await withAccountRls(db, input.accountId, (tx) =>
-    insertConsoleAuditEvent(tx, {
-      accountId: input.accountId,
-      actorSubjectId: input.actorSubjectId,
-      actorLabel: null,
-      action: "member.console_test_access_removed",
-      workspaceId: input.workspaceId,
-      sessionId: null,
-      detail: { subjectId: input.subjectId, reason: input.reason },
-    }),
-  );
 }

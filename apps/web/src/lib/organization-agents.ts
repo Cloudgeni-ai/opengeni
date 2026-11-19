@@ -26,6 +26,7 @@ import {
   type OrgAgentNewToolsPolicy,
   type OrgAgentRunsOn,
   type OrgAgentSessionOverrides,
+  type OrgAgentTestChatResponse,
   type OrgAgentTestWorkspaceResponse,
   type OrgAgentToolCatalog,
   type OrgAgentToolCatalogEntry,
@@ -39,10 +40,12 @@ import {
   type PublishOrgAgentResponse,
   type SaveOrgAgentDraftRequest,
   type SaveOrgAgentDraftResponse,
+  type SendOrgAgentTestChatMessageRequest,
   type SetOrgAgentManagementRequest,
   type UpdateOrgAgentRequest,
   type UpdateOrgToolServerRequest,
 } from "@opengeni/contracts";
+import type { SessionEvent } from "@opengeni/sdk";
 import { useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
@@ -155,6 +158,36 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
       client.requestJson<CreateOrgAgentTestChatResponse>(
         "POST",
         `${agent(id)}/test-chats`,
+        request,
+      ),
+    /** One of your own test chats (nobody else's, whatever their Console role). */
+    getTestChat: (id: string, sessionId: string, signal?: AbortSignal) =>
+      client.requestJson<OrgAgentTestChatResponse>(
+        "GET",
+        `${agent(id)}/test-chats/${encode(sessionId)}`,
+        undefined,
+        {},
+        opts(signal),
+      ),
+    listTestChatEvents: (
+      id: string,
+      sessionId: string,
+      options: { after?: number; limit?: number; signal?: AbortSignal } = {},
+    ) =>
+      client.requestJson<{ events: SessionEvent[]; hasMore: boolean; nextAfter: number | null }>(
+        "GET",
+        `${agent(id)}/test-chats/${encode(sessionId)}/events`,
+        undefined,
+        {
+          ...(options.after !== undefined ? { after: String(options.after) } : {}),
+          ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        },
+        opts(options.signal),
+      ),
+    sendTestChatMessage: (id: string, sessionId: string, request: SendOrgAgentTestChatMessageRequest) =>
+      client.requestJson<unknown>(
+        "POST",
+        `${agent(id)}/test-chats/${encode(sessionId)}/messages`,
         request,
       ),
     /** Organization machines and Sandbox Environments "Runs on" can pick. */

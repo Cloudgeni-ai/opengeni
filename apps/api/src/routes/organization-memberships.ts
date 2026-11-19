@@ -97,7 +97,6 @@ import {
   prepareOrganizationUserSetupDelivery,
   readSubscriptionPlanCatalog,
   revokeOrganizationInvitation,
-  setConsoleMemberRole,
   settleOrganizationUserSetupDelivery,
   putOrganizationWorkspaceMember,
   revokeOrganizationWorkspaceMember,
@@ -119,10 +118,7 @@ import {
   isAgentActingAsPerson,
   organizationSettingsPermission,
 } from "../http/acting-person";
-import {
-  requireConsoleAccess,
-  revokeConsoleTestAccessAfterMembershipChange,
-} from "./console-roles";
+import { requireConsoleAccess } from "./console-roles";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { hasRecentManagedSignIn } from "./managed-sign-in-methods";
 import {
@@ -1145,17 +1141,9 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           initialWorkspaceIds: payload.initialWorkspaceIds,
           role: payload.role,
           expiresAt: payload.expiresAt,
+          ...(consoleRole ? { consoleRole } : {}),
         }),
       );
-      if (consoleRole) {
-        await setConsoleMemberRole(deps.db, {
-          accountId: organizationId,
-          target: { invitationId: invitation.id },
-          role: consoleRole,
-          actorSubjectId: subjectId,
-          actorLabel: null,
-        });
-      }
       await deliverOrganizationUserSetup(deps, {
         organizationId,
         actorSubjectId: subjectId,
@@ -1399,20 +1387,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         await releaseMembershipBlocksInOrganization(admissionReleaseDeps(deps), {
           accountId: organizationId,
           personalWorkspaceId: member.personalWorkspaceId,
-        });
-      }
-      if (payload.kind === "change_role" || payload.kind === "offboard") {
-        // The change's transaction reset their Console role; Console test
-        // workspace access goes too unless they are still an owner or admin
-        // (docs/opengeni-console.md, "Roles"). A failure is a retryable 503;
-        // the same operationId repeats it.
-        await revokeConsoleTestAccessAfterMembershipChange(deps, {
-          organizationId,
-          subjectId: member.subjectId,
-          actorSubjectId: subjectId,
-          reason: payload.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
-          organizationRole:
-            payload.kind === "offboard" || member.status === "revoked" ? null : member.role,
         });
       }
       return context.json(member);

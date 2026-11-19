@@ -241,6 +241,7 @@ describe("where an organization machine or rig works", () => {
     expect(document.body.textContent).toContain("All product-managed workspaces");
     expect(document.body.textContent).toContain(MANAGED_DESCRIPTION.machine);
     expect(MANAGED_DESCRIPTION.machine).toContain("share this machine");
+    expect(MANAGED_DESCRIPTION.machine).toContain("Console Editors can run agents on it");
     await act(async () => root.unmount());
   });
 

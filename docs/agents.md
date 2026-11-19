@@ -787,7 +787,10 @@ database rule hides them from Slack, Teams and app agent lists, and from the
 previous release. The feature is per organization and off by default:
 `OPENGENI_ORG_AGENTS_ACCOUNT_IDS` lists the accounts that have it. The
 Console test chat runs in a per-organization test workspace
-(`organization_managed_workspaces.source = 'console_test'`).
+(`organization_managed_workspaces.source = 'console_test'`) as the tester's
+own test chat principal; nobody is a member of that workspace, and only the
+tester reads and continues their test chats, through the `test-chats` routes
+([Console roles](opengeni-console.md#roles)).
 
 ### How Console agents are stored
 

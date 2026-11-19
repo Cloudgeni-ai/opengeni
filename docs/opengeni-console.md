@@ -170,7 +170,7 @@ Console.
 | Role | Who | Console |
 | --- | --- | --- |
 | Full | Organization owners and admins, always | Everything. Switching an agent between code and Console management is owner-only |
-| Editor | A member given it | Viewer, plus creating and editing agents, test chats, and publishing or rolling back Console-managed agents (also moving running chats) |
+| Editor | A member given it | Viewer, plus creating and editing agents (including pointing "Runs on" at an organization machine or Sandbox Environment whose reach covers the workspaces the agent works in), test chats, and publishing or rolling back Console-managed agents (also moving running chats) |
 | Viewer | A member given it | Overview, Workspaces, Sessions with their detail and transcripts (under the review level) and cost, and Agents, versions, tool servers and an agent's sessions and usage, read-only |
 | None | Every other member (default) | Nothing (`403`) |
 
@@ -193,23 +193,24 @@ resets their Console role to none in the same transaction. Every role write
 for a person takes a per-person lock and checks they are still a member under
 it, so a concurrent offboarding is never overtaken.
 
-A person who runs test chats (an Editor, owner or admin) becomes a member of
-the organization's Console test workspace with only `workspace:read`,
-`sessions:create`, `sessions:read` and `sessions:control`: never
-`workspace:admin`, members, API keys, secrets or connections, so never
-`agents:manage`, and nothing they could create there outlives them. Every
-membership there is Console-granted (the workspace exists only for test
-chats); a new or narrowed one is audited as
-`member.console_test_access_granted`. It is removed, with a
-`member.console_test_access_removed` row in the same transaction, whenever
-their Console access drops below Editor: a Console role set below Editor, an
-owner or admin made a member, or offboarding, whatever role was stored. If
-the removal fails the request answers a retryable `503`
-(`console_access_cleanup_failed`) and repeating it (the same `operationId`
-for a member change) finishes it. Any chat started in the test workspace also
-needs Editor access (or an organization key) at that moment, so a membership
-left behind starts nothing. The app's People page shows "Console: Viewer" or
-"Console: Editor" next to such members.
+Test chats make nobody a member of anything. A test chat runs in the
+organization's Console test workspace as the tester's own test chat principal
+(`console-test:<tester>`, a service principal holding only `workspace:read`
+and `sessions:create`, `sessions:read` and `sessions:control` there, never
+`workspace:admin`, so never `agents:manage`), and nobody is a member of that
+workspace, owners and admins included. A tester reads and continues only their
+own test chats, through `GET`
+`/v1/organizations/:id/agents/:agentId/test-chats/:sessionId` (and `/events`)
+and `POST .../messages`, while their Console access is Editor or more; anyone
+else (another Editor, an owner) gets `404`, and the app's session routes refuse
+everyone without workspace access. Losing Editor access takes test chats away
+at once, with nothing to clean up. Owners and admins review test chats like any
+other managed workspace's, through Console's audited session routes. An
+Editor's agent can run on an organization machine whose reach the owners and
+admins set, so a test chat can use that machine.
+
+The app's People page shows "Console: Viewer" or "Console: Editor" next to
+members with a Console role.
 
 Roles are stored in `organization_console_roles` (migration 1508, one row
 per member or pending invitation, FORCE RLS on the account; the runtime may
@@ -217,7 +218,10 @@ read, insert and update, never delete). Only a person signed in as themselves
 (not an API key, an end user, or an agent acting for a person) holds a
 Console role (`holdsOrganizationMemberConsoleStanding`). Every role change is
 audited as `member.console_role_changed`, and a Viewer's or Editor's session
-reads are audited exactly as an admin's.
+reads are audited exactly as an admin's. An invitation's Console role is
+written in the invitation's own transaction. Follow-up: limit the table's
+`WITH CHECK` to account-level contexts (today any runtime context of the
+organization may write a row; the API is what authorizes role writes).
 
 ## Audit log
 
@@ -226,8 +230,8 @@ Every session detail open writes `session.transcript_viewed` (full) or
 before the response is returned; a transcript events read writes
 `session.transcript_viewed` too, unless the same reader already has one for that
 session from the last ten minutes, with the reader, workspace, session and end
-user. Review level changes, workspace kind changes, Console role changes and
-Console test workspace access are also logged. The
+user. Review level changes, workspace kind changes and Console role changes
+are also logged. The
 runtime role may only insert and read the log. Owners and admins read it in
 Console Settings.
 
@@ -293,7 +297,8 @@ Those routes answer 404 while the flag is off, which is how Console knows.
   to the same config hash.
 - **Test** starts a chat on the newest version in the organization's Console
   test workspace, with an optional pasted test token per tool server that
-  logs in each user, and shows it with the app's message timeline.
+  logs in each user, and shows it with the app's message timeline. Only its
+  tester sees and continues it (see Roles).
 - **Versions** lists each version's source (Console, Deploy or Chat), config
   hash and creation, compares two versions (Instructions and settings), and
   publishes or rolls back. "New chats only" is the default; "Also move running

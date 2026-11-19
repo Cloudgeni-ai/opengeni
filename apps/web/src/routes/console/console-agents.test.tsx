@@ -93,6 +93,7 @@ const { ManagedInConsoleAgents } = await import("@/components/agents/managed-in-
 const { orgAgentsApi, computeMenuOptions, computeOptionFor, runsOnForChoice, runsOnMenuOptions } =
   await import("@/lib/organization-agents");
 const { RunsOnField } = await import("./agent-editor");
+const { loadTestChat } = await import("./agent-test-chat");
 
 const at = "2026-11-18T10:00:00.000Z";
 
@@ -250,6 +251,29 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
       ],
       nextCursor: null,
     };
+  }
+  // Test chats: only through the agent's test-chats routes, never the app's session routes.
+  if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}`) {
+    return { workspaceId, sessionId: chatId, agentId, version: 3, status: "running" };
+  }
+  if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}/events`) {
+    return {
+      events: [
+        {
+          id: "13131313-1313-4131-8131-131313131313",
+          sessionId: chatId,
+          sequence: 1,
+          type: "user.message",
+          payload: { text: "Refund invoice 1042" },
+          createdAt: at,
+        },
+      ],
+      hasMore: false,
+      nextAfter: null,
+    };
+  }
+  if (method === "POST" && path === `${base}/agents/${agentId}/test-chats/${chatId}/messages`) {
+    return { id: "14141414-1414-4141-8141-141414141414" };
   }
   if (method === "GET" && path === `/v1/workspaces/${workspaceId}/organization-agents`) {
     // The server lists only published agents, and none while the flag is off.
@@ -697,6 +721,24 @@ describe("Tool servers", () => {
     expect(
       toolServerChanges({ ...shared, headers: "Authorization: Bearer k" }, null).sharedHeaders,
     ).toEqual({ Authorization: "Bearer k" });
+  });
+});
+
+describe("Test chat", () => {
+  test("reads and continues your own test chat through its test-chats routes", async () => {
+    const api = orgAgentsApi(client as never, organizationId);
+    requestJson.mockClear();
+    const loaded = await loadTestChat(api, agentId, { workspaceId, sessionId: chatId });
+    expect(loaded.status).toBe("running");
+    expect(loaded.events.map((event) => event.type)).toEqual(["user.message"]);
+    await api.sendTestChatMessage(agentId, chatId, { message: "And invoice 1043?" });
+    const paths = requestJson.mock.calls.map(([method, path]) => `${method} ${path}`);
+    const testChat = `/v1/organizations/${organizationId}/agents/${agentId}/test-chats/${chatId}`;
+    expect(paths.sort()).toEqual(
+      [`GET ${testChat}`, `GET ${testChat}/events`, `POST ${testChat}/messages`].sort(),
+    );
+    // Nobody is a member of the test workspace: no app session route is used.
+    expect(paths.some((path) => path.includes("/v1/workspaces/"))).toBe(false);
   });
 });
 
