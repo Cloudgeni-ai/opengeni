@@ -69,6 +69,14 @@ test("the summary names where your own thing works, in a few words", () => {
       row("Sales", false),
     ]),
   ).toBe("Works in your Personal workspace, Design and 2 more");
+  // On, but its connector isn't turned on there: it doesn't work there yet.
+  expect(
+    whereItWorksSummary([
+      personal,
+      row("Design", true),
+      row("Support", true, { connectorOff: true }),
+    ]),
+  ).toBe("Works in your Personal workspace and Design");
 });
 
 const LOGIN = "11111111-1111-4111-8111-111111111111";

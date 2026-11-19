@@ -9,6 +9,7 @@ import { connectionAccountLabel } from "@opengeni/contracts/connection-account-l
 import {
   isSubjectOwnPersonalWorkspace,
   issueSelfUserResourceGrant,
+  listEnabledMcpCapabilityServers,
   listEnrollments,
   listOwnSubscriptionCoreConnections,
   listSelfUserResourceAuthorities,
@@ -20,6 +21,10 @@ import { hasPermission, requirePermission, type AccessGrantAuthorization } from 
 import type { AppDependencies } from "../dependencies";
 import { releaseAdmissionBlocksAfterAccessChange } from "./admission-release";
 import { listOwnConnectionMetadata } from "../domain/personal-connection-delegations";
+import {
+  loginConnectorEndpoint,
+  loginConnectorTurnedOn,
+} from "../domain/personal-workspace-connectors";
 import { requireSessionAuthorization } from "../session-authorization";
 import {
   requireVerifiedOwningUser,
@@ -190,6 +195,12 @@ export type OwnResourceHere = {
   alwaysOn: boolean;
   /** You may turn it on here; turning it off needs no permission. */
   canChange: boolean;
+  /**
+   * A connector's login whose connector this shared workspace hasn't turned
+   * on: nothing here can use it until the connector is turned on, whether or
+   * not the login is on. Absent for anything else.
+   */
+  connectorOff?: true;
 };
 
 const USE_ACTION = {
@@ -322,6 +333,46 @@ function ownResourceHere(
 }
 
 /**
+ * Which of your own logins this workspace can't use because it hasn't turned
+ * on the connector each signs in to. Only a connector's login (one made for an
+ * MCP endpoint) in a shared workspace is checked: your Personal workspace
+ * carries the connectors behind your own logins, and other logins have no
+ * connector. A login this workspace may not read is left out.
+ */
+async function loginsWithConnectorOffHere(
+  deps: Pick<UserResourceGrantDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+  personal: boolean,
+  connectionIds: ReadonlySet<string>,
+): Promise<Set<string>> {
+  const off = new Set<string>();
+  if (personal || connectionIds.size === 0) return off;
+  let logins: Awaited<ReturnType<typeof listOwnConnectionMetadata>>;
+  try {
+    logins = (
+      await listOwnConnectionMetadata(deps.db, {
+        accountId: authorization.grant.accountId,
+        workspaceId,
+        subjectId: authorization.grant.subjectId,
+        reach: "anywhere",
+        includeInactive: true,
+        connectionIds,
+      })
+    ).filter((login) => loginConnectorEndpoint(login) !== null);
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "42501") return off;
+    throw error;
+  }
+  if (logins.length === 0) return off;
+  const servers = await listEnabledMcpCapabilityServers(deps.db, workspaceId);
+  for (const login of logins) {
+    if (!loginConnectorTurnedOn(servers, login)) off.add(login.id);
+  }
+  return off;
+}
+
+/**
  * Whether your own login, plan or machine works in this workspace for your
  * own messages. Null when it isn't yours or you can't see it here.
  */
@@ -348,7 +399,7 @@ async function readOwnResourceHere(
     workspaceId,
     subjectId: authorization.grant.subjectId,
   });
-  return ownResourceHere(
+  const here = ownResourceHere(
     authorization,
     authority,
     workspaceId,
@@ -356,6 +407,15 @@ async function readOwnResourceHere(
     personal,
     Date.now(),
   );
+  if (input.resourceKind !== "connection") return here;
+  const off = await loginsWithConnectorOffHere(
+    deps,
+    authorization,
+    workspaceId,
+    personal,
+    new Set([input.resourceId]),
+  );
+  return off.has(input.resourceId) ? { ...here, connectorOff: true } : here;
 }
 
 /** One of your own things as one workspace sees it. */
@@ -403,6 +463,16 @@ export async function listOwnResourcesHere(
         ...ownResourceHere(authorization, authority, workspaceId, resourceKind, personal, now),
       });
     }
+  }
+  const logins = new Set(
+    resources
+      .filter((resource) => resource.resourceKind === "connection")
+      .map((resource) => resource.resourceId),
+  );
+  const off = await loginsWithConnectorOffHere(deps, authorization, workspaceId, personal, logins);
+  for (const resource of resources) {
+    if (resource.resourceKind === "connection" && off.has(resource.resourceId))
+      resource.connectorOff = true;
   }
   return resources;
 }

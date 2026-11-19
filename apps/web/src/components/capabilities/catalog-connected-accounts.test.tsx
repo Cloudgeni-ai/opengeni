@@ -867,6 +867,91 @@ describe("catalog connected accounts", () => {
       await view.unmount();
     });
 
+    test("your own login that is on where the connector isn't says so, and offers Use it here", async () => {
+      const mine = account({ metadata: { email: "mine@example.test", mcpUrl: item.mcpUrl } });
+      const row = (overrides: Record<string, unknown>) => ({
+        personal: false,
+        current: false,
+        on: true,
+        alwaysOn: false,
+        canChange: true,
+        ...overrides,
+      });
+      let connectorOn = false;
+      const getOwnResourceReach = mock(
+        async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+          resourceKind: "connection" as const,
+          resourceId: resource.resourceId,
+          workspaces: [
+            row({ workspaceId: "personal", name: "Personal", personal: true, alwaysOn: true }),
+            row({ workspaceId: "design", name: "Design", connectorOff: true }),
+            row({
+              workspaceId: "team",
+              name: "Team",
+              current: true,
+              ...(connectorOn ? {} : { connectorOff: true }),
+            }),
+          ],
+        }),
+      );
+      const setOwnResourceReach = mock(async () => {
+        throw new Error("Use it here doesn't change where the login works");
+      });
+      const onUseOwnLoginHere = mock(() => undefined);
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const show = async (enabled: boolean) => {
+        await act(async () =>
+          root.render(
+            <CatalogConnectedAccounts
+              item={{ ...item, enabled }}
+              connections={[mine]}
+              management={management()}
+              ownReach={{
+                client: { getOwnResourceReach, setOwnResourceReach },
+                workspaceId: "team",
+              }}
+              onUseOwnLoginHere={enabled ? undefined : onUseOwnLoginHere}
+            />,
+          ),
+        );
+        await act(async () => {});
+      };
+      const useHere = () =>
+        [...container.querySelectorAll("button")].filter(
+          (button) => button.textContent === "Use it here",
+        );
+
+      await show(false);
+      // "On" alone would read as usable: each workspace without Slack says so.
+      expect(container.textContent).toContain(
+        "Slack isn't turned on here yet, so nothing here uses it",
+      );
+      expect(container.textContent).toContain(
+        "This workspace. Slack isn't turned on here yet, so nothing here uses it",
+      );
+      expect(
+        [...container.querySelectorAll('[role="switch"]')].map((entry) =>
+          entry.getAttribute("aria-checked"),
+        ),
+      ).toEqual(["true", "true", "true"]);
+      // Only this workspace's row offers it: the same step as Connect.
+      expect(useHere()).toHaveLength(1);
+      await act(async () => useHere()[0]!.click());
+      expect(onUseOwnLoginHere).toHaveBeenCalledTimes(1);
+      expect(setOwnResourceReach).not.toHaveBeenCalled();
+
+      // Once Slack is on here, the rows are read again and the offer goes.
+      connectorOn = true;
+      await show(true);
+      expect(getOwnResourceReach).toHaveBeenCalledTimes(2);
+      expect(useHere()).toHaveLength(0);
+      expect(container.textContent).not.toContain("This workspace. Slack isn't turned on here yet");
+      await act(async () => root.unmount());
+      container.remove();
+    });
+
     test("a service that can't identify accounts offers no Add, and says why", async () => {
       const mine = account({ accountIdentity: "single", metadata: { email: "me@example.test" } });
       const view = await render(

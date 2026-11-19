@@ -268,6 +268,8 @@ export function CatalogItemPage({
   // --- Header actions: at most one primary, then the ⋯ menu. -----------------
   let primary: ReactNode = null;
   const menu: ReactNode[] = [];
+  // While Connect is the sign-in step, your own login's row offers the same step.
+  let useOwnLoginHere: (() => void) | undefined;
   if (isSkill) {
     const updateAvailable = item.metadata.updateAvailable === true;
     if (!item.enabled || updateAvailable) {
@@ -419,6 +421,7 @@ export function CatalogItemPage({
       </Button>
     );
   } else if (signInFlow) {
+    useOwnLoginHere = setupBlocked ? undefined : onConnectAccount;
     primary = (
       <Button type="button" size="sm" className={buttonClass} onClick={onConnectAccount}>
         {`Connect ${title}`}
@@ -818,6 +821,9 @@ export function CatalogItemPage({
           workspaceId={workspaceId}
           workspaces={workspaces}
           {...connectionAccounts}
+          // Your own login works here once the connector is on: the same
+          // sign-in step as Connect, which offers to use that login.
+          onUseOwnLoginHere={useOwnLoginHere}
           {...(accountManagement
             ? {
                 management: {

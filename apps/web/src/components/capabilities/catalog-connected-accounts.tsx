@@ -30,6 +30,7 @@ import {
   OwnWhereItWorks,
   ownReachHasNothingToChoose,
   useOwnResourceReach,
+  type OwnLoginConnector,
   type OwnReachClient,
 } from "@opengeni/react/app/components/own-where-it-works";
 
@@ -83,6 +84,11 @@ export type CatalogConnectedAccountsProps = {
   workspaces?: readonly AccountOriginWorkspace[] | undefined;
   /** Your own logins: choose where each works for your own messages, asked from this workspace. */
   ownReach?: { client: OwnReachClient; workspaceId: string } | undefined;
+  /**
+   * Turn this connector on here with your own login, while it isn't on here
+   * (the connect card's "Use it here"). Offered on this workspace's row.
+   */
+  onUseOwnLoginHere?: (() => void) | undefined;
 };
 
 /** Under your own login: the workspaces where it works for your own messages. */
@@ -90,10 +96,12 @@ function OwnLoginWhereItWorks({
   ownReach,
   account,
   label,
+  connector,
 }: {
   ownReach: { client: OwnReachClient; workspaceId: string };
   account: ConnectionMetadata;
   label: string;
+  connector: OwnLoginConnector;
 }) {
   const reach = useOwnResourceReach({
     ...ownReach,
@@ -107,7 +115,7 @@ function OwnLoginWhereItWorks({
     <div className="min-w-0 basis-full">
       <p className="m-0 text-xs leading-4.5 font-medium text-fg">{OWN_WHERE_IT_WORKS_TITLE}</p>
       <p className="m-0 text-xs leading-4.5 text-fg-muted">{OWN_WHERE_IT_WORKS_DESCRIPTION}</p>
-      <OwnWhereItWorks name={label} reach={reach} />
+      <OwnWhereItWorks name={label} reach={reach} connector={connector} />
     </div>
   );
 }
@@ -184,6 +192,7 @@ export function CatalogConnectedAccounts({
   workspaceId,
   workspaces,
   ownReach,
+  onUseOwnLoginHere,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
@@ -382,7 +391,14 @@ export function CatalogConnectedAccounts({
                   {ownReach &&
                   account.subjectId !== null &&
                   account.subjectId === management?.viewerSubjectId ? (
-                    <OwnLoginWhereItWorks ownReach={ownReach} account={account} label={label} />
+                    <OwnLoginWhereItWorks
+                      // Turning the connector on changes what each workspace says: read again.
+                      key={`${account.id}:${item.enabled}`}
+                      ownReach={ownReach}
+                      account={account}
+                      label={label}
+                      connector={{ name: item.name, onUseHere: onUseOwnLoginHere }}
+                    />
                   ) : null}
                 </li>
               );

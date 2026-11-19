@@ -91,6 +91,7 @@ function reachEntry(
     on: here.on,
     alwaysOn: here.alwaysOn,
     canChange: here.canChange,
+    ...(here.connectorOff ? { connectorOff: true } : {}),
   };
 }
 

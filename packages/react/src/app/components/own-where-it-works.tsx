@@ -5,7 +5,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Button } from "../../ui/button";
 import { DetailSection } from "../../ui/detail-sheet";
 import { Notice } from "../../ui/notice";
-import { SettingRow, SettingRowGroup } from "../../ui/setting-row";
+import { SettingRow, SettingRowGroup, SettingRowLink } from "../../ui/setting-row";
 import { Skeleton } from "../../ui/skeleton";
 import { Switch } from "../../ui/switch";
 import { userErrorText } from "../../ui/api-error";
@@ -162,11 +162,30 @@ export function ownReachHasNothingToChoose(
   return workspaces.every((row) => row.alwaysOn);
 }
 
-function rowDescription(row: OwnResourceReachWorkspace): string | undefined {
+/**
+ * A login's connector: what it is called, and how to turn it on here with
+ * your own login (the connect card's "Use it here") when the page can.
+ */
+export type OwnLoginConnector = {
+  name: string;
+  /** Offered on this workspace's row while the connector isn't turned on here. */
+  onUseHere?: (() => void) | undefined;
+  /** Or the connector's page here, where "Use it here" is offered. */
+  useHereHref?: string | undefined;
+};
+
+function rowDescription(
+  row: OwnResourceReachWorkspace,
+  connector: OwnLoginConnector | undefined,
+): string | undefined {
   if (row.alwaysOn) return "Your Personal workspace. It always works here.";
   const where = row.personal ? "Your Personal workspace" : row.current ? "This workspace" : null;
+  // "On" alone would read as usable: nothing here uses it until its connector is on.
+  const connectorOff = row.connectorOff
+    ? `${connector?.name ?? "Its connector"} isn't turned on here yet, so nothing here uses it`
+    : null;
   const locked = row.canChange ? null : "You can't add your own things here";
-  const parts = [where, locked].filter((part): part is string => part !== null);
+  const parts = [where, connectorOff, locked].filter((part): part is string => part !== null);
   return parts.length > 0 ? parts.join(". ") : undefined;
 }
 
@@ -184,10 +203,13 @@ function disabledReason(row: OwnResourceReachWorkspace): string | undefined {
 export function OwnWhereItWorks({
   name,
   reach,
+  connector,
 }: {
   /** The login, plan or machine, for the switches' accessible names. */
   name: string;
   reach: ReturnType<typeof useOwnResourceReach>;
+  /** For a login: its connector, which a workspace may not have turned on. */
+  connector?: OwnLoginConnector | undefined;
 }) {
   const { state, pending, rowErrors, setOn, retry } = reach;
   if (state.status === "loading") {
@@ -224,7 +246,14 @@ export function OwnWhereItWorks({
         <SettingRow
           key={row.workspaceId}
           label={row.name}
-          description={rowDescription(row)}
+          description={rowDescription(row, connector)}
+          hint={
+            row.current && row.connectorOff && (connector?.onUseHere || connector?.useHereHref) ? (
+              <SettingRowLink onClick={connector.onUseHere} href={connector.useHereHref}>
+                Use it here
+              </SettingRowLink>
+            ) : undefined
+          }
           error={rowErrors[row.workspaceId]}
           control={
             <Switch

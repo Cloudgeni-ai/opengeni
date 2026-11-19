@@ -6657,6 +6657,12 @@ export type OwnResourceReachWorkspace = {
   alwaysOn: boolean;
   /** You may turn it on or off here. */
   canChange: boolean;
+  /**
+   * A connector's login whose connector this shared workspace hasn't turned
+   * on: nothing here can use it until the connector is turned on, even when
+   * it is on. Absent otherwise.
+   */
+  connectorOff?: boolean;
 };
 export type OwnResourceReachResponse = {
   resourceKind: OwnResourceReachKind;

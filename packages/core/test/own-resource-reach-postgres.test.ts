@@ -118,6 +118,59 @@ async function addLogin(f: Fixture, workspaceId: string) {
   return row!.id;
 }
 
+/** Your own sign-in to a connector, made for its MCP endpoint, as connecting one makes it. */
+async function addConnectorLogin(f: Fixture, workspaceId: string, item: Connector) {
+  const [row] = await app.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${f.accountId}, true),
+      set_config('opengeni.workspace_id', ${workspaceId}, true),
+      set_config('opengeni.subject_id', ${f.owner}, true)`;
+    return await tx<{ id: string }[]>`
+      insert into connections (
+        account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted, metadata
+      ) values (
+        ${f.accountId}, ${workspaceId}, ${f.owner}, ${item.providerDomain}, 'oauth2',
+        'ciphertext', ${tx.json({ mcpUrl: item.endpoint })}
+      ) returning id`;
+  });
+  return row!.id;
+}
+
+type Connector = { id: string; endpoint: string; providerDomain: string };
+
+function connector(): Connector {
+  const suffix = crypto.randomUUID().slice(0, 8);
+  return {
+    id: `mcp:notes-${suffix}`,
+    endpoint: `https://notes-${suffix}.example.test/mcp`,
+    providerDomain: `notes-${suffix}.example.test`,
+  };
+}
+
+/** Turn the connector on in a workspace for each member's own account. */
+async function turnOnConnector(f: Fixture, workspaceId: string, item: Connector) {
+  await shared.admin`insert into capability_catalog_items (
+      id, account_id, workspace_id, kind, source, name, endpoint_url,
+      auth_model, auth_kind, provider_domain, mcp_url, metadata
+    ) values (
+      ${item.id}, ${f.accountId}, ${workspaceId}, 'mcp', 'manual', 'Notes', ${item.endpoint},
+      'oauth2', 'oauth2', ${item.providerDomain}, ${item.endpoint},
+      ${shared.admin.json({ mcpServerId: item.id.slice("mcp:".length) })}
+    )`;
+  await shared.admin`insert into capability_installations (
+      account_id, workspace_id, capability_id, kind, status, config, metadata
+    ) values (
+      ${f.accountId}, ${workspaceId}, ${item.id}, 'mcp', 'active',
+      ${shared.admin.json({
+        connectionRef: {
+          providerDomain: item.providerDomain,
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      })},
+      ${shared.admin.json({ mcpConnectivity: { status: "auth_deferred" } })}
+    )`;
+}
+
 async function connectPlan(f: Fixture) {
   await shared.admin`delete from subscription_settings
     where account_id = ${f.accountId}::uuid and workspace_id is null`;
@@ -269,6 +322,56 @@ describe("where your own things work (real PostgreSQL)", () => {
     await expect(
       setOwnResourceHere(deps(), f.authorization(f.origin), f.origin, { ...resource, on: true }),
     ).rejects.toBeInstanceOf(OwnResourceNotFoundError);
+  }, 180_000);
+
+  test("a connector's login says where its connector isn't turned on, even where the login is on", async () => {
+    const f = await fixture();
+    const notes = connector();
+    const resourceId = await addConnectorLogin(f, f.origin, notes);
+    const resource = { resourceKind: "connection" as const, resourceId };
+    const plain = await addLogin(f, f.origin);
+
+    // On through a standing grant, but the connector isn't turned on there.
+    expect(
+      await setOwnResourceHere(deps(), f.authorization(f.other), f.other, {
+        ...resource,
+        on: true,
+      }),
+    ).toMatchObject({ on: true, connectorOff: true });
+    expect(await reach(f, f.other, resource)).toEqual({
+      personal: false,
+      on: true,
+      alwaysOn: false,
+      canChange: true,
+      connectorOff: true,
+    });
+    const listed = async (workspaceId: string) =>
+      Object.fromEntries(
+        (await listOwnResourcesHere(deps(), f.authorization(workspaceId), workspaceId)).map(
+          (entry) => [entry.resourceId, entry.connectorOff ?? false],
+        ),
+      );
+    // A login that isn't a connector's sign-in has no connector to turn on.
+    expect(await listed(f.other)).toMatchObject({ [resourceId]: true, [plain]: false });
+    // Your Personal workspace carries the connectors behind your own logins.
+    expect(await reach(f, f.personal, resource)).toEqual({
+      personal: true,
+      on: true,
+      alwaysOn: true,
+      canChange: false,
+    });
+    expect(await listed(f.personal)).toMatchObject({ [resourceId]: false, [plain]: false });
+
+    await turnOnConnector(f, f.other, notes);
+    expect(await reach(f, f.other, resource)).toEqual({
+      personal: false,
+      on: true,
+      alwaysOn: false,
+      canChange: true,
+    });
+    expect(await listed(f.other)).toMatchObject({ [resourceId]: false });
+    // Still off where it was added, until it is turned on there too.
+    expect(await reach(f, f.origin, resource)).toMatchObject({ on: true, connectorOff: true });
   }, 180_000);
 
   test("My things lists each of your own things with where it works and its name", async () => {

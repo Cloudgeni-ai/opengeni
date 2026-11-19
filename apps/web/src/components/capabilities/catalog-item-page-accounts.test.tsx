@@ -445,4 +445,88 @@ describe("connector page account management", () => {
       }
     }
   });
+
+  test("your own login on a connector that isn't on here offers Use it here, the same step as Connect", async () => {
+    const off = item({
+      connectionRef: {
+        providerDomain: "gmailmcp.googleapis.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    } as Partial<CapabilityCatalogItem>);
+    const mine = {
+      id: "mine",
+      accountId: "acct",
+      workspaceId: "elsewhere",
+      authorityId: "authority-mine",
+      subjectId: "me",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      status: "active",
+      metadata: { gmailEmail: "me@example.test", mcpUrl: off.mcpUrl },
+      grantedScopes: [],
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastUsedAt: null,
+      lastError: null,
+      version: 1,
+      createdBySubjectId: "me",
+      updatedBySubjectId: "me",
+      createdAt: "2026-11-01T00:00:00Z",
+      updatedAt: "2026-11-01T00:00:00Z",
+    } as unknown as ConnectionMetadata;
+    const client = {
+      getOwnResourceReach: mock(async () => ({
+        resourceKind: "connection" as const,
+        resourceId: "mine",
+        workspaces: [
+          {
+            workspaceId: "ws",
+            name: "Team",
+            personal: false,
+            current: true,
+            on: true,
+            alwaysOn: false,
+            canChange: true,
+            connectorOff: true,
+          },
+        ],
+      })),
+      setOwnResourceReach: mock(async () => {
+        throw new Error("not called");
+      }),
+    };
+    for (const setupUnavailable of [undefined, { title: "Not available", description: "Later." }]) {
+      const onConnectAccount = mock(() => {});
+      const view = await render(
+        <CatalogItemPage
+          {...common}
+          item={off}
+          onAction={() => {}}
+          onConnectAccount={onConnectAccount}
+          setupUnavailable={setupUnavailable as never}
+          connectionAccounts={{ connections: [mine], ownReach: { client, workspaceId: "ws" } }}
+          accountManagement={{ viewerSubjectId: "me", canWrite: true, onRemove: async () => true }}
+        />,
+      );
+      try {
+        await act(async () => {});
+        expect(view.container.textContent).toContain(
+          "This workspace. Gmail isn't turned on here yet, so nothing here uses it",
+        );
+        const useHere = buttons(view.container, "Use it here");
+        if (setupUnavailable) {
+          // Setting it up isn't possible here yet, so neither is this.
+          expect(useHere).toHaveLength(0);
+        } else {
+          expect(useHere).toHaveLength(1);
+          await act(async () => useHere[0]!.click());
+          expect(onConnectAccount).toHaveBeenCalledTimes(1);
+          expect(client.setOwnResourceReach).not.toHaveBeenCalled();
+        }
+      } finally {
+        await view.unmount();
+      }
+    }
+  });
 });
