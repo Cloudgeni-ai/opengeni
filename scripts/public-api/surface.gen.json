@@ -16710,7 +16710,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.archived\\\"\",\"\\\"agent.created\\\"\",\"\\\"agent.deployed\\\"\",\"\\\"agent.management_changed\\\"\",\"\\\"agent.published\\\"\",\"\\\"agent.updated\\\"\",\"\\\"agent.version_saved\\\"\",\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"tool_credential.deleted\\\"\",\"\\\"tool_credential.written\\\"\",\"\\\"tool_server.created\\\"\",\"\\\"tool_server.deleted\\\"\",\"\\\"tool_server.updated\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
+        "$": "enum=[\"\\\"agent.archived\\\"\",\"\\\"agent.created\\\"\",\"\\\"agent.deployed\\\"\",\"\\\"agent.management_changed\\\"\",\"\\\"agent.published\\\"\",\"\\\"agent.updated\\\"\",\"\\\"agent.version_saved\\\"\",\"\\\"member.console_role_changed\\\"\",\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"tool_credential.deleted\\\"\",\"\\\"tool_credential.written\\\"\",\"\\\"tool_server.created\\\"\",\"\\\"tool_server.deleted\\\"\",\"\\\"tool_server.updated\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
       }
     },
     "ConsoleAuditEvent": {
@@ -16769,6 +16769,14 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\",\"\\\"console_test\\\"\"]"
+      }
+    },
+    "ConsoleMemberRole": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"editor\\\"\",\"\\\"none\\\"\",\"\\\"viewer\\\"\"]"
       }
     },
     "ConsoleModelSpend": {
@@ -17525,6 +17533,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.consoleRole": "ref(ConsoleMemberRole)?",
         "$.email": "string!",
         "$.expiresAt": "string!",
         "$.initialWorkspaceIds": "array?",
