@@ -2805,6 +2805,9 @@ async function createSessionForRequestInFileScope(
           workspaceId,
           rawPayload as Record<string, unknown>,
           {
+            // An end user acting through the organization key counts here: the
+            // session proxy drops browser-sent organization agent fields, so
+            // they come only from the product's `createSession` hook.
             manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage"),
           },
         )
@@ -5694,7 +5697,12 @@ export async function updateSessionMcpApprovalPolicy(
     sessionId,
     serverId,
     requireApproval: normalizedPolicy,
-    manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage"),
+    // The session proxy passes this route through from the browser, so an end
+    // user acting through the organization key never inherits its
+    // agents:manage here; the product's server (the key without an actor) can.
+    manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage", {
+      endUsers: false,
+    }),
   });
 
   const outcome: { server?: SessionMcpApprovalPolicyTarget } = {};

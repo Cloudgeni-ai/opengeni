@@ -736,4 +736,77 @@ describe("session create with an organization agent over HTTP", () => {
     // An organization key holding agents:manage may.
     expect((await policy("notes", false, fixture.key)).status).toBe(200);
   }, 120_000);
+
+  test("an end user acting through a full organization key never inherits its agents:manage", async () => {
+    if (!fixture) return;
+    await shared!
+      .admin`insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
+      values (${fixture.accountId}, 'notes', 'Notes', 'https://notes.example.com/mcp', 'none')
+      on conflict do nothing`;
+    const created = await call("POST", agents(), {
+      key: "asked-end-user",
+      name: "asked-end-user",
+      instructions: "Take notes.",
+      config: {
+        model: "scripted-model",
+        toolServers: [
+          {
+            server: "notes",
+            tools: { mode: "selected", enabled: ["read", "write"] },
+            approval: { ask: ["write"] },
+          },
+        ],
+      },
+    });
+    expect(created.status).toBe(201);
+    const published = await call("POST", `${agents()}/${created.body.agent.id}/publish`, {
+      version: 1,
+      expectedVersion: created.body.agent.rowVersion,
+    });
+    expect(published.status).toBe(200);
+    // The browser's end user, as the session proxy forwards it: the full key with an actor.
+    const endUser = {
+      ...fixture.key,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({
+          mode: "external",
+          identity: { source: "product", externalId: `end-user-${crypto.randomUUID()}` },
+          membership: {
+            permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+          },
+        }),
+      ),
+    };
+    const chat = await call(
+      "POST",
+      sessions(),
+      { initialMessage: "hi", agent: "asked-end-user", visibility: "workspace" },
+      endUser,
+    );
+    expect(chat.status, JSON.stringify(chat.body)).toBe(202);
+    const policy = (requireApproval: unknown, key: Record<string, string>) =>
+      call(
+        "PATCH",
+        `${sessions()}/${chat.body.id}/mcp-servers/notes/approval-policy`,
+        { requireApproval },
+        key,
+      );
+    // The end user may ask first for more, but never turn the agent's "Ask first" off.
+    expect((await policy(true, endUser)).status).toBe(200);
+    expect((await policy(["write"], endUser)).status).toBe(200);
+    for (const requireApproval of [false, ["read"]]) {
+      const refused = await policy(requireApproval, endUser);
+      expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([
+        403,
+        "forbidden",
+        "agents_manage_required",
+      ]);
+    }
+    const [row] = await shared!.admin<{ require_approval: unknown }[]>`
+      select require_approval from session_mcp_servers
+      where session_id = ${chat.body.id} and server_id = 'notes'`;
+    expect(row!.require_approval).toEqual(["write"]);
+    // The product's server (the same key without an actor) still may.
+    expect((await policy(false, fixture.key)).status).toBe(200);
+  }, 120_000);
 });

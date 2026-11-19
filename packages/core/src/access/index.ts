@@ -1175,10 +1175,16 @@ export function authorizationHoldsOrganizationAdministration(
  * it (directly, or for one of its end users) whose scope includes the
  * workspace, or the organization's owner or an admin. A workspace membership,
  * a workspace key or a role on one workspace never counts.
+ *
+ * `endUsers: false` refuses an end user acting through the key (the external
+ * actor header): use it on routes the session proxy passes through from the
+ * browser, where the end user, not the product's server, decides the request.
+ * The same key without an actor (the product's server) still counts.
  */
 export function authorizationHoldsOrganizationPermission(
   authorization: AccessGrantAuthorization | undefined,
   permission: Permission,
+  options: { endUsers?: boolean } = {},
 ): boolean {
   if (!authorization) return false;
   const { grant } = authorization;
@@ -1198,6 +1204,7 @@ export function authorizationHoldsOrganizationPermission(
   const external = externalActorContexts.get(context);
   if (external) {
     return (
+      options.endUsers !== false &&
       external.identity.accountId === grant.accountId &&
       organizationWorkspaceInScope(external.workspaceScope, grant.workspaceId) &&
       hasPermission(external.permissions, permission, external.permissionMode)

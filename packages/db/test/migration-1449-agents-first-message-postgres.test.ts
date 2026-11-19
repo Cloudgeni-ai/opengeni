@@ -15,6 +15,7 @@ import {
 import { migrate } from "../src/migrate";
 
 const firstMigration = "1449_agent_revisions_content_bounds_check.sql";
+const lastMigration = "1452_agent_revisions_first_message_backfill.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;
@@ -67,7 +68,14 @@ describe.skipIf(!realDatabase)("1449 to 1452 agents First-message cleanup", () =
           ${firstMessage})`;
     }
 
-    await migrate(owned!.ownerUrl);
+    // Through the cleanup (1449 to 1452), where the assertions below belong.
+    const source = join(import.meta.dir, "../drizzle");
+    for (const name of await readdir(source)) {
+      if (name.endsWith(".sql") && name >= firstMigration && name <= lastMigration) {
+        await copyFile(join(source, name), join(prefix!, name));
+      }
+    }
+    await migrate(owned!.ownerUrl, undefined, { migrationsDirectory: prefix! });
 
     const rows = await admin<{ revision: number; instructions: string; first_message: string }[]>`
       select revision, instructions, first_message from agent_revisions
@@ -97,5 +105,20 @@ describe.skipIf(!realDatabase)("1449 to 1452 agents First-message cleanup", () =
       select relname as name from pg_class
       where relname = 'agent_revisions' and not relforcerowsecurity`;
     expect([...unforced]).toEqual([]);
+
+    // Later migrations (which add their own checks) keep the cleaned rows and
+    // the validated bounds.
+    await migrate(owned!.ownerUrl);
+    const later = await admin<{ revision: number; instructions: string; first_message: string }[]>`
+      select revision, instructions, first_message from agent_revisions
+      where agent_id = ${agentId} order by revision`;
+    expect([...later]).toEqual([...rows]);
+    const laterChecks = await admin<{ name: string; validated: boolean }[]>`
+      select conname as name, convalidated as validated from pg_constraint
+      where conrelid = 'agent_revisions'::regclass and contype = 'c' order by conname`;
+    expect([...laterChecks]).toContainEqual({
+      name: "agent_revisions_content_bounds_check",
+      validated: true,
+    });
   }, 600_000);
 });

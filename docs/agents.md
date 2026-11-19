@@ -672,7 +672,13 @@ version (any version in the Console test workspace); otherwise 404
 `agent_not_found`. After create, changing "Ask first" for one of the agent's
 servers (`PATCH .../mcp-servers/:serverId/approval-policy`) follows the same
 rule: asking first for more is allowed, asking for less than the agent needs
-`agents:manage` (403, `details.code` `agents_manage_required`).
+`agents:manage` (403, `details.code` `agents_manage_required`). On that route
+an end user acting through the organization key (the external actor header,
+as the session proxy forwards the browser) never holds the key's
+`agents:manage`; the product's server, sending the same key without an actor,
+does. At create the key's `agents:manage` still counts for its end users,
+since the session proxy takes the agent and its overrides only from the
+host's `createSession` hook.
 
 What a chat changed is stored per session (`sessions.agent_overrides`,
 `{setting: {agent, chat}}`), returned as `Session.orgAgent.overrides`, and
@@ -706,6 +712,12 @@ server's login comes from, in order:
 
 A `per_user` server never falls back to a shared key. Without a login the
 chat runs without that server and records `session.tool_server.unavailable`.
+
+Each turn checks that the agent is not archived and still reaches the chat's
+workspace (a managed workspace, or one the agent was added to). If not,
+existing chats lose the organization's secrets from the next turn: shared-key
+servers and stored end-user logins are unavailable (`missing_credentials`),
+while the credential provider and the chat's own headers still apply.
 
 Stored secrets stay with the origin they were given for. Changing a tool
 server's URL to another origin drops its shared key (unless the same request
