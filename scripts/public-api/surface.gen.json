@@ -25881,6 +25881,7 @@
         "$": "object",
         "$.alwaysOn": "boolean!",
         "$.canChange": "boolean!",
+        "$.connectorOff": "boolean?",
         "$.current": "boolean!",
         "$.name": "string!",
         "$.on": "boolean!",

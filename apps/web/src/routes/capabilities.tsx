@@ -1973,7 +1973,18 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
           tokenAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-token"),
         }}
         socialConnections={selectedSocialConnections}
-        connectionAccounts={catalogConnectionAccounts}
+        connectionAccounts={{
+          ...catalogConnectionAccounts,
+          ownReach: {
+            ...catalogConnectionAccounts.ownReach,
+            // Your login's switch turned this connector on here: show it on.
+            onConnectorTurnedOn: (target) => {
+              if (target !== workspaceId) return;
+              void refresh();
+              onRuntimeChanged();
+            },
+          },
+        }}
         accountManagement={{
           viewerSubjectId: context.accessContext?.subjectId ?? null,
           canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),

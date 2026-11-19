@@ -111,9 +111,10 @@ export type McpCapabilityConnect = {
   /**
    * Your own login the card offers to use here instead of a sign-in (D-54):
    * one that is off in this workspace, or your one login for a capability
-   * not set up here yet (on here or not). Offered only while the card would
-   * connect your own account: where others could use a shared connection,
-   * once you choose "Only me". The card asks once whether to use it.
+   * not set up here yet (on here or not). Offered while the card would
+   * connect your own account, which it starts with when you have such a
+   * login; choosing a connection for everyone instead withdraws it. The card
+   * asks once whether to use it.
    */
   offHere: ConnectionMetadata | null;
   waiting: boolean;
@@ -328,15 +329,17 @@ export function useMcpCapabilityConnect({
       (!resolved.connectionRef || resolved.connectionRef.subjectScope === "subject")
     ) {
       // Not set up here yet, but the person may already have their own login
-      // for it, turned on here or not. Where someone else could use a shared
-      // connection the card asks who can use it first, and offers the login
-      // once that is only the person (see `offHere`). Only an offer: if
-      // this read fails the card signs in as usual.
+      // for it, turned on here or not. The card offers it first, as theirs
+      // (each person's own account), without asking who can use it: they
+      // already chose to connect their own account. Connecting one for
+      // everyone stays a choice. Only an offer: if this read fails the card
+      // signs in as usual.
       const accounts = await Promise.resolve()
         .then(() => client.listOwnConnectionAccounts(workspaceId))
         .catch((): ConnectionMetadata[] => []);
       if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
       ownLoginElsewhere = ownLoginToUseHere(accounts, resolved.mcpUrl ?? resolved.endpointUrl);
+      if (ownLoginElsewhere && !item && !resolved.connectionRef) setOwnership("personal");
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     setConnected(accountReady);

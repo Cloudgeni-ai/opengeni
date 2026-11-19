@@ -8,7 +8,8 @@ import { Notice } from "../../ui/notice";
 import { SettingRow, SettingRowGroup } from "../../ui/setting-row";
 import { Skeleton } from "../../ui/skeleton";
 import { Switch } from "../../ui/switch";
-import { userErrorText } from "../../ui/api-error";
+import { serverRefusalText, userErrorText } from "../../ui/api-error";
+import { OWN_LOGIN_CONNECTOR_NEEDS_ADMIN_CODE } from "@opengeni/contracts/personal-integration-setup";
 
 /**
  * "Where it works" for your own login, model plan or machine: each workspace
@@ -32,6 +33,11 @@ export type OwnReachTarget = {
    * "Try again" after a failure still reads them fresh.
    */
   initialWorkspaces?: readonly OwnResourceReachWorkspace[] | undefined;
+  /**
+   * Turning a login on turned its connector on in that workspace: a page
+   * showing the connector reads it again.
+   */
+  onConnectorTurnedOn?: ((workspaceId: string) => void) | undefined;
 };
 
 type ReachState =
@@ -56,6 +62,7 @@ export function useOwnResourceReach({
   resourceKind,
   resourceId,
   initialWorkspaces,
+  onConnectorTurnedOn,
 }: OwnReachTarget) {
   const [state, setState] = useState<ReachState>(
     initialWorkspaces
@@ -119,7 +126,12 @@ export function useOwnResourceReach({
       const target = row.workspaceId;
       if (pending.has(target)) return;
       // The switch moves at once; a failure puts it back and says why.
-      replaceRow(target, (each) => ({ ...each, on }));
+      // Turning a login on turns its connector on too.
+      replaceRow(target, ({ connectorOff, ...each }) => ({
+        ...each,
+        on,
+        ...(connectorOff && !on ? { connectorOff } : {}),
+      }));
       setRowErrors(({ [target]: _cleared, ...rest }) => rest);
       setPending((now) => new Set(now).add(target));
       try {
@@ -127,12 +139,16 @@ export function useOwnResourceReach({
         // `current` is about the page, not the workspace the change was made in.
         if (live.current)
           replaceRow(target, (each) => ({ ...saved.workspace, current: each.current }));
+        if (on && row.connectorOff && !saved.workspace.connectorOff) onConnectorTurnedOn?.(target);
       } catch (error) {
         if (!live.current) return;
-        replaceRow(target, (each) => ({ ...each, on: row.on }));
+        replaceRow(target, (each) => ({ ...row, current: each.current }));
         setRowErrors((now) => ({
           ...now,
-          [target]: userErrorText(error, "Couldn't change this. Try again."),
+          // "Only an admin can turn <connector> on here": nothing changed.
+          [target]:
+            serverRefusalText(error, [OWN_LOGIN_CONNECTOR_NEEDS_ADMIN_CODE]) ??
+            userErrorText(error, "Couldn't change this. Try again."),
         }));
       } finally {
         if (live.current)
@@ -143,7 +159,7 @@ export function useOwnResourceReach({
           });
       }
     },
-    [client, pending, replaceRow, resourceId, resourceKind],
+    [client, onConnectorTurnedOn, pending, replaceRow, resourceId, resourceKind],
   );
 
   return {
@@ -162,11 +178,30 @@ export function ownReachHasNothingToChoose(
   return workspaces.every((row) => row.alwaysOn);
 }
 
-function rowDescription(row: OwnResourceReachWorkspace): string | undefined {
+/** A login's connector, by what it is called. */
+export type OwnLoginConnector = { name: string };
+
+/**
+ * Whether it works here: on, and for a login, its connector on here too.
+ * A login on where its connector isn't reads as off; turning it on turns
+ * both on, so there is one switch.
+ */
+export function ownReachWorksHere(row: Pick<OwnResourceReachWorkspace, "on" | "connectorOff">) {
+  return row.on && !row.connectorOff;
+}
+
+function rowDescription(
+  row: OwnResourceReachWorkspace,
+  connector: OwnLoginConnector | undefined,
+): string | undefined {
   if (row.alwaysOn) return "Your Personal workspace. It always works here.";
   const where = row.personal ? "Your Personal workspace" : row.current ? "This workspace" : null;
+  const connectorOff =
+    row.connectorOff && row.canChange
+      ? `Not used here yet. Turning it on turns ${connector?.name ?? "its connector"} on here too`
+      : null;
   const locked = row.canChange ? null : "You can't add your own things here";
-  const parts = [where, locked].filter((part): part is string => part !== null);
+  const parts = [where, connectorOff, locked].filter((part): part is string => part !== null);
   return parts.length > 0 ? parts.join(". ") : undefined;
 }
 
@@ -184,10 +219,13 @@ function disabledReason(row: OwnResourceReachWorkspace): string | undefined {
 export function OwnWhereItWorks({
   name,
   reach,
+  connector,
 }: {
   /** The login, plan or machine, for the switches' accessible names. */
   name: string;
   reach: ReturnType<typeof useOwnResourceReach>;
+  /** For a login: its connector, which turning the login on also turns on. */
+  connector?: OwnLoginConnector | undefined;
 }) {
   const { state, pending, rowErrors, setOn, retry } = reach;
   if (state.status === "loading") {
@@ -224,12 +262,12 @@ export function OwnWhereItWorks({
         <SettingRow
           key={row.workspaceId}
           label={row.name}
-          description={rowDescription(row)}
+          description={rowDescription(row, connector)}
           error={rowErrors[row.workspaceId]}
           control={
             <Switch
               aria-label={`Use ${name} in ${row.name}`}
-              checked={row.on}
+              checked={ownReachWorksHere(row)}
               pending={pending.has(row.workspaceId)}
               disabled={row.alwaysOn || !row.canChange}
               disabledReason={disabledReason(row)}

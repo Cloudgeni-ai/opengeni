@@ -1854,6 +1854,13 @@ export const OwnResourceReachWorkspace = /* @__PURE__ */ defineSchema(() =>
     alwaysOn: primitives.boolean,
     /** You may turn it on or off here. Turning off is always allowed when it is on. */
     canChange: primitives.boolean,
+    /**
+     * A connector's login whose connector this shared workspace hasn't turned
+     * on: nothing here uses it yet, even when it is on. Turning it on here
+     * turns the connector on too, for each person's own account, where you
+     * may. Absent otherwise.
+     */
+    connectorOff: primitives.boolean.optional(),
   }),
 );
 export const OwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
