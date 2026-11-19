@@ -83,6 +83,7 @@ import {
   teamsAgentLabel,
   teamsWorkspaceName,
   type TeamsChatTarget,
+  type DisconnectAuditActor,
   type TeamsInstallation,
   type TeamsRoute,
 } from "@opengeni/db";
@@ -2164,8 +2165,10 @@ async function requireSetupWorkspace(
 ): Promise<void> {
   const workspace = await getWorkspace(deps.db, workspaceId);
   if (workspace?.kind !== "shared") throw teamsConnectionRefused("shared_workspace_required");
+  // A disconnected binding to another organization is released when setup
+  // completes; only an active one keeps the workspace.
   const existing = await getWorkspaceTeamsInstallation(deps.db, workspaceId);
-  if (existing && existing.tenant_id !== tenantId)
+  if (existing && existing.tenant_id !== tenantId && existing.active)
     throw teamsConnectionRefused("workspace_linked_elsewhere");
 }
 function teamsAdminSignInConfig(deps: ApiRouteDeps): TeamsAdminSignInConfig {
@@ -2257,6 +2260,8 @@ export async function completeTeamsSetup(
      * the binding are verified, so a refused setup changes nothing.
      */
     replaceOwnLink?: boolean | undefined;
+    /** Who completes setup, audited when it releases the workspace's old binding. */
+    audit?: DisconnectAuditActor | undefined;
   },
 ) {
   const { setupToken, microsoft, replaceOwnLink } = input;
@@ -2296,8 +2301,23 @@ export async function completeTeamsSetup(
   // binding in its own workspace. It never replaces an active installation.
   if (!approved && existingTenant?.active) throw teamsConnectionRefused("already_connected");
   const existingWorkspace = await getWorkspaceTeamsInstallation(deps.db, grant.workspaceId);
-  if (existingWorkspace && existingWorkspace.tenant_id !== p.tenantId)
-    throw teamsConnectionRefused("workspace_linked_elsewhere");
+  // The workspace's administrator may connect it to another organization once
+  // its old one is disconnected: the old binding is released in the install
+  // transaction. An active binding to another organization keeps it.
+  const otherOrganization =
+    existingWorkspace && existingWorkspace.tenant_id !== p.tenantId ? existingWorkspace : null;
+  if (otherOrganization?.active) throw teamsConnectionRefused("workspace_linked_elsewhere");
+  const releaseWorkspaceInactive = otherOrganization
+    ? {
+        installation: otherOrganization,
+        audit: input.audit ?? {
+          subjectId: grant.subjectId,
+          source: "app" as const,
+          principalKind: grant.principalKind ?? null,
+        },
+      }
+    : null;
+  const ownInstallation = otherOrganization ? null : existingWorkspace;
   // The old workspace's audit names the Microsoft administrator whose
   // authority moved the binding, not an Opengeni identity from elsewhere.
   const replaceInactive =
@@ -2321,6 +2341,7 @@ export async function completeTeamsSetup(
       nonce: p.nonce,
       requireInactive: !approved,
       replaceInactive,
+      releaseWorkspaceInactive,
     });
   try {
     try {
@@ -2328,13 +2349,13 @@ export async function completeTeamsSetup(
     } catch (error) {
       if (
         !replaceOwnLink ||
-        !existingWorkspace ||
+        !ownInstallation ||
         teamsLinkConflict(error) !== "opengeni_account_linked"
       )
         throw error;
       // The conflicting link is the caller's own in this workspace's
       // installation, which is this tenant's. Nothing else is removed.
-      await removeTeamsLink(deps.db, existingWorkspace, grant.subjectId);
+      await removeTeamsLink(deps.db, ownInstallation, grant.subjectId);
       await install();
     }
   } catch (error) {
@@ -2370,6 +2391,7 @@ export async function completeTeamsSetup(
   deps.observability?.info("Teams organization connected", {
     method: approved ? "operator_approved" : "tenant_administrator",
     movedDisconnectedBinding: Boolean(replaceInactive),
+    releasedOtherOrganization: Boolean(releaseWorkspaceInactive),
   });
   if (p.conversation) {
     const conversation = p.conversation;
@@ -2590,7 +2612,12 @@ export function registerTeamsBotRoutes(app: Hono, deps: ApiRouteDeps): void {
         })
         .strict(),
     );
-    return c.json(await completeTeamsSetup(deps, grant, input));
+    return c.json(
+      await completeTeamsSetup(deps, grant, {
+        ...input,
+        audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
+      }),
+    );
   });
   app.delete(`${ROOT}/bot`, async (c) => {
     await browserHuman(c, deps);

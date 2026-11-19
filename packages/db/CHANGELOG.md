@@ -1,5 +1,26 @@
 # @opengeni/db
 
+## 6.30.1
+
+### Patch Changes
+
+- 24939b2: Migration 1499 grants the runtime EXECUTE on the Nango in-use check (1482) and the live Nango connection owners listing (1487), which both shipped withheld. Deleting a Nango connection is then decided from every non-revoked row that names it, and the Nango sweep also visits a person whose only connection is gone. Readiness now requires both grants. Migration 1500 validates `connections_account_identity_key_check`, which 1480 added `NOT VALID`. These must reach production only in a release after the one that contains 1487: the previous binary rejects an unknown granted definer.
+- c3d6b66: Pages now say where they are. In the macOS app the window bar shows a clickable trail before the page's title, such as "Agents › Meeting preparation" or "Organization settings › People"; on a detail page the back link moves into that trail and the page keeps its own title. An agent's Memory opened from the agent reads "Agents › Meeting preparation › Memory" and goes back to the agent, and a Knowledge entry's back link says "Knowledge". The web app keeps its layout.
+
+  History diffs are easier to read: a change is a tinted row with a coloured rule on its left edge instead of a boxed table, blank lines are dropped outside code, and the first version shows its text instead of every line marked as added.
+
+  Knowledge history now says "You" for the versions you saved, instead of "A teammate". Migration 1498 adds knowledge_entry_read's read-only `history_authors` operation, which returns only the ids of the asking person's own versions; the history route returns them as an extra `savedByYou` field, which is an empty list before the migration.
+
+- 9cd3256: A workspace whose Microsoft Teams bot was disconnected can now be connected to a different Teams organization through the normal setup. Setup releases the old organization's binding in the same transaction: its account links, stored chat choices, routes, pending deliveries and chat context in the workspace are removed, the old organization can no longer reach the workspace, and the release is audited. A workspace that is still connected to another organization is refused with a message that says to disconnect the bot first.
+  - @opengeni/codemode@6.30.1
+  - @opengeni/codex@6.30.1
+  - @opengeni/config@6.30.1
+  - @opengeni/contracts@6.30.1
+  - @opengeni/network@6.30.1
+  - @opengeni/observability@6.30.1
+  - @opengeni/subscriptions@6.30.1
+  - @opengeni/xai-subscription@6.30.1
+
 ## 6.30.0
 
 ### Minor Changes

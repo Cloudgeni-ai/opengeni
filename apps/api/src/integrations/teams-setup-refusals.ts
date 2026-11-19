@@ -57,7 +57,7 @@ const REFUSALS = {
   ],
   workspace_linked_elsewhere: [
     409,
-    "This workspace is linked to another Teams organization. Choose another workspace.",
+    "This workspace is connected to another Teams organization. Disconnect the bot in this workspace first, then connect again, or choose another workspace.",
   ],
   // The organization's existing connection.
   connected_elsewhere: [

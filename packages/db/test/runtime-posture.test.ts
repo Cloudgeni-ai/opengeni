@@ -640,12 +640,12 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
-      // 1482 and 1487 read only connections, present in every current posture, and
-      // withhold their runtime grants.
+      // 1482 and 1487 read only connections, present in every current posture;
+      // 1499 grants them to the runtime.
       {
         name: "nango_connections_in_use_v1(text[])",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -655,7 +655,7 @@ function safePosture(): RuntimeDatabasePosture {
       {
         name: "nango_live_connection_owners_v1(text, text, text, integer)",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -4374,8 +4374,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
-      "nango_connections_in_use_v1(text[])",
-      "nango_live_connection_owners_v1(text, text, text, integer)",
       "sandbox_fleet_warm_boxes_v1()",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);

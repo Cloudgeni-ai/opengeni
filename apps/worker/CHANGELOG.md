@@ -1,5 +1,41 @@
 # @opengeni/worker-bundle
 
+## 6.30.1
+
+### Patch Changes
+
+- e9692c2: Show "Add a card" when a box is refused inside a tool call and on the empty-credits notice for new Free organizations. Box refusals raised inside a tool call (card required, daily budget, fleet cap) now keep their failure code.
+- Updated dependencies [24939b2]
+- Updated dependencies [c3d6b66]
+- Updated dependencies [9cd3256]
+  - @opengeni/db@6.30.1
+  - @opengeni/core@6.30.1
+  - @opengeni/documents@6.30.1
+  - @opengeni/events@6.30.1
+  - @opengeni/agent-proto@6.30.1
+  - @opengeni/capabilities@6.30.1
+  - @opengeni/codemode@6.30.1
+  - @opengeni/codex@6.30.1
+  - @opengeni/config@6.30.1
+  - @opengeni/contracts@6.30.1
+  - @opengeni/decisions@6.30.1
+  - @opengeni/github@6.30.1
+  - @opengeni/interaction@6.30.1
+  - @opengeni/jev@6.30.1
+  - @opengeni/network@6.30.1
+  - @opengeni/observability@6.30.1
+  - @opengeni/runtime@6.30.1
+  - @opengeni/sdk@6.30.1
+  - @opengeni/storage@6.30.1
+  - @opengeni/subscriptions@6.30.1
+  - @opengeni/tool-gateway@6.30.1
+  - @opengeni/vaults@6.30.1
+  - @opengeni/vaults-bitwarden@6.30.1
+  - @opengeni/vaults-keeper@6.30.1
+  - @opengeni/vaults-onepassword@6.30.1
+  - @opengeni/vaults-protonpass@6.30.1
+  - @opengeni/xai-subscription@6.30.1
+
 ## 6.30.0
 
 ### Patch Changes

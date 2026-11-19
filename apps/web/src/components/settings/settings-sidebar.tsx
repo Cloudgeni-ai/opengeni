@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, type NavigateOptions } from "@tanstack/react-router";
 import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import {
   useEffect,
@@ -490,9 +490,27 @@ export function SettingsShell({
   const windowBarRow = useWindowBarRow(canvasRef, titleInWindowBar);
   // "Organization settings › People": which settings the page belongs to, by
   // the scope's kind (its name is in the rail's picker).
+  // The crumb opens that settings' first page.
+  const navigate = useNavigate();
+  const sectionHome = settingsSectionHome(sections, activeId);
+  const sectionHomeRef = useRef(sectionHome);
+  useLayoutEffect(() => {
+    sectionHomeRef.current = sectionHome;
+  });
+  const hasSectionHome = sectionHome !== null;
   const barSection = useMemo(
-    () => ({ label: windowBarSection ?? label }),
-    [label, windowBarSection],
+    () => ({
+      label: windowBarSection ?? label,
+      ...(hasSectionHome
+        ? {
+            onClick: () => {
+              const target = sectionHomeRef.current;
+              if (target) void navigate(target.link.props as NavigateOptions);
+            },
+          }
+        : {}),
+    }),
+    [label, windowBarSection, hasSectionHome, navigate],
   );
 
   const navigation = narrow ? (
@@ -633,6 +651,18 @@ export function SettingsShell({
       </section>
     </div>
   );
+}
+
+/** The first page of the settings the active page belongs to, which its window-bar crumb opens. */
+export function settingsSectionHome(
+  sections: SettingsRailSection[],
+  activeId: string | null,
+): SettingsRailItem | null {
+  if (!activeId) return null;
+  const section = sections.find((candidate) =>
+    candidate.groups.some((group) => group.items.some((item) => item.id === activeId)),
+  );
+  return section?.groups.find((group) => group.items.length > 0)?.items[0] ?? null;
 }
 
 /** Home link for a settings rail: sessions of a workspace, or the app root. */

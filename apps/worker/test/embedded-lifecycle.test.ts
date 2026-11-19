@@ -847,11 +847,11 @@ describe("embedded worker lifecycle contract", () => {
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           })),
           // Migration 1482: the deployment-wide Nango in-use check, created
-          // without runtime EXECUTE until a later migration grants it.
+          // without runtime EXECUTE; 1499 granted it.
           {
             name: "nango_connections_in_use_v1(text[])",
             owner: "opengeni_migrator",
-            can_execute: false,
+            can_execute: true,
             public_execute: false,
             security_definer: true,
             trigger_callable: false,
@@ -862,7 +862,7 @@ describe("embedded worker lifecycle contract", () => {
           {
             name: "nango_live_connection_owners_v1(text, text, text, integer)",
             owner: "opengeni_migrator",
-            can_execute: false,
+            can_execute: true,
             public_execute: false,
             security_definer: true,
             trigger_callable: false,

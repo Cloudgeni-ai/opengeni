@@ -1,5 +1,13 @@
 # @opengeni/codemode
 
+## 6.30.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.30.1
+- @opengeni/sdk@6.30.1
+- @opengeni/tool-gateway@6.30.1
+
 ## 6.30.0
 
 ### Patch Changes

@@ -76,7 +76,7 @@ async function nangoRow(nangoConnectionId: string) {
 }
 
 describe("migration 1482: Nango connections in use", () => {
-  test("the owner-run check sees every live row; the runtime grant is withheld", async () => {
+  test("the owner-run check sees every live row; without the runtime grant it answers nothing", async () => {
     if (!owned) return;
     await nangoRow("in-use-live");
     const revoked = await nangoRow("in-use-revoked");
@@ -87,7 +87,10 @@ describe("migration 1482: Nango connections in use", () => {
       revoked.grant.subjectId,
     );
     const ids = ["in-use-live", "in-use-revoked", "in-use-unknown"];
-    // Withheld until a later migration grants it.
+    // 1482 created it withheld (1499 grants it): without the grant, no answer.
+    await owned.admin.unsafe(
+      "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) FROM opengeni_app",
+    );
     expect(await nangoConnectionsInUse(client!.db, ids)).toBeNull();
     await owned.admin.unsafe(
       "GRANT EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) TO opengeni_app",

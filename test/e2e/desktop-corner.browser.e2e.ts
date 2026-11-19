@@ -318,19 +318,34 @@ describe("the desktop window bar", () => {
     // a list page, a form page and a detail page, with the current shell and
     // one that doesn't report its bar (0.1.33 and older), open and collapsed.
     const views = [
-      { view: "", title: "General", trail: ["Settings"], headingOnPage: false },
-      { view: "&apprail=none", title: "General", trail: ["Settings"], headingOnPage: false },
-      { view: "&view=content", title: "Automations", trail: [], headingOnPage: false },
+      // The settings crumb opens that settings' first page.
+      {
+        view: "",
+        title: "General",
+        trail: ["Settings"],
+        links: ["Settings"],
+        headingOnPage: false,
+      },
+      {
+        view: "&apprail=none",
+        title: "General",
+        trail: ["Settings"],
+        links: ["Settings"],
+        headingOnPage: false,
+      },
+      { view: "&view=content", title: "Automations", trail: [], links: [], headingOnPage: false },
       {
         view: "&view=content&page=form",
         title: "New automation",
         trail: [],
+        links: [],
         headingOnPage: false,
       },
       {
         view: "&view=content&page=detail",
         title: "Nightly report",
         trail: [],
+        links: [],
         headingOnPage: true,
       },
     ];
@@ -340,7 +355,7 @@ describe("the desktop window bar", () => {
     ];
     for (const { bar, lights } of shells) {
       const centre = trafficLightCentre(lights);
-      for (const { view, title, trail, headingOnPage } of views) {
+      for (const { view, title, trail, links, headingOnPage } of views) {
         const { page, errors } = await open("macos", `${view}&bar=${bar}`, 1280, 600);
         for (const rail of ["open", "collapsed"]) {
           const where = `${view || "settings"} bar=${bar} ${rail}`;
@@ -381,6 +396,11 @@ describe("the desktop window bar", () => {
               trail: [
                 ...header.querySelectorAll<HTMLElement>('nav[aria-label="Location"] > span'),
               ].map((crumb) => crumb.textContent),
+              links: [
+                ...header.querySelectorAll<HTMLElement>(
+                  'nav[aria-label="Location"] > span > :is(a, button)',
+                ),
+              ].map((crumb) => crumb.textContent),
               left: box.left,
               canvasLeft: canvas.getBoundingClientRect().left,
               textCentre: text.top + text.height / 2,
@@ -390,6 +410,7 @@ describe("the desktop window bar", () => {
           expect(row.count, where).toBe(1);
           expect(row.text, where).toBe(title);
           expect(row.trail, where).toEqual(trail);
+          expect(row.links, where).toEqual(links);
           expect(row.left, where).toBe(Math.max(row.canvasLeft!, MACOS_BAR_ROW_LEFT));
           expect(Math.abs(row.textCentre! - centre), where).toBeLessThanOrEqual(0.5);
           expect(row.drag, where).toBe("drag");
