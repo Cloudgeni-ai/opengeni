@@ -1,5 +1,20 @@
 # @opengeni/db
 
+## 6.30.2
+
+### Patch Changes
+
+- d07d727: A `personalResourceAttachment` on a chat that uses no personal Rig or Connected Machine is still refused with 422, but the refusal now says there is nothing to attach and that Connections are chosen with `connectionAccounts`, instead of the generic "The personal-resource attachment request is invalid".
+- ea21b19: A session create that the server refuses while starting its first turn (for example a personal-resource attachment that selects no personal Rig or Connected Machine) no longer leaves an idle, usable session behind when it carried an `idempotencyKey`. The refused session and its key are released, so retrying the same request gets the same refusal and a corrected request can reuse both the key and its `requestedSessionId`. Migration 1501 adds the database function this needs without granting it to the runtime yet; until a later release grants it, a refused keyed create keeps its session as before.
+  - @opengeni/codemode@6.30.2
+  - @opengeni/codex@6.30.2
+  - @opengeni/config@6.30.2
+  - @opengeni/contracts@6.30.2
+  - @opengeni/network@6.30.2
+  - @opengeni/observability@6.30.2
+  - @opengeni/subscriptions@6.30.2
+  - @opengeni/xai-subscription@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes
