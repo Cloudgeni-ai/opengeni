@@ -89,8 +89,33 @@ export function subscriptionCoreClaudeAccountHeaders(token: string): Record<stri
 export type SubscriptionCoreClaudeUsageReading = {
   status: "available" | "unavailable" | "scope_required" | "reconnect";
   observation: ClaudeUsageObservation | null;
+  /** When the read was requested (a refusal stored after it stands). */
   checkedAt: string;
+  /**
+   * Why an `unavailable` read failed, for the operator log: Claude's HTTP
+   * status, the kind of transport error (never its message), or a response
+   * that carried no reading.
+   */
+  failure?: SubscriptionCoreClaudeUsageFailure;
 };
+
+/** Why one usage read failed. Holds no token, header or response text. */
+export type SubscriptionCoreClaudeUsageFailure =
+  | { kind: "http_status"; status: number }
+  | { kind: "fetch_error"; error: string }
+  | { kind: "no_reading" };
+
+/** The kind of a thrown transport error: its name and system code, never its message. */
+export function subscriptionCoreClaudeUsageErrorKind(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  const cause = (error as { cause?: unknown }).cause;
+  const code =
+    (error as { code?: unknown }).code ??
+    (cause && typeof cause === "object" ? (cause as { code?: unknown }).code : undefined);
+  return typeof code === "string" && /^[A-Za-z0-9_]{1,64}$/.test(code)
+    ? `${error.name}:${code}`
+    : error.name;
+}
 
 /** The adapter's `fetchUsage`: one usage read with the connection's current bearer. */
 export async function fetchSubscriptionCoreClaudeUsage(
@@ -103,6 +128,7 @@ export async function fetchSubscriptionCoreClaudeUsage(
     return { status: "scope_required", observation: null, checkedAt };
   let status: SubscriptionCoreClaudeUsageReading["status"] = "unavailable";
   let observation: ClaudeUsageObservation | null = null;
+  let failure: SubscriptionCoreClaudeUsageFailure | undefined;
   try {
     const signal = AbortSignal.timeout(USAGE_DEADLINE_MS);
     const response = await read.fetch(SUBSCRIPTION_CORE_CLAUDE_RESET_STATUS_URL, {
@@ -120,6 +146,7 @@ export async function fetchSubscriptionCoreClaudeUsage(
       if (response.ok) {
         observation = parseClaudeUsageResponse(body, new Date(checkedAt));
         status = observation ? "available" : "unavailable";
+        if (!observation) failure = { kind: "no_reading" };
         if (observation?.details?.limitResets?.atLimit === true)
           observation = await withAtLimitProgram(read, credential.token, observation, checkedAt);
       } else {
@@ -132,17 +159,20 @@ export async function fetchSubscriptionCoreClaudeUsage(
           message.includes(SUBSCRIPTION_CORE_CLAUDE_USAGE_SCOPE)
             ? "scope_required"
             : "unavailable";
+        if (status === "unavailable") failure = { kind: "http_status", status: response.status };
       }
     } else {
       status = response.status === 401 ? "reconnect" : "unavailable";
+      if (status === "unavailable") failure = { kind: "http_status", status: response.status };
       await response.body?.cancel().catch(() => undefined);
     }
-  } catch {
+  } catch (error) {
     // Keep the stored observation; never imply an unavailable quota is zero.
     status = "unavailable";
     observation = null;
+    failure = { kind: "fetch_error", error: subscriptionCoreClaudeUsageErrorKind(error) };
   }
-  return { status, observation, checkedAt };
+  return { status, observation, checkedAt, ...(failure ? { failure } : {}) };
 }
 
 /**
@@ -207,7 +237,35 @@ export function subscriptionCoreClaudeUpstreamModelIds(
   return [...upstream].sort();
 }
 
-/** The adapter's `decodeQuota`: an available reading in the shared quota model, else null. */
+/**
+ * A reading stamped at `observedAt`, the instant the core received it (never
+ * earlier than the request). Claude answers with the account's usage as of
+ * its response, so a reading must not count as older than a response-header
+ * reading of a turn that arrived while it was in flight: stamped at the
+ * request, every such header write made the merge keep the stored quota and
+ * drop the reading. The reading's `checkedAt` stays the request time, which
+ * is what decides whether a refusal stored meanwhile stands.
+ */
+function observedWhenReceived(
+  observation: ClaudeUsageObservation,
+  observedAt: number,
+): ClaudeUsageObservation {
+  const requested = Date.parse(observation.observedAt);
+  if (!Number.isFinite(observedAt) || !(observedAt > requested)) return observation;
+  const at = new Date(observedAt).toISOString();
+  return {
+    ...observation,
+    observedAt: at,
+    windows: observation.windows.map((window) =>
+      window.observedAt === observation.observedAt ? { ...window, observedAt: at } : window,
+    ),
+  };
+}
+
+/**
+ * The adapter's `decodeQuota`: an available reading in the shared quota
+ * model, observed when the core received it (`input.observedAt`), else null.
+ */
 export function decodeSubscriptionCoreClaudeUsage(input: {
   response: unknown;
   observedAt: number;
@@ -219,7 +277,7 @@ export function decodeSubscriptionCoreClaudeUsage(input: {
   if (status !== "available" || !observation) return null;
   return {
     ...decodeSubscriptionCoreClaudeQuota({
-      observation,
+      observation: observedWhenReceived(observation, input.observedAt),
       refreshGeneration: input.refreshGeneration,
       upstreamModelIds: subscriptionCoreClaudeUpstreamModelIds(input.modelIds ?? []),
     }),
