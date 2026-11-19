@@ -13,7 +13,6 @@ import {
   orgAgentConfigHash,
   orgAgentYaml,
   orgAgentsApi,
-  orgAgentsEnabled,
   overrideEntries,
   parseOrgAgentYaml,
   sameDefinition,
@@ -193,24 +192,12 @@ describe("labels", () => {
   });
 });
 
-describe("flag", () => {
-  test("reads the organization list or the boolean", () => {
-    expect(
-      orgAgentsEnabled({ orgAgentsAccountIds: [organizationId.toUpperCase()] }, organizationId),
-    ).toBe(true);
-    expect(orgAgentsEnabled({ orgAgentsAccountIds: [] }, organizationId)).toBe(false);
-    expect(orgAgentsEnabled({ orgAgents: true }, organizationId)).toBe(true);
-    expect(orgAgentsEnabled({ orgAgents: true }, null)).toBe(false);
-    expect(orgAgentsEnabled({}, organizationId)).toBe(false);
-  });
-});
-
 describe("calls", () => {
   test("go to the organization's public routes", async () => {
     const requestJson = mock(async (..._args: unknown[]) => ({
       agent: { id: "a" },
       toolServer: { key: "billing" },
-      operation: { id: "op" },
+      operations: [{ id: "op0" }, { id: "op1", status: "running" }],
     }));
     const api = orgAgentsApi({ requestJson } as never, organizationId);
     await api.listAgents();
@@ -218,7 +205,11 @@ describe("calls", () => {
     await api.saveDraft("a1", { expectedVersion: 2, definition } as never);
     await api.movableChats("a1", 3);
     await api.publish("a1", { version: 3, moveRunningChats: true } as never);
-    await api.getPublishOperation("a1", "op1");
+    expect(await api.getPublishOperation("a1", "op1")).toEqual({
+      id: "op1",
+      status: "running",
+    } as never);
+    expect(await api.getPublishOperation("a1", "gone")).toBeNull();
     await api.startTestChat("a1", { version: 3, message: "Hi" });
     await api.listToolServerTools("billing");
     await api.deleteToolServer("billing");
@@ -230,10 +221,11 @@ describe("calls", () => {
       `PUT ${base}/agents/a1/draft`,
       `GET ${base}/agents/a1/movable-chats`,
       `POST ${base}/agents/a1/publish`,
-      `GET ${base}/agents/a1/publish-operations/op1`,
+      `GET ${base}/agents/a1/publish-operations`,
+      `GET ${base}/agents/a1/publish-operations`,
       `POST ${base}/agents/a1/test-chats`,
-      `GET ${base}/tool-servers/billing/tools`,
-      `DELETE ${base}/tool-servers/billing`,
+      `GET ${base}/agents/tool-servers/billing/tools`,
+      `DELETE ${base}/agents/tool-servers/billing`,
       "GET /v1/workspaces/ws/organization-agents",
     ]);
     expect(requestJson.mock.calls[3]?.[3]).toEqual({ version: "3" });

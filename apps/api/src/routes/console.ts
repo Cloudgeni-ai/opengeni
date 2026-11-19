@@ -61,6 +61,7 @@ import {
   withConsoleSessionRead,
   type ConsoleOrganizationWorkspace,
 } from "@opengeni/db";
+import { orgAgentsEnabledForAccount } from "@opengeni/config";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -185,6 +186,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
         organizationId,
         range,
         ...window,
+        ...(orgAgentsEnabledForAccount(deps.settings, organizationId) ? { orgAgents: true } : {}),
         reviewLevel: settings.reviewLevel,
         spend: {
           totalMicros: Math.max(0, managedMicros + teamMicros + otherMicros),

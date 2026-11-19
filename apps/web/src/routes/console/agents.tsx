@@ -54,7 +54,7 @@ export function agentVersionText(
 
 export function ConsoleAgentsRoute() {
   const enabled = useOrgAgentsEnabled();
-  return enabled ? <AgentsList /> : <AgentsComing />;
+  return enabled === false ? <AgentsComing /> : <AgentsList />;
 }
 
 function AgentsList() {

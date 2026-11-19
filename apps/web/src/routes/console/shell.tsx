@@ -47,7 +47,7 @@ import { NavGroup, NavItem } from "@opengeni/react/ui/settings-nav";
 import { Sheet, SheetContent, SheetTitle } from "@opengeni/react/ui/sheet";
 
 import { CONSOLE_PATH, onConsoleHost, type ConsoleSearch } from "@/lib/console-route";
-import { orgAgentsEnabled } from "@/lib/organization-agents";
+import { useOrgAgentsFlag } from "@/lib/organization-agents";
 import {
   ConsoleContext,
   ConsoleForbidden,
@@ -193,6 +193,8 @@ export function ConsoleShellRoute() {
     orgs[0] ??
     null;
 
+  const agentsFlag = useOrgAgentsFlag(context.client, organization?.accountId ?? null);
+
   const value = useMemo<ConsoleContextValue | null>(
     () =>
       organization
@@ -212,7 +214,7 @@ export function ConsoleShellRoute() {
   );
 
   const active = consoleNavDestination(pathname);
-  const agentsOn = orgAgentsEnabled(context.clientConfig, organization?.accountId ?? null);
+  const agentsOn = agentsFlag === true;
   const nav = consoleNavSections(agentsOn);
   const switchable = administered.length > 0 ? administered : orgs;
   const displayName =

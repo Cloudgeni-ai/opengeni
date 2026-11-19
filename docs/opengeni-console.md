@@ -189,9 +189,11 @@ existing identities. It is a label, never authority.
 Organizations with Console agents turned on (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`,
 off by default) get **Agents** and **Tool servers** in the Console nav. The
 pages call the public organization routes
-(`/v1/organizations/:organizationId/agents`, `/tool-servers`; contracts in
+(`/v1/organizations/:organizationId/agents`, tool servers under
+`agents/tool-servers`; contracts in
 `packages/contracts/src/organization-agents.ts`) through
 `apps/web/src/lib/organization-agents.ts`; Console has no routes of its own.
+Those routes answer 404 while the flag is off, which is how Console knows.
 
 - **Agents** lists each agent with its key, who manages it (Console or
   "Managed by code"), the published version and a waiting draft.

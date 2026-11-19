@@ -1,7 +1,7 @@
 // The app's read-only view of organization agents: the ones available in
 // this workspace, under the workspace's own agents. They are edited only in
 // Console, so nothing here changes them; admins get one way to Console.
-import type { OrgAgentSummary } from "@opengeni/contracts";
+import type { WorkspaceOrgAgent } from "@opengeni/contracts";
 import { Link } from "@tanstack/react-router";
 import { ArrowUpRightIcon, BotIcon } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -14,33 +14,29 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 
-import { listWorkspaceOrgAgents, orgAgentsEnabled } from "@/lib/organization-agents";
+import { listWorkspaceOrgAgents } from "@/lib/organization-agents";
 
 export const MANAGED_IN_CONSOLE = "Managed in Console";
 
 export function ManagedInConsoleAgents({ workspaceId }: { workspaceId: string }) {
   const { client, clientConfig, accessContext, workspaces } = useAppContext();
   const accountId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId ?? null;
-  const enabled = orgAgentsEnabled(clientConfig, accountId);
-  const [agents, setAgents] = useState<OrgAgentSummary[]>([]);
+  const [agents, setAgents] = useState<WorkspaceOrgAgent[]>([]);
   useEffect(() => {
     setAgents([]);
-    if (!enabled) return;
     const controller = new AbortController();
     listWorkspaceOrgAgents(client, workspaceId, controller.signal).then(
       (response) => {
         if (!controller.signal.aborted) setAgents(response.agents);
       },
-      // A workspace without them, or an older server: nothing to show.
+      // The server lists none while the organization's flag is off; an older
+      // server has no such route. Either way there is nothing to show.
       () => {},
     );
     return () => controller.abort();
-  }, [client, enabled, workspaceId]);
+  }, [client, workspaceId]);
 
-  const published = agents.filter(
-    (agent) => agent.archivedAt === null && agent.publishedVersion !== null,
-  );
-  if (!enabled || !accountId || published.length === 0) return null;
+  if (!accountId || agents.length === 0) return null;
   const admin = administersOrganization({ accessContext, clientConfig, accountId });
 
   return (
@@ -59,7 +55,7 @@ export function ManagedInConsoleAgents({ workspaceId }: { workspaceId: string })
       }
     >
       <RowList label={MANAGED_IN_CONSOLE} variant="catalog">
-        {published.map((agent) => (
+        {agents.map((agent) => (
           <ListRow
             key={agent.id}
             leading={<LogoTile name={agent.name} icon={<BotIcon />} />}

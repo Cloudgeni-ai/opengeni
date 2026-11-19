@@ -38,7 +38,7 @@ import {
 
 export function ConsoleToolServersRoute() {
   const enabled = useOrgAgentsEnabled();
-  if (!enabled) {
+  if (enabled === false) {
     return (
       <ConsolePage>
         <PageHeader title="Tool servers" icon={<PlugIcon />} />

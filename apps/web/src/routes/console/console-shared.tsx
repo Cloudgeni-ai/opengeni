@@ -31,7 +31,7 @@ import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { onConsoleHost } from "@/lib/console-route";
 import { rememberConsoleSignedOut } from "@/lib/console-sign-in";
-import { orgAgentsApi, orgAgentsEnabled, type OrgAgentsApi } from "@/lib/organization-agents";
+import { orgAgentsApi, useOrgAgentsFlag, type OrgAgentsApi } from "@/lib/organization-agents";
 
 export type ConsoleClient = ChatClient<OpenGeniBrowserClient>;
 
@@ -59,11 +59,10 @@ export function useOrgAgentsApi(): OrgAgentsApi {
   return useMemo(() => orgAgentsApi(client, organizationId), [client, organizationId]);
 }
 
-/** Whether this organization has Console agents (the per-organization flag). */
-export function useOrgAgentsEnabled(): boolean {
-  const { organizationId } = useConsole();
-  const { clientConfig } = useAppContext();
-  return orgAgentsEnabled(clientConfig, organizationId);
+/** Whether this organization has Console agents (the per-organization flag); null while unknown. */
+export function useOrgAgentsEnabled(): boolean | null {
+  const { client, organizationId } = useConsole();
+  return useOrgAgentsFlag(client, organizationId);
 }
 
 /* -------------------------------------------------------------- loading */
@@ -266,6 +265,30 @@ export function auditActionText(action: ConsoleAuditAction): string {
       return "Changed session review";
     case "workspace.kind_changed":
       return "Changed a workspace's kind";
+    case "agent.created":
+      return "Created an agent";
+    case "agent.updated":
+      return "Changed where an agent is available";
+    case "agent.version_saved":
+      return "Saved an agent version";
+    case "agent.published":
+      return "Published an agent";
+    case "agent.archived":
+      return "Archived an agent";
+    case "agent.management_changed":
+      return "Changed who manages an agent";
+    case "agent.deployed":
+      return "Deployed an agent";
+    case "tool_server.created":
+      return "Added a tool server";
+    case "tool_server.updated":
+      return "Changed a tool server";
+    case "tool_server.deleted":
+      return "Removed a tool server";
+    case "tool_credential.written":
+      return "Stored an end user's tool login";
+    case "tool_credential.deleted":
+      return "Removed an end user's tool login";
   }
 }
 

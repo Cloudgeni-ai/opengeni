@@ -41,7 +41,6 @@ const appContext = () => ({
     auth: { mode: "managedSession" },
     productAccessMode: "managed",
     managedAuthSessionSetMode: "legacy",
-    orgAgentsAccountIds: flagOn ? [organizationId] : [],
   },
   workspaces: [{ id: workspaceId, accountId: organizationId, name: "Analysts" }],
   authSession: { user: { name: "Mira Holt", email: "mira@kontali.test" } },
@@ -168,6 +167,9 @@ const toolServer = {
 
 const requestJson = mock(async (method: string, path: string, _body?: unknown) => {
   const base = `/v1/organizations/${organizationId}`;
+  if (!path.startsWith("/v1/workspaces/") && !flagOn) {
+    throw Object.assign(new Error("Agent not found."), { status: 404 });
+  }
   if (method === "GET" && path === `${base}/agents`) {
     return {
       agents: [
@@ -184,8 +186,9 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
     };
   }
   if (method === "GET" && path === `${base}/agents/${agentId}`) return { agent: agentRecord };
-  if (method === "GET" && path === `${base}/tool-servers`) return { toolServers: [toolServer] };
-  if (method === "GET" && path === `${base}/tool-servers/billing/tools`) {
+  if (method === "GET" && path === `${base}/agents/tool-servers`)
+    return { toolServers: [toolServer] };
+  if (method === "GET" && path === `${base}/agents/tool-servers/billing/tools`) {
     return {
       tools: [{ name: "lookup_invoice" }, { name: "refund" }, { name: "void_invoice" }],
       error: null,
@@ -223,15 +226,20 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
     };
   }
   if (method === "GET" && path === `/v1/workspaces/${workspaceId}/organization-agents`) {
+    // The server lists only published agents, and none while the flag is off.
     return {
-      agents: [
-        summary(),
-        summary({
-          id: "13131313-1313-4131-8131-131313131313",
-          name: "Unpublished",
-          publishedVersion: null,
-        }),
-      ],
+      agents: flagOn
+        ? [
+            {
+              id: agentId,
+              key: "support-desk",
+              name: "Support desk",
+              description: "Answers billing questions",
+              managedBy: "console",
+              publishedVersion: 2,
+            },
+          ]
+        : [],
     };
   }
   throw new Error(`Unexpected ${method} ${path}`);
@@ -269,7 +277,8 @@ async function render(node: ReactNode) {
         ConsoleContext.Provider,
         {
           value: {
-            client: client as never,
+            // A fresh client object per render: the flag read is shared per client.
+            client: { ...client } as never,
             organizationId,
             organizationLabel: "Kontali",
             search: { org: organizationId },
@@ -343,10 +352,11 @@ describe("Console agents list", () => {
     expect(page).toContain("New agent");
   });
 
-  test("without the flag, makes no calls", async () => {
+  test("without the flag, says agents are coming and lists nothing", async () => {
     flagOn = false;
     await render(createElement(ConsoleAgentsRoute));
-    expect(requestJson).not.toHaveBeenCalled();
+    expect(text()).toContain("Organization agents are coming");
+    expect(text()).not.toContain("New agent");
   });
 });
 
@@ -486,7 +496,6 @@ describe("Managed in Console (app)", () => {
     const page = text();
     expect(page).toContain("Managed in Console");
     expect(page).toContain("Support desk");
-    expect(page).not.toContain("Unpublished");
     expect(page).toContain("Open Console");
     expect(document.querySelectorAll("button").length).toBe(0);
   });
@@ -495,6 +504,5 @@ describe("Managed in Console (app)", () => {
     flagOn = false;
     await render(createElement(ManagedInConsoleAgents, { workspaceId }));
     expect(text()).toBe("");
-    expect(requestJson).not.toHaveBeenCalled();
   });
 });

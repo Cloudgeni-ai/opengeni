@@ -67,7 +67,9 @@ export function usePublishOperation(
     const timer = setTimeout(() => {
       api.getPublishOperation(agentId, id, controller.signal).then(
         (next) => {
-          if (!controller.signal.aborted) setOperation(next);
+          // Not among the recent operations any more: keep the last state seen.
+          if (!controller.signal.aborted)
+            setOperation((current) => next ?? (current ? { ...current } : current));
         },
         () => {
           if (!controller.signal.aborted)

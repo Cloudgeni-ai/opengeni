@@ -10,17 +10,21 @@ import {
   orgAgentDefinitionToFile,
   orgAgentFileToDefinition,
   type CreateOrgAgentRequest,
+  type CreateOrgAgentTestChatRequest,
+  type CreateOrgAgentTestChatResponse,
   type CreateOrgToolServerRequest,
   type ListOrgAgentSessionsResponse,
+  type ListOrgAgentPublishOperationsResponse,
   type ListOrgAgentVersionsResponse,
   type ListOrgAgentsResponse,
   type ListOrgToolServersResponse,
+  type ListWorkspaceOrgAgentsResponse,
   type OrgAgent,
   type OrgAgentDefinitionInput,
+  type OrgAgentMovableChatsResponse,
   type OrgAgentNewToolsPolicy,
-  type OrgAgentPublishOperation,
   type OrgAgentSessionOverrides,
-  type OrgAgentSummary,
+  type OrgAgentTestWorkspaceResponse,
   type OrgAgentToolCatalog,
   type OrgAgentToolCatalogEntry,
   type OrgAgentToolServerConfig,
@@ -32,10 +36,12 @@ import {
   type PublishOrgAgentRequest,
   type PublishOrgAgentResponse,
   type SaveOrgAgentDraftRequest,
+  type SaveOrgAgentDraftResponse,
   type SetOrgAgentManagementRequest,
   type UpdateOrgAgentRequest,
   type UpdateOrgToolServerRequest,
 } from "@opengeni/contracts";
+import { useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 /* ------------------------------------------------------------------ calls */
@@ -52,19 +58,6 @@ export type OrgAgentsTransport = {
     options?: RequestOptions,
   ): Promise<T>;
 };
-
-/** `POST .../agents/test-workspace`: the organization's Console test workspace. */
-export type OrgAgentTestWorkspaceResponse = { workspaceId: string };
-/** `POST .../agents/:id/test-chats`: a test chat on one version (usually the draft). */
-export type OrgAgentTestChatRequest = {
-  version: number;
-  message: string;
-  /** A pasted test token per `per_user` tool server, used only as that chat's login. */
-  toolLogins?: Record<string, string>;
-};
-export type OrgAgentTestChatResponse = { workspaceId: string; sessionId: string };
-export type OrgAgentMovableChats = { count: number };
-export type WorkspaceOrgAgentsResponse = { agents: OrgAgentSummary[] };
 
 function encode(value: string): string {
   return encodeURIComponent(value);
@@ -102,7 +95,8 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
     updateAgent: async (id: string, request: UpdateOrgAgentRequest) =>
       (await client.requestJson<{ agent: OrgAgent }>("PATCH", agent(id), request)).agent,
     saveDraft: async (id: string, request: SaveOrgAgentDraftRequest) =>
-      (await client.requestJson<{ agent: OrgAgent }>("PUT", `${agent(id)}/draft`, request)).agent,
+      (await client.requestJson<SaveOrgAgentDraftResponse>("PUT", `${agent(id)}/draft`, request))
+        .agent,
     listVersions: (id: string, signal?: AbortSignal) =>
       client.requestJson<ListOrgAgentVersionsResponse>(
         "GET",
@@ -112,7 +106,7 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
         opts(signal),
       ),
     movableChats: (id: string, version: number, signal?: AbortSignal) =>
-      client.requestJson<OrgAgentMovableChats>(
+      client.requestJson<OrgAgentMovableChatsResponse>(
         "GET",
         `${agent(id)}/movable-chats`,
         undefined,
@@ -121,16 +115,17 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
       ),
     publish: (id: string, request: PublishOrgAgentRequest) =>
       client.requestJson<PublishOrgAgentResponse>("POST", `${agent(id)}/publish`, request),
-    getPublishOperation: async (id: string, operationId: string, signal?: AbortSignal) =>
-      (
-        await client.requestJson<{ operation: OrgAgentPublishOperation }>(
-          "GET",
-          `${agent(id)}/publish-operations/${encode(operationId)}`,
-          undefined,
-          {},
-          opts(signal),
-        )
-      ).operation,
+    /** The operation from the agent's recent publish operations (there is no single-operation read). */
+    getPublishOperation: async (id: string, operationId: string, signal?: AbortSignal) => {
+      const { operations } = await client.requestJson<ListOrgAgentPublishOperationsResponse>(
+        "GET",
+        `${agent(id)}/publish-operations`,
+        undefined,
+        {},
+        opts(signal),
+      );
+      return operations.find((operation) => operation.id === operationId) ?? null;
+    },
     setManagement: async (id: string, request: SetOrgAgentManagementRequest) =>
       (await client.requestJson<{ agent: OrgAgent }>("POST", `${agent(id)}/management`, request))
         .agent,
@@ -154,12 +149,16 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
         `${base}/agents/test-workspace`,
         {},
       ),
-    startTestChat: (id: string, request: OrgAgentTestChatRequest) =>
-      client.requestJson<OrgAgentTestChatResponse>("POST", `${agent(id)}/test-chats`, request),
+    startTestChat: (id: string, request: CreateOrgAgentTestChatRequest) =>
+      client.requestJson<CreateOrgAgentTestChatResponse>(
+        "POST",
+        `${agent(id)}/test-chats`,
+        request,
+      ),
     listToolServers: (signal?: AbortSignal) =>
       client.requestJson<ListOrgToolServersResponse>(
         "GET",
-        `${base}/tool-servers`,
+        `${base}/agents/tool-servers`,
         undefined,
         {},
         opts(signal),
@@ -168,7 +167,7 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
       (
         await client.requestJson<{ toolServer: OrgToolServer }>(
           "GET",
-          `${base}/tool-servers/${encode(key)}`,
+          `${base}/agents/tool-servers/${encode(key)}`,
           undefined,
           {},
           opts(signal),
@@ -178,7 +177,7 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
       (
         await client.requestJson<{ toolServer: OrgToolServer }>(
           "POST",
-          `${base}/tool-servers`,
+          `${base}/agents/tool-servers`,
           request,
         )
       ).toolServer,
@@ -186,16 +185,16 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
       (
         await client.requestJson<{ toolServer: OrgToolServer }>(
           "PATCH",
-          `${base}/tool-servers/${encode(key)}`,
+          `${base}/agents/tool-servers/${encode(key)}`,
           request,
         )
       ).toolServer,
     deleteToolServer: (key: string) =>
-      client.requestJson<unknown>("DELETE", `${base}/tool-servers/${encode(key)}`),
+      client.requestJson<unknown>("DELETE", `${base}/agents/tool-servers/${encode(key)}`),
     listToolServerTools: (key: string, signal?: AbortSignal) =>
       client.requestJson<OrgToolServerToolsResponse>(
         "GET",
-        `${base}/tool-servers/${encode(key)}/tools`,
+        `${base}/agents/tool-servers/${encode(key)}/tools`,
         undefined,
         {},
         opts(signal),
@@ -210,8 +209,8 @@ export function listWorkspaceOrgAgents(
   client: OrgAgentsTransport,
   workspaceId: string,
   signal?: AbortSignal,
-): Promise<WorkspaceOrgAgentsResponse> {
-  return client.requestJson<WorkspaceOrgAgentsResponse>(
+): Promise<ListWorkspaceOrgAgentsResponse> {
+  return client.requestJson<ListWorkspaceOrgAgentsResponse>(
     "GET",
     `/v1/workspaces/${encode(workspaceId)}/organization-agents`,
     undefined,
@@ -223,26 +222,32 @@ export function listWorkspaceOrgAgents(
 /* ------------------------------------------------------------------- flag */
 
 /**
- * Whether Console agents are on for an organization. The server reports the
- * flag in client config as `orgAgents` (true when every organization the
- * person reaches has it) or `orgAgentsAccountIds` (the organizations that do).
+ * Whether Console agents are on for an organization: the per-organization
+ * flag. The agent routes answer 404 while it is off (and on older servers), so
+ * the flag is whether the organization's agent list can be read. null while
+ * the first read is in flight. One shared read per client and organization.
  */
-export function orgAgentsEnabled(clientConfig: unknown, organizationId: string | null): boolean {
-  if (!clientConfig || typeof clientConfig !== "object" || !organizationId) return false;
-  const config = clientConfig as {
-    orgAgents?: unknown;
-    orgAgentsAccountIds?: unknown;
-    features?: unknown;
-  };
-  if (Array.isArray(config.orgAgentsAccountIds)) {
-    const id = organizationId.toLowerCase();
-    return config.orgAgentsAccountIds.some(
-      (value) => typeof value === "string" && value.toLowerCase() === id,
-    );
-  }
-  if (config.orgAgents === true) return true;
-  const features = config.features as { orgAgents?: unknown } | undefined;
-  return Boolean(features && typeof features === "object" && features.orgAgents === true);
+export function useOrgAgentsFlag(
+  client: OrgAgentsTransport,
+  organizationId: string | null,
+): boolean | null {
+  const query = useSharedQuery(
+    client,
+    ["console", "org-agents-flag", organizationId],
+    (signal) =>
+      client.requestJson<ListOrgAgentsResponse>(
+        "GET",
+        `/v1/organizations/${encode(organizationId ?? "")}/agents`,
+        undefined,
+        {},
+        { signal },
+      ),
+    { enabled: Boolean(organizationId), staleTimeMs: 300_000 },
+  );
+  if (!organizationId) return false;
+  if (query.data) return true;
+  if (query.error) return false;
+  return null;
 }
 
 /* ------------------------------------------------------------- definitions */

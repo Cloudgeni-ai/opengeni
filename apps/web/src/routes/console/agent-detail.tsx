@@ -95,7 +95,7 @@ export function ConsoleAgentRoute() {
     onClick: () => void navigate({ to: "/console/agents", search }),
   };
 
-  if (!enabled) {
+  if (enabled === false) {
     return (
       <DetailPage back={back} className="px-0 pt-0 max-sm:px-0">
         <Notice>Console agents aren't on for this organization.</Notice>
