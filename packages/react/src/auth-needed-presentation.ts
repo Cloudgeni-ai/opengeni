@@ -103,12 +103,15 @@ function consentName(scopes: readonly string[]): string | null {
 export function accessNeededWording(
   t: OpenGeniText,
   access: { providerDomain: string; scopes: readonly string[] },
-): { consent: string; line: string } {
+): { consent: string; line: string; missingLine: string } {
   const provider = providerLabel(t, access.providerDomain);
   const consent = consentName(access.scopes) ?? provider;
   const known = [...new Set(access.scopes.flatMap((scope) => ADDITIONAL_ACCESS[scope] ?? []))];
   return {
     consent,
+    // For a surface that can't ask the provider itself: running the action
+    // then asks in the chat.
+    missingLine: t("approvalSurface.accessStillMissing", { provider }),
     line:
       known.length > 0
         ? t("approvalSurface.consentAsksFirst", {

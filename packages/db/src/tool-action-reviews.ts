@@ -434,8 +434,10 @@ export async function getToolActionReview(
       : approvedByViewer
         ? { approvedBy: "you" }
         : {}),
-    // Only a decision still to make asks the provider for access first.
-    ...(waiting && context?.accessNeeded ? { accessNeeded: context.accessNeeded } : {}),
+    // Only a viewer who can still approve is asked for the provider's access.
+    ...(waiting && !ownerOnly && request.reviewArguments !== null && context?.accessNeeded
+      ? { accessNeeded: context.accessNeeded }
+      : {}),
     detailsAvailable: args !== null,
   });
 }

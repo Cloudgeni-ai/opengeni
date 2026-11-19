@@ -86,6 +86,25 @@ describe("connection cards in one turn", () => {
     expect(posted).toBe(1);
   });
 
+  test("several repeats waiting on a card that failed to post post it once", async () => {
+    const ledger = createToolAuthNeededCardLedger();
+    let fail!: (error: Error) => void;
+    const first = ledger.post(
+      stepUp,
+      () => new Promise<void>((_resolve, reject) => (fail = reject)),
+    );
+    let posted = 0;
+    const publish = async () => {
+      posted += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    };
+    const repeats = [ledger.post(stepUp, publish), ledger.post(stepUp, publish)];
+    fail(new Error("event store unavailable"));
+    await expect(first).rejects.toThrow("event store unavailable");
+    await Promise.all(repeats);
+    expect(posted).toBe(1);
+  });
+
   test("a host's card is posted each time with its own sign-in link", async () => {
     const ledger = createToolAuthNeededCardLedger();
     const host = { ...stepUp, authoritySource: "host" } as ToolAuthNeededPayload;

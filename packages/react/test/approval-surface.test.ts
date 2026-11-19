@@ -695,6 +695,107 @@ describe("ApprovalSurface: an action whose account lacks access", () => {
     expect(approveButton()?.hasAttribute("disabled")).toBe(false);
   });
 
+  test("a consent that fails leaves the action waiting, with the error shown", async () => {
+    let approved = 0;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: async () => {
+          throw new Error("Your browser blocked the sign-in window.");
+        },
+        onApprove: async () => {
+          approved += 1;
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(approved).toBe(0);
+    expect(mounted.container.querySelector('[role="alert"]')?.textContent).toBeTruthy();
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("Reject while the provider's window is open stops waiting for it and declines", async () => {
+    const decisions: string[] = [];
+    let signal: AbortSignal | undefined;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: (_access, _approval, abort) => {
+          signal = abort;
+          // Never settles on its own: the person closed Google's window.
+          return new Promise<boolean>((_resolve, reject) =>
+            abort.addEventListener("abort", () => reject(abort.reason)),
+          );
+        },
+        onApprove: async () => {
+          decisions.push("approve");
+        },
+        onReject: async () => {
+          decisions.push("reject");
+        },
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(approveButton()?.textContent).toContain("Waiting for Google");
+    const reject = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Decline",
+    );
+    expect(reject?.hasAttribute("disabled")).toBe(false);
+    await act(async () => {
+      reject!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(signal?.aborted).toBe(true);
+    expect(decisions).toEqual(["reject"]);
+  });
+
+  test("Approve waits for the review, so missing access is never skipped", async () => {
+    const review = deferred<ToolActionReview>();
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: () => review.promise,
+        onAllowAccess: async () => true,
+        onApprove: noDecision,
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    // No decision is offered until the review says what access it needs.
+    expect(approveButton()).toBeUndefined();
+    review.resolve({ ...savedReview(), accessNeeded } as ToolActionReview);
+    await settle();
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("a surface that can't ask the provider still says access is missing", async () => {
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onApprove: noDecision,
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    expect(mounted.container.textContent).toContain(
+      "Gmail hasn't given Opengeni access for this yet; you'll be asked to allow it.",
+    );
+  });
+
   test("approve all leaves it out, so its access is asked on its own card", async () => {
     const approved: string[] = [];
     const items = ["a", "b", "c"].map((id) => ({ ...approval, id, arguments: { projectId: id } }));

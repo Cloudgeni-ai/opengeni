@@ -582,19 +582,22 @@ describe("Gmail REST MCP adapter", () => {
     expect(review.samples).toEqual([
       { id: "m-1", title: "Lunch", provenance: "provider_metadata" },
     ]);
-    // An email's preview needs the access itself: the card shows the call's fields.
-    expect(
-      await gmail.reviewContext("send_message", {
-        to: ["user@example.com"],
-        subject: "Hello",
-        body: "Hi",
-      }),
-    ).toEqual({
-      accessNeeded: {
-        providerDomain: "gmailmcp.googleapis.com",
-        connectionId: "conn_1",
-        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
-      },
+    // The email being approved is still shown: its preview is built with the
+    // account's read access, so content is never approved unseen.
+    const sendReview = await gmail.reviewContext("send_message", {
+      to: ["user@example.com"],
+      subject: "Hello",
+      body: "Hi",
+    });
+    expect(sendReview.accessNeeded).toEqual({
+      providerDomain: "gmailmcp.googleapis.com",
+      connectionId: "conn_1",
+      scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+    });
+    expect(sendReview.email).toMatchObject({
+      to: "user@example.com",
+      subject: "Hello",
+      textBody: expect.stringContaining("Hi"),
     });
     expect(requests).toEqual(["/gmail/v1/users/me/messages/m-1"]);
     requests.length = 0;
@@ -680,6 +683,48 @@ describe("Gmail REST MCP adapter", () => {
     await expect(gmail.reviewContext("trash_message", { messageId: "m-1" })).rejects.toThrow(
       "This Gmail action is not available for the connected account.",
     );
+  });
+
+  test("a host-owned account's review refuses missing access instead of offering a step-up", async () => {
+    const events: unknown[] = [];
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "ok",
+        headers: { authorization: "Bearer host-token" },
+        connectionId: "conn_host",
+        authoritySource: "host",
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      }),
+      onAuthNeeded: (payload) => {
+        events.push(payload);
+      },
+      fetchImpl: async () => Response.json({}),
+    });
+    await expect(gmail.reviewContext("trash_message", { messageId: "m-1" })).rejects.toThrow(
+      "Gmail has not been given access for this action yet.",
+    );
+    expect(events).toMatchObject([{ toolName: "trash_message", authoritySource: "host" }]);
+  });
+
+  test("an email's review is refused, not approved unseen, when the account can't read it", async () => {
+    const requests: string[] = [];
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "ok",
+        headers: { authorization: "Bearer gmail-token" },
+        connectionId: "conn_1",
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.labels"],
+      }),
+      onAuthNeeded: () => {},
+      fetchImpl: async (input) => {
+        requests.push(new URL(input.toString()).pathname);
+        return Response.json({});
+      },
+    });
+    await expect(
+      gmail.reviewContext("send_draft", { draftId: "draft-1", expectedContentSha256: "0" }),
+    ).rejects.toThrow("Gmail has not been given access for this action yet.");
+    expect(requests).toEqual([]);
   });
 
   test("never replays send_message or send_draft after a provider 401", async () => {

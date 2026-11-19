@@ -32,6 +32,7 @@ import {
   HumanInputSurface,
   type ToolReviewDetailsLoader,
 } from "../../../session-ui";
+import type { ApprovalSurfaceProps } from "../../../components/approval-surface";
 import { buttonVariants } from "../../../ui/button";
 import { userErrorText } from "../../../ui/api-error";
 import {
@@ -85,6 +86,8 @@ export type DescendantRequestsProps = {
   allowedSaveTo?: HumanInputFormProps["allowedSaveTo"];
   /** Safety-net re-read of questions while shown (live hints drive the rest). */
   pollIntervalMs?: number | undefined;
+  /** Asks a provider for access an action's account lacks, before approving it. */
+  onAllowAccess?: ApprovalSurfaceProps["onAllowAccess"];
 };
 
 // The shared-feed mode with an empty feed: no live stream per sub-session.
@@ -192,6 +195,7 @@ function DescendantRequestItem({
   loadSkillReview,
   allowedSaveTo,
   pollIntervalMs = DEFAULT_POLL_MS,
+  onAllowAccess,
 }: DescendantRequestsProps & {
   session: SessionSummary;
   compact: boolean;
@@ -389,6 +393,7 @@ function DescendantRequestItem({
               loadDetails={loadDetails}
               onApprove={(approval, answer) => decide(approval, "approve", answer)}
               onReject={(approval) => decide(approval, "reject")}
+              onAllowAccess={onAllowAccess}
             />
           </div>
         ) : null}

@@ -62,12 +62,14 @@ const MUTATION_TOOLS = new Set([
   "unlabel_message",
   "unlabel_thread",
 ]);
+/** Tools whose review composes the email, which needs the tool's own access. */
+const GMAIL_COMPOSE_REVIEW_TOOLS = ["send_draft", "send_message", "create_draft", "update_draft"];
+/** Read tools whose access builds that preview when the tool's own is missing. */
+const GMAIL_REVIEW_READ_TOOLS = ["get_message", "get_draft"];
 /**
  * The account was connected with less access than this tool needs. The person
  * is asked in the chat to allow more, through the same connect card.
  */
-/** Tools whose review composes the email, which needs the tool's own access. */
-const GMAIL_COMPOSE_REVIEW_TOOLS = ["send_draft", "send_message", "create_draft", "update_draft"];
 const GMAIL_MORE_ACCESS_NEEDED =
   "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; until they do, calling it again fails the same way.";
 const GMAIL_NOT_AVAILABLE_FOR_CONNECTION =
@@ -537,13 +539,25 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<Partial<import("@opengeni/contracts").ToolReviewContext>> {
+    const account = await this.resolveAccount(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
     // Access the person can allow is asked with the action itself: approving
     // first asks Google for it, so there is one decision, not a card first.
-    const accessNeeded = await this.reviewAccessNeed(toolName);
-    if (!accessNeeded) return await this.reviewFacts(toolName, args, true);
-    // The email preview needs that access; the card shows the call's fields.
-    if (GMAIL_COMPOSE_REVIEW_TOOLS.includes(toolName)) return { accessNeeded };
-    return { ...(await this.reviewFacts(toolName, args, false)), accessNeeded };
+    const accessNeeded = this.reviewAccessNeed(toolName, account);
+    if (!accessNeeded) {
+      // Ask for missing access before the person is asked to approve the action.
+      await this.checkToolGrant(toolName, account);
+      return await this.reviewFacts(toolName, args, false);
+    }
+    // The email being approved must be shown. It is read with the account's
+    // read access; without that the review is refused and access asked first.
+    if (
+      GMAIL_COMPOSE_REVIEW_TOOLS.includes(toolName) &&
+      !GMAIL_REVIEW_READ_TOOLS.every((tool) =>
+        gmailToolSupportsScopes(tool, account.grantedScopes ?? []),
+      )
+    )
+      await this.checkToolGrant(toolName, account);
+    return { ...(await this.reviewFacts(toolName, args, true)), accessNeeded };
   }
 
   /**
@@ -551,10 +565,10 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
    * can grant them (a native sign-in Opengeni can ask Google again for), or
    * null. A fixed-access or host-owned account is refused as before.
    */
-  private async reviewAccessNeed(
+  private reviewAccessNeed(
     toolName: string,
-  ): Promise<import("@opengeni/contracts").ToolReviewAccessNeeded | null> {
-    const result = await this.resolveAccount(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
+    result: Extract<ResolveCredentialResult, { status: "ok" }>,
+  ): import("@opengeni/contracts").ToolReviewAccessNeeded | null {
     const scopeNeed = result.grantedScopes
       ? gmailToolScopeNeed(toolName, result.grantedScopes)
       : null;
@@ -569,15 +583,18 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
   private async reviewFacts(
     toolName: string,
     args: Record<string, unknown>,
-    checkAccess: boolean,
+    readOnly: boolean,
   ): Promise<Partial<import("@opengeni/contracts").ToolReviewContext>> {
-    // Ask for missing access before the person is asked to approve the action.
-    if (checkAccess) await this.resolveForTool(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
     if (GMAIL_COMPOSE_REVIEW_TOOLS.includes(toolName)) {
+      // Reading for the preview uses read access when the tool's own is missing.
+      const messageTool = readOnly ? "get_message" : toolName;
       const raw =
         toolName === "send_draft"
-          ? await this.readDraftRaw(requiredId(args.draftId, "draftId"), toolName)
-          : await this.composeMime(args, await this.readReply(args, toolName), toolName);
+          ? await this.readDraftRaw(
+              requiredId(args.draftId, "draftId"),
+              readOnly ? "get_draft" : toolName,
+            )
+          : await this.composeMime(args, await this.readReply(args, messageTool), messageTool);
       if (toolName === "send_draft") assertContentHash(raw, args.expectedContentSha256);
       const parsed = await PostalMime.parse(raw, {
         maxHeadersSize: 128 * 1024,

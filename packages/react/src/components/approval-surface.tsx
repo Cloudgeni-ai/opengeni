@@ -89,10 +89,16 @@ export type ApprovalSurfaceProps = {
    * Approve click, so a host can open the provider's window there. Resolve
    * `true` to approve this one call now, `false` to leave it waiting (the
    * person didn't allow it, or the host continues the setup elsewhere).
-   * Without it, Approve only approves.
+   * Throw to leave it waiting and show why. `signal` aborts when the person
+   * presses Approve again or Reject meanwhile, e.g. after closing the
+   * provider's window. Without it, Approve says the access is still missing.
    */
   onAllowAccess?:
-    | ((access: ToolReviewAccessNeeded, approval: PendingApproval) => Promise<boolean>)
+    | ((
+        access: ToolReviewAccessNeeded,
+        approval: PendingApproval,
+        signal: AbortSignal,
+      ) => Promise<boolean>)
     | undefined;
   onViewDetails?: ((review: ToolActionReview, path: string) => void) | undefined;
   selectedApprovalId?: string | null | undefined;
@@ -198,6 +204,8 @@ export function ApprovalSurface({
     consent?: string | undefined;
   } | null>(null);
   const pendingRef = useRef<string | null>(null);
+  /** The open consent wait, which a new decision on the same action ends. */
+  const consentRef = useRef<{ id: string; controller: AbortController } | null>(null);
   const [decisionError, setDecisionError] = useState<{ cause: unknown } | null>(null);
   const [localSelectedId, setLocalSelectedId] = useState<string | null>(null);
   const selectedId = selectedApprovalId === undefined ? localSelectedId : selectedApprovalId;
@@ -358,10 +366,16 @@ export function ApprovalSurface({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      consentRef.current?.controller.abort();
     };
   }, []);
   useEffect(() => {
     if (pending && !approvals.some((approval) => approval.id === pending.id)) {
+      // Decided elsewhere or gone: stop waiting on its provider window.
+      if (consentRef.current?.id === pending.id) {
+        consentRef.current.controller.abort();
+        consentRef.current = null;
+      }
       pendingRef.current = null;
       setPending(null);
       // Hand focus to the next card without moving the view: a reader at the
@@ -387,27 +401,52 @@ export function ApprovalSurface({
     answer?: McpElicitationAnswer,
     access?: { needed: ToolReviewAccessNeeded; consent: string },
   ) => {
-    if (responding || pendingRef.current || bulkRef.current || decidedBy(approval)) return;
+    if (responding || bulkRef.current || decidedBy(approval)) return;
+    // Pressing again while the provider's window is open stops waiting for it
+    // (the person may have closed it): Reject declines, Approve asks again.
+    const waitingConsent = consentRef.current;
+    if (waitingConsent?.id === approval.id) {
+      consentRef.current = null;
+      waitingConsent.controller.abort();
+      pendingRef.current = null;
+    }
+    if (pendingRef.current) return;
     pendingRef.current = approval.id;
     const consentFirst = decision === "approve" && access && onAllowAccess ? access : undefined;
+    const consent = consentFirst
+      ? { id: approval.id, controller: new AbortController() }
+      : undefined;
+    if (consent) consentRef.current = consent;
     setPending({ id: approval.id, decision, consent: consentFirst?.consent });
     setDecisionError(null);
     try {
       // Synchronously in the click: the host may open the provider's window.
-      if (consentFirst && !(await onAllowAccess!(consentFirst.needed, approval))) {
-        if (pendingRef.current === approval.id) {
-          pendingRef.current = null;
-          setPending(null);
+      if (consentFirst && consent) {
+        const allowed = await onAllowAccess!(
+          consentFirst.needed,
+          approval,
+          consent.controller.signal,
+        );
+        // A newer press took over; it owns the card's state now.
+        if (consent.controller.signal.aborted || consentRef.current !== consent) return;
+        consentRef.current = null;
+        if (!allowed) {
+          if (pendingRef.current === approval.id) {
+            pendingRef.current = null;
+            setPending(null);
+          }
+          return;
         }
-        return;
+        setPending({ id: approval.id, decision });
       }
-      if (consentFirst) setPending({ id: approval.id, decision });
       await (decision === "approve"
         ? answer
           ? onApprove(approval, answer)
           : onApprove(approval)
         : onReject(approval));
     } catch (cause) {
+      if (consent?.controller.signal.aborted) return;
+      if (consent && consentRef.current === consent) consentRef.current = null;
       if (pendingRef.current === approval.id) {
         pendingRef.current = null;
         setPending(null);
@@ -618,7 +657,12 @@ export function ApprovalSurface({
             submitting={pending?.id === approval.id ? pending.decision : decidedBy(approval)}
             consentPending={pending?.id === approval.id ? pending.consent : undefined}
             allowsAccess={Boolean(onAllowAccess)}
-            disabled={bulkBusy || decidedBy(approval) !== null}
+            disabled={
+              // Waiting on the provider's window leaves this card's own
+              // buttons pressable, so the person can stop that wait.
+              (bulkBusy && !(pending?.id === approval.id && pending.consent)) ||
+              decidedBy(approval) !== null
+            }
             onApprove={(access) => void decide(approval, "approve", undefined, access)}
             onAnswer={(content) =>
               approval.elicitation
@@ -930,10 +974,9 @@ function ApprovalRequest({
     );
   const saved = loaded ?? fallback;
   const review = answer ? { ...saved, approveLabel: answer.approve } : saved;
-  const access =
-    allowsAccess && review.accessNeeded
-      ? { needed: review.accessNeeded, ...accessNeededWording(t, review.accessNeeded) }
-      : undefined;
+  const access = review.accessNeeded
+    ? { needed: review.accessNeeded, ...accessNeededWording(t, review.accessNeeded) }
+    : undefined;
   if (detailPath !== null)
     return (
       <ToolActionReviewDetails
@@ -995,9 +1038,12 @@ function ApprovalRequest({
         review={review}
         {...actions}
         onApprove={() =>
-          actions.onApprove(access ? { needed: access.needed, consent: access.consent } : undefined)
+          actions.onApprove(
+            access && allowsAccess ? { needed: access.needed, consent: access.consent } : undefined,
+          )
         }
-        notice={access?.line}
+        notice={access ? (allowsAccess ? access.line : access.missingLine) : undefined}
+        interruptible={Boolean(consentPending)}
         approvingLabel={
           consentPending
             ? t("messageTimeline.waitingForConsent", { consent: consentPending })

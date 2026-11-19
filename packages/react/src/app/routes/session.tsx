@@ -341,7 +341,10 @@ import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
 import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
 import { findConnectRecoveryTarget } from "../lib/connect-recovery-account";
 import type { CardStepUpOutcome } from "../lib/connection-step-up";
-import type { ToolReviewAccessNeeded } from "../../components/approval-surface";
+import type {
+  ApprovalSurfaceProps,
+  ToolReviewAccessNeeded,
+} from "../../components/approval-surface";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -1452,15 +1455,27 @@ export function SessionRoute({
   );
   // Approving an action whose account lacks access asks the provider for it
   // first, in the same click; the approval then covers only that one call.
-  // An account this page can't step up is approved as is: running the call
-  // then shows the access card instead.
+  // When no consent ran, the action stays waiting and says why: approving a
+  // call that is sure to fail would use up the decision.
   const allowAccessForApproval = useCallback(
-    async (access: ToolReviewAccessNeeded): Promise<boolean> => {
-      const running = stepUpConnection(access.connectionId, access.scopes, {});
-      const outcome = running ? await running : null;
-      if (outcome?.status === "resume_in_dialog") {
+    async (
+      access: ToolReviewAccessNeeded,
+      _approval?: unknown,
+      signal?: AbortSignal,
+    ): Promise<boolean> => {
+      const running = stepUpConnection(access.connectionId, access.scopes, { signal });
+      if (!running) {
+        toast.error(t("connectWindowHost.allowPopups"));
+        return false;
+      }
+      const outcome = await running;
+      if (outcome.status === "resume_in_dialog") {
         // The person finishes it there, then approves.
         setReconnectRequest(outcome.request);
+        return false;
+      }
+      if (outcome.status === "not_handled") {
+        toast.error(t("connectSetup.setupCouldNotContinueTryAgain"));
         return false;
       }
       return true;
@@ -2388,7 +2403,7 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: AuthNeededRecoveryHandler;
   /** Asks a provider for access an action's account lacks, before approving it. */
-  onAllowAccess: (access: ToolReviewAccessNeeded) => Promise<boolean>;
+  onAllowAccess: NonNullable<ApprovalSurfaceProps["onAllowAccess"]>;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
   onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
@@ -4733,6 +4748,7 @@ function SessionChatPane(props: {
                       onResolved={props.onDescendantResolved}
                       onResumingChange={onSubSessionResumingChange}
                       refreshSignal={props.descendantRefreshSignal}
+                      onAllowAccess={props.onAllowAccess}
                       loadSkillReview={loadSkillReview}
                       allowedSaveTo={secretSaveTargets(
                         context.accessContext,

@@ -385,6 +385,7 @@ export function ToolActionReviewCard({
   bare,
   notice,
   approvingLabel,
+  interruptible,
 }: {
   review: ToolActionReview;
   onApprove?: (() => void) | undefined;
@@ -400,6 +401,11 @@ export function ToolActionReviewCard({
   notice?: string | undefined;
   /** The approve button's words while it works, instead of "Approving…". */
   approvingLabel?: string | undefined;
+  /**
+   * While approving waits on the person elsewhere (a provider's window), both
+   * buttons stay pressable: pressing again stops that wait.
+   */
+  interruptible?: boolean | undefined;
 }) {
   const t = useOpenGeniText();
   // The host's words for the action, its fields, the reason and the button.
@@ -408,7 +414,7 @@ export function ToolActionReviewCard({
   const canApprove = review.availableActions.includes("approve") && !!onApprove;
   const canReject = review.availableActions.includes("reject") && !!onReject;
   const actionable = review.status === "pending" && (canApprove || canReject);
-  const busy = Boolean(disabled || submitting);
+  const busy = Boolean(disabled || (submitting && !interruptible));
   const tone: Tone = statusTone[review.status];
   const eyebrow = submitting
     ? submitting === "approve"

@@ -15,6 +15,8 @@ export const englishMessages = {
     "{consent} will ask you to allow {product} to {access} (one time).",
   "approvalSurface.consentAsksFirstMoreAccess":
     "{consent} will ask you to allow {product} more access to {provider} (one time).",
+  "approvalSurface.accessStillMissing":
+    "{provider} hasn't given {product} access for this yet; you'll be asked to allow it.",
   "approvalSurface.approveAction": "Approve action",
   /** Approves every waiting action the person may approve, one decision each. */
   "approvalSurface.approveAll": "Approve all {length}",

@@ -165,13 +165,15 @@ export function createToolAuthNeededCardLedger(): {
         [...new Set(payload.scopes ?? [])].sort(),
         payload.resource ?? null,
       ]);
-      const earlier = posted.get(key);
-      if (earlier) {
+      // After a failed post, a concurrent repeat may already be posting it
+      // again: wait for that one rather than posting another copy.
+      for (let earlier = posted.get(key); earlier; earlier = posted.get(key)) {
         try {
           await earlier;
           return;
         } catch {
-          // That card never posted: this ask posts it.
+          // That card never posted: unless another ask took over, this one posts it.
+          if (posted.get(key) === earlier) posted.delete(key);
         }
       }
       const current = publish();
