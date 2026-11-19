@@ -49,6 +49,8 @@ mock.module("../lib/navigation", () => ({
 
 // Complete: bun shares module mocks across the test files of one process.
 const MockAppContext = createContext<unknown>(null);
+// A stable Provider value; tests swap its client.
+const providedContext: { client: unknown } = { client };
 mock.module("../app-context", () => ({
   AppContext: MockAppContext,
   useAppContext: () => useContext(MockAppContext) ?? { client },
@@ -147,6 +149,78 @@ describe("credit required prompt", () => {
     root = createRoot(container);
     await render();
     expect(container.textContent).not.toContain("Add a card");
+  });
+
+  test("a new organization not yet enrolled in Free is offered Add a card too", async () => {
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 0 } });
+    const getBillingCardVerification = mock(async () => ({
+      accountId: "account-a",
+      card: null,
+      required: true,
+      verified: false,
+      canVerify: true,
+    }));
+    const custom = { ...client, getBillingCardVerification } as unknown as Parameters<
+      typeof CreditRequiredPromptView
+    >[0]["client"];
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <CreditRequiredPromptView
+          client={custom}
+          open
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          onOpenChange={() => {}}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Add a card so this organization can get Free credit.");
+  });
+
+  test("the empty-credits notice offers Add a card to an unverified Free owner", async () => {
+    const card = { required: true, verified: false, canVerify: true };
+    const getBillingCardVerification = mock(async () => ({
+      accountId: "account-a",
+      card: null,
+      ...card,
+    }));
+    providedContext.client = { ...client, getBillingCardVerification };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const render = async () => {
+      root = createRoot(container);
+      await act(async () =>
+        root!.render(
+          <MockAppContext.Provider value={providedContext}>
+            <EmptyCreditsNotice
+              workspaceId="workspace-a"
+              accountId="account-a"
+              canBuyCredits
+              canReadBilling
+            />
+          </MockAppContext.Provider>,
+        ),
+      );
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    };
+    await render();
+    expect(getBillingCardVerification).toHaveBeenCalledWith({ accountId: "account-a" });
+    expect(container.textContent).toContain("Add a card for Free credit");
+    expect(container.textContent).not.toContain("Add credits");
+    expect([...container.querySelectorAll("button")].map((b) => b.textContent)).toContain(
+      "Add a card",
+    );
+    // Someone who can't add the card (not the owner) keeps the credit notice.
+    await act(async () => root!.unmount());
+    card.canVerify = false;
+    await render();
+    expect(container.textContent).toContain("Add credits to start chatting");
+    expect(container.textContent).not.toContain("Add a card");
+    providedContext.client = client;
   });
 
   test("an enrolled Free account offers plans while a disabled catalog preserves the legacy action", async () => {

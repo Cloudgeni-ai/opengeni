@@ -97,13 +97,17 @@ export function CreditRequiredPromptView({
       .getBilling({ accountId })
       .then(async (billing) => {
         if (active) setStripeEnabled(billing.mode === "stripe");
-        if (!active || !billing.balance.plan || billing.mode !== "stripe") return;
+        if (!active || billing.mode !== "stripe") return;
+        // A brand-new organization may not be enrolled in Free yet; it
+        // still needs its card for Free credit.
         void client
           .getBillingCardVerification?.({ accountId })
           .then((card) => {
-            if (active && card.required && !card.verified) setCardAccountId(accountId);
+            if (active && card.required && !card.verified && card.canVerify)
+              setCardAccountId(accountId);
           })
           .catch(() => undefined);
+        if (!billing.balance.plan) return;
         const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
         if (
           active &&
@@ -353,9 +357,38 @@ export function EmptyCreditsNotice({
 
   const empty =
     stripeEnabled && (creditFunding === undefined ? legacyEmpty : creditFunding === "unavailable");
+  const canAdd = canBuyCredits && stripeEnabled;
+  // An unverified Free organization gets its Free credit once its owner adds
+  // a card (card verification gate): that is the one action, not buying.
+  const [cardAccountId, setCardAccountId] = useState<string | null>(null);
+  const cardCheck = empty && canAdd && !someCredit && accountId ? accountId : null;
+  useEffect(() => {
+    setCardAccountId(null);
+    if (!cardCheck) return;
+    let active = true;
+    client
+      .getBillingCardVerification?.({ accountId: cardCheck })
+      .then((card) => {
+        if (active && card.required && !card.verified && card.canVerify)
+          setCardAccountId(cardCheck);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [cardCheck, client]);
   useCreditExposure(empty, workspaceId);
   if (!empty) return null;
-  const canAdd = canBuyCredits && stripeEnabled;
+  if (cardCheck && cardAccountId === cardCheck) {
+    return (
+      <Notice tone="waiting" title="Add a card for Free credit">
+        You won't be charged.
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <AddCardButton client={client} accountId={cardCheck} />
+        </div>
+      </Notice>
+    );
+  }
   const body = someCredit
     ? canAdd
       ? `This model can't use the ${productName} credits you have right now. Add credits, or choose another model.`
