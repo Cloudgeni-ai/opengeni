@@ -22,6 +22,7 @@ import {
   ensureManagedAccessForUser,
   listInboxEntries,
   listInboxItems,
+  updateInboxItemAttention,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -150,6 +151,7 @@ function connectClaude(org: Org, workspaceId: string | null, email: string) {
         accountId: org.accountId,
         workspaceId,
         subjectId: org.owner.subjectId,
+        connectedBySubjectId: org.owner.subjectId,
         credentialEncrypted: encryptEnvironmentValue(
           key,
           JSON.stringify({ access_token: `a-${crypto.randomUUID()}`, refresh_token: "r" }),
@@ -294,6 +296,84 @@ describe.skipIf(!realDb)("an account that needs signing in again", () => {
     expect(await notices(org, org.owner.subjectId)).toHaveLength(1);
     expect((await noticeRows(id)).map((row) => row.status)).toEqual(["resolved", "open"]);
     expect(await pushes(org.owner.authSessionId)).toHaveLength(2);
+  });
+
+  test("while the runtime may not sync yet, signing in again leaves the notice for the person to dismiss", async () => {
+    const org = await organization();
+    const email = `again-${crypto.randomUUID()}@example.test`;
+    const id = await connectClaude(org, null, email);
+    await refusedUpstream(id);
+    const [notice] = await notices(org, org.owner.subjectId);
+    expect(notice?.body).not.toContain("can't reconnect it");
+    // The reconnect is the application role's own write.
+    expect(await connectClaude(org, null, email)).toBe(id);
+    expect((await connection(id)).status).toBe("active");
+    expect(await notices(org, org.owner.subjectId)).toHaveLength(1);
+    expect(
+      await updateInboxItemAttention(client.db, {
+        itemId: notice!.id,
+        accountId: org.accountId,
+        subjectId: org.owner.subjectId,
+        dismissed: true,
+      }),
+    ).toBe(true);
+    expect(await notices(org, org.owner.subjectId)).toEqual([]);
+  });
+
+  test("once the runtime may sync, signing in again closes the open notice", async () => {
+    const sync = "opengeni_private.sync_subscription_relogin_notice_v1(uuid)";
+    await shared.admin.unsafe(`grant execute on function ${sync} to opengeni_app`);
+    try {
+      const org = await organization();
+      const email = `granted-${crypto.randomUUID()}@example.test`;
+      const id = await connectClaude(org, null, email);
+      await refusedUpstream(id);
+      expect(await notices(org, org.owner.subjectId)).toHaveLength(1);
+      expect(await connectClaude(org, null, email)).toBe(id);
+      expect((await connection(id)).status).toBe("active");
+      expect(await notices(org, org.owner.subjectId)).toEqual([]);
+      expect((await noticeRows(id)).map((row) => row.status)).toEqual(["resolved"]);
+    } finally {
+      await shared.admin.unsafe(`revoke execute on function ${sync} from opengeni_app`);
+    }
+  });
+
+  test("a status write by a role that may not sync tells nobody and still succeeds", async () => {
+    // The runtime role's EXECUTE on the sync is withheld for one release.
+    const [grant] = await shared.admin<{ allowed: boolean }[]>`
+      select has_function_privilege('opengeni_app',
+        'opengeni_private.sync_subscription_relogin_notice_v1(uuid)', 'EXECUTE') as allowed`;
+    expect(grant!.allowed).toBe(false);
+
+    const org = await organization();
+    const id = await connectClaude(org, null, `withheld-${crypto.randomUUID()}@example.test`);
+    const writer = `relogin_writer_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    // The application role's privileges, without its row security context.
+    await shared.admin.unsafe(`create role ${writer} nologin bypassrls in role opengeni_app`);
+    try {
+      const writeAs = async (status: string) =>
+        await shared.admin.begin(async (tx) => {
+          await tx.unsafe(`set local role ${writer}`);
+          await tx`
+            update subscription_connections
+            set status = ${status}, version = version + 1 where id = ${id}::uuid`;
+        });
+
+      await writeAs("needs_relogin");
+      expect((await connection(id)).status).toBe("needs_relogin");
+      expect(await noticeRows(id)).toHaveLength(0);
+
+      // Once a later release grants EXECUTE, the same write tells them.
+      await writeAs("active");
+      await shared.admin.unsafe(
+        `grant execute on function opengeni_private.sync_subscription_relogin_notice_v1(uuid) to ${writer}`,
+      );
+      await writeAs("needs_relogin");
+      expect(await notices(org, org.owner.subjectId)).toHaveLength(1);
+    } finally {
+      await shared.admin.unsafe(`drop owned by ${writer}`);
+      await shared.admin.unsafe(`drop role ${writer}`);
+    }
   });
 
   test("a workspace's own account links to that workspace's sign-in step", async () => {

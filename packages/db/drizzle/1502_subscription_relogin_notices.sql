@@ -26,15 +26,24 @@
 --   and is unique per recipient and key. Existing chat items are unchanged,
 --   and clients already show an item whose chat they can't open as its text
 --   and link.
--- * `opengeni_private.open_subscription_relogin_notice_v1(connection)` opens
---   those notifications and queues their pushes (rule `needs_input`). An
---   AFTER trigger calls it when an account turns needs_relogin and resolves
---   them when it leaves that state (signed in again or disconnected). A
---   failure to notify never fails the status write.
+-- * `opengeni_private.sync_subscription_relogin_notice_v1(connection)` opens
+--   those notifications and queues their pushes (rule `needs_input`) while
+--   the account needs signing in, and resolves them once it doesn't (signed
+--   in again, recovered or disconnected). An AFTER trigger calls it whenever
+--   an account enters or leaves needs_relogin. A failure to notify never
+--   fails the status write.
 -- * Accounts that turned needs_relogin in the last 14 days are told now.
 --
--- No runtime role gains EXECUTE on anything: only triggers and this
--- migration call the new definer. It reads the connection and the
+-- The notice trigger is an ordinary trigger running as the writing role, so
+-- a write by the tables' owner (the subscription definer that records a
+-- model request refused after refresh, and this migration's backfill) syncs
+-- the notice. The runtime role's EXECUTE on the sync is withheld for one
+-- release (DEFERRED_RUNTIME_PRIVATE_ROUTINES), because the previous release
+-- refuses a runtime grant on a definer it doesn't know. Until a later
+-- migration grants it, a status write made directly by the runtime role (a
+-- failed credential refresh, a reconnect, a disconnect) syncs nothing, as
+-- before, and never fails; the person can still dismiss the notice. The
+-- sync reads the connection and the
 -- organization's memberships through their organization_membership_lifecycle
 -- policy arms (opened for its own reads and restored on every exit), with no
 -- locking clause, so FORCE row security on both tables admits its reads as
@@ -87,7 +96,7 @@ BEGIN
   $definition$, data_schema);
 
   EXECUTE pg_catalog.format($definition$
-    CREATE FUNCTION opengeni_private.open_subscription_relogin_notice_v1(p_connection_id uuid)
+    CREATE FUNCTION opengeni_private.sync_subscription_relogin_notice_v1(p_connection_id uuid)
     RETURNS integer
     LANGUAGE plpgsql
     VOLATILE
@@ -127,6 +136,12 @@ BEGIN
       THEN
         PERFORM pg_catalog.set_config(
           'opengeni.organization_tenancy_lifecycle', coalesce(v_previous_lifecycle, ''), true);
+        -- Signed in again, recovered or disconnected: its notices have
+        -- nothing left to ask.
+        UPDATE opengeni_private.inbox_items item
+        SET status = 'resolved', resolved_at = now(), updated_at = now()
+        WHERE item.session_id IS NULL AND item.kind = 'notification' AND item.status = 'open'
+          AND item.source_key LIKE 'subscription-relogin:' || p_connection_id::text || ':%%';
         RETURN 0;
       END IF;
       v_service := CASE v_connection.provider
@@ -247,19 +262,17 @@ BEGIN
     CREATE FUNCTION opengeni_private.subscription_connection_relogin_notice()
     RETURNS trigger
     LANGUAGE plpgsql
-    SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
     BEGIN
-      IF NEW.status = 'needs_relogin' AND OLD.status IS DISTINCT FROM 'needs_relogin' THEN
-        PERFORM opengeni_private.open_subscription_relogin_notice_v1(NEW.id);
-      ELSIF OLD.status = 'needs_relogin' AND NEW.status IS DISTINCT FROM 'needs_relogin' THEN
-        -- Signed in again or disconnected: the notice has nothing left to ask.
-        UPDATE opengeni_private.inbox_items item
-        SET status = 'resolved', resolved_at = now(), updated_at = now()
-        WHERE item.account_id = NEW.account_id AND item.session_id IS NULL
-          AND item.kind = 'notification' AND item.status = 'open'
-          AND item.source_key LIKE 'subscription-relogin:' || NEW.id::text || ':%%';
+      -- Runs as the writing role. The tables' owner (the subscription
+      -- definer that records a refused sign-in, and this migration) may
+      -- always sync the notice; a runtime role may once its EXECUTE is
+      -- granted, and until then its write tells nobody, as before.
+      IF pg_catalog.has_function_privilege(
+        'opengeni_private.sync_subscription_relogin_notice_v1(uuid)', 'EXECUTE')
+      THEN
+        PERFORM opengeni_private.sync_subscription_relogin_notice_v1(NEW.id);
       END IF;
       RETURN NULL;
     EXCEPTION WHEN OTHERS THEN
@@ -273,7 +286,7 @@ END
 $subscription_relogin_notices$;
 
 REVOKE ALL ON FUNCTION opengeni_private.stamp_subscription_connection_sign_in() FROM PUBLIC;
-REVOKE ALL ON FUNCTION opengeni_private.open_subscription_relogin_notice_v1(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.sync_subscription_relogin_notice_v1(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.subscription_connection_relogin_notice() FROM PUBLIC;
 
 CREATE TRIGGER subscription_connections_sign_in_trg
@@ -307,7 +320,7 @@ BEGIN
       AND connection.updated_at > now() - interval '14 days'
     ORDER BY connection.id
   LOOP
-    v_opened := v_opened + opengeni_private.open_subscription_relogin_notice_v1(v_id);
+    v_opened := v_opened + opengeni_private.sync_subscription_relogin_notice_v1(v_id);
   END LOOP;
   RAISE NOTICE 'subscription relogin notices opened: %', v_opened;
 END
