@@ -21,7 +21,10 @@ import { sha256Hex } from "@opengeni/contracts/values";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../src/http/api-error";
-import { organizationApiKeyPermissions, organizationReadApiKeyPermissions } from "../src/routes/api-keys";
+import {
+  organizationApiKeyPermissions,
+  organizationReadApiKeyPermissions,
+} from "../src/routes/api-keys";
 import { registerOrganizationAgentRoutes } from "../src/routes/organization-agents";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
@@ -40,15 +43,23 @@ type Fixture = {
   cookie: Record<string, string>;
   managedWorkspaceId: string;
   teamWorkspaceId: string;
-  keys: Record<"full" | "read" | "agentsRead" | "agentsManage" | "credentials" | "sessionsOnly", Record<string, string>>;
+  keys: Record<
+    "full" | "read" | "agentsRead" | "agentsManage" | "credentials" | "sessionsOnly",
+    Record<string, string>
+  >;
 };
 let fixture: Fixture | null = null;
-const authSessionByCookie = new Map<string, { authSessionId: string; userId: string; email: string }>();
+const authSessionByCookie = new Map<
+  string,
+  { authSessionId: string; userId: string; email: string }
+>();
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-organization-agents");
   if (!shared && requireRealDatabase) {
-    throw new Error("[api-organization-agents] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable");
+    throw new Error(
+      "[api-organization-agents] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+    );
   }
   if (!shared) return;
   client = createDb(shared.appUrl);
@@ -59,7 +70,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (shared && fixture) {
-    await shared.admin`delete from managed_accounts where id = ${fixture.accountId}`.catch(() => undefined);
+    await shared.admin`delete from managed_accounts where id = ${fixture.accountId}`.catch(
+      () => undefined,
+    );
     await shared.admin`delete from auth_users where id = ${fixture.userId}`.catch(() => undefined);
   }
   await client?.close().catch(() => undefined);
@@ -73,7 +86,9 @@ function buildApp(): Hono {
     productAccessMode: "managed",
     delegationSecret,
     sandboxBackend: "none",
-    environmentsEncryptionKey: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
+    environmentsEncryptionKey: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
+      "base64",
+    ),
   });
   const hono = new Hono();
   // The partial app renders errors the way the API's onError does: the
@@ -160,7 +175,8 @@ async function provisionFixture(): Promise<Fixture> {
     )`;
   authSessionByCookie.set(cookie, { authSessionId, userId, email });
   const accessResponse = await app.request("http://x/v1/access/me", { headers: { cookie } });
-  if (accessResponse.status !== 200) throw new Error(`managed provisioning failed: ${accessResponse.status}`);
+  if (accessResponse.status !== 200)
+    throw new Error(`managed provisioning failed: ${accessResponse.status}`);
   const access = (await accessResponse.json()) as AccessContext;
   const accountId = access.defaultAccountId!;
 
@@ -196,7 +212,11 @@ async function provisionFixture(): Promise<Fixture> {
       full: await key("Full", organizationApiKeyPermissions, null),
       read: await key("Read", organizationReadApiKeyPermissions, null),
       agentsRead: await key("Agents read", [], ["account:read", "agents:read", "workspace:read"]),
-      agentsManage: await key("Agents manage", [], ["account:read", "agents:read", "agents:manage"]),
+      agentsManage: await key(
+        "Agents manage",
+        [],
+        ["account:read", "agents:read", "agents:manage"],
+      ),
       credentials: await key("Logins", [], ["account:read", "tool_credentials:write"]),
       sessionsOnly: await key("Sessions", [], ["account:read", "agents:read", "sessions:read"]),
     },
@@ -230,7 +250,9 @@ async function call(
 const org = () => `/v1/organizations/${fixture!.accountId}/agents`;
 
 async function auditRows(action: string) {
-  return await shared!.admin<{ actor_subject_id: string; actor_label: string | null; detail: unknown }[]>`
+  return await shared!.admin<
+    { actor_subject_id: string; actor_label: string | null; detail: unknown }[]
+  >`
     select actor_subject_id, actor_label, detail from organization_console_audit_events
     where account_id = ${fixture!.accountId} and action = ${action} order by created_at`;
 }
@@ -245,13 +267,19 @@ describe("Console agents routes", () => {
         ["GET", `${org()}/tool-servers`],
         ["POST", `${org()}/test-workspace`],
         ["PUT", `${org()}/by-key/x/apply`],
-        [
-          "GET",
-          `/v1/workspaces/${fixture.managedWorkspaceId}/end-users/u1/tool-credentials/crm`,
-        ],
+        ["GET", `/v1/workspaces/${fixture.managedWorkspaceId}/end-users/u1/tool-credentials/crm`],
       ] as const) {
-        const reply = await call(method, path, fixture.keys.full, method === "PUT" ? { name: "X" } : undefined);
-        expect([path, reply.status, reply.body.details?.code]).toEqual([path, 404, "agent_not_found"]);
+        const reply = await call(
+          method,
+          path,
+          fixture.keys.full,
+          method === "PUT" ? { name: "X" } : undefined,
+        );
+        expect([path, reply.status, reply.body.details?.code]).toEqual([
+          path,
+          404,
+          "agent_not_found",
+        ]);
       }
       const workspaceList = await call(
         "GET",
@@ -272,7 +300,10 @@ describe("Console agents routes", () => {
     expect((await call("GET", org(), keys.agentsRead)).status).toBe(200);
     // The legacy read preset has no agents:read.
     const read = await call("GET", org(), keys.read);
-    expect([read.status, read.body.details]).toEqual([403, { code: "missing_permission", permission: "agents:read" }]);
+    expect([read.status, read.body.details]).toEqual([
+      403,
+      { code: "missing_permission", permission: "agents:read" },
+    ]);
     const credentialsOnly = await call("GET", org(), keys.credentials);
     expect(credentialsOnly.status).toBe(403);
 
@@ -287,7 +318,11 @@ describe("Console agents routes", () => {
     expect(byKey.status).toBe(201);
     const byOwner = await create(cookie, "by-owner");
     expect(byOwner.status).toBe(201);
-    expect(byOwner.body.agent).toMatchObject({ key: "by-owner", managedBy: "console", publishedVersion: null });
+    expect(byOwner.body.agent).toMatchObject({
+      key: "by-owner",
+      managedBy: "console",
+      publishedVersion: null,
+    });
     const duplicate = await create(keys.full, "by-owner");
     expect([duplicate.status, duplicate.body.details?.code]).toEqual([409, "agent_key_taken"]);
 
@@ -313,7 +348,11 @@ describe("Console agents routes", () => {
   test("versions, publish and the owner-only management switch", async () => {
     if (!fixture) return;
     const { keys, cookie } = fixture;
-    const created = await call("POST", org(), keys.full, { key: "flow", name: "Flow", instructions: "One." });
+    const created = await call("POST", org(), keys.full, {
+      key: "flow",
+      name: "Flow",
+      instructions: "One.",
+    });
     const agentId = created.body.agent.id as string;
     let rowVersion = created.body.agent.rowVersion as number;
 
@@ -342,11 +381,17 @@ describe("Console agents routes", () => {
     expect(publish.body.operation).toMatchObject({ toVersion: 2, status: "succeeded" });
     rowVersion = publish.body.agent.rowVersion;
     const versions = await call("GET", `${org()}/${agentId}/versions`, keys.agentsRead);
-    expect(versions.body.versions.map((version: { version: number }) => version.version)).toEqual([2, 1]);
+    expect(versions.body.versions.map((version: { version: number }) => version.version)).toEqual([
+      2, 1,
+    ]);
     const one = await call("GET", `${org()}/${agentId}/versions/1`, keys.agentsRead);
     expect(one.body.version.instructions).toBe("One.");
     expect((await call("GET", `${org()}/${agentId}/versions/9`, keys.agentsRead)).status).toBe(404);
-    const movable = await call("GET", `${org()}/${agentId}/movable-chats?version=1`, keys.agentsRead);
+    const movable = await call(
+      "GET",
+      `${org()}/${agentId}/movable-chats?version=1`,
+      keys.agentsRead,
+    );
     expect(movable).toEqual({ status: 200, body: { count: 0 } });
     const operations = await call("GET", `${org()}/${agentId}/publish-operations`, keys.agentsRead);
     expect(operations.body.operations.length).toBe(1);
@@ -356,7 +401,10 @@ describe("Console agents routes", () => {
       managedBy: "code",
       expectedVersion: rowVersion,
     });
-    expect([byKey.status, byKey.body.details?.code]).toEqual([403, "agent_management_requires_owner"]);
+    expect([byKey.status, byKey.body.details?.code]).toEqual([
+      403,
+      "agent_management_requires_owner",
+    ]);
     const byOwner = await call("POST", `${org()}/${agentId}/management`, cookie, {
       managedBy: "code",
       expectedVersion: rowVersion,
@@ -369,7 +417,10 @@ describe("Console agents routes", () => {
       instructions: "Edited",
       expectedVersion: rowVersion,
     });
-    expect([consoleEdit.status, consoleEdit.body.details?.code]).toEqual([409, "agent_managed_by_code"]);
+    expect([consoleEdit.status, consoleEdit.body.details?.code]).toEqual([
+      409,
+      "agent_managed_by_code",
+    ]);
     const deploy = await call("PUT", `${org()}/by-key/flow/apply`, keys.agentsManage, {
       name: "Flow",
       instructions: "Deployed.",
@@ -385,20 +436,31 @@ describe("Console agents routes", () => {
     });
     expect(archived.status).toBe(200);
     expect((await call("GET", `${org()}/${agentId}`, keys.full)).status).toBe(404);
-    expect((await call("GET", `${org()}/by-key/flow?includeArchived=true`, keys.full)).status).toBe(200);
+    expect((await call("GET", `${org()}/by-key/flow?includeArchived=true`, keys.full)).status).toBe(
+      200,
+    );
   }, 120_000);
 
   test("apply by key: dry run, create, unchanged, and a Console agent is refused", async () => {
     if (!fixture) return;
     const { keys } = fixture;
     const definition = { name: "Deployed", instructions: "Hello." };
-    const dry = await call("PUT", `${org()}/by-key/deployed/apply`, keys.full, { ...definition, dryRun: true });
+    const dry = await call("PUT", `${org()}/by-key/deployed/apply`, keys.full, {
+      ...definition,
+      dryRun: true,
+    });
     expect(dry.body).toMatchObject({ outcome: "created", dryRun: true, agent: null });
     expect((await call("GET", `${org()}/by-key/deployed`, keys.full)).status).toBe(404);
-    const created = await call("PUT", `${org()}/by-key/deployed/apply`, keys.full, { ...definition, publish: true });
+    const created = await call("PUT", `${org()}/by-key/deployed/apply`, keys.full, {
+      ...definition,
+      publish: true,
+    });
     expect(created.body).toMatchObject({ outcome: "created", version: 1, published: true });
     expect(created.body.configHash).toBe(dry.body.configHash);
-    const again = await call("PUT", `${org()}/by-key/deployed/apply`, keys.full, { ...definition, publish: true });
+    const again = await call("PUT", `${org()}/by-key/deployed/apply`, keys.full, {
+      ...definition,
+      publish: true,
+    });
     expect(again.body).toMatchObject({ outcome: "unchanged", version: 1 });
     const unknownServer = await call("PUT", `${org()}/by-key/deployed/apply`, keys.full, {
       ...definition,
@@ -409,8 +471,16 @@ describe("Console agents routes", () => {
       { code: "tool_server_not_found", missing: ["missing"] },
     ]);
     await call("POST", org(), keys.full, { key: "console-made", name: "Console made" });
-    const inConsole = await call("PUT", `${org()}/by-key/console-made/apply`, keys.full, definition);
-    expect([inConsole.status, inConsole.body.details?.code]).toEqual([409, "agent_managed_in_console"]);
+    const inConsole = await call(
+      "PUT",
+      `${org()}/by-key/console-made/apply`,
+      keys.full,
+      definition,
+    );
+    expect([inConsole.status, inConsole.body.details?.code]).toEqual([
+      409,
+      "agent_managed_in_console",
+    ]);
     const invalid = await call("PUT", `${org()}/by-key/Not_A_Key!/apply`, keys.full, definition);
     expect(invalid.status).toBe(404);
   }, 120_000);
@@ -427,7 +497,10 @@ describe("Console agents routes", () => {
       sharedHeaders: { Authorization: "Bearer route-shared-secret" },
     });
     expect(created.status).toBe(201);
-    expect(created.body.toolServer).toMatchObject({ hasSharedKey: true, sharedHeaderNames: ["Authorization"] });
+    expect(created.body.toolServer).toMatchObject({
+      hasSharedKey: true,
+      sharedHeaderNames: ["Authorization"],
+    });
     const listed = await call("GET", `${org()}/tool-servers`, keys.agentsRead);
     const one = await call("GET", `${org()}/tool-servers/crm`, keys.agentsRead);
     for (const reply of [created, listed, one]) {
@@ -453,12 +526,33 @@ describe("Console agents routes", () => {
       `/v1/workspaces/${workspaceId}/end-users/${user}/tool-credentials/crm`;
     const login = { kind: "headers", headers: { Authorization: "Bearer end-user-route-secret" } };
     // Needs tool_credentials:write.
-    const refused = await call("PUT", credentialPath(fixture.managedWorkspaceId), keys.agentsManage, login);
-    expect([refused.status, refused.body.details?.permission]).toEqual([403, "tool_credentials:write"]);
+    const refused = await call(
+      "PUT",
+      credentialPath(fixture.managedWorkspaceId),
+      keys.agentsManage,
+      login,
+    );
+    expect([refused.status, refused.body.details?.permission]).toEqual([
+      403,
+      "tool_credentials:write",
+    ]);
     // Only in managed workspaces.
-    const unmanaged = await call("PUT", credentialPath(fixture.teamWorkspaceId), keys.credentials, login);
-    expect([unmanaged.status, unmanaged.body.details?.code]).toEqual([409, "workspace_not_managed"]);
-    const stored = await call("PUT", credentialPath(fixture.managedWorkspaceId), keys.credentials, login);
+    const unmanaged = await call(
+      "PUT",
+      credentialPath(fixture.teamWorkspaceId),
+      keys.credentials,
+      login,
+    );
+    expect([unmanaged.status, unmanaged.body.details?.code]).toEqual([
+      409,
+      "workspace_not_managed",
+    ]);
+    const stored = await call(
+      "PUT",
+      credentialPath(fixture.managedWorkspaceId),
+      keys.credentials,
+      login,
+    );
     expect(stored.status).toBe(200);
     expect(stored.body.credential).toMatchObject({ toolServerKey: "crm", kind: "headers" });
     const read = await call("GET", credentialPath(fixture.managedWorkspaceId), keys.agentsRead);
@@ -467,14 +561,24 @@ describe("Console agents routes", () => {
       expect(JSON.stringify(reply.body)).not.toContain("end-user-route-secret");
     }
     // Unknown end users are not created by reads.
-    const unknownUser = await call("GET", credentialPath(fixture.managedWorkspaceId, "nobody"), keys.agentsRead);
+    const unknownUser = await call(
+      "GET",
+      credentialPath(fixture.managedWorkspaceId, "nobody"),
+      keys.agentsRead,
+    );
     expect(unknownUser.status).toBe(404);
     // A workspace of no organization the caller belongs to is simply not found.
     const foreign = await call("GET", credentialPath(crypto.randomUUID()), keys.agentsRead);
     expect(foreign.status).toBe(404);
-    const deleted = await call("DELETE", credentialPath(fixture.managedWorkspaceId), keys.credentials);
+    const deleted = await call(
+      "DELETE",
+      credentialPath(fixture.managedWorkspaceId),
+      keys.credentials,
+    );
     expect(deleted.status).toBe(204);
-    expect((await call("GET", credentialPath(fixture.managedWorkspaceId), keys.agentsRead)).status).toBe(404);
+    expect(
+      (await call("GET", credentialPath(fixture.managedWorkspaceId), keys.agentsRead)).status,
+    ).toBe(404);
 
     expect((await auditRows("tool_credential.written")).length).toBe(1);
     expect((await auditRows("tool_credential.deleted")).length).toBe(1);
@@ -503,7 +607,11 @@ describe("Console agents routes", () => {
       expectedVersion: created.body.agent.rowVersion,
     });
     for (const workspaceId of [fixture.managedWorkspaceId, fixture.teamWorkspaceId]) {
-      const listed = await call("GET", `/v1/workspaces/${workspaceId}/organization-agents`, keys.full);
+      const listed = await call(
+        "GET",
+        `/v1/workspaces/${workspaceId}/organization-agents`,
+        keys.full,
+      );
       expect(listed.status).toBe(200);
       expect(listed.body.agents.map((agent: { key: string }) => agent.key)).toContain("listed");
     }
@@ -511,18 +619,28 @@ describe("Console agents routes", () => {
     const first = await call("POST", `${org()}/test-workspace`, cookie);
     expect([first.status, first.body.created]).toEqual([201, true]);
     const again = await call("POST", `${org()}/test-workspace`, keys.full);
-    expect([again.status, again.body]).toEqual([200, { workspaceId: first.body.workspaceId, created: false }]);
+    expect([again.status, again.body]).toEqual([
+      200,
+      { workspaceId: first.body.workspaceId, created: false },
+    ]);
     const [marker] = await shared!.admin<{ source: string }[]>`
       select source from organization_managed_workspaces where workspace_id = ${first.body.workspaceId}`;
     expect(marker!.source).toBe("console_test");
     // The test workspace lists drafts' agents too, as a managed workspace.
-    const testList = await call("GET", `/v1/workspaces/${first.body.workspaceId}/organization-agents`, cookie);
+    const testList = await call(
+      "GET",
+      `/v1/workspaces/${first.body.workspaceId}/organization-agents`,
+      cookie,
+    );
     expect(testList.status).toBe(200);
 
     const missingVersion = await call("POST", `${org()}/${agentId}/test-chats`, keys.full, {
       version: 7,
       message: "hi",
     });
-    expect([missingVersion.status, missingVersion.body.details?.code]).toEqual([404, "agent_version_not_found"]);
+    expect([missingVersion.status, missingVersion.body.details?.code]).toEqual([
+      404,
+      "agent_version_not_found",
+    ]);
   }, 120_000);
 });
