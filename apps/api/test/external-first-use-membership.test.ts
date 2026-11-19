@@ -661,8 +661,13 @@ test("display details sent with the user are stored for Console and never change
   ).toEqual({ display_name: "Grace B. Hopper", email: null });
 }, 60_000);
 
-test("a workspace created by the key can be renamed by it, and the new name is what Console lists", async () => {
-  const org = await organization(CAPABLE, { composition: "production" });
+test("an organization key with workspace:admin renames a shared workspace; without it, it cannot", async () => {
+  const narrow = await organization(CAPABLE, { composition: "production" });
+  expect(
+    await status(narrow.service.updateWorkspace(narrow.workspace.id, { name: "Renamed" })),
+  ).toBe(403);
+  // A full-access organization key holds workspace:admin.
+  const org = await organization([...CAPABLE, "workspace:admin"], { composition: "production" });
   const renamed = await org.service.updateWorkspace(org.workspace.id, {
     name: "Kontali dev: Acme Holdings AS",
   });
