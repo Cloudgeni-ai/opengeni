@@ -328,4 +328,5 @@ ALTER TABLE organization_console_audit_events
     'agent.created', 'agent.updated', 'agent.version_saved', 'agent.published',
     'agent.archived', 'agent.management_changed', 'agent.deployed',
     'tool_server.created', 'tool_server.updated', 'tool_server.deleted',
-    'tool_credential.written', 'tool_credential.deleted')) NOT VALID;
+    'tool_credential.written', 'tool_credential.deleted',
+    'member.console_role_changed')) NOT VALID;
