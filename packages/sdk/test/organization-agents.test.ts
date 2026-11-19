@@ -100,18 +100,27 @@ describe("organization agents", () => {
   });
 
   test("management, versions, publish, tool servers and end-user logins use the documented routes", async () => {
-    const { client, requests } = recordingClient();
+    const operationId = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const { client, requests } = recordingClient((method, path) =>
+      method === "GET" && path.endsWith("/publish-operations")
+        ? { operations: [{ id: operationId, status: "succeeded" }] }
+        : {},
+    );
     const agents = organizationAgents(client, ORG);
     const agentId = "5d3c2b1a-0f9e-4d8c-8b7a-6f5e4d3c2b1a";
     await agents.list({ includeArchived: true });
     await agents.get("support");
+    await agents.get(agentId);
     await agents.create({ key: "triage", name: "Triage" });
     await agents.update(agentId, { expectedVersion: 2, workspaceIds: [] });
     await agents.saveDraft(agentId, { name: "Triage", expectedVersion: 3 });
     await agents.versions(agentId);
     await agents.version(agentId, 2);
     await agents.publish(agentId, { version: 2, expectedVersion: 4, moveRunningChats: true });
-    await agents.publishOperation(agentId, "op-1");
+    expect((await agents.publishOperation(agentId, operationId)).operation.id).toBe(operationId);
+    await expect(agents.publishOperation(agentId, "missing")).rejects.toThrow(
+      "Publish operation missing was not found",
+    );
     await agents.setManagement(agentId, { managedBy: "console", expectedVersion: 5 });
     await agents.archive(agentId);
     await agents.sessions(agentId, { version: 2, limit: 50 });
@@ -131,28 +140,30 @@ describe("organization agents", () => {
     expect(requests.map((request) => `${request.method} ${request.path}${request.search}`)).toEqual(
       [
         `GET ${base}/agents?includeArchived=true`,
-        `GET ${base}/agents/support`,
+        `GET ${base}/agents/by-key/support`,
+        `GET ${base}/agents/${agentId}`,
         `POST ${base}/agents`,
         `PATCH ${base}/agents/${agentId}`,
         `PUT ${base}/agents/${agentId}/draft`,
         `GET ${base}/agents/${agentId}/versions`,
         `GET ${base}/agents/${agentId}/versions/2`,
         `POST ${base}/agents/${agentId}/publish`,
-        `GET ${base}/agents/${agentId}/publish-operations/op-1`,
+        `GET ${base}/agents/${agentId}/publish-operations`,
+        `GET ${base}/agents/${agentId}/publish-operations`,
         `POST ${base}/agents/${agentId}/management`,
         `POST ${base}/agents/${agentId}/archive`,
         `GET ${base}/agents/${agentId}/sessions?version=2&limit=50`,
         `GET ${base}/agents/${agentId}/usage?range=30d`,
-        `GET ${base}/tool-servers`,
-        `GET ${base}/tool-servers/helpdesk`,
-        `GET ${base}/tool-servers/helpdesk/tools`,
-        `DELETE ${base}/tool-servers/helpdesk`,
+        `GET ${base}/agents/tool-servers`,
+        `GET ${base}/agents/tool-servers/helpdesk`,
+        `GET ${base}/agents/tool-servers/helpdesk/tools`,
+        `DELETE ${base}/agents/tool-servers/helpdesk`,
         `PUT ${login}`,
         `GET ${login}`,
         `DELETE ${login}`,
       ],
     );
-    expect(requests[17]!.body).toEqual({
+    expect(requests[20]!.body).toEqual({
       kind: "headers",
       headers: { authorization: "Bearer end-user-token" },
     });
