@@ -76,6 +76,7 @@ import {
   type VerifiedWorkspaceArchivePayload,
   describeLegacyNativeSnapshotArchive,
   inlineWorkspaceArchiveForRestore,
+  workspaceArchiveObjectRestoresFromSpool,
   MODAL_EXEC_READINESS_TIMEOUT_MS,
   SandboxExecReadinessError,
   WorkspaceArchiveIntegrityError,
@@ -673,14 +674,9 @@ async function materializeSpawnEnvelopeArchive(
       { retryable: true },
     );
   }
-  const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
-  if (
-    process.platform === "linux" &&
-    descriptor?.version === 1 &&
-    descriptor.workspace.projection === "sdk_local_archive_v1"
-  ) {
-    return envelope;
-  }
+  // Cold restore spools portable archives from object storage itself, after
+  // verifying them, and streams them into the new box.
+  if (workspaceArchiveObjectRestoresFromSpool(sessionState)) return envelope;
   return {
     ...record,
     sessionState: await inlineWorkspaceArchiveForRestore(sessionState, (key) =>

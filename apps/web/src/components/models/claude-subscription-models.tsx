@@ -370,6 +370,7 @@ export function ClaudeConnectPage({
       }
       reconnectAccountId={reconnectAccountId}
       reconnectCredentialVersion={reconnectAccount?.version}
+      reconnectAccountEmail={reconnectAccount?.email}
       onClose={onClose}
       onConnected={onConnected}
       fields={fields}

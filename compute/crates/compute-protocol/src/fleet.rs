@@ -196,6 +196,13 @@ pub struct Capacity {
     pub cpu_millis: u64,
     /// Processor time a wake can still reserve, in millicores.
     pub cpu_free_millis: u64,
+    /// Processors the VMs of its sandboxes awake or waking have in all:
+    /// what could keep its processors busy, however little of their time
+    /// each is guaranteed. Placement steers new sandboxes away from hosts
+    /// whose processors many of them share. Missing from what a host of an
+    /// earlier release wrote, which then counts none.
+    #[serde(default)]
+    pub vcpus_awake: u64,
     /// Unbooked disk headroom after worst-case writes and reserve, in MiB.
     /// This is not filesystem free space. The wire name is retained for
     /// hosts and services of earlier releases.
@@ -622,6 +629,8 @@ mod tests {
             "disk_free_mib":1,"awake":0,"sandboxes":0}"#;
         let capacity: Capacity = serde_json::from_str(older).unwrap();
         assert_eq!(capacity.disk_available_mib, None);
+        // Nor how many processors its awake VMs have: none, for placement.
+        assert_eq!(capacity.vcpus_awake, 0);
         assert!(
             serde_json::to_value(&capacity)
                 .unwrap()

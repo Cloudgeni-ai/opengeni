@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 
-// Restoring a workspace archive must cost memory proportional to the archive,
-// with a small constant: the restore holds the fetched bytes, one base64 copy
-// and one decoded copy. Copying a decoded Node Buffer with `Uint8Array.from`
+// Restoring an inline (database) workspace archive must cost memory
+// proportional to the archive, with a small constant: the restore holds the
+// base64 and one decoded copy. Copying a decoded Node Buffer with `Uint8Array.from`
 // walks it through Bun's generic iterator path, which used about 16x the
 // archive in transient memory per copy, so a few-hundred-MB workspace could
 // take a worker past 15 GB during a cold restore.
@@ -16,7 +16,7 @@ const fixture = fileURLToPath(
 
 describe("workspace archive restore memory", () => {
   test.skipIf(process.platform !== "linux")(
-    "restoring an object-storage archive peaks at a small multiple of its size",
+    "restoring an inline archive peaks at a small multiple of its size",
     async () => {
       const child = Bun.spawn([process.execPath, fixture, String(ARCHIVE_BYTES)], {
         stdout: "pipe",

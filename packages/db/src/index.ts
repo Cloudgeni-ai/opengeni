@@ -463,6 +463,9 @@ import {
   WORKSPACE_GOVERNANCE_NONE,
   readWorkspaceGovernanceContext,
   workspaceGovernanceContextItem,
+  WORKSPACE_FILESYSTEM_CONTEXT_PREFIX,
+  readWorkspaceFilesystemContext,
+  workspaceFilesystemContextItem,
   AGENT_INSTRUCTIONS_CONTEXT_PREFIX,
   agentInstructionsContextItem,
   agentInstructionsContextText,
@@ -45481,6 +45484,14 @@ const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
   item: workspaceGovernanceContextItem,
 };
 
+const WORKSPACE_FILESYSTEM_CHANNEL: SessionContextChannel = {
+  label: "Workspace filesystem",
+  metadataKey: "opengeniWorkspaceFilesystemHistoryId",
+  contentPrefix: WORKSPACE_FILESYSTEM_CONTEXT_PREFIX,
+  read: readWorkspaceFilesystemContext,
+  item: workspaceFilesystemContextItem,
+};
+
 const AGENT_INSTRUCTIONS_CHANNEL: SessionContextChannel = {
   label: "Agent instructions",
   metadataKey: "opengeniAgentInstructionsHistoryId",
@@ -45583,6 +45594,33 @@ export async function ensureSessionWorkspaceGovernance(
     WORKSPACE_GOVERNANCE_CHANNEL,
   );
   return visible === null || visible === WORKSPACE_GOVERNANCE_NONE ? null : visible;
+}
+
+/**
+ * Persist the active workspace's filesystem layout once per logical turn, as
+ * a history item before the turn that first sees a new layout (for example
+ * after the session moved to another machine). Retries reuse the turn
+ * snapshot. Null means the turn has no sandbox: nothing is written and the
+ * model keeps the layout it last read. Returns the model-visible layout.
+ */
+export async function ensureSessionWorkspaceFilesystem(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    layout: string | null;
+  },
+): Promise<string | null> {
+  const { layout, ...scope } = input;
+  return await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: layout },
+    WORKSPACE_FILESYSTEM_CHANNEL,
+  );
 }
 
 /**
@@ -60095,25 +60133,11 @@ function sandboxGroupOnlyOfArchivedChatsSql(input: {
     ))`;
 }
 
-/** Migration 1404's inventory, withheld from the runtime for one release. */
-export const COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE =
-  "opengeni_private.cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)";
-
 export type ColdSandboxOfArchivedChats = {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
 };
-
-/** False while the deployment's database withholds the inventory (1404). */
-export async function coldSandboxesOfArchivedChatsAvailable(db: Database): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select has_function_privilege(
-      to_regprocedure(${COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE})::oid, 'EXECUTE') as granted`,
-  );
-  return row?.granted === true;
-}
 
 /**
  * Cold sandboxes of a backend other than compute (a stopped Modal or Docker
@@ -75720,28 +75744,6 @@ export async function getSessionGoal(
       )
       .limit(1);
     return row ? mapSessionGoal(row) : null;
-  });
-}
-
-/** The given sessions that have a goal, in any state (one indexed lookup). */
-export async function sessionsWithGoal(
-  db: Database,
-  workspaceId: string,
-  sessionIds: readonly string[],
-): Promise<Set<string>> {
-  const ids = [...new Set(sessionIds)];
-  if (ids.length === 0) return new Set();
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({ sessionId: schema.sessionGoals.sessionId })
-      .from(schema.sessionGoals)
-      .where(
-        and(
-          eq(schema.sessionGoals.workspaceId, workspaceId),
-          inArray(schema.sessionGoals.sessionId, ids),
-        ),
-      );
-    return new Set(rows.map((row) => row.sessionId));
   });
 }
 

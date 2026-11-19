@@ -2337,6 +2337,18 @@ speed sends its full input, exactly as changing speed did before.
 Streaming Codex subscription requests travel over a pooled Responses
 WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex
 endpoint and metadata adapter in `packages/codex/src/responses-websocket.ts`.
+
+On OpenAI-served Responses routes (Codex subscription, OpenAI platform and
+Azure OpenAI), the agent's system prompt goes on the wire as the first `input`
+item, a `developer` message, not in top-level `instructions`
+(`packages/runtime/src/responses-system-prompt.ts`). From GPT-6.2 on, OpenAI
+places `instructions` after the input, outside every prompt-cache prefix, and
+bills them uncached on every request; earlier models cache both shapes. The
+item is projected per request from the same `instructions` string, so it is
+byte-identical across a chat's requests and never enters stored history.
+Requests that name `previous_response_id` or `conversation` keep
+`instructions`. Compatible endpoints and other providers are unchanged.
+
 The Codex Responses `session_id` header is a cache-affinity hint, not the
 conversation identifier. The worker supplies a deterministic hash of workspace
 and frozen initiating human identity so a new session can reuse a familiar

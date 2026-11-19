@@ -11,10 +11,17 @@ describe("sandbox base instructions", () => {
 
   test("keep every other SDK default line, extending two in place, so SDK updates still flow through", () => {
     const sdkLines = getDefaultSandboxInstructions().split("\n");
-    const baseLines = sandboxBaseInstructions().split("\n");
+    const base = sandboxBaseInstructions();
+    const filesystem = base.indexOf("\n\n# Filesystem\n");
+    expect(filesystem).toBeGreaterThan(0);
+    const baseLines = base.slice(0, filesystem).split("\n");
     const removed = sdkLines.filter((line) => line.startsWith("- Look for AGENTS.md"));
     expect(removed).toHaveLength(1);
-    const kept = sdkLines.filter((line) => !removed.includes(line));
+    const kept = sdkLines
+      .filter((line) => !removed.includes(line))
+      .join("\n")
+      .trimEnd()
+      .split("\n");
     expect(baseLines).toHaveLength(kept.length);
     const extended = kept.filter((line, index) => baseLines[index] !== line);
     expect(extended).toEqual([
@@ -22,6 +29,14 @@ describe("sandbox base instructions", () => {
       "- Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration.",
     ]);
     kept.forEach((line, index) => expect(baseLines[index]!.startsWith(line)).toBe(true));
+  });
+
+  test("close with a filesystem section that names no machine, so a machine swap keeps the prompt", () => {
+    const base = sandboxBaseInstructions();
+    expect(base.endsWith("supersedes it.\n")).toBe(true);
+    const section = base.slice(base.indexOf("# Filesystem\n"));
+    expect(section).toContain("<opengeni_workspace_filesystem>");
+    expect(section).not.toContain("/workspace");
   });
 
   test("keep the agent's own scratch work out of the user's project", () => {

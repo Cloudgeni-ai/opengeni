@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::{Host, Input, Level, SandboxId};
-use compute_engine::Engine;
+use compute_engine::{Engine, Readable};
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
@@ -467,6 +467,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let store = Arc::clone(&self.store);
         let events = self.events_tx.clone();
         let observer = self.observer.clone();
+        let engine = Arc::clone(&self.engine);
         tokio::spawn(async move {
             let claimed = match store.claim(id, owner).await {
                 Err(error) => Err(HostError::Io(error.to_string())),
@@ -477,7 +478,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }),
                 Ok(Owned::Done(None)) => Err(HostError::NoCopy(id)),
                 Ok(Owned::Done(Some(claimed))) => {
-                    let why = FilesOnly::of(&claimed, &record.config, from_files);
+                    let why = FilesOnly::of(&claimed, &record.config, from_files, |made_under| {
+                        engine.reads(made_under)
+                    });
                     files_only(&*store, &observer, id, owner, claimed, why).await
                 }
             };
@@ -998,18 +1001,43 @@ enum FilesOnly {
     /// the sandbox is given now (it was resized), which a restore would
     /// bring back instead.
     Reshaped,
+    /// Its memory image was made on another kind of host (another
+    /// processor model or host kernel), or in a format no VMM here reads.
+    /// Its saved processor state belongs to that host, and Firecracker
+    /// promises no restore across them: one may be refused, or load and
+    /// leave programs using instructions this processor lacks. The control
+    /// service sends such an adopt to a host of the image's kind when one
+    /// has room; here the sandbox wakes from its files, as any sandbox
+    /// whose memory was not kept does.
+    MadeElsewhere,
 }
 
 impl FilesOnly {
     /// Why `claimed`, adopted for a sandbox of `config`, is taken up from
-    /// its files alone, with `from_files` as the adopt asked.
-    fn of(claimed: &Claimed, config: &SandboxConfig, from_files: bool) -> Self {
+    /// its files alone, with `from_files` as the adopt asked and `reads`
+    /// telling whether this host's VMMs read an image made under a runtime.
+    fn of(
+        claimed: &Claimed,
+        config: &SandboxConfig,
+        from_files: bool,
+        reads: impl Fn(&str) -> Readable,
+    ) -> Self {
         if claimed.memory && claimed.made_at.differs(config) {
             Self::Reshaped
         } else if from_files {
             // Also when the copy names no memory image, as a checkpoint's
             // does: whatever ran in the sandbox on its lost owner is gone.
             Self::Stale
+        } else if claimed.memory
+            && claimed
+                .made_at
+                .runtime
+                .as_deref()
+                .is_some_and(|made_under| {
+                    matches!(reads(made_under), Readable::Elsewhere(_) | Readable::No(_))
+                })
+        {
+            Self::MadeElsewhere
         } else {
             Self::No
         }
@@ -1023,7 +1051,9 @@ impl FilesOnly {
 /// copy without the image and leaves it be. The sandbox boots fresh from
 /// its disk, and whatever ran in it is gone: for a stale image that raises
 /// [`Alarm::ProgramsLost`], as a VM that died does, while a resize, which
-/// asked for it, is only logged. A stale copy that names no memory image,
+/// asked for it, and an image made on another kind of host, which this
+/// host was never going to wake, are only logged: the sandbox wakes fresh
+/// from its files, as one whose memory is not kept always does. A stale copy that names no memory image,
 /// such as a checkpoint's, needs no change in the store, but raises the
 /// alarm all the same.
 async fn files_only<S: Store>(
@@ -1061,6 +1091,8 @@ async fn files_only<S: Store>(
         Ok(Owned::Done(Some(receipt))) => {
             if why == FilesOnly::Reshaped {
                 tracing::info!(%id, made_at = ?claimed.made_at, "adopted from its files: it was resized, and its memory image restores the machine it was saved from");
+            } else if why == FilesOnly::MadeElsewhere {
+                tracing::info!(%id, made_under = claimed.made_at.runtime.as_deref().unwrap_or(""), "adopted from its files: its memory image was made on another kind of host");
             } else {
                 tracing::info!(%id, "adopted from its files: its last owner was lost, so its memory image may be stale");
                 let what =

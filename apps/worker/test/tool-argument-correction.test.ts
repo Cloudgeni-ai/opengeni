@@ -184,6 +184,9 @@ async function buildWorkerAgent(
       defaultModelId: null,
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
+    spyOn(db, "ensureSessionWorkspaceFilesystem").mockImplementation(
+      async (_db, input) => input.layout,
+    ),
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
       async (_db, input) => input.governance,
     ),

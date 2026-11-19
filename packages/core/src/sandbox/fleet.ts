@@ -24,6 +24,7 @@ import {
   isSecretReferenceError,
   machineAccessNeededMessage,
   type SecretResolver,
+  VIRTUAL_WORKSPACE_ROOT,
 } from "@opengeni/contracts";
 import {
   authorizePersonalMachineForAttempt,
@@ -271,6 +272,12 @@ export type FleetSwapResult = {
   swapped: boolean;
   activeSandboxId: string | null;
   activeEpoch: number;
+  /**
+   * The workspace root commands and file tools use after a successful swap.
+   * The model's filesystem layout block changes only at the next turn, so a
+   * swap within a turn tells it the new root here.
+   */
+  workspaceRoot?: string;
   reason?: string;
   code?:
     | BackendUnresolvableCode
@@ -1040,6 +1047,11 @@ export async function swapActiveSandbox(
           swapped: true,
           activeSandboxId: result.pointer.activeSandboxId,
           activeEpoch: result.pointer.activeEpoch,
+          ...(resolved.targetSandboxId === null
+            ? { workspaceRoot: VIRTUAL_WORKSPACE_ROOT }
+            : resolved.workspaceRoot
+              ? { workspaceRoot: effectiveWorkingDir ?? resolved.workspaceRoot }
+              : {}),
         };
       }
       // Only a lost epoch race is worth re-reading and retrying; every other

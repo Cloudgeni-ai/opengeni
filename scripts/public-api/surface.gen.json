@@ -14932,6 +14932,7 @@
         "$.plan": "string! null",
         "$.reach": "ref(SubscriptionAccountReach)?",
         "$.scope": "ref(ResourceAuthorityScope)!",
+        "$.signedInAt": "string? null",
         "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
         "$.subject": "string!",
         "$.usage": "ref(ClaudeSubscriptionUsage)?",
@@ -20795,10 +20796,55 @@
     },
     "InboxItemStatus": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"dismissed\\\"\",\"\\\"open\\\"\",\"\\\"resolved\\\"\",\"\\\"withdrawn\\\"\"]"
+      }
+    },
+    "InboxNotice": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.body": "string!",
+        "$.choices": "array!",
+        "$.choices[]": "object",
+        "$.choices[].id": "string!",
+        "$.choices[].label": "string!",
+        "$.createdAt": "string!",
+        "$.eventSequence": "integer? null",
+        "$.facts": "array!",
+        "$.facts[]": "object",
+        "$.facts[].label": "string!",
+        "$.facts[].value": "string!",
+        "$.id": "string!",
+        "$.kind": "const!=[\"\\\"notification\\\"\"]",
+        "$.link": "object!",
+        "$.link.label": "string!",
+        "$.link.url": "string!",
+        "$.resolvedAt": "string! null",
+        "$.sender": "object! null",
+        "$.sender.label": "string!",
+        "$.sender.subjectId": "string!",
+        "$.serverQuestion": "object! null",
+        "$.serverQuestion.kind": "enum!=[\"\\\"confirm\\\"\",\"\\\"form\\\"\"]",
+        "$.serverQuestion.round": "integer!",
+        "$.serverQuestion.server": "string!",
+        "$.sessionAvailable": "const!=[\"false\"]",
+        "$.sessionId": "null!",
+        "$.sessionTitle": "string! null",
+        "$.snoozedUntil": "string! null",
+        "$.sourceKey": "string!",
+        "$.status": "ref(InboxItemStatus)!",
+        "$.subtitle": "string!",
+        "$.title": "string!",
+        "$.unread": "boolean!",
+        "$.updatedAt": "string!",
+        "$.urgency": "ref(NotificationUrgency)!",
+        "$.workspaceId": "string!"
       }
     },
     "InboxSettings": {
@@ -22815,6 +22861,8 @@
         "$.items": "array!",
         "$.items[]": "ref(InboxItem)",
         "$.needsYouCount": "integer!",
+        "$.notices": "array?",
+        "$.notices[]": "ref(InboxNotice)",
         "$.unreadCount": "integer!"
       }
     },
@@ -24616,7 +24664,8 @@
     },
     "NotificationUrgency": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"normal\\\"\",\"\\\"time_sensitive\\\"\"]"
@@ -37589,6 +37638,7 @@
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InboundEvent": "type",
       "InboundEventSummary": "type",
+      "InboxEntry": "type",
       "InboxItem": "type",
       "InboxItemChoice": "type",
       "InboxItemFact": "type",
@@ -37596,6 +37646,7 @@
       "InboxItemLink": "type",
       "InboxItemSender": "type",
       "InboxItemServerQuestion": "type",
+      "InboxNotice": "type",
       "InboxSettings": "type",
       "InboxTidyPolicy": "type",
       "InferenceFeatureAvailability": "type",

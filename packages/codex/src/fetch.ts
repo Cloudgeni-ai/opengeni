@@ -34,6 +34,7 @@ import {
 } from "./responses-websocket";
 import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./usage-normalize";
 import {
+  CODEX_TURN_STATE_HEADER,
   codexRequestStorage,
   type CodexModelRequestEvent,
   type CodexProviderRequestSettlement,
@@ -927,6 +928,28 @@ function setCodexIdentityHeaders(
   if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
     headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
   }
+  const turnState = ctx.turnState?.current;
+  if (turnState && turnState.accountId === (auth.chatgptAccountId ?? null)) {
+    headers.set(CODEX_TURN_STATE_HEADER, turnState.token);
+  }
+}
+
+/**
+ * Keeps the turn's sticky-routing token from its first successful response.
+ * A response to a request that sent one does not return another. A token
+ * from another account is replaced, so a credential change gets fresh routing.
+ */
+function captureCodexTurnState(
+  ctx: CodexRequestContext,
+  auth: CodexTokenSnapshot,
+  response: Response,
+): void {
+  const turnState = ctx.turnState;
+  if (!turnState || !response.ok) return;
+  const accountId = auth.chatgptAccountId ?? null;
+  if (turnState.current?.accountId === accountId) return;
+  const token = response.headers.get(CODEX_TURN_STATE_HEADER);
+  if (token) turnState.current = { token, accountId };
 }
 
 /**
@@ -1063,6 +1086,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       };
       try {
         res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
+        captureCodexTurnState(ctx, auth, res);
         const upstreamRequestId = providerRequestId(res.headers);
         await emitRequestEvent(audit, {
           phase: "headers",

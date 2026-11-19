@@ -41,7 +41,7 @@ and DML granted to the runtime role, so it could move to its own database:
 | `site_data_rate_windows` | fixed one-minute windows: writes per principal and per Site, Site-frame reads per principal |
 | `site_data_validation_windows` | fixed one-minute window of schema-validation time per Site |
 | `site_data_workspace_validation_windows` | fixed one-minute window of schema-validation time per workspace, a ceiling across its Sites |
-| `site_data_changes` | the change outbox (migration `1502`): one row per committed write transaction while someone listens (see "Change events") |
+| `site_data_changes` | the change outbox (migration `1504`): one row per committed write transaction while someone listens (see "Change events") |
 | `site_data_insert_keys` | idempotency keys of inserts, per collection and principal, pointing at the record they created |
 
 Principals are abstract strings: `user:<subjectId>` for people and
@@ -399,7 +399,8 @@ mode are added.
 ## Site SQL (optional Cloudflare storage)
 
 Site SQL gives one published Site its own SQLite database: one
-SQLite-backed Durable Object (`SiteDatabase`, `SITE_DB.idFromName(siteId)`)
+SQLite-backed Durable Object (`SiteDatabase`,
+`SITE_DB.jurisdiction("eu").idFromName(siteId)`, see [Location](#location))
 in the Sites gateway Worker. It sits next to Site Data; the owner turns it on
 per Site. Postgres stays the source of truth for the definitions, so the
 database can always be rebuilt; the Durable Object holds only the rows.
@@ -573,6 +574,73 @@ applied) is in the Durable Object's key-value storage, which workerd keeps in
 `_cf_KV` and refuses to user SQL, so no statement or trigger can read or
 change it. Request ids are kept in one-minute buckets for three minutes and
 each request deletes at most 256 older ones.
+
+### Location
+
+Site databases are stored in Cloudflare's EU jurisdiction: the gateway names
+each Site's object in `SITE_DB.jurisdiction("eu")`, so Cloudflare keeps its
+data in the EU. Only storage is placed; serving traffic (the Worker and the
+edge) is not restricted to the EU.
+
+Databases created before that live in the plain namespace
+(`SITE_DB.idFromName(siteId)`, the legacy object). A jurisdiction-scoped id is
+a different object, so each database moves once, inside the gateway
+(`apps/site-gateway/src/site-db-location.ts`, `site-db-relocation.ts`):
+
+- The first request for a Site reaches its EU object, which asks the legacy
+  object what it holds. An empty legacy object (every new Site) stores only a
+  moved marker (the Site id, no data) and the EU object becomes the database's
+  home.
+- Otherwise the EU object fences the legacy object (earlier gateway releases
+  get a retryable 503 that says nothing ran), copies it page by page (pages
+  of at most 1 MiB of UTF-8, staged with every value's storage class), builds
+  the copy in one transaction (tables and FTS5 settings, then rows with their
+  rowids and exact storage classes, text as its stored bytes, then indexes,
+  views and triggers so triggers never fire on the copy, then the
+  AUTOINCREMENT counters, with foreign keys checked before commit) and copies
+  the migration records and recent request ids.
+- The copy is accepted only when its schema, FTS5 settings, per-table row
+  counts and row SHA-256 digests, AUTOINCREMENT counters and migration
+  records equal the legacy object's, taken under the fence. The fence never
+  expires on its own, so the legacy object takes no write between that check
+  and the switch. Then the EU object becomes the home and the legacy object is
+  marked moved: it keeps its data, frozen, and sends any request from an
+  earlier gateway release to the EU object.
+- Requests that arrive during the move wait for it (a Durable Object runs one
+  copy at a time and every new request goes through the EU object), so no
+  write is lost or applied to the old copy.
+- When the move fails, nothing changes for the Site: the EU object discards
+  its partial copy, releases the legacy object and serves every request from
+  it, and retries after a backoff (1 minute, doubling to 1 hour). Databases
+  that cannot move this way stay where they are and are reported: an FTS5
+  table without its own content, a virtual table other than FTS5, a rowid
+  table whose columns take all of `rowid`, `_rowid_` and `oid`, a table with
+more than 99 columns (SQLite's limits in a Durable Object), and databases
+  over 32 MiB (the copy runs inside one request). A legacy object still on the
+  previous release (Cloudflare can defer a busy object's code update) is
+  served as it is and asked again after 30 seconds. Responses say where they
+  were served (`x-og-site-db-location: eu|legacy`) and, from the legacy
+  object, why it has not moved (`x-og-site-db-relocation-error`); the API logs
+  the latter.
+- Erasing a database erases its legacy copy too: `reset` and `migrate` with
+  `rebuild` first delete everything in the legacy object except its moved
+  marker, and a `reset` before the move erases the legacy database instead of
+  copying it. Workspace deletion resets each database, so it erases both.
+
+Idle databases move when an operator runs
+`apps/site-gateway/scripts/move-site-databases-to-eu.ts` after the gateway is
+deployed, with the API's `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN` and
+`OPENGENI_SITES_GATEWAY_SECRET` and every `site_sql_databases.site_id` (read
+as the table owner: the table has row-level security). It calls `inspect` for
+each Site, prints where each database is, exits non-zero while any has not
+moved (or when no ids were given), and can be rerun at any time.
+
+Nothing deletes a legacy object, and only an explicit reset or rebuild erases
+its data. Removing the frozen copies is a separate, explicit cleanup step
+after the move is verified. Do not roll the gateway back to a release from
+before this change once databases have moved: that release does not know
+about locations and would serve the frozen legacy copies. The ops deploy
+workflows refuse such a source.
 
 ### Owner tools and routes
 

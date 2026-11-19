@@ -28,9 +28,16 @@
 //! can, and takes the better: one with a ready clone of the shape first,
 //! then the one with the larger share of its room still free, then the one
 //! with more free memory, then the one with more it could free. A host's
-//! share free is the smaller of the shares of its memory and of its
-//! processor time it can still promise: what an awake sandbox is
-//! guaranteed. Comparing shares rather than amounts fills hosts of
+//! share free is the smallest of three: the shares of its memory and of
+//! its processor time it can still promise, which is what an awake sandbox
+//! is guaranteed, and the share of its processors that the VMs of its
+//! awake sandboxes do not have. That last one is less than nothing on a
+//! host whose processors its awake VMs share, and it only steers: a VM
+//! guaranteed a little processor time may still keep all its processors
+//! busy, as a build does, so two such VMs on a host with fewer processors
+//! than they have between them slow each other down while a host with
+//! processors to spare sits idle, though both hosts can promise them what
+//! they are guaranteed. Comparing shares rather than amounts fills hosts of
 //! different sizes evenly; by amount, every sandbox would go to the
 //! largest host until it had no more free than the next, however busy
 //! its processors, while a smaller host sat idle. Drawing two keeps load
@@ -87,6 +94,10 @@ pub struct Capacity {
     /// Processor time in millicores it can still promise to sandboxes
     /// that wake.
     pub free_cpu_millis: u64,
+    /// Processors the VMs of its sandboxes awake or waking have in all,
+    /// which may be more than it has: placement steers by it but never
+    /// refuses on it.
+    pub vcpus_awake: u64,
     /// Disk in MiB it can still promise, what it frees by disk relief
     /// among it.
     pub free_disk_mib: u64,
@@ -105,6 +116,8 @@ pub struct Demand {
     pub memory_max_mib: u64,
     /// Processor time in millicores it is guaranteed while awake.
     pub cpu_millis: u64,
+    /// Processors its VM has, which it may keep busy while awake.
+    pub vcpus: u64,
     /// Disk in MiB it needs.
     pub disk_mib: u64,
     /// The offers its host must make: the private destinations it reaches.
@@ -332,6 +345,7 @@ impl Fleet {
                 .reclaimable_memory_mib
                 .saturating_sub(memory - from_free);
             capacity.free_cpu_millis = capacity.free_cpu_millis.saturating_sub(demand.cpu_millis);
+            capacity.vcpus_awake = capacity.vcpus_awake.saturating_add(demand.vcpus);
             capacity.free_disk_mib = capacity.free_disk_mib.saturating_sub(demand.disk_mib);
             capacity.sandboxes = capacity.sandboxes.saturating_add(1);
             if placement.ready
@@ -543,18 +557,24 @@ fn has_ready(entry: &Slot, demand: &Demand) -> bool {
 }
 
 /// The share of its room a host can still promise, in millionths: the
-/// smaller of the shares of its memory and of its processor time free. A
-/// host that reports none of either has no share free.
-fn share_free(capacity: &Capacity) -> u64 {
-    let share = |free: u64, all: u64| {
+/// smallest of the shares of its memory and of its processor time free,
+/// and of its processors the VMs of its awake sandboxes do not have, which
+/// is below zero when they have more than it does. A host that reports
+/// no memory or processor time has no share free.
+fn share_free(capacity: &Capacity) -> i64 {
+    let share = |free: i128, all: u64| {
         if all == 0 {
             return 0;
         }
-        let millionths = u128::from(free.min(all)) * 1_000_000 / u128::from(all);
-        u64::try_from(millionths).unwrap_or(1_000_000)
+        let millionths = free.min(i128::from(all)) * 1_000_000 / i128::from(all);
+        i64::try_from(millionths).unwrap_or(if millionths < 0 { i64::MIN } else { 1_000_000 })
     };
-    share(capacity.free_memory_mib, capacity.memory_mib)
-        .min(share(capacity.free_cpu_millis, capacity.cpu_millis))
+    // The processor time it guarantees stands for the processors it has
+    // for sandboxes, a thousand millicores each.
+    let unshared = i128::from(capacity.cpu_millis) - i128::from(capacity.vcpus_awake) * 1_000;
+    share(capacity.free_memory_mib.into(), capacity.memory_mib)
+        .min(share(capacity.free_cpu_millis.into(), capacity.cpu_millis))
+        .min(share(unshared, capacity.cpu_millis))
 }
 
 #[cfg(test)]

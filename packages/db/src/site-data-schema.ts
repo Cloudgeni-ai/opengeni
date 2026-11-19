@@ -165,7 +165,7 @@ export const siteDataUsage = pgTable(
     fileCount: integer("file_count").notNull().default(0),
     fileBytes: bigint("file_bytes", { mode: "number" }).notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    // 1502_site_data_change_events: per-Site change counter and live listener lease.
+    // 1504_site_data_change_events: per-Site change counter and live listener lease.
     changeSeq: bigint("change_seq", { mode: "number" }).notNull().default(0),
     liveUntil: timestamp("live_until", { withTimezone: true }),
   },
@@ -174,7 +174,7 @@ export const siteDataUsage = pgTable(
   }),
 );
 
-/** 1502: outbox of Site Data change facts, written only while a Site has a live listener. */
+/** 1504: outbox of Site Data change facts, written only while a Site has a live listener. */
 export const siteDataChanges = pgTable(
   "site_data_changes",
   {
@@ -196,7 +196,7 @@ export const siteDataChanges = pgTable(
   }),
 );
 
-/** 1502: the record a keyed insert created, so a retried insert returns it. */
+/** 1504: the record a keyed insert created, so a retried insert returns it. */
 export const siteDataInsertKeys = pgTable(
   "site_data_insert_keys",
   {

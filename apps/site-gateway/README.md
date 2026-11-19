@@ -97,7 +97,13 @@ No domain is named in this app.
 ## Site SQL storage
 
 `src/site-database.ts` exports `SiteDatabase` (also exported from the Worker
-entry): one SQLite-backed Durable Object per Site, `SITE_DB.idFromName(siteId)`.
+entry): one SQLite-backed Durable Object per Site, in Cloudflare's EU
+jurisdiction (`SITE_DB.jurisdiction("eu").idFromName(siteId)`). A database
+created before that (plain `idFromName`) moves to the EU on first use and its
+old object is kept, frozen; `apps/site-gateway/scripts/move-site-databases-to-eu.ts` moves idle
+ones after a deploy. Local workerd has no jurisdictions, so development and
+tests emulate the EU namespace with `eu:<siteId>` names. See
+[Location](../../docs/site-data.md#location).
 Postgres keeps the definitions (migrations and named queries); the object
 holds the rows. `src/site-db.ts` serves the internal route the API calls:
 

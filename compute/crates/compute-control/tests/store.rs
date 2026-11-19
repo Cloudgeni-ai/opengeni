@@ -40,6 +40,7 @@ fn capacity() -> Capacity {
         memory_reclaimable_mib: 0,
         cpu_millis: 4000,
         cpu_free_millis: 4000,
+        vcpus_awake: 0,
         disk_free_mib: 1024,
         disk_available_mib: None,
         disk_reclaimable_mib: 0,

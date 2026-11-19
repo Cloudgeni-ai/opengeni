@@ -22,7 +22,7 @@ import {
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
-import type { InboxItem, OpenGeniClient } from "@opengeni/sdk";
+import type { InboxEntry, OpenGeniClient } from "@opengeni/sdk";
 import {
   accountForAppLink,
   normalizeServerUrl,
@@ -951,7 +951,7 @@ export class DesktopShell {
     this.showAccount(account.id, `${url.pathname}${url.search}`);
   }
 
-  private openInboxItem(accountId: string, item: InboxItem): void {
+  private openInboxItem(accountId: string, item: InboxEntry): void {
     this.showAccount(accountId, inboxItemPath(item, this.paths));
   }
 

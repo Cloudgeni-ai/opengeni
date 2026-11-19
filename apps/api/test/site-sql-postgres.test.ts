@@ -75,7 +75,7 @@ beforeAll(async () => {
       API_ORIGIN: "http://127.0.0.1:18787",
       APP_ORIGIN: "https://app.test",
       GATEWAY_SECRET: SECRET,
-      ENVIRONMENT: "production",
+      ENVIRONMENT: "test",
     },
     durableObjects: { SITE_DB: { className: "SiteDatabase", useSQLite: true } },
   });

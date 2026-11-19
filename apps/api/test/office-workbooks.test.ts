@@ -6,7 +6,7 @@ import {
 } from "@opengeni/core";
 import type { OpStreamConnection } from "@opengeni/events";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { chooseWorkbook, excelAddin } from "../src/mcp/excel-tools";
+import { chooseWorkbook, excelAddin, excelRunDescription } from "../src/mcp/excel-tools";
 import {
   clampTimeout,
   mintOfficeWorkbookTicket,
@@ -418,5 +418,15 @@ describe("chooseWorkbook", () => {
     expect(chooseWorkbook(books, "Book 1", ADDIN)).toMatchObject({
       error: expect.stringContaining("pass its id"),
     });
+  });
+});
+
+describe("excel_run description", () => {
+  test("offers the add-in card only to an agent that has the card tool", () => {
+    const withCard = excelRunDescription(true);
+    const withoutCard = excelRunDescription(false);
+    expect(withCard).toContain("capability_authorization_request with");
+    expect(withoutCard).not.toContain("capability_authorization_request");
+    expect(withCard.startsWith(`${withoutCard} When someone works on a spreadsheet`)).toBe(true);
   });
 });

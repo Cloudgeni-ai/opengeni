@@ -41,8 +41,9 @@ export interface GatewayEnv {
   RATE_LIMITER?: RateLimiterLike;
   /**
    * Optional per-Site Cloudflare storage: the `SiteDatabase` SQLite Durable
-   * Object namespace (`idFromName(siteId)`). Without it the internal Site
-   * database route answers 404; see `src/site-db.ts`.
+   * Object namespace. Databases live in its EU jurisdiction
+   * (`src/site-db-location.ts`). Without it the internal Site database route
+   * answers 404; see `src/site-db.ts`.
    */
   SITE_DB?: unknown;
   /**

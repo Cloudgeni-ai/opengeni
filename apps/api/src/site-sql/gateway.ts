@@ -3,6 +3,8 @@ import {
   SITE_GATEWAY_SIGNATURE_HEADER,
   SITE_GATEWAY_SIGNATURE_VERSION,
   SITE_GATEWAY_TIMESTAMP_HEADER,
+  SITE_DB_LOCATION_HEADER,
+  SITE_DB_RELOCATION_ERROR_HEADER,
   siteDbInternalPath,
   siteGatewayCanonicalString,
   type SiteDbErrorBody,
@@ -129,6 +131,18 @@ export function signGatewayInternalRequest(
   };
 }
 
+/** Sites logged as not in the EU yet, and when: at most once per Site per hour per process. */
+const notInEuLogged = new Map<string, number>();
+const NOT_IN_EU_LOG_MS = 60 * 60_000;
+
+function shouldLogNotInEu(siteId: string, now = Date.now()): boolean {
+  const last = notInEuLogged.get(siteId);
+  if (last !== undefined && now - last < NOT_IN_EU_LOG_MS) return false;
+  if (notInEuLogged.size >= 1000) notInEuLogged.clear();
+  notInEuLogged.set(siteId, now);
+  return true;
+}
+
 /** Read-only operations: a lost response cannot have changed anything. */
 const READ_ONLY: ReadonlySet<SiteDbOperation> = new Set(["inspect", "export"]);
 
@@ -191,6 +205,14 @@ async function callSiteDbOnce<T>(
   } catch {
     parsed = null;
   }
+  // A database not yet in the EU is served from its earlier location (apps/site-gateway, "Location").
+  const relocationError = response.headers.get(SITE_DB_RELOCATION_ERROR_HEADER);
+  if (relocationError && shouldLogNotInEu(siteId))
+    console.warn("[site-sql] Site database is not in the EU yet", {
+      siteId,
+      location: response.headers.get(SITE_DB_LOCATION_HEADER),
+      reason: relocationError,
+    });
   if (response.ok && parsed !== null && typeof parsed === "object") return parsed as T;
   const error = (parsed as Partial<SiteDbErrorBody> | null)?.error;
   const code = typeof error?.code === "string" ? error.code : "unavailable";
@@ -203,7 +225,8 @@ async function callSiteDbOnce<T>(
       503,
       "unavailable",
       response.status >= 500 ? message : "Site SQL is not reachable on this deployment",
-      response.status >= 500 && !READ_ONLY.has(operation),
+      // The gateway says when nothing ran (a database briefly held while it moves).
+      response.status >= 500 && !READ_ONLY.has(operation) && error?.outcomeUnknown !== false,
     );
   throw new SiteDbCallError(response.status, code, message);
 }

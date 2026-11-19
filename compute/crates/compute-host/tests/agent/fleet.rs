@@ -12,6 +12,7 @@ use std::time::Duration;
 use compute_core::{DiskPolicy, DiskSpace, HostPolicy, Level, Priority};
 use compute_engine::{CancellationToken, EngineError};
 use compute_host::fleet::{Admission, LeaseGate, boot_now};
+use compute_host::observe::{Alarm, Observer};
 use compute_host::protocol::{
     DiskStatus, DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request,
     SandboxConfig, SleepConfig,
@@ -498,6 +499,50 @@ async fn an_adopt_at_another_machine_shape_boots_from_the_files() {
         one.assert_clean();
         two.assert_clean();
     }
+}
+
+/// A sandbox whose memory image was made on another kind of host than the
+/// one that adopts it (another processor model, as when no host of its
+/// kind had room) wakes fresh from its files at once, as one whose memory
+/// is not kept always does: no restore is tried, so none is refused over
+/// and over, and nothing raises the programs-lost alarm. The image is gone
+/// from the store, so no later adopt tries it either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_on_another_kind_of_host_wakes_from_the_files_without_an_alarm() {
+    let a = Lab::root();
+    let shelf = a.join("shelf");
+    let one = Lab::start_stored(a, Arc::default(), Directory::new(&shelf)).await;
+    let observer = Observer::default();
+    let watched = observer.clone();
+    let two = Lab::start_stored_configured(
+        Lab::root(),
+        Arc::default(),
+        Directory::new(&shelf),
+        |config| config.observer = watched,
+    )
+    .await;
+    two.world.another_kind.store(true, Ordering::SeqCst);
+    let sandbox = id(22);
+    saved_and_handed_off(&one, sandbox).await;
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert!(!two.current(sandbox).await.memory_saved);
+    assert!(!shelf.join(sandbox.to_string()).join("memory").exists());
+    assert_eq!(
+        two.run(sandbox, &["get", "disk"]).await,
+        ["", "on-disk"],
+        "its programs ended, its files stayed"
+    );
+    assert_eq!(two.world.restores.load(Ordering::Relaxed), 0);
+    assert_eq!(two.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        two.current(sandbox).await.launches,
+        1,
+        "one VM process, the boot: no restore was tried and refused"
+    );
+    assert_eq!(observer.metrics().alarms(Alarm::ProgramsLost), 0);
+    one.assert_clean();
+    two.assert_clean();
 }
 
 /// A sandbox resized only in what it asks to be guaranteed, or given a
