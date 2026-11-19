@@ -186,10 +186,19 @@ one when inviting (`consoleRole` on `POST /v1/organizations/:id/invitations`,
 `none`, `viewer` or `editor`; refused for owner and admin invitations); a
 Console-only invitee gets no workspace access. The invitation's role becomes
 the member's when they accept. Changing a member's organization role or
-offboarding them resets their Console role to none. An Editor who runs test
-chats becomes a member of the organization's Console test workspace; that
-membership is removed when they stop being Editor. The app's People page
-shows "Console: Viewer" or "Console: Editor" next to such members.
+offboarding them resets their Console role to none. A person who runs test
+chats (an Editor, owner or admin) becomes a member of the organization's
+Console test workspace with only `workspace:read`, `sessions:create`,
+`sessions:read` and `sessions:control` (never `workspace:admin`, so never
+`agents:manage`). That membership is removed whenever their Console access
+drops below Editor: a Console role set below Editor, an owner or admin made a
+member, or offboarding, whatever role was stored. If the removal fails the
+request answers a retryable `503` (`console_access_cleanup_failed`) and
+repeating it (the same `operationId` for a member change) finishes it. An
+organization agent chat in the test workspace also needs Editor access (or
+an organization key) when it starts, so a membership left behind is not
+enough. The app's People page shows "Console: Viewer" or "Console: Editor"
+next to such members.
 
 Roles are stored in `organization_console_roles` (migration 1508, one row
 per member or pending invitation, FORCE RLS on the account; the runtime may

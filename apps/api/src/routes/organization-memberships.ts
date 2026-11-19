@@ -1414,13 +1414,17 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       }
       if (payload.kind === "change_role" || payload.kind === "offboard") {
         // A Console role belongs to a member: a new organization role or
-        // leaving resets it (docs/opengeni-console.md, "Roles").
+        // leaving resets it, and Console test workspace access goes unless
+        // they are still an owner or admin (docs/opengeni-console.md, "Roles").
+        // A failure is a retryable 503; the same operationId repeats it.
         await resetConsoleRoleAfterMembershipChange(deps, {
           organizationId,
           subjectId: member.subjectId,
           actorSubjectId: subjectId,
           actorLabel: null,
           reason: payload.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
+          organizationRole:
+            payload.kind === "offboard" || member.status === "revoked" ? null : member.role,
         });
       }
       return context.json(member);

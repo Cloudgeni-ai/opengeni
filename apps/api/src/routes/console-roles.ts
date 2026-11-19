@@ -19,7 +19,18 @@
  * level is refused with 403 `console_role_required`. A Console role never
  * grants access to app workspaces, and app workspace roles never grant
  * Console access.
+ *
+ * The one workspace a Console role touches is the organization's Console
+ * test workspace (`organization_managed_workspaces.source = 'console_test'`),
+ * where Editors and owners and admins run test chats. Their membership there
+ * holds only `CONSOLE_TEST_WORKSPACE_PERMISSIONS` (never `workspace:admin`,
+ * so it never stands for `agents:manage` or any other administration), it is
+ * removed whenever their Console access drops below Editor, and an
+ * organization agent chat there needs Editor access at the moment it starts
+ * (`requireConsoleTestChatStanding`), so a membership left behind is not
+ * enough.
  */
+import { orgAgentsEnabledForAccount } from "@opengeni/config";
 import {
   ConsoleAccessResponse,
   ConsoleMemberRolesResponse,
@@ -27,6 +38,7 @@ import {
   type AccessContext,
   type ConsoleAccessLevel,
   type ConsoleMemberRole,
+  type Permission,
 } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
@@ -154,10 +166,38 @@ export function consoleRoleRefusal(needed: ConsoleAccess): ApiHttpError {
 }
 
 /**
- * Editors run test chats in the organization's Console test workspace as its
- * members. When a person's Console role drops below Editor (or they stop
- * being a member with one), that membership goes too, so a Console role never
- * leaves app workspace access behind. Best effort: a failure is logged.
+ * What a person's membership of the Console test workspace holds: start,
+ * read and steer chats there. Nothing that administers the workspace or the
+ * organization (no `workspace:admin`, members, keys, secrets, connections or
+ * tool attachments), so it never satisfies `agents:manage`, even where a
+ * legacy permission check would expand `workspace:admin`.
+ */
+export const CONSOLE_TEST_WORKSPACE_PERMISSIONS: readonly Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+];
+
+/** Error `details.code` when Console test workspace access could not be removed. */
+export const CONSOLE_ACCESS_CLEANUP_FAILED = "console_access_cleanup_failed";
+
+function cleanupFailed(message: string): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "internal_error",
+    message,
+    retryable: true,
+    details: { code: CONSOLE_ACCESS_CLEANUP_FAILED },
+  });
+}
+
+/**
+ * Editors (and owners and admins) run test chats in the organization's
+ * Console test workspace as its members. When a person's Console access drops
+ * below Editor, that membership goes, whatever role was stored, so a Console
+ * role never leaves app workspace access behind. Removing a membership that
+ * is already gone succeeds. A failure is a retryable 503
+ * (`console_access_cleanup_failed`): repeating the same request removes it.
  */
 export async function revokeConsoleTestWorkspaceAccess(
   deps: ApiRouteDeps,
@@ -174,17 +214,24 @@ export async function revokeConsoleTestWorkspaceAccess(
       requireOrganizationSharedWorkspaceAdministration: true,
     });
   } catch (error) {
-    deps.observability?.warn("console test workspace access was not removed", {
+    deps.observability?.error("console test workspace access was not removed", {
       organizationId: input.organizationId,
       error: error instanceof Error ? error.message : String(error),
     });
+    throw cleanupFailed(
+      "The change was saved, but this person's Console test chat access wasn't removed. Try again.",
+    );
   }
 }
 
 /**
- * Resets a member's Console role to none (their organization role changed,
- * or they left), with its audit row, and removes Console test workspace
- * access an Editor had. Best effort: the membership change already happened.
+ * After an organization role change or offboarding: resets the person's
+ * Console role to none, with its audit row, and removes their Console test
+ * workspace access unless they are still an owner or admin (still full). Runs
+ * whatever was stored, so a demoted owner or admin (who has no stored role)
+ * loses it too. A failure is a retryable 503: the membership change itself
+ * is saved, and repeating the request with the same `operationId` repeats
+ * this cleanup.
  */
 export async function resetConsoleRoleAfterMembershipChange(
   deps: ApiRouteDeps,
@@ -194,24 +241,50 @@ export async function resetConsoleRoleAfterMembershipChange(
     actorSubjectId: string;
     actorLabel: string | null;
     reason: string;
+    /** Their organization role now, or null when they left. */
+    organizationRole: string | null;
   },
 ): Promise<void> {
   if (!input.subjectId.startsWith("user:")) return;
   try {
-    const previous = await clearConsoleMemberRole(deps.db, {
+    await clearConsoleMemberRole(deps.db, {
       accountId: input.organizationId,
       subjectId: input.subjectId,
       actorSubjectId: input.actorSubjectId,
       actorLabel: input.actorLabel,
       reason: input.reason,
     });
-    if (previous === "editor") await revokeConsoleTestWorkspaceAccess(deps, input);
   } catch (error) {
-    deps.observability?.warn("console role was not reset after a membership change", {
+    deps.observability?.error("console role was not reset after a membership change", {
       organizationId: input.organizationId,
       error: error instanceof Error ? error.message : String(error),
     });
+    throw cleanupFailed("The change was saved, but this person's Console role wasn't reset. Try again.");
   }
+  if (input.organizationRole === "owner" || input.organizationRole === "admin") return;
+  await revokeConsoleTestWorkspaceAccess(deps, input);
+}
+
+/**
+ * An organization agent chat in the Console test workspace (drafts run only
+ * there) needs, when it starts, an organization API key or a person with
+ * Editor access or more, checked now rather than from their membership. Any
+ * other workspace, or an organization without Console agents, is unaffected.
+ */
+export async function requireConsoleTestChatStanding(
+  deps: ApiRouteDeps,
+  c: Context,
+  input: { accountId: string; workspaceId: string },
+): Promise<void> {
+  if (!orgAgentsEnabledForAccount(deps.settings, input.accountId)) return;
+  const testWorkspaceId = await findOrgAgentTestWorkspace(deps.db, input.accountId);
+  if (!testWorkspaceId || testWorkspaceId.toLowerCase() !== input.workspaceId.toLowerCase()) {
+    return;
+  }
+  const context = await requireAccessContext(c, deps);
+  const organizationKey = accountScopedApiKeyWorkspaceAuthority(context);
+  if (organizationKey && organizationKey.accountId === input.accountId) return;
+  await requireConsoleAccessForContext(deps, context, input.accountId, "editor");
 }
 
 const OrganizationIdParam = z.string().uuid();
@@ -291,7 +364,9 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
         actorSubjectId: admin.subjectId,
         actorLabel: admin.label,
       });
-      if (result.from === "editor" && request.role !== "editor" && request.subjectId) {
+      // Anything below Editor: no Console test workspace access, whatever was
+      // stored before (a retry after a failed removal removes it then).
+      if (request.role !== "editor" && request.subjectId) {
         await revokeConsoleTestWorkspaceAccess(deps, {
           organizationId,
           subjectId: request.subjectId,

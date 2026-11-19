@@ -9,7 +9,8 @@
 // reset when a member's organization role changes.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import type { AccessContext } from "@opengeni/contracts";
+import type { AccessContext, Permission } from "@opengeni/contracts";
+import { hasPermission } from "@opengeni/core";
 import type {
   ApiRouteDeps,
   ManagedEmailDeliveryResult,
@@ -38,6 +39,7 @@ import { z } from "zod";
 import { ApiHttpError } from "../src/http/api-error";
 import { organizationApiKeyPermissions } from "../src/routes/api-keys";
 import { registerConsoleRoutes } from "../src/routes/console";
+import { CONSOLE_TEST_WORKSPACE_PERMISSIONS } from "../src/routes/console-roles";
 import { registerOrganizationAgentRoutes } from "../src/routes/organization-agents";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 import { registerSessionRoutes } from "../src/routes/sessions";
@@ -932,5 +934,205 @@ describe("Console roles: reads, writes and lifecycle", () => {
       (row) => row.detail.subjectId === temp.subjectId && row.detail.to === "none",
     );
     expect(reset.map((row) => row.detail.reason)).toEqual(["organization_role_changed"]);
+  }, 120_000);
+});
+
+describe("Console roles: the Console test workspace", () => {
+  /** The person's membership of the organization's Console test workspace, if any. */
+  async function testMembership(subjectId: string) {
+    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
+    if (!workspaceId) return null;
+    const [row] = await shared!.admin<{ role: string; permissions: string[] }[]>`
+      select role, permissions from workspace_memberships
+      where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
+    return row ?? null;
+  }
+
+  /** A membership left behind, as if an earlier removal had failed. */
+  async function leaveMembershipBehind(subjectId: string) {
+    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${fixture!.accountId}, ${workspaceId}, ${subjectId}, 'member',
+        ${CONSOLE_TEST_WORKSPACE_PERMISSIONS as string[]})
+      on conflict do nothing`;
+    expect(await testMembership(subjectId)).not.toBeNull();
+  }
+
+  const testChat = (who: Person) =>
+    call("POST", `${agents(fixture!)}/${fixture!.agentId}/test-chats`, who.headers, {
+      version: 1,
+      message: "hi",
+    });
+
+  /** Starting a draft chat in the test workspace directly, as the person. */
+  async function directDraftChat(who: Person) {
+    const workspaceId = await findOrgAgentTestWorkspace(client!.db, fixture!.accountId);
+    return await call("POST", `/v1/workspaces/${workspaceId}/sessions`, who.headers, {
+      initialMessage: "hi",
+      agent: { ref: fixture!.agentId, version: 1 },
+    });
+  }
+
+  const refusedForRole = (reply: Reply) =>
+    reply.status === 403 && reply.body.details?.code === "console_role_required";
+  const reachedTheChat = (reply: Reply) =>
+    reply.status !== 401 && reply.status !== 403 && reply.status !== 404;
+
+  test("membership there only starts and reads chats: never workspace:admin or agents:manage", async () => {
+    if (!fixture || !client || !shared) return;
+    const temp = await person("narrow");
+    await inviteAndAccept(fixture.accountId, fixture.people.owner, temp, "member", "editor");
+    expect((await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status).toBeLessThan(300);
+    const row = await testMembership(temp.subjectId);
+    expect(row?.role).toBe("member");
+    expect([...row!.permissions].sort()).toEqual([...CONSOLE_TEST_WORKSPACE_PERMISSIONS].sort());
+    const permissions = row!.permissions as Permission[];
+    for (const mode of ["legacy", "explicit", undefined] as const) {
+      expect(hasPermission(permissions, "agents:manage", mode)).toBe(false);
+      expect(hasPermission(permissions, "workspace:admin", mode)).toBe(false);
+      expect(hasPermission(permissions, "tool_credentials:write", mode)).toBe(false);
+      expect(hasPermission(permissions, "mcp_servers:attach", mode)).toBe(false);
+      expect(hasPermission(permissions, "secrets:read", mode)).toBe(false);
+    }
+    // An older, broader membership is narrowed the next time they test.
+    const workspaceId = await findOrgAgentTestWorkspace(client.db, fixture.accountId);
+    await shared.admin`update workspace_memberships set role = 'owner',
+        permissions = ${["workspace:read", "workspace:admin", "sessions:create"]}
+      where workspace_id = ${workspaceId} and subject_id = ${temp.subjectId}`;
+    expect((await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status).toBeLessThan(300);
+    expect((await testMembership(temp.subjectId))?.role).toBe("member");
+  }, 120_000);
+
+  test("a demoted admin and a demoted Editor lose test chats at once", async () => {
+    if (!fixture || !client || !shared) return;
+    const { accountId, people } = fixture;
+    const exAdmin = await person("ex-admin");
+    const adminMembership = await inviteAndAccept(accountId, people.owner, exAdmin, "admin");
+    const exEditor = await person("ex-editor");
+    await inviteAndAccept(accountId, people.owner, exEditor, "member", "editor");
+
+    for (const who of [exAdmin, exEditor]) {
+      const before = await testChat(who);
+      expect({ status: before.status, ok: reachedTheChat(before) }).toEqual({
+        status: before.status,
+        ok: true,
+      });
+      expect(await testMembership(who.subjectId)).not.toBeNull();
+      const direct = await directDraftChat(who);
+      expect({ status: direct.status, ok: reachedTheChat(direct) }).toEqual({
+        status: direct.status,
+        ok: true,
+      });
+    }
+
+    const demoted = await call(
+      "PATCH",
+      `/v1/organizations/${accountId}/members/${adminMembership.membershipId}`,
+      people.owner.headers,
+      {
+        kind: "change_role",
+        role: "member",
+        expectedAuthorizationRevision: adminMembership.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(demoted.status).toBe(200);
+    const lowered = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+      subjectId: exEditor.subjectId,
+      role: "viewer",
+    });
+    expect(lowered.status).toBe(200);
+
+    for (const who of [exAdmin, exEditor]) {
+      expect(await testMembership(who.subjectId)).toBeNull();
+      const viaConsole = await testChat(who);
+      expect([viaConsole.status, viaConsole.body.details?.code]).toEqual([
+        403,
+        "console_role_required",
+      ]);
+      // Without a membership the workspace itself refuses them.
+      const direct = await directDraftChat(who);
+      expect([403, 404]).toContain(direct.status);
+      // A membership left behind is not enough: the chat needs Editor now.
+      await leaveMembershipBehind(who.subjectId);
+      const leftover = await directDraftChat(who);
+      expect({ status: leftover.status, refused: refusedForRole(leftover) }).toEqual({
+        status: 403,
+        refused: true,
+      });
+    }
+  }, 300_000);
+
+  test("access drops remove the membership whatever was stored, and a repeat finishes the job", async () => {
+    if (!fixture || !client || !shared) return;
+    const { accountId, people } = fixture;
+    // A member with no stored role but a membership left behind: setting None removes it.
+    const leftover = await person("leftover");
+    await inviteAndAccept(accountId, people.owner, leftover, "member");
+    await leaveMembershipBehind(leftover.subjectId);
+    const none = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+      subjectId: leftover.subjectId,
+      role: "none",
+    });
+    expect(none.status).toBe(200);
+    expect(await testMembership(leftover.subjectId)).toBeNull();
+
+    // A demotion repeated with its operationId removes a membership left behind.
+    const admin = await person("repeat-admin");
+    const membership = await inviteAndAccept(accountId, people.owner, admin, "admin");
+    expect((await call("POST", `${agents(fixture)}/test-workspace`, admin.headers)).status).toBeLessThan(300);
+    const demotion = {
+      kind: "change_role",
+      role: "member",
+      expectedAuthorizationRevision: membership.authorizationRevision,
+      operationId: crypto.randomUUID(),
+    };
+    const path = `/v1/organizations/${accountId}/members/${membership.membershipId}`;
+    expect((await call("PATCH", path, people.owner.headers, demotion)).status).toBe(200);
+    expect(await testMembership(admin.subjectId)).toBeNull();
+    await leaveMembershipBehind(admin.subjectId);
+    const repeated = await call("PATCH", path, people.owner.headers, demotion);
+    expect(repeated.status).toBe(200);
+    expect(await testMembership(admin.subjectId)).toBeNull();
+
+    // Promotion keeps it: owners and admins stay full.
+    const editor = await person("promoted");
+    const editorMembership = await inviteAndAccept(accountId, people.owner, editor, "member", "editor");
+    expect((await call("POST", `${agents(fixture)}/test-workspace`, editor.headers)).status).toBeLessThan(300);
+    const promoted = await call(
+      "PATCH",
+      `/v1/organizations/${accountId}/members/${editorMembership.membershipId}`,
+      people.owner.headers,
+      {
+        kind: "change_role",
+        role: "admin",
+        expectedAuthorizationRevision: editorMembership.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(promoted.status).toBe(200);
+    expect(await testMembership(editor.subjectId)).not.toBeNull();
+  }, 300_000);
+
+  test("offboarding removes it", async () => {
+    if (!fixture || !client || !shared) return;
+    const { accountId, people } = fixture;
+    const leaving = await person("leaving");
+    const membership = await inviteAndAccept(accountId, people.owner, leaving, "member", "editor");
+    expect((await call("POST", `${agents(fixture)}/test-workspace`, leaving.headers)).status).toBeLessThan(300);
+    expect(await testMembership(leaving.subjectId)).not.toBeNull();
+    const offboarded = await call(
+      "PATCH",
+      `/v1/organizations/${accountId}/members/${membership.membershipId}`,
+      people.owner.headers,
+      {
+        kind: "offboard",
+        expectedAuthorizationRevision: membership.authorizationRevision,
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(offboarded.status).toBe(200);
+    expect(await testMembership(leaving.subjectId)).toBeNull();
   }, 120_000);
 });

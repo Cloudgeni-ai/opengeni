@@ -1,4 +1,5 @@
 import { prepareAgentChatCreate } from "../agent-chats";
+import { requireConsoleTestChatStanding } from "./console-roles";
 import {
   noteCreditUsageAudience,
   stripCreditUsageForRelayedBrowsers,
@@ -872,6 +873,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         422,
       );
+    }
+    // An organization agent chat in the Console test workspace needs Editor
+    // access (or an organization key) now; a create naming no organization
+    // agent never reaches this.
+    if (
+      payload !== null &&
+      typeof payload === "object" &&
+      sessionAgentFieldNamesOrgAgent((payload as { agent?: unknown }).agent)
+    ) {
+      await requireConsoleTestChatStanding(deps, c, { accountId: grant.accountId, workspaceId });
     }
     let session: Session;
     try {
