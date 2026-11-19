@@ -87,12 +87,22 @@ function param(c: Context, name: string): string {
 async function managedWorkspaces(
   deps: ApiRouteDeps,
   organizationId: string,
-): Promise<{ all: ConsoleOrganizationWorkspace[]; managed: ConsoleOrganizationWorkspace[] }> {
+): Promise<{
+  all: ConsoleOrganizationWorkspace[];
+  managed: ConsoleOrganizationWorkspace[];
+  /** The Console test workspace (its chats are agent test chats), if any. */
+  consoleTest: ReadonlySet<string>;
+}> {
   const [all, markers] = await Promise.all([
     listConsoleOrganizationWorkspaces(deps.db, organizationId),
     listManagedWorkspaceMarkers(deps.db, organizationId),
   ]);
-  return { all, managed: all.filter((workspace) => markers.has(workspace.id)) };
+  const consoleTest = new Set(
+    [...markers.values()]
+      .filter((marker) => marker.source === "console_test")
+      .map((marker) => marker.workspaceId),
+  );
+  return { all, managed: all.filter((workspace) => markers.has(workspace.id)), consoleTest };
 }
 
 function reviewOff(): HTTPException {
@@ -256,10 +266,11 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(400, { message: "cursor is invalid" });
       throw error;
     }
-    const { managed } = await managedWorkspaces(deps, organizationId);
+    const { managed, consoleTest } = await managedWorkspaces(deps, organizationId);
+    // Agent test chats stay out of the list unless their workspace is asked for.
     const workspaces = query.workspaceId
       ? managed.filter((workspace) => workspace.id === query.workspaceId)
-      : managed;
+      : managed.filter((workspace) => !consoleTest.has(workspace.id));
     const page = await listConsoleSessions(deps.db, {
       accountId: organizationId,
       workspaces,

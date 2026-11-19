@@ -125,6 +125,9 @@ describe("opengeni agents deploy", () => {
     const again = await cli(["agents", "deploy", "agents"], api);
     expect(again.exitCode).toBe(CLI_EXIT.ok);
     expect(again.stdout).toContain("support\tunchanged\tv1\tpublished");
+    const dry = await cli(["agents", "deploy", "agents", "--dry-run"], api);
+    expect(dry.exitCode).toBe(CLI_EXIT.ok);
+    expect(dry.stdout).toContain("support\tunchanged v1\t");
   });
 
   test("--dry-run and --move-running-chats are sent, and nothing is saved on a dry run", async () => {
@@ -134,7 +137,7 @@ describe("opengeni agents deploy", () => {
       api,
     );
     expect(result.exitCode).toBe(CLI_EXIT.ok);
-    expect(result.stdout).toContain("support\tcreated (dry run)\tv-\tnot published");
+    expect(result.stdout).toContain("support\twould create v1\twould publish");
     // A new agent diffs against nothing.
     expect(result.stdout).toContain(
       "--- support (new agent)\n+++ agents/support.yaml\n+ key: support\n",
@@ -383,7 +386,7 @@ describe("end to end", () => {
           outcome: "updated",
           dryRun,
           configHash: `sha256:${createHash("sha256").update(canonicalOrgAgentDefinitionJson(definition)).digest("hex")}`,
-          version: null,
+          version: 2,
           published: false,
           agent: null,
           operation: null,
@@ -419,7 +422,7 @@ describe("end to end", () => {
       ]);
       expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
       expect(stdout).toMatch(
-        /^support\tupdated \(dry run\)\tv-\tnot published\tsha256:[0-9a-f]{12}\n--- support \(new agent\)\n/u,
+        /^support\twould create v2\tnot published\tsha256:[0-9a-f]{12}\n--- support \(new agent\)\n/u,
       );
       expect(stdout).toContain("\ntriage\t");
       expect(received.map((entry) => entry.path)).toEqual([

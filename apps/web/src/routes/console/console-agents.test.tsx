@@ -230,6 +230,9 @@ const toolServer = {
 const requestJson = mock(
   async (method: string, path: string, _body?: unknown, query?: Record<string, string>) => {
     const base = `/v1/organizations/${organizationId}`;
+    if (method === "GET" && path === `${base}/console/access`) {
+      return { organizationId, access: "full", orgAgentsEnabled: flagOn };
+    }
     if (!path.startsWith("/v1/workspaces/") && !flagOn) {
       throw Object.assign(new Error("Agent not found."), { status: 404 });
     }
@@ -542,11 +545,14 @@ describe("Console agents list", () => {
     expect(page).toContain("New agent");
   });
 
-  test("without the flag, says agents are coming and lists nothing", async () => {
+  test("without the flag, says agents are coming and never calls the agent routes", async () => {
     flagOn = false;
+    requestJson.mockClear();
     await render(createElement(ConsoleAgentsRoute));
     expect(text()).toContain("Organization agents are coming");
     expect(text()).not.toContain("New agent");
+    const paths = requestJson.mock.calls.map((call) => call[1]);
+    expect(paths.some((path) => path.includes("/agents"))).toBe(false);
   });
 });
 

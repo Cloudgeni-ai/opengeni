@@ -382,6 +382,12 @@ export const ConsoleAccessResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     organizationId: primitives.uuid,
     access: ConsoleAccessLevel,
+    /**
+     * Console agents are on for this organization (the per-organization
+     * flag). Always false when `access` is `none`. Clients read this instead
+     * of probing the agent routes, which answer 404 while the flag is off.
+     */
+    orgAgentsEnabled: primitives.boolean,
   }),
 );
 export type ConsoleAccessResponse = z.infer<typeof ConsoleAccessResponse>;

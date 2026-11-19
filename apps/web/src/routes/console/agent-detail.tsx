@@ -65,8 +65,36 @@ export function useIsOrganizationOwner(): boolean {
   );
 }
 
+// Nothing here calls the agent routes until the flag is known to be on: they
+// answer 404 while it is off.
 export function ConsoleAgentRoute() {
   const enabled = useOrgAgentsEnabled();
+  return enabled === true ? <AgentDetail /> : <AgentUnavailable loading={enabled === null} />;
+}
+
+function AgentUnavailable({ loading }: { loading: boolean }) {
+  const { search } = useConsole();
+  const navigate = useNavigate();
+  const back = {
+    label: "Agents",
+    onClick: () => void navigate({ to: "/console/agents", search }),
+  };
+  return (
+    <DetailPage back={back} className="px-0 pt-0 max-sm:px-0">
+      {loading ? (
+        <div className="flex flex-col gap-3" aria-busy="true">
+          <Skeleton className="h-7 w-72" />
+          <Skeleton className="h-4 w-56" />
+          <Skeleton className="mt-6 h-[420px] w-full rounded-lg" />
+        </div>
+      ) : (
+        <Notice>Console agents aren't on for this organization.</Notice>
+      )}
+    </DetailPage>
+  );
+}
+
+function AgentDetail() {
   const { search } = useConsole();
   const navigate = useNavigate();
   const { agentId = "" } = useParams({ strict: false }) as { agentId?: string };
@@ -105,13 +133,6 @@ export function ConsoleAgentRoute() {
     onClick: () => void navigate({ to: "/console/agents", search }),
   };
 
-  if (enabled === false) {
-    return (
-      <DetailPage back={back} className="px-0 pt-0 max-sm:px-0">
-        <Notice>Console agents aren't on for this organization.</Notice>
-      </DetailPage>
-    );
-  }
   if (loaded.error && !agent) {
     return (
       <DetailPage back={back} className="px-0 pt-0 max-sm:px-0">

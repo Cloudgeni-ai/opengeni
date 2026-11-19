@@ -962,7 +962,12 @@ describe("Console roles: authorization matrix", () => {
     } as const;
     for (const [name, access] of Object.entries(expected)) {
       const reply = await call("GET", `${console_(fixture)}/access`, headersOf(name as CallerName));
-      expect([name, reply.status, reply.body.access]).toEqual([name, 200, access]);
+      expect([name, reply.status, reply.body.access, reply.body.orgAgentsEnabled]).toEqual([
+        name,
+        200,
+        access,
+        access !== "none",
+      ]);
     }
   }, 60_000);
 
@@ -978,7 +983,13 @@ describe("Console roles: authorization matrix", () => {
           `${console_(fixture)}/access`,
           headersOf(name as CallerName),
         );
-        expect([name, reply.status, reply.body.access]).toEqual([name, 200, access]);
+        // The flag is reported here, so clients never probe the agent routes.
+        expect([name, reply.status, reply.body.access, reply.body.orgAgentsEnabled]).toEqual([
+          name,
+          200,
+          access,
+          false,
+        ]);
       }
       const viewerSessions = await call(
         "GET",
@@ -1482,6 +1493,23 @@ describe("Console roles: Console test chats", () => {
       expect(hasPermission(held, "api_keys:manage", mode)).toBe(false);
       expect(hasPermission(held, "members:manage", mode)).toBe(false);
     }
+  }, 60_000);
+
+  test("test chats stay out of the Console Sessions list unless their workspace is asked for", async () => {
+    if (!fixture) return;
+    const workspaceId = await testWorkspaceId();
+    const sessionsPath = `/v1/organizations/${fixture.accountId}/console/sessions`;
+    const ids = (body: { sessions: { id: string }[] }) => body.sessions.map((s) => s.id);
+    const all = await call("GET", sessionsPath, headersOf("owner"));
+    expect(all.status).toBe(200);
+    expect(ids(all.body)).not.toContain(fixture.testChats.owner);
+    const scoped = await call(
+      "GET",
+      `${sessionsPath}?workspaceId=${workspaceId}`,
+      headersOf("owner"),
+    );
+    expect(scoped.status).toBe(200);
+    expect(ids(scoped.body)).toContain(fixture.testChats.owner);
   }, 60_000);
 
   test("a tester reads and continues their own test chat", async () => {

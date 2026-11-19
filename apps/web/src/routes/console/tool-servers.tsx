@@ -56,6 +56,14 @@ export function ConsoleToolServersRoute() {
       </ConsolePage>
     );
   }
+  if (enabled === null) {
+    return (
+      <ConsolePage>
+        <PageHeader title="Tool servers" icon={<PlugIcon />} />
+        <ListRowSkeleton count={3} />
+      </ConsolePage>
+    );
+  }
   return <ToolServersList />;
 }
 

@@ -138,21 +138,22 @@ export function fakeApi(options: { managedInConsole?: string[] } = {}) {
       const existing = agents.get(key);
       const same = existing?.versions.findIndex((version) => version.hash === hash) ?? -1;
       const outcome = !existing ? "created" : same >= 0 ? "unchanged" : "updated";
-      let version: number | null = same >= 0 ? same + 1 : (existing?.versions.length ?? 0) + 1;
+      const version: number = same >= 0 ? same + 1 : (existing?.versions.length ?? 0) + 1;
       if (!dryRun) {
         const record = existing ?? { id: crypto.randomUUID(), versions: [], published: null };
         if (same < 0) record.versions.push({ hash, definition });
         if (publish) record.published = version;
         agents.set(key, record);
-      } else if (outcome !== "unchanged") {
-        version = null;
       }
       const response: ApplyOrgAgentResponse = {
         outcome,
         dryRun,
         configHash: hash,
         version,
-        published: dryRun ? false : agents.get(key)?.published === version,
+        // Like the API: a dry run reports what a real deploy would publish.
+        published: dryRun
+          ? publish || existing?.published === version
+          : agents.get(key)?.published === version,
         agent: null,
         operation: null,
       };

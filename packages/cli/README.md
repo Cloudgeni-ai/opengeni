@@ -22,8 +22,8 @@ npx opengeni agents export support --out agents
 `.md` file next to the YAML file; a missing one is an error. Every file is checked first; nothing is
 deployed while one has a problem. Each agent prints one line: key, outcome
 (`created`, `updated`, `unchanged`), version, published or not, and its config
-hash. `--dry-run` writes nothing and prints each agent's changes against its
-published version. Options: `--dry-run`, `--publish`, `--move-running-chats` (with
+hash. `--dry-run` writes nothing; each line says `would create vN` or
+`unchanged`, followed by the agent's changes against its published version. Options: `--dry-run`, `--publish`, `--move-running-chats` (with
 `--publish`), `--json`, `--organization <id>`, `--base-url <url>` (default
 `OPENGENI_BASE_URL` or `https://app.opengeni.ai`). The exit code is 0 when
 every agent deployed and 1 otherwise.

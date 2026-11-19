@@ -35,6 +35,7 @@ import {
   getOrgToolServerWithSecrets,
   isSessionEventPersistenceError,
   listAgentsMissingFromSlack,
+  listOrgAgentChatWorkspaces,
   listOrgAgentPublishOperations,
   listOrgAgents,
   listOrgAgentSessions,
@@ -720,6 +721,12 @@ describe("organization agents: versions and publishing", () => {
     const [marker] = await shared.admin<{ source: string }[]>`
       select source from organization_managed_workspaces where workspace_id = ${first.workspaceId}`;
     expect(marker!.source).toBe("console_test");
+    // Test chats stay out of every agent's chats, usage and cost.
+    const chats = await listOrgAgentChatWorkspaces(app.db, {
+      accountId: org.accountId,
+      agentId: crypto.randomUUID(),
+    });
+    expect(chats.managed).not.toContain(first.workspaceId);
   }, 120_000);
 });
 

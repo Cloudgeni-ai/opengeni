@@ -200,7 +200,8 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requireAccessContext(c, deps);
     if (isConsoleKeyOrEndUser(context)) throw refusal(CONSOLE_PEOPLE_ONLY_MESSAGE);
     const access = await resolveConsoleAccess(deps, context, organizationId);
-    return c.json(ConsoleAccessResponse.parse({ organizationId, access }));
+    const orgAgentsEnabled = access !== "none" && consoleRolesEnabled(deps, organizationId);
+    return c.json(ConsoleAccessResponse.parse({ organizationId, access, orgAgentsEnabled }));
   });
 
   app.get(`${base}/member-roles`, async (c) => {

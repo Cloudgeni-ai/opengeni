@@ -83,7 +83,6 @@ export function AgentSessions({
                 { id: "user", label: "End user", width: 176 },
                 { id: "version", label: "Version", width: 80 },
                 { id: "cost", label: "Cost", width: 96 },
-                { id: "status", label: "Status", width: 112 },
                 { id: "updated", label: "Updated", width: 112 },
               ]}
             >
@@ -91,16 +90,13 @@ export function AgentSessions({
                 <ListRow
                   key={session.id}
                   title={chatTitle(session)}
-                  titleAddon={
-                    hasOverrides(session.overrides) ? (
-                      <MetaChip variant="soft">{CHANGED_BY_CHAT}</MetaChip>
-                    ) : null
-                  }
+                  // A quiet line under the title, so the title keeps its width.
+                  meta={hasOverrides(session.overrides) ? [CHANGED_BY_CHAT] : undefined}
+                  status={sessionStatus(session.status)}
                   cells={{
                     user: <EndUserName endUser={session.endUser} />,
                     version: `v${session.agentVersion}`,
                     cost: session.costMicros === undefined ? "—" : formatMicros(session.costMicros),
-                    status: sessionStatus(session.status),
                     updated: <RelativeTime date={session.updatedAt} />,
                   }}
                   onOpen={() => onSelect(session.id)}

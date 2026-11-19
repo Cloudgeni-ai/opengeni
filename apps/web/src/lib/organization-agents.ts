@@ -304,9 +304,11 @@ export async function listWorkspaceOrgAgents(
 
 /**
  * Whether Console agents are on for an organization: the per-organization
- * flag. The agent routes answer 404 while it is off (and on older servers), so
- * the flag is whether the organization's agent list can be read. null while
- * the first read is in flight. One shared read per client and organization.
+ * flag, as the signed-in person's Console access reports it (false where
+ * they have no Console access). Read from that always-present route, never
+ * by probing the agent routes, which answer 404 while the flag is off. An
+ * older server without the field reads as off. null while the first read is
+ * in flight. One shared read per client and organization.
  */
 export function useOrgAgentsFlag(
   client: OrgAgentsTransport,
@@ -316,9 +318,9 @@ export function useOrgAgentsFlag(
     client,
     ["console", "org-agents-flag", organizationId],
     (signal) =>
-      client.requestJson<ListOrgAgentsResponse>(
+      client.requestJson<{ orgAgentsEnabled?: boolean }>(
         "GET",
-        `/v1/organizations/${encode(organizationId ?? "")}/agents`,
+        `/v1/organizations/${encode(organizationId ?? "")}/console/access`,
         undefined,
         {},
         { signal },
@@ -326,7 +328,7 @@ export function useOrgAgentsFlag(
     { enabled: Boolean(organizationId), staleTimeMs: 300_000 },
   );
   if (!organizationId) return false;
-  if (query.data) return true;
+  if (query.data) return query.data.orgAgentsEnabled === true;
   if (query.error) return false;
   return null;
 }

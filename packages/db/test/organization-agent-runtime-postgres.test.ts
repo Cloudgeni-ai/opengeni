@@ -324,7 +324,13 @@ describe("organization agents at runtime", () => {
       agent_overrides: overrides,
     });
     const read = await getSession(client.db, org.workspaceId, session.id);
-    expect(read?.orgAgent).toEqual({ id: agentId, key: "support", version: 1, overrides });
+    expect(read?.orgAgent).toEqual({
+      id: agentId,
+      key: "support",
+      name: "support",
+      version: 1,
+      overrides,
+    });
     // agentId keeps its meaning: workspace agents only.
     expect(read?.agentId).toBeNull();
 

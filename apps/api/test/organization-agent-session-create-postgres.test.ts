@@ -293,6 +293,7 @@ describe("session create with an organization agent over HTTP", () => {
     expect(created.body.orgAgent).toEqual({
       id: agentId,
       key: "by-key",
+      name: "by-key",
       version: 1,
       overrides: null,
     });

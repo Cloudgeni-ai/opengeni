@@ -675,17 +675,17 @@ export async function readOrgAgentKeysInTransaction(
   tx: Database,
   accountId: string,
   agentIds: readonly string[],
-): Promise<Map<string, string>> {
+): Promise<Map<string, { key: string; name: string }>> {
   if (agentIds.length === 0) return new Map();
   const rows = await withOrgAgentsVisible(tx, () =>
-    rawRows<{ id: string; agent_key: string }>(
+    rawRows<{ id: string; agent_key: string; name: string }>(
       tx,
-      sql`select a.id::text as id, a.agent_key from agents a
+      sql`select a.id::text as id, a.agent_key, a.name from agents a
         where a.account_id = ${accountId}::uuid and a.scope = 'organization'
           and a.id = any(${pgUuidArray(agentIds)}::uuid[])`,
     ),
   );
-  return new Map(rows.map((row) => [row.id, row.agent_key]));
+  return new Map(rows.map((row) => [row.id, { key: row.agent_key, name: row.name }]));
 }
 
 /* ------------------------------------------------------------- end-user logins */

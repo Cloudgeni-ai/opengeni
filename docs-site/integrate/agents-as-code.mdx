@@ -107,7 +107,7 @@ npx opengeni agents deploy agents --dry-run
 npx opengeni agents deploy agents --publish
 ```
 
-Every file is checked first; nothing is deployed while one has a problem. Each agent prints one line: key, `created`, `updated` or `unchanged`, the version, whether it is published, and its config hash. Deploying unchanged files is a no-op. `--dry-run` writes nothing and prints each agent's diff against its published version; an `instructions` file that doesn't exist is an error. Add `--move-running-chats` with `--publish` to move running chats to the new version too, and `--json` for machine-readable output. `npx opengeni agents export <key> --out agents` writes an existing agent's file.
+Every file is checked first; nothing is deployed while one has a problem. Each agent prints one line: key, `created`, `updated` or `unchanged`, the version, whether it is published, and its config hash. Deploying unchanged files is a no-op. `--dry-run` writes nothing, says `would create vN` or `unchanged` for each agent and prints its diff against its published version; an `instructions` file that doesn't exist is an error. Add `--move-running-chats` with `--publish` to move running chats to the new version too, and `--json` for machine-readable output. `npx opengeni agents export <key> --out agents` writes an existing agent's file.
 
 From GitHub Actions:
 

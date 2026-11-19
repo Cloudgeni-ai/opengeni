@@ -632,7 +632,8 @@ editors completion and checks. The full reference is
 while any has a problem, then prints one line per agent: key, outcome
 (`created`, `updated`, `unchanged`), version, whether it is published, and
 the config hash. A missing instructions `.md` file is an error. `--dry-run`
-writes nothing and prints each agent's diff against its published version,
+writes nothing, says `would create vN` or `unchanged` for each agent and
+prints its diff against its published version,
 `--publish` publishes the
 deployed version, `--move-running-chats` (with `--publish`) also moves
 running chats. It reads `OPENGENI_API_KEY` (an organization key with

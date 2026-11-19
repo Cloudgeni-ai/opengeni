@@ -126,11 +126,13 @@ export function sessionSlackAgentInfo(
   return { id, name };
 }
 
-export type SessionAgentRef = { id: string; name: string | null };
+/** `managed`: an organization agent from Console, named by the chat itself. */
+export type SessionAgentRef = { id: string; name: string | null; managed?: boolean };
 
 type SessionAgentSource = {
   metadata?: Record<string, unknown> | null | undefined;
   agentId?: string | null | undefined;
+  orgAgent?: { id: string; key: string; name?: string | undefined } | null | undefined;
 };
 
 /**
@@ -139,6 +141,8 @@ type SessionAgentSource = {
  * the chat's metadata only supplies the name it had, until the agent loads.
  */
 export function sessionAgentRef(session: SessionAgentSource): SessionAgentRef | null {
+  const org = session.orgAgent;
+  if (org) return { id: org.id, name: org.name || org.key, managed: true };
   if (!session.agentId) return null;
   const slack = sessionSlackAgentInfo(session.metadata);
   return { id: session.agentId, name: slack?.id === session.agentId ? slack.name : null };
@@ -174,7 +178,8 @@ export function useSessionAgentInfo(
   ref: SessionAgentRef | null,
   resolveClient: () => SessionAgentClient | null | undefined,
 ): SessionAgentInfo | null {
-  const id = ref?.id ?? null;
+  // An organization agent isn't a workspace agent: there is nothing to read.
+  const id = ref && !ref.managed ? ref.id : null;
   const [loaded, setLoaded] = useState<{ key: string; value: CachedAgent } | null>(null);
   const key = id ? `${workspaceId}:${id}` : null;
   const client = key ? resolveClient() : null;

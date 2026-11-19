@@ -1368,8 +1368,11 @@ export async function listOrgAgentChatWorkspaces(
   return await withAccountRls(db, input.accountId, async (tx) => {
     const managed = await rawRows<{ workspace_id: string }>(
       tx,
+      // Not the Console test workspace: test chats are the tester's own and
+      // stay out of the agent's chats, usage and cost.
       sql`select workspace_id::text as workspace_id from organization_managed_workspaces
-        where account_id = ${input.accountId}::uuid order by workspace_id`,
+        where account_id = ${input.accountId}::uuid and source <> 'console_test'
+        order by workspace_id`,
     );
     const access = await rawRows<{ workspace_id: string }>(
       tx,

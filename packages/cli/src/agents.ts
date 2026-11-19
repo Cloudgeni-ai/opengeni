@@ -70,10 +70,24 @@ function shortHash(hash: string): string {
 function resultLine(result: DeployResult, dryRun: boolean): string {
   if (!result.ok) return `${result.key}\tfailed\t${result.error}`;
   const { response } = result;
-  const outcome = dryRun ? `${response.outcome} (dry run)` : response.outcome;
+  const hash = shortHash(response.configHash);
+  if (dryRun) {
+    // What a real deploy would do: "would create v3", or "unchanged" (v3 already has this config).
+    const version = response.version === null ? "" : ` v${response.version}`;
+    const outcome =
+      response.outcome === "unchanged" ? `unchanged${version}` : `would create${version}`;
+    const alreadyPublished =
+      response.version !== null && response.agent?.publishedVersion === response.version;
+    const published = alreadyPublished
+      ? "published"
+      : response.published
+        ? "would publish"
+        : "not published";
+    return `${result.key}\t${outcome}\t${published}\t${hash}`;
+  }
   const version = response.version === null ? "v-" : `v${response.version}`;
   const published = response.published ? "published" : "not published";
-  return `${result.key}\t${outcome}\t${version}\t${published}\t${shortHash(response.configHash)}`;
+  return `${result.key}\t${response.outcome}\t${version}\t${published}\t${hash}`;
 }
 
 /** `opengeni agents deploy <dir>`: validate every file, then apply each agent. */

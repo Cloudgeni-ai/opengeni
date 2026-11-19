@@ -30159,6 +30159,7 @@
         "$": "object",
         "$.id": "string!",
         "$.key": "string!",
+        "$.name": "string?",
         "$.overrides": "object! null",
         "$.overrides{}": "ref(OrgAgentOverrideChange)",
         "$.version": "integer!"

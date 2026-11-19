@@ -100333,12 +100333,13 @@ async function sessionOrgAgentProjection(
     db,
     { accountId: row.accountId, workspaceId: row.workspaceId },
     (tx) => readOrgAgentKeysInTransaction(tx, row.accountId, [agentId]),
-  ).catch(() => new Map<string, string>());
-  const key = keys.get(agentId);
-  if (!key) return null;
+  ).catch(() => new Map<string, { key: string; name: string }>());
+  const identity = keys.get(agentId);
+  if (!identity) return null;
   return {
     id: agentId,
-    key,
+    key: identity.key,
+    name: identity.name,
     version: Number(row.agentVersion),
     overrides:
       row.agentOverrides && typeof row.agentOverrides === "object" ? row.agentOverrides : null,

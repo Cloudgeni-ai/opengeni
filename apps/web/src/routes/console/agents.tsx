@@ -44,6 +44,15 @@ function AgentsComing() {
   );
 }
 
+function AgentsLoading() {
+  return (
+    <ConsolePage>
+      <PageHeader title="Agents" icon={<BotIcon />} />
+      <ListRowSkeleton count={3} />
+    </ConsolePage>
+  );
+}
+
 /** "v3", "v3 · Draft v4", "Draft v1". */
 export function agentVersionText(
   agent: Pick<OrgAgentSummary, "publishedVersion" | "latestVersion">,
@@ -57,7 +66,10 @@ export function agentVersionText(
 
 export function ConsoleAgentsRoute() {
   const enabled = useOrgAgentsEnabled();
-  return enabled === false ? <AgentsComing /> : <AgentsList />;
+  // The list is read only once the flag is known to be on (the agent routes
+  // answer 404 while it is off).
+  if (enabled === null) return <AgentsLoading />;
+  return enabled ? <AgentsList /> : <AgentsComing />;
 }
 
 function AgentsList() {

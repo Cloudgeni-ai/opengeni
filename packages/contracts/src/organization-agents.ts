@@ -707,6 +707,8 @@ export const SessionOrgAgent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: z.string().uuid(),
     key: OrgAgentKey,
+    /** The agent's name, for the chat header; absent on older servers. */
+    name: z.string().optional(),
     version: z.number().int().positive(),
     overrides: OrgAgentSessionOverrides.nullable(),
   }),
