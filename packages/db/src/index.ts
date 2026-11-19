@@ -101,6 +101,7 @@ export * from "./agents";
 export * from "./organization-agent-runtime";
 import {
   inheritedSessionOrgAgentInTransaction,
+  orgAgentConfigSharesInstructions,
   readOrgAgentKeysInTransaction,
   readOrgAgentVersion,
   withOrgAgentsVisible,
@@ -45658,6 +45659,12 @@ export type SessionAgentPrompt = {
    * Instructions are in the system prompt (`agent_prompt_version`).
    */
   orgVersion?: number;
+  /**
+   * Organization agent worker chats only (a chat started by another chat):
+   * after a move they get the new version's Instructions only when that
+   * version shares them with workers.
+   */
+  workerChat?: true;
 };
 
 /** Turn metadata key freezing the prompt revision for every attempt of a turn. */
@@ -45803,10 +45810,12 @@ export async function readSessionAgentPrompt(
       revision: number | null;
       agent_version: number | null;
       agent_prompt_version: number | null;
+      worker_chat: boolean | null;
     }>(
       scopedDb,
       sql`select s.agent_id::text as agent_id, s.agent_prompt_revision as revision,
-          s.agent_version, s.agent_prompt_version
+          s.agent_version, s.agent_prompt_version,
+          (s.parent_session_id is not null) as worker_chat
         from sessions s
         where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
     );
@@ -45825,6 +45834,7 @@ export async function readSessionAgentPrompt(
         session.agent_prompt_version === null || session.agent_prompt_version === undefined
           ? null
           : Number(session.agent_prompt_version),
+      workerChat: session.worker_chat === true,
     });
   }
   if (!session || session.revision === null || session.revision === undefined) return null;
@@ -45894,7 +45904,12 @@ async function readSessionOrgAgentPrompt(
     sessionId: string;
     turn?: { turnId: string; expectedExecutionGeneration: number; expectedAttemptId: string };
   },
-  session: { agentId: string; version: number; promptVersion: number | null },
+  session: {
+    agentId: string;
+    version: number;
+    promptVersion: number | null;
+    workerChat: boolean;
+  },
 ): Promise<SessionAgentPrompt | null> {
   if (session.promptVersion === null) return null;
   let revision = session.promptVersion;
@@ -45926,6 +45941,7 @@ async function readSessionOrgAgentPrompt(
     revision,
     instructions: row?.instructions ?? null,
     orgVersion,
+    ...(session.workerChat ? { workerChat: true } : {}),
   };
 }
 
@@ -45962,11 +45978,16 @@ export async function ensureSessionAgentInstructions(
       agentId: prompt.agentId,
       version: prompt.orgVersion,
     }).catch(() => null);
+    // A worker chat keeps the Instructions it has when the version it moved
+    // to does not share them with workers; nothing new is written.
+    const shared =
+      current !== null &&
+      (prompt.workerChat !== true || orgAgentConfigSharesInstructions(current.config));
     return await ensureSessionContextSnapshot(
       db,
       {
         ...scope,
-        text: current
+        text: shared && current
           ? agentInstructionsContextText({
               kind: "revision",
               revision: current.version,

@@ -86,6 +86,49 @@ async function plan(
 }
 
 describe("organization agent session create plan", () => {
+  test("live tool lists are fetched in parallel under one deadline", async () => {
+    const config = OrgAgentVersionConfig.parse({
+      toolServers: [
+        { server: "crm", tools: { mode: "selected", enabled: ["lookup"] }, newTools: "on" },
+        { server: "docs", tools: { mode: "selected", enabled: ["read"] }, newTools: "on" },
+        { server: "billing", tools: { mode: "selected", enabled: ["charge"] }, newTools: "on" },
+      ],
+    });
+    const started: string[] = [];
+    const live: Record<string, string[]> = {
+      crm: ["lookup", "export"],
+      docs: ["read", "search"],
+    };
+    const at = performance.now();
+    const result = await planOrgAgentSessionCreate({
+      raw: { initialMessage: "hi", agent: "support" },
+      request: OrgAgentSessionRequest.parse({ ref: "support" }),
+      config,
+      toolCatalog: { crm: [{ name: "lookup" }], docs: [{ name: "read" }], billing: [] },
+      toolServers: new Map([CRM, DOCS, BILLING].map((server) => [server.key, server])),
+      liveTools: async (server) => {
+        started.push(server.key);
+        // Billing never answers; the others take 300 ms each.
+        if (server.key === "billing") return await new Promise<string[] | null>(() => {});
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return live[server.key] ?? null;
+      },
+      liveToolsDeadlineMs: 800,
+    });
+    const elapsed = performance.now() - at;
+    // All three started at once; the create waited for the deadline, not 3 × 300 ms + a hang.
+    expect(started).toEqual(["crm", "docs", "billing"]);
+    expect(elapsed).toBeGreaterThanOrEqual(750);
+    expect(elapsed).toBeLessThan(1_500);
+    const servers = result.payload["mcpServers"] as Record<string, unknown>[];
+    expect(servers.map((server) => [server["id"], server["allowedTools"]])).toEqual([
+      ["crm", ["lookup", "export"]],
+      ["docs", ["read", "search"]],
+      // Not back in time: the version's own selection.
+      ["billing", ["charge"]],
+    ]);
+  });
+
   test("an unchanged agent becomes an ordinary create with no overrides", async () => {
     const result = await plan("support", { agentOverrides: "reject" });
     expect(result.overrides).toBeNull();

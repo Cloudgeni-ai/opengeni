@@ -9,12 +9,17 @@ import { createHash, randomBytes } from "node:crypto";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import type { ToolRef } from "@opengeni/contracts";
+import { resolveSessionCreateScope } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
+  createSession,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   refreshEndUserToolCredential,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import {
   orgAgentEndUserSubject,
@@ -116,7 +121,7 @@ async function fixture() {
       returning id::text`;
     return row!.id;
   }
-  return { accountId, workspaceId, agentId, servers, storeLogin };
+  return { accountId, workspaceId, agentId, servers, storeLogin, subjectId: `subject-${suffix}` };
 }
 
 const sessionServers = () => [
@@ -363,6 +368,102 @@ describe("organization agent tool server logins", () => {
     expect(bobAgain.result.mcpServers[0]?.headers).toEqual({ "X-Api-Key": "bob-key" });
     const alice = await resolve(orgAgentEndUserSubject(END_USER, END_USER));
     expect(alice.result.mcpServers[0]?.headers).toEqual({ "X-Api-Key": "alice-key" });
+  }, 180_000);
+
+  test("a worker chat's per-user login is its parent's end user's", async () => {
+    const f = await fixture();
+    await f.storeLogin("stored", { kind: "headers", headers: { "X-Api-Key": "alice-key" } }, null);
+    const base = {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "low" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+    };
+    // Alice's chat runs the agent; a turn of it starts a worker chat.
+    const parent = await createSession(client.db, {
+      ...base,
+      scopeSubjectId: END_USER,
+      orgAgent: { agentId: f.agentId, version: 1, promptVersion: 1, overrides: null },
+    });
+    await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.subjectId, (db) =>
+      submitHumanPromptInTransaction(db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: parent.id,
+        subjectId: f.subjectId,
+        actor: { type: "human", subjectId: f.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "work",
+        resources: [],
+        reasoningEffort: "low",
+        reasoningEffortFallback: "low",
+        source: "user",
+      }),
+    );
+    const claimed = await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      agentInstructionsProtocol: 1,
+      orgAgentProtocol: 1,
+    });
+    if (claimed.action !== "claimed") throw new Error(`not claimed: ${claimed.action}`);
+    // The child's scope as session create resolves it: the parent's end user.
+    const childScope = resolveSessionCreateScope({
+      requested: {
+        agentAccess: "workspace",
+        agentAccessProvided: false,
+        scopeSubjectId: null,
+        endUserProvided: false,
+        memoryScope: "workspace",
+        memoryScopeProvided: false,
+      },
+      parent: { agentAccess: "workspace", scopeSubjectId: END_USER, memoryScope: "workspace" },
+    });
+    const child = await createSession(client.db, {
+      ...base,
+      parentSessionId: parent.id,
+      scopeSubjectId: childScope.scopeSubjectId,
+      createdByActor: {
+        type: "agent_attempt",
+        attemptId: claimed.turn.activeAttemptId!,
+        sessionId: parent.id,
+        turnId: claimed.turn.id,
+        executionGeneration: claimed.turn.executionGeneration,
+      },
+    });
+    const [row] = await shared.admin<
+      { scope_subject_id: string | null; agent_id: string | null; agent_version: number | null }[]
+    >`select scope_subject_id, agent_id::text, agent_version from sessions where id = ${child.id}`;
+    expect(row).toEqual({ scope_subject_id: END_USER, agent_id: f.agentId, agent_version: 1 });
+    // A worker turn has no person behind it (or the parent's caller, not an
+    // end user): the login is the chat's end user's, Alice's.
+    for (const initiator of [null, f.subjectId]) {
+      const result = await resolveOrgAgentToolLogins({
+        db: client.db,
+        settings,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        orgAgent: { agentId: f.agentId, version: row!.agent_version! },
+        endUserSubjectId: orgAgentEndUserSubject(row!.scope_subject_id, initiator),
+        mcpServers: [{ id: "stored", name: "STORED", url: url("stored"), cacheToolsList: false }],
+        turnTools: [{ kind: "mcp", id: "stored" }],
+        providerManaged: () => false,
+        publishUnavailable: async () => {
+          throw new Error("unexpected unavailable server");
+        },
+      });
+      expect(result!.mcpServers[0]?.headers).toEqual({ "X-Api-Key": "alice-key" });
+    }
   }, 180_000);
 
   test("OAuth refresh holds a lease, not a row lock, during the token request", async () => {

@@ -304,12 +304,12 @@ describe("session create with an organization agent over HTTP", () => {
     expect([byId.status, byId.body.orgAgent?.id]).toEqual([202, agentId]);
     // An unknown key is refused, never a plain chat.
     const unknown = await call("POST", sessions(), { initialMessage: "hi", agent: "missing" });
-    expect([unknown.status, unknown.body.code]).toEqual([404, "agent_not_found"]);
+    expect([unknown.status, unknown.body.code, unknown.body.details?.code]).toEqual([404, "SESSION_CREATE_REJECTED", "agent_not_found"]);
     // An agent with no published version yet.
     const unpublished = await call("POST", agents(), { key: "unpublished", name: "unpublished" });
     expect(unpublished.status).toBe(201);
     const refused = await call("POST", sessions(), { initialMessage: "hi", agent: "unpublished" });
-    expect([refused.status, refused.body.code]).toEqual([409, "agent_not_published"]);
+    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([409, "SESSION_CREATE_REJECTED", "agent_not_published"]);
   }, 120_000);
 
   test("agent as { ref } with this chat's own instructions and settings", async () => {
@@ -356,7 +356,7 @@ describe("session create with an organization agent over HTTP", () => {
       model: "gpt-5.6-luna",
       agentOverrides: "reject",
     });
-    expect([refused.status, refused.body.code]).toEqual([422, "agent_override_rejected"]);
+    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([422, "SESSION_CREATE_REJECTED", "agent_override_rejected"]);
     const accepted = await call("POST", sessions(), {
       initialMessage: "hi",
       agent: { ref: "strict" },
@@ -407,7 +407,89 @@ describe("session create with an organization agent over HTTP", () => {
       initialMessage: "hi",
       agent: { ref: agentId, version: 2 },
     });
-    expect([outside.status, outside.body.code]).toEqual([404, "agent_not_found"]);
+    expect([outside.status, outside.body.code, outside.body.details?.code]).toEqual([404, "SESSION_CREATE_REJECTED", "agent_not_found"]);
+  }, 120_000);
+
+  test("a keyed retry returns the original chat after a publish or archive", async () => {
+    if (!fixture) return;
+    const { agentId } = await publishedAgent("replayed");
+    const rowVersion = async () =>
+      (await call("GET", `${agents()}/${agentId}`)).body.agent.rowVersion as number;
+    const idempotencyKey = `replay-${crypto.randomUUID()}`;
+    const body = { initialMessage: "hi", agent: "replayed", idempotencyKey };
+    const first = await call("POST", sessions(), body);
+    expect([first.status, first.body.orgAgent?.version]).toEqual([202, 1]);
+
+    // Version 2 is published: the retry still returns the chat on version 1.
+    const draft = await call("PUT", `${agents()}/${agentId}/draft`, {
+      name: "replayed",
+      instructions: "Version two.",
+      expectedVersion: await rowVersion(),
+    });
+    expect(draft.status).toBe(201);
+    const published = await call("POST", `${agents()}/${agentId}/publish`, {
+      version: 2,
+      expectedVersion: await rowVersion(),
+    });
+    expect(published.status).toBe(200);
+    const afterPublish = await call("POST", sessions(), body);
+    expect(afterPublish.status).toBeLessThan(300);
+    expect([afterPublish.body.id, afterPublish.body.orgAgent?.version]).toEqual([first.body.id, 1]);
+    expect((await binding(first.body.id)).agent_version).toBe(1);
+    // A new create gets version 2.
+    const fresh = await call("POST", sessions(), { initialMessage: "hi", agent: "replayed" });
+    expect([fresh.status, fresh.body.orgAgent?.version]).toEqual([202, 2]);
+    // The same key naming another version is a different request.
+    const otherVersion = await call("POST", sessions(), {
+      ...body,
+      agent: { ref: "replayed", version: 2 },
+    });
+    expect(otherVersion.status).toBe(409);
+
+    // Archived: the retry still returns the original chat; a new create is refused.
+    const archived = await call("POST", `${agents()}/${agentId}/archive`, {
+      expectedVersion: await rowVersion(),
+    });
+    expect(archived.status).toBe(200);
+    const afterArchive = await call("POST", sessions(), body);
+    expect(afterArchive.status).toBeLessThan(300);
+    expect(afterArchive.body.id).toBe(first.body.id);
+    const refused = await call("POST", sessions(), { initialMessage: "hi", agent: "replayed" });
+    expect([refused.status, refused.body.details?.code]).toEqual([404, "agent_not_found"]);
+  }, 120_000);
+
+  test("a keyed retry of an inline config create writes nothing again", async () => {
+    if (!fixture) return;
+    const config = {
+      name: "Inline replay",
+      instructions: "Write code.",
+      config: { model: "scripted-model" },
+    };
+    const idempotencyKey = `inline-${crypto.randomUUID()}`;
+    const body = { initialMessage: "hi", agent: { ref: "inline-replay", config }, idempotencyKey };
+    const first = await call("POST", sessions(), body);
+    expect([first.status, first.body.orgAgent?.version]).toEqual([202, 1]);
+    const writes = async () => {
+      const [row] = await shared!.admin<{ versions: number; audit: number }[]>`
+        select
+          (select count(*)::int from agent_revisions r join agents a on a.id = r.agent_id
+            where a.account_id = ${fixture!.accountId} and a.agent_key = 'inline-replay') as versions,
+          (select count(*)::int from organization_console_audit_events
+            where account_id = ${fixture!.accountId} and detail->>'key' = 'inline-replay') as audit`;
+      return row!;
+    };
+    expect(await writes()).toEqual({ versions: 1, audit: 1 });
+    const retry = await call("POST", sessions(), body);
+    expect(retry.status).toBeLessThan(300);
+    expect(retry.body.id).toBe(first.body.id);
+    expect(await writes()).toEqual({ versions: 1, audit: 1 });
+    // The same key with another config is a different request, and saves nothing.
+    const changed = await call("POST", sessions(), {
+      ...body,
+      agent: { ref: "inline-replay", config: { ...config, instructions: "Write tests." } },
+    });
+    expect(changed.status).toBe(409);
+    expect(await writes()).toEqual({ versions: 1, audit: 1 });
   }, 120_000);
 
   test("inline config saves an agent only with organization-level agents:manage", async () => {
@@ -426,8 +508,10 @@ describe("session create with an organization agent over HTTP", () => {
         { initialMessage: "hi", agent: { ref: "inline-coder", config } },
         key,
       );
-      expect([refused.status, refused.body.details?.code ?? refused.body.code]).toEqual([
+      // The session create route's envelope; the specific code is in details.
+      expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([
         403,
+        "SESSION_CREATE_FORBIDDEN",
         "agents_manage_required",
       ]);
     }
@@ -522,7 +606,7 @@ describe("session create with an organization agent over HTTP", () => {
       const refused = await asLimited({
         agent: { ref: "noted", toolServers: [{ server: "notes", ...change }] },
       });
-      expect([refused.status, refused.body.details?.code ?? refused.body.code]).toEqual([
+      expect([refused.status, refused.body.details?.code]).toEqual([
         403,
         "agents_manage_required",
       ]);
@@ -532,7 +616,7 @@ describe("session create with an organization agent over HTTP", () => {
       agent: "noted",
       mcpServers: [{ id: "notes", url: "https://notes.example.com/mcp" }],
     });
-    expect([replaced.status, replaced.body.details?.code ?? replaced.body.code]).toEqual([
+    expect([replaced.status, replaced.body.details?.code]).toEqual([
       403,
       "agents_manage_required",
     ]);

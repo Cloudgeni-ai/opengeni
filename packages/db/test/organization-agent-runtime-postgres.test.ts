@@ -15,6 +15,7 @@ import {
 } from "@opengeni/contracts";
 import {
   applyContextCompaction,
+  applyOrgAgent,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -434,6 +435,56 @@ describe("organization agents at runtime", () => {
     expect((await org.row(child.id)).agent_version).toBeNull();
   }, 180_000);
 
+  test("a moved worker chat gets new Instructions only when the new version shares them", async () => {
+    const org = await organization();
+    const agentId = await org.agent("movable", [
+      { instructions: "One.", config: { workers: { shareInstructions: true } } },
+      { instructions: "Two.", config: { workers: { shareInstructions: false } } },
+      { instructions: "Three.", config: { workers: { shareInstructions: true } } },
+    ]);
+    const parent = await org.chat({ agentId, version: 1, promptVersion: 1 });
+    const parentTurn = await org.claim(parent.id);
+    const child = await org.chat(null, {
+      parentSessionId: parent.id,
+      createdByActor: {
+        type: "agent_attempt",
+        attemptId: parentTurn.activeAttemptId!,
+        sessionId: parent.id,
+        turnId: parentTurn.id,
+        executionGeneration: parentTurn.executionGeneration,
+      },
+    });
+    await org.settle(parent.id, parentTurn);
+    expect((await org.row(child.id)).agent_prompt_version).toBe(1);
+
+    // Moved to a version that does not share: the worker keeps what it has.
+    await shared.admin`update sessions set agent_version = 2 where id = ${child.id}`;
+    const second = await org.claim(child.id);
+    expect(await org.readPrompt(child.id, second)).toMatchObject({
+      revision: 1,
+      orgVersion: 2,
+      workerChat: true,
+    });
+    expect(await org.deliver(child.id, second)).toBeNull();
+    expect(await org.delivered(child.id)).toEqual([]);
+    await org.settle(child.id, second);
+
+    // Moved to a version that shares again: delivered as usual.
+    await shared.admin`update sessions set agent_version = 3 where id = ${child.id}`;
+    const third = await org.claim(child.id);
+    expect(await org.deliver(child.id, third)).toBe(
+      agentInstructionsContextText({ kind: "revision", revision: 3, instructions: "Three." }),
+    );
+    await org.settle(child.id, third);
+
+    // The parent chat itself moves to the non-sharing version as before.
+    await shared.admin`update sessions set agent_version = 2 where id = ${parent.id}`;
+    const parentSecond = await org.claim(parent.id);
+    expect(await org.deliver(parent.id, parentSecond)).toBe(
+      agentInstructionsContextText({ kind: "revision", revision: 2, instructions: "Two." }),
+    );
+  }, 180_000);
+
   test("a moved chat gets the newer Instructions as one history item; compaction folds them", async () => {
     const org = await organization();
     const agentId = await org.agent("support", [
@@ -579,6 +630,40 @@ describe("organization agents at runtime", () => {
     expect(await save({ id: crypto.randomUUID(), configHash: hash("d"), mayWrite: true })).toEqual({
       outcome: "not_found",
     });
+  }, 180_000);
+
+  test("an inline save and a deploy of the same key serialize on the key lock", async () => {
+    const org = await organization();
+    for (const key of ["racer-1", "racer-2", "racer-3", "racer-4"]) {
+      const [inline, applied] = await Promise.all([
+        saveInlineOrgAgentVersion(client.db, {
+          ...org.scope,
+          ref: { key },
+          definition: { name: "Racer", description: "", instructions: "Inline.", config: {} },
+          toolCatalog: {},
+          configHash: hash(`inline-${key}`),
+          subjectId: org.subjectId,
+          mayWrite: true,
+        }),
+        applyOrgAgent(client.db, {
+          accountId: org.scope.accountId,
+          key,
+          actor: { subjectId: "api_key:deploy", label: "Deploy key" },
+          definition: { name: "Racer", instructions: "Deployed." },
+          publish: false,
+          moveRunningChats: false,
+          dryRun: false,
+        }),
+      ]);
+      // Whichever ran first created the agent; the other added a version.
+      expect(["created_agent", "created_version"]).toContain(inline.outcome);
+      expect(["created", "updated"]).toContain(applied.outcome);
+      const versions = await shared.admin<{ revision: number }[]>`
+        select r.revision from agent_revisions r join agents a on a.id = r.agent_id
+        where a.account_id = ${org.scope.accountId}::uuid and a.agent_key = ${key}
+        order by r.revision`;
+      expect(versions.map((row) => row.revision)).toEqual([1, 2]);
+    }
   }, 180_000);
 
   test("end-user login refresh runs under a lease and records failures", async () => {

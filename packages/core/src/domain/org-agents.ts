@@ -31,6 +31,7 @@ import {
   decryptEnvironmentValue,
   listOrgToolServersByKey,
   readEndUserToolCredential,
+  readOrgAgentBindingForCreateKey,
   readOrgAgentForSessionCreate,
   readOrgAgentVersion,
   saveInlineOrgAgentVersion,
@@ -206,6 +207,14 @@ async function prepare(
     workspaceId,
     ref,
   });
+  // A keyed retry of a create that already made its chat binds the version
+  // that chat runs, before any check or inline save: the agent may have been
+  // republished or archived since, and the existing create replay must see
+  // the same body to return the original chat.
+  const replayed = await replayedOrgAgentBinding(deps, grant, workspaceId, raw, request, agent);
+  if (replayed && agent) {
+    return await bind(deps, grant, workspaceId, raw, request, agent, replayed, authority);
+  }
   const inTestWorkspace = reach.managedSource === "console_test";
   if (agent && (agent.archived || !(reach.managedSource !== null || reach.access)))
     throw notFound();
@@ -311,6 +320,48 @@ async function prepare(
   return await bind(deps, grant, workspaceId, raw, request, agent, loaded, authority);
 }
 
+/**
+ * The version an earlier create with this request's idempotency key bound,
+ * or null when there is no key, no such chat, or it runs no organization
+ * agent. A retry naming another agent, another `version` or another inline
+ * config is a different request: 409, as for any reused key.
+ */
+async function replayedOrgAgentBinding(
+  deps: OrgAgentSessionCreateDeps,
+  grant: OrgAgentCreateGrant,
+  workspaceId: string,
+  raw: Record<string, unknown>,
+  request: OrgAgentSessionRequest,
+  agent: { id: string } | null,
+): Promise<OrgAgentRuntimeVersion | null> {
+  const key = raw["idempotencyKey"];
+  if (typeof key !== "string" || key.length === 0) return null;
+  const existing = await readOrgAgentBindingForCreateKey(deps.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    createIdempotencyKey: key,
+    subjectId: grant.subjectId ?? null,
+  });
+  if (!existing) return null;
+  const conflict = () =>
+    new HTTPException(409, {
+      message: "Session create idempotency key was reused with a different request",
+    });
+  if (!agent || agent.id !== existing.agentId) throw conflict();
+  if (request.version !== undefined && request.version !== existing.version) throw conflict();
+  const version = await readOrgAgentVersion(deps.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    agentId: existing.agentId,
+    version: existing.version,
+  });
+  if (!version) throw conflict();
+  if (request.config && version.configHash !== orgAgentConfigHash(request.config)) {
+    throw conflict();
+  }
+  return version;
+}
+
 async function bind(
   deps: OrgAgentSessionCreateDeps,
   grant: OrgAgentCreateGrant,
@@ -398,6 +449,11 @@ export async function planOrgAgentSessionCreate(input: {
    * `agents:manage` only).
    */
   mayWiden?: boolean;
+  /**
+   * One deadline for every live tool list of the create, fetched in parallel;
+   * a list not back in time counts as unavailable (default 5 seconds).
+   */
+  liveToolsDeadlineMs?: number;
 }): Promise<{
   payload: Record<string, unknown>;
   overrides: OrgAgentSessionOverrides | null;
@@ -413,8 +469,14 @@ export async function planOrgAgentSessionCreate(input: {
     (request.toolServers ?? []).map((override) => [override.server, override]),
   );
 
-  // Tool servers: the version's, with this chat's changes.
-  const materialized: MaterializedOrgToolServer[] = [];
+  // Tool servers: the version's, with this chat's changes. Live tool lists
+  // are fetched in parallel under one deadline after this loop.
+  const planned: {
+    server: { key: string; name: string; url: string } & Partial<OrgToolServerRuntime>;
+    serverConfig: OrgAgentVersionConfig["toolServers"][number];
+    effective: NonNullable<ReturnType<typeof effectiveOrgToolServerConfig>>;
+    live: Promise<string[] | null> | null;
+  }[] = [];
   const loginHeaders = new Map<string, Record<string, string>>();
   for (const serverConfig of config.toolServers) {
     const server = input.toolServers.get(serverConfig.server);
@@ -442,20 +504,25 @@ export async function planOrgAgentSessionCreate(input: {
       (effective.config.tools.mode === "selected" && effective.config.newTools !== "off") ||
       (effective.config.tools.mode === "all" &&
         (effective.disableTools.length > 0 || effective.config.newTools === "on_with_approval"));
-    const liveNames =
+    const live =
       needsLive && input.liveTools
-        ? await input.liveTools(server as OrgToolServerRuntime, headers).catch(() => null)
+        ? input.liveTools(server as OrgToolServerRuntime, headers).catch(() => null)
         : null;
-    materialized.push(
-      materializeOrgToolServer({
-        server,
-        effective,
-        catalogNames: orgAgentCatalogToolNames(input.toolCatalog, serverConfig.server),
-        liveNames,
-      }),
-    );
+    planned.push({ server, serverConfig, effective, live });
     if (headers && Object.keys(headers).length > 0) loginHeaders.set(serverConfig.server, headers);
   }
+  const liveLists = await withinDeadline(
+    planned.map((entry) => entry.live),
+    input.liveToolsDeadlineMs ?? LIVE_TOOLS_DEADLINE_MS,
+  );
+  const materialized: MaterializedOrgToolServer[] = planned.map((entry, index) =>
+    materializeOrgToolServer({
+      server: entry.server,
+      effective: entry.effective,
+      catalogNames: orgAgentCatalogToolNames(input.toolCatalog, entry.serverConfig.server),
+      liveNames: liveLists[index] ?? null,
+    }),
+  );
 
   // The request's own MCP servers: a new id adds one, an agent server's id replaces it.
   const requestServers = Array.isArray(raw["mcpServers"])
@@ -536,6 +603,40 @@ export async function planOrgAgentSessionCreate(input: {
 }
 
 /* ------------------------------------------------------- live tool lists */
+
+/** One deadline for all of a create's live tool lists, which run in parallel. */
+const LIVE_TOOLS_DEADLINE_MS = 5_000;
+
+/**
+ * Settle every pending list together; a list still running at the deadline
+ * (or failed) is null, which materializes the version's catalog as saved.
+ */
+async function withinDeadline(
+  pending: readonly (Promise<string[] | null> | null)[],
+  deadlineMs: number,
+): Promise<(string[] | null)[]> {
+  if (pending.every((entry) => entry === null)) return pending.map(() => null);
+  const results: (string[] | null)[] = pending.map(() => null);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, deadlineMs);
+  });
+  try {
+    await Promise.race([
+      Promise.all(
+        pending.map(async (entry, index) => {
+          if (!entry) return;
+          const names = await entry.catch(() => null);
+          results[index] = names;
+        }),
+      ),
+      deadline,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  return [...results];
+}
 
 const LIVE_TOOLS_TTL_MS = 60_000;
 const LIVE_TOOLS_TIMEOUT_MS = 5_000;

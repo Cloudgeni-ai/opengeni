@@ -7286,8 +7286,16 @@ async function defaultAgentChatVisibility(
 
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof OrgAgentSessionCreateError) {
-    // An organization agent the create named: `code` is one of ORG_AGENT_ERROR_CODES.
-    return c.json({ code: error.code, message: error.message }, error.httpStatus);
+    // An organization agent the create named, in this route's envelope:
+    // `details.code` is one of ORG_AGENT_ERROR_CODES.
+    return c.json(
+      {
+        code: error.httpStatus === 403 ? "SESSION_CREATE_FORBIDDEN" : "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { code: error.code },
+      },
+      error.httpStatus,
+    );
   }
   if (error instanceof SessionUsageLimitHttpError) {
     // a create-time usage limit the caller may not set (agents and

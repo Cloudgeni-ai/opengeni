@@ -13,7 +13,13 @@
  */
 import { sql } from "drizzle-orm";
 import { insertConsoleAuditEvent } from "./console";
-import { rawRows, withRlsContext, withoutSessionRlsActor, type Database } from "./database";
+import {
+  rawRows,
+  withRlsContext,
+  withWorkspaceSubjectSessionActivityRls,
+  withoutSessionRlsActor,
+  type Database,
+} from "./database";
 
 /** The transaction setting that makes organization agents visible (migration 1502). */
 export const ORG_AGENTS_VISIBILITY_SETTING = "opengeni.org_agents_v1";
@@ -178,6 +184,11 @@ async function agentByRef(
       ${lock ? sql`for update` : sql``}`,
   );
   return row ? mapAgent(row) : null;
+}
+
+/** The transaction advisory lock the management layer takes for the same key. */
+async function lockOrgAgentKey(tx: Database, key: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
 }
 
 async function workspaceReach(
@@ -352,10 +363,21 @@ export async function saveInlineOrgAgentVersion(
   },
 ): Promise<InlineOrgAgentVersionResult> {
   return await withOrgAgentScope(db, input, async (tx) => {
+    // Same lock order as apply (`org-agent-key`, then `org-agents` for a new
+    // agent), so an inline save and a deploy or Console create of the same key
+    // serialize instead of racing into the unique indexes.
+    let agentKey: string | null = "key" in input.ref ? input.ref.key : null;
+    if (agentKey === null) {
+      const byId = await agentByRef(tx, input.accountId, input.ref);
+      if (!byId) return { outcome: "not_found" as const };
+      agentKey = byId.key;
+    }
+    await lockOrgAgentKey(tx, `org-agent-key:${input.accountId}:${agentKey}`);
     let agent = await agentByRef(tx, input.accountId, input.ref, true);
     if (!agent) {
       if (!("key" in input.ref)) return { outcome: "not_found" as const };
       if (!input.mayWrite) return { outcome: "forbidden" as const };
+      await lockOrgAgentKey(tx, `org-agents:${input.accountId}`);
       const inserted = await rawRows<{ id: string }>(
         tx,
         sql`insert into agents (account_id, workspace_id, scope, visibility, name, name_key,
@@ -473,6 +495,42 @@ export type SessionOrgAgentState = {
   promptVersion: number | null;
   overrides: Record<string, { agent: unknown; chat: unknown }> | null;
 };
+
+/**
+ * The organization agent binding of the chat an earlier create made with this
+ * idempotency key, as the caller sees it; null when there is none or it runs
+ * no organization agent. A retry binds the same agent version instead of
+ * resolving the agent again (it may have been republished or archived since).
+ */
+export async function readOrgAgentBindingForCreateKey(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    createIdempotencyKey: string;
+    /** The subject the replay reads as; null reads workspace-shared chats only. */
+    subjectId: string | null;
+  },
+): Promise<{ sessionId: string; agentId: string; version: number } | null> {
+  const read = (tx: Database) =>
+    rawRows<{ id: string; agent_id: string | null; agent_version: number | null }>(
+      tx,
+      sql`select s.id::text as id, s.agent_id::text as agent_id, s.agent_version
+        from sessions s
+        where s.workspace_id = ${input.workspaceId}::uuid
+          and s.create_idempotency_key = ${input.createIdempotencyKey}
+        limit 1`,
+    );
+  const [row] = await withoutSessionRlsActor(() =>
+    input.subjectId?.trim()
+      ? withWorkspaceSubjectSessionActivityRls(db, input.workspaceId, input.subjectId, (tx) =>
+          read(tx as unknown as Database),
+        )
+      : withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, read),
+  );
+  if (!row?.agent_id || row.agent_version === null || row.agent_version === undefined) return null;
+  return { sessionId: row.id, agentId: row.agent_id, version: Number(row.agent_version) };
+}
 
 /** The organization agent version a chat runs, or null for every other chat. */
 export async function readSessionOrgAgentState(

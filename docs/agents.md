@@ -650,8 +650,9 @@ the other fields change settings for this chat only:
   selection, `disableTools` turns tools off, `approval` replaces "Ask first",
   `eager`, and `headers`, the chat's own login (see Logins);
 - `mcpServers` and `tools` add servers as today;
-- `version`: run a version other than the published one (drafts only in the
-  organization's Console test workspace);
+- `version`: run a specific version; outside the organization's Console test
+  workspace only the published version runs (any version, drafts included,
+  in the test workspace);
 - `config`: an inline code-agent definition; each distinct config becomes a
   version of a code-managed agent.
 
@@ -671,6 +672,11 @@ What a chat changed is stored per session (`sessions.agent_overrides`,
 shown in Console as "Changed by this chat" with a diff. `agentOverrides:
 "reject"` makes a create that would change anything fail with 422
 `agent_override_rejected`.
+
+Refusals use the session create envelope: `code` is
+`SESSION_CREATE_FORBIDDEN` (403) or `SESSION_CREATE_REJECTED` (404, 409,
+422), and `details.code` names the reason, for example `agent_not_found`,
+`agent_not_published`, `agents_manage_required` or `agent_override_rejected`.
 
 The session proxy (`@opengeni/sdk/session-proxy`) drops an organization agent
 (`agent` as a string or with `ref`) and `agentOverrides` sent by the browser;
