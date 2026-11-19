@@ -16720,7 +16720,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.archived\\\"\",\"\\\"agent.created\\\"\",\"\\\"agent.deployed\\\"\",\"\\\"agent.management_changed\\\"\",\"\\\"agent.published\\\"\",\"\\\"agent.updated\\\"\",\"\\\"agent.version_saved\\\"\",\"\\\"member.console_role_changed\\\"\",\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"tool_credential.deleted\\\"\",\"\\\"tool_credential.written\\\"\",\"\\\"tool_server.created\\\"\",\"\\\"tool_server.deleted\\\"\",\"\\\"tool_server.updated\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
+        "$": "enum=[\"\\\"agent.archived\\\"\",\"\\\"agent.created\\\"\",\"\\\"agent.deployed\\\"\",\"\\\"agent.management_changed\\\"\",\"\\\"agent.published\\\"\",\"\\\"agent.sessions_viewed\\\"\",\"\\\"agent.updated\\\"\",\"\\\"agent.version_saved\\\"\",\"\\\"member.console_role_changed\\\"\",\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"tool_credential.deleted\\\"\",\"\\\"tool_credential.written\\\"\",\"\\\"tool_server.created\\\"\",\"\\\"tool_server.deleted\\\"\",\"\\\"tool_server.updated\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
       }
     },
     "ConsoleAuditEvent": {
@@ -16729,7 +16729,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.action": "ref(ConsoleAuditAction)!",
+        "$.action": "ref(ConsoleAuditEventAction)!",
         "$.actorLabel": "string! null",
         "$.actorSubjectId": "string!",
         "$.createdAt": "string!",
@@ -16739,6 +16739,16 @@
         "$.sessionId": "string! null",
         "$.workspaceId": "string! null",
         "$.workspaceName": "string! null"
+      }
+    },
+    "ConsoleAuditEventAction": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "ref(ConsoleAuditAction)",
+        "$|1": "string"
       }
     },
     "ConsoleAuditEventListResponse": {
@@ -16781,6 +16791,16 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\",\"\\\"console_test\\\"\"]"
+      }
+    },
+    "ConsoleManagedSourceValue": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "ref(ConsoleManagedSource)",
+        "$|1": "string"
       }
     },
     "ConsoleMemberRole": {
@@ -16958,7 +16978,7 @@
         "$.id": "string!",
         "$.kind": "ref(ConsoleWorkspaceKind)!",
         "$.lastActivityAt": "string! null",
-        "$.managedSource": "ref(ConsoleManagedSource)! null",
+        "$.managedSource": "ref(ConsoleManagedSourceValue)! null",
         "$.name": "string!",
         "$.sessions": "integer!",
         "$.spendMicros": "integer!"
@@ -25039,7 +25059,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.allowManagedWorkspaces": "boolean!",
+        "$.allowManagedWorkspaces": "boolean?",
         "$.allowPersonalWorkspaces": "boolean!",
         "$.allowedWorkspaceIds": "array! null",
         "$.allowedWorkspaceIds[]": "string",
