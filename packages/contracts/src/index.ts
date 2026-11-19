@@ -5034,11 +5034,22 @@ export function userSetupCardShownMessage(
   );
 }
 
-/** What the agent reads when the setup card could not be posted for it. */
-export function userSetupCardUnpostedMessage(blocker: UserSetupBlocker): string {
+/**
+ * What the agent reads when the setup card could not be posted for it.
+ * `cardTool` says whether the agent has capability_authorization_request:
+ * the message names that tool only when it may exist (undefined: unknown).
+ */
+export function userSetupCardUnpostedMessage(
+  blocker: UserSetupBlocker,
+  cardTool?: boolean,
+): string {
+  const card =
+    cardTool === false
+      ? ""
+      : `post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId})${cardTool ? "" : " if that tool is available"}, and `;
   return (
-    `${blocker.problem} The person can fix this. Offer the fix in this reply: post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId}) if that tool is available, ` +
-    `and tell them the exact next step: ${blocker.nextStep}. ` +
+    `${blocker.problem} The person can fix this. Offer the fix in this reply: ${card}` +
+    `tell them the exact next step: ${blocker.nextStep}. ` +
     "Do not only report that it is unavailable."
   );
 }
@@ -19529,6 +19540,11 @@ export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
 // The single manifest blob (one per revision). Holds everything the workbench
 // needs for a cold paint: the tree index, per-repo status+diff, and the file
 // index (after-image refs). The M2 API serves this inline when small (≤2MB).
+// A capture never publishes a manifest larger than
+// WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES: diff hunks are shed (the entry is kept
+// with `truncated: true`) until it fits, so every reader can afford to parse
+// one. The API never parses a larger (legacy) manifest.
+export const WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
 export const WorkspaceCaptureManifest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     version: z.literal(1),
@@ -24422,6 +24438,7 @@ export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
+export * from "./workspace-filesystem-context";
 export * from "./agent-instructions-context";
 export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";

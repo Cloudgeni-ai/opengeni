@@ -236,6 +236,8 @@ export function installModalCommandStartRetention(session: object): void {
     "materializeEntry",
     "hydrateWorkspace",
     "persistWorkspace",
+    "hydrateWorkspaceTarStream",
+    "persistWorkspaceTarStream",
     "runDirectCommand",
     "runAsCommandRunner",
   ]) {

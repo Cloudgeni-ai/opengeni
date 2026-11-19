@@ -13,9 +13,10 @@
 #      (PLAYWRIGHT_DEB_DIR), with no network. The cache holds the debs for
 #      every browser, so any job that fills it serves every other job.
 #   3. Only then use the network: download into the cache and install, with
-#      apt retries and backoff. Archive mirrors whose host does not resolve
-#      are dropped first, and a fallback mirror outside ubuntu.com takes the
-#      lead, so apt never spends its budget on dead DNS names.
+#      apt retries and backoff. Archive mirrors whose host does not resolve,
+#      or resolves but does not answer HTTP, are dropped first, and a fallback
+#      mirror outside ubuntu.com takes the lead, so apt never spends its budget
+#      on dead DNS names or hosts that accept no connections.
 #   4. If that also fails, continue when every shared library the browsers
 #      link resolves (only fonts or tools are missing), and fail otherwise.
 #
@@ -69,6 +70,14 @@ resolves() {
   timeout 5 getent ahosts "$1" >/dev/null 2>&1
 }
 
+# The mirror resolves and answers HTTP at all (any status). A host that
+# resolves but accepts no connections would otherwise cost apt its timeout on
+# every retry of every file before the mirror method moves on.
+answers() {
+  resolves "$(mirror_host "$1")" &&
+    curl --silent --output /dev/null --head --connect-timeout 5 --max-time 8 "$1" >/dev/null 2>&1
+}
+
 mirror_host() {
   sed -E 's#^[a-z+]+://([^/:]+).*#\1#' <<<"$1"
 }
@@ -89,22 +98,22 @@ prepare_mirrors() {
     case "${line}" in "" | "#"*) continue ;; esac
     uri="${line%%[[:space:]]*}"
     case " ${FALLBACK_MIRRORS} " in *" ${uri} "*) continue ;; esac
-    if resolves "$(mirror_host "${uri}")"; then
+    if answers "${uri}"; then
       live+=("${line}")
     else
-      echo "::warning::apt mirror $(mirror_host "${uri}") does not resolve; skipping it."
+      echo "::warning::apt mirror $(mirror_host "${uri}") does not resolve or answer; skipping it."
       dropped=$((dropped + 1))
     fi
   done <"${APT_MIRRORS}"
   for uri in ${FALLBACK_MIRRORS}; do
-    if resolves "$(mirror_host "${uri}")"; then
+    if answers "${uri}"; then
       fallbacks+=("${uri}")
     else
-      echo "::warning::Fallback apt mirror $(mirror_host "${uri}") does not resolve; skipping it."
+      echo "::warning::Fallback apt mirror $(mirror_host "${uri}") does not resolve or answer; skipping it."
     fi
   done
   if [ "${#live[@]}" -eq 0 ] && [ "${#fallbacks[@]}" -eq 0 ]; then
-    echo "::warning::No apt mirror resolves; keeping the runner's mirror list."
+    echo "::warning::No apt mirror resolves and answers; keeping the runner's mirror list."
     return 0
   fi
   local priority=10
@@ -140,6 +149,60 @@ deb_file() {
   compgen -G "${DEB_DIR}/${1}_*.deb" | head -n 1
 }
 
+# Fetches the debs apt would download in parallel, each from the first mirror
+# that serves it at a usable speed. One archive mirror can trickle a single
+# file for minutes while answering others at once; apt fetches one file at a
+# time from one mirror, so a few trickling files exhaust the whole budget.
+# Here a transfer slower than PREFETCH_SPEED_LIMIT bytes/s for
+# PREFETCH_SPEED_TIME seconds moves on to the next mirror, and many files
+# download at once. Best effort: apt still fetches whatever this leaves, and
+# verifies every deb it uses against the signed package lists.
+prefetch_debs() {
+  local deadline=$1 remaining uris uri mirrors=()
+  shift
+  [ "${PLAYWRIGHT_PARALLEL_PREFETCH:-true}" = "true" ] || return 0
+  remaining=$((deadline - SECONDS))
+  [ "${remaining}" -gt 30 ] || return 0
+  if [ -f "${APT_MIRRORS}" ]; then
+    mapfile -t mirrors < <(awk '!/^#/ && NF { print $1 }' "${APT_MIRRORS}")
+  fi
+  for uri in ${FALLBACK_MIRRORS}; do
+    case " ${mirrors[*]} " in *" ${uri} "*) ;; *) mirrors+=("${uri}") ;; esac
+  done
+  [ "${#mirrors[@]}" -gt 0 ] || return 0
+  uris="$(sudo apt-get install -y -qq --no-install-recommends --download-only --print-uris \
+    -o Dir::Cache::archives="${DEB_DIR}" "$@" 2>/dev/null | grep "^'")" || return 0
+  [ -n "${uris}" ] || return 0
+  echo "Prefetching $(wc -l <<<"${uris}") browser system packages in parallel."
+  local fetch_dir
+  fetch_dir="$(mktemp -d)"
+  # Each line: 'URI' file size SHA256:hash. Mirror-list URIs name the list
+  # file, so the pool path is joined onto each mirror in turn.
+  PREFETCH_MIRRORS="${mirrors[*]}" PREFETCH_DIR="${fetch_dir}" \
+    timeout --kill-after="${KILL_AFTER_SECONDS}s" "$((remaining - 20))s" \
+    xargs -P 16 -L 1 bash -c '
+      uri="$0" file="$1" algo="${3%%:*}" hash="${3#*:}"
+      case "${algo}" in
+        SHA512) sum=sha512sum ;; SHA256) sum=sha256sum ;; SHA1) sum=sha1sum ;; MD5Sum) sum=md5sum ;;
+        *) exit 0 ;;
+      esac
+      path="${uri#*/pool/}"
+      [ "${path}" != "${uri}" ] || exit 0
+      for mirror in ${PREFETCH_MIRRORS}; do
+        if curl --fail --silent --location --connect-timeout 5 \
+          --speed-limit "${PREFETCH_SPEED_LIMIT:-100000}" --speed-time "${PREFETCH_SPEED_TIME:-8}" \
+          --max-time 180 --output "${PREFETCH_DIR}/${file}" "${mirror%/}/pool/${path}" &&
+          [ "$("${sum}" "${PREFETCH_DIR}/${file}" | cut -d " " -f 1)" = "${hash}" ]; then
+          exit 0
+        fi
+        rm -f "${PREFETCH_DIR}/${file}"
+      done
+      exit 0
+    ' <<<"${uris}" || true
+  sudo cp -n "${fetch_dir}"/*.deb "${DEB_DIR}/" 2>/dev/null || true
+  rm -rf "${fetch_dir}"
+}
+
 # Fills the deb cache with every browser's packages, using the network only
 # for what it lacks. Succeeds when the cache holds them all, at the versions
 # and hashes the package lists name.
@@ -165,6 +228,7 @@ fill_deb_cache() {
     # runner image's lists soon name debs that 404. A partly failed refresh
     # still leaves usable lists, so it never stops the download.
     timeout --kill-after="${KILL_AFTER_SECONDS}s" "${remaining}s" sudo apt-get update || true
+    prefetch_debs "${deadline}" ${all}
     remaining=$((deadline - SECONDS))
     status=124
     if [ "${remaining}" -ge 1 ]; then
@@ -200,29 +264,30 @@ finish_deb_cache() {
 
 # Installs the given packages from the deb cache with no network.
 install_from_deb_cache() {
-  local files=() package file
+  local package
   for package in "$@"; do
-    file="$(deb_file "${package}")"
-    if [ -z "${file}" ]; then
+    if [ -z "$(deb_file "${package}")" ]; then
       echo "The deb cache has no ${package}."
       return 1
     fi
-    files+=("${file}")
   done
   mkdir -p "${DEB_DIR}/partial"
   echo "::group::Install $# browser system packages from the deb cache"
   # apt resolves against the image's package lists and uses the cached debs
-  # when their versions match; dpkg installs the cached debs when the lists
-  # moved on. Only missing packages are installed, so nothing is downgraded.
+  # when their versions match. When they don't (the cache was filled after a
+  # list refresh, or on another runner image), the lists are refreshed and apt
+  # tries once more. Never `dpkg -i` the cached debs directly: a deb set built
+  # against other lists can pair a library with a sibling at another version
+  # (for example two mesa packages one point release apart), which leaves
+  # dpkg broken and every later apt run failing on unmet dependencies.
   local status=0
   sudo apt-get install -y --no-install-recommends --no-download \
     -o Dir::Cache::archives="${DEB_DIR}" "$@" || status=$?
   if [ "${status}" -ne 0 ]; then
+    timeout --kill-after="${KILL_AFTER_SECONDS}s" 120s sudo apt-get update || true
     status=0
-    sudo dpkg -i --refuse-downgrade "${files[@]}" || status=$?
-    if [ "${status}" -ne 0 ]; then
-      sudo dpkg --configure -a >/dev/null 2>&1 || true
-    fi
+    sudo apt-get install -y --no-install-recommends --no-download \
+      -o Dir::Cache::archives="${DEB_DIR}" "$@" || status=$?
   fi
   echo "::endgroup::"
   finish_deb_cache

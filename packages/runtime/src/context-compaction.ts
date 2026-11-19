@@ -37,10 +37,12 @@ import {
   latestAgentInstructionsContext,
   latestRepositorySkillsContext,
   latestSkillCatalogContext,
+  latestWorkspaceFilesystemContext,
   latestWorkspaceGovernanceContext,
   readAgentInstructionsContext,
   readRepositorySkillsContext,
   readSkillCatalogContext,
+  readWorkspaceFilesystemContext,
   readWorkspaceGovernanceContext,
   resourceMountPath,
 } from "@opengeni/contracts";
@@ -2291,6 +2293,7 @@ function rebuildAroundCheckpoint(
   const currentCatalog = latestSkillCatalogContext(items);
   const currentRepositorySkills = latestRepositorySkillsContext(items);
   const currentGovernance = latestWorkspaceGovernanceContext(items);
+  const currentFilesystem = latestWorkspaceFilesystemContext(items);
   const carriedAgentInstructions = carriedAgentInstructionsContext(items, turns);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
   const attachmentCatalog = buildAttachmentCatalogItem(
@@ -2302,6 +2305,7 @@ function rebuildAroundCheckpoint(
     currentCatalog,
     currentRepositorySkills,
     currentGovernance,
+    currentFilesystem,
     carriedAgentInstructions,
     attachmentCatalog,
   ].filter((item): item is CompactionItem => Boolean(item));
@@ -2406,7 +2410,8 @@ function isTurnOperationalNotice(item: CompactionItem): boolean {
 }
 
 /**
- * Skill catalog, repository Skill index and workspace governance snapshots
+ * Skill catalog, repository Skill index, workspace governance and workspace
+ * filesystem snapshots
  * are re-added as the latest copy only; agent instruction edits are folded
  * into the system prompt.
  */
@@ -2415,6 +2420,7 @@ function isSessionContextSnapshot(item: CompactionItem): boolean {
     readSkillCatalogContext(item) !== null ||
     readRepositorySkillsContext(item) !== null ||
     readWorkspaceGovernanceContext(item) !== null ||
+    readWorkspaceFilesystemContext(item) !== null ||
     readAgentInstructionsContext(item) !== null
   );
 }

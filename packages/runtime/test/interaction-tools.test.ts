@@ -3434,6 +3434,8 @@ describe("interaction attempt tools", () => {
         bridges?: Array<{ enrollmentId: string; sandboxId: string | null; machineName: string }>;
         activeSandboxId?: string | null;
         sessions?: BrowserSession[];
+        /** The agent also has the Connect card tool. */
+        cardTool?: boolean;
       } = {},
     ) => {
       let createRequest: Record<string, unknown> | null = null;
@@ -3471,7 +3473,9 @@ describe("interaction attempt tools", () => {
         },
         workspaceId,
         sessionId,
-        selectedTools: ["browser_open"],
+        selectedTools: machines.cardTool
+          ? ["browser_open", "capability_authorization_request"]
+          : ["browser_open"],
         permissions: ["sessions:control"],
         ...(postSetupCard ? { postSetupCard } : {}),
       });
@@ -3615,16 +3619,18 @@ describe("interaction attempt tools", () => {
     });
 
     test("explains how to connect Chrome when no profile is connected", async () => {
-      const { result, createRequest } = await open([
-        profile("Old", "2026-10-15T11:00:00.000Z", { state: "disconnected" }),
-      ]);
+      const { result, createRequest } = await open(
+        [profile("Old", "2026-10-15T11:00:00.000Z", { state: "disconnected" })],
+        undefined,
+        { cardTool: true },
+      );
       expect(createRequest).toBeNull();
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
       expect(JSON.stringify(result.structuredContent)).toContain("attached_browser_unavailable");
       // Without a card poster, the model is told to post the card itself.
       expect(JSON.stringify(result.structuredContent)).toContain(
-        "capability_authorization_request (capabilityId api:connected-machine)",
+        "capability_authorization_request (capabilityId api:connected-machine), and tell them",
       );
     });
 
@@ -3656,16 +3662,21 @@ describe("interaction attempt tools", () => {
           throw new Error("turn replaced");
         },
       ]) {
-        const { result } = await open([], poster);
-        expect(result.isError).toBe(true);
-        const text = JSON.stringify(result.structuredContent);
-        expect(text).toContain("attached_browser_unavailable");
-        expect(text).not.toContain("now posted in this chat");
-        expect(text).toContain("Offer the fix in this reply");
-        expect(text).toContain(
-          "capability_authorization_request (capabilityId api:connected-machine)",
-        );
-        expect(text).toContain("chromewebstore.google.com");
+        for (const cardTool of [true, false]) {
+          const { result } = await open([], poster, { cardTool });
+          expect(result.isError).toBe(true);
+          const text = JSON.stringify(result.structuredContent);
+          expect(text).toContain("attached_browser_unavailable");
+          expect(text).not.toContain("now posted in this chat");
+          expect(text).toContain("Offer the fix in this reply");
+          // The card tool is named only to an agent that has it.
+          if (cardTool)
+            expect(text).toContain(
+              "capability_authorization_request (capabilityId api:connected-machine)",
+            );
+          else expect(text).not.toContain("capability_authorization_request");
+          expect(text).toContain("chromewebstore.google.com");
+        }
       }
     });
 

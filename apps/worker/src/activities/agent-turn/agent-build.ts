@@ -9,6 +9,7 @@ import {
   ensureSessionRepositorySkills,
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
+  ensureSessionWorkspaceFilesystem,
   type SessionAgentPrompt,
   SUBSCRIPTION_CORE_XAI,
   turnWorkspaceSettingsAccess,
@@ -28,6 +29,7 @@ import {
   type RepositorySkillsIndex,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
+  workspaceFilesystemLayout,
 } from "@opengeni/runtime";
 import { claimPendingBackgroundCommandResults } from "@opengeni/db/session-background-commands";
 import {
@@ -734,6 +736,25 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedExecutionGeneration: turn.executionGeneration,
     expectedAttemptId: input.attemptId,
     governance: workspaceGovernance ?? null,
+  });
+  // The active workspace's layout names its machine's root. It reaches the
+  // model the same way, so moving the session to another machine adds an item
+  // before the next turn instead of rewriting the system prompt (which
+  // invalidated the whole cached history). A move within a turn is reported by
+  // its own tool result; the turn keeps its snapshot.
+  await ensureSessionWorkspaceFilesystem(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    expectedExecutionGeneration: turn.executionGeneration,
+    expectedAttemptId: input.attemptId,
+    layout: workspaceFilesystemLayout(eventing.modelRunSettings, runtimeResources, {
+      ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
+      ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
+        ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
+        : {}),
+    }),
   });
   // An agent edit made since this chat's system prompt was built reaches the
   // model the same way, so the cached prompt stays intact until compaction

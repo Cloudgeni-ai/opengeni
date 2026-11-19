@@ -19,6 +19,11 @@ import {
   hasResponsesTurn,
   type ResponsesTransportDiagnostic,
 } from "@opengeni/network/responses-websocket";
+import {
+  REPLAY_STATUS_ITEM_TYPES,
+  preservesReplayStatus,
+  replayedResponsesItem,
+} from "@opengeni/network/responses-replay";
 
 const URL = "https://chatgpt.example/backend-api/codex/responses";
 
@@ -470,6 +475,33 @@ test("persistent socket resources do not inherit the opening request context", a
   expect(openingContext).toBeUndefined();
   socket.emit({ type: "response.completed", response: { id: "first" } });
   await (await pending).text();
+  socket.close();
+});
+
+test("the turn's routing token comes back as a header but never splits or reaches the connection", async () => {
+  const { transport, sockets, httpCalls } = harness();
+  transport.warm(URL, request().headers);
+  const first = transport(URL, request());
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({ type: "codex.response.metadata", headers: { "x-codex-turn-state": "turn-a" } });
+  socket.emit({ type: "response.completed", response: { id: "r1", output: [] } });
+  const response = await first;
+  expect(response.headers.get("x-codex-turn-state")).toBe("turn-a");
+  await response.text();
+  const later = request();
+  const second = transport(
+    URL,
+    request(undefined, { headers: { ...later.headers, "x-codex-turn-state": "turn-a" } }),
+  );
+  for (let i = 0; i < 50 && socket.sent.length < 2; i++) await Bun.sleep(1);
+  socket.emit({ type: "response.completed", response: { id: "r2", output: [] } });
+  const reused = await second;
+  expect(reused.headers.get(CODEX_TRANSPORT_HEADER)).toStartWith("websocket; connection=reused");
+  await reused.text();
+  expect(sockets).toHaveLength(1);
+  expect(socket.headers["x-codex-turn-state"]).toBeUndefined();
+  expect(socket.sent.every((message) => !("x-codex-turn-state" in message))).toBe(true);
+  expect(httpCalls).toEqual([]);
   socket.close();
 });
 
@@ -1026,6 +1058,183 @@ describe("continuing the previous response on a connection", () => {
       "websocket; connection=reused; input=incremental",
     );
     await continued.text();
+  });
+
+  // Every hosted or tool item type a response can stream, as the backend
+  // streams it (with its provider id), and one real change to what replay
+  // keeps. Each must continue the chain when replayed unchanged and send the
+  // full input when the change is replayed instead.
+  const streamedItems: Array<{ item: Record<string, unknown>; change: Record<string, unknown> }> = [
+    {
+      item: {
+        id: "ws_1",
+        type: "web_search_call",
+        status: "completed",
+        action: { type: "search", query: "radon rules", queries: ["radon rules"] },
+      },
+      change: { action: { type: "open_page", url: "https://example.com" } },
+    },
+    {
+      item: {
+        id: "fs_1",
+        type: "file_search_call",
+        status: "completed",
+        queries: ["radon"],
+        results: null,
+      },
+      change: { queries: ["radon limits"] },
+    },
+    {
+      item: {
+        id: "ci_1",
+        type: "code_interpreter_call",
+        status: "completed",
+        code: "print(1)",
+        container_id: "cntr_1",
+        outputs: null,
+      },
+      change: { code: "print(2)" },
+    },
+    {
+      item: { id: "ig_1", type: "image_generation_call", status: "completed", result: "aW1n" },
+      change: { result: "b3RoZXI=" },
+    },
+    {
+      item: {
+        id: "cu_1",
+        type: "computer_call",
+        status: "completed",
+        call_id: "call_cu",
+        action: { type: "screenshot" },
+        pending_safety_checks: [],
+      },
+      change: { action: { type: "click", x: 1, y: 2, button: "left" } },
+    },
+    {
+      item: {
+        id: "lsh_1",
+        type: "local_shell_call",
+        status: "completed",
+        call_id: "call_sh",
+        action: { type: "exec", command: ["ls"], env: {} },
+      },
+      change: { action: { type: "exec", command: ["pwd"], env: {} } },
+    },
+    {
+      item: {
+        id: "apc_1",
+        type: "apply_patch_call",
+        status: "completed",
+        call_id: "call_patch",
+        operation: { type: "update_file", path: "a.txt", diff: "@@\n-a\n+b" },
+      },
+      change: { operation: { type: "delete_file", path: "a.txt" } },
+    },
+    {
+      item: {
+        id: "mcp_1",
+        type: "mcp_call",
+        status: "completed",
+        server_label: "docs",
+        name: "lookup",
+        arguments: "{}",
+        output: "ok",
+      },
+      change: { output: "different" },
+    },
+    {
+      item: { id: "mcpl_1", type: "mcp_list_tools", server_label: "docs", tools: [] },
+      change: { tools: [{ name: "lookup", input_schema: { type: "object" } }] },
+    },
+    {
+      item: {
+        id: "tsc_1",
+        type: "tool_search_call",
+        status: "completed",
+        call_id: "call_search",
+        execution: "client",
+        arguments: { query: "calendar" },
+      },
+      change: { arguments: { query: "mail" } },
+    },
+    {
+      item: {
+        id: "ctc_1",
+        type: "custom_tool_call",
+        status: "completed",
+        call_id: "call_custom",
+        name: "grammar",
+        input: "x",
+      },
+      change: { input: "y" },
+    },
+    { item: call, change: { arguments: '{"zone":"UTC"}' } },
+  ];
+  const normalized = (input: unknown[]) =>
+    normalizeCodexRequestBody(structuredClone({ ...base, input }), (slug) => slug);
+  const next = { type: "message", role: "user", content: "next" };
+
+  async function replayAfter(item: Record<string, unknown>, replayed: Record<string, unknown>) {
+    const { transport, sockets } = harness();
+    const first = transport(URL, request(normalized([user])));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: reasoning });
+    socket.emit({ type: "response.output_item.done", output_index: 1, item });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+    const { pending, sent } = await sendNext(
+      transport,
+      socket,
+      normalized([user, sentBack[0], replayed, next]),
+    );
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    const response = await pending;
+    await response.text();
+    return { sent, transport: response.headers.get(CODEX_TRANSPORT_HEADER) };
+  }
+
+  for (const { item, change } of streamedItems) {
+    test(`a replayed ${item.type} continues the response`, async () => {
+      // The SDK sends the item back as stored; replay strips what it strips.
+      const { sent, transport } = await replayAfter(item, item);
+      expect(sent.previous_response_id).toBe("resp_1");
+      expect(sent.input).toEqual([next]);
+      expect(transport).toBe("websocket; connection=reused; input=incremental");
+    });
+
+    test(`a replayed ${item.type} with a real change sends the full input`, async () => {
+      const { sent } = await replayAfter(item, { ...item, ...change });
+      expect(sent).not.toHaveProperty("previous_response_id");
+    });
+
+    if (preservesReplayStatus(item.type)) {
+      test(`a replayed ${item.type} with a different required status sends the full input`, async () => {
+        const { sent } = await replayAfter(item, { ...item, status: "incomplete" });
+        expect(sent).not.toHaveProperty("previous_response_id");
+      });
+    }
+  }
+
+  test("the continuation check mirrors everything the Codex normalizer strips", () => {
+    // Every item type the normalizer may see, including one it has never seen.
+    const items = [
+      ...streamedItems.map(({ item }) => item),
+      ...REPLAY_STATUS_ITEM_TYPES.map((type) => ({ id: "x_1", type, status: "completed" })),
+      reasoning,
+      preamble,
+      { id: "fco_1", type: "function_call_output", status: "completed", call_id: "c", output: "" },
+      { id: "fut_1", type: "future_hosted_call", status: "completed", payload: { a: 1 } },
+      { id: "tsc_2", type: "tool_search_call", status: "completed", arguments: '{"query":"q"}' },
+    ];
+    for (const item of items) {
+      // The normalizer changes each item exactly as the shared replay
+      // normalization does, and nothing more, byte for byte.
+      const [replayed] = normalized([item]).input as unknown[];
+      expect(JSON.stringify(replayed)).toBe(JSON.stringify(replayedResponsesItem(item)));
+      // The shared normalization is idempotent, so normalizing the replay
+      // again (as the continuation check does) never changes it further.
+      expect(replayedResponsesItem(replayed)).toEqual(replayed);
+    }
   });
 
   test("a replayed tool search with different arguments sends the full input", async () => {

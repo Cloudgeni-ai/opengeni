@@ -1814,6 +1814,78 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     }
   }, 60_000);
 
+  test("an agent with the card tool but no catalog search connects the person's computer by its fixed ID", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    // Workspace connectors without workspace administration: the card tool
+    // without capability_catalog_search or the fleet tools.
+    const attempt = await seedAttempt(false, ["capability_authorization_request"]);
+    const server = buildOpenGeniMcpServer(
+      {
+        settings: testSettings({ sandboxSelfhostedEnabled: true }),
+        db: client.db,
+        bus: new MemoryEventBus(),
+      } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: { ...attempt, firstPartyMcpTools: ["capability_authorization_request"] },
+      },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "card-without-catalog-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    try {
+      const { tools } = await mcp.listTools();
+      expect(tools.map((tool) => tool.name)).toEqual(["capability_authorization_request"]);
+      const description = tools[0]!.description!;
+      // Its description names no tool the agent lacks.
+      expect(description).not.toContain("capability_catalog_search");
+      expect(description).toStartWith(
+        "Show a Connect card in this chat for something the person must connect for the task, by the capability ID a tool result or notice names, or one named below. ",
+      );
+      expect(description).toContain("api:connected-machine");
+
+      const request = await mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId: "api:connected-machine", rationale: "Read files on your Mac." },
+      });
+      expect(request.isError).not.toBe(true);
+      // Another test in this workspace may have enrolled a machine already.
+      expect(["authorization_requested", "ready"]).toContain(
+        (mcpJson(request) as { status: string }).status,
+      );
+
+      await finalizeEnrollmentByToken(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        pubkey: `ed25519:${crypto.randomUUID()}`,
+        hasDisplay: true,
+        allowScreenControl: false,
+        os: "macos",
+        arch: "arm64",
+        sandboxName: "Desk Mac",
+      });
+      const ready = await mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId: "api:connected-machine", rationale: "Use your Mac." },
+      });
+      expect(ready.isError).not.toBe(true);
+      expect(mcpJson(ready)).toMatchObject({ status: "ready" });
+      // The ready result names sandboxes_list only for an agent that has it.
+      expect(JSON.stringify(mcpJson(ready))).not.toContain("sandboxes_list");
+      const events = (
+        await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+      ).filter((event) => event.type === "tool.auth_needed");
+      expect(events).toHaveLength(2);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+
   test("a registry entry for a built-in integration gives way to it; a built-in the organization turned off gets no card", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const gmailUrl = "https://gmailmcp.googleapis.com/mcp/v1";
@@ -2534,6 +2606,12 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         arguments: { capabilityId, rationale: "Read the ops inbox." },
       });
       expect(unnamed.isError).toBe(true);
+      // The error lists the accounts to choose from, so an agent without the
+      // catalog search can still name one.
+      const unnamedText = JSON.stringify(unnamed.content);
+      expect(unnamedText).toContain(`connectionId ${first.id}`);
+      expect(unnamedText).toContain(`connectionId ${second.id}`);
+      expect(unnamedText).not.toContain("capability_catalog_search");
       const unknown = await two.mcp.callTool({
         name: "capability_authorization_request",
         arguments: {
@@ -2543,6 +2621,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       });
       expect(unknown.isError).toBe(true);
+      expect(JSON.stringify(unknown.content)).toContain(`connectionId ${second.id}`);
       expect(await two.cards()).toHaveLength(0);
       const named = await two.mcp.callTool({
         name: "capability_authorization_request",

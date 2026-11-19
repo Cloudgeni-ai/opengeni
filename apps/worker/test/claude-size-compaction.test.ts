@@ -357,3 +357,83 @@ test("a withheld request that lacks durable items falls back to durable history"
   expect(JSON.stringify(inputs[0])).not.toContain("inspect_more");
   expect(JSON.stringify(inputs[0])).toContain("Inspect the next image");
 }, 60_000);
+
+// The byte estimate can be a fifth or more off at the compaction threshold.
+// The provider accepted the withheld history a moment ago, so the checkpoint
+// sends it as is and only the provider decides that it no longer fits.
+test("the withheld request is sent even when the byte estimate exceeds the budget", async () => {
+  const { scope, items } = await fixture();
+  const withheld = [...items.slice(0, 4), disclosure, ...items.slice(4)];
+  const inputs: unknown[] = [];
+  const summarize: CompactionSummarizer = async (_settings, input) => {
+    inputs.push(input);
+    return "Inspected the evidence; continue with the next image.";
+  };
+  summarize.measureInputBytes = async (_settings, input) =>
+    Buffer.byteLength(JSON.stringify(input));
+  summarize.withheldWireHistory = () => withheld;
+  // About 3k estimated tokens against a budget under 2k.
+  const result = await maybeCompactContext(
+    client.db,
+    testSettings({ contextWindowTokens: 2_500 }),
+    scope,
+    null,
+    summarize,
+    { force: true, trigger: "operator" },
+  );
+  expect(result.compacted).toBe(true);
+  expect(inputs).toEqual([buildCompactionPromptInput(withheld)]);
+}, 60_000);
+
+test("a Responses checkpoint sends the withheld request with its encrypted reasoning", async () => {
+  const { scope, items } = await fixture();
+  const reasoning = {
+    type: "reasoning",
+    content: [],
+    providerData: { encrypted_content: "opaque-reasoning-fixture" },
+  };
+  const withheld = [...items.slice(0, 3), reasoning, disclosure, ...items.slice(3)];
+  const inputs: unknown[] = [];
+  // A Responses summarizer has no byte sizer; the provider decides the fit.
+  const summarize: CompactionSummarizer = async (_settings, input) => {
+    inputs.push(input);
+    return "Inspected the evidence; continue with the next image.";
+  };
+  summarize.withheldWireHistory = () => withheld;
+  const result = await maybeCompactContext(client.db, testSettings(), scope, null, summarize, {
+    force: true,
+    trigger: "operator",
+  });
+  expect(result.compacted).toBe(true);
+  expect(inputs).toEqual([buildCompactionPromptInput(withheld)]);
+  expect(JSON.stringify(inputs[0])).toContain("opaque-reasoning-fixture");
+}, 60_000);
+
+test("a withheld request the provider refuses as too large falls back to durable history", async () => {
+  const { scope, items } = await fixture();
+  const withheld = [...items.slice(0, 4), disclosure, ...items.slice(4)];
+  const inputs: unknown[] = [];
+  const summarize: CompactionSummarizer = async (_settings, input) => {
+    inputs.push(input);
+    if (inputs.length === 1)
+      throw Object.assign(new Error("Claude context window exceeded"), {
+        code: "context_length_exceeded",
+      });
+    return "Inspected the evidence; continue with the next image.";
+  };
+  summarize.measureInputBytes = async (_settings, input) =>
+    Buffer.byteLength(JSON.stringify(input));
+  summarize.withheldWireHistory = () => withheld;
+  const result = await maybeCompactContext(client.db, testSettings(), scope, null, summarize, {
+    force: true,
+    trigger: "operator",
+  });
+  expect(result.compacted).toBe(true);
+  expect(inputs).toHaveLength(2);
+  expect(inputs[0]).toEqual(buildCompactionPromptInput(withheld));
+  expect(JSON.stringify(inputs[1])).not.toContain("inspect_more");
+  expect(JSON.stringify(inputs[1])).toContain("Inspect the next image");
+  expect(
+    result.events.find((event) => event.type === "session.context.compacted")?.payload,
+  ).toMatchObject({ compactionInputProviderCalls: 2 });
+}, 60_000);
