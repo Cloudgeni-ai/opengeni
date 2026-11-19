@@ -15,6 +15,9 @@
 {{- $providerTtftRecentMinSamples := int (default 30 ((.Values.observability).prometheusRule).providerTtftRecentMinSamples) }}
 {{- $providerTtftBaselineMinSamples := int (default 200 ((.Values.observability).prometheusRule).providerTtftBaselineMinSamples) }}
 {{- $sessionEventMinSamples := int (default 100 ((.Values.observability).prometheusRule).sessionEventMinSamples) }}
+{{- $apiEventLoopBlockedSeconds := float64 (default 5 ((.Values.observability).prometheusRule).apiEventLoopBlockedSeconds) }}
+{{- $apiEventLoopBlockedMinBlocks := int (default 2 ((.Values.observability).prometheusRule).apiEventLoopBlockedMinBlocks) }}
+{{- $scrapeInterval := ((.Values.observability).serviceMonitor).interval | default "30s" }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
 {{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
@@ -30,6 +33,9 @@
 {{- end }}
 {{- if le $sessionEventMinSamples 0 }}
 {{- fail "observability.prometheusRule.sessionEventMinSamples must be positive" }}
+{{- end }}
+{{- if or (le $apiEventLoopBlockedSeconds 0.0) (le $apiEventLoopBlockedMinBlocks 0) }}
+{{- fail "observability.prometheusRule.apiEventLoopBlockedSeconds and apiEventLoopBlockedMinBlocks must be positive" }}
 {{- end }}
 {{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must cover at least three sandbox reaper periods" }}
@@ -709,6 +715,27 @@ spec:
             user_impact: 'Opening workspaces and session lists feels slow in the app.'
             next_step: 'Check database CPU and slow queries before adding API pods.'
             description: Workspace or session reads have stayed slow (p95 over 2 seconds in every 5-minute window for 10 minutes) and degrade the interactive control plane. A few-second burst, such as one page load during a slow query or pod start, does not page. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
+        # Requests that hang on a blocked event loop are often cut off by a
+        # liveness restart before they complete, so the latency histogram above
+        # never records them. The event-loop delay gauge reports the worst
+        # block since the previous scrape, so count blocked scrapes per pod.
+        - alert: OpenGeniApiEventLoopBlocked
+          expr: |
+            max by (pod) (
+              count_over_time(
+                (max by (pod) (opengeni_nodejs_eventloop_lag_max_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}) > {{ $apiEventLoopBlockedSeconds }})[10m:{{ $scrapeInterval }}]
+              )
+            ) >= {{ $apiEventLoopBlockedMinBlocks }}
+          labels:
+            severity: warning
+          annotations:
+            summary: 'API pod {{ "{{ $labels.pod }}" }} froze for more than {{ $apiEventLoopBlockedSeconds }} seconds at least {{ $apiEventLoopBlockedMinBlocks }} times in 10 minutes.'
+            headline: 'API freezing'
+            value: '{{ "{{ printf `%.0f` $value }}" }} freezes over {{ $apiEventLoopBlockedSeconds }}s (10 min)'
+            user_impact: 'Every request on that pod waits while it is frozen; pages and chats hang for seconds, and the pod may fail its health checks and restart.'
+            next_step: 'Find what blocks the API on that pod (a large response, parse or synchronous work) from its logs and traces around the freezes; check whether it began with a deploy.'
+            description: opengeni_nodejs_eventloop_lag_max_seconds is the longest event-loop delay since the previous scrape. Repeated multi-second blocks stall every in-flight request on the pod and its liveness probe, and requests killed by the resulting restart never reach opengeni_http_request_duration_seconds, so the latency alerts stay quiet. Correlate the freeze times with API logs, traces and request routes.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # Product-level failure safety net: a route whose refusals (401/403/409/422)
         # jump against its own one-day baseline, or that refuses most of its
         # traffic. Use the classified rejection counter so an ended attempt's
@@ -1507,6 +1534,32 @@ spec:
             headline: '{{ "{{ $labels.job }}" }}: service down'
             user_impact: 'If this is the API or web service, users may be unable to use the app; if it is a worker, agent turns may stall.'
             next_step: 'Check the {{ "{{ $labels.job }}" }} pods (crash, OOM, failed deploy) and their health endpoint; roll back if it followed a deploy.'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        # A liveness kill or crash restarts the container in place, so the pod
+        # keeps its Service endpoint and OpenGeniServiceDown never fires. Turn
+        # workers have their own restart alerts above; Job pods report through
+        # KubeJobFailed.
+        - alert: OpenGeniServiceRestarted
+          expr: |
+            max by (pod, container) (
+              increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }}}[10m])
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (
+                kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component!="",label_app_kubernetes_io_component!="worker-turns"}
+              )
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (kube_pod_owner{namespace={{ .Release.Namespace | quote }},owner_kind!="Job"})
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Container {{ "{{ $labels.container }}" }} in {{ "{{ $labels.pod }}" }} restarted in the last 10 minutes.'
+            headline: '{{ "{{ $labels.container }}" }} restarted'
+            value: '{{ "{{ printf `%.0f` $value }}" }} restart(s) in 10 min'
+            user_impact: 'Requests on that pod failed or hung until it came back; if it is the API, users saw stalled pages or chats.'
+            next_step: 'Check the container''s last termination reason (liveness probe failure, OOMKilled, crash) and its logs just before the restart.'
+            description: The container restarted in place, which a liveness probe failure, an out-of-memory kill or a crash causes. A liveness restart usually follows a blocked event loop or a hung dependency, so check OpenGeniApiEventLoopBlocked and the pod's previous logs. Deploy rollouts replace pods instead of restarting them and do not trigger this.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # ── Worker memory headroom ───────────────────────────────────────────
         - alert: OpenGeniTurnWorkerMemoryHeadroomLow
