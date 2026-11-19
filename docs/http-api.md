@@ -48,6 +48,23 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `GET|POST /v1/organizations/:id/personal-api-keys` and
   `DELETE /v1/organizations/:id/personal-api-keys/:apiKeyId` (keys that act as
   the person who created them; see [`credentials.md`](credentials.md))
+- `/v1/organizations/:id/agents/*` for Console agents (organization agents),
+  for organization keys holding `agents:read` / `agents:manage` and the
+  organization's owners and admins: agents and their versions (`GET|POST`,
+  `GET|PATCH /:agentId`, `PUT /:agentId/draft`, `GET /:agentId/versions[/:version]`,
+  `POST /:agentId/publish`, `GET /:agentId/publish-operations`,
+  `GET /:agentId/movable-chats`, `POST /:agentId/archive`, owner-only
+  `POST /:agentId/management`), code deploys (`GET /by-key/:key`,
+  `PUT /by-key/:key/apply`), tool servers (`/tool-servers[/:key[/tools]]`),
+  chats and usage per agent (`GET /:agentId/sessions|usage`, also
+  `sessions:read`), the Console test workspace (`POST /test-workspace`) and
+  test chats (`POST /:agentId/test-chats`). See
+  [`agents.md` § Console agents](agents.md#console-agents)
+- `PUT|GET|DELETE /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`
+  (an end user's stored login for an organization tool server; `PUT`/`DELETE`
+  need `tool_credentials:write`, `GET` returns metadata only and needs
+  `agents:read`) and `GET /v1/workspaces/:workspaceId/organization-agents`
+  (published organization agents chats in the workspace can name)
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`

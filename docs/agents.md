@@ -698,3 +698,42 @@ previous release. The feature is per organization and off by default:
 `OPENGENI_ORG_AGENTS_ACCOUNT_IDS` lists the accounts that have it. The
 Console test chat runs in a per-organization test workspace
 (`organization_managed_workspaces.source = 'console_test'`).
+
+### How Console agents are stored
+
+Console agents (organization agents) are agents an organization defines once
+and uses across its workspaces, edited in Console or deployed from code. They
+are on per organization (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`, see
+[deployment](deployment.md)); routes are listed in [`http-api.md`](http-api.md).
+
+- Data (migration 1502): an `agents` row with `scope = 'organization'`, no
+  home workspace, an `agent_key` unique in the organization,
+  `published_revision` and `managed_by` (`console` or `code`). Each version is
+  one immutable `agent_revisions` row with `config`, `tool_catalog`, `source`
+  and `config_hash` (`sha256:` of `canonicalOrgAgentDefinitionJson`); saving or
+  deploying a definition whose hash matches any version reuses that version.
+  Publishes and rollbacks are rows in `agent_publish_operations` (a version's
+  "published at" comes from them). `agent_workspace_access` lists workspaces
+  besides the organization's managed ones where the agent is available.
+- Visibility: a restrictive policy hides organization rows unless the
+  transaction sets `opengeni.org_agents_v1`. Only
+  `packages/db/src/organization-agents.ts` (and the turn worker's reads) set it,
+  so Slack placement, Teams routing and the app's agent lists never see them.
+  This is not authorization: every route checks permissions first.
+- Who: organization keys with `agents:read`, `agents:manage` and
+  `tool_credentials:write` (full organization keys hold them through
+  `workspace:admin`; explicit keys get `agents:read` from a `:read` preset), and
+  the organization's owners and admins. Other members have no access, as in
+  Console. Only an owner (never a key) switches an agent between Console and
+  code management; afterwards Console edits of a code agent answer 409
+  `agent_managed_by_code` and deploys to a Console agent 409
+  `agent_managed_in_console`.
+- Tool servers (`organization_tool_servers`) are referenced by key in versions.
+  A shared key and an OAuth client secret are stored encrypted and never
+  returned. End users' logins (`end_user_tool_credentials`) are stored per
+  managed workspace and end user (`external_user:<id>`), encrypted, write-only.
+- Every write records a Console audit row (`agent.*`, `tool_server.*`,
+  `tool_credential.*`).
+- Drafts run only in the organization's Console test workspace
+  (`organization_managed_workspaces.source = 'console_test'`), created by
+  `POST .../agents/test-workspace`.

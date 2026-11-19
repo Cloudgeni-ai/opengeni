@@ -167,6 +167,9 @@ export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
 export * from "./domain/agents";
+export * from "./domain/org-agent-config";
+export * from "./domain/org-agents";
+export * from "./domain/org-agent-moves";
 export * from "./domain/agent-memory";
 export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
@@ -248,6 +251,7 @@ export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
 export { retainKnowledgeMessage } from "./domain/knowledge-messages";
 
 export * from "./domain/connector-tool-permissions";
+export * from "./domain/org-tool-servers";
 export * from "./domain/connector-tool-choice-accounts";
 export * from "./session-usage-limits";
 export * from "./session-usage-limit-metrics";

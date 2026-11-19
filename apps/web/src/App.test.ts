@@ -1128,7 +1128,7 @@ describe("api key permission options", () => {
       "Goals",
       "Sandbox Environments",
       "Artifacts",
-      "Agents",
+      "Console agents",
       "Admin & account",
     ]);
   });
