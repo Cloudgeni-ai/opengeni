@@ -912,7 +912,7 @@ const SITE_DATA_NOW_MAX_OFFSET_MS = 100 * 366 * 86_400_000;
 
 /**
  * Server-evaluated time in a filter value: `$now`, or `$now` plus or minus a
- * whole number of ms, s, m, h or d (`$now-5m`), at most a century. Returns the
+ * whole number of ms, s, m, h or d (`$now-5m`), clamped to a century. Returns the
  * offset in milliseconds, or null when the value is not a `$now` expression.
  */
 export function siteDataNowOffsetMs(value: unknown): number | null {
@@ -921,9 +921,8 @@ export function siteDataNowOffsetMs(value: unknown): number | null {
   if (!match) return null;
   if (!match[1]) return 0;
   const unit = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[3]!]!;
-  const amount = Number(match[2]) * unit;
-  // Beyond a century is not a lease; refusing it keeps timestamps in range.
-  if (amount > SITE_DATA_NOW_MAX_OFFSET_MS) return null;
+  // Beyond a century is not a lease; clamping keeps timestamps in range.
+  const amount = Math.min(Number(match[2]) * unit, SITE_DATA_NOW_MAX_OFFSET_MS);
   return match[1] === "-" ? -amount : amount;
 }
 

@@ -112,9 +112,10 @@ read again through their ordinary authorized calls. Admission refreshes
 longer than it, so connections reconnect before it lapses. A reconnect that
 missed changes, or a connection admitted just before a change, hears
 "anything may have changed". The published Site's page opens its connection
-with its first data call and lets it go while hidden. Hints still show when
+when its code first calls `onChange`, lets it go after 30 seconds hidden, and
+stops after five refused connections. Hints still show when
 others write (activity timing, never content); readable collections are fixed
-per connection until it reconnects. Without the `SITE_LIVE` gateway binding the live routes answer 404
+per connection until it reconnects. Without `OPENGENI_SITES_LIVE_ENABLED` and the `SITE_LIVE` gateway binding the live routes answer 404
 and pages keep their timed checks.
 
 Not covered: Site SQL writes (the Durable Object commit is not atomic with

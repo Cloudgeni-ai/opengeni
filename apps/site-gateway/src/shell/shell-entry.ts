@@ -361,16 +361,15 @@ function createLive(notify: (change: OpenGeniSiteDataChange) => void): { start()
       if (socket === current) socket = null;
       if (!wanted || !visible()) return;
       if (!admitted) failures += 1;
+      // Live hints are off in this deployment: stop asking until a reload.
+      if (failures >= 5) {
+        wanted = false;
+        return;
+      }
       // A planned refresh comes back at once; a dropped connection (a
       // gateway deploy drops them all) spreads its return over 30 seconds; a
-      // refused or missing live route backs off up to 10 minutes.
-      later(
-        planned
-          ? 1_000
-          : admitted
-            ? 1_000 + Math.random() * 29_000
-            : Math.min(600_000, 5_000 * 2 ** Math.min(failures, 7)),
-      );
+      // refused or missing live route backs off.
+      later(planned ? 1_000 : admitted ? 1_000 + Math.random() * 29_000 : 5_000 * 2 ** failures);
     });
   };
   document.addEventListener("visibilitychange", () => {
