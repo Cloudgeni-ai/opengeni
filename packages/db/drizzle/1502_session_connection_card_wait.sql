@@ -13,13 +13,15 @@
 -- * sessions.awaiting_connection_since: when the oldest of them was posted
 --   (kept while any stays open); null when none is open.
 -- * An AFTER INSERT trigger on session_events maintains both: a posted
---   notice adds its key, a withdrawn one removes it, and a `user.message`
---   clears them, since the person's new message supersedes the card. A failure
+--   notice adds its key, a withdrawn one removes it, and `turn.started`
+--   clears them: once the agent works again (the person wrote, the card's
+--   setup continued it, or anything else woke it) it no longer waits, and a
+--   card it still needs is posted again by that turn. A failure
 --   is a warning and never aborts the event's transaction. Imported
 --   read-only chats are left alone.
--- * The inbox trigger also takes `user.message`: the message closes the
---   chat's open connection-card notices (status withdrawn). Its function is
---   1289's plus that branch; same signature, so grants are kept.
+-- * The inbox trigger also takes `turn.started`, which closes the chat's
+--   open connection-card notices (status withdrawn). Its function is 1289's
+--   plus that branch; same signature, so grants are kept.
 -- * A new session never starts waiting: a BEFORE INSERT trigger clears the
 --   columns a fork copies from its source row.
 -- * Changing the timestamp notifies session lists, like other list fields.
@@ -45,7 +47,7 @@ DECLARE
   v_key text;
 BEGIN
   BEGIN
-    IF NEW.type = 'user.message' THEN
+    IF NEW.type = 'turn.started' THEN
       UPDATE sessions SET awaiting_connection_since = NULL, awaiting_connection_keys = NULL
       WHERE workspace_id = NEW.workspace_id AND id = NEW.session_id
         AND (awaiting_connection_keys IS NOT NULL OR awaiting_connection_since IS NOT NULL);
@@ -84,7 +86,7 @@ $track$;
 
 CREATE TRIGGER session_events_connection_wait_v1 AFTER INSERT ON session_events
   FOR EACH ROW
-  WHEN (NEW.duplicate_of_event_id IS NULL AND (NEW.type = 'user.message'
+  WHEN (NEW.duplicate_of_event_id IS NULL AND (NEW.type = 'turn.started'
     OR (NEW.type IN ('session.notification.posted', 'session.notification.withdrawn')
       AND starts_with(NEW.payload ->> 'key', 'connection-card:'))))
   EXECUTE FUNCTION opengeni_private.track_session_connection_wait_v1();
@@ -109,7 +111,7 @@ CREATE TRIGGER sessions_list_connection_wait_update_v1 AFTER UPDATE OF awaiting_
   WHEN (OLD.awaiting_connection_since IS DISTINCT FROM NEW.awaiting_connection_since)
   EXECUTE FUNCTION notify_session_list_change();
 
--- 1289's inbox projection plus the `user.message` branch.
+-- 1289's inbox projection plus the `turn.started` branch.
 CREATE OR REPLACE FUNCTION opengeni_private.project_inbox_for_session_event_v1() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path FROM CURRENT
@@ -133,8 +135,9 @@ DECLARE
   v_server_question jsonb;
 BEGIN
   BEGIN
-    IF NEW.type = 'user.message' THEN
-      -- The person's new message supersedes the chat's connection cards.
+    IF NEW.type = 'turn.started' THEN
+      -- The agent works again: it no longer waits on the chat's connection
+      -- cards, and one it still needs is posted again by this turn.
       UPDATE opengeni_private.inbox_items item
       SET status = 'withdrawn', resolved_at = now(), updated_at = now()
       WHERE item.session_id = NEW.session_id AND item.kind = 'notification'
@@ -418,7 +421,7 @@ CREATE TRIGGER session_events_inbox_projection_v1 AFTER INSERT ON session_events
     'user.approvalDecision', 'turn.completed', 'turn.failed', 'turn.cancelled',
     'turn.superseded', 'goal.paused', 'goal.resumed', 'goal.cleared', 'goal.completed',
     'goal.set', 'session.notification.posted', 'session.notification.withdrawn')
-    OR NEW.type = 'user.message'))
+    OR NEW.type = 'turn.started'))
   EXECUTE FUNCTION opengeni_private.project_inbox_for_session_event_v1();
 
 DO $pin$

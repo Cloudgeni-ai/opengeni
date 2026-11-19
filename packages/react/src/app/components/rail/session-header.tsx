@@ -235,6 +235,7 @@ export function SessionHeader({
   const displayStatus = sessionDisplayStatus({
     status,
     admissionBlock: session.admissionBlock,
+    awaitingConnectionSince: session.awaitingConnectionSince,
     archived: session.archived,
     retention: session.retention,
   });

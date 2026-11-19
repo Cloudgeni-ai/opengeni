@@ -11,7 +11,7 @@ import {
 
 // A connection card the agent waits on needs the person, as an approval does
 // (migration 1502): its `connection-card:` notice marks the idle chat as
-// needing them until the card is withdrawn or the person sends a new message.
+// needing them until the card is withdrawn or the agent starts working again.
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -130,12 +130,20 @@ test("a connection card notice marks the idle chat as needing the person until i
   );
   expect(await needsYou()).toEqual({ ids: [], count: 0, since: null });
 
-  // The person's new message supersedes the card, in the chat and the inbox.
+  // Once the agent works again (the person wrote, or the card's setup woke
+  // it) it no longer waits, in the chat and the inbox; a card it still needs
+  // is posted again by that turn. A message alone (a steer while the turn
+  // runs) leaves the card waiting.
   await post(cardA);
   expect(await inboxStatus(cardA)).toBe("open");
   expect((await state()).keys).toEqual([cardA]);
   await appendSessionEvents(client.db, workspaceId, session.id, [
     { type: "user.message", payload: { text: "Never mind, skip the mail." } },
+  ]);
+  expect((await state()).keys).toEqual([cardA]);
+  expect(await inboxStatus(cardA)).toBe("open");
+  await appendSessionEvents(client.db, workspaceId, session.id, [
+    { type: "turn.started", payload: {} },
   ]);
   expect(await state()).toEqual({ since: null, keys: null });
   expect(await inboxStatus(cardA)).toBe("withdrawn");
