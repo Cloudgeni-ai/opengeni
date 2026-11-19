@@ -281,6 +281,8 @@ export const ConsoleAuditAction = /* @__PURE__ */ defineSchema(() =>
     "tool_credential.written",
     "tool_credential.deleted",
     "member.console_role_changed",
+    "member.console_test_access_granted",
+    "member.console_test_access_removed",
   ]),
 );
 export type ConsoleAuditAction = z.infer<typeof ConsoleAuditAction>;

@@ -5,7 +5,7 @@ import {
   CONSOLE_ACCESS_CLEANUP_FAILED,
   consoleAccessCovers,
   requireConsoleAccessForContext,
-  resetConsoleRoleAfterMembershipChange,
+  revokeConsoleTestAccessAfterMembershipChange,
   resolveConsoleAccess,
   revokeConsoleTestWorkspaceAccess,
 } from "../src/routes/console-roles";
@@ -129,11 +129,10 @@ describe("Opengeni Console authority", () => {
       }),
     ).rejects.toMatchObject(expected);
     await expect(
-      resetConsoleRoleAfterMembershipChange(deps, {
+      revokeConsoleTestAccessAfterMembershipChange(deps, {
         organizationId,
         subjectId: "user:someone",
         actorSubjectId: "user:admin",
-        actorLabel: null,
         reason: "organization_role_changed",
         organizationRole: "member",
       }),

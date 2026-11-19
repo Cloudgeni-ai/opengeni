@@ -108,7 +108,7 @@ import {
   getOrgAgent,
   getOrgAgentVersion,
   getOrgToolServer,
-  grantWorkspaceAccess,
+  grantConsoleTestWorkspaceAccess,
   listOrgAgentChatWorkspaces,
   listOrgAgentCompute,
   listOrgAgentPublishOperations,
@@ -377,17 +377,17 @@ async function ensureTestWorkspace(deps: ApiRouteDeps, caller: Caller) {
         }),
     });
     // People who test agents start and read chats in it, nothing more
-    // (CONSOLE_TEST_WORKSPACE_PERMISSIONS: no workspace:admin, so never
-    // agents:manage); an older, broader membership is narrowed. Keys reach it
+    // (CONSOLE_TEST_WORKSPACE_PERMISSIONS: no workspace:admin, members, keys,
+    // secrets or connections, so never agents:manage); a broader membership
+    // is narrowed, and a new or changed one is audit-logged. Keys reach it
     // through their organization authority.
     if (!caller.apiKey) {
-      await grantWorkspaceAccess(deps.db, {
+      await grantConsoleTestWorkspaceAccess(deps.db, {
         accountId: caller.organizationId,
         workspaceId: result.workspaceId,
         subjectId: caller.context.subjectId,
-        role: "member",
-        permissions: [...CONSOLE_TEST_WORKSPACE_PERMISSIONS],
-        ...(caller.context.subjectLabel ? { subjectLabel: caller.context.subjectLabel } : {}),
+        subjectLabel: caller.context.subjectLabel ?? null,
+        permissions: CONSOLE_TEST_WORKSPACE_PERMISSIONS,
       });
     }
     return result;

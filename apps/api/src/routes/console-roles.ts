@@ -48,14 +48,17 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  clearConsoleMemberRole,
   ConsoleRoleTargetNotFoundError,
   findOrgAgentTestWorkspace,
   getConsoleMemberRole,
+  getOrganizationInvitationForAdministration,
   listConsoleMemberRoles,
   listOrganizationAdministrationMembers,
+  recordConsoleTestWorkspaceAccessRemoved,
   removeWorkspaceMember,
+  nestedPostgresSqlState,
   setConsoleMemberRole,
+  type Database,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -195,23 +198,36 @@ function cleanupFailed(message: string): ApiHttpError {
  * Editors (and owners and admins) run test chats in the organization's
  * Console test workspace as its members. When a person's Console access drops
  * below Editor, that membership goes, whatever role was stored, so a Console
- * role never leaves app workspace access behind. Removing a membership that
- * is already gone succeeds. A failure is a retryable 503
- * (`console_access_cleanup_failed`): repeating the same request removes it.
+ * role never leaves app workspace access behind. The removal and its audit
+ * row (`member.console_test_access_removed`) are one transaction; removing a
+ * membership that is already gone succeeds and writes nothing. A failure is a
+ * retryable 503 (`console_access_cleanup_failed`): repeating the same request
+ * removes it.
  */
 export async function revokeConsoleTestWorkspaceAccess(
   deps: ApiRouteDeps,
-  input: { organizationId: string; subjectId: string; actorSubjectId: string },
+  input: { organizationId: string; subjectId: string; actorSubjectId: string; reason?: string },
 ): Promise<void> {
   try {
     const workspaceId = await findOrgAgentTestWorkspace(deps.db, input.organizationId);
     if (!workspaceId) return;
-    await removeWorkspaceMember(deps.db, {
-      accountId: input.organizationId,
-      workspaceId,
-      actorSubjectId: input.actorSubjectId,
-      targetSubjectId: input.subjectId,
-      requireOrganizationSharedWorkspaceAdministration: true,
+    await deps.db.transaction(async (tx) => {
+      const db = tx as unknown as Database;
+      const removed = await removeWorkspaceMember(db, {
+        accountId: input.organizationId,
+        workspaceId,
+        actorSubjectId: input.actorSubjectId,
+        targetSubjectId: input.subjectId,
+        requireOrganizationSharedWorkspaceAdministration: true,
+      });
+      if (!removed) return;
+      await recordConsoleTestWorkspaceAccessRemoved(db, {
+        accountId: input.organizationId,
+        workspaceId,
+        subjectId: input.subjectId,
+        actorSubjectId: input.actorSubjectId,
+        reason: input.reason ?? "console_role_changed",
+      });
     });
   } catch (error) {
     deps.observability?.error("console test workspace access was not removed", {
@@ -225,44 +241,25 @@ export async function revokeConsoleTestWorkspaceAccess(
 }
 
 /**
- * After an organization role change or offboarding: resets the person's
- * Console role to none, with its audit row, and removes their Console test
- * workspace access unless they are still an owner or admin (still full). Runs
- * whatever was stored, so a demoted owner or admin (who has no stored role)
- * loses it too. A failure is a retryable 503: the membership change itself
- * is saved, and repeating the request with the same `operationId` repeats
- * this cleanup.
+ * After an organization role change or offboarding (whose transaction already
+ * reset the person's Console role): removes their Console test workspace
+ * access unless they are still an owner or admin (still full). Runs whatever
+ * was stored, so a demoted owner or admin (who has no stored role) loses it
+ * too. A failure is a retryable 503: the membership change itself is saved,
+ * and repeating the request with the same `operationId` repeats this.
  */
-export async function resetConsoleRoleAfterMembershipChange(
+export async function revokeConsoleTestAccessAfterMembershipChange(
   deps: ApiRouteDeps,
   input: {
     organizationId: string;
     subjectId: string;
     actorSubjectId: string;
-    actorLabel: string | null;
     reason: string;
     /** Their organization role now, or null when they left. */
     organizationRole: string | null;
   },
 ): Promise<void> {
   if (!input.subjectId.startsWith("user:")) return;
-  try {
-    await clearConsoleMemberRole(deps.db, {
-      accountId: input.organizationId,
-      subjectId: input.subjectId,
-      actorSubjectId: input.actorSubjectId,
-      actorLabel: input.actorLabel,
-      reason: input.reason,
-    });
-  } catch (error) {
-    deps.observability?.error("console role was not reset after a membership change", {
-      organizationId: input.organizationId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    throw cleanupFailed(
-      "The change was saved, but this person's Console role wasn't reset. Try again.",
-    );
-  }
   if (input.organizationRole === "owner" || input.organizationRole === "admin") return;
   await revokeConsoleTestWorkspaceAccess(deps, input);
 }
@@ -330,31 +327,58 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = organizationIdOf(c);
     const admin = await requireConsoleAccess(c, deps, organizationId, "full");
     const request = await parseRequestJson(c, SetConsoleMemberRoleRequest);
-    if (request.subjectId !== undefined) {
-      // A current member of this organization whose organization role is
-      // member: owners and admins are always full, and nobody else has one.
-      const members = await listOrganizationAdministrationMembers(deps.db, {
-        organizationId,
-        actorSubjectId: admin.subjectId,
+    const memberNotFound = () =>
+      new ApiHttpError(404, {
+        code: "not_found",
+        message: "Member not found",
+        details: { code: "member_not_found" },
       });
-      const member = members.find(
-        (candidate) => candidate.subjectId === request.subjectId && candidate.status !== "revoked",
-      );
-      if (!member || !member.subjectId.startsWith("user:")) {
-        throw new ApiHttpError(404, {
-          code: "not_found",
-          message: "Member not found",
-          details: { code: "member_not_found" },
+    const notApplicable = () =>
+      new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Owners and admins always have full Console access",
+        details: { code: "console_role_not_applicable" },
+      });
+    const invitationNotFound = () =>
+      new ApiHttpError(404, {
+        code: "not_found",
+        message: "Invitation not found",
+        details: { code: "invitation_not_found" },
+      });
+    // Checked in the role write's transaction, after its lock, so a
+    // concurrent offboarding or acceptance can't be overtaken.
+    const verifyTarget = async (tx: Database) => {
+      if (request.subjectId !== undefined) {
+        // A current member of this organization whose organization role is
+        // member: owners and admins are always full, and nobody else has one.
+        const members = await listOrganizationAdministrationMembers(tx, {
+          organizationId,
+          actorSubjectId: admin.subjectId,
         });
+        const member = members.find(
+          (candidate) =>
+            candidate.subjectId === request.subjectId && candidate.status !== "revoked",
+        );
+        if (!member || !member.subjectId.startsWith("user:")) throw memberNotFound();
+        if (member.role !== "member") throw notApplicable();
+        return;
       }
-      if (member.role !== "member") {
-        throw new ApiHttpError(422, {
-          code: "validation_failed",
-          message: "Owners and admins always have full Console access",
-          details: { code: "console_role_not_applicable" },
+      // A pending invitation to join as a member.
+      let invitation: Awaited<ReturnType<typeof getOrganizationInvitationForAdministration>>;
+      try {
+        invitation = await getOrganizationInvitationForAdministration(tx, {
+          organizationId,
+          actorSubjectId: admin.subjectId,
+          invitationId: request.invitationId!,
         });
+      } catch (error) {
+        // P0002: no such invitation in this organization.
+        if (nestedPostgresSqlState(error) === "P0002") throw invitationNotFound();
+        throw error;
       }
-    }
+      if (invitation.status !== "pending") throw invitationNotFound();
+      if (invitation.role !== "member") throw notApplicable();
+    };
     try {
       const result = await setConsoleMemberRole(deps.db, {
         accountId: organizationId,
@@ -365,6 +389,7 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
         role: request.role,
         actorSubjectId: admin.subjectId,
         actorLabel: admin.label,
+        verifyTarget,
       });
       // Anything below Editor: no Console test workspace access, whatever was
       // stored before (a retry after a failed removal removes it then).
@@ -373,17 +398,12 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
           organizationId,
           subjectId: request.subjectId,
           actorSubjectId: admin.subjectId,
+          reason: "console_role_changed",
         });
       }
       return c.json(result.entry);
     } catch (error) {
-      if (error instanceof ConsoleRoleTargetNotFoundError) {
-        throw new ApiHttpError(404, {
-          code: "not_found",
-          message: "Invitation not found",
-          details: { code: "invitation_not_found" },
-        });
-      }
+      if (error instanceof ConsoleRoleTargetNotFoundError) throw invitationNotFound();
       throw error;
     }
   });
