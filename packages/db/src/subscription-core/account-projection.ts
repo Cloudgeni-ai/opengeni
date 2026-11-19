@@ -22,6 +22,11 @@ export type SubscriptionCorePoolAccount = {
   allocatorUpdatedAt: Date | null;
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
+  /**
+   * When the account was last signed in (connected or reconnected), which
+   * bounds how long the provider keeps accepting it. Null when unknown.
+   */
+  signedInAt: Date | null;
   lastError: string | null;
   quotaUsedPercent: number | null;
   quotaResetAt: Date | null;

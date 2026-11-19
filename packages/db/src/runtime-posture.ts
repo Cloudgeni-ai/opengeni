@@ -544,6 +544,12 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 1213: clears a new session's archive marker; triggers fire
   // without the inserting role holding EXECUTE.
   "session_insert_not_archived()",
+  // Migration 1502: the sign-in stamp and needs-sign-in notice triggers on
+  // subscription connections, and the notice writer they (and only they)
+  // call. Triggers fire without the writing role holding EXECUTE.
+  "stamp_subscription_connection_sign_in()",
+  "subscription_connection_relogin_notice()",
+  "open_subscription_relogin_notice_v1(uuid)",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,

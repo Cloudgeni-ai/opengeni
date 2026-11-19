@@ -33,10 +33,21 @@ export type InboxItemRow = {
   sender: { subjectId: string; label: string } | null;
 };
 
+/**
+ * A notification about something other than a chat (1502), such as a
+ * subscription account that needs signing in again: no session, and always a
+ * link (a path in the web app, or an https URL).
+ */
+export type InboxNoticeRow = Omit<InboxItemRow, "sessionId" | "kind" | "link"> & {
+  sessionId: null;
+  kind: "notification";
+  link: { url: string; label: string };
+};
+
 type InboxItemRecord = {
   id: string;
   workspace_id: string;
-  session_id: string;
+  session_id: string | null;
   kind: InboxItemRow["kind"];
   source_key: string;
   title: string;
@@ -115,37 +126,26 @@ function factsOf(value: unknown): Array<{ label: string; value: string }> {
     .slice(0, 4);
 }
 
-function linkOf(value: unknown): { url: string; label: string } | null {
+/** An https URL, or (on a chat-less notice) a path in the web app. */
+function linkOf(value: unknown, allowPath = false): { url: string; label: string } | null {
   const parsed = jsonValue(value);
   if (typeof parsed !== "object" || parsed === null) return null;
   const { url, label } = parsed as { url?: unknown; label?: unknown };
-  return typeof url === "string" && /^https:\/\//iu.test(url) && typeof label === "string"
-    ? { url, label }
-    : null;
+  if (typeof url !== "string" || typeof label !== "string") return null;
+  if (/^https:\/\//iu.test(url)) return { url, label };
+  return allowPath && /^\/(?![/\\])/u.test(url) ? { url, label } : null;
 }
 
-/** The person's open items in one account, newest first. */
-export async function listInboxItems(
-  db: Database,
-  input: { accountId: string; subjectId: string },
-): Promise<InboxItemRow[]> {
-  const rows = await rawRows<InboxItemRecord>(
-    db,
-    sql`select * from opengeni_private.list_inbox_items_v3(
-      ${input.accountId}::uuid, ${input.subjectId}::text
-    )`,
-  );
-  return rows.map((row) => ({
+function inboxRowOf(row: InboxItemRecord): Omit<InboxItemRow, "sessionId" | "link"> {
+  return {
     id: row.id,
     workspaceId: row.workspace_id,
-    sessionId: row.session_id,
     kind: row.kind,
     sourceKey: row.source_key,
     title: row.title,
     subtitle: row.subtitle ?? "",
     body: row.body,
     facts: factsOf(row.facts),
-    link: linkOf(row.link),
     eventSequence: row.event_sequence ?? null,
     choices: choicesOf(row.choices),
     serverQuestion: serverQuestionOf(row.choices),
@@ -159,13 +159,49 @@ export async function listInboxItems(
     sender: row.sender_subject_id
       ? { subjectId: row.sender_subject_id, label: row.sender_label ?? "A teammate" }
       : null,
-  }));
+  };
+}
+
+/**
+ * The person's open items in one account, newest first: items from chats and
+ * notices about something other than a chat (1502).
+ */
+export async function listInboxEntries(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<Array<InboxItemRow | InboxNoticeRow>> {
+  const rows = await rawRows<InboxItemRecord>(
+    db,
+    sql`select * from opengeni_private.list_inbox_items_v3(
+      ${input.accountId}::uuid, ${input.subjectId}::text
+    )`,
+  );
+  return rows.flatMap((row): Array<InboxItemRow | InboxNoticeRow> => {
+    if (row.session_id !== null) {
+      return [{ ...inboxRowOf(row), sessionId: row.session_id, link: linkOf(row.link) }];
+    }
+    const link = linkOf(row.link, true);
+    return row.kind === "notification" && link
+      ? [{ ...inboxRowOf(row), sessionId: null, kind: "notification", link }]
+      : [];
+  });
+}
+
+/** The person's open items from chats in one account, newest first. */
+export async function listInboxItems(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<InboxItemRow[]> {
+  return (await listInboxEntries(db, input)).filter(
+    (row): row is InboxItemRow => row.sessionId !== null,
+  );
 }
 
 export type InboxItemRef = {
   id: string;
   workspaceId: string;
-  sessionId: string;
+  /** Null for a notice about something other than a chat (1502). */
+  sessionId: string | null;
   kind: InboxItemRow["kind"];
   sourceKey: string;
   status: InboxItemRow["status"];
@@ -179,7 +215,7 @@ export async function getInboxItem(
   const [row] = await rawRows<{
     id: string;
     workspace_id: string;
-    session_id: string;
+    session_id: string | null;
     kind: InboxItemRow["kind"];
     source_key: string;
     status: InboxItemRow["status"];

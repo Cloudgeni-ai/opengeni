@@ -149,6 +149,7 @@ function projectAccount(
     isActive: row.id === input.primaryConnectionId,
     expiresAt: date(row.expires_at),
     lastRefreshAt: date(row.last_refresh_at),
+    signedInAt: date(row.signed_in_at),
     lastError: row.last_error,
     primaryUsedPercent: primary?.usedPercent ?? null,
     primaryResetAt: primary?.resetsAt == null ? null : new Date(primary.resetsAt),

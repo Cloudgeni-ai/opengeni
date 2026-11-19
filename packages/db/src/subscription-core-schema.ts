@@ -31,6 +31,11 @@ export const subscriptionConnections = pgTable(
     credentialFormat: text("credential_format").notNull().default("v1"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
+    /**
+     * When the account was last signed in (connected or reconnected); a
+     * credential refresh leaves it (1502). Null when unknown.
+     */
+    signedInAt: timestamp("signed_in_at", { withTimezone: true }),
     refreshGeneration: bigint("refresh_generation", { mode: "number" }).notNull().default(1),
     version: integer("version").notNull().default(1),
     status: text("status").notNull().default("active"),

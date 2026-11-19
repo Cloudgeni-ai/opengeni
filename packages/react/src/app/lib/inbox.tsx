@@ -5,6 +5,7 @@ import { accessContextHasInbox } from "@opengeni/contracts";
 import type { ChatClient } from "@opengeni/sdk";
 import type {
   BillingCreditNotification,
+  InboxEntry,
   InboxItem,
   ListInboxResponse,
   OpenGeniClient,
@@ -16,8 +17,26 @@ import { useAppContext, type AppContextValue } from "../app-context";
 import { userErrorText } from "../../ui/api-error";
 import { inboxBillingAccountIds } from "./inbox-billing";
 
+/**
+ * The inbox as the app shows it: items from chats and notices about something
+ * else (such as a subscription account that needs signing in again) in one
+ * list, newest first. The counts stay the API's counts of chat items.
+ */
+export type InboxView = Omit<ListInboxResponse, "items" | "notices"> & { items: InboxEntry[] };
+
+export function inboxView(data: ListInboxResponse): InboxView {
+  // An older server sends no notices: keep its reading as it is.
+  if (data.notices === undefined) return data;
+  const { notices, ...rest } = data;
+  if (notices.length === 0) return rest;
+  return {
+    ...rest,
+    items: [...data.items, ...notices].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+  };
+}
+
 type InboxState = {
-  data: ListInboxResponse | null;
+  data: InboxView | null;
   error: unknown;
   loading: boolean;
 };
@@ -76,7 +95,7 @@ export class InboxStore {
           this.set({ error: new Error("The inbox response had no items."), loading: false });
           return;
         }
-        this.set({ data: this.withBillingReads(data), error: null, loading: false });
+        this.set({ data: this.withBillingReads(inboxView(data)), error: null, loading: false });
       })
       .catch((error: unknown) => {
         // Keep the last good list on a transient failure; the page says so.
@@ -95,7 +114,7 @@ export class InboxStore {
     this.state = EMPTY;
   }
 
-  private withBillingReads(data: ListInboxResponse): ListInboxResponse {
+  private withBillingReads(data: InboxView): InboxView {
     if (!data.billingNotifications) return data;
     return {
       ...data,
@@ -127,13 +146,15 @@ export class InboxStore {
   };
 
   /** Apply a local change at once (an answered item leaves) before the server confirms. */
-  patchItems(update: (items: InboxItem[]) => InboxItem[]) {
+  patchItems(update: (items: InboxEntry[]) => InboxEntry[]) {
     const data = this.state.data;
     if (!this.active || !data) return;
     const items = update(data.items);
     const now = Date.now();
     const awake = items.filter(
-      (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
+      (item) =>
+        item.sessionId !== null &&
+        (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now),
     );
     this.set({
       data: {
@@ -202,7 +223,7 @@ export function useInbox(
 
   const refresh = useCallback(() => store.refresh(), [store]);
   const patchItems = useCallback(
-    (update: (items: InboxItem[]) => InboxItem[]) => store.patchItems(update),
+    (update: (items: InboxEntry[]) => InboxEntry[]) => store.patchItems(update),
     [store],
   );
   const accountId = workspaces.find((workspace) => workspace.id === options.workspaceId)?.accountId;
@@ -231,8 +252,33 @@ export function isNeedsYouKind(kind: InboxItem["kind"]): boolean {
   return kind === "question" || kind === "approval" || kind === "goal_paused";
 }
 
+/**
+ * The chat an item came from. Questions, approvals, paused goals and replies
+ * always have one; only a notice about something other than a chat (such as a
+ * subscription account that needs signing in again) has none.
+ */
+export function inboxItemSessionId(item: Pick<InboxEntry, "sessionId" | "kind">): string {
+  if (item.sessionId === null) throw new Error(`This ${item.kind} isn't about a chat`);
+  return item.sessionId;
+}
+
+/**
+ * A notice's link as a path in this app when it points here (a path, or an
+ * address on this origin), so opening it stays in the app; null for a link
+ * elsewhere, which opens in a new tab.
+ */
+export function inboxLinkAppPath(url: string, origin: string): string | null {
+  if (/^\/(?![/\\])/u.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === origin ? `${parsed.pathname}${parsed.search}${parsed.hash}` : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Rail attention only; API chat counts keep their historical meaning. */
-export function inboxAttentionCount(data: ListInboxResponse | null): number {
+export function inboxAttentionCount(data: InboxView | ListInboxResponse | null): number {
   if (!data) return 0;
   const now = Date.now();
   return (

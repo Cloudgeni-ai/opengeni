@@ -1,4 +1,4 @@
-import type { InboxItem, OpenGeniClient } from "@opengeni/sdk";
+import type { InboxEntry, OpenGeniClient } from "@opengeni/sdk";
 
 import type { InboxAction } from "./inbox-model";
 
@@ -10,13 +10,16 @@ import type { InboxAction } from "./inbox-model";
  */
 export async function actOnInboxItem(
   client: OpenGeniClient,
-  item: InboxItem,
+  item: InboxEntry,
   action: InboxAction,
 ): Promise<boolean> {
+  const sessionId = item.sessionId;
+  // A notice about something other than a chat has nothing to answer.
+  if (sessionId === null) return false;
   if (action.kind === "approve" || action.kind === "deny") {
     if (item.kind !== "approval") return false;
     try {
-      await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
+      await client.sendApprovalDecision(item.workspaceId, sessionId, {
         approvalId: item.sourceKey,
         decision: action.kind === "approve" ? "approve" : "reject",
       });
@@ -27,15 +30,11 @@ export async function actOnInboxItem(
     return true;
   }
   if (item.kind !== "question") return false;
-  const request = await client.getHumanInputRequest(
-    item.workspaceId,
-    item.sessionId,
-    item.sourceKey,
-  );
+  const request = await client.getHumanInputRequest(item.workspaceId, sessionId, item.sourceKey);
   const question = request.questions[0];
   if (request.status !== "pending" || request.questions.length !== 1 || !question) return false;
   if (action.kind === "choose") {
-    await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
+    await client.submitHumanInputResponse(item.workspaceId, sessionId, item.sourceKey, {
       outcome: "answered",
       answers: [{ questionId: question.id, values: [action.choiceId] }],
     });
@@ -45,14 +44,14 @@ export async function actOnInboxItem(
   // A secret is never typed into a notification; the session opens on the secure card.
   if (!answer || question.kind === "secret") return false;
   if (question.kind === "text") {
-    await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
+    await client.submitHumanInputResponse(item.workspaceId, sessionId, item.sourceKey, {
       outcome: "answered",
       answers: [{ questionId: question.id, values: [answer] }],
     });
     return true;
   }
   if (!question.allowOther) return false;
-  await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
+  await client.submitHumanInputResponse(item.workspaceId, sessionId, item.sourceKey, {
     outcome: "answered",
     answers: [{ questionId: question.id, values: [], other: answer }],
   });

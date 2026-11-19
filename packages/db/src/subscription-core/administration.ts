@@ -88,6 +88,8 @@ export type SubscriptionCoreConnectionRow = {
   connected_by_subject_id: string | null;
   expires_at: Date | string | null;
   last_refresh_at: Date | string | null;
+  /** When it was last signed in (1502); null when unknown, and on personal rows. */
+  signed_in_at?: Date | string | null;
   managed_by_workspace_id: string | null;
   provider_state: Record<string, unknown> | null;
   updated_at: Date | string;
@@ -111,6 +113,7 @@ const CONNECTION_COLUMNS = sql`connection.id::text as id, connection.label,
   connection.extra_credits_enabled, connection.extra_credits_version, connection.extra_credits_updated_at,
   connection.allocator_version, connection.allowed_model_ids,
   connection.connected_by_subject_id, connection.expires_at, connection.last_refresh_at,
+  connection.signed_in_at,
   connection.managed_by_workspace_id::text as managed_by_workspace_id,
   connection.provider_state, connection.updated_at,
   quota.quota, quota.revision as quota_revision,
