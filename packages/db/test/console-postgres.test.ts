@@ -286,9 +286,9 @@ test("end-user display details: the latest wins, omitted fields keep, and Consol
     displayName: null,
     email: null,
   });
-  const [{ count: plainProfiles }] = await shared.admin<{ count: string }[]>`
-    select count(*)::text as count from organization_end_user_profiles where subject_id = ${plain}`;
-  expect(plainProfiles).toBe("0");
+  const plainProfiles = await shared.admin`
+    select 1 from organization_end_user_profiles where subject_id = ${plain}`;
+  expect(plainProfiles).toHaveLength(0);
 
   await rememberEndUserLabel(client.db, {
     accountId,

@@ -16,7 +16,7 @@ describe("end-user display details", () => {
       identity: { externalId: "auth0|66b45b", source: "default" },
     });
     const linked = {
-      mode: "linked_native",
+      mode: "linked_native" as const,
       identity: { externalId: "u-1", source: "product" },
       linkId: "6f1c2d4e-7a3b-4c5d-8e9f-0a1b2c3d4e5f",
       expectedLinkRevision: 3,
