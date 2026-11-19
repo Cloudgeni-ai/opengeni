@@ -154,12 +154,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * archived; until it is granted, such a non-compute sandbox keeps its saved
  * workspace until its chats are deleted (as before).
  * 1475 withheld the organization-wide sandbox counts and 1479 granted them.
- * 1482 withholds the check of which Nango connections a live connection
- * stands for; until it is granted, deleting a Nango connection is decided
- * from the person's own reads, and nothing is deleted when one of their
- * organizations cannot be fully read.
- * 1487 withholds the listing of live Nango rows' owners; until it is
- * granted, the Nango sweep only visits people Nango lists a connection for.
+ * 1482 withheld the check of which Nango connections a live connection
+ * stands for and 1487 the listing of live Nango rows' owners; 1499 granted
+ * both.
  * 1486 withheld the unpaid sandbox fleet counts and 1490 granted them.
  * 1492 withholds the managed warm box count; until it is granted, fleet
  * pressure reads the warm count of every lease, self-hosted ones included.
@@ -174,8 +171,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
-  "nango_connections_in_use_v1(text[])",
-  "nango_live_connection_owners_v1(text, text, text, integer)",
   "sandbox_fleet_warm_boxes_v1()",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 

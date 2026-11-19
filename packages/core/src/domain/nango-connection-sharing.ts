@@ -422,8 +422,9 @@ function unreferenced(
  * The ids of `candidates` nothing stands for any more, decided under the
  * person lock: no row in `rows` (the person's reads, including writes this
  * transaction made) and, deployment-wide, no live row in any organization.
- * Until that check is granted (migration 1482) only a complete read of every
- * organization of the person may decide; otherwise nothing is unused.
+ * Without that check's grant (1499; a database before it) only a complete
+ * read of every organization of the person may decide; otherwise nothing is
+ * unused.
  */
 async function unusedNangoConnections(
   tx: Database,
@@ -605,7 +606,7 @@ export async function releaseNangoConnections(
     /**
      * The connections were made by a connect attempt that is now refused or
      * failed. Only a store from that attempt (readable here) or a share
-     * after it can name one, so while the deployment-wide check is withheld
+     * after it can name one, so without the deployment-wide check's grant
      * an incomplete read still releases one no readable row names, if Nango
      * made it within a connect attempt's lifetime.
      */
