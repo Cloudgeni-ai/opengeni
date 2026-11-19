@@ -1453,7 +1453,7 @@ export async function createAndStartSessionWithOutcome(input: {
     const { session: keyed, created } = keyedResult;
     if (!created) {
       const persistedPolicy = readTurnExecutionPolicyV1(keyed.metadata);
-      const finished = await finishStartSession(
+      const finished = await finishCreatedSessionShell(
         keyed.temporalWorkflowId
           ? {
               ...input,
@@ -1469,6 +1469,7 @@ export async function createAndStartSessionWithOutcome(input: {
                 : {}),
             },
         keyed,
+        "keyed",
       );
       return {
         session: finished.session,
@@ -1477,11 +1478,13 @@ export async function createAndStartSessionWithOutcome(input: {
         changed: finished.changed,
       };
     }
-    // A keyed shell whose start fails stays durable: a retry with the same key
-    // repairs it with the parameters it was first accepted with.
-    const finished = await finishStartSession(
+    // A keyed shell whose start fails for an unknown reason stays durable: a
+    // retry with the same key repairs it with the parameters it was first
+    // accepted with. A start the server refused is discarded instead.
+    const finished = await finishCreatedSessionShell(
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
+      "keyed",
     );
     recordCreatedSessionUsage(input);
     return {
@@ -1567,9 +1570,10 @@ export async function createAndStartSessionWithOutcome(input: {
     }
     throw repositoryRemovedHttpError(error);
   }
-  const finished = await finishNewlyCreatedSession(
+  const finished = await finishCreatedSessionShell(
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
     session,
+    "unkeyed",
   );
   recordCreatedSessionUsage(input);
   return {
@@ -1581,24 +1585,30 @@ export async function createAndStartSessionWithOutcome(input: {
 }
 
 /**
- * Start an unkeyed shell this call just inserted. If the start fails before
- * the first event or turn commits, the caller gets the error and has no way to
- * resume that session, so the bare shell is discarded instead of lingering as
- * a queued session nothing runs. A shell that did initialize (including an
- * outcome-unknown commit) is kept.
+ * Start a committed shell, discarding it when the start fails before the first
+ * event or turn commits and the caller could not resume it: always for an
+ * unkeyed shell, and for a keyed shell when the server refused the start (the
+ * request is answered with a 4xx). A refused start would only be refused again,
+ * so a keyed retry recreates the session and gets the same answer, and a
+ * corrected request may reuse its requested session id. A keyed shell whose
+ * start failed for any other reason stays for its retry to repair. A shell that
+ * did initialize (including an outcome-unknown commit) is kept.
  */
-async function finishNewlyCreatedSession(
+async function finishCreatedSessionShell(
   input: Parameters<typeof finishStartSession>[0],
   session: Session,
+  key: "keyed" | "unkeyed",
 ): Promise<Awaited<ReturnType<typeof finishStartSession>>> {
   try {
     return await finishStartSession(input, session);
   } catch (error) {
+    if (key === "keyed" && !sessionStartRefused(error)) throw error;
     try {
       await discardUninitializedSessionShell(input.db, {
         accountId: session.accountId,
         workspaceId: session.workspaceId,
         sessionId: session.id,
+        discardKeyed: key === "keyed",
       });
     } catch {
       // The original start failure is the actionable error; a shell that
@@ -1606,6 +1616,20 @@ async function finishNewlyCreatedSession(
     }
     throw error;
   }
+}
+
+/**
+ * A start failure that is a definite decision rather than an outage: an HTTP
+ * 4xx, or a typed refusal `createSessionForRequest` answers with one. Its
+ * initializer transaction rolled back, so nothing of the start committed.
+ */
+function sessionStartRefused(error: unknown): boolean {
+  return (
+    (error instanceof HTTPException && error.status >= 400 && error.status < 500) ||
+    error instanceof PersonalResourceAttachmentAcceptanceError ||
+    error instanceof AgentCommandAuthorityError ||
+    error instanceof NewSessionDraftConflictError
+  );
 }
 
 function recordCreatedSessionUsage(input: {
