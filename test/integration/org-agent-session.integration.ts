@@ -31,7 +31,7 @@ const noopWorkflowClient: SessionWorkflowClient = {
   triggerScheduledTask: async () => undefined,
 };
 
-/** Tool servers must use https; the test's MCP server is local, so its https URL is routed to it. */
+/** Tool servers must use https; the test's local MCP server stands in for it (see below). */
 const TOOL_SERVER_URL = "https://tools.org-agents-e2e.test/mcp";
 
 describe("organization agents end to end", () => {
@@ -45,7 +45,6 @@ describe("organization agents end to end", () => {
   let workspaceId: string;
   let authorization: string;
   let mcp: TestMcpServer;
-  const originalFetch = globalThis.fetch;
   /** Server-side failures, shown with a failed assertion. */
   const serverErrors: unknown[] = [];
 
@@ -97,19 +96,9 @@ describe("organization agents end to end", () => {
     });
     server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
     mcp = startTestMcpServer();
-    const routed = ((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = input instanceof Request ? input.url : String(input);
-      if (!url.startsWith(TOOL_SERVER_URL)) return originalFetch(input, init);
-      const target = mcp.url + url.slice(TOOL_SERVER_URL.length);
-      return input instanceof Request
-        ? originalFetch(new Request(target, input), init)
-        : originalFetch(target, init);
-    }) as typeof fetch;
-    globalThis.fetch = Object.assign(routed, { preconnect: originalFetch.preconnect });
   }, 180_000);
 
   afterAll(async () => {
-    globalThis.fetch = originalFetch;
     mcp?.close();
     server?.stop(true);
     await bus?.close();
@@ -270,6 +259,10 @@ describe("organization agents end to end", () => {
     const [server] = await admin<{ server_id: string; url: string }[]>`
       select server_id, url from session_mcp_servers where session_id = ${sessionId}`;
     expect(server).toMatchObject({ server_id: "crm", url: TOOL_SERVER_URL });
+    // The local MCP server speaks plain HTTP on loopback: point this chat's copy
+    // of the server at it (a `none` server needs no login either way).
+    await admin`update session_mcp_servers set url = ${mcp.url}
+      where session_id = ${sessionId} and server_id = 'crm'`;
 
     const model = new ScriptedModel([
       {
