@@ -21,7 +21,6 @@ import {
   type ListWorkspaceOrgAgentsResponse,
   type OrgAgent,
   type OrgAgentDefinitionInput,
-  type OrgAgentMovableChatsResponse,
   type OrgAgentNewToolsPolicy,
   type OrgAgentSessionOverrides,
   type OrgAgentTestWorkspaceResponse,
@@ -106,7 +105,7 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
         opts(signal),
       ),
     movableChats: (id: string, version: number, signal?: AbortSignal) =>
-      client.requestJson<OrgAgentMovableChatsResponse>(
+      client.requestJson<{ count: number }>(
         "GET",
         `${agent(id)}/movable-chats`,
         undefined,
