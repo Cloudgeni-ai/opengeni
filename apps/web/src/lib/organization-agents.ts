@@ -387,19 +387,25 @@ export type ToolRow = {
  * version names that the server no longer offers. A tool not in the version's
  * catalog is "new"; for `selected` mode its state follows `newTools` only
  * when it is not already listed.
+ *
+ * `live` is null while the list is loading or when the server couldn't list
+ * its tools: the rows then come from the version's catalog and selection, and
+ * nothing is marked new or gone.
  */
 export function toolRows(
   server: OrgAgentToolServerConfig,
-  live: readonly OrgAgentToolCatalogEntry[],
+  live: readonly OrgAgentToolCatalogEntry[] | null,
   catalog: OrgAgentToolCatalog | null | undefined,
 ): ToolRow[] {
   const known = catalog?.[server.server];
-  const knownNames = known ? new Set(known.map((tool) => tool.name)) : null;
-  const liveNames = new Set(live.map((tool) => tool.name));
+  const liveKnown = live !== null;
+  const offered = live ?? known ?? [];
+  const knownNames = known && liveKnown ? new Set(known.map((tool) => tool.name)) : null;
+  const liveNames = new Set(offered.map((tool) => tool.name));
   const askAll = server.approval.ask === true;
   const askList = new Set(server.approval.ask === true ? [] : server.approval.ask);
   const enabled = new Set(server.tools.enabled);
-  const rows: ToolRow[] = live.map((tool) => {
+  const rows: ToolRow[] = offered.map((tool) => {
     const isNew = knownNames !== null && !knownNames.has(tool.name);
     const listed = enabled.has(tool.name);
     const on =
@@ -418,7 +424,7 @@ export function toolRows(
       on: true,
       ask: askAll || askList.has(name),
       isNew: false,
-      gone: true,
+      gone: liveKnown,
     });
   }
   return rows;

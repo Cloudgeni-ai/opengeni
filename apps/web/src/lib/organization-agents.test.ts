@@ -153,6 +153,17 @@ describe("tool rows", () => {
     expect(toolRows(server(), live, null).some((row) => row.isNew)).toBe(false);
   });
 
+  test("when the server couldn't list its tools, nothing is marked gone or new", () => {
+    const rows = toolRows(
+      server({ tools: { mode: "selected", enabled: ["lookup_invoice", "old"] } }),
+      null,
+      catalog,
+    );
+    expect(rows.some((row) => row.gone || row.isNew)).toBe(false);
+    expect(rows.find((row) => row.name === "old")).toMatchObject({ on: true, gone: false });
+    expect(rows.map((row) => row.name)).toContain("lookup_invoice");
+  });
+
   test("turning a tool off from 'all' lists the rest and drops its ask", () => {
     const names = live.map((tool) => tool.name);
     const next = withToolOn(
