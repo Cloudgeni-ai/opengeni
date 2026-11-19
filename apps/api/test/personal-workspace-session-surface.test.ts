@@ -2217,6 +2217,85 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
     ).toBe(404);
   }, 180_000);
 
+  test("turning your own login on where its connector isn't on turns the connector on, or says an admin must", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const app = buildApp(undefined, true);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const endpoint = `https://notes-${suffix}.example.test/mcp`;
+    const providerDomain = `notes-${suffix}.example.test`;
+    const capabilityId = `mcp:notes-${suffix}`;
+    // Your own sign-in to a connector, added in your Personal workspace.
+    const loginId = await shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${human.accountId}, true),
+        set_config('opengeni.workspace_id', ${human.personalWorkspaceId}, true),
+        set_config('opengeni.subject_id', ${human.subjectId}, true)`;
+      const [row] = await tx<Array<{ id: string }>>`
+        insert into connections (
+          account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted, metadata
+        ) values (
+          ${human.accountId}, ${human.personalWorkspaceId}, ${human.subjectId}, ${providerDomain},
+          'oauth2', 'ciphertext', ${tx.json({ mcpUrl: endpoint })}
+        ) returning id`;
+      return row!.id;
+    });
+    const turnOn = async () =>
+      await app.request(`http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources/reach`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ resourceKind: "connection", resourceId: loginId, on: true }),
+      });
+    const here = async () => {
+      const response = await app.request(
+        `http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources/reach?resourceKind=connection&resourceId=${loginId}`,
+        { headers },
+      );
+      const body = (await response.json()) as {
+        workspaces: Array<{ workspaceId: string; on: boolean; connectorOff?: boolean }>;
+      };
+      return body.workspaces.find((row) => row.workspaceId === human.legacyWorkspaceId);
+    };
+    expect(await here()).toMatchObject({ on: false, connectorOff: true });
+
+    // The shared workspace has no such connector: an admin has to add it.
+    // Nothing changes.
+    const refused = await turnOn();
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({
+      error: {
+        message:
+          "Only an admin can add this connector to this workspace. Ask one to add it, then use your login here.",
+        details: { code: "own_login_connector_needs_admin" },
+      },
+    });
+    expect(await here()).toMatchObject({ on: false, connectorOff: true });
+
+    // Once it is in the workspace's catalog, one switch turns it on with the login.
+    await shared.admin`insert into capability_catalog_items (
+        id, account_id, workspace_id, kind, source, name, endpoint_url,
+        auth_model, auth_kind, provider_domain, mcp_url, metadata
+      ) values (
+        ${capabilityId}, ${human.accountId}, ${human.legacyWorkspaceId}, 'mcp', 'manual', 'Notes',
+        ${endpoint}, 'oauth2', 'oauth2', ${providerDomain}, ${endpoint},
+        ${shared.admin.json({ mcpServerId: capabilityId.slice("mcp:".length) })}
+      )`;
+    const turnedOn = await turnOn();
+    expect(turnedOn.status).toBe(200);
+    const saved = (await turnedOn.json()) as { workspace: Record<string, unknown> };
+    expect(saved.workspace).toMatchObject({ workspaceId: human.legacyWorkspaceId, on: true });
+    expect(saved.workspace).not.toHaveProperty("connectorOff");
+    const [installed] = await shared.admin<
+      Array<{ status: string; config: Record<string, unknown> }>
+    >`
+      select status, config from capability_installations
+      where workspace_id = ${human.legacyWorkspaceId} and capability_id = ${capabilityId}`;
+    expect(installed).toMatchObject({
+      status: "active",
+      config: { connectionRef: { providerDomain, kind: "oauth2", subjectScope: "subject" } },
+    });
+  }, 180_000);
+
   test("My things lists your own logins with where each works, and nobody else's", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

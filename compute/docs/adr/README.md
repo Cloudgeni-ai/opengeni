@@ -48,6 +48,8 @@ old one; old records stay as history.
 | 40 | [An image is built over the one before](0040-an-image-is-built-over-the-one-before.md) | Accepted |
 | 41 | [Every host keeps each new image ahead of its creates](0041-every-host-keeps-each-new-image-ahead.md) | Accepted |
 | 43 | [A fresh boot repairs a damaged file system](0043-a-fresh-boot-repairs-a-damaged-file-system.md) | Accepted |
+| 44 | [A request the kernel may compress is kept by `memory.min`](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md) | Accepted |
+| 44 | [A request the kernel may compress is kept by `memory.min`](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md) | Accepted |
 
 ## Format
 

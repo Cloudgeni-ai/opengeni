@@ -21,6 +21,10 @@
       "sha256": "f6c70651a4623b3d5404e6dc7d740ebc5f85b844f4f9f622e9359f5ee7c798b9"
     },
     {
+      "path": ".github/workflows/bot-pin-pr-queue.yml",
+      "sha256": "80d282d107ea578bfc7b6a7b3d11769d6f02d9e2baff1e71678a6712ee01305e"
+    },
+    {
       "path": ".github/workflows/browser-engine-pins.yml",
       "sha256": "decc84aa96743f1a79ba1621ee7b00b62ab9b21a0a375139b1fa7006ecc5b8c1"
     },
@@ -42,7 +46,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "40772b57688c638e28e001ab3a565509f19e27b23c32875a3245e14128a20c4d"
+      "sha256": "fca68a908ed15847b2ac24d3d36d57f1feaee0f7cea9827c7e74a4030f456f39"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -166,7 +170,7 @@
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "328813c110e33dc6bc21d1ec72cd38a219945eccf8dc4cf1e50e178cb93c265f"
+      "sha256": "80ebf66ec57d4054e2e7e613865905c189530e4fa8e9cc25721ffccaf16d0623"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
@@ -644,6 +648,12 @@
       "job": "wasm",
       "step": "Verify exact source",
       "sha256": "7c01541f3dc7c536488a007902ea1453cd191ebb6c348edcbac345077c0dcb25"
+    },
+    {
+      "workflow": ".github/workflows/bot-pin-pr-queue.yml",
+      "job": "queue",
+      "step": "Queue them",
+      "sha256": "ef7582791cdc5a3bb9c410e2878c26f5a5a4152aed8b97a408f692885501f391"
     },
     {
       "workflow": ".github/workflows/browser-engine-pins.yml",
@@ -1195,7 +1205,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "kvm",
       "step": "Huge pages for the nested profile",
-      "sha256": "95ace5da0c3accf0b6d576b14a4506fa109de0c2eb8739bb1139bbd08be122e3"
+      "sha256": "fa09370bdc763c645f1b575f098108f3429f13df58bc124122c5ca36cb64eb75"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -2346,6 +2356,12 @@
     {
       "workflow": ".github/workflows/runtime-posture-compatibility.yml",
       "job": "compatibility",
+      "step": "Also check the revision production actually runs",
+      "sha256": "5d9d29169962d4ff2303d1f710e899e6efeef74130859230618c28179b649479"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
       "step": "Database package typecheck",
       "sha256": "e9cd13e489a44a5698a122ed3dd5383d80b8bf4eaff7b16921da6dfa0c1184af"
     },
@@ -2377,7 +2393,7 @@
       "workflow": ".github/workflows/runtime-posture-compatibility.yml",
       "job": "compatibility",
       "step": "Validate baseline advancement scope",
-      "sha256": "8405c48a52927764784dc531e96339f791883d9a4c7d217270f83a699ac7ca63"
+      "sha256": "7866e3bacef5b1cfd667d37895b8dcb52434b713c74955da3c277ac767aa48e6"
     },
     {
       "workflow": ".github/workflows/seal-release-head.yml",

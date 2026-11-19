@@ -12,6 +12,7 @@ import {
 
 mock.module("../../lib/navigation", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#fixture">{children}</a>,
+  usePage: () => ({ readQuery: () => new URLSearchParams(), replaceQuery: () => {} }),
 }));
 const { FailedSessionBanner } = await import("./failed-session-banner");
 beforeAll(() => {
@@ -1179,4 +1180,81 @@ test("a chat its owner's machine isn't allowed for offers Allow in place of Retr
     "This chat has ended. Start a new chat to use a repository.",
   );
   expect(buttons()[0]!.textContent).toBe("Allow for this chat");
+});
+
+const cardVerificationStatus = { canVerify: true };
+const createBillingCardVerificationSession = mock(async () => ({
+  url: "https://checkout.stripe.test/c/pay/cs_test_1",
+}));
+const cardAppContext = {
+  client: {
+    createBillingCardVerificationSession,
+    getBillingCardVerification: async () => ({
+      accountId: "acct-1",
+      required: true,
+      verified: false,
+      card: null,
+      ...cardVerificationStatus,
+    }),
+  },
+  workspaces: [{ id: "ws-1", accountId: "acct-1" }],
+} as unknown as import("../../app-context").AppContextValue;
+
+test("a missing card offers Add a card and continues the chat once the card is added", async () => {
+  const { AppContext } = await import("../../app-context");
+  const { noteCardVerified } = await import("../../lib/card-verification");
+  const cardFailure = {
+    ...failure,
+    failureCode: "sandbox_card_required",
+    reason:
+      "Sandboxes on the Free plan need a verified card. Add a card to continue; you won't be charged.",
+  };
+  // Without billing access the one fix is asking the owner.
+  const member = await render(<FailedSessionBanner failure={cardFailure} actions={actions} />);
+  expect(member.textContent).toContain(cardFailure.reason);
+  expect(member.textContent).toContain("Ask the organization owner to add a card.");
+  expect(member.querySelector("button")).toBeNull();
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // An admin who isn't the owner can't add the card either.
+  cardVerificationStatus.canVerify = false;
+  const admin = await render(
+    <AppContext.Provider value={cardAppContext}>
+      <FailedSessionBanner
+        failure={cardFailure}
+        actions={actions}
+        workspaceId="ws-1"
+        canBuyCredits
+      />
+    </AppContext.Provider>,
+  );
+  await act(async () => {});
+  expect(admin.textContent).toContain("Ask the organization owner to add a card.");
+  expect(admin.querySelector("button")).toBeNull();
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+  cardVerificationStatus.canVerify = true;
+
+  const onRetry = mock(async () => true);
+  const owner = await render(
+    <AppContext.Provider value={cardAppContext}>
+      <FailedSessionBanner
+        failure={cardFailure}
+        actions={{ onRetry, retryBlocker: null }}
+        workspaceId="ws-1"
+        canBuyCredits
+      />
+    </AppContext.Provider>,
+  );
+  await act(async () => {});
+  const buttons = [...owner.querySelectorAll("button")].map((button) => button.textContent);
+  expect(buttons).toEqual(["Add a card"]);
+  expect(owner.querySelector("button")!.disabled).toBe(false);
+  expect(onRetry).not.toHaveBeenCalled();
+  // Back from checkout with the card verified: the refused chat continues once.
+  await act(async () => noteCardVerified());
+  expect(onRetry).toHaveBeenCalledTimes(1);
+  await act(async () => noteCardVerified());
+  expect(onRetry).toHaveBeenCalledTimes(2);
 });

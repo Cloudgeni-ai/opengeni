@@ -124,7 +124,9 @@ Identity comes from the first of these that applies to the connection:
   | Linear | `get_user` with `query: "me"`; optional `get_workspace` | `linearUserId` | email, name, workspace |
   | Notion | token response `workspace_id` and `user_id`; else a person from `notion-get-self` | `notionWorkspaceId`, `notionUserId` | email, name, workspace |
   | Asana (`/v2/mcp`) | `get_me` tool | `asanaUserId` | email, name |
-  | Stripe | `get_stripe_account_info` tool | `stripeAccountId` | email, account name |
+  | Stripe | `get_stripe_account_info` tool (`account_id`, `display_name`; older `id` Account shape too); optional `stripe_api_read` `GetAccount` for the same account | `stripeAccountId` | email, account name |
+  | Sentry (`mcp.sentry.dev/mcp`) | `whoami` tool; optional `find_organizations` | `sentryUserId` | email, name, organization (the session's, else the only one listed) |
+  | Apollo (`mcp.apollo.io/mcp`) | `apollo_users_api_profile` tool (current-user profile) | `apolloUserId` | email, name |
 
 - Generic OpenID Connect, when nothing above applies and the authorization
   server advertises `openid` in its `scopes_supported`. The sign-in then asks
@@ -158,7 +160,7 @@ of them count as the same resource for duplicates and share one lock.
 
 ### One account per person when a service can't identify accounts
 
-Services with no identity source (HubSpot, Sentry and Apollo among the
+Services with no identity source (HubSpot among the
 catalog's, and any custom MCP without OpenID Connect) follow a one-account
 rule, enforced in `decideOAuthAccountConnection`:
 
@@ -197,7 +199,58 @@ Account rows and pickers mark each account "Yours" (the viewer's own) or
 elsewhere. Agents see each account route as `<connector> — <account> · Yours`
 or `· Shared`, so a personal and a shared connection never read the same.
 
+`<account>` follows one rule for people and agents
+(`connectionAccountLabel` in `packages/contracts/src/connection-account-label.ts`):
+
+1. the account the provider identified (email, account or workspace name);
+2. otherwise the name the person gave the connection (see below);
+3. otherwise `<domain> account` (the connector name in the UI).
+
+When two of one connector's accounts with the same scope would still read
+the same, `distinctConnectionAccountLabels` adds when each was connected
+("· Connected Oct 25"), then the time ("· Connected Oct 25 14:05 UTC" for
+agents, local time in the UI), and only if that still ties, the first six
+characters of the connection ID. Agents' labels are computed over every
+account of the server the turn could use, before an explicit selection or pin
+narrows them, so an account keeps the same label whichever accounts a turn
+attaches. Accounts that already differ keep their label unchanged.
+
 Existing duplicate records are not deleted or rebound by this flow. Their
 accepted session/schedule references and approval policies remain intact.
-Account lists and pickers show available provider names, workspace names and
-emails; internal IDs and hashes are not account labels.
+Account lists and pickers show available provider names, workspace names,
+emails and the person's own names; internal IDs and hashes appear only as the
+last tiebreaker above.
+
+### Naming a connection
+
+API-key and custom-header connections carry no identity: a key doesn't say
+which account it belongs to. So two keys for the same server, with different
+access, would otherwise both read `<domain> account · Yours`. A connection
+therefore has an optional `label`, a name its owner chooses ("Team inbox",
+"Read-only key"):
+
+- Set it when connecting (`label` on `POST .../connections`, or the optional
+  "Name" field in the key form and in Connect's credential step).
+- Change or clear it later with `PATCH .../connections/{id}` and
+  `{ "label": "…" }` or `{ "label": null }`, or with Rename on the connector
+  page. A rename carries no other change (combining it with others is a 422);
+  it honours `expectedVersion` and changes neither the version nor the
+  connection's authority, because it changes no credential or access.
+- It is stored in its own column, so reconnecting or replacing a key keeps it.
+  It is trimmed, control characters become spaces, and it is at most 80
+  characters; blank means no name.
+- A verified provider identity always wins over a name, so a name can never
+  make one account read as another. Rename is offered only where the service
+  gives no identity. The name is display only and never selects credentials.
+
+A new or changed name reaches agents from the next turn: accepted turns keep
+the labels they were built with, so earlier requests are never rewritten.
+
+### Why an account can be missing from a session
+
+A personal account works in the workspaces where its owner turned it on
+("Where it works" on the connector page). A session only binds accounts that
+are turned on in its workspace, so an account connected elsewhere and not
+turned on here has no route and no label in that session's tools, even when
+its owner has several accounts of the same service. Turning it on there adds
+it from the next turn.

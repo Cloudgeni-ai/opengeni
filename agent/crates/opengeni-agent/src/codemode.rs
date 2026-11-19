@@ -248,7 +248,7 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
             }
         }
         CodemodeAction::Show(args) => {
-            print!("{}", client.catalog().await?.show_output(&args.tool)?);
+            print!("{}", client.catalog().await?.show_output(&args.tools)?);
         }
         CodemodeAction::Call(args) => run_call(&client, args).await?,
         CodemodeAction::Read { operation_id } => {
@@ -732,7 +732,7 @@ impl CodemodeClient {
     ) -> Result<Value, CodemodeError> {
         let arguments = read_arguments(&args.arguments).await?;
         let catalog = self.catalog().await?;
-        let entry = catalog.resolve(&args.tool)?;
+        let entry = catalog.resolve_for_call(&args.tool)?;
         let request = CallRequest {
             operation_id: operation_id.clone(),
             catalog_digest: catalog.digest.clone(),
@@ -1109,36 +1109,145 @@ impl Catalog {
         Ok(output)
     }
 
-    fn show_output(&self, name: &str) -> Result<String, CodemodeError> {
-        let entry = self.resolve(name)?;
-        let single = Catalog {
+    /// One tool prints its object; several print an array in the order asked.
+    fn show_output(&self, names: &[String]) -> Result<String, CodemodeError> {
+        let entries = names
+            .iter()
+            .map(|name| self.resolve(name).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+        let shown = Catalog {
             attempt_id: self.attempt_id.clone(),
             digest: self.digest.clone(),
-            entries: vec![entry.clone()],
+            entries,
         };
-        let output = serde_json::to_string_pretty(&single.list_projection()["tools"][0])?;
+        let tools = shown.list_projection()["tools"].clone();
+        let value = if names.len() == 1 {
+            tools[0].clone()
+        } else {
+            tools
+        };
+        let output = serde_json::to_string_pretty(&value)?;
         Ok(format!("{output}\n"))
     }
 
+    /// Resolve the name an agent uses to ask for a tool, as `resolveCatalogTool`
+    /// in `@opengeni/codemode` does: the exact path, model name or
+    /// `serverId.tool`; then the namespace or server with the tool's own name
+    /// (`.` or `__`); then the tool's own name when one tool has it. The first
+    /// level with any match decides; a miss suggests the closest paths.
     fn resolve(&self, name: &str) -> Result<&CatalogEntry, CodemodeError> {
-        let matches: Vec<_> = self
+        self.resolve_name(name, true)
+    }
+
+    /// Resolve the tool a call names. The tool's own name alone does not
+    /// name its server or account, and could mean another account's tool in a
+    /// later turn, so a call by it runs nothing and is told the path instead.
+    fn resolve_for_call(&self, name: &str) -> Result<&CatalogEntry, CodemodeError> {
+        self.resolve_name(name, false)
+    }
+
+    fn resolve_name(&self, name: &str, allow_plain: bool) -> Result<&CatalogEntry, CodemodeError> {
+        let plain = |entry: &CatalogEntry| {
+            entry.identity.tool_name == name
+                || entry.codemode_path.last().is_some_and(|last| last == name)
+        };
+        let levels: [&dyn Fn(&CatalogEntry) -> bool; 3] = [
+            &|entry| {
+                entry.codemode_path.join(".") == name
+                    || entry.model_name == name
+                    || format!("{}.{}", entry.identity.server_id, entry.identity.tool_name) == name
+            },
+            &|entry| {
+                [
+                    entry.codemode_path.first().map_or("", String::as_str),
+                    entry.identity.server_id.as_str(),
+                ]
+                .iter()
+                .any(|prefix| {
+                    format!("{prefix}.{}", entry.identity.tool_name) == name
+                        || format!("{prefix}__{}", entry.identity.tool_name) == name
+                })
+            },
+            &|entry| allow_plain && plain(entry),
+        ];
+        for matches in levels {
+            let found: Vec<_> = self.entries.iter().filter(|entry| matches(entry)).collect();
+            match found.as_slice() {
+                [] => {}
+                [entry] => return Ok(entry),
+                _ => {
+                    let mut paths: Vec<_> = found
+                        .iter()
+                        .map(|entry| entry.codemode_path.join("."))
+                        .collect();
+                    paths.sort();
+                    return Err(CodemodeError::InvalidArguments(format!(
+                        "Ambiguous tool: {name} matches {}. Use one of these paths.",
+                        paths.join(", ")
+                    )));
+                }
+            }
+        }
+        if !allow_plain {
+            let mut paths: Vec<_> = self
+                .entries
+                .iter()
+                .filter(|entry| plain(entry))
+                .map(|entry| entry.codemode_path.join("."))
+                .collect();
+            if !paths.is_empty() {
+                paths.sort();
+                return Err(CodemodeError::InvalidArguments(format!(
+                    "Call a tool by its path, not its own name alone: {}.",
+                    paths.join(", ")
+                )));
+            }
+        }
+        let closest = self.closest_paths(name);
+        Err(CodemodeError::InvalidArguments(if closest.is_empty() {
+            format!("Unknown Codemode tool: {name}")
+        } else {
+            format!(
+                "Unknown Codemode tool: {name}. Closest: {}.",
+                closest.join(", ")
+            )
+        }))
+    }
+
+    fn closest_paths(&self, name: &str) -> Vec<String> {
+        fn words(value: &str) -> std::collections::BTreeSet<String> {
+            let mut spaced = String::new();
+            let mut previous: Option<char> = None;
+            for character in value.chars() {
+                if character.is_ascii_uppercase()
+                    && previous.is_some_and(|before| {
+                        before.is_ascii_lowercase() || before.is_ascii_digit()
+                    })
+                {
+                    spaced.push(' ');
+                }
+                spaced.push(character.to_ascii_lowercase());
+                previous = Some(character);
+            }
+            spaced
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_string)
+                .collect()
+        }
+        let wanted = words(name);
+        let mut scored: Vec<(usize, String)> = self
             .entries
             .iter()
-            .filter(|entry| {
-                entry.model_name == name
-                    || entry.codemode_path.join(".") == name
-                    || format!("{}.{}", entry.identity.server_id, entry.identity.tool_name) == name
+            .map(|entry| {
+                let path = entry.codemode_path.join(".");
+                let have = words(&format!("{path} {}", entry.identity.tool_name));
+                (wanted.intersection(&have).count(), path)
             })
+            .filter(|(score, _)| *score > 0)
             .collect();
-        match matches.as_slice() {
-            [entry] => Ok(entry),
-            [] => Err(CodemodeError::InvalidArguments(format!(
-                "Unknown Codemode tool: {name}"
-            ))),
-            _ => Err(CodemodeError::InvalidArguments(format!(
-                "Ambiguous Codemode tool: {name}"
-            ))),
-        }
+        scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        scored.into_iter().take(5).map(|(_, path)| path).collect()
     }
 
     fn list_projection(&self) -> Value {
@@ -1614,6 +1723,79 @@ mod tests {
     }
 
     #[test]
+    fn shows_several_tools_by_short_reference_names_and_suggests_on_a_miss() {
+        let catalog = catalog(vec![
+            entry("docs", "search", "docs__search", &["docs", "search"]),
+            entry(
+                "account-0123abcd",
+                "records_get-line",
+                "records_0123ab__records_get_line",
+                &["records_0123ab", "records_get_line_9f00aa11"],
+            ),
+            entry(
+                "account-0123abcd",
+                "records_swap",
+                "records_0123ab__records_swap",
+                &["records_0123ab", "records_swap"],
+            ),
+        ]);
+        let names = [
+            "docs.search",
+            "records_0123ab.records_get-line",
+            "records_swap",
+        ]
+        .map(str::to_string);
+        let shown: Value = serde_json::from_str(&catalog.show_output(&names).unwrap()).unwrap();
+        let paths: Vec<_> = shown
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "docs.search",
+                "records_0123ab.records_get_line_9f00aa11",
+                "records_0123ab.records_swap"
+            ]
+        );
+        assert_eq!(
+            catalog
+                .resolve("records_0123ab__records_swap")
+                .unwrap()
+                .identity
+                .tool_name,
+            "records_swap"
+        );
+        let plain_call = catalog
+            .resolve_for_call("records_swap")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            plain_call.contains("by its path")
+                && plain_call.contains("records_0123ab.records_swap"),
+            "{plain_call}"
+        );
+        assert_eq!(
+            catalog
+                .resolve_for_call("records_0123ab.records_swap")
+                .unwrap()
+                .identity
+                .tool_name,
+            "records_swap"
+        );
+        let miss = catalog
+            .resolve("records_swap_line")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            miss.contains("Closest: ") && miss.contains("records_0123ab.records_swap"),
+            "{miss}"
+        );
+    }
+
+    #[test]
     fn call_output_omits_only_exact_structured_content_text_duplicates() {
         let structured = json!({ "items": [{ "id": 1, "title": "Bug \"quoted\"" }], "total": 1 });
         let pretty = serde_json::to_string_pretty(&structured).expect("pretty");
@@ -2045,15 +2227,16 @@ mod tests {
             entry("other", "tool", "other__tool", &["other", "tool"]),
         ]);
         for name in ["server.tool", "server__tool"] {
-            let shown: Value = serde_json::from_str(&catalog.show_output(name).unwrap()).unwrap();
+            let shown: Value =
+                serde_json::from_str(&catalog.show_output(&[name.to_string()]).unwrap()).unwrap();
             assert_eq!(shown, catalog.list_projection()["tools"][0]);
         }
-        assert!(catalog.show_output("missing").is_err());
+        assert!(catalog.show_output(&["missing".to_string()]).is_err());
         catalog
             .entries
             .push(entry("alias", "tool", "server.tool", &["alias", "tool"]));
         assert!(catalog
-            .show_output("server.tool")
+            .show_output(&["server.tool".to_string()])
             .unwrap_err()
             .to_string()
             .contains("Ambiguous"));
@@ -2061,7 +2244,7 @@ mod tests {
         catalog.entries[0].input_schema = json!({"type": "object", "description": ""});
         catalog.entries[0].input_schema =
             json!({"type": "object", "description": "😀".repeat(17_000)});
-        let output = catalog.show_output("server.tool").unwrap();
+        let output = catalog.show_output(&["server.tool".to_string()]).unwrap();
         assert!(output.len() > 65_536);
         let shown: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(shown["inputSchema"], catalog.entries[0].input_schema);

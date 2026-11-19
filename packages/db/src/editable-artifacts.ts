@@ -692,12 +692,18 @@ export async function listEditableArtifactIdsForSession(
     async (tx) => {
       const rows = await rawRows<{ artifact_id: string }>(
         tx,
-        sql`select artifact_id
-          from editable_artifact_session_links
-          where account_id = ${scope.accountId}::uuid
-            and workspace_id = ${scope.workspaceId}::uuid
-            and session_id = ${sessionId}::uuid
-          order by last_used_at desc, artifact_id
+        sql`select l.artifact_id
+          from editable_artifact_session_links l
+          where l.account_id = ${scope.accountId}::uuid
+            and l.workspace_id = ${scope.workspaceId}::uuid
+            and l.session_id = ${sessionId}::uuid
+            -- An archived artifact is removed: it no longer opens.
+            and exists (
+              select 1 from editable_artifacts a
+              where a.account_id = l.account_id and a.workspace_id = l.workspace_id
+                and a.id = l.artifact_id and a.lifecycle_state = 'active'
+            )
+          order by l.last_used_at desc, l.artifact_id
           limit ${limit}`,
       );
       return Object.freeze(rows.map((row) => validateStableId(row.artifact_id, "artifact id")));
@@ -814,6 +820,63 @@ export async function setEditableArtifactAudience(
       );
     return Object.freeze({ visibility, ownerSubjectId: caller });
   });
+}
+
+/**
+ * Archive an artifact (the app's Delete): it leaves the Artifacts list, no
+ * longer opens and never accepts another edit. Archiving is one-way (the update guard refuses
+ * reactivation). The row lock serializes it with commits, which re-check the
+ * lifecycle under the same lock. Someone else's Only me artifact reads as
+ * missing. Archiving an archived artifact is a no-op.
+ */
+export async function archiveEditableArtifact(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  input: Readonly<{ artifactId: string; actor: PersistedEditableArtifactActor }>,
+): Promise<Readonly<{ lifecycle: "archived"; changed: boolean }>> {
+  const scope = validateScope(scopeInput);
+  const artifactId = validateStableId(input.artifactId, "artifact id");
+  const actor = input.actor;
+  validateIdentity(actor.subjectId, "archiving subject id");
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{
+      visibility: string;
+      owner_subject_id: string | null;
+      lifecycle_state: string;
+    }>(
+      tx,
+      sql`select visibility, owner_subject_id, lifecycle_state
+        from editable_artifacts
+        where account_id = ${scope.accountId}::uuid
+          and workspace_id = ${scope.workspaceId}::uuid
+          and id = ${artifactId}
+        for update`,
+    );
+    if (!row || (row.visibility === "user_private" && row.owner_subject_id !== actor.subjectId))
+      throw new EditableArtifactPersistenceError("not_found", "Editable artifact was not found");
+    const decision = await transactionallyAuthorizeEditableArtifactActor(tx, {
+      scope,
+      artifactId,
+      actor,
+      permission: "manage",
+    });
+    if (!decision.allowed) throw new EditableArtifactArchiveForbiddenError();
+    if (row.lifecycle_state === "archived")
+      return Object.freeze({ lifecycle: "archived" as const, changed: false });
+    await tx.execute(sql`update editable_artifacts
+      set lifecycle_state = 'archived', updated_at = greatest(now(), updated_at)
+      where account_id = ${scope.accountId}::uuid
+        and workspace_id = ${scope.workspaceId}::uuid
+        and id = ${artifactId}`);
+    return Object.freeze({ lifecycle: "archived" as const, changed: true });
+  });
+}
+
+export class EditableArtifactArchiveForbiddenError extends Error {
+  constructor() {
+    super("You do not have permission to archive this artifact");
+    this.name = "EditableArtifactArchiveForbiddenError";
+  }
 }
 
 function audienceFromRow(row: {
@@ -3686,7 +3749,7 @@ function committedTransactionFromRow(
   if (row.modality !== durableModality) {
     throw corrupt("Stored transaction modality differs from its durable artifact");
   }
-  const bytes = Uint8Array.from(row.committed_transaction_bytes);
+  const bytes = new Uint8Array(row.committed_transaction_bytes);
   const declaredByteSize = validateInteger(
     row.committed_transaction_byte_size,
     "committed transaction byte size",
@@ -5411,7 +5474,7 @@ function readNativeReceiptBytes(row: CommittedTransactionRow): Uint8Array {
   if (!(row.native_receipt_bytes instanceof Uint8Array)) {
     throw corrupt("Serialized native receipt bytes are missing");
   }
-  const bytes = Uint8Array.from(row.native_receipt_bytes);
+  const bytes = new Uint8Array(row.native_receipt_bytes);
   const byteSize = validateInteger(
     row.native_receipt_byte_size,
     "serialized native receipt byte size",

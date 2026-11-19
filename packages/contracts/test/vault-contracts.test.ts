@@ -347,10 +347,11 @@ describe("ask card secret field", () => {
     expect(output.failures).toEqual(failures);
     expect(RequestHumanInputToolInput.safeParse(output.askCard).success).toBe(true);
     expect(typeof output.hint).toBe("string");
-    // A reference meant for another workspace or session is not asked for
-    // blindly: the hint first says how to pass it on unresolved.
+    // A reference meant as literal text (in a file, or for another workspace
+    // or session) is not asked for blindly: the hint first says how to keep
+    // it unresolved.
     expect(output.hint).toBe(
-      "Nothing was run. A secret is missing. If the reference was meant to reach another workspace, chat or later work unresolved, write it as \\{{secret:…}} and retry. Otherwise call request_human_input with askCard exactly as given, then retry with the returned references.",
+      "Nothing was run. A secret is missing. If the reference was meant to stay literal text, in a file, a command or work it is passed on to, write it as \\{{secret:…}} and retry. Otherwise call request_human_input with askCard exactly as given, then retry with the returned references.",
     );
   });
 });

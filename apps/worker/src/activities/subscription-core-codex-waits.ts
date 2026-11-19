@@ -40,6 +40,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import type { Settings } from "@opengeni/config";
+import type { Observability } from "@opengeni/observability";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { refreshCoreCodexModelEntitlements } from "@opengeni/core";
 import { servingCatalogForBlockedTurn } from "./agent-turn/subscription-serving-catalog";
@@ -432,6 +433,8 @@ export async function reconcileCoreCapacityWait(
     bus: EventBus;
     /** Present on the workflow's reconcile; the in-turn arm has just placed. */
     settings?: Settings;
+    /** Logs the end of a wait this reconcile settles. */
+    observability?: Observability;
   },
   binding: CoreWaitBinding,
   input: {
@@ -492,6 +495,27 @@ export async function reconcileCoreCapacityWait(
     input.sessionId,
     result.events,
   );
+  if (result.action === "resumed" || (result.action === "superseded" && result.reason)) {
+    // Pairs with "Turn started waiting for subscription capacity" (the arm).
+    // A Steer or Cancel that ends a wait deletes the waiter in its own
+    // commit and is logged by neither line.
+    const parkedAt = result.parkedAt ?? null;
+    services.observability?.info("Turn stopped waiting for subscription capacity", {
+      provider: waiter.provider,
+      outcome: result.action,
+      reason: result.action === "superseded" ? result.reason : "capacity_available",
+      waitReason: waiter.waitReason,
+      waitedSeconds: parkedAt
+        ? Math.max(0, Math.round((Date.now() - parkedAt.getTime()) / 1000))
+        : null,
+      waiterId: waiter.waiterId,
+      generation: waiter.generation,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: waiter.blockedTurnId,
+    });
+  }
   if (result.action === "waiting") {
     return { action: "waiting", ...subscriptionCoreCodexCapacityWaitRef(result.waiter) };
   }

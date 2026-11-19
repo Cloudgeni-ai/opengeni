@@ -95,6 +95,75 @@ export async function completeSelfServiceOrganizationSetup(
 export type SignupNetworkSource = { addressHash: string; prefixHash: string };
 
 /**
+ * Whether the owner's mail address is a disposable inbox (its domain or MX
+ * host is a temporary-inbox service, migration 1493), as the API found at
+ * setup. Only this flag is recorded, never the domain or the MX host.
+ */
+export type SignupMailSignal = "disposable" | "clear";
+
+/**
+ * Hands the setup trigger the owner's mail signal for this transaction
+ * (migration 1493). Transaction-local and set by the trusted API; null
+ * records nothing (unknown).
+ */
+export async function setSignupMailSignalForSetup(
+  txDb: Database,
+  signal: SignupMailSignal | null | undefined,
+): Promise<void> {
+  await rawRows(
+    txDb,
+    sql`select pg_catalog.set_config('opengeni.signup_owner_mail_signal', ${signal ?? ""}, true)`,
+  );
+}
+
+/**
+ * Hands the setup receipt trigger the signup network (migration 1354) for
+ * this transaction. Every route that can create a self-serve organization
+ * must call it before the receipt is written, so the network rate limit and
+ * velocity rule see the organization. Transaction-local and set by the
+ * trusted API, never from the request body. Null records nothing.
+ */
+export async function setSignupNetworkSourceForSetup(
+  txDb: Database,
+  signupNetwork: SignupNetworkSource | null | undefined,
+): Promise<void> {
+  await rawRows(
+    txDb,
+    sql`select pg_catalog.set_config(
+      'opengeni.signup_network_source',
+      ${
+        signupNetwork
+          ? JSON.stringify({
+              addressHash: signupNetwork.addressHash,
+              prefixHash: signupNetwork.prefixHash,
+            })
+          : ""
+      }, true
+    )`,
+  );
+}
+
+/**
+ * Accounts the setup receipt trigger of this transaction asked to evaluate
+ * after commit (this one first, then recent same-network organizations).
+ * Empty for a replay of a committed setup or when detection is off.
+ */
+export async function readSignupNetworkEvaluateAccounts(txDb: Database): Promise<string[]> {
+  // The network rules' list (1354, 1471, 1484), then the email cluster
+  // rule's (1489), each this organization first; duplicates once.
+  const [evaluate] = await rawRows<{ ids: string | null; email_ids: string | null }>(
+    txDb,
+    sql`select pg_catalog.current_setting('opengeni.signup_network_evaluate_accounts', true) as ids,
+      pg_catalog.current_setting('opengeni.signup_email_cluster_evaluate_accounts', true) as email_ids`,
+  );
+  const ids = [
+    ...(evaluate?.ids ?? "").split(","),
+    ...(evaluate?.email_ids ?? "").split(","),
+  ].filter((id) => /^[0-9a-f-]{36}$/u.test(id));
+  return [...new Set(ids)];
+}
+
+/**
  * {@link completeSelfServiceOrganizationSetup} that also hands the setup
  * receipt trigger the signup network (migration 1354). A new self-serve
  * organization records it and may be refused with SQLSTATE OG429 by the
@@ -114,6 +183,7 @@ export async function completeSelfServiceOrganizationSetupWithSignupNetwork(
     trialCreditsEnabled?: boolean;
     trialCreditModelIds?: string[] | undefined;
     signupNetwork?: SignupNetworkSource | null;
+    signupMailSignal?: SignupMailSignal | null;
   },
 ): Promise<{
   setup: CompleteSelfServiceOrganizationSetupResponseType;
@@ -140,20 +210,8 @@ export async function completeSelfServiceOrganizationSetupWithSignupNetwork(
       ${input.trialCreditModelIds ? JSON.stringify(input.trialCreditModelIds) : ""}, true
     )`,
     );
-    await rawRows(
-      txDb,
-      sql`select pg_catalog.set_config(
-      'opengeni.signup_network_source',
-      ${
-        input.signupNetwork
-          ? JSON.stringify({
-              addressHash: input.signupNetwork.addressHash,
-              prefixHash: input.signupNetwork.prefixHash,
-            })
-          : ""
-      }, true
-    )`,
-    );
+    await setSignupNetworkSourceForSetup(txDb, input.signupNetwork);
+    await setSignupMailSignalForSetup(txDb, input.signupMailSignal);
     const [row] = await rawRows<{ result: unknown }>(
       txDb,
       sql`select complete_self_service_organization_setup(
@@ -168,14 +226,7 @@ export async function completeSelfServiceOrganizationSetupWithSignupNetwork(
     );
     const setup = CompleteSelfServiceOrganizationSetupResponse.parse(row?.result);
     // Set only by the receipt trigger of this transaction, for a new receipt.
-    const [evaluate] = await rawRows<{ ids: string | null }>(
-      txDb,
-      sql`select pg_catalog.current_setting('opengeni.signup_network_evaluate_accounts', true) as ids`,
-    );
-    const evaluateAccountIds = (evaluate?.ids ?? "")
-      .split(",")
-      .filter((id) => /^[0-9a-f-]{36}$/u.test(id));
-    return { setup, evaluateAccountIds };
+    return { setup, evaluateAccountIds: await readSignupNetworkEvaluateAccounts(txDb) };
   });
 }
 

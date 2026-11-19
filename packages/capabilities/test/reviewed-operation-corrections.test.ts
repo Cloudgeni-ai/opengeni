@@ -197,7 +197,7 @@ describe("reviewed operation corrections", () => {
     const revision = compile(MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION);
     const draft = revision.tools.find((t) => t.operationKey === "me.CreateMessages")!;
     expect(draft.name).toBe("Create draft message");
-    expect(draft.description).toContain("Create a draft in");
+    expect(draft.description).toContain("Create a new email draft in");
     expect(draft.description).not.toContain("open extension");
     expect(revision.tools.find((t) => t.operationKey === "me.ListMessages")!.name).toBe(
       "List messages",
@@ -337,14 +337,88 @@ describe("reviewed operation corrections", () => {
     expect(url).toBe("https://api.example.com/v1/d:/a/b");
   });
 
-  test("every reviewed request path names the provider path's parameters", () => {
-    const names = (path: string) => [...path.matchAll(/\{\+?([^}]+)\}/g)].map((m) => m[1]).sort();
+  test("every path parameter only a reviewed request path names is described", () => {
+    const names = (path: string) => [...path.matchAll(/\{\+?([^}]+)\}/g)].map((m) => m[1]!);
     for (const definition of CORE_INTEGRATION_DEFINITIONS) {
       if (definition.source.kind !== "openapi") continue;
       for (const entry of definition.source.operationAllowlist ?? []) {
         if (!entry.requestPath) continue;
-        expect(names(requestPathTemplate(entry.requestPath))).toEqual(names(entry.path));
+        const added = names(requestPathTemplate(entry.requestPath)).filter(
+          (name) => !names(entry.path).includes(name),
+        );
+        for (const name of added) expect(entry.pathParameterDescriptions?.[name]).toBeString();
       }
     }
+  });
+
+  test("a request path with other path parameters gets its own parameter list", async () => {
+    const spec = {
+      openapi: "3.0.4",
+      info: { title: "Files", version: "1" },
+      servers: [{ url: "https://api.example.com/v1" }],
+      paths: {
+        "/drives/{drive-id}/items/{item-id}": {
+          get: {
+            operationId: "items.get",
+            parameters: [{ name: "$select", in: "query", schema: { type: "string" } }],
+            responses: ok,
+          },
+          parameters: [pathParameter("drive-id"), pathParameter("item-id")],
+        },
+      },
+    };
+    const definition = {
+      ...MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+      id: "files",
+      source: {
+        kind: "openapi",
+        url: "https://api.example.com/openapi.json",
+        operationAllowlist: [
+          { path: "/drives/{drive-id}/items/{item-id}", method: "get" },
+          {
+            path: "/drives/{drive-id}/items/{item-id}",
+            method: "get",
+            operationId: "items.getByPath",
+            summary: "Get item by path",
+            requestPath: "/drives/{drive-id}/root:/{+path}",
+            pathParameterDescriptions: { path: "The item's path." },
+          },
+        ],
+      },
+    } as unknown as IntegrationDefinition;
+    const revision = compileOpenApiRevision(filterOpenApiDocumentForDefinition(spec, definition), {
+      definitionId: "files",
+    });
+    // The provider operation keeps its tool; the reviewed one is a second tool.
+    expect(revision.tools.map((tool) => tool.id).sort()).toEqual(["items_get", "items_getbypath"]);
+    const byPath = revision.tools.find((tool) => tool.id === "items_getbypath")!;
+    expect(byPath.name).toBe("Get item by path");
+    const pathSchema = (byPath.inputSchema as { properties: { path: Record<string, unknown> } })
+      .properties.path as {
+      properties: Record<string, { description?: string }>;
+      required: string[];
+    };
+    expect(Object.keys(pathSchema.properties).sort()).toEqual(["drive-id", "path"]);
+    expect(pathSchema.required.sort()).toEqual(["drive-id", "path"]);
+    expect(pathSchema.properties.path!.description).toBe("The item's path.");
+    expect(
+      revision.bindings.items_getbypath!.parameters.map((parameter) => parameter.name).sort(),
+    ).toEqual(["$select", "drive-id", "path"]);
+    let url = "";
+    await invokeOpenApiOperation(
+      {
+        revision,
+        authority: { accountId: "a", workspaceId: "w" },
+        transport: {
+          async fetch(input) {
+            url = String(input);
+            return Response.json({});
+          },
+        },
+      },
+      "items_getbypath",
+      { path: { "drive-id": "d", path: "Documents/Q4 plan.docx" } },
+    );
+    expect(url).toBe("https://graph.microsoft.com/v1.0/drives/d/root:/Documents/Q4%20plan.docx");
   });
 });

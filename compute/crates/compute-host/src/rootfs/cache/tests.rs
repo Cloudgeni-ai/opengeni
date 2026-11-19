@@ -29,11 +29,14 @@ fn age(path: &Path, by: Duration) {
         .unwrap();
 }
 
-/// How many files `rootfs` holds, besides the use marks.
+/// How many files `rootfs` holds, besides the use marks and stamps.
 fn images_in(rootfs: &Path) -> usize {
     fs::read_dir(rootfs)
         .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().file_name() != "used")
+        .filter(|entry| {
+            let name = entry.as_ref().unwrap().file_name();
+            name != "used" && name != "checked"
+        })
         .count()
 }
 
@@ -68,10 +71,99 @@ async fn an_image_is_fetched_once_checked_and_then_kept() {
     // agent.
     assert!(cache.get(image, &NoStore).await.is_ok());
     let reopened = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
-    // Checked against its id before the next agent uses it.
-    assert!(!reopened.has(image));
+    // Checked by its fetch, and stamped: the next agent takes it as is.
+    assert!(reopened.has(image));
     assert!(reopened.hold(image).await.is_some());
     assert!(reopened.has(image));
+}
+
+/// Writes `bytes` over the file at `path`, keeping its length and its
+/// modified time: a change a stamp cannot see.
+fn overwrite_unseen(path: &Path, bytes: &[u8]) {
+    let modified = fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(fs::metadata(path).unwrap().len(), bytes.len() as u64);
+    fs::write(path, bytes).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+}
+
+/// An image found to match its id is stamped with its file's identity,
+/// and a later agent takes it as checked without reading it while it is
+/// that file: checking hashes every byte, which cost a 64 GiB image's
+/// first create after each restart 15 to 33 seconds. The stamp is
+/// written whichever way the image was found to match: fetched, built
+/// here, or checked after a restart.
+#[tokio::test]
+async fn a_next_agent_takes_an_image_found_to_match_as_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    let (store, fetched) = stored(dir.path(), b"fetched").await;
+    let cache = Cache::open(rootfs.clone(), WEEK, Ownership::detached()).unwrap();
+    drop(cache.get(fetched, &store).await.unwrap());
+    let built = dir.path().join("built.ext4");
+    fs::write(&built, b"built here").unwrap();
+    let made = ImageId(*blake3::hash(b"built here").as_bytes());
+    cache.adopt(made, &built).await.unwrap();
+    // Left unstamped, as an earlier agent left every image.
+    let left = ImageId(*blake3::hash(b"left before").as_bytes());
+    fs::write(rootfs.join(format!("{left}.ext4")), b"left before").unwrap();
+    drop(cache);
+
+    let reopened = Cache::open(rootfs.clone(), WEEK, Ownership::detached()).unwrap();
+    assert!(reopened.has(fetched) && reopened.has(made));
+    assert!(!reopened.has(left), "unstamped: checked first");
+    assert!(reopened.hold(left).await.is_some());
+    drop(reopened);
+
+    // Nothing is read: a change the stamp cannot see goes unnoticed, which
+    // shows the agent took each image on its stamp alone.
+    overwrite_unseen(&rootfs.join(format!("{fetched}.ext4")), b"FETCHED");
+    overwrite_unseen(&rootfs.join(format!("{left}.ext4")), b"LEFT BEFORE");
+    let again = Cache::open(rootfs, WEEK, Ownership::detached()).unwrap();
+    for image in [fetched, made, left] {
+        assert!(again.has(image), "taken as checked");
+    }
+}
+
+/// A stamp vouches only for the file it was taken of: an image whose file
+/// changed since, or was replaced, is checked again, and removed if it no
+/// longer matches its id.
+#[tokio::test]
+async fn an_image_changed_or_replaced_since_its_stamp_is_checked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    let cache = Cache::open(rootfs.clone(), WEEK, Ownership::detached()).unwrap();
+    let mut images = Vec::new();
+    for bytes in [&b"changed"[..], b"replaced"] {
+        let (store, image) = stored(dir.path(), bytes).await;
+        drop(cache.get(image, &store).await.unwrap());
+        images.push(image);
+    }
+    let [changed, replaced] = images[..] else {
+        panic!()
+    };
+    drop(cache);
+    let changed_path = rootfs.join(format!("{changed}.ext4"));
+    fs::write(&changed_path, b"CHANGED").unwrap();
+    age(&changed_path, Duration::from_secs(60));
+    // The same bytes in a new file: another inode.
+    let replaced_path = rootfs.join(format!("{replaced}.ext4"));
+    let other = dir.path().join("other.ext4");
+    fs::write(&other, b"replaced").unwrap();
+    fs::rename(&other, &replaced_path).unwrap();
+
+    let reopened = Cache::open(rootfs, WEEK, Ownership::detached()).unwrap();
+    assert!(!reopened.has(changed) && !reopened.has(replaced));
+    assert!(
+        reopened.hold(changed).await.is_none(),
+        "no longer its image"
+    );
+    assert!(!changed_path.exists());
+    assert!(reopened.hold(replaced).await.is_some(), "still its image");
 }
 
 /// A file an earlier agent left under an image's name is used only if it
@@ -315,7 +407,9 @@ async fn relief_removes_an_image_now_unless_in_use() {
     assert!(since < Duration::from_secs(60), "just used: {since:?}");
 
     assert!(cache.remove(used).await, "unused, if lately");
+    assert!(cache.stamp(held).exists(), "stamped when fetched");
     assert!(!cache.has(used) && !cache.path(used).exists() && !cache.mark(used).exists());
+    assert!(!cache.stamp(used).exists(), "its stamp goes with it");
     assert!(!cache.remove(held).await, "a copy holds it");
     assert!(cache.has(held) && cache.path(held).exists());
     assert_eq!(cache.images(), vec![held]);
@@ -415,8 +509,8 @@ async fn an_image_without_a_use_mark_ages_from_its_file() {
     assert!(cache.hold(recent).await.is_some());
 }
 
-/// A use mark whose image is gone (a removal stopped between the two) or
-/// that names no image is removed when the cache opens.
+/// A use mark or stamp whose image is gone (a removal stopped between
+/// them) or that names no image is removed when the cache opens.
 #[tokio::test]
 async fn marks_without_their_image_are_removed_on_open() {
     let dir = tempfile::tempdir().unwrap();
@@ -427,12 +521,16 @@ async fn marks_without_their_image_are_removed_on_open() {
     let gone = ImageId(*blake3::hash(b"gone").as_bytes());
     fs::write(cache.mark(gone), b"").unwrap();
     fs::write(rootfs.join("used").join("not-an-image"), b"").unwrap();
+    fs::write(cache.stamp(gone), b"").unwrap();
+    fs::write(rootfs.join("checked").join("not-an-image"), b"").unwrap();
     let reopened = Cache::open(rootfs.clone(), WEEK, Ownership::detached()).unwrap();
-    let names: Vec<_> = fs::read_dir(rootfs.join("used"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(names, [image.to_string()]);
+    for marks in ["used", "checked"] {
+        let names: Vec<_> = fs::read_dir(rootfs.join(marks))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, [image.to_string()], "{marks}");
+    }
     assert!(reopened.hold(image).await.is_some());
 }
 

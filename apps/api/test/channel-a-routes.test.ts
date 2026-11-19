@@ -58,7 +58,10 @@ test("pending synchronous commands preserve their original handle and never refr
   const mapped = mapChannelAError(pending);
   expect(mapped).toBeInstanceOf(HTTPException);
   expect((mapped as HTTPException).status).toBe(409);
-  expect((mapped as HTTPException).message).toContain("pending or unknown");
+  expect((mapped as HTTPException).message).toContain(
+    "outcome of an internal filesystem step is unknown",
+  );
+  expect((mapped as HTTPException).message).toContain("no handle to read");
   expect((mapped as HTTPException).message).not.toMatch(/retry|try again|already wrote/iu);
   expect(shouldEvictChannelAHandleAfterError(pending, "read")).toBe(false);
   let starts = 0;

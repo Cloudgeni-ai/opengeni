@@ -47,12 +47,28 @@ type Adapter = {
 type Scope = { adapter: Adapter; captures: Set<Capture> };
 const adapters = new WeakMap<object, Adapter>();
 const scopes = new AsyncLocalStorage<Scope>();
+// Forwarding views (a routing Proxy that adds placement-private control, for
+// example) never own a collector. Their commands run on the physical session.
+const physicalSessions = new WeakMap<object, object>();
+
+function physicalSession<T extends object>(session: T): T {
+  return (physicalSessions.get(session) as T | undefined) ?? session;
+}
+
+/** Declare that `view` only forwards to `physical`. Native collection (its
+ * adapter, scope and terminal pages) is keyed by the physical session, so a
+ * runner given the view must enter and observe that same collection; keying
+ * it by the view would leave the SDK's own receipt with no lossless output. */
+export function shareNativeSynchronousCollection<T extends object>(view: T, physical: object): T {
+  if (view !== physical) physicalSessions.set(view, physicalSession(physical));
+  return view;
+}
 
 /** True while a worker synchronous runner's collection scope covers this
  * session. Its one Start must then go through the SDK's own `exec`, which is
  * where the scope observes the exact child and its separate streams. */
 export function nativeSynchronousCollectionCovers(session: object): boolean {
-  const adapter = adapters.get(session);
+  const adapter = adapters.get(physicalSession(session));
   return adapter !== undefined && scopes.getStore()?.adapter === adapter;
 }
 type TerminalProviderScope = {
@@ -63,7 +79,8 @@ type TerminalProviderScope = {
 };
 const terminalProviderPages = new AsyncLocalStorage<TerminalProviderScope>();
 
-function terminalProviderScope(session: object): TerminalProviderScope | undefined {
+function terminalProviderScope(view: object): TerminalProviderScope | undefined {
+  const session = physicalSession(view);
   // Routing nests its collector proxy inside the exact backend's scope.
   for (let scope = terminalProviderPages.getStore(); scope; scope = scope.parent)
     if (!scope.closed && scope.session === session) return scope;
@@ -590,7 +607,7 @@ export async function releaseNativeSynchronousCommandOutput(
   session: object,
   receipt: unknown,
 ): Promise<void> {
-  const adapter = adapters.get(session);
+  const adapter = adapters.get(physicalSession(session));
   const page = adapter?.pages.get(receipt);
   if (
     !adapter ||
@@ -611,7 +628,7 @@ export async function releaseNativeSynchronousCommandOutput(
 /** Runtime-owned native session aliases are readonly, turn-owned locators,
  * not SDK PTYs or durable cross-worker background command identities. */
 export function isNativeSynchronousCommandHandle(session: object, handle: number): boolean {
-  return adapters.get(session)?.captures.get(handle)?.daytona !== undefined;
+  return adapters.get(physicalSession(session))?.captures.get(handle)?.daytona !== undefined;
 }
 
 /** Setup aliases change only SDK metadata, never the original native stream.
@@ -622,7 +639,7 @@ export function aliasNativeSynchronousCommandOutput(
   aliased: string,
   sessionId: number,
 ): void {
-  const adapter = adapters.get(session);
+  const adapter = adapters.get(physicalSession(session));
   const page = adapter?.pages.get(original);
   if (!adapter || !page) return;
   for (const capture of adapter.captures.values()) {
@@ -932,9 +949,10 @@ export function withoutNativeSynchronousCommandCollection<T>(run: () => T): T {
  * scope; model/background/interactive commands outside it retain SDK semantics.
  * Unknown active captures stay bound for later exact-handle control reads. */
 export async function withNativeSynchronousCommandCollection<T>(
-  session: ChannelASession,
+  view: ChannelASession,
   run: () => Promise<T>,
 ): Promise<T> {
+  const session = physicalSession(view);
   if (!terminalProviderScope(session)) {
     const terminal: TerminalProviderScope = {
       session,

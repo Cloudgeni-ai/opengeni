@@ -99,7 +99,7 @@ export function isTimelineUserQuestion(event: SessionEvent): boolean {
    sequence) into renderable items: chat messages with accumulated streaming
    deltas, reasoning summaries, tool calls matched to their outputs, sandbox
    operations with command output, spawned-worker status (the manager's
-   `session_create` / `session_send_message` orchestration calls), goal
+   `session_create` / `session_queue_message` orchestration calls), goal
    markers, status changes, and turn failures.
 
    It is a pure function — same events in, same items out — so it can be
@@ -108,7 +108,9 @@ export function isTimelineUserQuestion(event: SessionEvent): boolean {
 
 /** Tool leaves on the first-party Opengeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
-const WORKER_MESSAGE_TOOL = "session_send_message";
+const WORKER_MESSAGE_TOOL = "session_queue_message";
+/** The same tool's earlier name, still in older sessions' history. */
+const RETIRED_WORKER_MESSAGE_TOOL = "session_send_message";
 const WORKER_FAILURE_CODE_MAX_LENGTH = 128;
 const WORKER_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
 type PendingWaitOutcome = { id: string; reason: string; occurredAt: string };
@@ -1014,7 +1016,8 @@ export function buildTimeline(
         const workerArgs = invoked ? invoked.arguments : args;
         if (
           toolMatchesLeaf(workerName, WORKER_SPAWN_TOOL) ||
-          toolMatchesLeaf(workerName, WORKER_MESSAGE_TOOL)
+          toolMatchesLeaf(workerName, WORKER_MESSAGE_TOOL) ||
+          toolMatchesLeaf(workerName, RETIRED_WORKER_MESSAGE_TOOL)
         ) {
           const spawn = toolMatchesLeaf(workerName, WORKER_SPAWN_TOOL);
           const title = spawn ? workerTitle(workerArgs) : null;
@@ -1762,11 +1765,15 @@ export function buildTimeline(
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           authoritySource: payload.authoritySource === "host" ? "host" : null,
-          reason: authNeededReason(
-            payload.authoritySource === "host" && typeof payload.authorizationUrl === "string"
-              ? (payload.hostReason ?? payload.reason)
-              : payload.reason,
-          ),
+          // The exact account reason beside a legacy-safe reason, when known.
+          reason:
+            payload.accountReason === "account_scope_fixed"
+              ? "account_scope_fixed"
+              : authNeededReason(
+                  payload.authoritySource === "host" && typeof payload.authorizationUrl === "string"
+                    ? (payload.hostReason ?? payload.reason)
+                    : payload.reason,
+                ),
           scopes: stringList(payload.scopes),
           resource: typeof payload.resource === "string" ? payload.resource : null,
           toolName: typeof payload.toolName === "string" ? payload.toolName : null,
@@ -4938,6 +4945,7 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "unsupported_auth",
   "resource_scope_unavailable",
   "designated_credential_unavailable",
+  "account_scope_fixed",
 ]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {
@@ -4974,7 +4982,27 @@ function capabilityAuthorizationRequest(
     action: action as NonNullable<AuthNeededItem["capability"]>["action"],
     rationale: record.rationale,
     requiredVariables: stringList(record.requiredVariables),
+    ...connectInputs(record.inputs),
   };
+}
+
+/** The values a capability card asks the person for before connecting. */
+function connectInputs(value: unknown): Pick<NonNullable<AuthNeededItem["capability"]>, "inputs"> {
+  if (!Array.isArray(value)) return {};
+  const inputs = value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const input = entry as Record<string, unknown>;
+    if (typeof input.id !== "string" || !input.id || typeof input.label !== "string") return [];
+    return [
+      {
+        id: input.id,
+        label: input.label,
+        ...(typeof input.placeholder === "string" ? { placeholder: input.placeholder } : {}),
+        ...(typeof input.value === "string" ? { value: input.value } : {}),
+      },
+    ];
+  });
+  return inputs.length > 0 ? { inputs } : {};
 }
 
 function customMcpSetupRequest(value: unknown): NonNullable<AuthNeededItem["setupRequest"]> | null {
@@ -5018,7 +5046,7 @@ function reasoningText(payload: unknown): string {
     .join("");
 }
 
-/** The worker's initial/sent message from `session_create`/`session_send_message` args. */
+/** The worker's initial/sent message from `session_create`/`session_queue_message` args. */
 function workerPrompt(args: unknown): string | null {
   const record = asRecord(typeof args === "string" ? tryParseJson(args) : args);
   for (const key of ["initialMessage", "message", "text", "prompt"] as const) {

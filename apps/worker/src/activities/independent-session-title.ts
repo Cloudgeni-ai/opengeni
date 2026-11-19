@@ -56,8 +56,10 @@ import {
   SessionTitleResponse,
   SessionTitleRouteUnavailableError,
   sessionTitleApiConnectionId,
+  sessionTitleFailureDiagnostic,
   sessionTitleRouteIdentity,
   titlePricingJson,
+  type SessionTitleFailureStage,
 } from "./session-title-route";
 import {
   SESSION_TITLE_LEASE_MS,
@@ -185,6 +187,8 @@ export async function reconcileSessionTitleOperation(
     (await finishSessionTitleOperation(db, { ...claim, state }))
       ? { action: "terminal" }
       : { action: "retry", delayMs: 5_000 };
+  // Where the attempt failed, for the content-free failure diagnostic.
+  let stage: SessionTitleFailureStage = "admission";
   try {
     const key = environmentsEncryptionKeyBytes(service.settings);
     if (!key) throw new Error("Session title encryption key is unavailable");
@@ -198,6 +202,7 @@ export async function reconcileSessionTitleOperation(
       return await finish(refused ? "failed" : "unknown");
     }
     if (operation.state === "responded") {
+      stage = "settlement";
       const recoveredSettings = await settingsWithModelProviderCredentials(db, {
         ...input,
         settings: service.settings,
@@ -306,6 +311,7 @@ export async function reconcileSessionTitleOperation(
         // SDK retries within this live invocation reuse one reservation. A new
         // activity still sees dispatching and never replays an uncertain call.
         let reservation: Promise<void> | undefined;
+        stage = "provider_request";
         const result = operation.connectionId
           ? await generate()
           : await withModelTransportStartedObserver(
@@ -319,6 +325,7 @@ export async function reconcileSessionTitleOperation(
         // Paid usage is accounting truth even if the metadata holder expired
         // while the provider was answering. The same stable key is replay-safe
         // when the retained-response transaction later records its event/fact.
+        stage = "response";
         let billingFailure: { error: unknown } | null = null;
         try {
           if (result.usage)
@@ -362,7 +369,9 @@ export async function reconcileSessionTitleOperation(
             errorClass: error instanceof Error ? error.name : "UnknownError",
           });
         });
+        stage = "billing";
         if (billingFailure) throw billingFailure.error;
+        stage = "settlement";
         const retained = await getSessionTitleOperation(db, input);
         if (!retained) throw new Error("Title operation disappeared");
         if (
@@ -399,7 +408,7 @@ export async function reconcileSessionTitleOperation(
     service.observability.warn("Independent session title failed", {
       operationId: operation.id,
       terminalStateCommitted: outcome.action === "terminal",
-      errorClass: error instanceof Error ? error.name : "UnknownError",
+      ...sessionTitleFailureDiagnostic(error, stage),
     });
     return outcome;
   }

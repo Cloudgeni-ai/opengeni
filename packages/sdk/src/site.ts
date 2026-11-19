@@ -75,6 +75,8 @@ import type {
   ToolGatewayResolvedTool,
   ToolGatewayInvokeRequest,
   ToolGatewayInvokeResponse,
+  ToolGatewaySiteReadinessResponse,
+  ToolGatewayTarget,
 } from "./types";
 
 export const OPENGENI_SITE_BRIDGE_VERSION = 2 as const;
@@ -242,6 +244,8 @@ export type OpenGeniSiteBridgeReadyMessage = {
   viewer?: 1;
   /** The host answers the `location` and `location.navigate` bridge methods and posts location events. */
   location?: 1;
+  /** The host answers the `readiness` bridge method and posts `tool_readiness` events. */
+  toolReadiness?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -253,7 +257,15 @@ export type OpenGeniSiteToolCallRequest = Omit<
 /** Host-filtered catalog projection. Tenant routing context never enters Site code. */
 export type OpenGeniSiteToolCatalog = Omit<ToolGatewayCatalog, "accountId" | "workspaceId">;
 
-export type OpenGeniSiteWorkspaceTools = OpenGeniWorkspaceTools<OpenGeniSiteToolCatalog>;
+export type OpenGeniSiteWorkspaceTools = OpenGeniWorkspaceTools<OpenGeniSiteToolCatalog> & {
+  /**
+   * Call `listener` when what the viewer can do with this Site's tools may
+   * have changed: after they connect or reconnect an account, choose
+   * "Always allow", or reset allowed actions. Ask `$readiness` again then.
+   * Returns a function that stops listening.
+   */
+  readonly $onReadinessChange: (listener: () => void) => () => void;
+};
 
 export type OpenGeniSiteBridgeRequestMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_REQUEST;
@@ -265,6 +277,7 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: "declarations" }
   | { method: "resolve"; payload: ToolGatewayResolveRequest }
   | { method: "invoke"; payload: ToolGatewayInvokeRequest }
+  | { method: "readiness"; payload: { targets: ToolGatewayTarget[] } }
   | { method: typeof OPENGENI_SITE_BRIDGE_VIEWER_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_LOCATION_METHOD }
@@ -274,13 +287,14 @@ export type OpenGeniSiteBridgeRequestMessage = {
     }
 );
 
-/** The host's location changed (back/forward, the address bar, or a navigate call). */
+/**
+ * The host's location changed (back/forward, the address bar, or a navigate
+ * call), or what the viewer can do with the Site's tools may have changed.
+ */
 export type OpenGeniSiteBridgeEventMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_EVENT;
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
-  event: "location";
-  location: OpenGeniSiteLocationValue;
-};
+} & ({ event: "location"; location: OpenGeniSiteLocationValue } | { event: "tool_readiness" });
 
 export type OpenGeniSiteBridgeCancelMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_CANCEL;
@@ -301,6 +315,7 @@ export type OpenGeniSiteBridgeResponseMessage = {
         | ToolGatewayDeclarationsResponse
         | ToolGatewayResolvedTool
         | ToolGatewayInvokeResponse
+        | ToolGatewaySiteReadinessResponse
         | OpenGeniSiteViewer
         | OpenGeniSiteSignInResult
         | OpenGeniSiteLocationValue;
@@ -455,11 +470,19 @@ export function createOpenGeniSiteClient(
     toolGatewayMode: options.toolGatewayMode ?? "target",
     fetch: (input, init) => transport.fetch(input, init),
   });
+  const workspaceTools = new OpenGeniToolsClient(transport).forWorkspace("site-host");
+  const onReadinessChange = (listener: () => void) => transport.subscribeToolReadiness(listener);
+  const tools = new Proxy(workspaceTools, {
+    get: (target, property, receiver) =>
+      property === "$onReadinessChange"
+        ? onReadinessChange
+        : Reflect.get(target, property, receiver),
+  }) as unknown as OpenGeniSiteWorkspaceTools;
   return {
     client,
     ai: createOpenGeniSiteAi(client, SITE_WORKSPACE),
     workspaceId: SITE_WORKSPACE,
-    tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
+    tools,
     data: siteData.data,
     files: siteData.files,
     sql: siteSql,
@@ -494,7 +517,28 @@ type SiteLocationTransport = {
   location(): Promise<OpenGeniSiteLocationValue | null>;
   navigate(to: string, replace: boolean): Promise<OpenGeniSiteLocationValue>;
   subscribeLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void;
+  subscribeToolReadiness(listener: () => void): () => void;
 };
+
+function readinessUnsupported(): OpenGeniSiteBridgeError {
+  return new OpenGeniSiteBridgeError(
+    "readiness_unsupported",
+    "This Site host doesn't report tool readiness; call the tool and handle its result",
+  );
+}
+
+/** Call every readiness listener, keeping one listener's failure from reaching the others. */
+function notifyReadinessListeners(listeners: ReadonlySet<() => void>): void {
+  for (const listener of [...listeners]) {
+    try {
+      listener();
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
+  }
+}
 
 /** Call every listener, keeping one listener's failure from reaching the others. */
 function notifyLocationListeners(
@@ -571,6 +615,11 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport, SiteL
     // Every client on the page hears it, as with a bridge host.
     notifyLocationListeners(localLocationListeners, now);
     return now;
+  }
+
+  /** A local preview has no Opengeni frame to change what the viewer can do. */
+  subscribeToolReadiness(_listener: () => void): () => void {
+    return () => undefined;
   }
 
   subscribeLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void {
@@ -723,6 +772,7 @@ function localCodemodeSuffix(method: string, path: string): string {
   if (method === "POST" && path.endsWith("/tools/calls")) return "/calls";
   if (method === "POST" && path.endsWith("/tools/resolve")) return "/resolve";
   if (method === "POST" && path.endsWith("/tools/invoke")) return "/invoke";
+  if (method === "POST" && path.endsWith("/tools/readiness")) throw readinessUnsupported();
   throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported Site tool request");
 }
 
@@ -758,6 +808,8 @@ export function isOpenGeniSiteBridgeRequestMessage(
     return true;
   if (value.method === OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD)
     return isRecord(value.payload) && typeof value.payload.to === "string";
+  if (value.method === "readiness")
+    return isRecord(value.payload) && Array.isArray(value.payload.targets);
   return ["call", "resolve", "invoke"].includes(String(value.method)) && isRecord(value.payload);
 }
 
@@ -768,8 +820,8 @@ export function isOpenGeniSiteBridgeEventMessage(
     isRecord(value) &&
     value.type === OPENGENI_SITE_BRIDGE_EVENT &&
     value.version === OPENGENI_SITE_BRIDGE_VERSION &&
-    value.event === "location" &&
-    openGeniSiteLocationValue(value.location) !== null
+    ((value.event === "location" && openGeniSiteLocationValue(value.location) !== null) ||
+      value.event === "tool_readiness")
   );
 }
 
@@ -816,7 +868,9 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
   private siteData = false;
   private viewerSupported = false;
   private locationSupported = false;
+  private toolReadiness = false;
   private readonly locationListeners = new Set<(location: OpenGeniSiteLocationValue) => void>();
+  private readonly readinessListeners = new Set<() => void>();
   private readonly options: OpenGeniSiteClientOptions;
   private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
@@ -927,6 +981,21 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
     };
   }
 
+  subscribeToolReadiness(listener: () => void): () => void {
+    this.readinessListeners.add(listener);
+    // Connect so the host's events reach this client (see subscribeLocation).
+    const attempt = (retries: number): void => {
+      this.connect().catch(() => {
+        if (retries > 0 && !this.closed && this.readinessListeners.size > 0)
+          setTimeout(() => attempt(retries - 1), 1_000);
+      });
+    };
+    attempt(2);
+    return () => {
+      this.readinessListeners.delete(listener);
+    };
+  }
+
   private locationResult(value: unknown): OpenGeniSiteLocationValue {
     const location = openGeniSiteLocationValue(value);
     if (!location)
@@ -960,6 +1029,17 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         requestOptions,
       )) as T;
     }
+    if (method === "POST" && path.endsWith("/tools/readiness")) {
+      await this.connect();
+      if (!this.toolReadiness) throw readinessUnsupported();
+      if (!isRecord(body) || !Array.isArray(body.targets))
+        throw new TypeError("Site readiness targets are required");
+      // The host supplies the Site and version; nothing else crosses.
+      return (await this.request(
+        { method: "readiness", payload: { targets: body.targets as ToolGatewayTarget[] } },
+        requestOptions,
+      )) as T;
+    }
     if (method === "GET" && path.endsWith("/tools/catalog")) {
       return (await this.request({ method: "catalog" }, requestOptions)) as T;
     }
@@ -985,6 +1065,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
     this.stopHandlingLinks?.();
     this.stopHandlingLinks = null;
     this.locationListeners.clear();
+    this.readinessListeners.clear();
     this.bootstrap.close();
     this.port?.close();
     this.port = null;
@@ -1000,6 +1081,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
           Extract<OpenGeniSiteBridgeRequestMessage, { method: "invoke" }>,
           "type" | "version" | "requestId"
         >
+      | { method: "readiness"; payload: { targets: ToolGatewayTarget[] } }
       | { method: "catalog" }
       | { method: "call"; payload: OpenGeniSiteToolCallRequest }
       | { method: "declarations" }
@@ -1114,13 +1196,18 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         this.siteData = message.siteData === 1;
         this.viewerSupported = message.viewer === 1;
         this.locationSupported = message.location === 1;
-        if (this.locationSupported)
+        this.toolReadiness = message.toolReadiness === 1;
+        if (this.locationSupported || this.toolReadiness)
           channel.port1.addEventListener("message", (hostEvent: MessageEvent<unknown>) => {
-            if (isOpenGeniSiteBridgeEventMessage(hostEvent.data))
-              notifyLocationListeners(
-                this.locationListeners,
-                openGeniSiteLocationValue(hostEvent.data.location)!,
-              );
+            const data = hostEvent.data;
+            if (!isOpenGeniSiteBridgeEventMessage(data)) return;
+            if (data.event === "location") {
+              if (this.locationSupported)
+                notifyLocationListeners(
+                  this.locationListeners,
+                  openGeniSiteLocationValue(data.location)!,
+                );
+            } else if (this.toolReadiness) notifyReadinessListeners(this.readinessListeners);
           });
         this.port = channel.port1;
         resolve(channel.port1);

@@ -1,5 +1,89 @@
 # @opengeni/jev
 
+## 6.30.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.30.1
+
+## 6.30.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/decisions@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.29.1
+
+## 6.29.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.29.0
+
+## 6.28.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- @opengeni/decisions@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

@@ -220,14 +220,16 @@ integration, never a region, and is never read for EU status.
   SaaS search APIs (TinyFish, Parallel, Perplexity, Exa, Tavily, Brave),
   OpenAI hosted image generation, Vercel AI Gateway (images, video, live
   voice), the Codex and SuperGrok subscriptions, ElevenLabs, OpenAI
-  transcription and OpenAI Realtime live transcripts, and the Jev and
-  OpenRouter decision models. None is EU.
+  transcription and OpenAI Realtime live transcripts, and the Jev decision
+  model. None is EU.
 - **Operator declarations** cover routes a deployment can place in the EU:
   Firecrawl, Jina and SearXNG search (self-hosted), Azure Live voice, Azure
   OpenAI and Azure Speech transcription, Azure OpenAI Realtime live
   transcripts (`transcription.azure-openai-realtime`, declared separately
   from batch transcription), the Knowledge embedding endpoint, and
-  an OpenAI-compatible decision model. Each declaration describes one
+  a decision model on the OpenAI or OpenRouter decisions API at the
+  operator's own endpoint (an Azure OpenAI or Azure AI Foundry resource:
+  `decision_model.openai` or `decision_model.openrouter`). Each declaration describes one
   endpoint: it applies only when the call sends to that same origin, so a
   changed base URL, an Azure resource other than the declared one, or a
   missing endpoint is unknown. One Azure resource can hold an EU Data Zone
@@ -270,8 +272,9 @@ integration, never a region, and is never read for EU status.
 
 - **Vendor default hosts** of declarable routes keep a code-owned rule and
   cannot be declared: `api.openai.com` (US; an OpenAI decision model or
-  embedder without a base URL sends there), `s.jina.ai`, `r.jina.ai` and
-  `api.firecrawl.dev` (unknown).
+  embedder without a base URL sends there), `openrouter.ai` (global; an
+  OpenRouter decision model without an endpoint sends there), `s.jina.ai`,
+  `r.jina.ai` and `api.firecrawl.dev` (unknown).
 
 Under EU (`settings.requiredModelGeography === "eu"` in a turn, or the
 workspace's EU-only setting for work outside a turn), a side-feature call runs
@@ -305,7 +308,7 @@ added later, is refused unless its route's record is EU. Non-empty
 | Voice input and transcription | Only declared-EU Azure OpenAI or Azure Speech. Dictation fallback stays on EU providers; recordings and uploads are refused otherwise. The local diarizer stays on. |
 | Live transcripts | The client connects to the provider with a secret the server mints, past the transport guard, so the mint itself is refused (`422 region_restricted`) unless the provider's live route is declared EU. Only Azure OpenAI Realtime can be; OpenAI Realtime and ElevenLabs are refused. |
 | Knowledge embeddings | Only a declared-EU embedding endpoint. Otherwise search falls back to keyword (`fallbackReason: "region_restricted"`) and indexing waits. The local deterministic embedder stays on. |
-| Code search and tool routing | Only a declared-EU OpenAI-compatible decision model. Otherwise code search is off and tool routing uses local ranking. |
+| Code search and tool routing | Only a declared-EU decision model endpoint. Otherwise code search is off and tool routing uses local ranking. |
 | Site viewer conversations | Only EU models, for the model and its fallback. |
 | Document parsing | Local OCR; no model call. |
 

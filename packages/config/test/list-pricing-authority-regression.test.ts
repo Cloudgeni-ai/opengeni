@@ -16,13 +16,19 @@ import {
 // Captured by importing the detached base's config, not this PR's config:
 // 272c01613b2f8071eab3024f855fcb39fd54a6fc (2026-10-03).
 const BASE_DEBIT_TABLE_SHA256 = "5761bd31ef1dfcd918d1b750904342619a454895c1ee63d2d8f60c64c4a87c7a";
+// Billed models added to the debit table after that base. Every other entry,
+// GPT-6 Astra's included, must stay byte-identical.
+const ADDED_DEBIT_MODELS = new Set(["gpt-6.2-astra", "gpt-6.2-sol"]);
 const BASE_BARE_SOL_DEFINITION =
   "sha256:d58cb44d22f04624f6e68c1432a55ae3715168254c33bc2d89a46320b1dd8b0c";
 const base = getSettings({ OPENGENI_ENV: "test" });
 
 describe("comparison pricing preserves base debit and accepted-policy authority", () => {
   test("keeps the entire base debit-default table unchanged", () => {
-    expect(createHash("sha256").update(JSON.stringify(defaultModelPricing)).digest("hex")).toBe(
+    const baseEntries = Object.fromEntries(
+      Object.entries(defaultModelPricing).filter(([id]) => !ADDED_DEBIT_MODELS.has(id)),
+    );
+    expect(createHash("sha256").update(JSON.stringify(baseEntries)).digest("hex")).toBe(
       BASE_DEBIT_TABLE_SHA256,
     );
     for (const id of ["gpt-6.1-sol", "grok-4.5", "grok-4.6", "grok-4.7", "claude-opus-5-5"]) {

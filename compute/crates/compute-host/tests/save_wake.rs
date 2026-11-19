@@ -39,6 +39,8 @@ use tokio::time::Instant;
 mod required;
 #[path = "support/state.rs"]
 mod state;
+#[path = "support/vms.rs"]
+mod vms;
 use required::skip;
 use state::private_dir;
 
@@ -81,11 +83,18 @@ struct Agent {
     client: Client,
     root: PathBuf,
     task: tokio::task::JoinHandle<()>,
+    /// The cgroup that holds its VMs.
+    cgroup: PathBuf,
 }
 
 impl Drop for Agent {
+    /// Ends the agent as a crash would: its VMs run on, for a later agent
+    /// to adopt. A test that fails part way ends them too.
     fn drop(&mut self) {
         self.task.abort();
+        if std::thread::panicking() {
+            vms::end_vms(&self.cgroup);
+        }
     }
 }
 
@@ -136,6 +145,7 @@ async fn restart_with<S: Store>(
         .with_test_writer()
         .try_init();
     let root = lab.join("ht").join(name);
+    let cgroup = setup.cgroup.clone();
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
         retained: Vec::new(),
@@ -199,8 +209,12 @@ async fn restart_with<S: Store>(
         client: Client::new(&socket),
         root,
         task,
+        cgroup,
     }
 }
+
+/// The cgroup that holds the VMs of an agent run as its own process.
+const PROCESS_CGROUP: &str = "/sys/fs/cgroup/compute-host-test";
 
 /// An agent running as its own process, as in production: killing it runs
 /// no destructor, so whatever it was doing stops wherever it was.
@@ -211,9 +225,14 @@ struct Process {
 }
 
 impl Drop for Process {
+    /// Kills the agent; its VMs run on, as after a crash. A test that
+    /// fails part way ends them too.
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if std::thread::panicking() {
+            vms::end_vms(Path::new(PROCESS_CGROUP));
+        }
     }
 }
 
@@ -252,7 +271,7 @@ impl Process {
             .arg("--base-image")
             .arg(lab.join("base.ext4"))
             .arg("--cgroup")
-            .arg("/sys/fs/cgroup/compute-host-test")
+            .arg(PROCESS_CGROUP)
             .arg("--memory-profile")
             .arg(profile().to_string())
             .arg("--busy-cpu-percent")

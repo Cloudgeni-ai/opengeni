@@ -455,15 +455,31 @@ impl JobState {
     }
 }
 
-/// The frame send hook: fire-and-forget, called in ascending seq order.
-type EmitFn = Box<dyn Fn(Frame) + Send>;
+/// Resolves once a full output lane has room again.
+pub type LaneRoom = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// What the output lane did with an emitted frame.
+pub enum Delivery {
+    /// The lane took the frame. Also the answer when no lane exists at all
+    /// (between connections): the frame is gone, and the consumer's next
+    /// attach replays it.
+    Taken,
+    /// The lane is full and did not take the frame. The pump keeps it as its
+    /// next frame to send and sends it once `LaneRoom` resolves: a full lane
+    /// holds a replay back, it never loses frames the consumer could only
+    /// recover by noticing a gap after the fact.
+    Full(LaneRoom),
+}
+
+/// The frame send hook, called in ascending seq order. It never blocks.
+type EmitFn = Box<dyn Fn(Frame) -> Delivery + Send>;
 /// Encodes the terminal record into the retained Exit-frame payload.
 type EncodeExitFn = Box<dyn Fn(&JobExit) -> Vec<u8> + Send>;
 /// The exactly-once lifecycle notification at completion.
 type OnExitFn = Box<dyn FnOnce(Option<u64>, &JobExit) + Send>;
 
-/// The supervisor-injected seams. All fire-and-forget: the pump never awaits
-/// or retries them (publishing and its failures belong to the supervisor).
+/// The supervisor-injected seams. None blocks the pump; a frame a full lane
+/// refuses is retained and sent again when the lane has room.
 pub struct JobHooks {
     emit: EmitFn,
     encode_exit: EncodeExitFn,
@@ -474,7 +490,8 @@ impl JobHooks {
     /// Bundles the three seams.
     ///
     /// * `emit` — called for every frame the pump sends (live or replay), in
-    ///   strictly ascending seq order per attachment.
+    ///   strictly ascending seq order per attachment; it reports whether the
+    ///   lane took the frame (see [`Delivery`]).
     /// * `encode_exit` — produces the opaque Exit-frame payload the retention
     ///   log stores and replays (the wire encoding, at supervisor level).
     /// * `on_exit` — fires exactly once when the job reaches its terminal
@@ -482,7 +499,7 @@ impl JobHooks {
     ///   Exit frame itself could not be retained (see module docs). The
     ///   supervisor routes this to `registry.complete()`.
     pub fn new(
-        emit: impl Fn(Frame) + Send + 'static,
+        emit: impl Fn(Frame) -> Delivery + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
         on_exit: impl FnOnce(Option<u64>, &JobExit) + Send + 'static,
     ) -> Self {
@@ -573,6 +590,7 @@ pub async fn run_job(
         deadline,
         config,
         spool_dir: spool_dir.clone(),
+        lane_room: None,
     };
     // Boxed: the pump future carries the read buffers' state machine and this
     // sits at a task's root, so one heap allocation per job is the right trade.
@@ -622,6 +640,7 @@ pub struct ResumeParams {
 /// The carried state or frames could not be restored. The adopted exec is
 /// returned so the caller can end it; nothing was emitted.
 #[allow(clippy::result_large_err)] // a cold path; the caller kills the returned process
+#[allow(clippy::too_many_lines)] // one restore sequence: state, frames, pump
 pub async fn run_job_resumed(
     params: ResumeParams,
     mailbox: mpsc::Receiver<JobCommand>,
@@ -719,6 +738,7 @@ pub async fn run_job_resumed(
         deadline: state.deadline_ms.map(|ms| now + Duration::from_millis(ms)),
         config,
         spool_dir: spool_dir.clone(),
+        lane_room: None,
     };
     let end = if lingering {
         Box::pin(pump.linger()).await
@@ -873,6 +893,8 @@ enum Event {
     Deadline,
     /// The progress ticker fired (data silence).
     ProgressTick,
+    /// The output lane that refused a frame has room again.
+    LaneRoom,
     /// A pipe read completed on `channel` (`Ok(0)` = EOF).
     Read(Channel, std::io::Result<usize>),
 }
@@ -925,6 +947,9 @@ struct Pump {
     config: JobConfig,
     /// The op's spool directory; a handover exports frames beside it.
     spool_dir: PathBuf,
+    /// The output lane refused the next frame to send: resolves when it has
+    /// room, and sending resumes from the pending-send cursor.
+    lane_room: Option<LaneRoom>,
 }
 
 impl Pump {
@@ -944,8 +969,10 @@ impl Pump {
             // below are ungated) — a throttled pump must keep receiving the
             // credit that un-throttles it.
             let may_read = self.may_read();
+            let lane_full = self.lane_room.is_some();
             let event = tokio::select! {
                 cmd = self.mailbox.recv(), if !self.mailbox_closed => Event::Command(cmd),
+                () = lane_room(&mut self.lane_room), if lane_full => Event::LaneRoom,
                 status = wait_child(self.child.as_mut(), self.child_done) => Event::ChildExit(status),
                 () = sleep_until_opt(self.deadline), if self.deadline.is_some()
                     && !self.child_done
@@ -973,6 +1000,10 @@ impl Pump {
                     }
                 }
                 Event::Command(Some(cmd)) => self.handle_command(cmd),
+                Event::LaneRoom => {
+                    self.lane_room = None;
+                    self.drive_catch_up();
+                }
                 Event::ChildExit(Ok(status)) => {
                     self.child_done = true;
                     self.child_code = status.code().unwrap_or(-1);
@@ -1070,7 +1101,16 @@ impl Pump {
     /// logged, not fatal — the terminal record already exists.
     async fn linger(mut self) -> JobEnd {
         while !self.final_acked && !self.mailbox_closed {
-            let Some(cmd) = self.mailbox.recv().await else {
+            let lane_full = self.lane_room.is_some();
+            let cmd = tokio::select! {
+                cmd = self.mailbox.recv() => cmd,
+                () = lane_room(&mut self.lane_room), if lane_full => {
+                    self.lane_room = None;
+                    self.drive_catch_up();
+                    continue;
+                }
+            };
+            let Some(cmd) = cmd else {
                 break;
             };
             #[cfg(unix)]
@@ -1412,7 +1452,11 @@ impl Pump {
                     // next current-generation ack resumes from here.
                     return Ok(());
                 }
-                self.send(frame);
+                if !self.send(frame) {
+                    // The lane is full: the cursor holds, and sending
+                    // resumes from here once it has room.
+                    return Ok(());
+                }
             }
             // Everything in this bite was sent; loop for the next bite (the
             // cursor advanced, so the walk always terminates).
@@ -1431,16 +1475,28 @@ impl Pump {
         let seq = self.retention.append(body)?;
         self.watermark.store(seq, Ordering::Relaxed);
         if let Some(body) = live_copy {
+            // A refused frame stays retained behind the cursor.
             self.send(Frame { seq, body });
         }
         Ok(seq)
     }
 
-    /// The single emit choke point: every frame that leaves the pump passes
-    /// through `flow.on_sent` accounting first (a pinned invariant).
-    fn send(&mut self, frame: Frame) {
-        self.flow.on_sent(frame.seq, payload_len(&frame.body));
-        (self.hooks.emit)(frame);
+    /// The single emit choke point: every frame the lane takes passes through
+    /// `flow.on_sent` accounting (a pinned invariant). A frame a full lane
+    /// refuses is not sent: the pending-send cursor stays before it, and the
+    /// lane's room wakes [`Self::catch_up`]. Returns whether it was sent.
+    fn send(&mut self, frame: Frame) -> bool {
+        let (seq, len) = (frame.seq, payload_len(&frame.body));
+        match (self.hooks.emit)(frame) {
+            Delivery::Taken => {
+                self.flow.on_sent(seq, len);
+                true
+            }
+            Delivery::Full(room) => {
+                self.lane_room = Some(room);
+                false
+            }
+        }
     }
 
     /// Digests + appends one chunk of child output.
@@ -1578,6 +1634,14 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
+/// Waits for a full output lane to have room; pends forever when none is full.
+async fn lane_room(room: &mut Option<LaneRoom>) {
+    match room.as_mut() {
+        Some(room) => room.await,
+        None => std::future::pending().await,
+    }
+}
+
 // The tests drive REAL /bin/sh children through the containment primitive —
 // they validate POSIX child semantics (exit codes, pipes, process groups)
 // and are unix-only by nature (the #349 CI lesson). The code under test itself
@@ -1676,6 +1740,7 @@ mod tests {
             let hooks = JobHooks::new(
                 move |frame| {
                     let _ = frame_tx.send(frame);
+                    Delivery::Taken
                 },
                 move |exit| match exit_payload_bytes {
                     Some(n) => vec![0xEE; n],
@@ -2796,6 +2861,7 @@ mod tests {
         let hooks = JobHooks::new(
             move |frame| {
                 let _ = frame_tx.send(frame);
+                Delivery::Taken
             },
             |exit| format!("{exit:?}").into_bytes(),
             move |exit_seq, exit: &JobExit| {
@@ -2927,6 +2993,7 @@ mod tests {
         let hooks = JobHooks::new(
             move |frame| {
                 let _ = frame_tx.send(frame);
+                Delivery::Taken
             },
             |exit| format!("{exit:?}").into_bytes(),
             |_, _| panic!("a lingering job's lifecycle hook already ran"),

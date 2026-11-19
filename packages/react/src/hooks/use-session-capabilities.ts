@@ -95,6 +95,10 @@ export type UseSessionCapabilitiesResult = {
   acknowledgmentRequired: "unredacted" | "shared" | null;
   /** 429 from the desktop attach: the per-session viewer cap is reached. */
   viewerCapReached: boolean;
+  /** Which limit the 429 hit: `viewers` (too many live viewers) or
+   * `computers` (the workspace or plan limit on computers running with no
+   * task, or on running computers). Null when no limit was hit. */
+  viewerCapReason: "viewers" | "computers" | null;
   /** The viewer holder id minted on a desktop attach (for detach/heartbeat). */
   viewerId: string | null;
   /** Force a re-negotiation (after acknowledging, a resolution change, etc.). */
@@ -114,6 +118,58 @@ function desktopAttachable(cell: SessionCapabilities["DesktopStream"]): boolean 
   if (cell.transport !== null) return true;
   // transport === null: attach only when the reason is a transient cold state.
   return cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null;
+}
+
+/** Events that mean a person is at the page. Captured on the window so a
+ * canvas or terminal that stops propagation still counts. */
+const VIEWER_INTERACTION_EVENTS = [
+  "pointerdown",
+  "pointermove",
+  "keydown",
+  "wheel",
+  "touchstart",
+] as const;
+
+/**
+ * Track when the person last interacted with the page, for the viewer
+ * heartbeat (`lastInteractionAgeMs`). Page load, pointer, keyboard, wheel,
+ * touch, window focus and the page becoming visible all count. `onInteraction`
+ * runs after each recorded interaction.
+ */
+function useViewerInteractionClock(onInteraction: () => void): {
+  current: number;
+} {
+  const lastInteractionRef = useRef(Date.now());
+  const onInteractionRef = useRef(onInteraction);
+  onInteractionRef.current = onInteraction;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const record = () => {
+      lastInteractionRef.current = Date.now();
+      onInteractionRef.current();
+    };
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") record();
+    };
+    const listenerOptions = { capture: true, passive: true } as const;
+    for (const type of VIEWER_INTERACTION_EVENTS) {
+      window.addEventListener(type, record, listenerOptions);
+    }
+    window.addEventListener("focus", record, listenerOptions);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+    return () => {
+      for (const type of VIEWER_INTERACTION_EVENTS) {
+        window.removeEventListener(type, record, listenerOptions);
+      }
+      window.removeEventListener("focus", record, listenerOptions);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
+    };
+  }, []);
+  return lastInteractionRef;
 }
 
 /**
@@ -166,6 +222,7 @@ export function useSessionCapabilities(
     "unredacted" | "shared" | null
   >(null);
   const [viewerCapReached, setViewerCapReached] = useState(false);
+  const [viewerCapReason, setViewerCapReason] = useState<"viewers" | "computers" | null>(null);
   const [viewerId, setViewerId] = useState<string | null>(null);
   const [stateIdentity, setStateIdentity] = useState(identityKey);
   // Bumped to force a fresh negotiation cycle.
@@ -181,6 +238,32 @@ export function useSessionCapabilities(
     setNonce((n) => n + 1);
   }, []);
 
+  // Refused for a missing card (card verification gate): attach again once a
+  // card is verified (app/lib/card-verification.ts raises the event).
+  const cardRefusedRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onCardVerified = () => {
+      if (!cardRefusedRef.current) return;
+      cardRefusedRef.current = false;
+      setViewerCapReached(false);
+      setViewerCapReason(null);
+      setNonce((n) => n + 1);
+    };
+    window.addEventListener("opengeni:card-verified", onCardVerified);
+    return () => window.removeEventListener("opengeni:card-verified", onCardVerified);
+  }, []);
+
+  // Set when the server released this page's viewer while the person was away
+  // (the idle drain): the box is re-acquired on their next interaction rather
+  // than re-warmed at once for an empty room.
+  const resumeOnInteractionRef = useRef(false);
+  const lastInteractionRef = useViewerInteractionClock(() => {
+    if (!resumeOnInteractionRef.current) return;
+    resumeOnInteractionRef.current = false;
+    setNonce((n) => n + 1);
+  });
+
   // ── Negotiation + viewer lifecycle ──────────────────────────────────────────
   useEffect(() => {
     const identityChanged = previousIdentityRef.current !== identityKey;
@@ -192,9 +275,11 @@ export function useSessionCapabilities(
       setError(null);
       setAcknowledgmentRequired(null);
       setViewerCapReached(false);
+      setViewerCapReason(null);
       setViewerId(null);
       epochRef.current = 0;
       viewerIdRef.current = null;
+      resumeOnInteractionRef.current = false;
     }
     if (!lifecycleEnabled || !sessionId) {
       setState("idle");
@@ -208,7 +293,14 @@ export function useSessionCapabilities(
     // the replacement grant degrades.
     viewerIdRef.current = null;
     setViewerId(null);
+    // Still set when the server released this page's viewer while the person
+    // was away and they have not come back: this negotiation (an outside
+    // re-check) reads capabilities but must not re-attach and re-warm the box.
+    // Their next interaction clears it and re-negotiates with an attach.
+    const awaitingInteraction = resumeOnInteractionRef.current;
     let cancelled = false;
+    // The server's viewer idle window from the attach (null: off or unknown).
+    let idleDrainMs: number | null = null;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
     let localViewerId: string | null = null;
@@ -229,6 +321,23 @@ export function useSessionCapabilities(
       setError(null);
     };
 
+    // The holder is gone (reaped, idle-released or fenced by a new epoch).
+    // When the person has been away at least the server's idle window, the
+    // server released it on purpose: stop beating and re-attach on their next
+    // interaction. Otherwise re-negotiate now.
+    const reacquire = () => {
+      if (cancelled) return;
+      if (idleDrainMs !== null && Date.now() - lastInteractionRef.current >= idleDrainMs) {
+        localViewerId = null;
+        viewerIdRef.current = null;
+        setViewerId(null);
+        setState("on-demand");
+        resumeOnInteractionRef.current = true;
+        return;
+      }
+      renegotiate();
+    };
+
     const startHeartbeat = (caps: SessionCapabilities) => {
       if (!localViewerId || heartbeatTimer !== null) return;
       const intervalMs =
@@ -241,12 +350,13 @@ export function useSessionCapabilities(
           void client
             .heartbeatViewer(workspaceId, sessionId, localViewerId, {
               leaseEpoch: epochRef.current,
+              lastInteractionAgeMs: Math.max(0, Date.now() - lastInteractionRef.current),
             })
             .then((res) => {
               // alive:false ⇒ the holder was reaped or the epoch moved under us;
               // re-negotiate to re-acquire against the new owner.
               if (!res.alive && !cancelled) {
-                renegotiate();
+                reacquire();
               }
             })
             .catch((cause) => {
@@ -255,7 +365,7 @@ export function useSessionCapabilities(
                 cause instanceof OpenGeniApiError &&
                 (cause.status === 409 || cause.status === 410)
               ) {
-                renegotiate();
+                reacquire();
               }
             })
             .finally(schedule);
@@ -301,6 +411,7 @@ export function useSessionCapabilities(
       setState("negotiating");
       setAcknowledgmentRequired(null);
       setViewerCapReached(false);
+      setViewerCapReason(null);
       try {
         const caps = await client.getStreamCapabilities(workspaceId, sessionId, {
           signal: requestAbort.signal,
@@ -335,7 +446,11 @@ export function useSessionCapabilities(
         // being advertised; liveness (cold included) does not suppress it — POST
         // /viewers warms a cold box exactly as it does for a desktop/terminal engage.
         const wantFilesAttach = attachFiles && caps.FileSystem.available;
-        if (wantDesktopAttach || wantTerminalAttach || wantFilesAttach) {
+        // Set when the server refused the attach for a bound on boxes kept warm
+        // only for viewers (429): the session stays usable without a live box,
+        // so do not poll for a warm-up that will not come.
+        let attachRefused = false;
+        if (!awaitingInteraction && (wantDesktopAttach || wantTerminalAttach || wantFilesAttach)) {
           try {
             // Declare WHICH plane we're attaching for. `desktop:true` opts into the
             // un-redacted pixel plane (which carries the consent gate); a
@@ -345,6 +460,7 @@ export function useSessionCapabilities(
               desktop: wantDesktopAttach,
               terminal: wantTerminalAttach,
               files: wantFilesAttach,
+              lastInteractionAgeMs: Math.max(0, Date.now() - lastInteractionRef.current),
             });
             if (cancelled) {
               // The attach crossed an identity/unmount boundary after the server
@@ -368,6 +484,10 @@ export function useSessionCapabilities(
             }
             localViewerId = holder.viewerId;
             viewerIdRef.current = holder.viewerId;
+            idleDrainMs =
+              typeof holder.viewerIdleDrainMs === "number" && holder.viewerIdleDrainMs > 0
+                ? holder.viewerIdleDrainMs
+                : null;
             setViewerId(holder.viewerId);
             epochRef.current = holder.leaseEpoch;
             // Fold the freshly-minted live address(es) into the doc the components
@@ -421,7 +541,50 @@ export function useSessionCapabilities(
                   );
                 }
               } else if (cause.status === 429) {
-                setViewerCapReached(true);
+                // The server names the refusal in details.viewerRefusal;
+                // servers before it only say so in the message. Remove the
+                // message fallback once servers without viewerRefusal are no
+                // longer supported.
+                const refusal =
+                  typeof cause.details?.viewerRefusal === "string"
+                    ? cause.details.viewerRefusal
+                    : cause.message.includes("went unused")
+                      ? "viewer_idle"
+                      : cause.message.includes("computers")
+                        ? "computer_limit"
+                        : null;
+                // A Free organization without a verified card: the app's
+                // card gate (app/components/add-card.tsx) offers Add a card.
+                const cardRequired = cause.details?.code === "sandbox_card_required";
+                if (cardRequired && typeof window !== "undefined") {
+                  window.dispatchEvent(
+                    new CustomEvent("opengeni:card-required", {
+                      detail: { workspaceId, accountId: null },
+                    }),
+                  );
+                }
+                if (cardRequired) {
+                  // Nothing warms this box until a card is added.
+                  cardRefusedRef.current = true;
+                  attachRefused = true;
+                  setViewerCapReached(true);
+                  setViewerCapReason("computers");
+                } else if (refusal === "viewer_idle") {
+                  // The box was stopped while nobody used the page: wait for
+                  // the person to interact, then attach again.
+                  attachRefused = true;
+                  resumeOnInteractionRef.current = true;
+                } else {
+                  setViewerCapReached(true);
+                  // A limit on computers (running with no task, or running
+                  // at all) under the workspace or plan: nothing will warm
+                  // this box for us, so rest on-demand instead of polling
+                  // toward a warm-up. Other limits keep polling, as another
+                  // holder may warm it.
+                  const computers = refusal === "computer_limit";
+                  setViewerCapReason(computers ? "computers" : "viewers");
+                  if (computers) attachRefused = true;
+                }
               } else if (cause.status === 403) {
                 setState("error");
                 setError(cause);
@@ -441,7 +604,10 @@ export function useSessionCapabilities(
         // non-warm lease "warming in flight" — worth polling, and worth surfacing a
         // stall as an error. With no warm-up requested a cold lease is the benign
         // boxless resting state (below), never an error.
-        const warmUpRequested = wantDesktopAttach || wantTerminalAttach || wantFilesAttach;
+        const warmUpRequested =
+          !awaitingInteraction &&
+          !attachRefused &&
+          (wantDesktopAttach || wantTerminalAttach || wantFilesAttach);
         if (sandboxAcceptsLiveIo(caps.liveness) || localViewerId) {
           setState("ready");
           startHeartbeat(caps);
@@ -532,6 +698,7 @@ export function useSessionCapabilities(
     error: identityMatches ? error : null,
     acknowledgmentRequired: identityMatches ? acknowledgmentRequired : null,
     viewerCapReached: identityMatches && viewerCapReached,
+    viewerCapReason: identityMatches && viewerCapReached ? viewerCapReason : null,
     viewerId: identityMatches ? viewerId : null,
     renegotiate,
   };

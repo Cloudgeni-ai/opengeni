@@ -1,7 +1,8 @@
-import type {
-  ConnectionMetadata,
-  McpPersonalConnectionDelegation,
-  McpServerConnectionRef,
+import {
+  sameConnectorProviderDomain,
+  type ConnectionMetadata,
+  type McpPersonalConnectionDelegation,
+  type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
   getWorkspace,
@@ -16,6 +17,7 @@ import {
   type OriginMcpCapabilityServer,
 } from "@opengeni/db";
 import { readOrganizationIntegrationPolicyForServing } from "@opengeni/db/organization-integration-policy";
+import { dedicatedMcpIntegrationKey } from "./organization-integration-catalog";
 import {
   personalWorkspaceOwnerOriginConnections,
   type PersonalWorkspaceOriginConnections,
@@ -28,17 +30,6 @@ import {
 const MCP_INTEGRATION_KEY = "custom:mcp";
 
 /**
- * Reviewed MCP endpoints a dedicated Connect adapter owns, with the policy key
- * that adapter checks (see `integrationKeyForConnectProvider`).
- */
-const DEDICATED_MCP_INTEGRATION_KEYS: Readonly<Record<string, string>> = {
-  "gmailmcp.googleapis.com": "gmail",
-  "drivemcp.googleapis.com": "google-drive",
-  "calendarmcp.googleapis.com": "google-calendar",
-  "mcp.slack.com": "slack-personal",
-};
-
-/**
  * The organization policy keys the owner's own setup of this connector in
  * Personal would check: a curated connector served by a dedicated adapter uses
  * that adapter's key, any other curated connector the generic MCP key, and a
@@ -48,13 +39,7 @@ const DEDICATED_MCP_INTEGRATION_KEYS: Readonly<Record<string, string>> = {
 function integrationKeysForCarriedServer(
   server: Pick<OriginMcpCapabilityServer, "url" | "catalogScope">,
 ): string[] {
-  let host: string | null = null;
-  try {
-    host = new URL(server.url).hostname.toLowerCase();
-  } catch {
-    host = null;
-  }
-  const dedicated = host ? DEDICATED_MCP_INTEGRATION_KEYS[host] : undefined;
+  const dedicated = dedicatedMcpIntegrationKey(server.url);
   if (server.catalogScope === "workspace")
     return dedicated ? [MCP_INTEGRATION_KEY, dedicated] : [MCP_INTEGRATION_KEY];
   return [dedicated ?? MCP_INTEGRATION_KEY];
@@ -84,19 +69,67 @@ function canonicalUrl(value: string): string {
   }
 }
 
-/** The same match the account binder applies, against one owned connection. */
+/**
+ * The same match the account binder applies, against one owned connection.
+ * An account from either integration backend counts as the connector's: the
+ * backend switch later points the carried connector at the one it serves.
+ */
 function refMatchesConnection(
   ref: McpServerConnectionRef,
   connection: ConnectionMetadata,
 ): boolean {
   return (
+    refMatchesLoginService(ref, connection) &&
+    (!ref.connectionId || ref.connectionId === connection.id)
+  );
+}
+
+/** The provider, kind and resource match, whichever account the reference pins. */
+function refMatchesLoginService(
+  ref: McpServerConnectionRef,
+  connection: ConnectionMetadata,
+): boolean {
+  return (
     ref.authoritySource !== "host" &&
-    ref.providerDomain.toLowerCase() === connection.providerDomain.toLowerCase() &&
+    sameConnectorProviderDomain(ref.providerDomain, connection.providerDomain) &&
     (!ref.kind || ref.kind === connection.kind) &&
-    (!ref.connectionId || ref.connectionId === connection.id) &&
     (!ref.resource ||
       (typeof connection.metadata.resource === "string" &&
         canonicalUrl(connection.metadata.resource) === canonicalUrl(ref.resource)))
+  );
+}
+
+/**
+ * The connector a login was made for, when it is a connector's sign-in: the
+ * MCP endpoint it was connected for. Null for any other login.
+ */
+export function loginConnectorEndpoint(connection: ConnectionMetadata): string | null {
+  const mcpUrl = connection.metadata.mcpUrl;
+  return typeof mcpUrl === "string" && mcpUrl.trim() ? mcpUrl : null;
+}
+
+/** Whether two connector endpoints are the same, written either way. */
+export function sameConnectorEndpoint(left: string, right: string): boolean {
+  return canonicalUrl(left) === canonicalUrl(right);
+}
+
+/**
+ * Whether a workspace has turned on the connector a login signs in to: one of
+ * its enabled connectors is that endpoint, or binds that provider's accounts
+ * (the account binder's provider, kind and resource match). Whose account an
+ * enabled connector is set to use is a separate question; this only says
+ * whether the connector is on.
+ */
+export function loginConnectorTurnedOn(
+  servers: readonly Pick<EnabledMcpCapabilityServer, "url" | "connectionRef">[],
+  connection: ConnectionMetadata,
+): boolean {
+  const endpoint = loginConnectorEndpoint(connection);
+  return servers.some(
+    (server) =>
+      (endpoint !== null && canonicalUrl(server.url) === canonicalUrl(endpoint)) ||
+      (server.connectionRef !== undefined &&
+        refMatchesLoginService(server.connectionRef, connection)),
   );
 }
 

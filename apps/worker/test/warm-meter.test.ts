@@ -102,6 +102,7 @@ async function warmGroup(
 ): Promise<void> {
   for (const h of holders) {
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: groupId,

@@ -9,6 +9,7 @@ import {
 
 import {
   SCHEDULE_FREQUENCIES,
+  SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES,
   cadenceOfSchedule,
   createRequestFromDraft,
   deriveScheduleName,
@@ -189,6 +190,64 @@ describe("schedule templates", () => {
         minute: 0,
         timeZone: "Europe/Oslo",
         daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+      }),
+    );
+  });
+});
+
+describe("simplified interface templates", () => {
+  test("offer business work on connected apps instead of the shared developer set", () => {
+    const simplified = scheduleTemplates(true, true);
+    expect(simplified.map((template) => template.id)).toEqual([
+      "day-brief",
+      "client-update",
+      "friday-report",
+    ]);
+    expect(scheduleTemplates(false, true)).toEqual(simplified);
+    const words = simplified
+      .flatMap((template) => [template.name, template.description, template.instructions])
+      .join(" ");
+    for (const developer of [
+      /repositor/iu,
+      /pull request/iu,
+      /dependenc/iu,
+      /incident/iu,
+      /cloud spend/iu,
+    ]) {
+      expect(words).not.toMatch(developer);
+    }
+    // The full interface keeps the shared templates.
+    expect(scheduleTemplates(false).map((template) => template.id)).toEqual([
+      "morning-brief",
+      "dependency-pr",
+      "cost-check",
+    ]);
+  });
+
+  test("they run on a schedule and leave sending to the person", () => {
+    for (const template of SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES) {
+      expect(template.triggers).toEqual([]);
+      expect(template.schedule?.type).toBe("calendar");
+    }
+    expect(templateById("client-update")?.instructions).toContain("Don't send anything");
+  });
+
+  test("a link to either interface's template opens in both", () => {
+    expect(templateById("client-update", false)?.name).toBe("Weekly client update");
+    expect(templateById("morning-brief", false)?.id).toBe("morning-brief");
+    const draft = draftFromTemplate(
+      templateById("friday-report")!,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    const request = createRequestFromDraft(draft, { now: NOW, learningScope: "personal" });
+    expect(request.schedule).toEqual(
+      expect.objectContaining({
+        type: "calendar",
+        hour: 15,
+        minute: 0,
+        timeZone: "Europe/Oslo",
+        daysOfWeek: ["FRIDAY"],
       }),
     );
   });

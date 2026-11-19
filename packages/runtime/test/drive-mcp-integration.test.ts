@@ -135,7 +135,7 @@ test("Drive preparation uses one real MCP transport plus selected-account REST t
     ]);
     await expect(
       server.callTool("drive__delete_file", { fileId: "existing-file" }),
-    ).rejects.toThrow("not allowed");
+    ).rejects.toThrow("is not one of the tools");
     const official = await server.callToolResult!("drive__create_file", { textContent: "report" });
     expect(official.structuredContent).toEqual({ id: "created-official" });
     expect(official._meta).toMatchObject({ source: "official-fixture" });

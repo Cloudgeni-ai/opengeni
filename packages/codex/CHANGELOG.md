@@ -1,5 +1,140 @@
 # @opengeni/codex
 
+## 6.30.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.30.1
+- @opengeni/network@6.30.1
+
+## 6.30.0
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/network@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/contracts@6.29.2
+- @opengeni/network@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/network@6.29.1
+
+## 6.29.0
+
+### Minor Changes
+
+- 6581a0f: GPT-6.2 Astra (`gpt-6.2-astra`) and GPT-6.2 Sol (`gpt-6.2-sol`) replace GPT-6 Astra as Opengeni's default models. The built-in OpenAI defaults are now `OPENGENI_OPENAI_MODEL=gpt-6.2-astra` and `OPENGENI_OPENAI_ALLOWED_MODELS=gpt-6.2-astra,gpt-6.2-sol,gpt-6-sol,gpt-6-luna`, and the built-in Codex subscription models are GPT-6.2 Astra, GPT-6.2 Sol, GPT-6 Sol and GPT-6 Luna. Both new models offer Fast and, where OpenAI serves it, Ultrafast, and get compact labels ("6.2 Astra", "6.2 Sol").
+
+  Their OpenAI list prices per million tokens: GPT-6.2 Astra $8 input, $0.40 cached input, $10 cache write and $40 output; GPT-6.2 Sol $2, $0.10, $2.50 and $10. Above 272K input tokens the whole request pays twice the input and cache rates and 1.5 times the output rate. Ultrafast is priced at OpenAI's launch rate of 3 times Standard, which OpenAI raises to 6 times on 1 March 2027.
+
+  GPT-6 Astra is no longer offered by default. Deployments that list it explicitly keep it, and it keeps its price, so Azure deployments of it, accepted turns and recorded usage stay priced. Chats on it keep their history and ask for another model on the next message; database-mode catalogs retire it with `retired: true` as before. GPT-6.1 Sol is unchanged.
+
+### Patch Changes
+
+- @opengeni/contracts@6.29.0
+- @opengeni/network@6.29.0
+
+## 6.28.0
+
+### Patch Changes
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/network@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/network@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/network@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/network@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/network@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [5fd2c21]
+  - @opengeni/contracts@6.24.1
+  - @opengeni/network@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 24104b1: Codex usage reads no longer fail when ChatGPT reports `null` for optional fields. The usage response now carries `credits.balance: null` for accounts without purchased credits, which the parser rejected, so every quota read for those accounts returned status `error`: the quota bars showed nothing, quota cooldowns could not be confirmed over, and the production acceptance quota check could not run. Optional fields now accept `null`, a malformed plan label or credit balance no longer discards the quota windows, and feature limits in the current nested `additional_rate_limits` shape are read. A malformed quota window still fails closed.
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/network@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/network@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/network@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

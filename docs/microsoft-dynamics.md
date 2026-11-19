@@ -50,10 +50,19 @@ Entra, deploy it, then delete the old one.
 ## Connecting
 
 - `capability_catalog_search` returns the agent-only entry
-  `api:microsoft-dynamics` when the client is configured. Its setup detail
-  (and `capability_authorization_request`, which answers `input_required`)
-  tells the agent to ask for the environment address and call
-  `custom_mcp_setup_request` with it.
+  `api:microsoft-dynamics` when the client is configured, with
+  `setup.connectInputs` (the environment address). The entry declares that
+  connect-time input in `@opengeni/contracts/capability-connect-inputs`.
+- `capability_authorization_request` (and tool discovery's card) posts a
+  Connect card that asks the person for the environment address, in one field
+  with one Connect action. The agent may pass an address the person already
+  gave as `inputs.endpointUrl`; it is filled in only when it reads as an
+  environment address, and the result says why when it doesn't. An
+  environment already in the workspace answers instead: ready when usable,
+  else its own card when it is the only one this person can connect.
+- The card adds the environment through capability creation with
+  `connectFor: "api:microsoft-dynamics"`, so the API refuses any address that
+  isn't a Dynamics environment, then opens the ordinary sign-in dialog.
 - `custom_mcp_setup_request` and capability creation store any Dynamics
   environment address as its connection URL (`canonicalMcpEndpointUrl`).
 - The chat card for a Dynamics URL shows "Microsoft Dynamics" with one

@@ -24,6 +24,7 @@ import {
   creatorLabel,
   machineCreatorDisplay,
 } from "../../lib/creator-initials";
+import { useResolvedCreator } from "../../lib/creator-labels";
 import { sessionHoverFacts } from "../../lib/session-hover-facts";
 import type { RailSession } from "../../lib/session-list-entry";
 import { cn } from "../../lib/utils";
@@ -91,7 +92,8 @@ export function SessionRowHoverDetails({
   useMinuteNow();
   const now = fixedNow ?? Date.now();
   const facts = sessionHoverFacts(session, { descendantCount, descendantCountTruncated, now });
-  const createdBy: CreatorRef = session.createdBy;
+  const createdBy: CreatorRef =
+    useResolvedCreator(session.workspaceId, session.createdBy) ?? session.createdBy;
   // API keys (even subject-frozen ones) and services get the bot icon.
   const machineCreator = machineCreatorDisplay(createdBy) !== null;
   const creatorName =

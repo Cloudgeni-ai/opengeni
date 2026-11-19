@@ -101,6 +101,7 @@ async function fixture(backend: "compute" | "modal") {
     sandboxGroupId: session.sandboxGroupId,
   };
   await acquireLease(db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     ...ids,
     kind: "turn",
     holderId: "turn-1",
@@ -463,6 +464,7 @@ describe("compute leases and idle drain", () => {
         || jsonb_build_object('opengeniProviderInstanceId', instance_id)
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
     const arrival = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...ids,
       kind: "turn",
       holderId: "turn-2",
@@ -619,6 +621,7 @@ describe("the compute sandbox of archived chats", () => {
         || jsonb_build_object('opengeniProviderInstanceId', instance_id)
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
     const arrival = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...ids,
       kind: "turn",
       holderId: "turn-2",
@@ -761,6 +764,7 @@ describe("the stopped sandbox of archived chats on other backends", () => {
     await admin`update sessions set archived_at = null
       where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
     const arrival = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...ids,
       kind: "turn",
       holderId: "turn-2",

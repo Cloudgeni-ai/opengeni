@@ -144,6 +144,8 @@ describe("attempt-local initial wire dispatch clock", () => {
       const fallbackProviderCompletionEvents = ${declaration("fallbackProviderCompletionEvents")};
       const responseResult = { usageReported: false };
       const next = { value: {} };
+      // The settlement captures the terminal response it settles.
+      const settledEvent = next.value;
       const start = ${declaration("recordFallbackProviderDispatchAtWire")};
       const firstByte = ${declaration("settleFallbackProviderFirstByte")};
       const complete = async () => { ${parsed.source.slice(completed.start, completed.end)} };

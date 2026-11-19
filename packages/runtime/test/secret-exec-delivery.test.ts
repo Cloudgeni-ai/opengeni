@@ -57,7 +57,17 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 
 const sessions: LocalSession[] = [];
 const shellTempRoot = mkdtempSync(join(tmpdir(), "opengeni-secret-exec-test-"));
-afterAll(() => rmSync(shellTempRoot, { recursive: true, force: true }));
+// The local backend's sandbox is this host: its secret leak guard writes
+// ledger files there, which these tests remove again.
+const LEDGER_DIRECTORY = "/tmp/opengeni-private/secret-ledger";
+const ledgerFiles = () => (existsSync(LEDGER_DIRECTORY) ? readdirSync(LEDGER_DIRECTORY) : []);
+const ledgerBefore = new Set(ledgerFiles());
+afterAll(() => {
+  for (const name of ledgerFiles()) {
+    if (!ledgerBefore.has(name)) rmSync(join(LEDGER_DIRECTORY, name), { force: true });
+  }
+  rmSync(shellTempRoot, { recursive: true, force: true });
+});
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map(async (session) => await session.close()));
   // Tests that never reach attempt-end cleanup leave the stub attempt's
@@ -489,6 +499,48 @@ describe("apply_patch and view_image wrappers", () => {
     expect(operations).toEqual([
       { type: "create_file", path: "{{secret:Plain}}", diff: `+v=${VALUES.Plain}\n` },
     ]);
+  });
+
+  test("apply_patch resolves only added lines; context and removed lines stay text", async () => {
+    const resolver = createStaticSecretResolver(VALUES);
+    const controller = createTurnToolCancellationController(undefined, {
+      secretResolver: resolver,
+    });
+    const { tools, seen } = fakeTools(["apply_patch"]);
+    const wrapped = controller.wrapTools(tools) as typeof tools;
+    // The file already documents a reference literally; the edit keeps it as
+    // context, removes another, and adds one escaped and one real reference.
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: README.md",
+      "@@ Usage: {{secret:Plain}}",
+      " TOKEN={{secret:Plain}}",
+      "-OLD={{secret:Canary}}",
+      "+DOC=\\{{secret:Plain}}",
+      "*** End Patch",
+    ].join("\n");
+    expect(
+      await wrapped[0]!.invoke(runContext, JSON.stringify({ patch }), undefined as never),
+    ).toBe("ok");
+    const sent = JSON.parse(seen.apply_patch![0]!) as { patch: string };
+    expect(sent.patch).toContain("@@ Usage: {{secret:Plain}}");
+    expect(sent.patch).toContain(" TOKEN={{secret:Plain}}");
+    expect(sent.patch).toContain("-OLD={{secret:Canary}}");
+    expect(sent.patch).toContain("+DOC={{secret:Plain}}");
+    expect(resolver.calls).toEqual([]);
+
+    const added = [
+      "*** Begin Patch",
+      "*** Update File: README.md",
+      " TOKEN=\\{{secret:Plain}}",
+      "+TOKEN2={{secret:Plain}}",
+      "*** End Patch",
+    ].join("\n");
+    await wrapped[0]!.invoke(runContext, JSON.stringify({ patch: added }), undefined as never);
+    const second = JSON.parse(seen.apply_patch![1]!) as { patch: string };
+    expect(second.patch).toContain(" TOKEN={{secret:Plain}}");
+    expect(second.patch).toContain(`+TOKEN2=${VALUES.Plain}`);
+    expect(resolver.calls.map((call) => call.refs)).toEqual([["{{secret:Plain}}"]]);
   });
 });
 

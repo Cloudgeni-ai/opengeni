@@ -27,6 +27,7 @@ import {
   isSessionEventPersistenceError,
   DatabaseTransactionError,
   SandboxLeaseTransitionError,
+  SandboxOrganizationBoxLimitError,
   KnowledgeLearningScopeChangedError,
   nestedErrorRecords,
   nestedPostgresMessage,
@@ -620,6 +621,8 @@ export type McpConnectorAccountNeedingReconnect = {
 /** Connectors listed by name in the notice; the rest are counted. */
 const UNAVAILABLE_MCP_NOTICE_MAX_LISTED = 8;
 const UNAVAILABLE_MCP_NAME_MAX_CHARS = 80;
+/** Connected connectors named beside the unavailable ones; the rest are counted. */
+const CONNECTED_MCP_NOTICE_MAX_LISTED = 16;
 
 /**
  * The plain reason, and what the person can do. Shared by the turn notice and
@@ -638,14 +641,20 @@ export function unavailableMcpConnectorReasonText(reason: UnavailableMcpConnecto
   }
 }
 
-function displayConnector(connector: UnavailableMcpConnector): string {
+function cleanConnectorName(name: string | undefined): string {
   // Workspace-configured text: one bounded line, never instructions.
-  const name = (connector.name ?? "")
-    // oxlint-disable-next-line no-control-regex -- strip control characters
-    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, UNAVAILABLE_MCP_NAME_MAX_CHARS);
+  return (
+    (name ?? "")
+      // oxlint-disable-next-line no-control-regex -- strip control characters
+      .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, UNAVAILABLE_MCP_NAME_MAX_CHARS)
+  );
+}
+
+function displayConnector(connector: UnavailableMcpConnector): string {
+  const name = cleanConnectorName(connector.name);
   return name && name !== connector.id
     ? `${JSON.stringify(name)} (${connector.id})`
     : JSON.stringify(connector.id);
@@ -667,10 +676,55 @@ export function unavailableMcpOperationalContext(input: {
   omittedCount?: number;
   /** Accounts of this chat's connectors that stopped working and need reconnecting. */
   needsReconnect?: readonly McpConnectorAccountNeedingReconnect[];
+  /**
+   * This chat's connectors that are connected for this turn. Named only beside
+   * an unavailable or broken one, so a missing connector is never the only
+   * connector the model hears about: their tools may be deferred behind tool
+   * search, and a similarly named unavailable connector must not read as the
+   * one the person asked for. Their tools are listed only after this notice is
+   * written, so it does not promise any.
+   */
+  connected?: readonly { id: string; name?: string | undefined }[];
 }): string | undefined {
   const unavailable = unavailableMcpConnectorsNotice(input);
   const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? []);
-  return unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
+  const notice =
+    unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
+  if (!notice) return undefined;
+  const named = new Set(
+    [
+      ...input.connectors.map((connector) => connector.name),
+      ...(input.needsReconnect ?? []).map((account) => account.connector.name),
+    ]
+      .map(cleanConnectorName)
+      .filter(Boolean),
+  );
+  const connected = connectedMcpConnectorsLine(input.connected ?? [], named);
+  return connected ? `${notice}\n${connected}` : notice;
+}
+
+/**
+ * One line naming the connectors connected for this turn, deduplicated and
+ * sorted. A name shared with a connector named above carries its ID, as there.
+ */
+function connectedMcpConnectorsLine(
+  connectors: readonly { id: string; name?: string | undefined }[],
+  namedAbove: ReadonlySet<string>,
+): string | undefined {
+  const unique = [
+    ...new Set(
+      connectors.map((connector) => {
+        const name = cleanConnectorName(connector.name);
+        return name && !namedAbove.has(name)
+          ? JSON.stringify(name)
+          : displayConnector({ ...connector, reason: "no_account" });
+      }),
+    ),
+  ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  if (unique.length === 0) return undefined;
+  const listed = unique.slice(0, CONNECTED_MCP_NOTICE_MAX_LISTED);
+  const more = unique.length - listed.length;
+  return `Connected for this turn: ${listed.join(", ")}${more > 0 ? ` and ${more} more` : ""} (their tools may appear only through tool search). A connector the person names may be one of these rather than a similarly named one above.`;
 }
 
 /**
@@ -727,7 +781,7 @@ function unavailableMcpConnectorsNotice(input: {
   return [
     "Connector availability for this turn: these connectors are configured for this chat, but their tools were not loaded this turn, so tool search and tool lists do not show them.",
     ...lines,
-    "When the person's request needs one of them, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
+    "Prefer loaded tools that can do the task: one of these connectors is needed only when the person named it or no loaded tool can do it, and an answer from other tools says which of these was not checked. When one is needed, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
   ].join("\n");
 }
 
@@ -1130,7 +1184,13 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
 export type SandboxLifecycleTransitionDiagnostic = {
   sandboxGroupId: string;
   leaseEpoch: number;
-  reason: "capture_in_progress" | "rotation_in_progress" | "provider_recovery_in_progress";
+  reason:
+    | "capture_in_progress"
+    | "rotation_in_progress"
+    | "provider_recovery_in_progress"
+    | "organization_sandbox_capacity";
+  /** organization_sandbox_capacity only: the plan's running-box limit. */
+  organizationBoxLimit?: number;
 };
 
 /**
@@ -1165,12 +1225,20 @@ export function sandboxLifecycleTransitionDiagnostic(
         record.leaseEpoch >= 0 &&
         (reason === "capture_in_progress" ||
           reason === "rotation_in_progress" ||
-          reason === "provider_recovery_in_progress")
+          reason === "provider_recovery_in_progress" ||
+          reason === "organization_sandbox_capacity")
       ) {
+        const limit = record.organizationBoxLimit;
         return {
           sandboxGroupId: record.sandboxGroupId,
           leaseEpoch: record.leaseEpoch,
           reason,
+          ...(reason === "organization_sandbox_capacity" &&
+          typeof limit === "number" &&
+          Number.isSafeInteger(limit) &&
+          limit >= 0
+            ? { organizationBoxLimit: limit }
+            : {}),
         };
       }
 
@@ -1525,6 +1593,14 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 }
 
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
+  // The active sandbox route moved (another home, workspace root or native
+  // capability set) before the checkpoint request left: the transport's
+  // pre-dispatch route check refused it, so no provider saw it. That is the
+  // same route transition an ordinary request recovers from. Failure
+  // settlement continues the same turn in a fresh attempt on the new route,
+  // which checkpoints there. Checked before the wrapper type: the check may
+  // also throw unwrapped.
+  if (sandboxRouteTransitionCode(error) !== null) return true;
   if (!(error instanceof CompactionProviderResponseError)) return false;
   // The worker's own included-usage refusal (usage exhausted or unverifiable)
   // happens before dispatch, so the checkpoint request was never sent. It
@@ -2257,6 +2333,39 @@ export function findSandboxBackendNotServedError(
 }
 
 /**
+ * A plan compute-bound refusal anywhere in an error's cause graph: `cause`
+ * chains, AggregateError members, and the agents SDK's ToolCallError
+ * (`.error`), since a lazily started box is refused inside a tool call.
+ */
+export function findSandboxOrganizationBoxLimitError(
+  error: unknown,
+): SandboxOrganizationBoxLimitError | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : causeChain(error);
+  return (
+    nodes.find(
+      (node): node is SandboxOrganizationBoxLimitError =>
+        node instanceof SandboxOrganizationBoxLimitError,
+    ) ?? null
+  );
+}
+
+/** Up to 16 `cause` links, for when the full graph walk gives up. */
+function causeChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  for (let current = error; current && typeof current === "object";) {
+    if (chain.includes(current) || chain.length >= 16) break;
+    chain.push(current);
+    try {
+      current = (current as { cause?: unknown }).cause;
+    } catch {
+      break;
+    }
+  }
+  return chain;
+}
+
+/**
  * Record the closed provider condition on a retryable model-provider failure so
  * clients can say "overloaded" rather than a generic outage. Presentation
  * evidence only: retry authority and pacing are decided by `code`.
@@ -2345,6 +2454,20 @@ const REPLAY_SAFE_CHECKPOINT_TRANSPORT_CODES: ReadonlySet<string> = new Set([
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
 ]);
 
+/**
+ * A checkpoint failure whose diagnostics carry nothing but an error name: no
+ * HTTP status, response, request id, provider code, type, field, stream event
+ * or rejection reason. The provider never answered.
+ */
+function isUnansweredCompactionProviderFailure(
+  error: unknown,
+): error is CompactionProviderResponseError {
+  if (!(error instanceof CompactionProviderResponseError)) return false;
+  return Object.entries(error.diagnostics).every(
+    ([key, value]) => key === "errorName" || value === null || value === undefined,
+  );
+}
+
 function classifyAgentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
@@ -2370,6 +2493,14 @@ function classifyAgentRunFailurePayload(
       code: backendNotServed.code,
       retryable: false,
     };
+  }
+  // The organization's plan allows no sandbox now: a held or denied
+  // organization that has not paid, or a Free organization (or person) past
+  // today's box time. Neither frees on its own within the turn, so the turn
+  // fails with the person-facing reason instead of waiting.
+  const computeRefusal = findSandboxOrganizationBoxLimitError(error);
+  if (computeRefusal) {
+    return { error: computeRefusal.message, code: computeRefusal.code, retryable: false };
   }
   // The chat's personal machine isn't allowed for this turn. Its cause is the
   // database's refusal, which is not a database fault: the machine's owner
@@ -2440,6 +2571,25 @@ function classifyAgentRunFailurePayload(
   const expired = nodes.find((node) => node instanceof ProviderOverloadRecoveryExpiredError);
   if (expired instanceof ProviderOverloadRecoveryExpiredError) return expired.failure;
   const failure = baseAgentRunFailurePayload(error, options);
+  // A checkpoint request that failed before any provider answer (no status,
+  // response, code or type anywhere in its cause chain) changed nothing and
+  // proved nothing about the history: a dropped connection, a fetch that
+  // never left, a pre-dispatch check. The next request may pass, so retry the
+  // same turn under the bounded provider recovery policy rather than failing
+  // it and holding the session. Only the unclassified fallback is replaced;
+  // every typed failure above keeps its own classification.
+  if (
+    failure.code === undefined &&
+    failure.retryable === undefined &&
+    isUnansweredCompactionProviderFailure(error)
+  ) {
+    return {
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      detail: error.message,
+    };
+  }
   const diagnostic = materializationVerificationDiagnostic(error);
   const anthropic = anthropicRequestDiagnostic(error);
   if (anthropic) {

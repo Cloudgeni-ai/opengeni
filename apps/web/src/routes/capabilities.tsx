@@ -6,6 +6,7 @@ import {
 } from "@opengeni/react/app/lib/drive-connect-return";
 import type { ChatClient } from "@opengeni/sdk";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
+import { sameConnectorProviderDomain } from "@opengeni/contracts/nango";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
@@ -37,6 +38,10 @@ import {
   OWNERSHIP_HELP,
 } from "@/components/capabilities/capability-copy";
 import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
+import {
+  connectorRowHealth,
+  connectorRowRepairAction,
+} from "@/components/capabilities/connector-row-health";
 import {
   catalogServiceIdentity,
   collapseConnectionService,
@@ -90,6 +95,8 @@ import {
 } from "@opengeni/react/ui/line-tabs";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { SkillsPanel } from "./skills-panel";
+import { partitionSimplifiedInterfaceServices } from "@/components/capabilities/simplified-interface-services";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
 import { capabilityLogoSource } from "@opengeni/react/app/components/capabilities/capability-logo-source";
 import { type ConnectAction } from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
@@ -114,6 +121,7 @@ import {
   useFinishUnfinishedConnectSetups,
 } from "@/components/capabilities/use-api-integration-accounts";
 import {
+  nativeCatalogItemCannotConnect,
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
   nativeIntegrationModel,
@@ -141,6 +149,15 @@ import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { WindowBarTitleBoundary } from "@opengeni/react/ui/window-bar-title";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
+import { desktopBridge } from "@opengeni/react/app/lib/desktop";
+import {
+  DESKTOP_CONNECT_POLL_MS,
+  desktopConnectAlreadyFinished,
+  finishedDesktopConnection,
+  rememberDesktopConnectFinished,
+  startDesktopConnectWatch,
+  type DesktopConnectWatch,
+} from "@/lib/desktop-connect-watch";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -156,10 +173,10 @@ import {
   connectionHealth,
   isConnectorCatalogItem,
   isMissingCredentialsError,
-  normalizeProviderDomain,
   oauthConnectionRef,
   catalogConnectionAccountSelection,
   oauthConnectionOwnership,
+  oauthServerFinish,
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
@@ -318,6 +335,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     connections,
     connectionsLoadFailed,
     connectionsAccessDenied,
+    accounts,
     fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
@@ -335,7 +353,13 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
 
   // now, so it scrolls that section into view instead.
   const [filter] = useState<CapabilityFilter>("all");
-  const [activeTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
+  const [chosenTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
+  // The simplified interface shows one thing here: the apps to connect. Skills
+  // opened by their own address still show, with the full page around them.
+  const focused = useSimplifiedInterface().simplified && initialSection !== "skills";
+  const activeTab = focused ? "connections" : chosenTab;
+  // Its own apps come first; the rest of the catalog waits behind one button.
+  const [moreAppsShown, setMoreAppsShown] = useState(false);
   const [query, setQuery] = useState("");
   const hasQuery = query.trim().length > 0;
   const searchingAll = activeTab === "all";
@@ -499,9 +523,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       items.filter(
         (item) =>
           isConnectorCatalogItem(item) &&
-          nativeCatalogItemVisible(item, nativeConnectCatalog, nativeConnectionFacts),
+          nativeCatalogItemVisible(item, nativeConnectCatalog, nativeConnectionFacts, {
+            searching: hasQuery,
+          }),
       ),
-    [items, nativeConnectCatalog, nativeConnectionFacts],
+    [items, nativeConnectCatalog, nativeConnectionFacts, hasQuery],
   );
   // The Featured strip shows curated connectors when nothing narrows the list;
   // the grid then carries the long tail. A search or a non-MCP filter hides the
@@ -557,7 +583,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     refresh,
     onRuntimeChanged,
   });
-  const github = useGitHubIntegration({ workspaceId });
+  const github = useGitHubIntegration({ workspaceId, pageOpen: openIntegration === "github" });
   // Outlook Mail/Calendar/Contacts and OneDrive: one row per provider, folding
   // every connected account into that row's Connected accounts block. Every
   // curated definition here is oauth2-only, so a single shared effect (below)
@@ -636,10 +662,25 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     ),
   }));
   const connectorChip = (item: CapabilityCatalogItem) =>
-    connectionAccessChip(
-      capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
-      connectionsAccessDenied,
-    );
+    !item.enabled && nativeCatalogItemCannotConnect(item)
+      ? { label: "Unavailable" as const, tone: "plain" as const }
+      : connectionAccessChip(
+          capabilityStateChip(item, connectionHealth(item, accounts ?? [], accounts !== null)),
+          connectionsAccessDenied,
+        );
+  // One state source with the item page: the reason names what needs fixing
+  // and the row offers that page's one repair.
+  const connectorRowStatus = (item: CapabilityCatalogItem) => {
+    const health = connectionHealth(item, accounts ?? [], accounts !== null);
+    return connectorRowHealth({
+      item,
+      health,
+      chip: connectorChip(item),
+      repairable: !connectionsAccessDenied,
+      busy: busyId !== null,
+      onRepair: () => repairFromList(item, health),
+    });
+  };
   const openIntegrationFrom = () => {
     integrationOpenerRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -694,8 +735,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
             description: personalExtensionOrigin(item)
               ? `From ${personalExtensionOrigin(item)}`
               : (capabilityDescription(item) ?? undefined),
-            status: connectorChip(item).label,
-            state: catalogStatusForChip(connectorChip(item)),
+            ...connectorRowStatus(item),
             connected: item.enabled,
             onOpen: () => openItem(item),
           },
@@ -723,12 +763,19 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // Connected first, then about 30 popular providers. The long tail of the
   // public registry is reached only by searching, labelled Community.
   const connectedServices = connectedConnectionServices(connectionServices);
-  const popularServices = featuredServices
-    .filter((service) => !connectedServices.includes(service))
-    .slice(0, POPULAR_LIMIT);
+  const availableFeaturedServices = featuredServices.filter(
+    (service) => !connectedServices.includes(service),
+  );
+  const popularServices = availableFeaturedServices.slice(0, POPULAR_LIMIT);
   const communityServices = remainingServices.filter(
     (service) => !connectedServices.includes(service),
   );
+  // The simplified interface's own apps first, wherever they rank among the popular.
+  const simplifiedPartition = partitionSimplifiedInterfaceServices(availableFeaturedServices);
+  const simplifiedApps = {
+    apps: simplifiedPartition.apps,
+    others: simplifiedPartition.others.slice(0, POPULAR_LIMIT),
+  };
   const openIntegrationModel =
     integrations.find((adapter) => adapter.model.id === openIntegration)?.model ?? null;
   // The item the sheet renders, always from the live catalog. Registry items
@@ -799,7 +846,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         }
       : rawSelectedItem;
   const selectedHealth: ConnectionHealth = selectedItem
-    ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
+    ? connectionHealth(selectedItem, accounts ?? [], accounts !== null)
     : { state: "none" };
   const currentWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId);
   const selectedConnectAccess = selectedItem
@@ -810,17 +857,29 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         memberIntegrationSetup,
       )
     : null;
-  const selectedSetupUnavailable = selectedItem
-    ? (nativeCatalogItemNotice(
-        selectedItem,
+  const setupUnavailableFor = (item: CapabilityCatalogItem) => {
+    const connectAccess =
+      item === selectedItem
+        ? selectedConnectAccess
+        : catalogConnectAccess(
+            item,
+            context.accessContext?.workspaceGrants.find(
+              (grant) => grant.workspaceId === workspaceId,
+            ),
+            currentWorkspace?.kind,
+            memberIntegrationSetup,
+          );
+    return (
+      nativeCatalogItemNotice(
+        item,
         nativeConnectCatalog,
         () => void refresh(),
         nativeConnectionFacts,
       ) ??
-      (selectedConnectAccess?.blocked
-        ? { tone: "muted" as const, ...selectedConnectAccess.blocked }
-        : undefined))
-    : undefined;
+      (connectAccess?.blocked ? { tone: "muted" as const, ...connectAccess.blocked } : undefined)
+    );
+  };
+  const selectedSetupUnavailable = selectedItem ? setupUnavailableFor(selectedItem) : undefined;
   const selectedSocialConnections = selectedItem
     ? (() => {
         const plan = capabilityConnectPlan(selectedItem);
@@ -873,11 +932,13 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         description:
           reason === "provider_denied"
             ? "The Fiken authorization was declined."
-            : reason === "no_api_company"
-              ? "The Fiken account has API access to no company. Order API module access in Fiken first."
-              : // An expired or reused link is not a reason to switch to a token.
-                (oauthCallbackReasonMessage(reason) ??
-                "Try again, or connect with a personal API token instead."),
+            : reason === "provider_error"
+              ? "Fiken refused the connection. Your Fiken user may not be approved for this app yet."
+              : reason === "no_api_company"
+                ? "The Fiken account has API access to no company. Order API module access in Fiken first."
+                : // An expired or reused link is not a reason to switch to a token.
+                  (oauthCallbackReasonMessage(reason) ??
+                  "Try again, or connect with a personal API token instead."),
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1177,14 +1238,36 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // --- Connect flows ---------------------------------------------------------
 
   async function handleAction(action: ConnectAction): Promise<boolean> {
-    // Removing one account is management of an existing row, never fresh setup.
+    // Removing or renaming one account is management of an existing row, never
+    // fresh setup.
     if (
       !selected ||
       !selectedItem ||
       busyId !== null ||
-      (selectedSetupUnavailable && action.type !== "remove_connection")
+      (selectedSetupUnavailable &&
+        action.type !== "remove_connection" &&
+        action.type !== "rename_connection" &&
+        action.type !== "turn_on_here")
     )
       return false;
+    return await runAction(selectedItem, selected.registry, action);
+  }
+
+  /** A list row's one repair; without one the item's page opens and offers it. */
+  function repairFromList(item: CapabilityCatalogItem, health: ConnectionHealth) {
+    const action = connectorRowRepairAction(item, health, {
+      setupUnavailable: setupUnavailableFor(item) !== undefined,
+    });
+    if (action) void runAction(item, false, action);
+    else openItem(item);
+  }
+
+  async function runAction(
+    targetItem: CapabilityCatalogItem,
+    registry: boolean,
+    action: ConnectAction,
+  ): Promise<boolean> {
+    if (busyId !== null) return false;
     // Social authorization starts a new provider attempt even when existing
     // rows are retained for management. Disconnect never needs this readiness.
     if (
@@ -1192,15 +1275,17 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       !nativeProviderAvailable(nativeConnectCatalog, action.provider)
     )
       return false;
-    setBusyId(selectedItem.id);
+    setBusyId(targetItem.id);
     setSheetError(null);
+    // The id the sign-in returns to: a registry entry is saved first and gets its own.
+    let returnItemId = targetItem.id;
     try {
       await performCapabilityAction(
         {
           client,
           workspaceId,
-          item: selectedItem,
-          registry: selected.registry,
+          item: targetItem,
+          registry,
           connections: connectionsLoadFailed ? null : connections,
           canManageSkills,
           refresh,
@@ -1209,17 +1294,32 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
           onComplete: () => setSheetError(null),
           onSkillRemoval: setSkillRemoval,
           connectReturnUrl: window.location.href,
-          returnPathFor: (id) =>
-            `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`,
-          redirect: (url) => window.location.assign(url),
+          returnPathFor: (id) => {
+            returnItemId = id;
+            return `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`;
+          },
+          redirect: (url) => {
+            watchDesktopConnect(targetItem, returnItemId, action);
+            window.location.assign(url);
+          },
         },
         action,
       );
-      if (action.type === "remove_connection") catalogConnectionAccounts.onRetry();
+      if (
+        action.type === "remove_connection" ||
+        action.type === "rename_connection" ||
+        action.type === "turn_on_here"
+      )
+        catalogConnectionAccounts.onRetry();
       return true;
     } catch (error) {
       await refresh();
-      if (action.type === "remove_connection") catalogConnectionAccounts.onRetry();
+      if (
+        action.type === "remove_connection" ||
+        action.type === "rename_connection" ||
+        action.type === "turn_on_here"
+      )
+        catalogConnectionAccounts.onRetry();
       const copy = capabilityErrorToast(error, "Something went wrong");
       setSheetError(
         isMissingCredentialsError(error)
@@ -1386,28 +1486,44 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // ?integration_oauth=success|error; we read it once, strip it from the URL,
   // and either auto-enable with the fresh connection or reopen the sheet with a
   // human error + retry. Runs after the catalog loads so the item is resolvable.
-  const oauthHandled = useRef(false);
+  // Keyed by the search it read: the desktop app can bring a later outcome to
+  // this page while it is open, without a reload.
+  const oauthHandled = useRef<string | null>(null);
   useEffect(() => {
-    if (oauthHandled.current || loading) return;
-    const params = new URLSearchParams(window.location.search);
+    if (loading) return;
+    const search = window.location.search;
+    if (oauthHandled.current === search) return;
+    const params = new URLSearchParams(search);
     const outcome = params.get("integration_oauth");
     if (!outcome) return;
     // Provider-definition API integrations have their own immutable preview/install
     // continuation. Leave those callback parameters intact for the control
     // center instead of treating them as a legacy MCP catalog connection.
     if (params.has("api_integration_definition")) return;
-    oauthHandled.current = true;
+    oauthHandled.current = search;
 
     const itemId = params.get("connect_item");
     // Strip the OAuth params so a refresh doesn't reprocess them.
     clearReturnParams();
 
+    const connectionId = params.get("connectionId");
+    if (outcome === "success" && connectionId && desktopConnectAlreadyFinished(connectionId)) {
+      // The app finished this connection while the browser was still open.
+      void refresh();
+      return;
+    }
+    if (outcome === "success" && connectionId) {
+      // The hand-back arrived first: finish here, and stop watching for it.
+      rememberDesktopConnectFinished(connectionId);
+      setDesktopWatch(null);
+    }
     if (outcome === "success") {
       void resumeOAuthConnect(
         itemId,
-        params.get("connectionId"),
+        connectionId,
         params.get("providerDomain"),
         oauthConnectionOwnership(params.get("ownership")),
+        oauthServerFinish(params.get("capability")),
       );
     } else {
       const reason = params.get("reason");
@@ -1429,7 +1545,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items, setQuery]);
+  }, [loading, items, setQuery, searchStr]);
 
   // An agent recommendation deep-links to the same human-reviewed setup sheet
   // as a marketplace click. Loading the live catalog again prevents an old
@@ -1472,12 +1588,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     if (!domain) return;
     reconnectHandled.current = true;
     clearReturnParams();
-    const target = normalizeProviderDomain(domain);
     const item = items.find(
       (candidate) =>
         candidate.enabled &&
         candidate.connectionRef &&
-        normalizeProviderDomain(candidate.connectionRef.providerDomain) === target,
+        sameConnectorProviderDomain(candidate.connectionRef.providerDomain, domain),
     );
     if (item) {
       setSelected(
@@ -1500,6 +1615,9 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     connectionId: string | null,
     providerDomain: string | null,
     ownership: ConnectionOwnership | null,
+    // What the sign-in callback already did with the capability. The callback
+    // turns it on itself, so this page usually only shows the result.
+    serverFinish: "enabled" | "on" | null = null,
   ) {
     setBusyId(itemId ?? "oauth-return");
     // Hoisted above the try so the catch can reopen the sheet from the freshly
@@ -1529,13 +1647,16 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       }
       if (action === "reconnect") {
         // Already enabled: the exact pinned row was refreshed in place, or a
-        // personal account (refreshed or newly added) joined the generic binding.
+        // personal account (refreshed or newly added) joined the generic binding,
+        // or the sign-in callback turned it on.
         onRuntimeChanged();
         catalogConnectionAccounts.onRetry();
         toast.success(
-          item!.connectionRef?.connectionId === connectionId
-            ? `Reconnected ${item!.name}`
-            : `Connected ${item!.name}`,
+          serverFinish === "enabled" && !items.find((candidate) => candidate.id === itemId)?.enabled
+            ? `Connected and enabled ${item!.name}`
+            : item!.connectionRef?.connectionId === connectionId && serverFinish !== "enabled"
+              ? `Reconnected ${item!.name}`
+              : `Connected ${item!.name}`,
         );
         return true;
       }
@@ -1579,6 +1700,20 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       );
       return true;
     } catch (error) {
+      // The sign-in callback may have turned it on at the same moment (the
+      // desktop app sees the new account as soon as it is saved). If it is on
+      // with this account now, setup is done.
+      if (itemId && connectionId) {
+        const settled = await client.listCapabilities(workspaceId).catch(() => null);
+        const now = settled?.items.find((candidate) => candidate.id === itemId) ?? null;
+        if (settled && now && oauthResumeAction(now, connectionId) === "reconnect") {
+          setItems(settled.items);
+          onRuntimeChanged();
+          catalogConnectionAccounts.onRetry();
+          toast.success(`Connected ${now.name}`);
+          return true;
+        }
+      }
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
       setSheetError(copy.description);
       // Reopen the sheet on the item so the failure has a Retry, when resolvable.
@@ -1600,6 +1735,89 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     } finally {
       setBusyId(null);
     }
+  }
+
+  // In the desktop app a connection's sign-in finishes in the person's
+  // browser. Watch for the new connection and finish here as soon as it
+  // appears, instead of waiting for the browser to hand the person back.
+  const [desktopWatch, setDesktopWatch] = useState<DesktopConnectWatch | null>(null);
+  const resumeFromWatch = useRef(resumeOAuthConnect);
+  resumeFromWatch.current = resumeOAuthConnect;
+  useEffect(() => {
+    if (!desktopWatch) return;
+    let stopped = false;
+    let checking = false;
+    const check = async () => {
+      if (stopped || checking) return;
+      if (Date.now() > desktopWatch.until) {
+        stopped = true;
+        setDesktopWatch(null);
+        return;
+      }
+      checking = true;
+      try {
+        const finished = finishedDesktopConnection(
+          desktopWatch,
+          await client.listConnections(workspaceId),
+          (id) => desktopConnectAlreadyFinished(id),
+        );
+        if (!finished || stopped) return;
+        stopped = true;
+        setDesktopWatch(null);
+        rememberDesktopConnectFinished(finished.id);
+        await resumeFromWatch.current(
+          desktopWatch.itemId,
+          finished.id,
+          finished.providerDomain,
+          desktopWatch.ownership,
+        );
+      } catch {
+        // Read again on the next tick.
+      } finally {
+        checking = false;
+      }
+    };
+    const timer = window.setInterval(() => void check(), DESKTOP_CONNECT_POLL_MS);
+    const onFocus = () => void check();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [desktopWatch, client, workspaceId]);
+
+  function watchDesktopConnect(
+    item: CapabilityCatalogItem,
+    itemId: string,
+    action: ConnectAction,
+  ): void {
+    if (!desktopBridge || connections === null) return;
+    if (
+      action.type !== "oauth" &&
+      action.type !== "reconnect_oauth" &&
+      action.type !== "add_oauth_account"
+    )
+      return;
+    // Google Drive resumes through its own return step.
+    if ((item.mcpUrl ?? item.endpointUrl) === DRIVE_MCP_URL) return;
+    const plan = capabilityConnectPlan(item);
+    setDesktopWatch(
+      startDesktopConnectWatch({
+        itemId,
+        providerDomain:
+          plan.mode === "oauth"
+            ? plan.providerDomain
+            : (item.connectionRef?.providerDomain ?? null),
+        mcpUrl: plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null),
+        ownership: action.ownership,
+        viewerSubjectId: context.accessContext?.subjectId ?? null,
+        reconnectConnectionId: action.type === "reconnect_oauth" ? action.connectionId : null,
+        connections,
+      }),
+    );
   }
 
   async function submitAddCustom(form: CapabilityFormState) {
@@ -1755,7 +1973,18 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
           tokenAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-token"),
         }}
         socialConnections={selectedSocialConnections}
-        connectionAccounts={catalogConnectionAccounts}
+        connectionAccounts={{
+          ...catalogConnectionAccounts,
+          ownReach: {
+            ...catalogConnectionAccounts.ownReach,
+            // Your login's switch turned this connector on here: show it on.
+            onConnectorTurnedOn: (target) => {
+              if (target !== workspaceId) return;
+              void refresh();
+              onRuntimeChanged();
+            },
+          },
+        }}
         accountManagement={{
           viewerSubjectId: context.accessContext?.subjectId ?? null,
           canWrite: hasWorkspacePermission(context.accessContext, workspaceId, "connections:write"),
@@ -1770,6 +1999,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
             hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),
+          onRename: (connection, label) =>
+            handleAction({ type: "rename_connection", item: selectedItem, connection, label }),
         }}
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
@@ -1910,7 +2141,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
               <PageHeader
                 icon={<PlugIcon />}
                 title="Capabilities"
-                description="Tools, skills, and plugins your agents can use"
+                description={
+                  focused
+                    ? "Connect the tools you already use"
+                    : "Tools, skills, and plugins your agents can use"
+                }
                 actions={
                   <div
                     ref={setCatalogActionTarget}
@@ -1918,12 +2153,14 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                   />
                 }
                 tabs={
-                  <LineTabsList aria-label="Capability types">
-                    <LineTabsTrigger value="all">All</LineTabsTrigger>
-                    <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
-                    <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-                    <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
-                  </LineTabsList>
+                  focused ? undefined : (
+                    <LineTabsList aria-label="Capability types">
+                      <LineTabsTrigger value="all">All</LineTabsTrigger>
+                      <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
+                      <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+                      <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
+                    </LineTabsList>
+                  )
                 }
               />
             </WindowBarTitleBoundary>
@@ -1972,9 +2209,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                 value={query}
                 onValueChange={setQuery}
                 placeholder={
-                  activeTab === "all"
-                    ? "Search connections, skills, and plugins"
-                    : `Search ${activeTab}`
+                  focused
+                    ? "Search apps"
+                    : activeTab === "all"
+                      ? "Search connections, skills, and plugins"
+                      : `Search ${activeTab}`
                 }
               />
             </Toolbar>
@@ -1985,6 +2224,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                     {!searchingAll ? (
                       <CatalogHeader
                         title="Connections"
+                        hidden={focused}
                         action={
                           <Button type="button" onClick={() => setAddOpen(true)}>
                             <PlusIcon />
@@ -2102,12 +2342,46 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                             <ConnectedServiceList services={connectedServices} />
                           </section>
                         ) : null}
-                        <section aria-label="Popular" className="mt-6">
-                          <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Popular</h2>
+                        {focused && simplifiedApps.apps.length > 0 ? (
+                          <section aria-label="Recommended" className="mt-6">
+                            <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Recommended</h2>
+                            <ConnectionCatalog
+                              grouped={false}
+                              columns={2}
+                              services={simplifiedApps.apps}
+                            />
+                          </section>
+                        ) : null}
+                        {focused &&
+                        simplifiedApps.apps.length > 0 &&
+                        simplifiedApps.others.length > 0 &&
+                        !moreAppsShown ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="mt-6"
+                            onClick={() => setMoreAppsShown(true)}
+                          >
+                            Show more apps
+                          </Button>
+                        ) : null}
+                        <section
+                          aria-label={focused ? "More apps" : "Popular"}
+                          className="mt-6"
+                          hidden={
+                            focused &&
+                            (simplifiedApps.others.length === 0 ||
+                              (simplifiedApps.apps.length > 0 && !moreAppsShown))
+                          }
+                        >
+                          <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>
+                            {focused ? "More apps" : "Popular"}
+                          </h2>
                           <ConnectionCatalog
                             grouped={false}
                             columns={2}
-                            services={popularServices}
+                            services={focused ? simplifiedApps.others : popularServices}
                           />
                           {communityServices.length > 0 ? (
                             <p className="mt-4 text-xs leading-4.5 text-fg-muted">

@@ -457,6 +457,18 @@ export {
   type SecretStdinCarry,
 } from "./secret-delivery";
 
+// Secret leak guard: no git commit or push of a value Opengeni delivered.
+export {
+  SecretLeakGuard,
+  SecretLedgerKey,
+  gitLeakPlan,
+  secretLedgerKeyFor,
+  secretLeakMessage,
+  type SecretLeak,
+  type SecretLeakGuardRunner,
+  type SecretLedgerWriter,
+} from "./secret-leak-guard";
+
 // Credential profiles: per-command environment variables resolved from secret
 // references at the same exec boundary (docs/secrets.md).
 export {
@@ -1333,7 +1345,8 @@ export function readWorkspaceArchiveFromEnvelopeSessionState(
     return undefined;
   }
   try {
-    return Uint8Array.from(Buffer.from(b64, "base64"));
+    const decoded = Buffer.from(b64, "base64");
+    return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
   } catch {
     return undefined;
   }

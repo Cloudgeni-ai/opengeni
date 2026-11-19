@@ -8,13 +8,18 @@ import {
 } from "@opengeni/config";
 
 describe("Codex model catalog", () => {
-  const expected = ["codex/gpt-6-astra", "codex/gpt-6-sol", "codex/gpt-6-luna"];
+  const expected = [
+    "codex/gpt-6.2-astra",
+    "codex/gpt-6.2-sol",
+    "codex/gpt-6-sol",
+    "codex/gpt-6-luna",
+  ];
 
-  test("always returns the static approved catalog including Astra", () => {
+  test("always returns the static approved catalog including GPT-6.2 Astra", () => {
     const models = codexModelsForPicker();
 
     expect(models.map((model) => model.id)).toEqual(expected);
-    expect(models.at(0)?.label).toBe("GPT-6 Astra");
+    expect(models.at(0)?.label).toBe("GPT-6.2 Astra");
   });
 
   test("live support filters exact upstream models, without prefix matching or invented rows", () => {

@@ -571,6 +571,9 @@ async function resolvePluginPackage(input: {
         source,
         connection: connectionDescriptor(connection),
         transport: input.transport,
+        ...(input.deps.apiIntegrationDefinitionLookup
+          ? { definitionLookup: input.deps.apiIntegrationDefinitionLookup }
+          : {}),
         authority: {
           accountId: input.accountId,
           workspaceId: input.workspaceId,

@@ -51,6 +51,13 @@ import {
   withRlsContext,
 } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
+import {
+  readSignupNetworkEvaluateAccounts,
+  setSignupMailSignalForSetup,
+  setSignupNetworkSourceForSetup,
+  type SignupMailSignal,
+  type SignupNetworkSource,
+} from "./managed-user-setup";
 import { lockSessionEventWriteRows } from "./session-control";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import * as schema from "./schema";
@@ -66,6 +73,30 @@ export async function createManagedOrganization(
     trialCreditModelIds?: string[] | undefined;
   },
 ): Promise<CreateOrganizationResponseType> {
+  return (await createManagedOrganizationWithSignupNetwork(db, input)).organization;
+}
+
+/**
+ * {@link createManagedOrganization} that also hands the setup receipt
+ * trigger the signup network (migration 1354), exactly like organization
+ * onboarding: this legacy route writes the same self-serve setup receipt and
+ * Free eligibility, so it must be recorded, rate limited (SQLSTATE OG429)
+ * and evaluated the same way. `evaluateAccountIds` lists the accounts to
+ * evaluate after commit.
+ */
+export async function createManagedOrganizationWithSignupNetwork(
+  db: Database,
+  input: {
+    subjectId: string;
+    subjectLabel: string;
+    name: string;
+    operationId: string;
+    trialCreditsEnabled?: boolean;
+    trialCreditModelIds?: string[] | undefined;
+    signupNetwork?: SignupNetworkSource | null;
+    signupMailSignal?: SignupMailSignal | null;
+  },
+): Promise<{ organization: CreateOrganizationResponseType; evaluateAccountIds: string[] }> {
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
     // This legacy first-organization route delegates to the same self-service
@@ -85,6 +116,8 @@ export async function createManagedOrganization(
       ${input.trialCreditModelIds ? JSON.stringify(input.trialCreditModelIds) : ""}, true
     )`,
     );
+    await setSignupNetworkSourceForSetup(tx as unknown as Database, input.signupNetwork);
+    await setSignupMailSignalForSetup(tx as unknown as Database, input.signupMailSignal);
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select create_managed_organization(
@@ -94,7 +127,54 @@ export async function createManagedOrganization(
         ${input.operationId}::uuid
       ) as result`,
     );
-    return CreateOrganizationResponse.parse(row?.result);
+    return {
+      organization: CreateOrganizationResponse.parse(row?.result),
+      evaluateAccountIds: await readSignupNetworkEvaluateAccounts(tx as unknown as Database),
+    };
+  });
+}
+
+/**
+ * Create one more organization for a person who already has one. Like a
+ * first organization's setup (migration 1484), it records the signup network
+ * passed here and may be refused with SQLSTATE OG429 by the network rate
+ * limit; `evaluateAccountIds` lists the accounts to evaluate after commit.
+ * A person who owns or administers a held or denied organization gets the new
+ * one held.
+ */
+export async function createAdditionalManagedOrganizationWithSignupNetwork(
+  db: Database,
+  input: {
+    subjectId: string;
+    subjectLabel: string;
+    name: string;
+    workspaceName: string;
+    operationId: string;
+    signupNetwork?: SignupNetworkSource | null;
+    signupMailSignal?: SignupMailSignal | null;
+  },
+): Promise<{
+  organization: CreateAdditionalOrganizationResponseType;
+  evaluateAccountIds: string[];
+}> {
+  return await db.transaction(async (tx) => {
+    await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
+    await setSignupNetworkSourceForSetup(tx as unknown as Database, input.signupNetwork);
+    await setSignupMailSignalForSetup(tx as unknown as Database, input.signupMailSignal);
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select create_additional_managed_organization(
+        ${input.subjectId},
+        ${input.subjectLabel},
+        ${input.name},
+        ${input.workspaceName},
+        ${input.operationId}::uuid
+      ) as result`,
+    );
+    return {
+      organization: CreateAdditionalOrganizationResponse.parse(row?.result),
+      evaluateAccountIds: await readSignupNetworkEvaluateAccounts(tx as unknown as Database),
+    };
   });
 }
 
@@ -108,20 +188,7 @@ export async function createAdditionalManagedOrganization(
     operationId: string;
   },
 ): Promise<CreateAdditionalOrganizationResponseType> {
-  return await db.transaction(async (tx) => {
-    await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
-    const [row] = await rawRows<{ result: unknown }>(
-      tx,
-      sql`select create_additional_managed_organization(
-        ${input.subjectId},
-        ${input.subjectLabel},
-        ${input.name},
-        ${input.workspaceName},
-        ${input.operationId}::uuid
-      ) as result`,
-    );
-    return CreateAdditionalOrganizationResponse.parse(row?.result);
-  });
+  return (await createAdditionalManagedOrganizationWithSignupNetwork(db, input)).organization;
 }
 
 /**

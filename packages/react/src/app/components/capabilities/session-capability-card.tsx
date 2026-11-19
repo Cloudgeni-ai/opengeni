@@ -26,6 +26,7 @@ import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
 import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
 import { SessionCustomMcpCard } from "./session-custom-mcp-card";
+import { SessionConnectInputsCard } from "./session-connect-inputs-card";
 import {
   capabilityConnectPlan,
   capabilityErrorToast,
@@ -89,6 +90,16 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
     () => setRegistered((current) => (current?.open ? { ...current, open: false } : current)),
     [],
   );
+  if (props.item.capability?.inputs?.length && !registered) {
+    return (
+      <SessionConnectInputsCard
+        key={`${props.workspaceId}:${props.item.id}`}
+        item={props.item}
+        workspaceId={props.workspaceId}
+        onRegistered={onRegistered}
+      />
+    );
+  }
   if (props.item.setupRequest && !registered) {
     return (
       <SessionCustomMcpCard
@@ -107,11 +118,11 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         setupRequest: null,
         capability: {
           id: registered.id,
-          name: props.item.setupRequest!.name,
+          name: props.item.setupRequest?.name ?? props.item.capability!.name,
           kind: "mcp" as const,
           source: "manual" as const,
           action: "connect" as const,
-          rationale: props.item.setupRequest!.rationale,
+          rationale: props.item.setupRequest?.rationale ?? props.item.capability!.rationale,
           requiredVariables: [],
         },
       }
@@ -672,7 +683,7 @@ function SessionCapabilitySetup({
   const ownsActionRow =
     !catalog.loadError && item && !item.enabled && (item.kind === "skill" || item.kind === "mcp");
   const health = item
-    ? connectionHealth(item, catalog.connections ?? [], catalog.connections !== null)
+    ? connectionHealth(item, catalog.accounts ?? [], catalog.accounts !== null)
     : null;
   return (
     <div className="p-6 sm:p-8">
@@ -706,7 +717,7 @@ function SessionCapabilitySetup({
           showIdentity={false}
           onCancel={ownsActionRow ? onClose : undefined}
           item={item}
-          health={connectionHealth(item, catalog.connections ?? [], catalog.connections !== null)}
+          health={connectionHealth(item, catalog.accounts ?? [], catalog.accounts !== null)}
           logoSrc={capabilityLogoSource(item, (path) => context.client.catalogAssetUrl(path))}
           busy={busy}
           errorMessage={error}

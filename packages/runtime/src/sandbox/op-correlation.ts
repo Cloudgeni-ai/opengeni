@@ -56,8 +56,12 @@ export type RemoteOperationControl = {
   observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
   /** After the foreground consumer ends without terminal proof, transfer this
    * exact operation to the durable command ledger with a stop request. True
-   * means custody committed, never merely that cancellation was requested. */
-  abandonExecCommand?(opId: string): Promise<boolean>;
+   * means custody committed, never merely that cancellation was requested.
+   * `consumerEnding` says the attempt that owns the foreground wait is ending
+   * for good (its worker is shutting down) and will never read the result, so
+   * custody may transfer while that wait is still pending: the process that
+   * holds it is about to exit, and the ledger's stop request outlives it. */
+  abandonExecCommand?(opId: string, options?: { consumerEnding?: boolean }): Promise<boolean>;
   /**
    * End this operation's foreground wait now, as if its yield window ended: a
    * command that may continue in the background returns its handle and keeps

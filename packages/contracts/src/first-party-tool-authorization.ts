@@ -129,6 +129,8 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   command_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   command_read: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
+  session_queue_message: { allOf: ["sessions:control"] },
+  // Retired (RETIRED_SESSION_TOOL_NAMES): never registered; kept for stored selections.
   session_send_message: { allOf: ["sessions:control"] },
   session_message_status: { sessionRequired: true, allOf: ["sessions:read"] },
   session_target_get: { sessionRequired: true, allOf: ["sessions:read"] },

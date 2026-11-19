@@ -1,0 +1,270 @@
+import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
+import { tool, type ModelRequest } from "@openai/agents";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing/scripted-model";
+import { readWorkspaceGovernanceContext } from "@opengeni/contracts";
+import {
+  activateWorkspaceInstructionPolicyRevision,
+  appendSessionEvents,
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  createWorkspaceInstructionPolicyDraft,
+  enqueueSessionTurn,
+  getActiveSessionHistoryItemsPaged,
+  initializeSessionStartAtomically,
+  listSessionEvents,
+  withSessionRlsActorContext,
+} from "@opengeni/db";
+import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
+import { createActivityTestHarness } from "../src/activities";
+
+// Workspace governance through the real worker turn path: real PostgreSQL in
+// the production posture and the real SDK call flow over an offline
+// ScriptedModel. A turn runs under the governance active when it starts
+// running, keeps it for every request of the turn, and a change made meanwhile
+// reaches the next turn without changing what earlier requests sent.
+setDefaultTimeout(120_000);
+let shared: RestrictedRuntimeTestDatabase;
+let app: ReturnType<typeof createDb>;
+beforeAll(async () => {
+  const acquired = await acquireRestrictedRuntimeTestDatabase("workspace-governance-turn-start");
+  if (!acquired) throw new Error("Native PostgreSQL required for workspace governance tests");
+  shared = acquired;
+  app = createDb(shared.appUrl, { searchPath: shared.schema });
+}, 600_000);
+afterAll(async () => {
+  await app?.close();
+  await shared?.release();
+}, 60_000);
+
+/** Records each request's input as sent, before the run appends to it. */
+class RecordingModel extends ScriptedModel {
+  sent: string[] = [];
+  override async getResponse(request: ModelRequest) {
+    this.sent.push(JSON.stringify(request.input));
+    return await super.getResponse(request);
+  }
+  override async *getStreamedResponse(request: ModelRequest) {
+    this.sent.push(JSON.stringify(request.input));
+    yield* super.getStreamedResponse(request);
+  }
+}
+
+async function fixture() {
+  const subjectId = `user:governance-current:${crypto.randomUUID()}`;
+  const access = await bootstrapWorkspace(app.db, {
+    accountExternalSource: "governance-current",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Governance current",
+    workspaceExternalSource: "governance-current",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Governance current",
+    subjectId,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const ctx = { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId };
+  let current: { id: string; version: number } | null = null;
+  /** Activate a new global workspace policy, as an owner would. */
+  const activatePolicy = async (content: string) => {
+    const draft = await createWorkspaceInstructionPolicyDraft(app.db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      content,
+      provenanceSource: "human",
+      provenanceSourceId: null,
+      supersedesRevisionId: current?.id ?? null,
+      createdBySubjectId: subjectId,
+    });
+    await activateWorkspaceInstructionPolicyRevision(app.db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      revisionId: draft.id,
+      expectedCurrentRevisionId: current?.id ?? null,
+      expectedActivationVersion: current?.version ?? 0,
+      actorSubjectId: subjectId,
+      reason: "Governance test",
+    });
+    current = { id: draft.id, version: (current?.version ?? 0) + 1 };
+  };
+  const session = await createSession(app.db, {
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    createdBy: { kind: "subject", subjectId },
+    initialMessage: "Run the local tool, then answer",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  return { ...ctx, session, activatePolicy };
+}
+
+/** Offline runtime: the production SDK call flow plus one local tool. */
+function scriptedRuntime(scripted: ScriptedModel, onTool: () => Promise<void>): OpenGeniRuntime {
+  const production = createProductionAgentRuntime({ model: scripted });
+  return {
+    ...production,
+    configure: () => {},
+    resolveTurnModel: () => ({
+      provider: { id: "test-chat", label: "Offline", kind: "api-key", api: "chat", builtin: false },
+      client: {} as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>["client"],
+      model: scripted,
+      configured: {
+        id: "scripted-model",
+        label: "Offline",
+        providerId: "test-chat",
+        providerLabel: "Offline",
+        api: "chat",
+        contextWindowTokens: 250_000,
+        effectiveContextWindowTokens: 250_000,
+        autoCompactTokenLimit: 225_000,
+        reasoningEffort: false,
+        hostedWebSearch: false,
+      },
+    }),
+    buildAgent: (...args) => {
+      const agent = production.buildAgent(...args);
+      agent.tools.push(
+        tool({
+          name: "local_fixture",
+          description: "Offline no-op",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          strict: false,
+          execute: async () => {
+            await onTool();
+            return "local result";
+          },
+        }),
+      );
+      return agent;
+    },
+  };
+}
+
+async function runTurn(
+  f: Awaited<ReturnType<typeof fixture>>,
+  scripted: ScriptedModel,
+  onTool: () => Promise<void> = async () => {},
+) {
+  const activities = createActivityTestHarness({
+    settings: testSettings({
+      databaseUrl: shared.appUrl,
+      openaiModel: "scripted-model",
+      sandboxBackend: "none",
+    }),
+    db: app.db,
+    bus: new MemoryEventBus(),
+    runtime: scriptedRuntime(scripted, onTool),
+  });
+  return await activities.runAgentTurn({
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sessionId: f.session.id,
+    workflowId: `session-${f.session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+}
+
+async function start(f: Awaited<ReturnType<typeof fixture>>) {
+  await initializeSessionStartAtomically(app.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sessionId: f.session.id,
+    reasoningEffortFallback: "medium",
+    createdEventPayload: {},
+    goal: null,
+  });
+}
+
+async function governanceHistory(f: Awaited<ReturnType<typeof fixture>>) {
+  const history = await getActiveSessionHistoryItemsPaged(app.db, f.workspaceId, f.session.id);
+  return history
+    .map((row) => readWorkspaceGovernanceContext(row.item as Record<string, unknown>))
+    .filter((value) => value !== null);
+}
+
+test("a turn that waited after acceptance sends its first request under the governance activated meanwhile", async () => {
+  const f = await fixture();
+  await f.activatePolicy("RULE_BEFORE_ACCEPTANCE");
+  // The turn is accepted, then waits (for example for subscription capacity)
+  // while an owner activates a new policy.
+  await start(f);
+  await f.activatePolicy("RULE_WHILE_WAITING");
+  const scripted = new RecordingModel([{ output: [assistantMessage("done")] }]);
+  expect((await runTurn(f, scripted)).status).toBe("idle");
+  expect(scripted.sent).toHaveLength(1);
+  expect(scripted.sent[0]).toContain("RULE_WHILE_WAITING");
+  expect(scripted.sent[0]).not.toContain("RULE_BEFORE_ACCEPTANCE");
+});
+
+test("governance activated during a turn reaches the next turn, never a request of the running one", async () => {
+  const f = await fixture();
+  await f.activatePolicy("RULE_A");
+  await start(f);
+  const scripted = new RecordingModel([
+    { output: [functionCall("local_fixture", {}, "call-governance")] },
+    { output: [assistantMessage("done")] },
+    { output: [assistantMessage("next done")] },
+  ]);
+  // The tool runs between the two requests; the owner changes the policy then.
+  // The running turn keeps the rules it started with.
+  expect((await runTurn(f, scripted, async () => await f.activatePolicy("RULE_B"))).status).toBe(
+    "idle",
+  );
+  expect(scripted.sent).toHaveLength(2);
+  for (const sent of scripted.sent) {
+    expect(sent).toContain("RULE_A");
+    expect(sent).not.toContain("RULE_B");
+  }
+  const events = await listSessionEvents(app.db, f.workspaceId, f.session.id, {
+    after: 0,
+    limit: 200,
+  });
+  expect(events.filter((event) => event.type.startsWith("turn.recovery"))).toEqual([]);
+
+  // The next turn runs under the new policy, shown after everything the
+  // earlier requests sent, which is sent again unchanged.
+  const [trigger] = await appendSessionEvents(app.db, f.workspaceId, f.session.id, [
+    { type: "user.message", payload: { text: "NEXT_QUESTION" } },
+  ]);
+  await withSessionRlsActorContext({ subjectId: f.subjectId }, () =>
+    enqueueSessionTurn(app.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: f.session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${f.session.id}`,
+      source: "user",
+      prompt: "NEXT_QUESTION",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: f.subjectId },
+    }),
+  );
+  expect((await runTurn(f, scripted)).status).toBe("idle");
+  expect(scripted.sent).toHaveLength(3);
+  const [, before, after] = scripted.sent.map((sent) => JSON.parse(sent) as unknown[]);
+  expect(JSON.stringify(after!.slice(0, before!.length))).toBe(JSON.stringify(before));
+  const tail = JSON.stringify(after!.slice(before!.length));
+  expect(tail).toContain("RULE_B");
+  expect(tail.indexOf("RULE_B")).toBeLessThan(tail.indexOf("NEXT_QUESTION"));
+  expect(await governanceHistory(f)).toHaveLength(2);
+});

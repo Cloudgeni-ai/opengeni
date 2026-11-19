@@ -547,6 +547,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         });
         const holderId = sandboxLeaseHolderIdForAttempt(workspaceMutationFence.attemptId);
         const acquired = await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId,
           workspaceId,
           sandboxGroupId: session.sandboxGroupId,
@@ -929,6 +930,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         sessionId: session.id,
       });
       const acquired = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId,
         workspaceId,
         sandboxGroupId: session.sandboxGroupId,
@@ -1070,6 +1072,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     // Seed the durable warm home so a same-target route epoch change exercises
     // the worker's lease-backed home resolver instead of the static fallback.
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,
@@ -1824,6 +1827,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       sandboxBackend: "modal",
     });
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,
@@ -1941,6 +1945,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       },
     };
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,

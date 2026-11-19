@@ -11,7 +11,9 @@ import {
   encodeModelContextSnapshotContent,
   hydrateStoredModelContextSnapshot,
   lockSessionContentShared,
+  modelContextSnapshotJsonUtf8Bytes,
   writeSessionContentBlobs,
+  type ModelContextSnapshotContentCache,
 } from "./session-content-blobs";
 
 export class ModelContextSnapshotAuthorityError extends Error {
@@ -33,10 +35,18 @@ export async function persistModelContextSnapshot(
     attemptId: string;
     executionGeneration: number;
     snapshot: ModelContextSnapshot;
+    /**
+     * One run's memo of repeated snapshot content (see
+     * ModelContextSnapshotContentCache); results are identical without it.
+     */
+    contentCache?: ModelContextSnapshotContentCache;
   },
 ): Promise<void> {
   const snapshot = ModelContextSnapshot.parse(input.snapshot);
-  if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > MODEL_CONTEXT_SNAPSHOT_MAX_UTF8_BYTES) {
+  if (
+    modelContextSnapshotJsonUtf8Bytes(snapshot, input.contentCache) >
+    MODEL_CONTEXT_SNAPSHOT_MAX_UTF8_BYTES
+  ) {
     throw new RangeError("Model context snapshot exceeds the 16 MiB persist limit");
   }
   await withRlsContext(
@@ -71,7 +81,7 @@ export async function persistModelContextSnapshot(
         }
 
         const now = new Date(snapshot.capturedAt);
-        const encoded = encodeModelContextSnapshotContent(snapshot);
+        const encoded = encodeModelContextSnapshotContent(snapshot, input.contentCache);
         await writeSessionContentBlobs(
           tx,
           {

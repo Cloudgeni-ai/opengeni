@@ -1177,8 +1177,14 @@ See [`knowledge.md`](knowledge.md) for storage, migration and review.
 
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
-rather than resolve or overwrite it; they also reuse the accepted governance
-snapshots. A new user/API turn or a newly materialized goal, system,
+rather than resolve or overwrite it; they also keep the turn's governance
+snapshots. Instruction policies and the organization profile are resolved when
+the turn starts running, not when it was accepted: an attempt resolves them as
+of the earliest snapshot an earlier attempt of the turn took, unless that
+attempt only parked the turn for capacity (it sends no model request), and
+otherwise as of its own snapshot time. A turn that waited in the queue or for
+capacity therefore runs under governance activated while it waited, and a
+change made while it runs reaches the next turn. A new user/API turn or a newly materialized goal, system,
 child-result, scheduled, or compaction turn is a new logical turn and resolves
 fresh execution and governance policy. Thus a per-turn model/provider switch
 persists through recovery without accidentally becoming a permanent session
@@ -1564,6 +1570,28 @@ moving sentence chosen from the recorded `transitionReason`/`rotationReason`,
 with "The turn continues automatically as soon as the sandbox is ready." It has
 no attempt counter because the wait has no retry budget; the turn resumes on the
 lifecycle wake.
+
+**Organization sandbox capacity.** A turn that would start a new box while its
+organization already runs the most boxes its plan allows
+(`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`, `runningBoxesPerOrganization`; see
+[deployment](deployment.md)) is not given one: the cold election returns
+`fenced` reason `organization_sandbox_capacity`, registers no holder and
+licenses no provider create. The worker settles it like any other lifecycle
+transition (`sandbox_lifecycle_transition`, `transitionReason:
+"organization_sandbox_capacity"`, `organizationBoxLimit`), settling unstarted
+commands as not started, and parks the same turn for
+`ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS` (one minute) with no retry budget and no
+turn worker held. The replacement attempt asks again; joining or re-arming a box
+that already runs never counts. This is a concurrency bound, never a run-length
+limit: an admitted turn keeps its box for as long as it works. The same wait
+applies to the per-person bound `runningBoxesPerPerson`. A tier that allows no
+box (`restricted`) or an organization or person past today's box time
+(`boxSecondsPerOrganizationPerDay`, `boxSecondsPerPersonPerDay`) never frees
+within the turn, so admission raises `SandboxOrganizationBoxLimitError` instead
+and the turn fails with its message (code `sandbox_compute_unavailable`, not
+retryable); a turn that already holds the box finishes (see
+[deployment](deployment.md), "Free compute bounds"). The lazy
+provisioner never retries the transition in place.
 
 **Durable recovery observability.** The control worker reads one content-free,
 cross-workspace aggregate per minute,
@@ -2369,7 +2397,7 @@ single value `external` for every connector, API-integration, Codex Apps, and
 custom tool. Server, raw tool, tenant, request, error, and content values are
 deliberately absent from labels.
 
-First-party `session_create` and `session_send_message` failures return an MCP
+First-party `session_create` and `session_queue_message` failures return an MCP
 `isError` result with a bounded structured `{ error: { code, message } }`
 projection. The durable tool-output event retains that raw MCP result, and the
 React timeline promotes the two calls to worker rows that display the safe code
@@ -2887,7 +2915,7 @@ bounded, independently useful work with a defined integration point. Parent
 work must stay disjoint from the delegated implementation. Independent review
 or comparison can examine the same subject with a distinct deliverable.
 Delegation has setup and coordination overhead, so the default prefers a direct
-answer for small work and a `session_send_message` follow-up to an existing child
+answer for small work and a `session_queue_message` follow-up to an existing child
 over another spawn. Explicit user requests and applicable Skill guidance for
 delegation, independent review, or fresh workers override that default within
 existing authority. For
@@ -4311,6 +4339,68 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 
+**Boxes held only by viewers.** A viewer holder (an open session page using
+the desktop, terminal or files plane) keeps its box warm for as long as its
+heartbeats arrive. Admission already refuses a viewer that would warm one more
+viewer-only box beyond `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE`
+or the plan tier's limits ([deployment](deployment.md)), but a box a turn,
+process or readiness hold kept warm becomes viewer-only when that holder
+leaves, and nothing ended a viewer-only hold. The sandbox reaper therefore
+applies two bounds after admission. Both apply only to warm boxes whose every
+holder is a viewer, with no turn holder and no session of the sandbox group
+with open work (`queued`, `running`, `requires_action`, `recovering`,
+`waiting_capacity`). A box with a turn, process, Browser/ComputerSession or
+direct operation is never counted or drained by them. Compute and selfhosted
+boxes are exempt, and so is every box of an organization in the `embedded`
+(host-provisioned) or `enterprise` plan tier ([deployment](deployment.md)),
+whose host may hold viewers without reporting interaction.
+
+- Idle drain (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, default 30 minutes, `0`
+  disables). The server bounds the hold by what it observes: the viewers'
+  attach times and turns created or finished in the box's sessions. The web
+  client may extend it by reporting, on every attach and heartbeat, how long
+  ago the person last used the page (`lastInteractionAgeMs`: pointer,
+  keyboard, wheel, touch, window focus or the page becoming visible); the API
+  keeps the newest as the holder's `last_interaction_at`. Only a person's own
+  signed-in session can report it: the API ignores the field from an API key
+  (workspace, organization or personal), a delegated or service caller, so
+  such a viewer is bounded by what the server observes. A viewer's activity
+  is its last reported interaction, otherwise its attach time; a box's
+  activity is the newest of its viewers' activity and its sessions' turns.
+  When nothing happened for the window, the reaper deletes the viewer
+  holders, records the release (`sandbox_leases.viewer_idle_drained_at`) and
+  moves the lease to draining with the ordinary idle grace, so the workspace
+  is saved and the box stops as when the last tab closes. The page's next
+  heartbeat answers `alive: false`. For one more idle window after the
+  release, a person-facing viewer attach to that box that reports no
+  interaction after the release, while the session had no turn or open work
+  since, is refused with 429 (`details.viewerRefusal: "viewer_idle"`), so an
+  unattended page or an old client re-attaching on its own cannot reset the
+  idle clock at once. After that window any attach is admitted, so a person
+  returning on an older client, or someone else, can warm the box. A page
+  that knows the window (`viewerIdleDrainMs` on the attach response) waits for
+  the person's next interaction and then re-attaches, which is admitted and
+  resumes the box; the record is cleared.
+- Over-limit drain. The reaper counts the boxes still warm per workspace
+  (`OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE`) and per
+  organization across its workspaces (the plan tier's
+  `viewerOnlyBoxesPerOrganization`) and, over either limit, drains the least
+  recently active boxes, but only boxes nobody has used for at least five
+  minutes; a box in active use is never evicted, and admission keeps new
+  boxes within the limits.
+
+Sessions with open work are an intentional exception: while a session is
+`queued`, `requires_action`, `waiting_capacity` or otherwise open, a person or
+the agent may still act, so its viewer-held box is neither drained nor counted.
+
+Every decision is rechecked under the lease lock on the database clock, so a
+viewer that reported interaction, an attach or a turn after the reaper's read
+keeps the box. Idle drains run before the limits are applied to the boxes
+still warm. Drains log `sandbox reaper: drained viewer-only box` with the
+reason, inactivity and whether the client reported interaction, and count
+`opengeni_sandbox_viewer_only_drains_total{reason}` (`viewer_idle`,
+`viewer_workspace_limit`, `viewer_organization_limit`).
+
 **Browsers and desktops on a retired instance.** A browser or desktop
 controller runs inside one exact provider instance (`placement_instance_id`),
 and nothing rebinds it to a successor. When its lease no longer runs that
@@ -4822,8 +4912,17 @@ turns finish naturally for its shutdown grace (default 90 seconds,
 turn that outlasts the grace, Temporal cancels the activity with reason
 `WORKER_SHUTDOWN`; the activity checkpoints conversation truth and the sandbox
 envelope, closes the exact attempt as recoverable, and leaves the same logical
-turn in `recovering`. It never creates a human queue row or synthetic user
-message. Any in-flight side-effecting tool call is durably closed with an
+turn in `recovering`. The handoff does not depend on the run noticing the
+cancellation: a run still parked a few seconds later, in a wait that never
+observes cancellation (an unanswered machine or provider call), is abandoned
+and the attempt is settled and finalized as the same `worker_shutdown`
+handoff inside the force-stop window; the abandoned run is fenced by the
+closed attempt and ends with the process. A turn whose worker died anyway is
+closed `lease_lost_recoverable` after the heartbeat timeout, and its
+subscription lease stops holding the turn at that closure, so the redispatched
+attempt is not refused as busy until the lease TTL runs out. It never creates
+a human queue row or synthetic user message. Any in-flight side-effecting tool
+call is durably closed with an
 explicit `interrupted / outcome unknown` result before the next attempt can
 run; this includes Codemode calls, whose operation is journaled before dispatch
 and whose execution-start marker prevents replay after the side-effect boundary.
@@ -5063,6 +5162,20 @@ patch preserves the old completion command when replaying pre-upgrade histories;
 already scheduled activities keep their recorded timeout and retry options.
 A provider or database outage can still
 prevent delivery; this recovery contract does not claim to remove that outage.
+
+### Repeated identical tool calls
+
+A model can get stuck calling one tool with the same arguments over and over
+while nothing changes. `installRepeatedToolCallGuard`
+(`packages/runtime/src/repeated-tool-call-guard.ts`) wraps every function tool
+of the turn's agent, its clones, and tools bound by name. Once one exact call
+(same tool, same arguments in any key order) has returned the same result 8
+times in a row, an identical call started within 30 seconds of the last one
+that ran returns a short notice as its result instead of running, and the run
+continues. A changed result restarts the count, so calls whose results change
+are never affected; polling slower than 30 seconds always runs. The notice is
+the call's ordinary tool result, so it is recorded with the turn's other
+results; there is no separate event.
 
 ## Goals — what makes long runs continue
 

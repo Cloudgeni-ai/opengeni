@@ -401,12 +401,19 @@ describe("summarizeRailNodes", () => {
 });
 
 describe("creatorInitials", () => {
-  test("derives two-letter monograms from labels and subject ids", () => {
+  test("derives two-letter monograms from labels", () => {
     expect(
       creatorInitials({ kind: "subject", subjectId: "user:x", label: "Davlet Dzhakishev" }),
     ).toBe("DD");
     expect(creatorInitials({ kind: "subject", subjectId: "user:x", label: "iuliia" })).toBe("IU");
-    expect(creatorInitials({ kind: "subject", subjectId: "user:bendik" })).toBe("BE");
+  });
+
+  test("never shows an id fragment for a person without a label", () => {
+    // A Slack-started chat frozen without a label used to show "3B" here.
+    const unlabeled = { kind: "subject", subjectId: "user:3BvWq9xYz" } as const;
+    expect(creatorInitials(unlabeled)).toBeNull();
+    expect(creatorInitials({ ...unlabeled, label: "  " })).toBeNull();
+    expect(creatorAnnouncement(unlabeled)).toBeNull();
   });
 
   test("hides machinery: service and unattributed-legacy creators get none", () => {

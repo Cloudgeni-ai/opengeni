@@ -8,7 +8,7 @@ import type {
   ChatSession as Session,
 } from "@opengeni/sdk";
 
-import { normalizeProviderDomain } from "../../lib/capabilities";
+import { sameConnectorProviderDomain } from "@opengeni/contracts/nango";
 
 function canonicalResource(value: string): string {
   try {
@@ -43,7 +43,8 @@ export function matchingConnectionAccounts(
       (!endpoint ||
         typeof entry.metadata?.mcpUrl !== "string" ||
         canonicalResource(entry.metadata.mcpUrl) === canonicalResource(endpoint)) &&
-      normalizeProviderDomain(entry.providerDomain) === normalizeProviderDomain(ref.providerDomain),
+      // Either backend's account counts for its connector (native or Nango).
+      sameConnectorProviderDomain(entry.providerDomain, ref.providerDomain),
   );
   return matches;
 }

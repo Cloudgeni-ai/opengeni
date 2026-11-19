@@ -7,7 +7,7 @@ import { isPasskeyOnlyAccountEmail } from "@opengeni/contracts/passkey-only-acco
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
-import { AppearanceSubmenu } from "@/components/appearance-menu";
+import { AppearanceSubmenu, SimplifiedInterfaceMenuItem } from "@/components/appearance-menu";
 import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
@@ -167,6 +167,7 @@ export function RailFooter() {
                 {managed ? <ConsoleMenuItem workspaceId={rail.workspaceId} /> : null}
                 {managed || newOrganization.item ? <DropdownMenuSeparator /> : null}
                 <AppearanceSubmenu />
+                <SimplifiedInterfaceMenuItem />
                 <HelpMenu
                   documentationUrl={context.clientConfig.documentationUrl}
                   supportEmail={context.clientConfig.supportEmail}

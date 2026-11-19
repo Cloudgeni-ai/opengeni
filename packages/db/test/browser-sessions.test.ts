@@ -2232,6 +2232,7 @@ describe("durable BrowserSession lifecycle", () => {
     const scope = await fixture();
     const holderId = `browser-session:pending`;
     const acquired = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
       sandboxGroupId: scope.sandboxGroupId,
@@ -2314,6 +2315,7 @@ describe("durable BrowserSession lifecycle", () => {
     const abandoned = await fixture();
     const abandonedSeedHolder = `browser-session:pending-${crypto.randomUUID()}`;
     const acquired = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...abandoned,
       kind: "interaction",
       holderId: abandonedSeedHolder,
@@ -2361,6 +2363,7 @@ describe("durable BrowserSession lifecycle", () => {
     const active = await fixture();
     const activeSeedHolder = `browser-session:pending-${crypto.randomUUID()}`;
     const activeLease = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...active,
       kind: "interaction",
       holderId: activeSeedHolder,
@@ -2452,6 +2455,7 @@ describe("durable BrowserSession lifecycle", () => {
     const abandonedComputer = await fixture();
     const computerSeedHolder = `computer-session:pending-${crypto.randomUUID()}`;
     const computerLease = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...abandonedComputer,
       kind: "interaction",
       holderId: computerSeedHolder,
@@ -2611,6 +2615,7 @@ describe("durable BrowserSession lifecycle", () => {
     const orphan = await fixture();
     const orphanHolder = `browser-session:${crypto.randomUUID()}`;
     const orphanLease = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...orphan,
       kind: "interaction",
       holderId: orphanHolder,

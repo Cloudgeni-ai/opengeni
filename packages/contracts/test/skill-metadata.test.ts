@@ -4,6 +4,7 @@ import {
   parseSkillFrontmatter,
   SkillArtifactDefinition,
   SkillFrontmatterError,
+  skillDeclaredTools,
   SessionSkill,
   SessionSkills,
   StoredSessionSkills,
@@ -264,4 +265,20 @@ test.each([
   }
   expect(error).toBeInstanceOf(SkillFrontmatterError);
   expect((error as SkillFrontmatterError).reason).toBe(reason);
+});
+
+test("a Skill declares the tools it needs as a list or one separated string", () => {
+  expect(
+    skillDeclaredTools(
+      "---\nname: records\ndescription: d\ntools:\n  - records.swap\n  - records__get_line\n  - records.swap\n---\nBody",
+    ),
+  ).toEqual(["records.swap", "records__get_line"]);
+  expect(
+    skillDeclaredTools("---\nname: r\ndescription: d\ntools: records.swap, send_message\n---\n"),
+  ).toEqual(["records.swap", "send_message"]);
+  expect(skillDeclaredTools("---\nname: r\ndescription: d\n---\n")).toEqual([]);
+  expect(skillDeclaredTools("---\nname: r\ntools: [a\n---\n")).toEqual([]);
+  expect(skillDeclaredTools("# no header")).toEqual([]);
+  const many = Array.from({ length: 40 }, (_, index) => `  - tool${index}`).join("\n");
+  expect(skillDeclaredTools(`---\nname: r\ntools:\n${many}\n---\n`)).toHaveLength(20);
 });

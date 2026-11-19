@@ -1,10 +1,7 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
-import {
-  personalWorkspaceExtensionApiIntegrations,
-  personalWorkspaceExtensionMcpServers,
-} from "./personal-workspace-connectors";
+import { personalWorkspaceExtensionApiIntegrations } from "./personal-workspace-connectors";
 import {
   boundMcpResponseBody,
   MCP_MAX_RESPONSE_BYTES,
@@ -54,7 +51,9 @@ import {
   isOfficialGoogleCalendarMcpConfig,
   isOfficialSlackMcpConfig,
   isOfficialDriveMcpConfig,
+  isNangoDriveConfig,
   mergeDriveMcpTools,
+  nangoDriveTools,
   sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime";
 import { hasPermission } from "../access";
@@ -64,9 +63,13 @@ import {
 } from "./personal-connection-delegations";
 import {
   buildCapabilityCatalog,
-  settingsWithMcpCapabilityServers,
+  settingsWithEnabledCapabilityMcpServers,
   settingsWithApiIntegrationServers,
 } from "./capabilities";
+import {
+  carryConnectorToolChoices,
+  mirrorConnectorToolChoices,
+} from "./connector-tool-choice-accounts";
 
 export class ConnectorConnectionRequiredError extends HTTPException {
   constructor() {
@@ -206,7 +209,7 @@ async function resolveTarget(input: Input) {
       connection,
       connectionId: accountId(integration),
       accountLabel: connection
-        ? connectionAccountIdentityLabel(connection.metadata, integration.displayName)
+        ? connectionAccountLabel(connection, integration.displayName)
         : integration.displayName,
       accounts,
       instanceKey: integration.instanceKey,
@@ -243,19 +246,19 @@ async function resolveTarget(input: Input) {
   ) {
     throw new HTTPException(404, { message: "Connected MCP connector not found" });
   }
-  const enabled = await listEnabledMcpCapabilityServers(input.db, input.workspaceId);
-  // A connector a Personal workspace carries for its owner is configured here
-  // like its own, with the same derived definition the session runs with.
-  const carried =
-    input.personalOwnerVerified && !enabled.some((server) => server.id === item.runtime.mcpServerId)
-      ? await personalWorkspaceExtensionMcpServers(input.db, {
-          workspaceId: input.workspaceId,
-          accountId: input.grant.accountId,
-          subjectId: input.grant.subjectId,
-          ownServers: enabled,
-        })
-      : [];
-  const settings = settingsWithMcpCapabilityServers(input.settings, [...enabled, ...carried]);
+  // Exactly the definition a session runs with: the same resolution,
+  // including a connector a Personal workspace carries for its owner and the
+  // integration backend switch, so the account whose choices are managed here
+  // is the account a turn binds and enforces them for.
+  const settings = await settingsWithEnabledCapabilityMcpServers(
+    input.db,
+    input.workspaceId,
+    input.settings,
+    {
+      ...(input.personalOwnerVerified ? { subjectId: input.grant.subjectId } : {}),
+      accountId: input.grant.accountId,
+    },
+  );
   const server = settings.mcpServers.find((candidate) => candidate.id === item.runtime.mcpServerId);
   if (!server || server.url !== item.endpointUrl)
     throw new HTTPException(409, { message: "Connector configuration is unavailable" });
@@ -344,22 +347,34 @@ export function reviewedConnectorToolCatalog(
         )
       : isOfficialSlackMcpConfig(server.url, server.connectionRef)
         ? slackRestMcpToolsForScopes(grantedScopes)
-        : // A bridge's fixed tools: its hosted server is never what agents call.
-          (fixedBridgeConnectorTools(server.url, server.connectionRef)?.map(
-            (tool): ListedTool => ({
-              name: tool.name,
-              ...(tool.description ? { description: tool.description } : {}),
-              ...(tool.annotations
-                ? {
-                    annotations: {
-                      readOnlyHint: tool.annotations.readOnlyHint,
-                      destructiveHint: tool.annotations.destructiveHint,
-                    },
-                  }
-                : {}),
-              ...(tool._meta ? { _meta: tool._meta } : {}),
-            }),
-          ) ?? null);
+        : // Drive through Nango is served from Drive REST, never its hosted server.
+          isNangoDriveConfig(server)
+          ? nangoDriveTools().map(
+              (tool): ListedTool => ({
+                name: tool.name,
+                description: tool.description,
+                annotations: {
+                  readOnlyHint: tool.annotations.readOnlyHint,
+                  destructiveHint: tool.annotations.destructiveHint,
+                },
+              }),
+            )
+          : // A bridge's fixed tools: its hosted server is never what agents call.
+            (fixedBridgeConnectorTools(server.url, server.connectionRef)?.map(
+              (tool): ListedTool => ({
+                name: tool.name,
+                ...(tool.description ? { description: tool.description } : {}),
+                ...(tool.annotations
+                  ? {
+                      annotations: {
+                        readOnlyHint: tool.annotations.readOnlyHint,
+                        destructiveHint: tool.annotations.destructiveHint,
+                      },
+                    }
+                  : {}),
+                ...(tool._meta ? { _meta: tool._meta } : {}),
+              }),
+            ) ?? null);
   return (
     tools?.filter((tool) => !server.allowedTools || server.allowedTools.includes(tool.name)) ?? null
   );
@@ -456,6 +471,15 @@ export async function getConnectorToolPermissions(
   input: Input,
 ): Promise<ConnectorToolPermissionsResponse> {
   const target = await resolveTarget(input);
+  // An account first seen under this backend starts with the choices its
+  // owner made for it under the other one.
+  if (target.connection?.subjectId && input.personalOwnerVerified)
+    await carryConnectorToolChoices(input.db, target.connection).catch((error: unknown) =>
+      console.warn("[connectors] carrying tool choices to an account failed", {
+        connectionId: target.connectionId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
   const policyWorkspaceId = connectorToolPolicyWorkspaceId(input, target.connection);
   const policies = await listConnectorToolPermissionPolicies(input.db, {
     accountId: input.grant.accountId,
@@ -568,6 +592,19 @@ export async function updateConnectorToolPermissions(
     throw new HTTPException(409, {
       message: "The connector account changed. Reload its permissions.",
     });
+  // A change never starts from a reset copy of the account's choices. If they
+  // can't be brought over, nothing changes: an edit to an empty set would then
+  // be mirrored over the other backend's account.
+  if (target.connection?.subjectId)
+    await carryConnectorToolChoices(input.db, target.connection).catch((error: unknown) => {
+      console.warn("[connectors] carrying tool choices to an account failed", {
+        connectionId: target.connectionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new HTTPException(409, {
+        message: "This account's choices could not be loaded. Reload its permissions.",
+      });
+    });
   try {
     await updateConnectorToolPermissionPolicies(input.db, {
       accountId: input.grant.accountId,
@@ -592,6 +629,16 @@ export async function updateConnectorToolPermissions(
       throw new HTTPException(409, { message: error.message });
     throw error;
   }
+  // The same provider account under the other backend keeps the same choices.
+  // A failure leaves them to the next change, which mirrors the whole set.
+  if (target.connection?.subjectId)
+    await mirrorConnectorToolChoices(input.db, target.connection, target.server.id).catch(
+      (error: unknown) =>
+        console.warn("[connectors] mirroring tool choices to an account failed", {
+          connectionId: target.connectionId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    );
 }
 
 /**

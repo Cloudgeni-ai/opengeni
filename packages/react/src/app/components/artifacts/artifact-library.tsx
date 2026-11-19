@@ -13,6 +13,7 @@ import {
   PanelsTopLeftIcon,
   PinIcon,
   PinOffIcon,
+  Trash2Icon,
   UsersIcon,
 } from "lucide-react";
 import {
@@ -29,6 +30,7 @@ import {
 import { toast } from "../../lib/toast";
 
 import { Button } from "../../../ui/button";
+import { ConfirmDialog } from "../../../ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -83,6 +85,7 @@ import {
   rememberArtifactView,
   type ArtifactView,
 } from "../../lib/artifact-library-view";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { cn } from "../../lib/utils";
 import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
@@ -100,6 +103,11 @@ const ArtifactViewer = lazy(() =>
 const IMAGE_GLYPH = <ImageIcon className="size-4 text-fg-subtle" aria-hidden />;
 
 export type ArtifactPinAction = (item: ArtifactCatalogItem, pinned: boolean) => Promise<void>;
+/**
+ * Deletes a document, spreadsheet or presentation (archives it, so it leaves
+ * the list and no longer opens), then refreshes the list.
+ */
+export type ArtifactArchiveAction = (item: ArtifactCatalogItem) => Promise<void>;
 
 function PinnedMarker() {
   return (
@@ -296,6 +304,7 @@ type ArtifactOpenOptions = {
   /** A plain click on an image or file shows it in the list's viewer instead. */
   onView?: ((item: ArtifactCatalogItem) => void) | undefined;
   onPin?: ArtifactPinAction | undefined;
+  onArchive?: ArtifactArchiveAction | undefined;
   loading?: boolean | undefined;
   browseSearch?: ArtifactReturnSearch | undefined;
 };
@@ -312,6 +321,7 @@ function useArtifactOpen({
   onSelect,
   onView,
   onPin,
+  onArchive,
   loading = false,
   browseSearch,
 }: ArtifactOpenOptions) {
@@ -327,6 +337,29 @@ function useArtifactOpen({
     hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   const [pinning, setPinning] = useState(false);
   const pinInFlight = useRef(false);
+  const [confirmingArchive, setConfirmingArchive] = useState(false);
+  const deleted = useRef(false);
+  // A deleted item leaves the list with its menu, so focus moves to the search.
+  const focusAfterDelete = {
+    get current() {
+      return deleted.current
+        ? document.querySelector<HTMLElement>('input[aria-label="Search artifacts by title"]')
+        : null;
+    },
+  };
+  const canArchive = Boolean(onArchive && isEditableKind(item.kind) && item.status === "active");
+  const archive = async () => {
+    if (!onArchive) return false;
+    try {
+      await onArchive(item);
+      deleted.current = true;
+      toast(`Deleted ${item.title}`);
+      return true;
+    } catch (error) {
+      toast.error("Couldn't delete", { description: userErrorText(error) });
+      return false;
+    }
+  };
   const togglePin = async () => {
     if (!onPin || pinInFlight.current || loading) return;
     pinInFlight.current = true;
@@ -402,13 +435,39 @@ function useArtifactOpen({
         <LinkIcon />
         Copy link
       </DropdownMenuItem>
+      {canArchive ? (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem variant="destructive" onSelect={() => setConfirmingArchive(true)}>
+            <Trash2Icon />
+            Delete…
+          </DropdownMenuItem>
+        </>
+      ) : null}
     </>
   );
+  const archiveDialog = canArchive ? (
+    <ConfirmDialog
+      open={confirmingArchive}
+      onOpenChange={setConfirmingArchive}
+      title={`Delete ${item.title}?`}
+      description="It's removed from Artifacts and can't be opened again."
+      confirmLabel={`Delete ${artifactKindLabel[item.kind].toLowerCase()}`}
+      pendingLabel="Deleting…"
+      restoreFocusFallbackRef={focusAfterDelete}
+      onConfirm={archive}
+    />
+  ) : null;
   const activate = onView && opensInViewer(item) ? () => onView(item) : open;
   return {
     open: activate,
     menu,
-    dialog: audience.dialog,
+    dialog: (
+      <>
+        {audience.dialog}
+        {archiveDialog}
+      </>
+    ),
     // Links keep a real href (new tab, copy); a plain click stays in the router.
     link: onSelect
       ? null
@@ -454,6 +513,7 @@ export function ArtifactRow({
   onSelect,
   onView,
   onPin,
+  onArchive,
   loading,
   browseSearch,
 }: {
@@ -463,6 +523,7 @@ export function ArtifactRow({
   onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
   onView?: ((item: ArtifactCatalogItem) => void) | undefined;
   onPin?: ArtifactPinAction | undefined;
+  onArchive?: ArtifactArchiveAction | undefined;
   loading?: boolean | undefined;
   browseSearch?: ArtifactReturnSearch | undefined;
 }) {
@@ -473,6 +534,7 @@ export function ArtifactRow({
     onSelect,
     onView,
     onPin,
+    onArchive,
     loading,
     browseSearch,
   });
@@ -708,6 +770,7 @@ export function ArtifactCard({
   onSelect,
   onView,
   onPin,
+  onArchive,
   loading,
   browseSearch,
 }: {
@@ -717,6 +780,7 @@ export function ArtifactCard({
   onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
   onView?: ((item: ArtifactCatalogItem) => void) | undefined;
   onPin?: ArtifactPinAction | undefined;
+  onArchive?: ArtifactArchiveAction | undefined;
   loading?: boolean | undefined;
   browseSearch?: ArtifactReturnSearch | undefined;
 }) {
@@ -727,6 +791,7 @@ export function ArtifactCard({
     onSelect,
     onView,
     onPin,
+    onArchive,
     loading,
     browseSearch,
   });
@@ -854,6 +919,7 @@ export function ArtifactLibrary({
   onLoadMore,
   onSelect,
   onPin,
+  onArchive,
   compact = false,
   emptyAction,
   onEmptyChange,
@@ -874,6 +940,7 @@ export function ArtifactLibrary({
   onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
   /** Omitted for viewers without permission to change workspace pins. */
   onPin?: ArtifactPinAction | undefined;
+  onArchive?: ArtifactArchiveAction | undefined;
   /**
    * The session's artifact panel: no page tabs, so the type filter joins the
    * Filter menu.
@@ -896,6 +963,7 @@ export function ArtifactLibrary({
    */
   viewer?: boolean | undefined;
 }) {
+  const { productName } = useSimplifiedInterface();
   const [view, setView] = useState<ArtifactView>(readArtifactView);
   const changeView = (next: ArtifactView) => {
     setView(next);
@@ -986,7 +1054,7 @@ export function ArtifactLibrary({
         variant={compact ? "inline" : "page"}
         icon={<PanelsTopLeftIcon />}
         title="No artifacts yet"
-        description="Sites, images, documents, spreadsheets and presentations Opengeni makes show up here."
+        description={`Sites, images, documents, spreadsheets and presentations ${productName} makes show up here.`}
         action={emptyAction}
       />
     );
@@ -1041,6 +1109,7 @@ export function ArtifactLibrary({
                 onSelect={onSelect}
                 onView={viewer ? showInViewer : undefined}
                 onPin={onPin}
+                onArchive={onArchive}
                 loading={loading}
                 browseSearch={browseSearch}
               />
@@ -1062,6 +1131,7 @@ export function ArtifactLibrary({
                 onSelect={onSelect}
                 onView={viewer ? showInViewer : undefined}
                 onPin={onPin}
+                onArchive={onArchive}
                 loading={loading}
                 browseSearch={browseSearch}
               />
@@ -1143,6 +1213,7 @@ export function ArtifactLibrary({
                   sessionId={sessionId}
                   onSelect={onSelect}
                   onPin={onPin}
+                  onArchive={onArchive}
                   loading={loading}
                   browseSearch={browseSearch}
                 />

@@ -13,7 +13,6 @@ import {
   type ConnectedToolAccount,
   type DiscoveryCardEvent,
 } from "../src/lazy-tool-transport";
-import { prefixedMcpToolName } from "../src/mcp-model-tool-name";
 
 // A search that clearly names one integration the person can connect shows its
 // Connect card itself, through the card tool, so the card never depends on the
@@ -33,6 +32,12 @@ const HUBSPOT = { capabilityId: "mcp:hubspot", name: "HubSpot", providerDomain: 
 const LINEAR = { capabilityId: "mcp:linear", name: "Linear", providerDomain: "linear.app" };
 const GMAIL = { capabilityId: "api:gmail", name: "Gmail" };
 const CALENDAR = { capabilityId: "api:google-calendar", name: "Google Calendar" };
+const DYNAMICS = {
+  capabilityId: "api:microsoft-dynamics",
+  name: "Microsoft Dynamics",
+  providerDomain: "dynamics.com",
+};
+const CLOSE = { capabilityId: "mcp:close", name: "Close", providerDomain: "close.com" };
 
 function candidate(name: string, description: string): Tool {
   return tool({
@@ -200,6 +205,27 @@ describe("a search that clearly names one connectable integration shows its card
         }).prepareSearch({ query });
         expect(requested).toEqual([integration]);
         expect(outputOf(result).connectCard).toMatchObject({ shown: true });
+      }
+    });
+
+    test(`${transport}: a product word names its integration over ordinary-word names`, async () => {
+      // Search queries models wrote for "What open opportunities do we have
+      // in Dynamics 365?". "close date" also reads as Close, an ordinary word.
+      for (const query of [
+        "Read/list Dynamics 365 CRM sales opportunities records, filter opportunity status open; retrieve opportunity names and amounts",
+        "Read open opportunity records from Dynamics 365 CRM, including name, estimated value, close date and owner; use connected integration tools.",
+      ]) {
+        const { requested, request } = cardTool();
+        const result = await runtimeWith(transport, {
+          matches: [DYNAMICS, CLOSE],
+          request,
+        }).prepareSearch({ query });
+        expect({ query, requested }).toEqual({ query, requested: [DYNAMICS] });
+        expect(outputOf(result).connectCard).toMatchObject({
+          shown: true,
+          capabilityId: DYNAMICS.capabilityId,
+        });
+        expect(outputOf(result).notConnected).not.toContain("Close");
       }
     });
 
@@ -461,6 +487,93 @@ describe("a request that opens with an integration's name as its label", () => {
   });
 });
 
+describe("a connected account of the same kind keeps the search from showing a card", () => {
+  const OUTLOOK_SEND = "mcp_outlook__send_mail";
+  const GMAIL_MAIL = { ...GMAIL, category: "communication" };
+  const account = (connector: string, kind?: string): ConnectedToolAccount => ({
+    source: connector.toLowerCase(),
+    label: connector,
+    connector,
+    ...(kind ? { kind } : {}),
+  });
+  // A query a model wrote for "Did I get an email saying when the Kestrel
+  // failover drill was moved to?" while Outlook Mail was connected and Gmail
+  // had no signed-in account.
+  const query = "Search the user's Gmail mailbox for an email about the Kestrel failover drill";
+
+  for (const transport of TRANSPORTS) {
+    test(`${transport}: Outlook Mail connected: Gmail is named, its card is not shown`, async () => {
+      const { requested, request } = cardTool();
+      const events: DiscoveryCardEvent[] = [];
+      const runtime = runtimeWith(transport, {
+        matches: [GMAIL_MAIL],
+        request,
+        accounts: new Map([[OUTLOOK_SEND, account("Outlook Mail", "communication")]]),
+      });
+      runtime.setDiscoveryCardSink((event) => {
+        events.push(event);
+      });
+      const result = await runtime.prepareSearch({ query });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(requested).toEqual([]);
+      expect(outputOf(result).notConnected).toBe(
+        `Not connected yet: Gmail (capabilityId "api:gmail"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.`,
+      );
+      expect(outputOf(result).connectCard).toEqual({ shown: false });
+      // The card tool stays loaded, so the model can still show it.
+      expect(loaded(result)).toContain(CARD);
+      expect(events).toEqual([
+        {
+          source: "tool_search",
+          outcome: "skipped",
+          reason: "connected_alternative",
+          query,
+          integrations: [{ capabilityId: GMAIL.capabilityId, name: "Gmail" }],
+        },
+      ]);
+    });
+  }
+
+  test("a connected account of another kind, a generic kind, or no kind does not stop the card", async () => {
+    for (const accounts of [
+      new Map([["mcp_onedrive__list_files", account("OneDrive", "productivity")]]),
+      new Map([["mcp_custom__send", account("Acme Mail", "custom")]]),
+      new Map([["mcp_acme__send", account("Acme Mail")]]),
+    ]) {
+      const { requested, request } = cardTool();
+      const result = await runtimeWith("generic_dispatch", {
+        matches: [GMAIL_MAIL],
+        request,
+        accounts,
+      }).prepareSearch({ query });
+      expect(requested).toEqual([GMAIL_MAIL]);
+      expect(outputOf(result).connectCard).toMatchObject({ shown: true });
+    }
+  });
+
+  test("an empty listing filtered by the integration's name keeps its card", async () => {
+    const { requested, request } = cardTool();
+    const runtime = runtimeWith("generic_dispatch", {
+      matches: [GMAIL_MAIL],
+      request,
+      accounts: new Map([[OUTLOOK_SEND, account("Outlook Mail", "communication")]]),
+    });
+    const output = await listing(runtime, { namePrefix: "gmail" });
+    expect(requested).toEqual([GMAIL_MAIL]);
+    expect(output.connectCard).toMatchObject({ shown: true });
+  });
+
+  test("an integration without a catalog category keeps its card", async () => {
+    const { requested, request } = cardTool();
+    await runtimeWith("generic_dispatch", {
+      matches: [GMAIL],
+      request,
+      accounts: new Map([[OUTLOOK_SEND, account("Outlook Mail", "communication")]]),
+    }).prepareSearch({ query });
+    expect(requested).toEqual([GMAIL]);
+  });
+});
+
 describe("discovery records why no card was newly shown", () => {
   const recording = (
     transport: Transport,
@@ -503,6 +616,17 @@ describe("discovery records why no card was newly shown", () => {
     ]);
     expect(several.events).toMatchObject([
       { outcome: "skipped", reason: "several_named", integrations: [{ name: "Gmail" }, {}] },
+    ]);
+  });
+
+  test("skipped: a product word in lower case reads as an ordinary word", async () => {
+    const { requested, request } = cardTool();
+    const { runtime, events } = recording("generic_dispatch", { matches: [DYNAMICS], request });
+    await runtime.prepareSearch({ query: "notes on team dynamics from the retro" });
+    await settled();
+    expect(requested).toEqual([]);
+    expect(events).toMatchObject([
+      { outcome: "skipped", reason: "not_distinctive", integrations: [{ name: DYNAMICS.name }] },
     ]);
   });
 
@@ -632,16 +756,16 @@ describe("discovery records why no card was newly shown", () => {
   });
 });
 
-describe("tool_list browsing that names an integration not installed", () => {
-  const listing = async (
-    runtime: LazyToolRuntime,
-    args: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> => {
-    const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
-    if (!list || list.type !== "function") throw new Error("missing list");
-    return JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
-  };
+const listing = async (
+  runtime: LazyToolRuntime,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> => {
+  const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
+  if (!list || list.type !== "function") throw new Error("missing list");
+  return JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
+};
 
+describe("tool_list browsing that names an integration not installed", () => {
   test("an empty filtered listing shows the card of the one integration it names", async () => {
     for (const args of [
       { view: "tools", group: "connection/0799034d9553", namePrefix: "clickup" },
@@ -744,18 +868,28 @@ describe("tool_list browsing that names an integration not installed", () => {
   });
 });
 
-describe("one connection's tools are browsable from one tool's digest", () => {
-  test("a namePrefix of one aliased tool's digest lists every tool of its connection", async () => {
-    const registry = "slack-workspace";
-    const listChannels = prefixedMcpToolName(registry, "slack_list_channels");
-    const sendMessage = prefixedMcpToolName(registry, "slack_send_message");
-    const other = prefixedMcpToolName("other-server", "other_tool");
-    expect(listChannels.slice(0, 28)).not.toBe(sendMessage.slice(0, 28));
-    const mapping = new Map([
-      [listChannels, registry],
-      [sendMessage, registry],
-      [other, "other-server"],
-    ]);
+describe("one connection's tools are browsable from its server name", () => {
+  test("a namePrefix of server. or server__ lists every tool of that server", async () => {
+    const registry = `account-${"a".repeat(64)}`;
+    const references = new Map(
+      [
+        ["list_channels", registry, "chat"],
+        ["send_message", registry, "chat"],
+        ["other_tool", "other-server", "other"],
+      ].map(([toolName, registryId, namespace]) => [
+        toolName!,
+        {
+          wireName: toolName!,
+          namespace: namespace!,
+          namespaceBase: namespace!,
+          registryId: registryId!,
+          toolName: toolName!,
+        },
+      ]),
+    );
+    const mapping = new Map(
+      [...references].map(([name, reference]) => [name, reference.registryId]),
+    );
     const runtime = new LazyToolRuntime(
       "generic_dispatch",
       new Set(mapping.values()),
@@ -763,38 +897,36 @@ describe("one connection's tools are browsable from one tool's digest", () => {
       new Set(mapping.values()),
       new Set(),
       () => mapping,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => references,
     );
     runtime.refresh([
-      candidate(listChannels, "List Slack channels"),
-      candidate(sendMessage, "Send a Slack message"),
-      candidate(other, "Other tool"),
+      candidate("list_channels", "List chat channels"),
+      candidate("send_message", "Send a chat message"),
+      candidate("other_tool", "Other tool"),
     ]);
     const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
     if (!list || list.type !== "function") throw new Error("missing list");
     const invoke = async (args: unknown) =>
       JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
-    for (const namePrefix of [listChannels.slice(0, 28), listChannels.slice(0, 30)]) {
+    for (const namePrefix of ["chat.", "chat__", `${registry}.`]) {
       const output = await invoke({ namePrefix });
-      expect(new Set(output.tools.map((t: { name: string }) => t.name))).toEqual(
-        new Set([listChannels, sendMessage]),
-      );
-      expect(output.message).toBe(
-        "namePrefix is one tool's own digest, so this lists every tool of that tool's connection.",
-      );
+      expect(output.tools.map((t: { name: string }) => t.name)).toEqual([
+        "list_channels",
+        "send_message",
+      ]);
     }
-    // Within a group, only that group's tools of the connection.
-    const grouped = await invoke({ namePrefix: listChannels.slice(0, 28), group: "absent" });
-    expect(grouped.tools).toEqual([]);
-    const inGroup = await invoke({
-      namePrefix: listChannels.slice(0, 28),
-      group: (await invoke({ view: "groups" })).groups.find(
-        (entry: { group: string; count: number }) => entry.count === 2,
-      ).group,
-    });
-    expect(inGroup.tools).toHaveLength(2);
     // The full name still lists that one tool.
-    const exact = await invoke({ namePrefix: listChannels });
-    expect(exact.tools.map((t: { name: string }) => t.name)).toEqual([listChannels]);
-    expect(exact).not.toHaveProperty("message");
+    const exact = await invoke({ namePrefix: "send_message" });
+    expect(exact.tools.map((t: { name: string }) => t.name)).toEqual(["send_message"]);
   });
 });

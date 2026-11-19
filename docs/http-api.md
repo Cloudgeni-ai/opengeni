@@ -42,6 +42,9 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   On a Console host, auth emails, invitation links, Google and GitHub sign-in
   returns and Stripe returns use the request's allowed host
   (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`)
+- `GET /v1/console-sign-in/start`, `POST /v1/console-sign-in/authorize` and
+  `GET /v1/console-sign-in/callback`: Console's sign-in handoff from the app
+  host (browser-only; see [`opengeni-console.md`](opengeni-console.md#signing-in))
 - `GET|POST /v1/organizations/:id/personal-api-keys` and
   `DELETE /v1/organizations/:id/personal-api-keys/:apiKeyId` (keys that act as
   the person who created them; see [`credentials.md`](credentials.md))

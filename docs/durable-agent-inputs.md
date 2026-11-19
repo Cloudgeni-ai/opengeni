@@ -355,10 +355,14 @@ final answer from `session_wait` (`contentComplete`) or `session_events` (a
 whole `results`/debug item) has consumed it. Only a direct model call counts:
 the worker's tool gateway marks each first-party call with the attempt surface
 that issued it (`_meta.opengeniCaller`, `FIRST_PARTY_MCP_CALLER_META_KEY`), and
-a Codemode script, which may return only a summary to the model, or an
-unmarked call from an older worker proves nothing. The read records each such
+an unmarked call from an older worker proves nothing. A Codemode read (for
+example `ogtool call` in a shell command) proves nothing by itself either,
+since the script may return only a summary to the model; see below for when
+it counts. The read records each such
 answer on the reading turn as `metadata.consumedChildAnswers` entries
-(`childSessionId`, `sequence`, `attemptId`; the newest 64 are kept) in a
+(`childSessionId`, `sequence`, `attemptId`, and the model's `callId` for the
+read when the worker sent it as `_meta.opengeniModelCallId`; the newest 64 are
+kept) in a
 separate best-effort transaction that locks only that turn row (a bounded wait;
 a busy row skips it) and re-proves that the attempt is still live and the
 session's current one and that each sequence is the child's result-bearing
@@ -369,6 +373,18 @@ completes its turn. `session_wait` reports own pending input less each idle
 result whose every part (the answer, each goal continuation, and each omitted
 part) this attempt or a completed turn received, so the parent is neither woken
 by nor told to end its turn for an answer it already has.
+
+A Codemode read of a complete answer by the same exact live attempt is recorded
+apart, as `metadata.codemodeChildAnswerReads` entries (`childSessionId`,
+`sequence`, `attemptId`, no call id), so readers that predate the key never
+take it for a model read. Such an entry counts as received only when a
+`function_call_result` in the same turn's durable history holds the child's
+whole answer as a JSON string value, escaped once (the read's own JSON, for
+example after `jq -r '.content[0].text'`) or twice (the tool result as
+`ogtool call` prints it). That stored tool result is what the model saw.
+A script that printed only a summary, text that merely contains the answer, or
+an answer printed some other way proves nothing, and the result is delivered
+normally. Otherwise such an entry is treated like a model read below.
 
 The attempt's successful completion settlement
 (`applySessionTurnSettlement` with `completed`) then marks each still-pending
@@ -385,8 +401,12 @@ attempt that completed it: the row is inserted `superseded`, keeps its
 with `reason: consumed_by_parent_read`, with no goal auto-resume, wake, or
 queued status. The insert and the completion both hold the parent session lock,
 so they serialize. A read by an attempt that fails, is interrupted, or is
-replaced, even after the read, suppresses nothing: that result is delivered
-normally, as is a result reporting any part the parent did not read, such as an
+replaced, even after the read, suppresses nothing unless the same turn's
+durable history holds that read's own tool result (`function_call_result` with
+the recorded `callId`): a recovered attempt of the turn resumes from that
+history, so the turn's completion counts the read as if that attempt had made
+it. Otherwise that result is delivered normally, as is a result reporting any
+part the parent did not read, such as an
 older answer skipped by a later cursor. The record only ever suppresses a
 duplicate: an older writer or a lost record delivers the result as before, and
 older workers ignore the metadata key. A parent that reads an answer and then

@@ -59,6 +59,7 @@ import {
   requireAccessContext,
   organizationMembershipHttpStatus,
   requireCanonicalLocalAccountAdministrator,
+  assertOrganizationNotSuspended,
   updateExternalIdentityMembershipForRequest,
   releaseAdmissionBlocksAfterAccessChange,
   releaseMembershipBlocksInOrganization,
@@ -69,8 +70,8 @@ import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
   claimOrganizationUserSetupDelivery,
-  createAdditionalManagedOrganization,
-  createManagedOrganization,
+  createAdditionalManagedOrganizationWithSignupNetwork,
+  createManagedOrganizationWithSignupNetwork,
   createOrganizationWorkspace,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -99,6 +100,7 @@ import {
   settleOrganizationUserSetupDelivery,
   putOrganizationWorkspaceMember,
   revokeOrganizationWorkspaceMember,
+  SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE,
   updateOrganizationWorkspace,
   updateOrganizationSharedWorkspaceSettings,
   updateOrganizationMember,
@@ -128,6 +130,12 @@ import {
   assertOrganizationUserSetupDeliveryConfigured,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
+import {
+  evaluateSignupNetworkAccountsAfterSetup,
+  requestSignupMailSignal,
+  requestSignupNetworkSource,
+  signupNetworkRateLimitError,
+} from "../auth/signup-network";
 import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
@@ -502,42 +510,57 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
+    // Started now, awaited at setup: bounded and never throws (migration 1493).
+    const signupMailSignal = requestSignupMailSignal(session.user.email, deps.settings);
     const payload = await parseBody(context, CreateOrganizationRequest);
+    // This legacy first-organization route writes the same self-serve setup
+    // receipt and Free eligibility as organization onboarding, so it records
+    // the signup network, applies its rate limit and evaluates the new
+    // organization the same way (migration 1354).
+    let created: Awaited<ReturnType<typeof createManagedOrganizationWithSignupNetwork>>;
     try {
-      return context.json(
-        CreateOrganizationResponse.parse(
-          await createManagedOrganization(deps.db, {
-            subjectId,
-            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
-            ...payload,
-            trialCreditModelIds: signupCreditModelIds(deps.settings),
-            trialCreditsEnabled:
-              deps.settings.productAccessMode === "managed" &&
-              deps.settings.verifiedSignupTrialCreditsEnabled,
-          }),
-        ),
-        201,
-      );
+      created = await createManagedOrganizationWithSignupNetwork(deps.db, {
+        subjectId,
+        subjectLabel: accountContactEmail(session.user.email) || session.user.name,
+        ...payload,
+        trialCreditModelIds: signupCreditModelIds(deps.settings),
+        trialCreditsEnabled:
+          deps.settings.productAccessMode === "managed" &&
+          deps.settings.verifiedSignupTrialCreditsEnabled,
+        signupNetwork: requestSignupNetworkSource(context, deps.settings),
+        signupMailSignal: await signupMailSignal,
+      });
     } catch (error) {
+      if (nestedPostgresSqlState(error) === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
+        throw signupNetworkRateLimitError();
+      }
       return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
+    const organization = CreateOrganizationResponse.parse(created.organization);
+    await evaluateSignupNetworkAccountsAfterSetup(deps.db, created.evaluateAccountIds);
+    return context.json(organization, 201);
   });
 
   app.post("/v1/organizations/additional", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
+    // Started now, awaited at setup: bounded and never throws (migration 1493).
+    const signupMailSignal = requestSignupMailSignal(session.user.email, deps.settings);
     const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
+    // An additional organization records the signup network, applies its
+    // rate limit and is evaluated like a first organization (migration 1484).
+    let created: Awaited<ReturnType<typeof createAdditionalManagedOrganizationWithSignupNetwork>>;
     try {
-      return context.json(
-        CreateAdditionalOrganizationResponse.parse(
-          await createAdditionalManagedOrganization(deps.db, {
-            subjectId,
-            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
-            ...payload,
-          }),
-        ),
-        201,
-      );
+      created = await createAdditionalManagedOrganizationWithSignupNetwork(deps.db, {
+        subjectId,
+        subjectLabel: accountContactEmail(session.user.email) || session.user.name,
+        ...payload,
+        signupNetwork: requestSignupNetworkSource(context, deps.settings),
+        signupMailSignal: await signupMailSignal,
+      });
     } catch (error) {
+      if (nestedPostgresSqlState(error) === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
+        throw signupNetworkRateLimitError();
+      }
       return await rethrowMembershipErrorWithPlans(
         context,
         deps,
@@ -545,6 +568,8 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         "additional organization limit reached",
       );
     }
+    await evaluateSignupNetworkAccountsAfterSetup(deps.db, created.evaluateAccountIds);
+    return context.json(CreateAdditionalOrganizationResponse.parse(created.organization), 201);
   });
 
   app.get("/v1/organization-memberships", async (context) => {
@@ -1069,6 +1094,9 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       context.req.param("organizationId"),
       "organization id",
     );
+    // A suspended organization cannot invite (docs/deployment.md,
+    // "Free compute bounds").
+    await assertOrganizationNotSuspended(deps.db, { accountId: organizationId, subjectId });
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
     // `.invalid` addresses (RFC 2606) reach no one, and one is the stored
     // placeholder of an account without an email address.

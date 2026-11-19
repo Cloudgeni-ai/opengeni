@@ -203,15 +203,10 @@ export const SIDE_FEATURE_ROUTES = {
   // deterministic embedder sends nothing and needs no route.
   "knowledge.embeddings": { features: ["knowledge_embeddings"], declarable: true },
   "decision_model.jev": { features: DECISIONS, declarable: false, rule: gateway("Jev") },
-  "decision_model.openrouter": {
-    features: DECISIONS,
-    declarable: false,
-    rule: {
-      geography: "global",
-      deploymentType: "gateway",
-      reference: "OpenRouter routes requests to upstream providers in any region.",
-    },
-  },
+  // The OpenRouter-shaped decisions API: OpenRouter itself (a vendor default
+  // host with a code-owned rule), or another host serving the same API, such
+  // as an Azure AI Foundry resource, at an endpoint the operator chooses.
+  "decision_model.openrouter": { features: DECISIONS, declarable: true },
   // An OpenAI-compatible endpoint the operator chooses.
   "decision_model.openai": { features: DECISIONS, declarable: true },
 } as const satisfies Record<string, RouteSpec>;
@@ -305,6 +300,11 @@ const VENDOR_DEFAULT_HOSTS: Record<string, Rule> = {
     geography: "us",
     deploymentType: "provider_default",
     reference: "OpenAI's default API host api.openai.com processes in the US.",
+  },
+  "openrouter.ai": {
+    geography: "global",
+    deploymentType: "gateway",
+    reference: "OpenRouter routes requests to upstream providers in any region.",
   },
   "s.jina.ai": saas("Jina Search"),
   "r.jina.ai": saas("Jina Reader"),

@@ -24,6 +24,7 @@ export async function setSessionTargetContext(
 ) {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (tx) => {
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.actor.sessionId],

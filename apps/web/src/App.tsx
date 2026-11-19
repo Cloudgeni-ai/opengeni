@@ -49,9 +49,11 @@
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
+//   /connect-continue?next=…                 → signs the browser in, then finishes a desktop sign-in
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/composer-stack                      → DEV-only session column preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
+//   /dev/connect-return                      → DEV-only browser pages a desktop sign-in ends on
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 // The shared session UI renders through this app's router and API helpers.
 import "./app-host";
@@ -67,7 +69,7 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
-import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { DESKTOP_APP_RETURN_PATH, OAUTH_SIGN_IN_TO_FINISH_PATH } from "@opengeni/contracts";
 import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
@@ -116,6 +118,7 @@ import {
   parseConsoleSessionsSearch,
   parseConsoleUsageSearch,
 } from "@/lib/console-route";
+import { parseConsoleSignInSearch } from "@/lib/console-sign-in";
 import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
 import { siteAuthSearch } from "@/lib/site-auth";
 import {
@@ -212,6 +215,10 @@ const LazyDesktopReturnRoute = lazyRouteComponent(
   () => import("@/routes/desktop-return"),
   "DesktopReturnRoute",
 );
+const LazyConnectContinueRoute = lazyRouteComponent(
+  () => import("@/routes/connect-continue"),
+  "ConnectContinueRoute",
+);
 const LazySetupAccountRoute = lazyRouteComponent(
   () => import("@/routes/setup-account"),
   "SetupAccountRoute",
@@ -232,6 +239,10 @@ const LazyNativeSignInRoute = lazyRouteComponent(
   () => import("@/routes/native-sign-in"),
   "NativeSignInRoute",
 );
+const LazyConsoleSignInRoute = lazyRouteComponent(
+  () => import("@/routes/console-sign-in"),
+  "ConsoleSignInRoute",
+);
 const LazySiteAuthorizeRoute = lazyRouteComponent(
   () => import("@/routes/site-auth"),
   "SiteAuthorizeRoute",
@@ -247,6 +258,10 @@ const LazySubscriptionPlansPreview = lazyRouteComponent(
 const LazyOwnSubscriptionPlanPreview = lazyRouteComponent(
   () => import("@/dev/own-subscription-plan-preview"),
   "OwnSubscriptionPlanPreview",
+);
+const LazyConnectReturnPreview = lazyRouteComponent(
+  () => import("@/dev/connect-return-preview"),
+  "ConnectReturnPreview",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
@@ -516,6 +531,13 @@ const desktopReturnRoute = createRoute({
   path: DESKTOP_APP_RETURN_PATH.slice(1),
   component: LazyDesktopReturnRoute,
 });
+// A sign-in started in the desktop app that came back to a browser signed in
+// to no one: the auth gate signs the browser in, then it finishes. NOT public.
+const connectContinueRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: OAUTH_SIGN_IN_TO_FINISH_PATH.slice(1),
+  component: LazyConnectContinueRoute,
+});
 const setupAccountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "setup-account",
@@ -557,10 +579,33 @@ const nativeSignInRoute = createRoute({
       ...text("code_challenge"),
       ...text("state"),
       ...text("device_name"),
+      ...text("relay"),
       ...(isNativeAppPlatform(search.platform) ? { platform: search.platform } : {}),
     };
   },
   component: NativeSignIn,
+});
+// The Opengeni phone app's in-app viewers for a Site and for a document,
+// spreadsheet or presentation: the Site or editor alone, without the web app's
+// rail or header (the app draws its own). The app signs its web view in with
+// the device session.
+const nativeSiteViewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "native-view/workspaces/$workspaceId/sites/$siteId",
+  component: NativeSiteView,
+});
+const nativeEditableArtifactViewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "native-view/workspaces/$workspaceId/artifacts/editable/$artifactId",
+  component: NativeEditableArtifactView,
+});
+// Where Opengeni Console, on its own host, sends a signed-out person: sign in
+// here if needed, then go back to Console with a one-time code (code + PKCE).
+const consoleSignInRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "console-sign-in",
+  validateSearch: parseConsoleSignInSearch,
+  component: ConsoleSignIn,
 });
 // Where a published Site's gateway sends a viewer to sign in: confirm the
 // Site and account, then hand the gateway a one-time code (code + PKCE).
@@ -592,6 +637,11 @@ const ownSubscriptionPlanPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/own-subscription-plan",
   component: LazyOwnSubscriptionPlanPreview,
+});
+const connectReturnPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/connect-return",
+  component: LazyConnectReturnPreview,
 });
 // DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
 const devSessionTimelineRoute = createRoute({
@@ -1236,12 +1286,16 @@ const routeTree = rootRoute.addChildren([
   sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,
+  connectContinueRoute,
   identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
   confirmPasskeyRoute,
   nativeSignInRoute,
+  nativeSiteViewRoute,
+  nativeEditableArtifactViewRoute,
+  consoleSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV
     ? [
@@ -1249,6 +1303,7 @@ const routeTree = rootRoute.addChildren([
         onboardingPreviewRoute,
         subscriptionPlansPreviewRoute,
         ownSubscriptionPlanPreviewRoute,
+        connectReturnPreviewRoute,
         devSessionTimelineRoute,
       ]
     : []),
@@ -1792,6 +1847,29 @@ function EditableArtifact() {
   return <LazyEditableArtifactRoute {...params} fromSession={fromSession} />;
 }
 
+function NativeSiteView() {
+  const { workspaceId, siteId } = nativeSiteViewRoute.useParams();
+  return (
+    <div className="h-dvh w-dvw overflow-hidden bg-og-bg">
+      <LazySiteViewRoute
+        key={`${workspaceId}:${siteId}`}
+        workspaceId={workspaceId}
+        siteId={siteId}
+        embedded
+      />
+    </div>
+  );
+}
+
+function NativeEditableArtifactView() {
+  const params = nativeEditableArtifactViewRoute.useParams();
+  return (
+    <div className="h-dvh w-dvw overflow-hidden bg-og-bg">
+      <LazyEditableArtifactRoute {...params} embedded />
+    </div>
+  );
+}
+
 function RetainedArtifact() {
   const params = workspaceRetainedArtifactRoute.useParams();
   const { fromSession } = workspaceRetainedArtifactRoute.useSearch();
@@ -1892,6 +1970,11 @@ function Device() {
 function NativeSignIn() {
   const search = nativeSignInRoute.useSearch();
   return <LazyNativeSignInRoute search={search} />;
+}
+
+function ConsoleSignIn() {
+  const search = consoleSignInRoute.useSearch();
+  return <LazyConsoleSignInRoute search={search} />;
 }
 
 function SiteAuthorize() {

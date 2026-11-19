@@ -5,7 +5,7 @@
 - Timeline navigation has a reserved 44-point lane above the composer, outside the scrolling text. The composer's occupied space is excluded from the reading viewport; annotation and inline-input positioning use that actual viewport.
 - The latest prompt anchors a growing answer. A manual scroll releases that anchor; Jump to latest explicitly follows the tail. UIKit's programmatic momentum-completion events cannot change the person's follow intent. Pending-to-durable prompt replacement waits for the new row's layout instead of briefly jumping to the end.
 - A display-only, account-client-scoped handoff carries the just-submitted first prompt and attachments across route navigation until durable history is ready. The native screen uses the existing shared startup timeline, not a second queue model. Nothing is resent or persisted by this handoff.
-- Native startup uses one plain “Working” indicator, which says so after 30 seconds when a start takes longer than usual. Web and native share the existing useful-output predicate, so startup decoration disappears on the first text, reasoning, or tool activity rather than competing with the reply. Failed preparation and expanded work details remain available. Host-provided loading copy and renderers remain supported.
+- Native startup shows the animated thinking orb (the web's GenieLoading visual) beside one stable “Working” status, which says so after 30 seconds when a start takes longer than usual. Web and native share the existing useful-output predicate, so startup decoration disappears on the first text, reasoning, or tool activity rather than competing with the reply. Failed preparation and expanded work details remain available. Host-provided loading copy and renderers remain supported. (Between this change and the follow-up below, the orb was briefly a plain spinner; see [Preparing state](#preparing-state).)
 - New-chat privacy reflects the server's default until the person chooses otherwise. Drafts and create requests carry only a choice the person made, so an explicit Workspace choice is kept even when the workspace default is private, and an unchosen chat (or one whose privacy capability could not be read) always gets the server's default. This corrects the actual choice as well as the chip; it does not change server authorization or visibility policy.
 
 No worker, provider, prompt assembly, tool schema, model-facing description, history projection, or model-input ordering is changed. The public API snapshot adds only two shared presentation helpers.
@@ -29,3 +29,23 @@ Also exercised Jump to latest, Back to your message, manual scrolling followed b
 - Native reading offsets: short content, long attachments, and explicit tail following.
 - Privacy: server default, explicit Workspace, draft restoration, reset, unavailable private-chat choices, and a failed capability read.
 - Existing native human-input/stuck-screen and shared startup tests remain in the targeted checks.
+
+## Preparing state
+
+The orb is back as the default preparing visual; the status text, slow-start copy, first-output dismissal, failed-preparation row and `renderPreparing` override are unchanged. Rendered from the actual `MessageTimeline` through react-native-web at iPhone width (no simulator), with the same events before and after:
+
+| Before | After | After (animated) |
+| --- | --- | --- |
+| ![Small spinner beside Working](screenshots/preparing-orb/before-preparing.png) | ![Thinking orb beside Working](screenshots/preparing-orb/after-preparing.png) | ![Thinking orb animating beside Working](screenshots/preparing-orb/after-preparing.gif) |
+
+## Links
+
+Links in a reply used to be drawn in the near-white (dark) or near-black (light) neutral accent with no underline on the phone, so in dark mode "Open …" read as one more line of body text. Every link kind (web URLs, autolinked URLs, artifact, Site, chat and file links, links in lists and tables) now uses the `link` color token, a calm blue in both themes that keeps 4.9:1 or more on every chat surface, with a resting underline tinted from it. A press shows a soft wash of the link color. The web chat already underlined links and now uses the same token. Hosts rebrand it with `--og-color-link` on web and `link` in the native theme overrides.
+
+The new "Links" lab scenario renders the same reply on both. Native, from the actual `MessageTimeline` through react-native-web at iPhone width:
+
+![Native chat links before and after, light and dark](screenshots/chat-links/native-links-before-after.png)
+
+Web chat (`/dev/session-timeline?scenario=links`) at the same width:
+
+![Web chat links before and after, light and dark](screenshots/chat-links/web-links-before-after.png)

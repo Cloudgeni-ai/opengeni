@@ -1,5 +1,135 @@
 # @opengeni/browserd
 
+## 0.4.48
+
+### Patch Changes
+
+- 2bebae4: Two macOS computer-use fixes from the pinned CUA driver. A batch step that asks for desktop scope (a drag, click or scroll in desktop screenshot coordinates, keys to the frontmost app) no longer inherits the window an earlier step used, which turned it into a window-scoped action at the wrong coordinates. A slider or other control whose accessibility value reads as NaN is now treated as unreadable: setting its value no longer falls back to stepping it with up to 500 decrement actions (NaN never equals the last reading, so every step looked like progress), which could run the control to its minimum while reporting that nothing changed.
+  - @opengeni/contracts@6.30.1
+  - @opengeni/interaction@6.30.1
+
+## 0.4.47
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/interaction@6.30.0
+
+## 0.4.46
+
+### Patch Changes
+
+- @opengeni/contracts@6.29.2
+- @opengeni/interaction@6.29.2
+
+## 0.4.45
+
+### Patch Changes
+
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/interaction@6.29.1
+
+## 0.4.44
+
+### Patch Changes
+
+- fd0b9e5: A browser click on an element inside a sideways-scrolling container that runs past an ancestor's clipped edge (a carousel wider than a page column that clips its overflow) now scrolls the element into view and clicks it, instead of refusing it as past the clipped edge. Chromium's scroll into view left such an element in place because it already lies inside its scroller's own box; the driver now centers it in its scrollers when nothing of it shows and nothing covers it.
+  - @opengeni/contracts@6.29.0
+  - @opengeni/interaction@6.29.0
+
+## 0.4.43
+
+### Patch Changes
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/interaction@6.28.0
+
+## 0.4.42
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/interaction@6.27.1
+
+## 0.4.41
+
+### Patch Changes
+
+- 4befd55: Managed browsers on desktop sandbox images can now be continued after their controller restarts. The image's browser wrapper added its own default profile switch in front of the controller's, so the controller could never identify the browser it launched and every such browser became unusable after a restart. The wrapper now adds its default profile only when the caller names none.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/interaction@6.27.0
+
+## 0.4.40
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/interaction@6.26.0
+
+## 0.4.39
+
+### Patch Changes
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/interaction@6.25.0
+
+## 0.4.38
+
+### Patch Changes
+
+- Updated dependencies [5fd2c21]
+  - @opengeni/contracts@6.24.1
+  - @opengeni/interaction@6.24.1
+
+## 0.4.37
+
+### Patch Changes
+
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/interaction@6.24.0
+
+## 0.4.36
+
+### Patch Changes
+
+- cd56d63: On macOS, typing into a window whose fields are not in its accessibility tree (a Simulator device, an Android emulator) goes to the point of the click just before it. That click now counts only for two minutes. Before, a click from hours earlier still counted when no other action had been sent to the window since, so typing after the field was focused by other means (the person, the device's own tools) clicked again at the old point, which could press whatever is there now. Such typing is now refused before anything is sent, with the existing message to click the field and then type.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/interaction@6.23.0
+
+## 0.4.35
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/interaction@6.22.0
+
 ## 0.4.34
 
 ### Patch Changes

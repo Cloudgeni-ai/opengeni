@@ -8,6 +8,7 @@ import { useRail } from "./rail-context";
 import { RAIL_BRAND_LINK_CLASS, RailBrandMark, RailBrandRow } from "./rail-surface";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
+import type { WindowBarCrumb } from "../../../ui/window-bar-title";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
 import {
   SIDEBAR_TOGGLE_IN_WINDOW_BAR,
@@ -17,6 +18,7 @@ import {
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 
 /**
  * The surface-owned sections of the session shell. Every slot is optional: a
@@ -37,6 +39,11 @@ export type SessionShellSlots = Readonly<{
   railFooter?: ReactNode;
   /** Notices across the top of the canvas, under the top strip. */
   canvasBanners?: ReactNode;
+  /**
+   * The rail section a page is in ("Agents"), first in the macOS window bar's
+   * trail. Null where the page is the section itself or in none.
+   */
+  windowBarSection?: ((pathname: string) => WindowBarCrumb | null) | undefined;
 }>;
 
 export const SessionShellSlotsContext = createContext<SessionShellSlots>({});
@@ -68,6 +75,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
   // Without the brand (an embed), the row holds just the collapse toggle, at
   // its end.
   const brand = useSessionUiFeature("brand");
+  const { productName } = useSimplifiedInterface();
   const brandless = !brand;
   const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !rail.isMobile;
   const collapseToggle = !rail.isMobile ? (
@@ -93,7 +101,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: rail.workspaceId }}
             className={RAIL_BRAND_LINK_CLASS}
-            aria-label="Opengeni home"
+            aria-label={`${productName} home`}
           >
             <RailBrandMark collapsed={rail.collapsed} />
           </Link>

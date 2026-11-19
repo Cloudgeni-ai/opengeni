@@ -1,5 +1,37 @@
 # @opengeni/artifact-kernel-wasm-presentation
 
+## 6.30.1
+
+## 6.30.0
+
+## 6.29.2
+
+## 6.29.1
+
+## 6.29.0
+
+## 6.28.0
+
+## 6.27.1
+
+## 6.27.0
+
+## 6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- e126cb5: Deleting a slide that has objects is now one atomic edit. The presentation kernel rejected a batch that deleted a slide's objects and then the slide with "unknown presentation slide", so the editor saved two separate edits. The kernel now applies such a batch, and the same for layouts and masters deleted together with their objects; a rejected batch also restores the deleted slide's hit-testing index. The editor deletes a slide and its objects in a single batch. Presentations edited this way need this kernel or newer, so don't roll the API back below this release.
+
+## 6.24.1
+
+## 6.24.0
+
+## 6.23.0
+
+## 6.22.0
+
 ## 6.21.0
 
 ## 6.20.1

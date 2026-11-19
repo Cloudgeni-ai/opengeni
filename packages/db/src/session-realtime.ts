@@ -200,6 +200,7 @@ async function appendRealtimeLifecycleEvent(
   // so this is a nonblocking re-acquisition that also prevents a future caller
   // from inserting a sequence row without the required session fence.
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: session.workspaceId,
     controlLock: "share",
     sessionIds: [session.id],

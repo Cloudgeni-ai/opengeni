@@ -81,7 +81,7 @@ describe("which own login a connector card reconnects", () => {
   });
 });
 
-describe("which own login from another workspace a card offers to use here", () => {
+describe("which own login a card offers to use for a capability not set up here", () => {
   const elsewhere = (id: string, overrides: Partial<ConnectionMetadata> = {}) =>
     login(id, "active", { workspaceId: "elsewhere", turnedOnHere: false, ...overrides });
 
@@ -89,8 +89,17 @@ describe("which own login from another workspace a card offers to use here", () 
     expect(ownLoginToUseHere([elsewhere("mine")], GMAIL)?.id).toBe("mine");
   });
 
-  test("nothing when it is already on here, ambiguous, lapsed, shared or another endpoint", () => {
-    expect(ownLoginToUseHere([elsewhere("on", { turnedOnHere: true })], GMAIL)).toBeNull();
+  test("also when it is already on here: the capability still has to be set up", () => {
+    expect(ownLoginToUseHere([elsewhere("on", { turnedOnHere: true })], GMAIL)?.id).toBe("on");
+    expect(
+      ownLoginToUseHere([login("added-here", "active", { turnedOnHere: true })], GMAIL)?.id,
+    ).toBe("added-here");
+  });
+
+  test("nothing when ambiguous, lapsed, shared or another endpoint", () => {
+    expect(
+      ownLoginToUseHere([elsewhere("on", { turnedOnHere: true }), elsewhere("off")], GMAIL),
+    ).toBeNull();
     expect(ownLoginToUseHere([elsewhere("one"), elsewhere("two")], GMAIL)).toBeNull();
     expect(ownLoginToUseHere([elsewhere("lapsed", { status: "needs_reauth" })], GMAIL)).toBeNull();
     expect(ownLoginToUseHere([elsewhere("shared", { subjectId: null })], GMAIL)).toBeNull();

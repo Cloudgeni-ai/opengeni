@@ -2,7 +2,12 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  OwnResourceReachWorkspace,
+} from "@opengeni/sdk";
 // The Radix dialog is a portal; this inline stand-in keeps its contract.
 mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
@@ -34,6 +39,45 @@ mock.module("@opengeni/react/ui/confirm-dialog", () => ({
           }}
         >
           {confirmLabel}
+        </button>
+      </div>
+    ) : null,
+}));
+
+// Same for the form dialog: render its fields and submit inline.
+mock.module("@opengeni/react/ui/form-dialog", () => ({
+  FormDialog: ({
+    open,
+    title,
+    description,
+    submitLabel,
+    children,
+    onOpenChange,
+    onSubmit,
+  }: {
+    open: boolean;
+    title: ReactNode;
+    description?: ReactNode;
+    submitLabel: ReactNode;
+    children?: ReactNode;
+    onOpenChange: (open: boolean) => void;
+    onSubmit: () => Promise<boolean | void>;
+  }) =>
+    open ? (
+      <div role="dialog">
+        <p>{title}</p>
+        {description ? <p>{description}</p> : null}
+        {children}
+        <button
+          type="button"
+          onClick={() => {
+            void (async () => {
+              const result = await onSubmit();
+              if (result !== false) onOpenChange(false);
+            })();
+          }}
+        >
+          {submitLabel}
         </button>
       </div>
     ) : null,
@@ -518,6 +562,138 @@ describe("catalog connected accounts", () => {
       await view.unmount();
     });
 
+    describe("naming an account", () => {
+      const keyItem = {
+        ...item,
+        name: "Example MCP",
+        authKind: "api_key",
+        mcpUrl: "https://mcp.example.test/mcp",
+        connectionRef: { providerDomain: "mcp.example.test", kind: "api_key" },
+      } as CapabilityCatalogItem;
+      const key = (overrides: Partial<ConnectionMetadata> = {}) =>
+        account({
+          providerDomain: "mcp.example.test",
+          kind: "api_key",
+          metadata: { mcpUrl: keyItem.mcpUrl, resource: keyItem.mcpUrl },
+          ...overrides,
+        });
+      async function type(input: HTMLInputElement, value: string) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+        await act(async () => {
+          input.focus();
+          setter.call(input, value);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          // React DOM loaded before the DOM shim here, so it watches the
+          // focused field's keys instead of input events.
+          input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+        });
+      }
+
+      test("a named key shows its name; unnamed keys say when each was connected", async () => {
+        const view = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[
+              key({ label: "Team inbox" }),
+              key({ createdAt: "2026-10-01T09:00:00Z" }),
+              key({ createdAt: "2026-10-20T09:00:00Z" }),
+            ]}
+          />,
+        );
+        const labels = [...view.container.querySelectorAll("li p")].map((node) => node.textContent);
+        expect(labels[0]).toBe("Team inbox");
+        expect(new Set(labels).size).toBe(3);
+        for (const label of labels.slice(1))
+          expect(label).toMatch(/^Example MCP account · Connected /);
+        await view.unmount();
+      });
+
+      test("Rename is offered only where the service doesn't say who the account is", async () => {
+        const identified = account({ metadata: { email: "known@example.test" } });
+        const unnamed = key();
+        const others = key({ subjectId: "someone-else" });
+        const view = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[unnamed, others]}
+            management={management({ onRename: mock(async () => true) })}
+          />,
+        );
+        // Your own unnamed key can be named; another person's key is theirs to name.
+        const renames = buttons(view.container).filter((label) => label?.startsWith("Rename"));
+        expect(renames).toHaveLength(1);
+        expect(renames[0]).toStartWith("Rename Example MCP account");
+        await view.unmount();
+        const oauth = await render(
+          <CatalogConnectedAccounts
+            item={item}
+            connections={[identified]}
+            management={management({ onRename: mock(async () => true) })}
+          />,
+        );
+        expect(buttons(oauth.container)).not.toContain("Rename known@example.test");
+        await oauth.unmount();
+        const withoutRename = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[unnamed]}
+            management={management()}
+          />,
+        );
+        expect(buttons(withoutRename.container).some((label) => label?.startsWith("Rename"))).toBe(
+          false,
+        );
+        await withoutRename.unmount();
+      });
+
+      test("Rename saves a trimmed name for exactly that account; blank removes it", async () => {
+        const target = key({ label: "Old name" });
+        const onRename = mock(async () => true);
+        const view = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[key(), target]}
+            management={management({ onRename })}
+          />,
+        );
+        const open = async () =>
+          act(async () =>
+            (
+              view.container.querySelector(
+                'button[aria-label="Rename Old name"]',
+              ) as HTMLButtonElement
+            ).click(),
+          );
+        const save = async () => {
+          const dialog = document.querySelector('[role="dialog"]')!;
+          const button = [...dialog.querySelectorAll("button")].find(
+            (candidate) => candidate.textContent === "Save name",
+          )!;
+          await act(async () => button.click());
+        };
+        await open();
+        const dialog = document.querySelector('[role="dialog"]')!;
+        expect(dialog.textContent).toContain("Name this account");
+        const input = dialog.querySelector("input") as HTMLInputElement;
+        expect(input.value).toBe("Old name");
+        // Unchanged: nothing to save.
+        await save();
+        expect(onRename).not.toHaveBeenCalled();
+        await open();
+        await type(
+          document.querySelector('[role="dialog"] input') as HTMLInputElement,
+          "  Team inbox ",
+        );
+        await save();
+        expect(onRename).toHaveBeenCalledWith(target, "Team inbox");
+        await open();
+        await type(document.querySelector('[role="dialog"] input') as HTMLInputElement, "   ");
+        await save();
+        expect(onRename).toHaveBeenLastCalledWith(target, null);
+        await view.unmount();
+      });
+    });
+
     test("accounts that would read the same say when each was connected", async () => {
       const first = account({ metadata: {}, createdAt: "2026-10-01T09:00:00Z" });
       const second = account({ metadata: {}, createdAt: "2026-10-20T09:00:00Z" });
@@ -693,6 +869,110 @@ describe("catalog connected accounts", () => {
           .querySelector('[aria-label="Use mine@example.test in Team"]')
           ?.getAttribute("aria-checked"),
       ).toBe("true");
+      await view.unmount();
+    });
+
+    test("your own login where the connector isn't on reads as off, and one switch turns both on", async () => {
+      const mine = account({ metadata: { email: "mine@example.test", mcpUrl: item.mcpUrl } });
+      const row = (
+        overrides: Pick<OwnResourceReachWorkspace, "workspaceId" | "name"> &
+          Partial<OwnResourceReachWorkspace>,
+      ): OwnResourceReachWorkspace => ({
+        personal: false,
+        current: false,
+        on: true,
+        alwaysOn: false,
+        canChange: true,
+        ...overrides,
+      });
+      const getOwnResourceReach = mock(
+        async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+          resourceKind: "connection" as const,
+          resourceId: resource.resourceId,
+          workspaces: [
+            row({ workspaceId: "personal", name: "Personal", personal: true, alwaysOn: true }),
+            // On through a standing grant, but Slack isn't on in either.
+            row({ workspaceId: "design", name: "Design", connectorOff: true }),
+            row({ workspaceId: "team", name: "Team", current: true, connectorOff: true }),
+          ],
+        }),
+      );
+      const setOwnResourceReach = mock(
+        async (
+          workspaceId: string,
+          request: { resourceKind: string; resourceId: string; on: boolean },
+        ) => {
+          if (workspaceId === "design")
+            throw new OpenGeniApiError(
+              403,
+              JSON.stringify({
+                error: {
+                  code: "forbidden",
+                  message:
+                    "Only an admin can turn Slack on in this workspace. Ask one to turn it on, then use your login here.",
+                  details: { code: "own_login_connector_needs_admin" },
+                },
+              }),
+              { mutation: true },
+            );
+          return {
+            workspace: row({ workspaceId, name: "Team", on: request.on }),
+          };
+        },
+      );
+      const turnedOn = mock((_workspaceId: string) => undefined);
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={{ ...item, enabled: false }}
+          connections={[mine]}
+          management={management()}
+          ownReach={{
+            client: { getOwnResourceReach, setOwnResourceReach },
+            workspaceId: "team",
+            onConnectorTurnedOn: turnedOn,
+          }}
+        />,
+      );
+      await act(async () => {});
+      const switches = () =>
+        Object.fromEntries(
+          [...view.container.querySelectorAll('[role="switch"]')].map((entry) => [
+            entry.getAttribute("aria-label"),
+            entry.getAttribute("aria-checked"),
+          ]),
+        );
+      // "On" would read as usable: nothing there uses it until Slack is on.
+      expect(switches()).toEqual({
+        "Use mine@example.test in Personal": "true",
+        "Use mine@example.test in Design": "false",
+        "Use mine@example.test in Team": "false",
+      });
+      expect(view.container.textContent).toContain(
+        "This workspace. Not used here yet. Turning it on turns Slack on here too",
+      );
+      expect(view.container.textContent).not.toContain("Use it here");
+
+      // One switch: the server turns Slack on here with the login.
+      const toggle = (label: string) =>
+        act(async () =>
+          (view.container.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement).click(),
+        );
+      await toggle("Use mine@example.test in Team");
+      expect(setOwnResourceReach).toHaveBeenCalledWith("team", {
+        resourceKind: "connection",
+        resourceId: mine.id,
+        on: true,
+      });
+      expect(switches()["Use mine@example.test in Team"]).toBe("true");
+      expect(turnedOn.mock.calls).toEqual([["team"]]);
+
+      // Where only an admin may turn Slack on, it says so and nothing moves.
+      await toggle("Use mine@example.test in Design");
+      expect(switches()["Use mine@example.test in Design"]).toBe("false");
+      expect(view.container.textContent).toContain(
+        "Only an admin can turn Slack on in this workspace. Ask one to turn it on, then use your login here.",
+      );
+      expect(turnedOn).toHaveBeenCalledTimes(1);
       await view.unmount();
     });
 

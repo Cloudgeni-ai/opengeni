@@ -22,6 +22,7 @@ import {
 import { CreditAmountPicker } from "./credit-amount-picker";
 import { Notice } from "../../ui/notice";
 import { useAppContext } from "../app-context";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 import { useCreditBalance } from "./credits/use-credit-balance";
 import { userErrorText } from "../../ui/api-error";
 import { validTopupAmount } from "../lib/format";
@@ -30,6 +31,7 @@ import { analyticsAction } from "../../ui/analytics-actions";
 import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
 import { subscriptionAction } from "../lib/subscription-plans";
 import type { PaymentRefusalCode } from "../lib/model-access";
+import { AddCardButton } from "./add-card-button";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -65,6 +67,7 @@ export function CreditRequiredPromptView({
   beforeLeave,
 }: CreditRequiredPromptProps & { client: ChatClient<OpenGeniBrowserClient> }) {
   const page = usePage();
+  const { simplified, productName } = useSimplifiedInterface();
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
   const [busy, setBusy] = useState(false);
   // A redeemed coupon, celebrated in this dialog with its real amount.
@@ -75,6 +78,11 @@ export function CreditRequiredPromptView({
   const [stripeEnabled, setStripeEnabled] = useState(false);
   const [upgradeAccountId, setUpgradeAccountId] = useState<string | null>(null);
   const canUpgrade = open && canBuyCredits && accountId !== null && upgradeAccountId === accountId;
+  // A Free organization without a verified card gets its Free credit once a
+  // card is added (card verification gate).
+  const [cardAccountId, setCardAccountId] = useState<string | null>(null);
+  const offerCard =
+    open && canBuyCredits && purpose === "required" && !refusalCode && cardAccountId === accountId;
 
   useEffect(() => {
     setUpgradeAccountId(null);
@@ -84,11 +92,22 @@ export function CreditRequiredPromptView({
     }
     let active = true;
     setStripeEnabled(false);
+    setCardAccountId(null);
     void client
       .getBilling({ accountId })
       .then(async (billing) => {
         if (active) setStripeEnabled(billing.mode === "stripe");
-        if (!active || !billing.balance.plan || billing.mode !== "stripe") return;
+        if (!active || billing.mode !== "stripe") return;
+        // A brand-new organization may not be enrolled in Free yet; it
+        // still needs its card for Free credit.
+        void client
+          .getBillingCardVerification?.({ accountId })
+          .then((card) => {
+            if (active && card.required && !card.verified && card.canVerify)
+              setCardAccountId(accountId);
+          })
+          .catch(() => undefined);
+        if (!billing.balance.plan) return;
         const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
         if (
           active &&
@@ -183,12 +202,12 @@ export function CreditRequiredPromptView({
         <DialogHeader>
           <DialogTitle>
             {purpose === "topup"
-              ? "Add Opengeni credits"
+              ? `Add ${productName} credits`
               : refusalCode === "byok_paid_credit_required"
                 ? "Add credits to use your own key"
                 : refusalCode === "api_credits_required"
                   ? "API usage uses credits, not your plan credit"
-                  : "Add Opengeni credits to continue"}
+                  : `Add ${productName} credits to continue`}
           </DialogTitle>
           {/* A refusal's title names its fix; the line below it says how. With
               only the Billing link to show, the link says it. */}
@@ -212,6 +231,12 @@ export function CreditRequiredPromptView({
                 : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
+        {offerCard ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-3 text-sm">
+            <span>Add a card so this organization can get Free credit. You won't be charged.</span>
+            <AddCardButton client={client} accountId={accountId} variant="outline" />
+          </div>
+        ) : null}
         {canBuyCredits && stripeEnabled ? (
           <div className="grid gap-4">
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
@@ -264,7 +289,7 @@ export function CreditRequiredPromptView({
           </DialogFooter>
         ) : null}
         {/* Own-key and API refusals have one fix: credits. */}
-        {purpose === "required" && !refusalCode ? (
+        {purpose === "required" && !refusalCode && (canUpgrade || !simplified) ? (
           <DialogFooter>
             {/* Credits are the main action when they can be bought here. */}
             <Button
@@ -320,6 +345,7 @@ export function EmptyCreditsNotice({
   onAddCredits?: (() => void) | undefined;
 }) {
   const client = useAppContext().client;
+  const { simplified, productName } = useSimplifiedInterface();
   // The balance is positive but this model can't use it (for example free
   // credit for other models), so "you don't have any" would be untrue. Only
   // that much is known, so the words claim no more. The chat's refusal
@@ -331,16 +357,45 @@ export function EmptyCreditsNotice({
 
   const empty =
     stripeEnabled && (creditFunding === undefined ? legacyEmpty : creditFunding === "unavailable");
+  const canAdd = canBuyCredits && stripeEnabled;
+  // An unverified Free organization gets its Free credit once its owner adds
+  // a card (card verification gate): that is the one action, not buying.
+  const [cardAccountId, setCardAccountId] = useState<string | null>(null);
+  const cardCheck = empty && canAdd && !someCredit && accountId ? accountId : null;
+  useEffect(() => {
+    setCardAccountId(null);
+    if (!cardCheck) return;
+    let active = true;
+    client
+      .getBillingCardVerification?.({ accountId: cardCheck })
+      .then((card) => {
+        if (active && card.required && !card.verified && card.canVerify)
+          setCardAccountId(cardCheck);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [cardCheck, client]);
   useCreditExposure(empty, workspaceId);
   if (!empty) return null;
-  const canAdd = canBuyCredits && stripeEnabled;
+  if (cardCheck && cardAccountId === cardCheck) {
+    return (
+      <Notice tone="waiting" title="Add a card for Free credit">
+        You won't be charged.
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <AddCardButton client={client} accountId={cardCheck} />
+        </div>
+      </Notice>
+    );
+  }
   const body = someCredit
     ? canAdd
-      ? "This model can't use the Opengeni credits you have right now. Add credits, or choose another model."
-      : "This model can't use your organization's Opengeni credits right now. Choose another model, or ask an organization owner to add credits."
+      ? `This model can't use the ${productName} credits you have right now. Add credits, or choose another model.`
+      : `This model can't use your organization's ${productName} credits right now. Choose another model, or ask an organization owner to add credits.`
     : canAdd
-      ? "Chats here are paid with Opengeni credits, and you don't have any right now."
-      : "Chats here are paid with Opengeni credits, and there are none left. Ask an organization owner to add some.";
+      ? `Chats here are paid with ${productName} credits, and you don't have any right now.`
+      : `Chats here are paid with ${productName} credits, and there are none left. Ask an organization owner to add some.`;
   return (
     <Notice
       tone="waiting"
@@ -381,23 +436,26 @@ export function EmptyCreditsNotice({
             </Button>
           )
         ) : null}
-        {/* Beside Add credits it is a quiet link, flush with the text when it wraps. */}
-        <Button
-          asChild
-          type="button"
-          size="sm"
-          variant={canAdd ? "link" : "outline"}
-          className={canAdd ? "px-0" : undefined}
-        >
-          <Link
-            to="/workspaces/$workspaceId/organization"
-            params={{ workspaceId }}
-            search={{ section: "models", workspace: workspaceId }}
-            {...analyticsAction("connect_model")}
+        {/* Beside Add credits it is a quiet link, flush with the text when it wraps.
+            Geni chats run on credits only, so it has no provider account to offer. */}
+        {simplified ? null : (
+          <Button
+            asChild
+            type="button"
+            size="sm"
+            variant={canAdd ? "link" : "outline"}
+            className={canAdd ? "px-0" : undefined}
           >
-            Use your own provider account
-          </Link>
-        </Button>
+            <Link
+              to="/workspaces/$workspaceId/organization"
+              params={{ workspaceId }}
+              search={{ section: "models", workspace: workspaceId }}
+              {...analyticsAction("connect_model")}
+            >
+              Use your own provider account
+            </Link>
+          </Button>
+        )}
       </div>
     </Notice>
   );

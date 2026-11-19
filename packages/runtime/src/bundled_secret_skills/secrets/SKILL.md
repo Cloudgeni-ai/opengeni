@@ -22,8 +22,9 @@ task allows it, enroll 2FA, fetch codes and solve CAPTCHAs yourself.
 
 A reference resolves where something runs: shell commands, typing, files,
 `run_on` and connector calls. Opengeni tools that store or send text
-(messages, goals, notes, Slack posts) keep it as text for later work. Escape
-it (`\{{secret:Item}}`) where something runs first, such as `ogtool call`.
+(messages, goals, notes, Slack posts) keep it as text for later work. Escape it
+(`\{{secret:Item}}`) to keep it literal, in files as well as commands, such
+as a README or `ogtool call`.
 `secret_*` tools take references as names.
 
 ## Tools

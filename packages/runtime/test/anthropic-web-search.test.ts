@@ -3,9 +3,11 @@ import {
   Agent,
   Runner,
   setTracingDisabled,
+  tool as functionTool,
   webSearchTool,
   type ModelRequest,
 } from "@openai/agents";
+import { z } from "zod";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import {
   ANTHROPIC_PAUSE_TURN_MAX_REQUESTS,
@@ -602,6 +604,130 @@ describe("Claude web search replay", () => {
     expect(JSON.stringify(unmarked(later.messages.slice(0, 3)))).toBe(
       JSON.stringify(unmarked(first.messages)),
     );
+  });
+
+  /**
+   * Claude 4.6 and later refuse a request that continues the assistant's own
+   * reply: one that ends on an assistant message, or on tool results after a
+   * reply that carries anything past its first tool call. System messages do
+   * not end the conversation.
+   */
+  const continuesReply = (body: any): boolean => {
+    const turns = body.messages.filter((entry: any) => entry.role !== "system");
+    const last = turns.at(-1);
+    if (last?.role === "assistant") return true;
+    if (!last?.content.every((block: any) => block.type === "tool_result")) return false;
+    const reply: any[] = turns.at(-2)?.content ?? [];
+    const firstCall = reply.findIndex((block) => block.type === "tool_use");
+    return reply.slice(firstCall + 1).some((block) => block.type !== "tool_use");
+  };
+
+  test("a reply without thinking with a search after our tool call ends with the tool call", () => {
+    // Claude Opus 5.5 wrote a note, called our tool, then started a search in
+    // the same reply. Every later request ended inside that reply.
+    const reply = anthropicResponse(
+      message(
+        "msg_1",
+        [
+          { type: "text", text: "Meanwhile, I'll check." },
+          { type: "tool_use", id: "toolu_1", name: "lookup", input: { key: "a" } },
+          call,
+        ],
+        "tool_use",
+      ),
+      undefined,
+      new Map([["lookup", { name: "lookup" }]]),
+    ).output;
+    const toolResult = {
+      type: "function_call_result",
+      callId: "toolu_1",
+      name: "lookup",
+      status: "completed",
+      output: "a result",
+    };
+    const turn = [{ role: "user", content: "Go" }, ...reply, toolResult] as any[];
+    // The next turn, started by an agent message, adds only a system message.
+    const update = { role: "system", content: "An agent message arrived." };
+    for (const input of [turn, [...turn, update]]) {
+      const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, false);
+      expect(body.messages[1].content.map((block: any) => block.type)).toEqual([
+        "text",
+        "text",
+        "tool_use",
+      ]);
+      expect(body.messages[1].content[0].text).toBe("Meanwhile, I'll check.");
+      expect(JSON.stringify(body.messages)).not.toContain("server_tool_use");
+      expect(JSON.stringify(body.messages[1])).toContain("opengeni release notes");
+      expect(body.messages[2].content.map((block: any) => block.type)).toEqual(["tool_result"]);
+      expect(continuesReply(body)).toBe(false);
+    }
+
+    // A later request keeps the same prefix.
+    const first = buildAnthropicRequest(request(turn), "claude-opus-5-5", provider, false);
+    const later = buildAnthropicRequest(
+      request([...turn, { role: "assistant", content: "Done" }, { role: "user", content: "Ok" }]),
+      "claude-opus-5-5",
+      provider,
+      false,
+    );
+    expect(JSON.stringify(unmarked(later.messages.slice(0, 3)))).toBe(
+      JSON.stringify(unmarked(first.messages)),
+    );
+  });
+
+  test("a run whose reply searches after our tool call reaches its answer", async () => {
+    const sent: any[] = [];
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      sent.push(body);
+      if (continuesReply(body))
+        return new Response(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message:
+                "This model does not support assistant message prefill. The conversation must end with a user message.",
+            },
+          }),
+          { status: 400 },
+        );
+      return new Response(
+        JSON.stringify(
+          sent.length === 1
+            ? message(
+                "msg_1",
+                [
+                  { type: "text", text: "Checking." },
+                  { type: "tool_use", id: "toolu_1", name: "lookup", input: { key: "a" } },
+                  call,
+                ],
+                "tool_use",
+              )
+            : message("msg_2", [{ type: "text", text: "Done." }]),
+        ),
+      );
+    }) as typeof fetch);
+    const agent = new Agent({
+      name: "Test",
+      model,
+      tools: [
+        functionTool({
+          name: "lookup",
+          description: "Lookup",
+          parameters: z.object({ key: z.string() }),
+          execute: async ({ key }) => `${key} result`,
+        }),
+        webSearchTool(),
+      ],
+    });
+    const result = await new Runner({ tracingDisabled: true }).run(agent, "Go");
+    expect(result.finalOutput).toBe("Done.");
+    expect(sent).toHaveLength(2);
+    expect(sent[1].messages.at(-1).content[0]).toMatchObject({
+      type: "tool_result",
+      tool_use_id: "toolu_1",
+    });
   });
 
   test("an interrupted search and an orphaned result become inert facts, stably", () => {

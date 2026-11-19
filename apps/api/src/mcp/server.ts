@@ -107,6 +107,7 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   TOOL_DISCOVERY_CARD_META_KEY,
 } from "@opengeni/contracts";
 import {
@@ -166,6 +167,7 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  TaskNoteRefusedError,
   releaseWorkClaim,
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
@@ -261,11 +263,16 @@ import {
   SessionAuthorizationUnavailableError,
   dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
+  connectedFirstCatalogMatchOrder,
   suggestCapabilityCatalogItems,
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
   nangoBackendsFor,
+  builtInIntegrationDuplicated,
+  builtInIntegrationPolicyApplies,
+  builtInIntegrationTurnedOffDetail,
+  withoutBuiltInIntegrationDuplicates,
   nangoReplacedSocialProviders,
   type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
@@ -309,13 +316,42 @@ import {
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
   microsoftDynamicsEnvironmentAddress,
+  microsoftDynamicsAddressProblem,
   microsoftDynamicsMcpEndpoint,
   microsoftDynamicsProductForMcpUrl,
   type MicrosoftDynamicsProduct,
 } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  capabilityConnectEndpoint,
+  capabilityConnectInputs,
+  type CapabilityConnectInput,
+} from "@opengeni/contracts/capability-connect-inputs";
 
-/** What the agent needs before it can show a Microsoft Dynamics Connect card. */
-const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com, or https://businesscentral.dynamics.com/<tenant>/<environment> for Business Central; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+/**
+ * How to show a card that asks the person for its connect-time inputs: the
+ * card tool posts it, and the agent may fill in values the person already gave.
+ */
+function connectInputsCardDetail(
+  capabilityId: string,
+  inputs: readonly CapabilityConnectInput[],
+): string {
+  const asks = inputs.map((input) => input.label.toLowerCase()).join(" and ");
+  const keys = inputs.map((input) => input.id).join(", ");
+  return `Call capability_authorization_request with capabilityId ${capabilityId}: its card asks the person for the ${asks}, then signs them in. If they already gave it, also pass it in inputs (${keys}) to fill it in.`;
+}
+
+/** A catalog match's connect-time inputs, which its card asks the person for. */
+function connectInputsOf(
+  item: CapabilityCatalogItem,
+  setup: CapabilitySetupProjection,
+): { connectInputs?: { id: string; label: string }[] } {
+  const inputs =
+    setup.status === "authorization_required" && capabilityConnectInputs(item.surfaceType);
+  return inputs ? { connectInputs: inputs.map(({ id, label }) => ({ id, label })) } : {};
+}
+
+/** How a Microsoft Dynamics environment is connected. */
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. ${connectInputsCardDetail(MICROSOFT_DYNAMICS_CAPABILITY_ID, capabilityConnectInputs("microsoft_dynamics") ?? [])}`;
 
 /** The workspace's own Dynamics environments: catalog entries for an exact environment endpoint. */
 function microsoftDynamicsEnvironments(
@@ -386,12 +422,15 @@ const SETUP_CARD_CONTINUES =
 function microsoftDynamicsSetupProblem(
   settings: ApiRouteDeps["settings"],
   product: MicrosoftDynamicsProduct | null,
+  addressProblem: string | null = null,
 ): string | null {
   if (
     !settings.microsoftDynamicsClientId?.trim() ||
     !settings.microsoftDynamicsClientSecret?.trim()
   )
     return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
+  if (!product && addressProblem)
+    return `${addressProblem} Nothing was posted; ask the person for that address, then call custom_mcp_setup_request again.`;
   if (!product)
     return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again.";
   return null;
@@ -518,6 +557,8 @@ import {
   markToolArgumentRejection,
   toolArgumentRejectionResult,
 } from "./tool-argument-error";
+import { FirstPartyMcpServer, taskNoteRefusalResult } from "./database-tool-failure";
+import type { Observability } from "@opengeni/observability";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -552,8 +593,11 @@ import {
   type SessionWaitResult,
 } from "./session-wait";
 import {
+  agentSessionInputReceipt,
   mcpMutationReceipt,
+  operatorSessionInputSummary,
   sessionControlMutationReceipt,
+  sessionMessageStatusSummary,
   sessionCreateMutationReceipt,
 } from "./receipts";
 import {
@@ -598,7 +642,10 @@ import {
   deploymentCannotConnect,
   inChatCapabilitySetup,
 } from "@opengeni/contracts/personal-integration-setup";
-import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
+import {
+  readOrganizationIntegrationPolicyForServing,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -724,7 +771,7 @@ const ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
 // API-wide request-body ceiling for this 200-code-point field.
 const MCP_DISCOVERY_QUERY_MAX_UTF16_CODE_UNITS = WORK_DISCOVERY_QUERY_MAX_CHARS * 8;
 
-type OrchestrationToolName = "session_create" | "session_send_message" | "session_steer";
+type OrchestrationToolName = "session_create" | "session_queue_message" | "session_steer";
 
 function boundedOrchestrationFailureMessage(value: string): string {
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
@@ -1165,7 +1212,7 @@ function buildSessionCreateToolInput(
   });
 }
 
-export class PolicyMcpServer extends McpServer {
+export class PolicyMcpServer extends FirstPartyMcpServer {
   private registeredToolCount = 0;
 
   constructor(
@@ -1173,8 +1220,9 @@ export class PolicyMcpServer extends McpServer {
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
     private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
+    failureLog?: Pick<Observability, "error">,
   ) {
-    super({ name: "opengeni", version: "1.0.0" });
+    super({ name: "opengeni", version: "1.0.0" }, failureLog);
     const sdk = this as unknown as {
       createToolError(message: string): { _meta?: Record<string, unknown> };
       executeToolHandler(tool: unknown, args: unknown, extra: unknown): Promise<unknown>;
@@ -1283,9 +1331,14 @@ export class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, ((...args: unknown[]) => {
-      return dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
-    }) as ToolCallback<InputArgs>);
+    return super.registerTool(
+      name,
+      config,
+      (async (...args: unknown[]) =>
+        await dispatchWithSessionAuthorizationReadReuse(() =>
+          handler(...args),
+        )) as ToolCallback<InputArgs>,
+    );
   }
 
   ensureToolsListHandler(): void {
@@ -1504,6 +1557,7 @@ export function buildOpenGeniMcpServer(
       startedByPerson: appActions.startedByPerson,
       fullAccess: appActions.fullAccess,
     },
+    deps.observability,
   );
   // One authority for everything this session does as a person: the app
   // action tools, and the session tools' chats in other workspaces, which
@@ -3830,6 +3884,11 @@ function registerGoalTools(
         replay: semantic.replay,
         outcome: semantic.outcome,
         proposalId: semantic.proposalId,
+        ...(semantic.outcome === "unchanged"
+          ? {
+              message: `Nothing changed: the goal already has this content, so its objective revision stays ${semantic.goal.objectiveRevision}.`,
+            }
+          : {}),
       });
     },
   );
@@ -4557,6 +4616,15 @@ function registerTaskNoteTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // A refusal the task-note routines raise becomes a typed, actionable result.
+  const result = async (run: () => Promise<unknown>) => {
+    try {
+      return json(await run());
+    } catch (error) {
+      if (error instanceof TaskNoteRefusedError) return taskNoteRefusalResult(error);
+      throw error;
+    }
+  };
   const boundedUtf8 = (maxBytes: number, label: string) =>
     z4
       .string()
@@ -4586,12 +4654,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(
-        await listTaskNotes(deps.db, {
-          ...attemptClaims(),
-          includeArchived,
-          limit,
-        }),
+      return await result(
+        async () =>
+          await listTaskNotes(deps.db, {
+            ...attemptClaims(),
+            includeArchived,
+            limit,
+          }),
       );
     },
   );
@@ -4610,14 +4679,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, kind, text, expiresInDays }) => {
       await authorize();
-      return json(
-        await createTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          kind,
-          text,
-          expiresInDays,
-        }),
+      return await result(
+        async () =>
+          await createTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            kind,
+            text,
+            expiresInDays,
+          }),
       );
     },
   );
@@ -4636,14 +4706,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, noteId, expectedVersion, reason }) => {
       await authorize();
-      return json(
-        await archiveTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          noteId,
-          expectedVersion,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await archiveTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            noteId,
+            expectedVersion,
+            reason,
+          }),
       );
     },
   );
@@ -4680,17 +4751,18 @@ function registerTaskNoteTools(
       reason,
     }) => {
       await authorize();
-      return json(
-        await replaceTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          replacedNoteId,
-          expectedReplacedVersion,
-          replacementKind,
-          replacementText,
-          replacementExpiresInDays,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await replaceTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            replacedNoteId,
+            expectedReplacedVersion,
+            replacementKind,
+            replacementText,
+            replacementExpiresInDays,
+            reason,
+          }),
       );
     },
   );
@@ -5848,21 +5920,29 @@ function registerWorkspaceOrchestrationTools(
   // answer to its model. Record it on the reading turn: when that attempt
   // completes its turn, a pending terminal result repeating only answers the
   // model already holds is superseded instead of starting another inference.
-  // Only a direct model call counts: a Codemode script may keep the output to
-  // itself. Best-effort: a failure leaves that result to be delivered.
+  // The model's call id lets a later attempt of the same turn, which resumes
+  // from durable history holding this read's output, count it too.
+  // A Codemode call (for example `ogtool call` in a shell command) is recorded
+  // apart: a script may keep the output to itself, so it counts only when the
+  // turn's durable history shows the model received the answer. An unmarked
+  // call proves nothing. Best-effort: a failure leaves that result to be
+  // delivered.
   const recordConsumedChildResults = async (
     children: { sessionId: string; sequences: number[] }[],
     extra: { _meta?: Record<string, unknown> } | undefined,
   ): Promise<void> => {
     const claims = exactAgentAttemptClaims(grant);
+    const caller = extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY];
     if (
-      extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] !== "model" ||
+      (caller !== "model" && caller !== "codemode") ||
       !callerSessionId ||
       !claims ||
       claims.sessionId !== callerSessionId ||
       !children.some((child) => child.sequences.length > 0)
     )
       return;
+    const callId =
+      caller === "model" ? extra?._meta?.[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY] : undefined;
     try {
       await recordConsumedChildAnswers(deps.db, {
         accountId: grant.accountId,
@@ -5871,6 +5951,8 @@ function registerWorkspaceOrchestrationTools(
         turnId: claims.turnId,
         attemptId: claims.attemptId,
         executionGeneration: claims.executionGeneration,
+        via: caller,
+        ...(typeof callId === "string" ? { callId } : {}),
         children,
       });
     } catch (error) {
@@ -5956,7 +6038,7 @@ function registerWorkspaceOrchestrationTools(
       "session_message_status",
       {
         description:
-          "Follow the exact update ID returned by session_send_message or session_steer. Returns delivery state, consuming turn and an exact outcome read when present; acceptance or another turn finishing is not completion. Never resends. Use session_wait for changes, then read again. A paused pending target requires an explicitly authorized resume; do not silently steer it.",
+          "Follow the exact update ID returned by session_queue_message or session_steer. Returns a plain summary, delivery state (pending until the target gets it), the turn that read it and an exact outcome read when present; acceptance or another turn finishing is not completion. Never resends. Use session_wait for changes, then read again. A paused pending target requires an explicitly authorized resume; do not silently steer it.",
         inputSchema: { sessionId: z4.string().uuid(), updateId: z4.string().uuid() },
       },
       async ({ sessionId, updateId }) => {
@@ -5988,6 +6070,12 @@ function registerWorkspaceOrchestrationTools(
           : null;
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         return json({
+          summary: sessionMessageStatusSummary({
+            kind: update.kind as "agent_message" | "agent_steer_instruction",
+            state: update.state,
+            deliveredAt: update.deliveredAt,
+            hasOutcome: outcome !== null,
+          }),
           sessionId,
           updateId,
           delivery: update.state,
@@ -6908,7 +6996,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and queue a related follow-up to a worker you already spawned with session_queue_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         // `selfhosted` is reached through machineTarget, so it is not offered
         // as a bare backend choice.
         inputSchema: sessionCreateToolInput(
@@ -6964,10 +7052,10 @@ function registerWorkspaceOrchestrationTools(
 
   if (can("sessions:control")) {
     server.registerTool(
-      "session_send_message",
+      "session_queue_message",
       {
         description:
-          "To continue related work, by default message a worker you already spawned instead of spawning a new one; it keeps its context. Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Explicit user requests and applicable Skill guidance for independent review or fresh workers override that default within existing authority. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
+          "Send a message to another session or agent: send messages to a worker you spawned, your parent or a peer session. Like a person's Queue in the chat, a session that is mid-turn gets the message only after its current turn ends, and it does not change what that session is doing now; an idle session starts its next turn with it. To change what a session is doing now, use session_steer instead. To continue related work, by default queue a follow-up to a worker you already spawned instead of spawning a new one; it keeps its context. Explicit user requests and applicable Skill guidance for independent review or fresh workers override that default within existing authority. The result's summary says when the target gets it. Queued is not delivered: follow the returned updateId with session_message_status; another of the target's turns finishing does not prove it got your message. Do not send a message again while it is still queued; inspect blockers and report a stalled handoff if it cannot safely progress. Sessionless operator calls append a human/API prompt that queues the same way, and resource.id is its turn ID.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -6979,7 +7067,7 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       inThisWorkspaceOr(
-        "session_send_message",
+        "session_queue_message",
         async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
           try {
             await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
@@ -6995,32 +7083,17 @@ function registerWorkspaceOrchestrationTools(
                 { targetSessionId, text, idempotencyKey },
               );
               return json(
-                mcpMutationReceipt({
-                  operation: "session_send_message",
-                  committed: true,
-                  outcome: result.replay ? "replayed" : "accepted",
-                  changed: !result.replay,
-                  resource: {
-                    type: "session_system_update",
-                    id: result.updateId,
-                    state: result.effectiveState,
-                  },
-                  relatedResources: [{ type: "session", id: targetSessionId }],
+                agentSessionInputReceipt({
+                  operation: "session_queue_message",
+                  targetSessionId,
+                  updateId: result.updateId,
+                  readAt: result.readAt,
+                  replay: result.replay,
                   timestamp: result.receipt.createdAt.toISOString(),
-                  idempotency: { status: result.replay ? "replayed" : "applied" },
-                  facts: {
-                    delivery: "coalesced_internal_update",
-                    wakeRequested: result.wakeRevision !== null,
-                    resumeRequired: result.effectiveState === "paused",
-                  },
-                  nextAction: {
-                    tool: "session_get",
-                    arguments: { sessionId: targetSessionId },
-                  },
                 }),
               );
             }
-            const { accepted, turn, replay, waitsForMachineOwner } =
+            const { accepted, turn, replay, routing, waitsForMachineOwner } =
               await acceptSessionUserMessageWithOutcome(
                 deps,
                 grant,
@@ -7038,10 +7111,11 @@ function registerWorkspaceOrchestrationTools(
               );
             return json(
               mcpMutationReceipt({
-                operation: "session_send_message",
+                operation: "session_queue_message",
                 committed: true,
-                outcome: replay ? "replayed" : "accepted",
+                outcome: replay ? "replayed" : "queued",
                 changed: !replay,
+                summary: operatorSessionInputSummary({ routing, replay }),
                 resource: {
                   type: "session_turn",
                   id: turn.id,
@@ -7067,7 +7141,7 @@ function registerWorkspaceOrchestrationTools(
             );
           } catch (error) {
             return orchestrationFailureResult(
-              "session_send_message",
+              "session_queue_message",
               error,
               deps,
               grant,
@@ -7222,7 +7296,7 @@ function registerWorkspaceOrchestrationTools(
       "session_steer",
       {
         description:
-          "Atomically replace another session's current direction and resume it. The Agent Steer is a typed machine input shown in the target queue/timeline and durably retained in model history; it never impersonates a human prompt. Sessionless operator calls append a human/API steer and resource.id is its turn ID.",
+          "Change what another session or agent (a worker you spawned, your parent or a peer) is doing now. Like a person's Steer in the chat, it gets your instruction at its next step, after its current tool calls finish, and the instruction replaces its current direction. A paused session is resumed; a session with no turn running starts one. To add information without changing what a session is doing now, use session_queue_message instead. A newer steer replaces an older one the target has not received yet. The Agent Steer is a typed machine input shown in the target queue/timeline and durably retained in model history; it never impersonates a human prompt. Follow the returned updateId with session_message_status. Sessionless operator calls append a human/API steer and resource.id is its turn ID.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           instruction: z4.string().min(1),
@@ -7234,7 +7308,7 @@ function registerWorkspaceOrchestrationTools(
         try {
           if (callerSessionId === null) {
             await authorizeFirstPartySession(deps, grant, sessionId, "session.steer");
-            const { accepted, turn, replay, waitsForMachineOwner } =
+            const { accepted, turn, replay, routing, waitsForMachineOwner } =
               await acceptSessionUserMessageWithOutcome(deps, grant, grant.workspaceId, sessionId, {
                 text: instruction,
                 delivery: "steer",
@@ -7245,8 +7319,9 @@ function registerWorkspaceOrchestrationTools(
               mcpMutationReceipt({
                 operation: "session_steer",
                 committed: true,
-                outcome: replay ? "replayed" : "updated",
+                outcome: replay ? "replayed" : "steered",
                 changed: !replay,
+                summary: operatorSessionInputSummary({ routing, replay }),
                 resource: {
                   type: "session_turn",
                   id: turn.id,
@@ -7270,25 +7345,13 @@ function registerWorkspaceOrchestrationTools(
             { targetSessionId: sessionId, instruction, idempotencyKey },
           );
           return json(
-            mcpMutationReceipt({
+            agentSessionInputReceipt({
               operation: "session_steer",
-              committed: true,
-              outcome: result.replay ? "replayed" : "updated",
-              changed: !result.replay,
-              resource: {
-                type: "session_system_update",
-                id: result.updateId,
-                state: result.effectiveState,
-              },
-              relatedResources: [{ type: "session", id: sessionId }],
-              timestamp: result.receipt.createdAt.toISOString(),
-              idempotency: { status: result.replay ? "replayed" : "applied" },
-              facts: {
-                interruptionCount: result.interruptionCount,
-                stoppingPreviousAttempt: result.interruptionCount > 0,
-              },
+              targetSessionId: sessionId,
               updateId: result.updateId,
-              nextAction: { tool: "session_get", arguments: { sessionId } },
+              readAt: result.readAt,
+              replay: result.replay,
+              timestamp: result.receipt.createdAt.toISOString(),
             }),
           );
         } catch (error) {
@@ -7840,7 +7903,28 @@ function registerCapabilityDiscoveryTools(
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
   // This is a readiness projection, never credential resolution or a new grant.
+  // A built-in integration the organization's policy leaves out has no card:
+  // its connection would be refused, so the agent says it is turned off.
   const projectSetups = async (
+    items: CapabilityCatalogItem[],
+  ): Promise<CapabilitySetupProjection[]> => {
+    const [setups, policy] = await Promise.all([
+      projectSetupsAllowed(items),
+      items.some(builtInIntegrationPolicyApplies)
+        ? readOrganizationIntegrationPolicyForServing(deps.db, {
+            accountId: grant.accountId,
+          }).catch(() => null)
+        : null,
+    ]);
+    if (!policy) return setups;
+    return setups.map((setup, index) => {
+      const turnedOff = builtInIntegrationTurnedOffDetail(items[index]!, policy);
+      return turnedOff && setup.status !== "ready"
+        ? { status: "unavailable", action: null, detail: turnedOff }
+        : setup;
+    });
+  };
+  const projectSetupsAllowed = async (
     items: CapabilityCatalogItem[],
   ): Promise<CapabilitySetupProjection[]> => {
     const availableServerIds = new Set<string>();
@@ -7952,7 +8036,13 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
-      const candidates = [...current.items, ...recommendations(), ...pluginItems];
+      // One service is offered once: a registry entry that duplicates a
+      // built-in integration this deployment offers is left out.
+      const candidates = withoutBuiltInIntegrationDuplicates([
+        ...current.items,
+        ...recommendations(),
+        ...pluginItems,
+      ]);
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       // A plugin installs for the whole workspace. When the catalogue also
       // offers one of its MCP servers as a connection, its setup names that
@@ -7987,7 +8077,10 @@ function registerCapabilityDiscoveryTools(
         (_, index) => projected[ranked.length + index]!.status !== "unavailable",
       );
       for (const [index, { item }] of ranked.entries()) {
-        if (item.kind !== "plugin" || item.enabled) continue;
+        // A plugin that is only a built-in the organization turned off keeps
+        // that answer: it has no card.
+        if (item.kind !== "plugin" || item.enabled || setups[index]!.status === "unavailable")
+          continue;
         const endpoints = new Set(pluginMcpEndpointKeys(item));
         setups[index] = pluginCapabilitySetup(
           item,
@@ -7998,7 +8091,14 @@ function registerCapabilityDiscoveryTools(
             .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
         );
       }
-      const matches = ranked.map(({ item, matchedOn, approximate }, index) => {
+      // A service the person can already use comes before a same-category
+      // one they would still have to connect, unless the query names it.
+      const order = connectedFirstCatalogMatchOrder(
+        ranked,
+        setups.map((setup) => setup.status === "ready"),
+      );
+      const matches = order.map((index) => {
+        const { item, matchedOn, approximate } = ranked[index]!;
         const setup = withCapabilityReconnectSetup(
           item,
           setups[index]!,
@@ -8020,6 +8120,7 @@ function registerCapabilityDiscoveryTools(
           setup: {
             ...setup,
             requiredVariables: capabilityRequiredVariables(item),
+            ...connectInputsOf(item, setup),
             nextAction:
               setup.status === "authorization_required" ||
               setup.reconnect?.some((account) => account.reconnectHere)
@@ -8079,21 +8180,39 @@ function registerCapabilityDiscoveryTools(
           .describe(
             "When setup.reconnect lists accounts that stopped working: the connectionId of the one to reconnect. The card then reconnects that same account.",
           ),
+        inputs: z4
+          .record(z4.string().min(1).max(64), z4.string().max(2048))
+          .optional()
+          .describe(
+            "When setup.connectInputs lists values the card asks for: those the person already gave, by id. The card shows them filled in.",
+          ),
       },
     },
-    async ({ capabilityId, rationale, connectionId }, extra) => {
+    async ({ capabilityId, rationale, connectionId, inputs }, extra) => {
+      // No values is the same as no inputs.
+      const suppliedInputs = inputs && Object.keys(inputs).length > 0 ? inputs : undefined;
       await authorize();
       // Tool discovery shows a card for a search that clearly names one
       // integration; it shows that card at most once per chat.
       const fromDiscovery = extra?._meta?.[TOOL_DISCOVERY_CARD_META_KEY] === true;
       const current = await catalog();
+      // What the card's message adds about connections already here.
+      let alsoHere = "";
+      // The agent's inputs chose an existing connection instead of a card field.
+      let inputsConsumed = false;
+      // The agent's inputs name a connection not here yet: the card asks for
+      // it even when another connection of the entry is ready.
+      let anotherConnection = false;
+      const listed = [...current.items, ...recommendations()];
       let item =
-        [...current.items, ...recommendations()].find(
-          (candidate) => candidate.id === capabilityId,
-        ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
+        listed.find((candidate) => candidate.id === capabilityId) ??
+        (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new ToolArgumentError("Unknown or untrusted capability; search the catalog again.");
       }
+      // A registry entry for a service this deployment connects through its
+      // built-in integration gets the built-in's card.
+      item = builtInIntegrationDuplicated(item, listed) ?? item;
       // Each Dynamics connection is one customer environment. An environment
       // already here answers for the generic entry: ready when this caller can
       // use it, else its own card (which needs no address) when it is the only
@@ -8109,26 +8228,51 @@ function registerCapabilityDiscoveryTools(
             message: own.detail,
           });
         const environments = await dynamicsEnvironmentSetups(current.items);
-        const connectable = environments.filter(
-          ({ setup }) => setup.status === "authorization_required",
-        );
         const fromEnvironments = microsoftDynamicsSetupFromEnvironments(environments);
-        if (fromEnvironments?.status !== "ready" && connectable.length === 1) {
-          item = connectable[0]!.item;
+        // Inputs that name an environment already here answer with that
+        // environment. Inputs that name another one, or can't be used, get
+        // the card that asks for it.
+        const named = suppliedInputs
+          ? capabilityConnectEndpoint(item.surfaceType, suppliedInputs)
+          : null;
+        const namedHere =
+          named && "endpointUrl" in named
+            ? environments.find(
+                ({ item: environment }) =>
+                  (environment.mcpUrl ?? environment.endpointUrl) === named.endpointUrl,
+              )
+            : undefined;
+        if (namedHere) {
+          item = namedHere.item;
+          inputsConsumed = true;
+        } else if (suppliedInputs) {
+          anotherConnection = true;
         } else {
-          return json({
-            capabilityId: item.id,
-            status: fromEnvironments?.status === "ready" ? "ready" : "input_required",
-            cardShown: false,
-            message: fromEnvironments?.detail ?? MICROSOFT_DYNAMICS_SETUP_DETAIL,
-          });
+          if (fromEnvironments?.status === "ready")
+            return json({
+              capabilityId: item.id,
+              status: "ready",
+              cardShown: false,
+              message: fromEnvironments.detail,
+            });
+          // The only environment this person can still connect needs no
+          // address.
+          const connectable = environments.filter(
+            ({ setup }) => setup.status === "authorization_required",
+          );
+          if (connectable.length === 1) item = connectable[0]!.item;
+          else if (fromEnvironments) alsoHere = ` ${fromEnvironments.detail}`;
         }
       }
-      const [[setup], inventory] = await Promise.all([
+      const [[projected], inventory] = await Promise.all([
         setupProjections([item]),
         reconnectInventory([item]),
       ]);
-      if (!setup) throw new Error("Capability setup projection is unavailable.");
+      if (!projected) throw new Error("Capability setup projection is unavailable.");
+      const setup: CapabilitySetupProjection =
+        anotherConnection && projected.status === "ready"
+          ? { status: "authorization_required", action: "connect", detail: projected.detail }
+          : projected;
       // An account of this entry that stopped working is reconnected in place:
       // a first-time Connect cannot replace it. The agent names the one the
       // task needs; without a name, the only one here is used while no
@@ -8199,11 +8343,26 @@ function registerCapabilityDiscoveryTools(
       const personCannotConnect =
         person !== null &&
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
+      // A card for a new connection asks for the entry's connect-time inputs,
+      // filled in with what the agent passed when that is usable.
+      const declaredInputs = reconnect ? null : capabilityConnectInputs(item.surfaceType);
+      const supplied = declaredInputs && suppliedInputs ? suppliedInputs : null;
+      const suppliedEndpoint = supplied
+        ? capabilityConnectEndpoint(item.surfaceType, supplied)
+        : null;
+      const cardInputs = declaredInputs?.map((input) => {
+        const value = supplied?.[input.id]?.trim();
+        return {
+          ...input,
+          ...(value && suppliedEndpoint && "endpointUrl" in suppliedEndpoint ? { value } : {}),
+        };
+      });
       const { eventId, alreadyShown } = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
         ...(reconnect ? { reconnect } : {}),
+        ...(cardInputs ? { inputs: cardInputs } : {}),
         // Tool discovery's card is not posted again until the person writes.
         // A model call always posts: a card whose state changed (a machine
         // just connected) is worth showing again.
@@ -8213,15 +8372,19 @@ function registerCapabilityDiscoveryTools(
       // never report one that was not shown. A card already there keeps the
       // status and guidance it would have had, and says it was not reposted.
       const shown = { cardShown: eventId !== null, ...(alreadyShown ? { alreadyShown } : {}) };
+      const inputsUnused =
+        suppliedInputs && !declaredInputs && !inputsConsumed
+          ? " The inputs you passed were not used: this card asks for none."
+          : "";
       const posted = (body: { message: string } & Record<string, unknown>) =>
-        json(
-          alreadyShown
-            ? {
-                ...body,
-                message: `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`,
-              }
-            : body,
-        );
+        json({
+          ...body,
+          message: `${
+            alreadyShown
+              ? `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`
+              : body.message
+          }${inputsUnused}`,
+        });
       if (reconnect) {
         return posted({
           capabilityId: item.id,
@@ -8270,11 +8433,13 @@ function registerCapabilityDiscoveryTools(
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : item.surfaceType === "integration_definition"
-                ? integrationDefinitionCardPostedMessage(item)
-                : item.kind === "plugin"
-                  ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
-                  : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
+              : declaredInputs
+                ? `The card was posted. It asks the person for the ${declaredInputs.map((input) => input.label.toLowerCase()).join(" and ")}, then signs them in; nothing is connected yet.${suppliedEndpoint && "problem" in suppliedEndpoint ? ` What you passed was not filled in: ${suppliedEndpoint.problem}` : ""} ${SETUP_CARD_CONTINUES}${alsoHere}`
+                : item.surfaceType === "integration_definition"
+                  ? integrationDefinitionCardPostedMessage(item)
+                  : item.kind === "plugin"
+                    ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
+                    : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8291,7 +8456,9 @@ function registerCapabilityDiscoveryTools(
           .url()
           .max(2048)
           .refine((url) => {
-            if (microsoftDynamicsMcpEndpoint(url)) return true;
+            // An unreadable Dynamics address is answered with what to paste instead.
+            if (microsoftDynamicsMcpEndpoint(url) || microsoftDynamicsAddressProblem(url))
+              return true;
             const parsed = new URL(url);
             return (
               parsed.protocol === "https:" &&
@@ -8348,12 +8515,18 @@ function registerCapabilityDiscoveryTools(
       // A Dynamics environment address becomes its connection endpoint and
       // signs in through Microsoft; say plainly when this deployment can't.
       const dynamics = microsoftDynamicsMcpEndpoint(suppliedEndpointUrl);
+      const addressProblem = dynamics ? null : microsoftDynamicsAddressProblem(suppliedEndpointUrl);
       if (
         dynamics ||
+        addressProblem ||
         (name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase() &&
           looksLikeMicrosoftDynamicsPage(suppliedEndpointUrl))
       ) {
-        const unavailable = microsoftDynamicsSetupProblem(deps.settings, dynamics?.product ?? null);
+        const unavailable = microsoftDynamicsSetupProblem(
+          deps.settings,
+          dynamics?.product ?? null,
+          addressProblem,
+        );
         if (unavailable) return json({ status: "unavailable", message: unavailable });
       }
       const endpointUrl = dynamics
@@ -8671,6 +8844,8 @@ async function appendCapabilityCardEvent(
     toolName?: string;
     /** The account that stopped working which this card reconnects. */
     reconnect?: ConnectionNeedingReconnect;
+    /** The connect-time inputs the card asks for, with the agent's values. */
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
     /**
      * Post the card only when no current card of the same kind for the
      * capability is already shown in this turn, or (`since_latest_message`)
@@ -8728,6 +8903,7 @@ function capabilityCardPayload(
     rationale: string;
     toolName?: string;
     reconnect?: Pick<ConnectionNeedingReconnect, "connectionId" | "ownership">;
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
   },
 ): ToolAuthNeededPayload {
   return ToolAuthNeededPayload.parse({
@@ -8752,6 +8928,7 @@ function capabilityCardPayload(
       action: input.action,
       rationale: input.rationale,
       requiredVariables: capabilityRequiredVariables(item),
+      ...(input.inputs?.length ? { inputs: input.inputs } : {}),
     },
   });
 }

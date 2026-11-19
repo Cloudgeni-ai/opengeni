@@ -306,7 +306,7 @@ export function sessionCreateRunning(id: string, message: string): ToolSpec {
 
 export function sessionSendMessage(id: string, childSessionId: string, text: string): ToolSpec {
   return {
-    name: "opengeni__session_send_message",
+    name: "opengeni__session_queue_message",
     id,
     arguments: { sessionId: childSessionId, text },
     output: {

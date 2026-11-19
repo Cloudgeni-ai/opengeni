@@ -27,7 +27,7 @@ import { findPickerRow } from "../../../model-policy";
 import { sessionDisplayTitle, withLineageAutomationFacts } from "../../../session-list-model";
 import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-policy";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
-import { BrandMark, Wordmark } from "../brand-mark";
+import { Wordmark, WordmarkMark } from "../brand-mark";
 import { SessionHeader } from "./session-header";
 import { SessionStartupProvider } from "../../../lib/session-startup";
 import {
@@ -274,7 +274,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
   const context = useAppContext();
-  const { canvasBanners } = useContext(SessionShellSlotsContext);
+  const { canvasBanners, windowBarSection } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
@@ -411,7 +411,10 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
           {...windowBarRow}
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
-          <WindowBarPageTitle enabled={pageTitleInWindowBar}>
+          <WindowBarPageTitle
+            enabled={pageTitleInWindowBar}
+            section={pageTitleInWindowBar ? (windowBarSection?.(pathname) ?? null) : null}
+          >
             <SessionStartupProvider session={context.session}>
               <CanvasTopStrip hamburgerRef={hamburgerRef} />
               {canvasBanners}
@@ -507,7 +510,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
           params={{ workspaceId: rail.workspaceId }}
           className="flex items-center gap-2 text-fg"
         >
-          <BrandMark className="w-5" />
+          <WordmarkMark className="w-5" tileClassName="size-6" />
           <Wordmark className="text-[17px]" />
         </Link>
       ) : null}

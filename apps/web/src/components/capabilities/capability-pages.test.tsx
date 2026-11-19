@@ -14,7 +14,11 @@ import { nativeCatalogItemNotice } from "@opengeni/react/app/components/capabili
 import { IntegrationPage } from "./integration-page";
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { ProviderPage } from "./provider-page";
-import type { CapabilityCatalogItem, SocialConnection } from "@opengeni/react/app/types";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  SocialConnection,
+} from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -703,7 +707,7 @@ describe("CatalogItemPage", () => {
     const view = await render(
       <CatalogItemPage
         {...common}
-        health={{ state: "attention", connection: null }}
+        health={{ state: "attention", connection: null, reason: "not_connected" }}
         item={item({
           id: "mcp:slack",
           name: "Slack",
@@ -732,6 +736,71 @@ describe("CatalogItemPage", () => {
       expect(view.container.textContent).not.toContain("Needs attention");
     } finally {
       await view.unmount();
+    }
+  });
+
+  test("a needing-attention page names its reason and offers exactly one repair", async () => {
+    const gmailRef = {
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      subjectScope: "subject" as const,
+    };
+    const account = {
+      id: "own-gmail",
+      accountId: "a",
+      workspaceId: "integration-tests",
+      subjectId: "me",
+      authorityId: "authority-1",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      status: "active",
+      turnedOnHere: false,
+    } as unknown as ConnectionMetadata;
+    const actions: unknown[] = [];
+    const offHere = await render(
+      <CatalogItemPage
+        {...common}
+        workspaceId=""
+        health={{ state: "attention", connection: account, reason: "off_here" }}
+        item={item({ enabled: true, connectionRef: gmailRef })}
+        onAction={(action) => actions.push(action)}
+      />,
+    );
+    try {
+      expect(offHere.container.textContent).toContain("Off in this workspace");
+      expect(buttons(offHere.container, "Turn on here")).toHaveLength(1);
+      expect(buttons(offHere.container, "Reconnect")).toHaveLength(0);
+      await act(async () => buttons(offHere.container, "Turn on here")[0]!.click());
+      expect(actions).toMatchObject([{ type: "turn_on_here", connection: account }]);
+    } finally {
+      await offHere.unmount();
+    }
+    const signedOut = {
+      ...account,
+      status: "needs_reauth",
+      turnedOnHere: true,
+    } as ConnectionMetadata;
+    const lapsed = await render(
+      <CatalogItemPage
+        {...common}
+        workspaceId=""
+        health={{ state: "attention", connection: signedOut, reason: "signed_out" }}
+        item={item({ enabled: true, connectionRef: gmailRef })}
+        onAction={(action) => actions.push(action)}
+      />,
+    );
+    try {
+      expect(lapsed.container.textContent).toContain("Signed out");
+      expect(buttons(lapsed.container, "Reconnect")).toHaveLength(1);
+      expect(buttons(lapsed.container, "Turn on here")).toHaveLength(0);
+      await act(async () => buttons(lapsed.container, "Reconnect")[0]!.click());
+      expect(actions[1]).toMatchObject({
+        type: "reconnect_oauth",
+        connectionId: "own-gmail",
+        connectionWorkspaceId: "integration-tests",
+      });
+    } finally {
+      await lapsed.unmount();
     }
   });
 });

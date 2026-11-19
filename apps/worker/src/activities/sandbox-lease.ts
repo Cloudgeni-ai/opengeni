@@ -60,7 +60,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
-  summarizeQueuedTurnsByHold,
+  summarizeTurnHolds,
   countActiveUsers,
   readCreditGrantTotals,
   readManagedAuthNewSignupsSwitch,
@@ -228,6 +228,12 @@ import { CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES } from "../concurrency";
 import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
+import { boundViewerOnlyWarmBoxes } from "./sandbox-viewer-only-bounds";
+import {
+  boundComputeBoundedWarmBoxes,
+  drainClosedComputeOrganizations,
+  observeUnpaidSandboxFleet,
+} from "./sandbox-compute-bounds";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
@@ -260,6 +266,7 @@ import {
   recordSandboxRotationBacklogGauges,
   recordSandboxCheckpointStalenessGauges,
   recordQueuedTurnHoldGauges,
+  recordCapacityWaitingTurnGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -1004,6 +1011,11 @@ export function createSandboxLeaseActivities(
       });
       recordSandboxDeadlineRotationsRequested(observability, rotationsRequested);
 
+      // Organizations review just held or denied: drain their boxes now so
+      // the inventory below dispatches them in this sweep. Bounded, and a
+      // failure leaves them to the maintenance pass.
+      await drainClosedComputeOrganizationsBounded({ db, settings, observability });
+
       // Keep the remaining dispatch-critical path to one bounded DB inventory.
       // Billing, reconciliation, provider-orphan cleanup, artifact GC, and gauges
       // run only after every drainable box has its own durable child.
@@ -1412,6 +1424,56 @@ export function createSandboxLeaseActivities(
         observability,
       );
 
+      // Boxes kept warm only by open session pages: drain the idle ones and
+      // hold each workspace and organization to its viewer-only box limits.
+      // Drained boxes get their provider child on a following sweep, as any
+      // other drain.
+      try {
+        const bounds = await boundViewerOnlyWarmBoxes(
+          { db, settings, observability },
+          meterResult.leases,
+          { concurrency: SANDBOX_MAINTENANCE_ITEM_CONCURRENCY },
+        );
+        forceDrained +=
+          bounds.drained.viewer_idle +
+          bounds.drained.viewer_workspace_limit +
+          bounds.drained.viewer_organization_limit;
+      } catch (error) {
+        observability.warn("sandbox reaper: viewer-only box bounds failed", {
+          error: errorMessage(error),
+        });
+      }
+
+      // The plan's free-compute bounds over every holder kind: a closed plan,
+      // a spent daily box-time budget, or (idleDrainAllHolders) a box no turn
+      // holds that nobody used for the idle window, or a box of a young
+      // unpaid organization that never started a turn (youngTurnlessBoxSeconds).
+      try {
+        const bounds = await boundComputeBoundedWarmBoxes(
+          { db, settings, observability },
+          meterResult.leases,
+          { concurrency: SANDBOX_MAINTENANCE_ITEM_CONCURRENCY },
+        );
+        forceDrained +=
+          bounds.drained.compute_closed +
+          bounds.drained.compute_daily_budget +
+          bounds.drained.compute_idle +
+          bounds.drained.compute_turnless;
+      } catch (error) {
+        observability.warn("sandbox reaper: compute bounds failed", {
+          error: errorMessage(error),
+        });
+      }
+      // The unpaid fleet's pressure and box time (fleet limits), recorded for
+      // alerting; admission enforces them.
+      try {
+        await observeUnpaidSandboxFleet({ db, settings, observability });
+      } catch (error) {
+        observability.warn("sandbox reaper: unpaid fleet observation failed", {
+          error: errorMessage(error),
+        });
+      }
+
       // Terminal-owner process reconciliation is ancillary to lease dispatch.
       // Exact provider proof is durably checkpointed before settlement; every
       // ambiguous outcome remains claimed/deferred for another sweep.
@@ -1656,6 +1718,37 @@ export const SANDBOX_CHECKPOINT_GC_CLAIM_TTL_MS = CHECKPOINT_GC_CLAIM_TTL_MS;
 const CHECKPOINT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const CHECKPOINT_TOMBSTONE_PRUNE_LIMIT = 500;
 const SANDBOX_MAINTENANCE_ITEM_CONCURRENCY = 8;
+
+/** The sweep's closed-organization drain may take this long before the
+ * inventory goes on without waiting for it (its drains still land). */
+export const SANDBOX_CLOSED_COMPUTE_DRAIN_BUDGET_MS = 15_000;
+
+async function drainClosedComputeOrganizationsBounded(
+  services: Parameters<typeof drainClosedComputeOrganizations>[0],
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pass = (async () => {
+    const leases = await listMeterableWarmLeases(services.db);
+    return await drainClosedComputeOrganizations(services, leases, {
+      concurrency: SANDBOX_MAINTENANCE_ITEM_CONCURRENCY,
+    });
+  })().catch((error: unknown) => {
+    services.observability.warn("sandbox reaper: closed compute drain failed", {
+      error: errorMessage(error),
+    });
+    return null;
+  });
+  try {
+    await Promise.race([
+      pass,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SANDBOX_CLOSED_COMPUTE_DRAIN_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 type ConnectedCommandReconciliationOutcome =
   | "claim_failed"
@@ -2515,7 +2608,9 @@ export async function releaseClaimedConnectedCommandOutput(
       !(await settleConnectedCommandOutputReleaseClaim(db, {
         claim,
         outcome,
-        retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+        // A published final ACK is confirmed by a later look at the runner;
+        // one that keeps finding the op retained backs off like a failure.
+        retryAfterMs: outcome === "published" ? connectedOutputRetryMs(settings, claim) : 0,
       }))
     )
       throw new Error("Connected command output release no longer owns its exact claim");
@@ -3964,7 +4059,11 @@ async function accrueWarmTick(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
-): Promise<{ accrued: number; workspaceIds: Set<string> }> {
+): Promise<{
+  accrued: number;
+  workspaceIds: Set<string>;
+  leases: MeterableWarmLease[];
+}> {
   const workspaceIds = new Set<string>();
   let accrued = 0;
   let leases: MeterableWarmLease[] = [];
@@ -3974,7 +4073,7 @@ async function accrueWarmTick(
     observability.warn("sandbox reaper: warm-lease read failed", {
       error: errorMessage(error),
     });
-    return { accrued, workspaceIds };
+    return { accrued, workspaceIds, leases };
   }
   for (const lease of leases) {
     workspaceIds.add(lease.workspaceId);
@@ -4008,7 +4107,7 @@ async function accrueWarmTick(
       });
     }
   });
-  return { accrued, workspaceIds };
+  return { accrued, workspaceIds, leases };
 }
 
 /**
@@ -4077,7 +4176,11 @@ async function refreshQueueLeaseAndCreditGauges(
     })(),
     (async () => {
       try {
-        recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
+        // One summary: the queued-turn hold split and the turns parked
+        // waiting for subscription capacity (1485).
+        const holds = await summarizeTurnHolds(db);
+        recordQueuedTurnHoldGauges(observability, holds.queued);
+        recordCapacityWaitingTurnGauges(observability, holds.capacityWaiting);
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),

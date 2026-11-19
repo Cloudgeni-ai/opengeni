@@ -1,8 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { QUEUED_TURN_HOLDS, type QueuedTurnHold, type QueuedTurnHoldSummary } from "@opengeni/db";
+import {
+  CAPACITY_WAITING_TURN_PROVIDERS,
+  QUEUED_TURN_HOLDS,
+  type CapacityWaitingTurnProvider,
+  type CapacityWaitingTurnSummary,
+  type QueuedTurnHold,
+  type QueuedTurnHoldSummary,
+} from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
-import { recordQueuedTurnHoldGauges, recordTurnsQueuedGauge } from "../src/observability-metrics";
+import {
+  recordCapacityWaitingTurnGauges,
+  recordQueuedTurnHoldGauges,
+  recordTurnsQueuedGauge,
+} from "../src/observability-metrics";
 
 function summary(
   partial: Partial<Record<QueuedTurnHold, QueuedTurnHoldSummary>>,
@@ -53,5 +64,56 @@ describe("queued turn hold metrics", () => {
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_turns_queued_by_hold\{[^}]*hold="ready"[^}]*\} 0/);
     expect(metrics).toMatch(/opengeni_turns_queued_oldest_age_seconds\{[^}]*hold="ready"[^}]*\} 0/);
+  });
+});
+
+function waiting(
+  partial: Partial<Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>>,
+): Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary> {
+  return Object.fromEntries(
+    CAPACITY_WAITING_TURN_PROVIDERS.map((provider) => [
+      provider,
+      partial[provider] ?? { count: 0, oldestAgeSeconds: 0 },
+    ]),
+  ) as Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
+}
+
+describe("capacity-waiting turn metrics", () => {
+  test("publishes every provider's parked turns and oldest wait, without identities", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordCapacityWaitingTurnGauges(
+      observability,
+      waiting({ codex: { count: 4, oldestAgeSeconds: 7_500 } }),
+    );
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_turns_waiting_capacity\{[^}]*provider="codex"[^}]*\} 4/);
+    expect(metrics).toMatch(
+      /opengeni_turns_waiting_capacity_oldest_age_seconds\{[^}]*provider="codex"[^}]*\} 7500/,
+    );
+    for (const provider of CAPACITY_WAITING_TURN_PROVIDERS) {
+      expect(metrics).toMatch(
+        new RegExp(`opengeni_turns_waiting_capacity\\{[^}]*provider="${provider}"`),
+      );
+    }
+    expect(metrics).toMatch(/opengeni_turns_waiting_capacity\{[^}]*provider="claude"[^}]*\} 0/);
+    expect(metrics).not.toMatch(/session_id|workspace_id|account_id/);
+  });
+
+  test("a provider whose waits ended drops back to zero on the next refresh", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordCapacityWaitingTurnGauges(
+      observability,
+      waiting({ xai: { count: 2, oldestAgeSeconds: 60 } }),
+    );
+    recordCapacityWaitingTurnGauges(observability, waiting({}));
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_turns_waiting_capacity\{[^}]*provider="xai"[^}]*\} 0/);
+    expect(metrics).toMatch(
+      /opengeni_turns_waiting_capacity_oldest_age_seconds\{[^}]*provider="xai"[^}]*\} 0/,
+    );
   });
 });

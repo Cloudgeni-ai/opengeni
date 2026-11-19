@@ -407,6 +407,69 @@ describe("capacity activities accept both waiter shapes", () => {
     );
   });
 
+  test("a reconcile that ends a wait logs it once, with the wait's length; one that keeps it waiting logs nothing", async () => {
+    spy(db, "getSubscriptionCoreCodexCapacityWaitById").mockResolvedValue({
+      ...waiter,
+      blockedTurnLive: false,
+    });
+    outbox([]);
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait");
+    const info = mock((_message: string, _attributes: Record<string, unknown>) => undefined);
+    const run = () =>
+      reconcileCoreCodexCapacityWait(
+        {
+          db: {} as db.Database,
+          bus: { publish: async () => undefined } as never,
+          observability: { info } as never,
+        } as never,
+        { ...scope, sessionId: "session-1", waiterId: "waiter-1", generation: 2 },
+      );
+
+    reconcile.mockResolvedValueOnce({
+      action: "resumed",
+      events: [],
+      parkedAt: new Date(Date.now() - 90 * 60_000),
+    });
+    expect(await run()).toEqual({ action: "resumed" });
+    expect(info).toHaveBeenCalledTimes(1);
+    const [message, attributes] = info.mock.calls[0]!;
+    expect(message).toBe("Turn stopped waiting for subscription capacity");
+    expect(attributes).toMatchObject({
+      provider: "codex",
+      outcome: "resumed",
+      reason: "capacity_available",
+      waitReason: "no_eligible_capacity",
+      waiterId: "waiter-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+    });
+    expect(attributes.waitedSeconds).toBeGreaterThanOrEqual(5_400);
+    expect(attributes.waitedSeconds).toBeLessThan(5_460);
+
+    reconcile.mockResolvedValueOnce({
+      action: "superseded",
+      events: [],
+      reason: "goal_changed",
+      parkedAt: null,
+    });
+    expect(await run()).toEqual({ action: "superseded" });
+    expect(info).toHaveBeenCalledTimes(2);
+    expect(info.mock.calls[1]![1]).toMatchObject({
+      outcome: "superseded",
+      reason: "goal_changed",
+      waitedSeconds: null,
+    });
+
+    // A waiter another reconcile already removed, and a wait that goes on,
+    // end nothing here.
+    reconcile.mockResolvedValueOnce({ action: "superseded", events: [] });
+    await run();
+    reconcile.mockResolvedValueOnce({ action: "waiting", waiter, events: [] });
+    await run();
+    expect(info).toHaveBeenCalledTimes(2);
+  });
+
   test("a reconcile repairs a typed wake a crash left pending before it evaluates", async () => {
     spy(db, "getSubscriptionCoreCodexCapacityWaitById").mockResolvedValue(waiter);
     const { claim, mark } = outbox([delivery({ sessionId: "session-2", waiterId: "waiter-2" })]);

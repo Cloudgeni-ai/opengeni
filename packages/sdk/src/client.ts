@@ -570,6 +570,9 @@ import type {
   McpConnectionDecision,
   NativeAppAuthorizeInput,
   NativeAppTokenInput,
+  NativeAppRelayInput,
+  NativeAppRelay,
+  NativeAppRelayPoll,
   NativeAppToken,
   InboxItem,
   InboxSettings,
@@ -592,6 +595,10 @@ import type {
   UpdateBillingAutoTopUpRequest,
   CreateBillingAutoTopUpSetupSessionRequest,
   CreateBillingAutoTopUpSetupSessionResponse,
+  BillingCardVerificationStatus,
+  CreateBillingCardVerificationSessionRequest,
+  CreateBillingCardVerificationSessionResponse,
+  ConfirmBillingCardVerificationRequest,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -10243,6 +10250,24 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Delete a document, spreadsheet or presentation by archiving it: it
+   * leaves the Artifacts list and no longer opens or takes edits. One-way.
+   */
+  async archiveEditableArtifact(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/archive`,
+      {},
+      undefined,
+      options,
+    );
+  }
+
   /** A Site's data collections, usage and limits. Needs a manager of the Site. */
   async getSiteData(
     workspaceId: string,
@@ -12300,6 +12325,24 @@ export class OpenGeniClient {
     );
   }
 
+  /** Start a sign-in the person approves in their browser (see `NativeAppRelayInput`). */
+  async createNativeAppRelay(input: NativeAppRelayInput): Promise<NativeAppRelay> {
+    return await this.requestJson<NativeAppRelay>("POST", "/v1/native-app/relays", input);
+  }
+
+  /** Approve an app's relayed sign-in from the signed-in browser with the code the app shows. */
+  async approveNativeAppRelay(input: { relayId: string; confirmationCode: string }): Promise<void> {
+    await this.requestJson<unknown>("POST", "/v1/native-app/relays/approve", input);
+  }
+
+  /** Check a relayed sign-in with the app's PKCE verifier. */
+  async pollNativeAppRelay(input: {
+    relayId: string;
+    codeVerifier: string;
+  }): Promise<NativeAppRelayPoll> {
+    return await this.requestJson<NativeAppRelayPoll>("POST", "/v1/native-app/relays/poll", input);
+  }
+
   /** Exchange a native app sign-in code and its PKCE verifier for the app's credential. */
   async exchangeNativeAppCode(input: NativeAppTokenInput): Promise<NativeAppToken> {
     return await this.requestJson<NativeAppToken>("POST", "/v1/native-app/token", input);
@@ -12950,6 +12993,27 @@ export class OpenGeniClient {
     request: CreateBillingAutoTopUpSetupSessionRequest,
   ): Promise<CreateBillingAutoTopUpSetupSessionResponse> {
     return await this.requestJson("POST", "/v1/billing/auto-top-up/setup", request);
+  }
+
+  /** Whether the organization needs a verified card for sandboxes and Free credit. */
+  async getBillingCardVerification(
+    options: { accountId?: string } = {},
+  ): Promise<BillingCardVerificationStatus> {
+    return await this.requestJson("GET", "/v1/billing/card-verification", undefined, options);
+  }
+
+  /** Owner-only. A Stripe Checkout session that saves and verifies a card; no charge. */
+  async createBillingCardVerificationSession(
+    request: CreateBillingCardVerificationSessionRequest,
+  ): Promise<CreateBillingCardVerificationSessionResponse> {
+    return await this.requestJson("POST", "/v1/billing/card-verification/setup", request);
+  }
+
+  /** Records the card of a completed card verification checkout session. */
+  async confirmBillingCardVerification(
+    request: ConfirmBillingCardVerificationRequest,
+  ): Promise<BillingCardVerificationStatus> {
+    return await this.requestJson("POST", "/v1/billing/card-verification/confirm", request);
   }
 
   async createSubscriptionCheckout(

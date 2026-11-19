@@ -4724,6 +4724,7 @@ export async function mutateWorkspaceControlInTransaction(
   const affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }> = [];
   if (capacityWaitingTurns.length > 0) {
     await lockSessionEventWriteRows(db, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "already_locked",
       sessionIds: capacityWaitingTurns.map((row) => row.sessionId),

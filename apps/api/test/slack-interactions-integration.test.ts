@@ -1695,8 +1695,9 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       ];
       // The website draft narrows connectors, Opengeni tools and permissions,
       // none of which may reach a Slack task. Its repositories do, in form
-      // order, through the workspace App catalog: an archived, an empty and a
-      // repository the catalog does not offer are skipped.
+      // order, through the workspace App catalog: an archived one and a
+      // repository the catalog does not offer are skipped. One GitHub reports
+      // at size 0 is kept, as a new chat in the app keeps it.
       const draftRepository = {
         kind: "repository" as const,
         uri: "https://github.com/example/draft-only.git",
@@ -1828,8 +1829,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       >`select resources, variable_set_ids, tools, tool_policy, first_party_mcp_tools, first_party_mcp_permissions, initial_message, reasoning_effort from sessions where id = ${interaction!.session_id}`;
       // The repositories in the person's own form, in form order, on the
       // default branch and best effort; never their recently used ones,
-      // another member's, an archived one, an empty one or one the catalog
-      // does not offer.
+      // another member's, an archived one or one the catalog does not offer.
       expect(session!.resources).toEqual([
         {
           kind: "repository",
@@ -1839,6 +1839,16 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
           provider: "github",
           githubInstallationId: 71,
           githubRepositoryId: 44,
+          optional: true,
+        },
+        {
+          kind: "repository",
+          uri: "https://github.com/example-owner/blank.git",
+          ref: "main",
+          mountPath: "repos/github.com/example-owner/blank",
+          provider: "github",
+          githubInstallationId: 71,
+          githubRepositoryId: 47,
           optional: true,
         },
         {
@@ -3372,6 +3382,19 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     ).toBeNull();
     // Nor can anyone confirm another person's request.
     expect((await link(memberId, outsider.id, 1)).status).toBe(400);
+    // Someone else's request gets the same answer whatever version they send.
+    for (const action of ["link", "request-access", "cancel"]) {
+      for (const expectedVersion of [1, 9]) {
+        const response = await api.request(`${basePath}/${outsider.id}/${action}`, {
+          method: "POST",
+          headers: as(memberId),
+          body: JSON.stringify({ expectedVersion, idempotencyKey: crypto.randomUUID() }),
+        });
+        expect(`${action}@${expectedVersion}:${response.status}`).toBe(
+          `${action}@${expectedVersion}:400`,
+        );
+      }
+    }
     // They can ask the workspace for access instead.
     const asked = await api.request(`${basePath}/${outsider.id}/request-access`, {
       method: "POST",

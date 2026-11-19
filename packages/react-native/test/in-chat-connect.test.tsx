@@ -680,6 +680,8 @@ describe("native MCP saved sign-in attempts", () => {
         {
           listCapabilities: async () => ({ items: [item] }),
           listConnections: async () => [],
+          // No own login to offer instead of a sign-in.
+          listOwnConnectionAccounts: async () => [],
           connectTransport: () => fakeTransport({ get: () => settled }).transport,
           getSession: async () => ({ toolPolicy: { mode: "custom" }, tools: [] }),
         },
@@ -928,5 +930,170 @@ describe("native MCP server question", () => {
     );
     await act(async () => buttonNamed("Decline")!.click());
     expect(decided).toEqual([["call-share", "reject"]]);
+  });
+});
+
+describe("native MCP card with your own login", () => {
+  const SUBJECT_BINDING = {
+    providerDomain: "calendar.example.com",
+    kind: "oauth2",
+    subjectScope: "subject",
+  };
+  function ownLogin(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "connection-own-calendar",
+      workspaceId: "workspace-personal",
+      subjectId: "user:me",
+      authorityId: "authority-own-calendar",
+      providerDomain: "calendar.example.com",
+      kind: "oauth2",
+      status: "active",
+      metadata: { mcpUrl: "https://calendar.example.com/mcp", email: "me@calendar.example" },
+      turnedOnHere: false,
+      turnedOnHereGrantId: null,
+      ...overrides,
+    };
+  }
+  // A shareable connector that isn't turned on in this workspace yet.
+  async function render(login: ReturnType<typeof ownLogin>) {
+    const base = {
+      id: "mcp:example-calendar",
+      kind: "mcp",
+      source: "library",
+      stale: false,
+      authKind: "oauth2",
+      metadata: {},
+      name: "Example Calendar",
+      description: "Read and plan your calendar.",
+      providerDomain: "calendar.example.com",
+      mcpUrl: "https://calendar.example.com/mcp",
+      enabled: false,
+      connectionRef: null as unknown,
+      tools: [],
+    };
+    let item = base;
+    const enabled: unknown[] = [];
+    const issued: unknown[] = [];
+    const signIns: unknown[] = [];
+    const continued: unknown[] = [];
+    const client = new Proxy(
+      {
+        listCapabilities: async () => ({ items: [item] }),
+        listConnections: async () => [],
+        listOwnConnectionAccounts: async () => [login],
+        enableCapability: async (_workspace: string, capabilityId: string, body: unknown) => {
+          enabled.push({ capabilityId, body });
+          item = { ...base, enabled: true, connectionRef: SUBJECT_BINDING };
+          return {};
+        },
+        issueUserResourceGrant: async (_workspace: string, authorityId: string, body: unknown) => {
+          issued.push({ authorityId, body });
+          return { grant: { grantId: "grant-new" } };
+        },
+        getSession: async () => ({ toolPolicy: { mode: "explicit", selectedIds: [] }, tools: [] }),
+        updateSessionToolPolicy: async () => ({}),
+        continueAfterCapabilitySetup: async (
+          _workspace: string,
+          _session: string,
+          body: unknown,
+        ) => {
+          continued.push(body);
+          return {};
+        },
+        connectTransport: () =>
+          fakeTransport({
+            begin: () => {
+              signIns.push("begin");
+              return attempt({ providerId: "example-calendar" });
+            },
+          }).transport,
+      },
+      { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+    );
+    mounted = await renderComponent(
+      <NativeMcpCapabilityCard
+        client={client as never}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="mcp:example-calendar"
+        name="Example Calendar"
+        rationale="To read your calendar."
+        personalOnly={false}
+        options={{
+          browser: {
+            openAuthSession: async () => {
+              signIns.push("browser");
+              return undefined;
+            },
+          },
+          returnUrl: "https://console.example/return",
+        }}
+      />,
+    );
+    for (let pass = 0; pass < 4; pass += 1) await flush();
+    return { enabled, issued, signIns, continued };
+  }
+  const settle = async () => {
+    for (let pass = 0; pass < 8; pass += 1) await flush();
+  };
+
+  test("your login already on here is used for a connector not set up here, in one tap", async () => {
+    const { enabled, issued, signIns, continued } = await render(
+      ownLogin({ turnedOnHere: true, turnedOnHereGrantId: "grant-standing" }),
+    );
+    const text = mounted!.container.textContent ?? "";
+    expect(buttonNamed("Use my Example Calendar here")).toBeDefined();
+    expect(buttonNamed("Connect Example Calendar")).toBeUndefined();
+    expect(text).toContain("You added me@calendar.example in another workspace.");
+    expect(text).not.toContain("Who can use this connection?");
+    expect(text).not.toContain("Review access before signing in");
+    // Sharing with everyone stays a secondary choice.
+    expect(buttonNamed("Connect an account for everyone instead")).toBeDefined();
+    await act(async () => buttonNamed("Use my Example Calendar here")!.click());
+    await settle();
+    // Turned on for each person's own account; the login was already on here.
+    expect(enabled).toEqual([
+      { capabilityId: "mcp:example-calendar", body: { connectionRef: SUBJECT_BINDING } },
+    ]);
+    expect(issued).toEqual([]);
+    expect(signIns).toEqual([]);
+    expect(continued).toEqual([{ capabilityId: "mcp:example-calendar" }]);
+    expect(buttonNamed("Use my Example Calendar here")).toBeUndefined();
+  });
+
+  test("your login that is off here is turned on as well, still without a sign-in", async () => {
+    const { enabled, issued, signIns } = await render(ownLogin());
+    await act(async () => buttonNamed("Use my Example Calendar here")!.click());
+    await settle();
+    expect(enabled).toEqual([
+      { capabilityId: "mcp:example-calendar", body: { connectionRef: SUBJECT_BINDING } },
+    ]);
+    expect(issued).toEqual([
+      {
+        authorityId: "authority-own-calendar",
+        body: {
+          scope: "user",
+          resourceKind: "connection",
+          mode: "always",
+          context: "workspace_shared",
+          workspaceSharedAcknowledged: true,
+        },
+      },
+    ]);
+    expect(signIns).toEqual([]);
+  });
+
+  test("connecting an account for everyone instead asks who can use it and drops your login", async () => {
+    const { enabled, signIns } = await render(
+      ownLogin({ turnedOnHere: true, turnedOnHereGrantId: "grant-standing" }),
+    );
+    await act(async () => buttonNamed("Connect an account for everyone instead")!.click());
+    await settle();
+    const text = mounted!.container.textContent ?? "";
+    expect(text).toContain("Who can use this connection?");
+    expect(buttonNamed("Use my Example Calendar here")).toBeUndefined();
+    expect(buttonNamed("Continue to Example Calendar")).toBeDefined();
+    expect(enabled).toEqual([]);
+    expect(signIns).toEqual([]);
   });
 });

@@ -150,6 +150,8 @@ export * from "./domain/personal-connection-delegations";
 export * from "./domain/personal-github-repository-access";
 export * from "./domain/connections-needing-reconnect";
 export * from "./domain/nango-integrations";
+export * from "./domain/nango-connection-sharing";
+export * from "./domain/built-in-integration-duplicates";
 export {
   listApiIntegrationsWithPersonalExtension,
   type PersonalWorkspaceExtensionApiIntegration,
@@ -246,5 +248,6 @@ export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
 export { retainKnowledgeMessage } from "./domain/knowledge-messages";
 
 export * from "./domain/connector-tool-permissions";
+export * from "./domain/connector-tool-choice-accounts";
 export * from "./session-usage-limits";
 export * from "./session-usage-limit-metrics";

@@ -38,7 +38,7 @@ describe("ordinary-session realtime context projection", () => {
           item: {
             type: "function_call",
             callId: "call-1",
-            name: "session_send_message",
+            name: "session_queue_message",
           },
         },
       ]),

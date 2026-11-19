@@ -200,6 +200,7 @@ describe("explicit current-workspace recovery", () => {
       request.operationId,
     );
     let elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "current-retry",
@@ -215,6 +216,7 @@ describe("explicit current-workspace recovery", () => {
       request.operationId,
     );
     elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "current-retry",
@@ -320,6 +322,7 @@ describe("explicit current-workspace recovery", () => {
       expect(notices[0]!.n).toBe(1);
     }
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "explicit-empty",
@@ -387,6 +390,7 @@ describe("explicit current-workspace recovery", () => {
       };
       await recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request });
       const elected = await acquireLease(client.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...groupLease(f),
         kind: "viewer",
         holderId: "empty-replacement",
@@ -496,6 +500,7 @@ describe("explicit current-workspace recovery", () => {
       if (newCapture) {
         expect(cold.archiveComplete).toBe(true);
         const next = await acquireLease(client.db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...groupLease(f),
           kind: "viewer",
           holderId: "new-capture-restore",
@@ -524,6 +529,7 @@ describe("explicit current-workspace recovery", () => {
       });
       expect(
         await acquireLease(client.db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...groupLease(f),
           kind: "viewer",
           holderId: "do-not-resurrect",
@@ -720,6 +726,7 @@ async function completeRecovery(f: Awaited<ReturnType<typeof fixture>>, holderId
     sandboxGroupId: f.session.sandboxGroupId,
   };
   const elected = await acquireLease(client.db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     ...scope,
     kind: "viewer",
     holderId,
@@ -809,6 +816,7 @@ describe("explicit singleton checkpoint recovery", () => {
     // A completed consent is not reusable authority for the later loss.
     expect(
       await acquireLease(client.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: f.accountId,
         workspaceId: f.workspaceId,
         sandboxGroupId: f.session.sandboxGroupId,
@@ -1306,6 +1314,7 @@ describe("explicit singleton checkpoint recovery", () => {
       }),
     ).toMatchObject({ action: "claimed" });
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: f.accountId,
       workspaceId: f.workspaceId,
       sandboxGroupId: f.session.sandboxGroupId,
@@ -1765,6 +1774,7 @@ describe("explicit singleton checkpoint recovery", () => {
       sandboxGroupId: f.session.sandboxGroupId,
     };
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...scope,
       kind: "viewer",
       holderId: "recovery-test",
@@ -1843,6 +1853,7 @@ describe("explicit singleton checkpoint recovery", () => {
       sandboxGroupId: f.session.sandboxGroupId,
     };
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...scope,
       kind: "viewer",
       holderId: "failed-recovery-test",
@@ -1861,6 +1872,7 @@ describe("explicit singleton checkpoint recovery", () => {
     expect((await f.consent()).outcome).toBe("replayed");
     await expect(
       acquireLease(client.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...scope,
         kind: "viewer",
         holderId: "failed-recovery-retry",
@@ -1882,6 +1894,7 @@ describe("explicit singleton checkpoint recovery", () => {
     await expect(f.consent()).rejects.toThrow("authority is unavailable");
     await expect(
       acquireLease(client.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: f.accountId,
         workspaceId: f.workspaceId,
         sandboxGroupId: f.session.sandboxGroupId,
@@ -2075,6 +2088,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
 
     // The next turn's election restores the exact selection across the group.
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "turn",
       holderId: initiator.attemptId,
@@ -2260,6 +2274,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     });
 
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "turn",
       holderId: initiator.attemptId,
@@ -2348,6 +2363,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     if (authorization.status === "not_eligible" || authorization.lane !== "fresh_workspace")
       throw new Error("expected a fresh-workspace decision");
     const first = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "unpublished-fresh-box",
@@ -2398,6 +2414,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       recovery: { restore: { status: "unrecoverable" }, workspace: { status: "unrecoverable" } },
     });
     const second = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "retry-unpublished-fresh-box",
@@ -2450,6 +2467,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     if (authorization.status === "not_eligible" || authorization.lane !== "fresh_workspace")
       throw new Error("expected a fresh-workspace decision");
     const first = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "failed-fresh-create",
@@ -2474,6 +2492,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       1,
     );
     const second = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "retried-fresh-create",
@@ -2530,6 +2549,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     retryable: boolean,
   ) {
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "turn",
       holderId,
@@ -2674,6 +2694,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
           workspace: { status: "not_ready" },
         })}::jsonb) where id = ${f.leaseId}`;
       const elected = await acquireLease(client.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...groupLease(f),
         kind: "viewer",
         holderId: `ordinary-restore-${failureCode}`,
@@ -3101,6 +3122,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       // Exactly the dead end older workers produced for every later turn.
       await expect(
         acquireLease(client.db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId: f.accountId,
           workspaceId: f.workspaceId,
           sandboxGroupId: lost.sandboxGroupId,
@@ -3129,6 +3151,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       }
       expect(
         await acquireLease(client.db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId: f.accountId,
           workspaceId: f.workspaceId,
           sandboxGroupId: lost.sandboxGroupId,
@@ -3358,6 +3381,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       if ("ordinaryRestore" in shape.expected) {
         expect(decision, shape.name).toEqual({ status: "not_eligible" });
         const elected = await acquireLease(client.db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...groupLease(f),
           kind: "turn",
           holderId: initiator.attemptId,
@@ -3386,6 +3410,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       });
       // The decided lane is also what the next spawner elects.
       const elected = await acquireLease(client.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...groupLease(f),
         kind: "turn",
         holderId: initiator.attemptId,
@@ -3417,6 +3442,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
   test("a fresh box drained before publication keeps the decision; members never get a legacy archive back", async () => {
     const { f, members, initiator, decision } = await freshDecision();
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "turn",
       holderId: initiator.attemptId,
@@ -3452,6 +3478,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     });
     expect(cold?.recovery.restore.status).toBe("unrecoverable");
     const next = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(f),
       kind: "viewer",
       holderId: "after-orphaned-fresh-box",
@@ -3496,6 +3523,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     })}::jsonb where id = ${f.leaseId}`;
     expect(
       await acquireLease(client.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...groupLease(f),
         kind: "viewer",
         holderId: "consent-excludes-fresh",
@@ -3531,6 +3559,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     const { f: g, initiator, decision } = await freshDecision();
     // The decision's box is being created when a new child joins the group.
     await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...groupLease(g),
       kind: "turn",
       holderId: initiator.attemptId,

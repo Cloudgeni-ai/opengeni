@@ -3,6 +3,7 @@ import {
   agentPrivateFileOwnerSubjectId,
   billingOriginForGrant,
   fundedBillingOrigin,
+  requestAuthenticatedAsAgentAttempt,
   requireLiveAgentAttemptAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
@@ -12,6 +13,8 @@ import {
   billingOriginOverride,
   freezeAgentLearningPolicy,
   getSlackPrivateSessionOwnerSubjectId,
+  isAgentAttemptLivenessFence,
+  nestedAuthorityRefusalMessage,
   readTurnBillingOrigin,
   withBillingOriginOverride,
   withSessionRlsActorContext,
@@ -44,6 +47,44 @@ function agentAttemptAuthorityError(
   });
   if (cause !== undefined) error.cause = cause;
   return error;
+}
+
+/**
+ * The learning-policy read goes through the database's own attempt fence,
+ * which locks the session, turn and attempt. When the turn moves on after the
+ * live-attempt check passed (the attempt finished, was superseded or
+ * interrupted while the request was in flight), that fence refuses instead.
+ * It is the same stale attempt, so it gets the same refusal, not a 500.
+ */
+function staleAttemptFenceAsRefusal(error: unknown): never {
+  const message = nestedAuthorityRefusalMessage(error);
+  if (message !== null && isAgentAttemptLivenessFence(message)) {
+    throw agentAttemptAuthorityError("caller_stale", error);
+  }
+  throw error;
+}
+
+/**
+ * The central answer for an agent attempt found stale after its request
+ * context was entered: by a later handler or middleware's own liveness check
+ * (Hono hands their errors straight to `onError`, past the request context's
+ * own mapping), or by the database's attempt fence on a later read. Both are
+ * the same stale attempt the request context refuses up front, so they get its
+ * refusal, never a 500. Only a request that authenticated as an agent attempt
+ * is answered this way; every other caller and every other session refusal
+ * keeps its existing handling.
+ */
+export function agentAttemptStaleHttpError(error: unknown, request: Request): ApiHttpError | null {
+  if (!requestAuthenticatedAsAgentAttempt(request)) return null;
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return error.reason === "caller_stale"
+      ? agentAttemptAuthorityError("caller_stale", error)
+      : null;
+  }
+  const message = nestedAuthorityRefusalMessage(error);
+  return message !== null && isAgentAttemptLivenessFence(message)
+    ? agentAttemptAuthorityError("caller_stale", error)
+    : null;
 }
 
 /**
@@ -287,6 +328,7 @@ export async function withAccessGrantSessionRlsContext<T>(
         learning,
         slackPrivateOwnerSubjectId,
       }),
+      staleAttemptFenceAsRefusal,
     );
   try {
     // The learning policy is keyed by the exact attempt, which a live actor

@@ -1,3 +1,163 @@
+diff --git a/dist/openaiChatCompletionsStreaming.js b/dist/openaiChatCompletionsStreaming.js
+index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..4116a1a31ab39af067ce6f05b1caa677bddbf64a 100644
+--- a/dist/openaiChatCompletionsStreaming.js
++++ b/dist/openaiChatCompletionsStreaming.js
+@@ -111,7 +111,12 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+         }
+         // Handle tool calls
+         if (delta.tool_calls) {
+-            for (const tc_delta of delta.tool_calls) {
++            for (const raw_tc_delta of delta.tool_calls) {
++                // Some providers (Gemini's OpenAI-compatible API) stream each
++                // tool call whole without an `index`; give each its own.
++                const tc_delta = typeof raw_tc_delta.index === 'number'
++                    ? raw_tc_delta
++                    : { ...raw_tc_delta, index: unindexedToolCallIndex(state, raw_tc_delta) };
+                 if (state.ignored_tool_call_indexes.has(tc_delta.index)) {
+                     continue;
+                 }
+@@ -138,6 +143,19 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+                 if (tc_delta.id && !state.function_calls[tc_delta.index].callId) {
+                     state.function_calls[tc_delta.index].callId = tc_delta.id;
+                 }
++                // Keep the provider's own fields on the call (for example
++                // Gemini's `extra_content` thought signature), as the
++                // non-streamed path does, so a replayed call carries them.
++                for (const [key, value] of Object.entries(tc_delta)) {
++                    if (STREAMED_TOOL_CALL_SDK_FIELDS.has(key) || value === undefined || value === null) {
++                        continue;
++                    }
++                    const functionCall = state.function_calls[tc_delta.index];
++                    functionCall.providerData = {
++                        ...functionCall.providerData,
++                        [key]: mergeToolCallProviderField(functionCall.providerData?.[key], value),
++                    };
++                }
+             }
+         }
+     }
+@@ -219,6 +237,41 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+     };
+     yield finalEvent;
+ }
++const STREAMED_TOOL_CALL_SDK_FIELDS = new Set(['index', 'id', 'type', 'function']);
++function isPlainRecord(value) {
++    return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++function mergeToolCallProviderField(previous, next) {
++    if (!isPlainRecord(previous) || !isPlainRecord(next)) {
++        return next;
++    }
++    const merged = { ...previous };
++    for (const [key, value] of Object.entries(next)) {
++        merged[key] = mergeToolCallProviderField(previous[key], value);
++    }
++    return merged;
++}
++function unindexedToolCallIndex(state, toolCall) {
++    const last = state.last_unindexed_tool_call;
++    // A delta that names a function while the last call already has a name
++    // is the next call, even when the provider sends no (or an empty) id.
++    const startsNamedCall = Boolean(toolCall.function?.name) &&
++        Boolean(last && state.function_calls[last.index]?.name);
++    if (last &&
++        ((toolCall.id && toolCall.id === last.callId) ||
++            (!startsNamedCall && (!toolCall.id || !last.callId)))) {
++        if (toolCall.id && !last.callId) {
++            last.callId = toolCall.id;
++        }
++        return last.index;
++    }
++    const used = [...Object.keys(state.function_calls), ...state.ignored_tool_call_indexes]
++        .map(Number)
++        .filter(Number.isFinite);
++    const index = used.length > 0 ? Math.max(...used) + 1 : 0;
++    state.last_unindexed_tool_call = { index, callId: toolCall.id || undefined };
++    return index;
++}
+ function buildTraceChoice(state) {
+     const toolCalls = Object.entries(state.function_calls)
+         .sort(([left], [right]) => Number(left) - Number(right))
+diff --git a/dist/openaiChatCompletionsStreaming.mjs b/dist/openaiChatCompletionsStreaming.mjs
+index a09ff7c37dae74f2a50ba577269a36942ac900df..587c5b9f5beedaf0d8a0df50fcb7332992cd754d 100644
+--- a/dist/openaiChatCompletionsStreaming.mjs
++++ b/dist/openaiChatCompletionsStreaming.mjs
+@@ -105,7 +105,12 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+         }
+         // Handle tool calls
+         if (delta.tool_calls) {
+-            for (const tc_delta of delta.tool_calls) {
++            for (const raw_tc_delta of delta.tool_calls) {
++                // Some providers (Gemini's OpenAI-compatible API) stream each
++                // tool call whole without an `index`; give each its own.
++                const tc_delta = typeof raw_tc_delta.index === 'number'
++                    ? raw_tc_delta
++                    : { ...raw_tc_delta, index: unindexedToolCallIndex(state, raw_tc_delta) };
+                 if (state.ignored_tool_call_indexes.has(tc_delta.index)) {
+                     continue;
+                 }
+@@ -132,6 +137,19 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+                 if (tc_delta.id && !state.function_calls[tc_delta.index].callId) {
+                     state.function_calls[tc_delta.index].callId = tc_delta.id;
+                 }
++                // Keep the provider's own fields on the call (for example
++                // Gemini's `extra_content` thought signature), as the
++                // non-streamed path does, so a replayed call carries them.
++                for (const [key, value] of Object.entries(tc_delta)) {
++                    if (STREAMED_TOOL_CALL_SDK_FIELDS.has(key) || value === undefined || value === null) {
++                        continue;
++                    }
++                    const functionCall = state.function_calls[tc_delta.index];
++                    functionCall.providerData = {
++                        ...functionCall.providerData,
++                        [key]: mergeToolCallProviderField(functionCall.providerData?.[key], value),
++                    };
++                }
+             }
+         }
+     }
+@@ -213,6 +231,41 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+     };
+     yield finalEvent;
+ }
++const STREAMED_TOOL_CALL_SDK_FIELDS = new Set(['index', 'id', 'type', 'function']);
++function isPlainRecord(value) {
++    return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++function mergeToolCallProviderField(previous, next) {
++    if (!isPlainRecord(previous) || !isPlainRecord(next)) {
++        return next;
++    }
++    const merged = { ...previous };
++    for (const [key, value] of Object.entries(next)) {
++        merged[key] = mergeToolCallProviderField(previous[key], value);
++    }
++    return merged;
++}
++function unindexedToolCallIndex(state, toolCall) {
++    const last = state.last_unindexed_tool_call;
++    // A delta that names a function while the last call already has a name
++    // is the next call, even when the provider sends no (or an empty) id.
++    const startsNamedCall = Boolean(toolCall.function?.name) &&
++        Boolean(last && state.function_calls[last.index]?.name);
++    if (last &&
++        ((toolCall.id && toolCall.id === last.callId) ||
++            (!startsNamedCall && (!toolCall.id || !last.callId)))) {
++        if (toolCall.id && !last.callId) {
++            last.callId = toolCall.id;
++        }
++        return last.index;
++    }
++    const used = [...Object.keys(state.function_calls), ...state.ignored_tool_call_indexes]
++        .map(Number)
++        .filter(Number.isFinite);
++    const index = used.length > 0 ? Math.max(...used) + 1 : 0;
++    state.last_unindexed_tool_call = { index, callId: toolCall.id || undefined };
++    return index;
++}
+ function buildTraceChoice(state) {
+     const toolCalls = Object.entries(state.function_calls)
+         .sort(([left], [right]) => Number(left) - Number(right))
 diff --git a/dist/openaiResponsesModel.d.ts b/dist/openaiResponsesModel.d.ts
 index 8b7a523..4409b13 100644
 --- a/dist/openaiResponsesModel.d.ts

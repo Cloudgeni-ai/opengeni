@@ -245,6 +245,35 @@ export class NangoClient {
   }
 
   /**
+   * Whether Nango still has the connection: false only on its 404 for this
+   * very connection, true when it answers for it (including a failed
+   * refresh, 424); any other answer throws.
+   */
+  async connectionExists(connectionId: string, providerConfigKey: string): Promise<boolean> {
+    const query = new URLSearchParams({
+      provider_config_key: providerConfigKey,
+      refresh_token: "false",
+    });
+    const path = `/connections/${encodeURIComponent(connectionId)}?${query.toString()}`;
+    const result = await this.json("GET", path);
+    if (result.status === 404) return false;
+    if (result.status === 424) return true;
+    const raw = (result.body ?? {}) as Record<string, unknown>;
+    if (
+      result.status >= 200 &&
+      result.status < 300 &&
+      raw.connection_id === connectionId &&
+      (raw.provider_config_key === undefined || raw.provider_config_key === providerConfigKey)
+    )
+      return true;
+    throw new NangoApiError(
+      `Nango GET /connections/{id} answered ${result.status} without that connection`,
+      result.status,
+      errorCode(result.body),
+    );
+  }
+
+  /**
    * One connection read with the documented `GET /connections/{id}`, or null
    * when Nango does not know it. Only its summary and granted scopes leave this
    * method; credentials in the response are never returned. `tags` is null

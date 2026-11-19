@@ -1,4 +1,4 @@
-import { AppearanceSubmenu } from "@/components/appearance-menu";
+import { AppearanceSubmenu, SimplifiedInterfaceMenuItem } from "@/components/appearance-menu";
 import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { HelpMenu } from "@/components/help-menu";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
@@ -314,6 +314,7 @@ export function BrowserAccountMenu({
           <DropdownMenuSeparator />
           <AccountUsageMenuItem workspaceId={rail.workspaceId} />
           <AppearanceSubmenu />
+          <SimplifiedInterfaceMenuItem />
           <HelpMenu
             documentationUrl={context.clientConfig.documentationUrl}
             supportEmail={context.clientConfig.supportEmail}

@@ -3,7 +3,9 @@ import {
   forwardRef,
   useContext,
   useId,
+  useMemo,
   useRef,
+  useState,
   type ComponentPropsWithoutRef,
   type ComponentRef,
   type ReactNode,
@@ -19,7 +21,13 @@ import { Sheet, SheetClose, SheetDescription, SheetTitle, SheetTrigger } from ".
 import { Skeleton } from "./skeleton";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
-import { WindowBarTitleBoundary } from "./window-bar-title";
+import {
+  WindowBarOwnerReportContext,
+  WindowBarPlaceContext,
+  WindowBarTitleBoundary,
+  type WindowBarCrumb,
+  type WindowBarPlace,
+} from "./window-bar-title";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
@@ -187,14 +195,54 @@ export interface DetailBackLink {
 /** A deep-linkable detail page on the standard 960px column. */
 export function DetailPage({
   back,
+  section,
   children,
   className,
 }: {
   /** "Variable sets": the list this page belongs to. */
   back?: DetailBackLink | undefined;
+  /**
+   * The section the macOS window bar's trail starts with, when it isn't the
+   * one the page's route is in: an agent's Memory, opened from the agent,
+   * reads "Agents › Meeting preparation › Memory".
+   */
+  section?: WindowBarCrumb | undefined;
   children: ReactNode;
   className?: string | undefined;
 }) {
+  // The latest links, so the trail's crumbs never call a stale handler.
+  const latest = useRef({ back, section });
+  latest.current = { back, section };
+  const backLabel = typeof back?.label === "string" ? back.label : null;
+  const backHref = back?.href;
+  const backClicks = Boolean(back?.onClick);
+  const sectionLabel = section?.label;
+  const sectionHref = section?.href;
+  const sectionClicks = Boolean(section?.onClick);
+  const place = useMemo<WindowBarPlace>(
+    () => ({
+      parent: backLabel
+        ? {
+            label: backLabel,
+            href: backHref,
+            onClick: backClicks ? () => latest.current.back?.onClick?.() : undefined,
+          }
+        : null,
+      section: sectionLabel
+        ? {
+            label: sectionLabel,
+            href: sectionHref,
+            onClick: sectionClicks ? () => latest.current.section?.onClick?.() : undefined,
+          }
+        : undefined,
+    }),
+    [backLabel, backHref, backClicks, sectionLabel, sectionHref, sectionClicks],
+  );
+  // In the macOS app the back link is a step in the window bar's trail
+  // ("Knowledge › Meeting preparation"), so the page doesn't draw it twice;
+  // only while this page's own header names the bar, so a page still loading
+  // keeps its way back.
+  const [headerInBar, setHeaderInBar] = useState(false);
   return (
     <div
       data-slot="detail-page"
@@ -203,8 +251,12 @@ export function DetailPage({
         className,
       )}
     >
-      {back ? <BackLink back={back} /> : null}
-      <PresentationContext.Provider value="page">{children}</PresentationContext.Provider>
+      {back && !(headerInBar && place.parent) ? <BackLink back={back} /> : null}
+      <WindowBarPlaceContext.Provider value={place}>
+        <WindowBarOwnerReportContext.Provider value={setHeaderInBar}>
+          <PresentationContext.Provider value="page">{children}</PresentationContext.Provider>
+        </WindowBarOwnerReportContext.Provider>
+      </WindowBarPlaceContext.Provider>
     </div>
   );
 }

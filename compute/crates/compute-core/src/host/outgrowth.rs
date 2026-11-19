@@ -1,7 +1,7 @@
 //! Running sandboxes that borrow memory above their request (ADR 24).
 //!
-//! A running VM's `memory.low` is its request plus the host memory its
-//! compressed pages take, so the kernel never takes what the sandbox was
+//! A running VM's `memory.min` (ADR 44) is its request plus the host memory
+//! its compressed pages take, so the kernel never takes what the sandbox was
 //! promised, however much of what it borrowed it compressed. Its
 //! `memory.high` is that and a level of borrowed memory: past it the kernel
 //! compresses the sandbox's own coldest pages and the sandbox waits on its
@@ -96,7 +96,7 @@ pub(crate) struct Paging {
 /// The memory bounds asked of a running VM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Bound {
-    /// Its `memory.low`.
+    /// Its `memory.min`.
     pub low: u64,
     /// Its `memory.high`; `None` for none.
     pub high: Option<u64>,

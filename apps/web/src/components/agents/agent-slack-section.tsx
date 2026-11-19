@@ -12,8 +12,13 @@ import {
   type SlackAgentNameProblem,
 } from "@opengeni/contracts";
 import type { Agent, AgentSlackInstall } from "@opengeni/sdk";
+import { useState } from "react";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { workspacePeopleLabel } from "@opengeni/react/app/components/agents/agent-page";
 import { agentErrorCode, useAgentSlackInstalls } from "@opengeni/react/app/lib/agents";
 import { useNavigate } from "@opengeni/react/app/lib/navigation";
@@ -25,9 +30,20 @@ import { RowButton } from "@opengeni/react/ui/page-actions";
 import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 
-/** How people ask the agent in Slack: `@Opengeni Data team`. */
-export function agentSlackCall(name: string): string {
-  return slackAgentCallText(name);
+import {
+  canInstallOpenGeniSlackBot,
+  openGeniSlackBotConnectRequest,
+  SLACK_AGENT_IDENTITY_MISSING,
+  slackAgentIdentityMissingTitle,
+} from "../capabilities/use-slack-integration";
+
+/**
+ * How people ask the agent in Slack: `@Opengeni Data team`, with the app's
+ * name in that Slack workspace when the server says it (`@Opengeni Staging …`).
+ */
+export function agentSlackCall(name: string, botDisplayName?: string): string {
+  const bot = botDisplayName?.trim();
+  return bot ? slackAgentCallText(name, `@${bot}`) : slackAgentCallText(name);
 }
 
 /** Why Slack refused, in words; falls back to the server's own message. */
@@ -84,15 +100,20 @@ function InstallRow({
   install,
   workspaceName,
   onIntroduce,
+  onUpdate,
 }: {
   agent: Agent;
   install: AgentSlackInstall;
   workspaceName: string;
   onIntroduce: (connectionId: string) => void;
+  /** Starts installing the Slack app again; absent for people who can't. */
+  onUpdate?: (() => void) | undefined;
 }) {
   const availability = install.availability;
   const teamName = install.slackTeamName ?? "Slack workspace";
   const canManage = agent.viewer.canManageSlack;
+  // Without chat:write.customize, Slack posts its replies as the app.
+  const postsAsApp = availability !== null && install.postsAsAgent === false;
 
   return (
     <SettingRow
@@ -102,7 +123,7 @@ function InstallRow({
           <>
             People ask it with{" "}
             <span className="font-medium text-fg" data-agent-slack-handle="">
-              {agentSlackCall(agent.name)}
+              {agentSlackCall(agent.name, install.botDisplayName)}
             </span>
           </>
         ) : (
@@ -112,6 +133,17 @@ function InstallRow({
     >
       {availability ? (
         <>
+          {postsAsApp ? (
+            <SettingRow
+              label={slackAgentIdentityMissingTitle(install.botDisplayName)}
+              description={SLACK_AGENT_IDENTITY_MISSING.agentDescription}
+              control={
+                onUpdate ? (
+                  <RowButton onClick={onUpdate}>{SLACK_AGENT_IDENTITY_MISSING.action}</RowButton>
+                ) : undefined
+              }
+            />
+          ) : null}
           {canManage ? (
             <SettingRow
               label="Introduce in channels"
@@ -134,9 +166,22 @@ export function AgentSlackSection({
   agent: Agent;
   onIntroduce: (connectionId: string) => void;
 }) {
-  const { workspaces } = useAppContext();
+  const { workspaces, client, accessContext } = useAppContext();
   const navigate = useNavigate();
   const installs = useAgentSlackInstalls(agent.workspaceId, agent.id);
+  const [update, setUpdate] = useState<NativeConnectRequest | null>(null);
+  const updateFor = (install: AgentSlackInstall) => {
+    const home = install.installWorkspaceId;
+    if (!home || !canInstallOpenGeniSlackBot(accessContext, home)) return undefined;
+    return () =>
+      setUpdate(
+        openGeniSlackBotConnectRequest({
+          workspaceId: home,
+          transport: client.connectTransport(),
+          reconnectAccountId: install.connectionId,
+        }),
+      );
+  };
   const workspaceName = workspaces.find((row) => row.id === agent.workspaceId)?.name ?? "";
   const value = installs.value;
   if (value === undefined) {
@@ -209,8 +254,21 @@ export function AgentSlackSection({
           install={install}
           workspaceName={workspaceName}
           onIntroduce={onIntroduce}
+          onUpdate={updateFor(install)}
         />
       ))}
+      {update ? (
+        <NativeConnectSetup
+          transport={update.scope.transport}
+          workspaceId={update.scope.workspaceId}
+          request={update}
+          onClose={() => setUpdate(null)}
+          onComplete={() => {
+            setUpdate(null);
+            installs.reload();
+          }}
+        />
+      ) : null}
     </>
   );
 }

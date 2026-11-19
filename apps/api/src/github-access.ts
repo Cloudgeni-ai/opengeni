@@ -558,6 +558,47 @@ async function followGitHubRepositoryLists(
 }
 
 /**
+ * Whether GitHub shows a workspace App repository without any branch, which is
+ * what a repository nobody has pushed to yet looks like. False when that
+ * cannot be told (a provider port without branch listing, or a GitHub
+ * failure); such a repository is attached best effort, and the sandbox clone
+ * handles an empty remote itself.
+ *
+ * GitHub's repository `size` (`sizeKb`) cannot answer this: GitHub computes it
+ * lazily, and it can stay 0 long after the first push.
+ */
+export async function isGitHubRepositoryProvenEmpty(
+  deps: ApiRouteDeps,
+  repository: Pick<GitHubRepository, "id" | "installationId">,
+): Promise<boolean> {
+  try {
+    const page = await workspaceGitHubRepositoryBranchServices.listProviderBranches(deps, {
+      installationId: repository.installationId,
+      repositoryId: repository.id,
+      page: 1,
+      limit: 1,
+    });
+    return (
+      page !== null &&
+      page.installationId === repository.installationId &&
+      page.repositoryId === repository.id &&
+      page.branches.length === 0
+    );
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: "GitHub repository branch check failed",
+        githubInstallationId: repository.installationId,
+        githubRepositoryId: repository.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return false;
+  }
+}
+
+/**
  * The exact session repository resource for one workspace GitHub App
  * repository: its default branch, a canonical clone URI, and the installation
  * identity that platform-brokered Git auth and create-time validation check.

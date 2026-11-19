@@ -5,7 +5,13 @@ booked and guaranteed like memory. Amended 2026-10-29 by
 [24](0024-busy-sandboxes-are-slowed-never-frozen.md): a sandbox in use is
 never paused for memory (step 3 of the relief is gone), running VMs are
 compressed where the host allows it, and the VMMs' out-of-memory score
-follows their request.
+follows their request. Amended 2026-11-14 by
+[44](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md):
+where running VMs may be compressed, their requests are kept by
+`memory.min`. Amended 2026-11-14 by
+[44](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md):
+where running VMs may be compressed, their requests are kept by
+`memory.min`.
 
 ## Context
 

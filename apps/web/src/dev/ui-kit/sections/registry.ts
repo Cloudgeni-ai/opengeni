@@ -147,6 +147,7 @@ export const SECTION_KEYS = [
   "page-knowledge",
   "page-org-people",
   "page-org-connectors",
+  "page-connection-health",
   "page-eu-only",
   "page-sign-out-recordings",
   "page-admin-step-up",
@@ -1115,6 +1116,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
     usedOn: "Organization settings > Integrations",
     load: () => import("./page-org-connectors"),
+  },
+  {
+    key: "page-connection-health",
+    group: "Pages",
+    title: "Connection health",
+    purpose:
+      "Why a connection needs attention and its one repair, the same on the Connections list and the connector's page.",
+    usedOn: "Capabilities > Connections, a connector's page",
+    load: () => import("./page-connection-health"),
   },
   {
     key: "page-eu-only",

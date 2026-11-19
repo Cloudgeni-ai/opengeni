@@ -402,6 +402,71 @@ describe("document reference model", () => {
     expect(table.style.widthPt).toBe(30);
   });
 
+  test("round-trips full-width tables on pages whose text width is not a whole point", async () => {
+    // A4 with 1in and 2cm margins: 595.3 - 72 - 72 is 451.29999999999995 in floating point.
+    for (const marginPt of [72, 56.7]) {
+      const page = {
+        widthPt: 595.3,
+        heightPt: 841.9,
+        marginTopPt: marginPt,
+        marginRightPt: marginPt,
+        marginBottomPt: marginPt,
+        marginLeftPt: marginPt,
+        headerPt: 35.4,
+        footerPt: 35.4,
+        gutterPt: 0,
+      };
+      const textWidthTwip = Math.round(page.widthPt * 20) - 2 * Math.round(marginPt * 20);
+      for (let columns = 1; columns <= 8; columns += 1) {
+        const document = Document.create({ ...deterministicOptions, page });
+        document.blocks.addTable([Array.from({ length: columns }, (_, index) => `C${index}`)]);
+
+        const docx = await DocumentFile.exportDocx(document);
+        const xml = await (
+          await (await import("jszip")).default.loadAsync(await docx.arrayBuffer())
+        )
+          .file("word/document.xml")!
+          .async("string");
+        const grid = [...xml.matchAll(/<w:gridCol w:w="(\d+)"\/>/gu)].map((match) =>
+          Number(match[1]),
+        );
+        expect(grid).toHaveLength(columns);
+        const gridWidthTwip = grid.reduce((sum, width) => sum + width, 0);
+        expect(gridWidthTwip).toBeLessThanOrEqual(textWidthTwip);
+        expect(gridWidthTwip).toBeGreaterThanOrEqual(textWidthTwip - columns / 2);
+        expect(xml).toContain(`<w:tblW w:type="dxa" w:w="${gridWidthTwip}"/>`);
+
+        const restored = await DocumentFile.importDocx(docx);
+        const table = restored.blocks.items[0];
+        if (table?.kind !== "table") throw new Error("Fixture table missing");
+        expect(table.style.widthPt).toBeCloseTo(gridWidthTwip / 20, 10);
+      }
+    }
+  });
+
+  test("accepts a table exactly as wide as a fractional text area, and nothing wider", () => {
+    const page = {
+      widthPt: 595.3,
+      heightPt: 841.9,
+      marginTopPt: 72,
+      marginRightPt: 72,
+      marginBottomPt: 72,
+      marginLeftPt: 72,
+    };
+    const document = Document.create({ ...deterministicOptions, page });
+    const table = document.blocks.addTable([["A", "B"]], {
+      widthPt: 451.3,
+      columnWidthsPt: [225.65, 225.65],
+    });
+    expect(table.style.widthPt).toBe(451.3);
+    expect(() => document.blocks.addTable([["A"]], { widthPt: 451.4 })).toThrow(
+      "table width must be between 1 and 451.29999999999995",
+    );
+    expect(() => document.blocks.addTable([["A"]], { columnWidthsPt: [451.4] })).toThrow(
+      "table column width must be between 1 and 451.29999999999995",
+    );
+  });
+
   test("atomically edits and formats ranges while preserving styles and rebasing review anchors", () => {
     const document = Document.create(deterministicOptions);
     const paragraph = document.blocks.addParagraph([

@@ -344,12 +344,15 @@ function Words({ words, kind }: { words: DiffSegment[]; kind: DiffLineKind }) {
           <Fragment key={index}>{segment.text}</Fragment>
         ) : kind === "added" ? (
           // oxlint-disable-next-line react/no-array-index-key -- segments never reorder
-          <ins key={index} className="rounded-[3px] bg-status-idle/25 no-underline">
+          <ins key={index} className="rounded-[3px] bg-status-idle/20 px-px no-underline">
             {segment.text}
           </ins>
         ) : (
-          // oxlint-disable-next-line react/no-array-index-key -- segments never reorder
-          <del key={index} className="rounded-[3px] bg-danger/25 no-underline">
+          <del
+            // oxlint-disable-next-line react/no-array-index-key -- segments never reorder
+            key={index}
+            className="rounded-[3px] bg-danger/15 px-px line-through decoration-danger/60"
+          >
             {segment.text}
           </del>
         ),
@@ -377,18 +380,20 @@ function LineRow({
   return (
     <div
       className={cn(
-        "grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] pr-4",
+        // A change is a soft tint with a coloured rule on its left edge, the
+        // way the text reads in a review, not a row in a table.
+        "grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] gap-x-1.5 rounded-r-[6px] border-l-2 border-transparent pr-3 pl-2",
         size === "sm" ? "text-xs leading-4.5" : "text-sm leading-5",
-        line.kind === "added" && "bg-status-idle/[0.08]",
-        line.kind === "removed" && "bg-danger/[0.07]",
-        blank ? "min-h-2" : "py-0.5",
+        line.kind === "added" && "border-status-idle/70 bg-status-idle/[0.07]",
+        line.kind === "removed" && "border-danger/60 bg-danger/[0.06]",
+        blank ? "min-h-2" : "py-1",
         heading && "not-first:pt-2.5",
       )}
     >
       <span
         aria-hidden="true"
         className={cn(
-          "text-center font-mono select-none",
+          "text-center font-mono text-fg-subtle select-none",
           line.kind === "added" && "text-status-idle",
           line.kind === "removed" && "text-danger",
         )}
@@ -401,7 +406,11 @@ function LineRow({
           "min-w-0 break-words whitespace-pre-wrap text-pretty",
           format === "code" && "font-mono text-xs leading-5",
           heading && "font-semibold",
-          line.kind === "context" ? "text-fg-muted" : "text-fg",
+          line.kind === "context"
+            ? "text-fg-muted"
+            : line.kind === "removed"
+              ? "text-fg-label"
+              : "text-fg",
           heading && line.kind === "context" && "text-fg",
           bullet && "relative pl-3.5",
         )}
@@ -475,7 +484,7 @@ function InlineBody({
   expand: (id: string) => void;
 }) {
   return (
-    <div className="py-2">
+    <div className="flex min-w-0 flex-col gap-0.5 py-2">
       {rows.map((row, index) =>
         row.type === "collapsed" ? (
           expanded.has(row.id) ? (
@@ -752,8 +761,8 @@ export function DiffView({
   const titleId = useId();
   const lines = useMemo(() => {
     const all = linesProp ?? diffLines(before, after);
-    // Blank lines only space out markdown; as diff rows they'd be empty "+" rows.
-    return format === "markdown" ? all.filter((line) => !isBlank(line.text)) : all;
+    // Blank lines only space out prose; as diff rows they'd be empty "+" rows.
+    return format === "code" ? all : all.filter((line) => !isBlank(line.text));
   }, [after, before, format, linesProp]);
   const rows = useMemo(() => buildDiffRows(lines, context), [context, lines]);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());

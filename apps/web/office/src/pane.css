@@ -26,6 +26,12 @@ body,
   min-height: 0;
 }
 
+/* Office for Mac floats its add-in info button ("i", 26x26 px, 8 px from the
+   right, 6 px from the top) over the pane; keep header buttons clear of it. */
+html[data-office-platform="Mac"] [data-titlebar] {
+  padding-right: 42px !important;
+}
+
 .pane-bar {
   display: flex;
   align-items: center;
@@ -166,6 +172,15 @@ body,
 .pane-primary:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+.pane-center .pane-code {
+  font-family: var(--og-font-mono);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: var(--og-color-fg);
+  user-select: all;
 }
 
 .pane-error {

@@ -188,8 +188,9 @@ refused with `user_mismatch` and connects nothing.
 What self-serve cannot do: bind a tenant the person doesn't administer (the
 Microsoft sign-in must be the same Teams user and hold an administrator role in
 that tenant), replace, take over or move an active connection, or bind a
-workspace that is already bound to another tenant. Even two setups racing never
-rotate an active installation.
+workspace that is actively connected to another tenant
+(`workspace_linked_elsewhere`: disconnect the bot in that workspace first). Even
+two setups racing never rotate an active installation.
 
 What a tenant administrator can do with a connection that already exists:
 
@@ -210,6 +211,24 @@ What a tenant administrator can do with a connection that already exists:
   and the Microsoft administrator as `microsoft:<tenant ID>:<object ID>` (not
   the Opengeni identity in the new workspace). This keeps a binding left behind
   by a departed admin, consultant or trial from locking the organization out.
+
+What a workspace administrator can do when the workspace was connected to
+another tenant: after **Disconnect bot**, connect a different tenant through the
+normal self-serve setup (the new tenant's Teams or Global Administrator sign-in
+and tenant admission still apply; no Global Administrator of the old tenant is
+needed, because the workspace is theirs). The old tenant's binding is released
+in the install transaction exactly as for a move: its account links (with their
+chat choices and parked switch-card messages), routes, inbox and outbox, and its
+chat context in the workspace are deleted, so nothing leaks into the new
+tenant, and the old tenant gets the setup prompt again instead of reaching the
+workspace. The workspace gets a `connection.disconnected` audit record with
+reason `released_for_another_organization`, the removed counts, and the Opengeni
+administrator who completed setup, and `newTenantId`. If the old tenant
+reconnects meanwhile, the release changes nothing and setup is refused with
+`connection_changed`. Released, the old tenant is unbound like a new one: any
+of its Teams or Global Administrators can connect it to a workspace they
+administer. Disconnect only ever acts on the binding it read (tenant and
+workspace), so a stale disconnect never touches the new tenant.
 
 A setup proof is single-use (its nonce is recorded at install), and Microsoft
 codes are single-use and PKCE-bound.
@@ -319,6 +338,8 @@ Staging acceptance for self-serve, in the dedicated test tenant:
    link.
 7. After disconnecting, a Teams Administrator can reconnect only in the original
    workspace; a Global Administrator can move it to another shared workspace.
+   A workspace whose bot was disconnected can connect a different tenant; while
+   connected, it refuses with `workspace_linked_elsewhere`.
 8. A person without an administrator role opens their own account link, signs in
    to Microsoft with their Teams account and is linked.
 9. A workspace member opens someone else's account link and signs in to
@@ -755,7 +776,9 @@ conversation, organization connected or not, account linked or not).
   be the chat's linked owner, with live organization membership and current
   access to the chat's workspace (their own Personal workspace included). On a
   chat with an agent anyone in the organization may use, it is recorded as that
-  agent (`teams-agent:<agentId>`) while the agent is still open to them.
+  agent (`teams-agent:<agentId>`) while the agent is still open to them, with
+  the person who rated in the report's server-only diagnostics
+  (`onBehalfOf.subjectId`).
 
 ## Publisher verification and Store submission
 
@@ -811,9 +834,10 @@ With it on:
   `/teams/connect`, not one workspace's page. A person who isn't a member gets
   `link_not_organization_member`.
 - **Where a message goes**, first match wins: `in <Workspace>: …` for one
-  message; `<App name>: …` for the main assistant; an agent addressed by name
-  (`Name: …`, `Name, …` or `+name`), which also becomes the chat's choice; the
-  person's remembered choice; their Personal workspace; their only workspace;
+  message; `<App name>: …` for the main assistant, for one message; an agent
+  addressed by name (`Name: …`, `Name, …` or `+name`), for one message; the
+  person's remembered choice, which only **switch** changes; their Personal
+  workspace; their only workspace;
   otherwise a **switch** card with the message parked until they pick (one
   card per person, 24 hours, single use). Agents are the organization's shared
   agents in workspaces the person can use; Only me agents and agents in
@@ -821,11 +845,13 @@ With it on:
   "**Agent** · Workspace" header, a one-off `in <Workspace>: …` message's
   replies a "**Workspace**" header, and the first reply after a real choice
   names the workspace the chat is saved in. A one-off continues the person's
-  chat in that workspace (same route as a switch there); it doesn't change the
-  remembered choice.
+  chat in that workspace, or with that agent (same route as a switch there);
+  it doesn't change the remembered choice. An agent's name or the app name on
+  its own changes nothing and says how to ask once or switch. An app-name
+  one-off's replies carry the "**Workspace**" header too.
 - **Agents anyone in the organization may use** (Who can use it: Anyone in
   <organization>, see [agents.md](agents.md#anyone-in-the-organization)) are
-  also listed, addressed and remembered for people who aren't in their
+  also listed, addressed and chosen with **switch** for people who aren't in their
   workspace, with Slack's open-agent rules: only in 1:1 chats; Teams'
   `getMemberById` must say the sender is a full member (`userRole` "user") of
   the connected tenant, never a guest, read on every queued message; the
@@ -885,8 +911,9 @@ person can't use (refused), and a reach limit set by an organization admin
 Each tenant/workspace binding stays fixed while active. Disconnect pauses that
 binding; reconnect uses the same tenant and workspace. With self-serve setup, a
 Global Administrator of the tenant can move a disconnected binding to another
-workspace (see Self-serve organization setup); nothing else transfers either
-side.
+workspace, and a workspace administrator can connect a disconnected workspace
+to a different tenant (see Self-serve organization setup); nothing else
+transfers either side.
 
 Remove the pilot/reviewer allowlists and keep broad switches false to close
 admission. Revoke a compromised credential at its Microsoft authority and rotate

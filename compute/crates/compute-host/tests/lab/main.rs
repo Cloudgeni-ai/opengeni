@@ -45,6 +45,8 @@ mod spoofing;
 mod squeeze;
 #[path = "../support/state.rs"]
 mod state;
+#[path = "../support/vms.rs"]
+mod vms;
 
 use required::skip;
 
@@ -81,6 +83,8 @@ fn id(n: usize) -> Id {
 struct Agent {
     child: Child,
     client: Client,
+    /// The cgroup that holds its VMs.
+    cgroup: PathBuf,
 }
 
 struct Host {
@@ -169,7 +173,11 @@ impl Host {
             assert!(Instant::now() < deadline, "the agent never came up");
             sleep(Duration::from_millis(20)).await;
         }
-        Agent { child, client }
+        Agent {
+            child,
+            client,
+            cgroup: self.cgroup.clone(),
+        }
     }
 
     /// Keeps the agent's log with the results, then deletes the host's
@@ -217,12 +225,8 @@ impl Drop for Agent {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if std::thread::panicking()
-            && let Ok(vms) = std::fs::read_dir(CGROUP)
-        {
-            for vm in vms.flatten().filter(|vm| vm.path().is_dir()) {
-                let _ = std::fs::write(vm.path().join("cgroup.kill"), "1");
-            }
+        if std::thread::panicking() {
+            vms::end_vms(&self.cgroup);
         }
     }
 }

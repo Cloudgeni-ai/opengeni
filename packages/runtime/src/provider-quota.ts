@@ -396,6 +396,44 @@ export function classifyProviderQuotaError(
   }
 }
 
+/** Bound on a provider error message taken from an array-wrapped error body. */
+export const WRAPPED_PROVIDER_ERROR_MESSAGE_MAX_CHARS = 2_000;
+
+/**
+ * Google's OpenAI-compatible endpoints (AI Studio and Vertex) answer errors
+ * with a JSON array, `[{"error": {"code": 400, "message": "...", "status":
+ * "INVALID_ARGUMENT"}}]`. The OpenAI SDK reads only an object's `error`, so
+ * the provider's reason is lost and the failure reads "400 status code (no
+ * body)". Reshape such a body into the SDK's form, keeping only the bounded
+ * message and the string code/type (Google's `status` serves as the code), so
+ * the failure names the provider's reason. Any other body is unchanged. The
+ * SDK client and the quota retry veto both apply it, so they read the same
+ * evidence.
+ */
+export function unwrappedErrorBody<T>(body: T): T | { error: Record<string, string> } {
+  if (!Array.isArray(body)) return body;
+  const first: unknown = body[0];
+  const wrapped =
+    first && typeof first === "object" ? (first as { error?: unknown }).error : undefined;
+  if (!wrapped || typeof wrapped !== "object" || Array.isArray(wrapped)) return body;
+  const record = wrapped as Record<string, unknown>;
+  const error: Record<string, string> = {};
+  if (typeof record.message === "string" && record.message.trim())
+    error.message =
+      record.message.length <= WRAPPED_PROVIDER_ERROR_MESSAGE_MAX_CHARS
+        ? record.message
+        : `${record.message.slice(0, WRAPPED_PROVIDER_ERROR_MESSAGE_MAX_CHARS)}…`;
+  const code =
+    typeof record.code === "string" && record.code
+      ? record.code
+      : typeof record.status === "string" && record.status
+        ? record.status
+        : undefined;
+  if (code) error.code = code;
+  if (typeof record.type === "string" && record.type) error.type = record.type;
+  return Object.keys(error).length > 0 ? { error } : body;
+}
+
 /**
  * Classify a raw provider HTTP response without consuming its body. It builds
  * the exact error the OpenAI SDK throws for this response (the same
@@ -417,7 +455,7 @@ export async function classifyProviderQuotaResponse(
   }
   const sdkError = APIError.generate(
     response.status,
-    json as object | undefined,
+    unwrappedErrorBody(json) as object | undefined,
     json ? undefined : text,
     response.headers,
   );

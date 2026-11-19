@@ -1,5 +1,651 @@
 # @opengeni/worker-bundle
 
+## 6.30.1
+
+### Patch Changes
+
+- e9692c2: Show "Add a card" when a box is refused inside a tool call and on the empty-credits notice for new Free organizations. Box refusals raised inside a tool call (card required, daily budget, fleet cap) now keep their failure code.
+- Updated dependencies [24939b2]
+- Updated dependencies [c3d6b66]
+- Updated dependencies [9cd3256]
+  - @opengeni/db@6.30.1
+  - @opengeni/core@6.30.1
+  - @opengeni/documents@6.30.1
+  - @opengeni/events@6.30.1
+  - @opengeni/agent-proto@6.30.1
+  - @opengeni/capabilities@6.30.1
+  - @opengeni/codemode@6.30.1
+  - @opengeni/codex@6.30.1
+  - @opengeni/config@6.30.1
+  - @opengeni/contracts@6.30.1
+  - @opengeni/decisions@6.30.1
+  - @opengeni/github@6.30.1
+  - @opengeni/interaction@6.30.1
+  - @opengeni/jev@6.30.1
+  - @opengeni/network@6.30.1
+  - @opengeni/observability@6.30.1
+  - @opengeni/runtime@6.30.1
+  - @opengeni/sdk@6.30.1
+  - @opengeni/storage@6.30.1
+  - @opengeni/subscriptions@6.30.1
+  - @opengeni/tool-gateway@6.30.1
+  - @opengeni/vaults@6.30.1
+  - @opengeni/vaults-bitwarden@6.30.1
+  - @opengeni/vaults-keeper@6.30.1
+  - @opengeni/vaults-onepassword@6.30.1
+  - @opengeni/vaults-protonpass@6.30.1
+  - @opengeni/xai-subscription@6.30.1
+
+## 6.30.0
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/db@6.30.0
+  - @opengeni/contracts@6.30.0
+  - @opengeni/sdk@6.30.0
+  - @opengeni/core@6.30.0
+  - @opengeni/documents@6.30.0
+  - @opengeni/events@6.30.0
+  - @opengeni/capabilities@6.30.0
+  - @opengeni/codemode@6.30.0
+  - @opengeni/codex@6.30.0
+  - @opengeni/config@6.30.0
+  - @opengeni/decisions@6.30.0
+  - @opengeni/github@6.30.0
+  - @opengeni/interaction@6.30.0
+  - @opengeni/observability@6.30.0
+  - @opengeni/runtime@6.30.0
+  - @opengeni/storage@6.30.0
+  - @opengeni/tool-gateway@6.30.0
+  - @opengeni/vaults@6.30.0
+  - @opengeni/vaults-bitwarden@6.30.0
+  - @opengeni/vaults-keeper@6.30.0
+  - @opengeni/vaults-onepassword@6.30.0
+  - @opengeni/vaults-protonpass@6.30.0
+  - @opengeni/jev@6.30.0
+  - @opengeni/agent-proto@6.30.0
+  - @opengeni/network@6.30.0
+  - @opengeni/subscriptions@6.30.0
+  - @opengeni/xai-subscription@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- 2c58048: Per-tool approvals work for connectors served through Nango, the same as for native ones.
+
+  - A connector's approvals page resolves the connector exactly as a session does, including the integration backend switch. A Gmail, Calendar or Drive account connected through Nango is the account its approvals are managed for, with the same tools and defaults (Drive: the tools its bridge serves), instead of the page asking to connect an account. Choices are stored for that account and apply to its calls.
+  - Choices belong to the provider account, not the backend. When the same person connects the same account under the other backend, its connection starts with the choices already made, and every later change is mirrored to both. Switching a connector between native and Nango no longer resets "Ask first" or "Always allow".
+  - Drive through Nango lists the tools its REST bridge serves.
+  - A Personal workspace carries a connector its owner connected through Nango in another workspace, as it does for a native account.
+  - Site tools and the workspace tool gateway read a personal account's choices from the workspace it was connected from, as an agent turn does, so a choice applies wherever the account is used.
+  - Gmail approvals through Nango get the same review titles as native Gmail.
+
+- becc8b1: A turn no longer wedges when a model response with no tool calls (for example one a Steer cut short) arrives while the worker is still busy recording the request's start. The worker kept the response's streamed items only while it waited for tool calls, so when it read the response afterwards it never learned the items were complete. The response then never settled, and the next model step (which hands the turn over to the Steer) waited on it until the attempt was cancelled. The items now wait for the response that owns them.
+- Updated dependencies [2c58048]
+  - @opengeni/core@6.29.2
+  - @opengeni/db@6.29.2
+  - @opengeni/runtime@6.29.2
+  - @opengeni/documents@6.29.2
+  - @opengeni/events@6.29.2
+  - @opengeni/agent-proto@6.29.2
+  - @opengeni/capabilities@6.29.2
+  - @opengeni/codemode@6.29.2
+  - @opengeni/codex@6.29.2
+  - @opengeni/config@6.29.2
+  - @opengeni/contracts@6.29.2
+  - @opengeni/decisions@6.29.2
+  - @opengeni/github@6.29.2
+  - @opengeni/interaction@6.29.2
+  - @opengeni/jev@6.29.2
+  - @opengeni/network@6.29.2
+  - @opengeni/observability@6.29.2
+  - @opengeni/sdk@6.29.2
+  - @opengeni/storage@6.29.2
+  - @opengeni/subscriptions@6.29.2
+  - @opengeni/tool-gateway@6.29.2
+  - @opengeni/vaults@6.29.2
+  - @opengeni/vaults-bitwarden@6.29.2
+  - @opengeni/vaults-keeper@6.29.2
+  - @opengeni/vaults-onepassword@6.29.2
+  - @opengeni/vaults-protonpass@6.29.2
+  - @opengeni/xai-subscription@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [a641523]
+- Updated dependencies [4884618]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/sdk@6.29.1
+  - @opengeni/core@6.29.1
+  - @opengeni/db@6.29.1
+  - @opengeni/config@6.29.1
+  - @opengeni/capabilities@6.29.1
+  - @opengeni/codemode@6.29.1
+  - @opengeni/codex@6.29.1
+  - @opengeni/decisions@6.29.1
+  - @opengeni/documents@6.29.1
+  - @opengeni/events@6.29.1
+  - @opengeni/github@6.29.1
+  - @opengeni/interaction@6.29.1
+  - @opengeni/observability@6.29.1
+  - @opengeni/runtime@6.29.1
+  - @opengeni/storage@6.29.1
+  - @opengeni/tool-gateway@6.29.1
+  - @opengeni/vaults@6.29.1
+  - @opengeni/vaults-bitwarden@6.29.1
+  - @opengeni/vaults-keeper@6.29.1
+  - @opengeni/vaults-onepassword@6.29.1
+  - @opengeni/vaults-protonpass@6.29.1
+  - @opengeni/jev@6.29.1
+  - @opengeni/agent-proto@6.29.1
+  - @opengeni/network@6.29.1
+  - @opengeni/subscriptions@6.29.1
+  - @opengeni/xai-subscription@6.29.1
+
+## 6.29.0
+
+### Patch Changes
+
+- 133d6b9: Decoding a sandbox image that an image-generation request references now copies its bytes with `new Uint8Array(buffer)` instead of `Uint8Array.from(buffer)`. Bun runs the latter element by element when the source is a Node Buffer, which used about 16 times the image size in transient memory. The image bytes are unchanged.
+- b34167e: Every Modal box now starts with its CPU and memory ceilings. A cold start without a durable admission callback (the desktop viewer, Channel A, rematerialization and rig verification) used the pinned Agents adapter's create, which sent only the reservation (0.125 cores, 128 MiB), no ceilings or egress allowlists, and skipped the create boundary that refuses a box without ceilings. It now takes Opengeni's bounded create, so these boxes get the tier's ceilings (2 cores / 4096 MiB unpaid, 16 cores / 32768 MiB otherwise) and fail closed when they are missing.
+
+  A box of an organization that review holds or denies is now stopped in the next reaper sweep. The closed-organization drain runs in every sweep's inventory instead of only in the maintenance pass after it, skips the reconnect grace, and also closes an unpaid organization whose self-serve owner or a viewer runs a held or denied one. Before, a denial took a maintenance pass, the 60 second grace and another sweep before the box was stopped.
+
+- c64d1e4: Follow-ups to one Nango connection per account.
+
+  - **Missing connections:** the Nango sweep now asks an active row to reconnect (`nango_connection_missing`) when Nango confirms its connection is gone (a 404 for that connection), for example after an older release deleted a shared connection during a rollout or rollback. A row whose account has another healthy connection that covers its scopes is moved onto that one instead. People whose only connection is gone are found through a new deployment-wide listing (migration 1487) once a later migration grants it; until then only people with a connection Nango lists for this deployment are visited. Too many missing connections at once (as with a wrong Nango environment), or a pass that could not plan everyone, marks none; the worker reports the former as `missingBreakerTripped`. When nothing listed carries this deployment's tag, the deployment-wide listing is not used.
+  - **Legacy duplicates keep running turns:** a legacy duplicate row moved onto the shared connection without its account key keeps its `authority_generation`, so turns already running on it keep working.
+  - **Scopes count as a grant only when confirmed:** a row's scopes count as a grant for sharing only when it carries `nangoScopesConfirmed` naming its own Nango connection (Nango reported them for that connection). Rows without reported scopes still carry the older `nangoScopesUnconfirmed` for the previous release during a rollout or rollback. Rows saved before the marker no longer move another organization's row onto their connection on their stored scopes; for such connections the scopes Nango reports count instead, so older duplicates still merge.
+  - **Deletes after commit:** the sweep deletes connections Nango can no longer refresh only after the rows' writes commit, under the person lock in a transaction that writes no connection rows.
+  - **Deployment tag mismatch:** a worker whose deployment tag matches none of the listed connections logs once that its tag is possibly mismatched.
+  - **Reconnect attempts:** reconnecting a Nango-backed account through `POST /v1/workspaces/:workspaceId/connect/attempts` with `reconnectAccountId` no longer answers 404 while the integration is served through Nango; the attempt starts Nango Connect. A reconnect must name the person's own account of that same integration.
+
+- 60f6dea: Plan-less organizations on a deployment without subscription plans are no longer bounded like Free, and turns parked at an organization's running-box limit no longer count as sandbox recoveries.
+
+  - **`none` without subscription plans:** with `OPENGENI_SUBSCRIPTION_PLANS_ENABLED` off, no organization ever gets a plan row, so `none` is every organization's ordinary tier. It is no longer unpaid: the default plan limits leave it unbounded (`DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS`), and none of the free compute bounds, unpaid fleet limits or unpaid Modal ceilings apply to it. With subscription plans on, `none` is still a self-serve organization waiting for Free enrollment and stays bounded like Free. Promotion decisions (`restricted`, linked restriction, suspension) apply either way. Operators can still bound `none` in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. New `sandboxPlanTierUnpaid`; `parseSandboxPlanLimitsJson` takes `{ subscriptionPlansEnabled }`, `settingsForSandboxPlanTier` reads `subscriptionPlansEnabled` from its settings, and `acquireLease` accepts `subscriptionPlansEnabled` (omitted means on).
+  - **Recovery cause `organization_limit`:** a turn parked because its organization already runs as many boxes as its plan allows counts in `opengeni_turn_recoveries_total` as `cause="organization_limit"` instead of `sandbox`, and `OpenGeniTurnRecoveryRatioHigh` excludes it like `route_change`.
+
+- 41414cf: Rig verification now takes a sandbox only within the organization's plan and fleet compute limits: an organization whose tier allows no running box (held or denied) is refused before a verification sandbox starts, and the verification records a failed outcome instead of retrying. Creating a sandbox environment, change or version is refused with 403 for a suspended organization. `acquireLease` now requires `sandboxPlanLimits`; a caller that must bypass the limits passes the named opt-out `"unbounded_test_fixture"`.
+- Updated dependencies [7b590d3]
+- Updated dependencies [59e5248]
+- Updated dependencies [c5a628c]
+- Updated dependencies [30bd11c]
+- Updated dependencies [6581a0f]
+- Updated dependencies [b34167e]
+- Updated dependencies [c64d1e4]
+- Updated dependencies [088561b]
+- Updated dependencies [60f6dea]
+- Updated dependencies [bdecc33]
+- Updated dependencies [41414cf]
+- Updated dependencies [7b590d3]
+- Updated dependencies [7b590d3]
+- Updated dependencies [ea75565]
+  - @opengeni/db@6.29.0
+  - @opengeni/config@6.29.0
+  - @opengeni/runtime@6.29.0
+  - @opengeni/codex@6.29.0
+  - @opengeni/capabilities@6.29.0
+  - @opengeni/core@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/documents@6.29.0
+  - @opengeni/events@6.29.0
+  - @opengeni/github@6.29.0
+  - @opengeni/storage@6.29.0
+  - @opengeni/sdk@6.29.0
+  - @opengeni/agent-proto@6.29.0
+  - @opengeni/codemode@6.29.0
+  - @opengeni/contracts@6.29.0
+  - @opengeni/decisions@6.29.0
+  - @opengeni/interaction@6.29.0
+  - @opengeni/jev@6.29.0
+  - @opengeni/network@6.29.0
+  - @opengeni/observability@6.29.0
+  - @opengeni/subscriptions@6.29.0
+  - @opengeni/tool-gateway@6.29.0
+  - @opengeni/vaults@6.29.0
+  - @opengeni/vaults-bitwarden@6.29.0
+  - @opengeni/vaults-keeper@6.29.0
+  - @opengeni/vaults-onepassword@6.29.0
+  - @opengeni/vaults-protonpass@6.29.0
+
+## 6.28.0
+
+### Minor Changes
+
+- 4ef5ef6: Operators can now see turns parked waiting for subscription capacity. A turn that finds no account with capacity (a usage limit or no eligible account) parks as its chat's active turn, so `opengeni_turns_queued_by_hold{hold="waiting_capacity"}`, which counts only prompts queued behind it, read 0 while turns waited for hours. The control worker now publishes `opengeni_turns_waiting_capacity{provider}`, the turns parked right now that run as soon as capacity returns, by the provider they wait on (`codex`, `claude`, `xai`; 0 when none), and `opengeni_turns_waiting_capacity_oldest_age_seconds{provider}`, the seconds since the oldest of them parked. A wait in a paused or stopped chat (its own Pause or Stop, an ancestor's or the workspace's) or one the capacity reconcile would supersede is not counted. The worker logs `Turn started waiting for subscription capacity` when a turn parks and `Turn stopped waiting for subscription capacity` (with `outcome`, `reason` and `waitedSeconds`) when capacity returns or the wait is superseded.
+
+  Migration 1485 extends the already granted `opengeni_private.summarize_queued_turns_by_hold()` with these rows (an earlier worker ignores them), so a normal deploy publishes the gauges with no further migration. The summary now reads inside the session inventory window, and `subscription_capacity_waiters` and `workspace_inference_controls` gain the owner-only inventory read policy sessions and turns already have: under a database owner that does not bypass row security, the queued-turn split also counts queued turns and workspace pauses it used to miss. `@opengeni/db` exports `summarizeTurnHolds`, `summarizeCapacityWaitingTurns` and `CAPACITY_WAITING_TURN_PROVIDERS`, and a resumed or superseded capacity reconcile reports when the turn parked.
+
+### Patch Changes
+
+- 515bc72: Connector tools have readable names: `<connector>_<account tag>__<tool>` (a configured server's readable id instead of the connector), decided by the tool's identity alone, instead of a name with a different hash per tool. Every tool of one server shares a guessable prefix, and a name never comes to mean another account's or connector's tool. Codemode paths use the same namespace. `tool_search` names, `ogtool show` and Codemode accept a tool's published `server.tool` or its own name, while a call needs a name carrying its server; a query naming several tools loads all of them whatever its limit, and a miss suggests the closest tools. `ogtool show` and the native client's `codemode show` accept several names. A Skill can list the tools it uses in a `tools:` frontmatter key, and reading it loads them. A call to a tool's former name runs nothing and returns its current name; approvals stay keyed by the tool's identity.
+- e09a38b: Unpaid sandboxes are now bounded across the whole fleet, not only per organization and person, so many new accounts cannot add up to a large fleet. All unpaid organizations together share a running-box cap (default 40) and a daily box-time budget (default 300 box-hours per UTC day); an unpaid organization in its first 24 hours runs one box and gets 6 box-hours; and when more than 50 boxes of every plan are warm, unpaid boxes are capped at 15 until the warm count stays below 40 for 15 minutes. A refused start says the shared free capacity is busy (`sandbox_capacity_unpaid_busy`); an agent turn fails with that message instead of retrying, and a turn already on a running box keeps working. Unpaid admissions fail closed when the fleet cannot be read. Paid, Enterprise, host-provisioned and credit-buying organizations are never counted or limited.
+
+  Values are runtime settings in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`, separate from the plan limits; unknown fields are ignored, so it can be set during a rolling deploy. The reaper records the fleet's state as metrics, with a page while the daily budget is spent. The running caps (including the pressure cap) and the daily budget read a new database function (migration 1486) that a later release grants; until then the young-organization limits apply, and pressure only with a cap of 0.
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+- Updated dependencies [4ef5ef6]
+- Updated dependencies [e09a38b]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/runtime@6.28.0
+  - @opengeni/codemode@6.28.0
+  - @opengeni/tool-gateway@6.28.0
+  - @opengeni/db@6.28.0
+  - @opengeni/config@6.28.0
+  - @opengeni/capabilities@6.28.0
+  - @opengeni/codex@6.28.0
+  - @opengeni/core@6.28.0
+  - @opengeni/decisions@6.28.0
+  - @opengeni/documents@6.28.0
+  - @opengeni/events@6.28.0
+  - @opengeni/github@6.28.0
+  - @opengeni/interaction@6.28.0
+  - @opengeni/observability@6.28.0
+  - @opengeni/sdk@6.28.0
+  - @opengeni/storage@6.28.0
+  - @opengeni/vaults@6.28.0
+  - @opengeni/vaults-bitwarden@6.28.0
+  - @opengeni/vaults-keeper@6.28.0
+  - @opengeni/vaults-onepassword@6.28.0
+  - @opengeni/vaults-protonpass@6.28.0
+  - @opengeni/jev@6.28.0
+  - @opengeni/agent-proto@6.28.0
+  - @opengeni/network@6.28.0
+  - @opengeni/subscriptions@6.28.0
+  - @opengeni/xai-subscription@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [afcb2d6]
+- Updated dependencies [02804ec]
+  - @opengeni/db@6.27.1
+  - @opengeni/contracts@6.27.1
+  - @opengeni/core@6.27.1
+  - @opengeni/documents@6.27.1
+  - @opengeni/events@6.27.1
+  - @opengeni/capabilities@6.27.1
+  - @opengeni/codemode@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/decisions@6.27.1
+  - @opengeni/github@6.27.1
+  - @opengeni/interaction@6.27.1
+  - @opengeni/observability@6.27.1
+  - @opengeni/runtime@6.27.1
+  - @opengeni/sdk@6.27.1
+  - @opengeni/storage@6.27.1
+  - @opengeni/tool-gateway@6.27.1
+  - @opengeni/vaults@6.27.1
+  - @opengeni/vaults-bitwarden@6.27.1
+  - @opengeni/vaults-keeper@6.27.1
+  - @opengeni/vaults-onepassword@6.27.1
+  - @opengeni/vaults-protonpass@6.27.1
+  - @opengeni/jev@6.27.1
+  - @opengeni/agent-proto@6.27.1
+  - @opengeni/network@6.27.1
+  - @opengeni/subscriptions@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [c3ca657]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [d85f57f]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [d51e6e5]
+  - @opengeni/runtime@6.27.0
+  - @opengeni/capabilities@6.27.0
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+  - @opengeni/db@6.27.0
+  - @opengeni/core@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codemode@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/decisions@6.27.0
+  - @opengeni/documents@6.27.0
+  - @opengeni/events@6.27.0
+  - @opengeni/github@6.27.0
+  - @opengeni/interaction@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/storage@6.27.0
+  - @opengeni/tool-gateway@6.27.0
+  - @opengeni/vaults@6.27.0
+  - @opengeni/vaults-bitwarden@6.27.0
+  - @opengeni/vaults-keeper@6.27.0
+  - @opengeni/vaults-onepassword@6.27.0
+  - @opengeni/vaults-protonpass@6.27.0
+  - @opengeni/jev@6.27.0
+  - @opengeni/agent-proto@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/subscriptions@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- b6b3579: Less waiting between a model response and the next model request. A tool's result is now recorded as soon as its response's usage and tool calls are saved, instead of waiting for that response's billing writes and history checkpoint; the next model request still waits for both. The task usage receipt that the saved usage event already records is no longer written a second time, and the model-call slot is released before the response's history checkpoint, which the next request still makes durable before it is sent.
+
+  Recovery of owed model usage no longer counts a response twice against a task's usage limit when its provider response id is stored encoded (one containing a lone surrogate or starting with the lossless codec's prefix), and such a response is no longer listed as owed again after its ledger is settled.
+
+- c8efcb0: The per-turn connector availability notice now also names the chat's connectors that are connected for this turn, noting that their tools may appear only through tool search. Before, a turn with an unavailable connector named only that one, so an agent asked to use a connected service whose tools wait behind tool search could take a similarly named unavailable connector (Google Calendar beside a connected Outlook Calendar) for it and answer that the service wasn't available without searching. Connectors already reported unavailable, selections narrowed to no tools, and connectors whose every account needs reconnecting are not listed as connected. The line appears only on turns that already carry the notice.
+- 8fae328: Connected tools that can do a task now win over a Connect card for an unconnected alternative. Tool search no longer shows an integration's Connect card by itself when the chat already has a connected account of the same kind (Outlook Mail beside an unconnected Gmail); the search result still names the integration, and the agent can show its card when the person asked for it. In the agent's integration catalog search, a service the person can already use in the chat comes before a same-category service they would still have to connect, unless the request names the unconnected service. The per-turn connector availability notice now says that a configured but unavailable connector is needed only when the person named it or no loaded tool can do the task.
+- 47eb375: One verified account is now one connection, on every backend. Connections record a server-owned `account_identity_key` (the integration and the verified provider account), and the database allows one live connection per organization, owner and key, so a racing or legacy writer can no longer save a second connection to the same account; it fails as "already connected" instead. OAuth MCP logins, Nango connections and provider OAuth connections (personal GitHub and others) set it.
+
+  Opengeni also no longer pays for two Nango connections for the same account. When a person connects the same verified account to the same Nango integration in several organizations, every organization's row now points at one shared Nango connection, and that connection is deleted in Nango only when the last row referencing it is gone. Reconnects, refused or failed connect attempts and disconnects release the replaced connection through the same reference check, and the worker now sweeps Nango every 15 minutes: for connections this release made (tagged with the deployment), it merges leftover duplicates, deletes abandoned and cascade-orphaned connections, and deletes connections whose refresh has failed for 24 hours. Older, untagged connections are left to `integrations:nango orphans`. Disconnecting a Nango-managed Google app still does not revoke the grant at Google, because Nango's OAuth client is shared across the person's connections.
+
+  Email accounts are matched case-insensitively, and scopes Nango could not report never move another organization's connection onto a narrower one.
+
+  Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
+
+  While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [b6b3579]
+- Updated dependencies [8fae328]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+- Updated dependencies [47eb375]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [33dd6da]
+- Updated dependencies [5e3441a]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/db@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/core@6.26.0
+  - @opengeni/runtime@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/capabilities@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/decisions@6.26.0
+  - @opengeni/documents@6.26.0
+  - @opengeni/events@6.26.0
+  - @opengeni/github@6.26.0
+  - @opengeni/interaction@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/storage@6.26.0
+  - @opengeni/vaults@6.26.0
+  - @opengeni/vaults-bitwarden@6.26.0
+  - @opengeni/vaults-keeper@6.26.0
+  - @opengeni/vaults-onepassword@6.26.0
+  - @opengeni/vaults-protonpass@6.26.0
+  - @opengeni/jev@6.26.0
+  - @opengeni/agent-proto@6.26.0
+  - @opengeni/network@6.26.0
+  - @opengeni/subscriptions@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- 43435d5: Connected-command output release sweeps no longer reread output that cannot be released yet. When a command's runner is offline, its output is due again after its age since exit (at least 30 seconds, at most 5 minutes) instead of being checked by every claim, and it is still released once the runner returns. A final output acknowledgement that the runner keeps answering as retained now backs off (30 seconds, doubling to 5 minutes) instead of retrying every reaper period. Foreground command completions no longer take the fenced command lookup or write anything; only runner processes with a matching background command (or one recorded before this release) do.
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [f99f940]
+- Updated dependencies [43435d5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [bb55e5d]
+- Updated dependencies [43435d5]
+- Updated dependencies [7f09ad6]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [43435d5]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/core@6.25.0
+  - @opengeni/db@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/capabilities@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/runtime@6.25.0
+  - @opengeni/codemode@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/decisions@6.25.0
+  - @opengeni/documents@6.25.0
+  - @opengeni/events@6.25.0
+  - @opengeni/github@6.25.0
+  - @opengeni/interaction@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/storage@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+  - @opengeni/vaults@6.25.0
+  - @opengeni/vaults-bitwarden@6.25.0
+  - @opengeni/vaults-keeper@6.25.0
+  - @opengeni/vaults-onepassword@6.25.0
+  - @opengeni/vaults-protonpass@6.25.0
+  - @opengeni/jev@6.25.0
+  - @opengeni/agent-proto@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/subscriptions@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [f041392]
+- Updated dependencies [e5ce845]
+- Updated dependencies [5fd2c21]
+- Updated dependencies [e4c5c29]
+  - @opengeni/db@6.24.1
+  - @opengeni/config@6.24.1
+  - @opengeni/sdk@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/core@6.24.1
+  - @opengeni/documents@6.24.1
+  - @opengeni/events@6.24.1
+  - @opengeni/github@6.24.1
+  - @opengeni/runtime@6.24.1
+  - @opengeni/storage@6.24.1
+  - @opengeni/codemode@6.24.1
+  - @opengeni/capabilities@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/decisions@6.24.1
+  - @opengeni/interaction@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/tool-gateway@6.24.1
+  - @opengeni/vaults@6.24.1
+  - @opengeni/vaults-bitwarden@6.24.1
+  - @opengeni/vaults-keeper@6.24.1
+  - @opengeni/vaults-onepassword@6.24.1
+  - @opengeni/vaults-protonpass@6.24.1
+  - @opengeni/jev@6.24.1
+  - @opengeni/agent-proto@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/subscriptions@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [8924854]
+- Updated dependencies [0ad29b9]
+- Updated dependencies [24104b1]
+- Updated dependencies [8924854]
+- Updated dependencies [e6c9e45]
+- Updated dependencies [b9baad4]
+- Updated dependencies [8924854]
+- Updated dependencies [c0248a5]
+- Updated dependencies [1b544b0]
+- Updated dependencies [477f1db]
+  - @opengeni/core@6.24.0
+  - @opengeni/db@6.24.0
+  - @opengeni/codex@6.24.0
+  - @opengeni/runtime@6.24.0
+  - @opengeni/capabilities@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/documents@6.24.0
+  - @opengeni/events@6.24.0
+  - @opengeni/sdk@6.24.0
+  - @opengeni/codemode@6.24.0
+  - @opengeni/decisions@6.24.0
+  - @opengeni/github@6.24.0
+  - @opengeni/interaction@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/storage@6.24.0
+  - @opengeni/tool-gateway@6.24.0
+  - @opengeni/vaults@6.24.0
+  - @opengeni/vaults-bitwarden@6.24.0
+  - @opengeni/vaults-keeper@6.24.0
+  - @opengeni/vaults-onepassword@6.24.0
+  - @opengeni/vaults-protonpass@6.24.0
+  - @opengeni/jev@6.24.0
+  - @opengeni/agent-proto@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/subscriptions@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- cfde5ba: Retry of a failed turn that was resumed by an approval or a human-input answer now continues from the conversation, where the decided tool call and its result already are, instead of failing with "Open suffix resume has no interruption rows".
+- 92a5650: A turn interrupted by a turn worker shutdown, such as a rolling deploy, now resumes on another worker within seconds instead of stalling for about five minutes. This fixes two separate causes.
+
+  First, when the shutdown cancelled the turn while a Connected Machine command was still running (for example a generated-file download or a slow `exec_command`), finalization waited for the machine to prove the command had exited. A slow or silent machine could not do that before the worker's force stop. The worker then died without settling the activity, writing its quiescence receipt or releasing its subscription lease, and recovery waited for the two-minute heartbeat timeout. Now, when the turn ends because its worker is shutting down, each still-running machine command goes to the session's command ledger with a stop request (the custody already used for machines that stop answering), and finalization continues without waiting. Pause, Steer and normal completion still wait for exact exit proof.
+
+  Second, a dead attempt's subscription turn lease was held until its five-minute TTL expired, so the next generation was refused with `subscription_lease_busy`. A newer generation of the same turn can now take over the lease once the holder's attempt has written its quiescence receipt, which proves it can no longer use the account. Renewal, current-lease checks and usage finalization still use the lease's own expiry.
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [c0089e1]
+- Updated dependencies [982cce9]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+- Updated dependencies [1d7e007]
+- Updated dependencies [892b27b]
+- Updated dependencies [5ba261b]
+- Updated dependencies [cfde5ba]
+- Updated dependencies [37c35ed]
+- Updated dependencies [32a19a3]
+- Updated dependencies [621f4d2]
+- Updated dependencies [92a5650]
+- Updated dependencies [f0cc559]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/db@6.23.0
+  - @opengeni/runtime@6.23.0
+  - @opengeni/core@6.23.0
+  - @opengeni/capabilities@6.23.0
+  - @opengeni/vaults-protonpass@6.23.0
+  - @opengeni/sdk@6.23.0
+  - @opengeni/codemode@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/config@6.23.0
+  - @opengeni/decisions@6.23.0
+  - @opengeni/documents@6.23.0
+  - @opengeni/events@6.23.0
+  - @opengeni/github@6.23.0
+  - @opengeni/interaction@6.23.0
+  - @opengeni/observability@6.23.0
+  - @opengeni/storage@6.23.0
+  - @opengeni/tool-gateway@6.23.0
+  - @opengeni/vaults@6.23.0
+  - @opengeni/vaults-bitwarden@6.23.0
+  - @opengeni/vaults-keeper@6.23.0
+  - @opengeni/vaults-onepassword@6.23.0
+  - @opengeni/jev@6.23.0
+  - @opengeni/agent-proto@6.23.0
+  - @opengeni/network@6.23.0
+  - @opengeni/subscriptions@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- 3bf1c71: A Connected Machine command's completion no longer reaches its session minutes late on a slow uplink. The agent sent the few-byte completion notice, its retries and its operation inventory through the same first-in-first-out connection as command output, so the notice waited behind every output frame already queued (or was dropped from a full queue) until the next reconnect. The agent now sends them on its control connection, repeating an unacknowledged completion with every heartbeat. Opengeni's collector also used to give up on a completed command's output after five seconds without it, attach again (queuing the same frames once more) and back off for up to five minutes; it now follows one attachment until the exit arrives or its claim budget ends. `replayConnectedCommandOutput` requires a deadline for terminal replays. Failed completion, inventory collection, probe, settlement and output release warnings now carry a closed `reason` code (`claim_deadline`, `exit_frontier_not_reached`, `exit_frontier_mismatch`, `output_transport_unavailable`, `control_<code>`, `database_<sqlstate>` or `unclassified`), exported by the new `connectedCommandFailureReason`, since telemetry does not export error text.
+- 3604f11: Gemini 3 and later on Google's own OpenAI-compatible endpoints (AI Studio and Vertex) no longer fail on the first request after a tool call. Streamed Chat Completions tool calls now keep the fields the provider returned beyond the call itself, such as Gemini's `extra_content` thought signature, as non-streamed calls already did, so the follow-up request sends the signature back. Parallel tool calls streamed without an `index`, as Gemini on AI Studio sends them, now stay separate calls instead of being merged into one. The call records the provider that returned these fields: only that provider receives them again, and any other provider on Chat Completions or Responses gets the plain call. Provider error bodies wrapped in a JSON array, as Google sends them, are now read for the provider's bounded message and status code, so a failed turn shows the provider's reason instead of "400 status code (no body)". An exhausted-quota 429 sent this way now also stops the SDK's retries and fails the turn as provider quota, as object-shaped quota errors already did.
+- 07ecbcc: Skills whose SKILL.md description is a multi-line YAML block install again: the installed Skill's summary folds line breaks into spaces, and any remaining invalid Skill metadata returns a 422 instead of a server error. Chat titles now work on chat-API routes that report unset usage counters as null, and a failed title logs a content-free reason (the failing stage, error name and provider status or code).
+- Updated dependencies [1f25da5]
+- Updated dependencies [3bf1c71]
+- Updated dependencies [6597d38]
+- Updated dependencies [d50092b]
+- Updated dependencies [3604f11]
+- Updated dependencies [c36183c]
+- Updated dependencies [0d72a8b]
+- Updated dependencies [07ecbcc]
+- Updated dependencies [c105ed2]
+  - @opengeni/db@6.22.0
+  - @opengeni/runtime@6.22.0
+  - @opengeni/contracts@6.22.0
+  - @opengeni/sdk@6.22.0
+  - @opengeni/observability@6.22.0
+  - @opengeni/core@6.22.0
+  - @opengeni/documents@6.22.0
+  - @opengeni/events@6.22.0
+  - @opengeni/capabilities@6.22.0
+  - @opengeni/codemode@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/decisions@6.22.0
+  - @opengeni/github@6.22.0
+  - @opengeni/interaction@6.22.0
+  - @opengeni/storage@6.22.0
+  - @opengeni/tool-gateway@6.22.0
+  - @opengeni/vaults@6.22.0
+  - @opengeni/vaults-bitwarden@6.22.0
+  - @opengeni/vaults-keeper@6.22.0
+  - @opengeni/vaults-onepassword@6.22.0
+  - @opengeni/vaults-protonpass@6.22.0
+  - @opengeni/jev@6.22.0
+  - @opengeni/agent-proto@6.22.0
+  - @opengeni/network@6.22.0
+  - @opengeni/subscriptions@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

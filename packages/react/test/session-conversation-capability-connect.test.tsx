@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import type { Permission, SessionEvent } from "@opengeni/sdk";
+import { OpenGeniApiError, type Permission, type SessionEvent } from "@opengeni/sdk";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
@@ -155,6 +155,110 @@ const connectButton = () =>
     button.textContent?.includes("Connect Mail"),
   );
 
+const buttonNamed = (name: string) =>
+  [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === name);
+
+/** The card finished: Mail is connected and in this chat. */
+const finished = () =>
+  document.body.textContent?.includes("Available in this conversation") === true;
+
+/** The person's own Mail login (an "Only me" account), added in another workspace. */
+function ownMailLogin(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "connection-own-mail",
+    accountId: "account-1",
+    workspaceId: "workspace-personal",
+    subjectId: "user:me",
+    authorityId: "authority-own-mail",
+    providerDomain: "mail.example",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: { mcpUrl: "https://mcp.mail.example/mcp", email: "me@mail.example" },
+    createdBySubjectId: "user:me",
+    updatedBySubjectId: "user:me",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    turnedOnHere: false,
+    turnedOnHereGrantId: null,
+    ...overrides,
+  };
+}
+
+/** Mail as a service that connects each person's own account by default. */
+const personalMail = CapabilityCatalogItem.parse({
+  ...mail,
+  metadata: { defaultConnectionOwnership: "personal" },
+});
+
+const SUBJECT_BINDING = {
+  providerDomain: "mail.example",
+  kind: "oauth2",
+  subjectScope: "subject",
+} as const;
+
+/**
+ * A conversation whose Mail connector is not set up in this workspace yet and
+ * whose viewer has one own login for it. Records each step the card takes:
+ * turning the capability on, turning the login on here and starting a sign-in.
+ */
+async function notSetUpHere(
+  login: ReturnType<typeof ownMailLogin>,
+  options: { catalogItem?: CapabilityCatalogItem; refuseEnable?: OpenGeniApiError } = {},
+) {
+  const catalogItem = options.catalogItem ?? personalMail;
+  const steps: string[] = [];
+  const enabled: unknown[] = [];
+  const issued: unknown[] = [];
+  let installed = false;
+  const client = conversationClient(CONNECT);
+  const session = await client.getSession(WORKSPACE_ID, SESSION_ID);
+  const transport = (client as unknown as { connectTransport: () => object }).connectTransport();
+  Object.assign(client, {
+    getSession: async () => ({ ...session, toolPolicy: { mode: "explicit", selectedIds: [] } }),
+    listCapabilities: async () => ({
+      items: [
+        installed
+          ? CapabilityCatalogItem.parse({
+              ...catalogItem,
+              enabled: true,
+              connectionRef: SUBJECT_BINDING,
+            })
+          : catalogItem,
+      ],
+    }),
+    listOwnConnectionAccounts: async () => [{ ...login }],
+    enableCapability: async (workspaceId: string, capabilityId: string, body: unknown) => {
+      steps.push("enable");
+      enabled.push({ workspaceId, capabilityId, body });
+      if (options.refuseEnable) throw options.refuseEnable;
+      installed = true;
+      return {};
+    },
+    issueUserResourceGrant: async (workspaceId: string, authorityId: string, body: unknown) => {
+      steps.push("turn on here");
+      issued.push({ workspaceId, authorityId, body });
+      login.turnedOnHere = true;
+      login.turnedOnHereGrantId = "grant-1" as never;
+      return { grant: { grantId: "grant-1" } };
+    },
+    connectTransport: () => ({
+      ...transport,
+      begin: async () => {
+        steps.push("sign in");
+        throw new Error("no sign-in expected");
+      },
+    }),
+    continueAfterCapabilitySetup: async () => ({}),
+  });
+  return { client, steps, enabled, issued };
+}
+
 test("the stock conversation offers the shared connect card for an agent's request", async () => {
   const view = await renderComponent(
     <SessionConversation
@@ -303,29 +407,7 @@ test("your login added in another workspace is offered here with one standing ch
     enabled: true,
     connectionRef: { providerDomain: "mail.example", kind: "oauth2", subjectScope: "subject" },
   });
-  const login = {
-    id: "connection-own-mail",
-    accountId: "account-1",
-    workspaceId: "workspace-personal",
-    subjectId: "user:me",
-    authorityId: "authority-own-mail",
-    providerDomain: "mail.example",
-    kind: "oauth2",
-    status: "active",
-    grantedScopes: [],
-    expiresAt: null,
-    lastRefreshAt: null,
-    lastUsedAt: null,
-    lastError: null,
-    version: 1,
-    metadata: { mcpUrl: "https://mcp.mail.example/mcp", email: "me@mail.example" },
-    createdBySubjectId: "user:me",
-    updatedBySubjectId: "user:me",
-    createdAt: new Date(0).toISOString(),
-    updatedAt: new Date(0).toISOString(),
-    turnedOnHere: false,
-    turnedOnHereGrantId: null,
-  };
+  const login = ownMailLogin();
   const issued: unknown[] = [];
   const client = conversationClient(CONNECT);
   const session = await client.getSession(WORKSPACE_ID, SESSION_ID);
@@ -340,7 +422,7 @@ test("your login added in another workspace is offered here with one standing ch
   });
   const useItHere = () =>
     [...document.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Use it here",
+      (button) => button.textContent?.trim() === "Use my Mail here",
     );
   const view = await renderComponent(
     <SessionConversation
@@ -362,7 +444,7 @@ test("your login added in another workspace is offered here with one standing ch
     expect(document.body.textContent).not.toContain("Review access before signing in");
     expect(connectButton()).toBeUndefined();
     await actRun(() => useItHere()!.click());
-    await waitFor(() => issued.length === 1, "Use it here did not turn the login on");
+    await waitFor(() => issued.length === 1, "Using your login did not turn it on");
     expect(issued[0]).toEqual({
       workspaceId: WORKSPACE_ID,
       authorityId: "authority-own-mail",
@@ -374,6 +456,178 @@ test("your login added in another workspace is offered here with one standing ch
         workspaceSharedAcknowledged: true,
       },
     });
+  } finally {
+    await view.unmount();
+  }
+});
+
+async function renderConversation(client: ReturnType<typeof conversationClient>) {
+  return await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+    />,
+  );
+}
+
+const forbidden = () =>
+  new OpenGeniApiError(
+    403,
+    JSON.stringify({ error: { status: 403, code: "forbidden", message: "forbidden" } }),
+    { mutation: true },
+  );
+
+test("your login already on here is used for a connector not set up here, without a sign-in", async () => {
+  const login = ownMailLogin({ turnedOnHere: true, turnedOnHereGrantId: "grant-standing" });
+  const { client, steps, enabled, issued } = await notSetUpHere(login);
+  const view = await renderConversation(client);
+  try {
+    await waitFor(
+      () =>
+        document.body.textContent?.includes("Use it for your messages here too?") === true &&
+        buttonNamed("Use my Mail here") !== undefined,
+      "The card did not offer your login that is already on here",
+    );
+    expect(document.body.textContent).toContain("You added me@mail.example in another workspace.");
+    expect(connectButton()).toBeUndefined();
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
+    // Set up for each person's own account; the login is already on here.
+    expect(enabled).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        capabilityId: "mcp:mail",
+        body: { connectionRef: SUBJECT_BINDING },
+      },
+    ]);
+    expect(issued).toEqual([]);
+    expect(steps).toEqual(["enable"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a shareable connector offers your login that is on here first; one for everyone stays a choice", async () => {
+  // Mail shares one workspace connection by default and the workspace has
+  // other people. You already connected your own account, so the card offers
+  // it without asking who can use it; a connection for everyone stays a choice.
+  const login = ownMailLogin({ turnedOnHere: true, turnedOnHereGrantId: "grant-standing" });
+  const { client, steps, enabled, issued } = await notSetUpHere(login, { catalogItem: mail });
+  const view = await renderConversation(client);
+  const radio = (label: string) =>
+    [...document.querySelectorAll("label")]
+      .find((node) => node.textContent?.trim() === label)
+      ?.querySelector("input") as HTMLInputElement | undefined;
+  try {
+    await waitFor(
+      () => buttonNamed("Use my Mail here") !== undefined,
+      "The card did not offer your login first",
+    );
+    expect(document.body.textContent).not.toContain("Who can use this connection?");
+    expect(document.body.textContent).toContain("You added me@mail.example in another workspace.");
+    expect(connectButton()).toBeUndefined();
+    // The other choice: a new connection for everyone, asked as before.
+    await actRun(() => buttonNamed("Connect an account for everyone instead")!.click());
+    await waitFor(
+      () =>
+        document.body.textContent?.includes("Who can use this connection?") === true &&
+        buttonNamed("Continue to Mail") !== undefined,
+      "Choosing everyone did not go to a new shared connection",
+    );
+    expect(radio("Everyone in this workspace")!.checked).toBe(true);
+    expect(buttonNamed("Use my Mail here")).toBeUndefined();
+    expect(steps).toEqual([]);
+    // Only me brings your login back.
+    await actRun(() => radio("Only me")!.click());
+    await waitFor(() => buttonNamed("Use my Mail here") !== undefined, "No offer after Only me");
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
+    expect(enabled).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        capabilityId: "mcp:mail",
+        body: { connectionRef: SUBJECT_BINDING },
+      },
+    ]);
+    expect(issued).toEqual([]);
+    expect(steps).toEqual(["enable"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a login connected in this workspace is offered again when its connector isn't on here", async () => {
+  const login = ownMailLogin({ workspaceId: WORKSPACE_ID, turnedOnHere: true });
+  const { client, steps } = await notSetUpHere(login);
+  const view = await renderConversation(client);
+  try {
+    await waitFor(
+      () => buttonNamed("Use my Mail here") !== undefined,
+      "The card did not offer the login connected here",
+    );
+    expect(document.body.textContent).toContain(
+      "You already connected me@mail.example. Use it for your messages here?",
+    );
+    expect(document.body.textContent).not.toContain("in another workspace");
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
+    expect(steps).toEqual(["enable"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a login off here is set up and turned on for a connector not set up here, as before", async () => {
+  const login = ownMailLogin();
+  const { client, steps, enabled, issued } = await notSetUpHere(login);
+  const view = await renderConversation(client);
+  try {
+    await waitFor(
+      () => buttonNamed("Use my Mail here") !== undefined,
+      "The card did not offer your login that is off here",
+    );
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
+    // Turned on for each person's own account first, so a refusal leaves the
+    // login as it was; then the login is turned on here.
+    expect(steps).toEqual(["enable", "turn on here"]);
+    expect(enabled).toHaveLength(1);
+    expect(issued).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        authorityId: "authority-own-mail",
+        body: {
+          scope: "user",
+          resourceKind: "connection",
+          mode: "always",
+          context: "workspace_shared",
+          workspaceSharedAcknowledged: true,
+        },
+      },
+    ]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("when only an admin can turn the connector on, using your login says so and changes nothing", async () => {
+  const login = ownMailLogin({ turnedOnHere: true, turnedOnHereGrantId: "grant-standing" });
+  const { client, steps, issued } = await notSetUpHere(login, { refuseEnable: forbidden() });
+  const view = await renderConversation(client);
+  try {
+    await waitFor(
+      () => buttonNamed("Use my Mail here") !== undefined,
+      "No offer to use your login",
+    );
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(
+      () => document.body.textContent?.includes("Only an admin can turn on Mail.") === true,
+      "The card did not say an admin has to turn it on",
+    );
+    expect(steps).toEqual(["enable"]);
+    expect(issued).toEqual([]);
   } finally {
     await view.unmount();
   }

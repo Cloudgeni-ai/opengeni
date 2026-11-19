@@ -52,7 +52,11 @@ export async function requireAccountPermission(
 
 /** Nango Connect, its webhook, and the organization's Nango usage (docs/nango.md). */
 export function registerNangoRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const nangoDeps = { db: deps.db, settings: deps.settings };
+  const nangoDeps = {
+    db: deps.db,
+    settings: deps.settings,
+    mcpServerLogoStorage: deps.objectStorage,
+  };
 
   // Public: the signed state and its browser binding are the authority.
   app.get(NANGO_CONNECT_PATH, async (c) =>

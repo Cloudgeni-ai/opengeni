@@ -88,6 +88,8 @@ export type DesktopViewerProps = {
   renderViewerCap?: (() => ReactNode) | undefined;
   /** Surface the 429 cap state from `useSessionCapabilities().viewerCapReached`. */
   viewerCapReached?: boolean | undefined;
+  /** Which limit it hit, from `useSessionCapabilities().viewerCapReason`. */
+  viewerCapReason?: "viewers" | "computers" | null | undefined;
   /**
    * Connect watchdog (ms): if a live url is present but the RFB hasn't connected
    * within this window, surface a "Couldn't connect" + Reconnect instead of an
@@ -172,6 +174,7 @@ export function DesktopViewer({
   renderWarming,
   renderViewerCap,
   viewerCapReached,
+  viewerCapReason,
   connectTimeoutMs = 13_000,
   className,
 }: DesktopViewerProps) {
@@ -461,10 +464,15 @@ export function DesktopViewer({
     case "viewer_cap":
       overlay =
         renderViewerCap?.() ??
-        defaultNotice(
-          t("desktopViewer.tooManyViewers"),
-          t("desktopViewer.thisSessionHasReachedIts"),
-        );
+        (viewerCapReason === "computers"
+          ? defaultNotice(
+              t("desktopViewer.computerLimitReached"),
+              t("sandboxWorkspace.tooManyComputersRunningWithoutTask"),
+            )
+          : defaultNotice(
+              t("desktopViewer.tooManyViewers"),
+              t("desktopViewer.thisSessionHasReachedIts"),
+            ));
       break;
     case "unavailable":
       overlay =

@@ -93,6 +93,7 @@ import {
   withoutNativeSynchronousCommandCollection,
   releaseNativeSynchronousCommandOutput,
   isNativeSynchronousCommandHandle,
+  shareNativeSynchronousCollection,
 } from "../native-synchronous-collection";
 import { observeSynchronousCommand, synchronousCommandPage } from "../synchronous-command";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
@@ -2799,6 +2800,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
+  /**
+   * Write one file of the secret leak guard's ledger (docs/secrets.md,
+   * "Keeping values out of commits"). Like a secret file it is private, but
+   * it belongs to no attempt scope, so attempt-end cleanup keeps it.
+   */
+  async writeSecretLedger(file: { path: string; content: Uint8Array }): Promise<void> {
+    await this.dispatch("writeSecretLedger", false, async (session, backend) => {
+      await withoutProviderCommandHandle(() =>
+        writeSecretFileOnBackend(session, file, backend.kind),
+      );
+    });
+  }
+
   private noteSecretScope(session: RoutableBackendSession, scope: string): void {
     let scopes = this.secretScopes.get(session);
     if (!scopes) this.secretScopes.set(session, (scopes = new Set()));
@@ -3297,7 +3311,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): ChannelASession {
     const privateSession = withPlacementPrivateControl(session, backend.kind);
     const admittedCompositeMutation = admittedProviderCommandHandle() !== undefined;
-    return new Proxy(privateSession, {
+    const composite = new Proxy(privateSession, {
       get: (target, property) => {
         if (property === "execReadOnly")
           return (
@@ -3313,6 +3327,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    // Runners receive this view, but provider output is collected on the
+    // physical backend session it forwards to.
+    return shareNativeSynchronousCollection(composite, session);
   }
 
   /** Inspect an exact-file envelope on one resolved backend without entering
@@ -3644,7 +3661,7 @@ function withPlacementPrivateControl(
   session: RoutableBackendSession,
   backendKind: string,
 ): ChannelASession {
-  return new Proxy(session, {
+  const view = new Proxy(session, {
     get(target, property) {
       if (property === "writePlacementPrivate") {
         return async (args: unknown) =>
@@ -3662,6 +3679,7 @@ function withPlacementPrivateControl(
       return typeof value === "function" ? value.bind(target) : value;
     },
   }) as ChannelASession;
+  return shareNativeSynchronousCollection(view, session);
 }
 
 async function writePlacementPrivateOnBackend(

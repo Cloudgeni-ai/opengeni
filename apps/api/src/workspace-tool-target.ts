@@ -5,7 +5,12 @@ import {
   ToolGatewayInvokeResponse,
   ToolGatewayTargetApprovalResponse,
   ToolGatewaySiteConsentResponse,
+  ToolGatewaySiteReadinessResponse,
+  ToolGatewaySiteAllowancesResetResponse,
+  type ToolGatewaySiteAllowancesResetRequest,
   type ToolGatewaySiteConsentRequest,
+  type ToolGatewaySiteReadinessRequest,
+  type ToolGatewaySiteReadinessTool,
   type ToolGatewayIdentity,
   type ToolGatewayResolveRequest,
   type ToolGatewayInvokeRequest,
@@ -24,7 +29,10 @@ import {
 } from "@opengeni/core";
 import {
   beginTargetToolGatewayCall,
+  clearSiteToolAllowances,
   getWorkspaceArtifactContentRef,
+  listConnectorToolPermissionPolicies,
+  projectConnectorToolPermission,
   hasSiteToolAllowance,
   issueToolGatewayApproval,
   listSiteToolAllowances,
@@ -40,6 +48,12 @@ import {
   projectToolGatewayPath,
   type PreparedToolGatewayCall,
 } from "@opengeni/tool-gateway";
+import {
+  isMcpRequestNotSentError,
+  isMcpServerUnreachableError,
+  mcpToolScopeNeed,
+  sessionMcpApprovalConnectionId,
+} from "@opengeni/runtime/workspace-tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./http/api-error";
 import {
@@ -48,6 +62,8 @@ import {
   requireWorkspaceToolApprovalAuthorization,
   requireWorkspaceToolGatewayAuthorization,
   throwWorkspaceToolGatewayHttpError,
+  toolServerUnreachableError,
+  ToolReviewAuthNeededError,
   type PreparedWorkspaceToolGateway,
   type WorkspaceSiteVersionResolver,
   type WorkspaceToolGatewayAuthorization,
@@ -59,6 +75,7 @@ import {
 import { resolveSiteSessionOrigin } from "./site-session-origin";
 import {
   readSiteToolAccountInventory,
+  readSiteToolReconnectAccounts,
   routeSiteTool,
   siteToolConsentChoices,
   siteToolNotAvailableForViewer,
@@ -82,6 +99,11 @@ export type TargetGatewayOptions = {
   hasAllowance?: typeof hasSiteToolAllowance;
   listAllowances?: typeof listSiteToolAllowances;
   recordAllowance?: typeof recordSiteToolAllowance;
+  clearAllowances?: typeof clearSiteToolAllowances;
+  /** The viewer's accounts that must sign in again (readiness only). */
+  readReconnect?: typeof readSiteToolReconnectAccounts;
+  /** A connection's saved tool permissions (readiness reads them; calls decide in the gateway). */
+  listPolicies?: typeof listConnectorToolPermissionPolicies;
   /** Observes the request's fence (statistics), never its authority. */
   onFence?: (fence: TargetAuthorityFence) => void;
 };
@@ -128,6 +150,62 @@ async function siteVersionReader(
 type DirectSiteRouting = Extract<SiteToolRouting, { kind: "direct" }>;
 /** What the Site request is for: a resolve may use any of the viewer's accounts. */
 type SiteTargetMode = "resolve" | "invoke" | "approve";
+
+/**
+ * A provider review that stopped before anything ran, as the typed answer the
+ * Site's viewer can act on, or null when the review failed for another reason.
+ * The connector's own auth-needed report says whether the account must allow
+ * more access or sign in again; a provider refusal for this account (for
+ * example a connection whose access can't grow) says it isn't available to it.
+ */
+function siteToolReviewRefusal(error: unknown): ApiHttpError | null {
+  if (error instanceof ToolReviewAuthNeededError) {
+    const { payload } = error;
+    // An account whose access is fixed can't be given more, and signing in
+    // again would not help: the action isn't available to it.
+    if (payload.accountReason === "account_scope_fixed") return unavailableForAccount();
+    if (payload.reason === "insufficient_scope" && payload.connectionId)
+      return new ApiHttpError(409, {
+        code: "conflict",
+        message: "Give this account more access in Opengeni, then try again.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: {
+          code: "tool_connection_needs_more_access",
+          connectionId: payload.connectionId,
+          scopes: payload.scopes ?? [],
+        },
+      });
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: "Reconnect this account in Opengeni, then try again.",
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        code: "tool_connection_needs_attention",
+        reason: payload.reason,
+        ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
+      },
+    });
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "access_denied"
+  )
+    return unavailableForAccount();
+  return null;
+}
+
+function unavailableForAccount(): ApiHttpError {
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: "This action isn't available for this account.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "tool_unavailable_for_account" },
+  });
+}
 
 /** A Site call that needs the person in the Opengeni frame (consent, account or connection). */
 function siteConsentError(
@@ -202,14 +280,10 @@ function siteAllowanceKey(
 }
 
 /** The pinned active Site version's declarations, read as the caller may see it. */
-async function readSiteDeclaration(
+async function readSiteVersionDeclarations(
   deps: ApiRouteDeps,
   authorization: WorkspaceToolGatewayAuthorization,
-  request: {
-    siteArtifactId: string;
-    siteVersionId: string;
-    target: ToolGatewayTarget;
-  },
+  request: { siteArtifactId: string; siteVersionId: string },
   options: TargetGatewayOptions,
 ) {
   const visible = options.readSiteVersion ?? (await siteVersionReader(deps, authorization));
@@ -222,21 +296,43 @@ async function readSiteDeclaration(
     );
     if (status !== "active" || version.id !== request.siteVersionId) throw notAuthorized();
     const declared: readonly ToolGatewayIdentity[] = version.requestedTools;
-    let requested: ToolGatewayIdentity;
-    if ("identity" in request.target) requested = request.target.identity;
-    else {
-      const path = request.target.path;
-      const matches = declared.filter((item) => samePath(projectedPath(item), path));
-      if (matches.length !== 1) throw notAuthorized();
-      requested = matches[0]!;
-    }
-    return { visible, declared, requested };
+    return { visible, declared };
   } catch (error) {
     // A missing, unseen or replaced Site version is a refusal; anything else
     // (a transient read, reauthorization) keeps its own status.
     if (error instanceof WorkspaceArtifactNotFoundError) throw notAuthorized();
     throw error;
   }
+}
+
+/** The declared identity a target names; a path must match exactly one declaration. */
+function declaredTarget(
+  declared: readonly ToolGatewayIdentity[],
+  target: ToolGatewayTarget,
+): ToolGatewayIdentity {
+  if ("identity" in target) return target.identity;
+  const matches = declared.filter((item) => samePath(projectedPath(item), target.path));
+  if (matches.length !== 1) throw notAuthorized();
+  return matches[0]!;
+}
+
+async function readSiteDeclaration(
+  deps: ApiRouteDeps,
+  authorization: WorkspaceToolGatewayAuthorization,
+  request: {
+    siteArtifactId: string;
+    siteVersionId: string;
+    target: ToolGatewayTarget;
+  },
+  options: TargetGatewayOptions,
+) {
+  const { visible, declared } = await readSiteVersionDeclarations(
+    deps,
+    authorization,
+    request,
+    options,
+  );
+  return { visible, declared, requested: declaredTarget(declared, request.target) };
 }
 const notAuthorized = () => new HTTPException(403, { message: "site_tool_not_authorized" });
 
@@ -383,6 +479,13 @@ function resolvedTool(
   };
 }
 
+/** Whether the server a target needs dropped out of the preparation as unreachable. */
+function unreachableTarget(prepared: PreparedWorkspaceToolGateway, target: ToolGatewayTarget) {
+  // A path names no server until it resolves, so it can't say which server
+  // was missing; it keeps the plain unavailable answer.
+  return "identity" in target && prepared.unreachable?.has(target.identity.serverId) === true;
+}
+
 async function withTarget<T>(
   deps: ApiRouteDeps,
   authorization: WorkspaceToolGatewayAuthorization,
@@ -432,7 +535,15 @@ async function withTarget<T>(
         fence,
       });
       options.signal?.throwIfAborted();
-      tool = resolvedTool(prepared, target);
+      try {
+        tool = resolvedTool(prepared, target);
+      } catch (error) {
+        // The tool is missing because its server could not be reached, not
+        // because it does not exist: nothing was sent, so try again.
+        if (isToolUnavailable(error) && unreachableTarget(prepared, target))
+          throw toolServerUnreachableError();
+        throw error;
+      }
     } catch (error) {
       // A physical boundary that denied (or could not read) authority drops an
       // optional connector silently or fails a required one; report that
@@ -442,7 +553,10 @@ async function withTarget<T>(
         // so, instead of the bare unavailable-tool answer.
         site?.routing.unresolved && isToolUnavailable(error)
           ? siteToolNotAvailableForViewer()
-          : error,
+          : // A required server that could not be reached fails its preparation.
+            !(error instanceof HTTPException) && isMcpServerUnreachableError(error)
+            ? toolServerUnreachableError()
+            : error,
       );
     }
     return await use(prepared, tool, fence, site?.routing);
@@ -628,7 +742,9 @@ export async function invokeWorkspaceToolTarget(
           tool,
           result,
         });
-      } catch {
+      } catch (error) {
+        // Only a request that provably never left is known not to have run.
+        if (isMcpRequestNotSentError(error)) throw toolServerUnreachableError();
         throw new ApiHttpError(502, {
           code: "upstream_unavailable",
           message: "The tool call ended without a confirmed result. Reconcile before retrying.",
@@ -939,6 +1055,8 @@ async function reviewSiteToolCall(
           : {};
       } catch (error) {
         if (error instanceof ApiHttpError || error instanceof HTTPException) throw error;
+        const typed = siteToolReviewRefusal(error);
+        if (typed) throw typed;
         throw new ApiHttpError(422, {
           code: "validation_failed",
           message: "Opengeni couldn't read what this action would do, so it was not run.",
@@ -964,4 +1082,265 @@ async function reviewSiteToolCall(
       });
     },
   );
+}
+
+type SiteReadinessConfirm = ToolGatewaySiteReadinessTool["confirm"];
+
+/**
+ * Whether a tool on one approval identity asks first, from the same saved
+ * permissions and recommendation inputs the gateway decides with. A tool's own
+ * recommendation is read from its provider, which readiness never contacts,
+ * so unless a saved choice or the server's own setting decides, it is `maybe`.
+ */
+function siteToolPermission(
+  policies: Parameters<typeof projectConnectorToolPermission>[0],
+  target: { connectionId: string; serverId: string; toolName: string },
+  recommendsApproval: boolean,
+): "block" | SiteReadinessConfirm {
+  const defaults: Array<"allow" | "ask"> = recommendsApproval ? ["ask"] : ["allow", "ask"];
+  const projections = defaults.map((defaultDecision) =>
+    projectConnectorToolPermission(policies, { ...target, defaultDecision }),
+  );
+  if (projections.some((projection) => projection.conditional)) return "maybe";
+  const permissions = new Set(projections.map((projection) => projection.permission));
+  if (permissions.size !== 1) return "maybe";
+  const [permission] = [...permissions];
+  return permission === "block" ? "block" : permission === "ask" ? "always" : "never";
+}
+
+/**
+ * What the viewer can do with each of a pinned Site's declared tools before
+ * anything runs: whether it runs, asks first, needs an account chosen,
+ * connected or reconnected, is blocked, or needs Opengeni. Read-only and
+ * advisory: the same declarations, account routing, saved permissions and
+ * "Always allow" choices a call uses, without preparing a call or contacting
+ * a provider. Every call is still checked in full.
+ */
+export async function describeWorkspaceSiteToolReadiness(
+  deps: ApiRouteDeps,
+  authorization: WorkspaceToolGatewayAuthorization,
+  request: ToolGatewaySiteReadinessRequest,
+  options: TargetGatewayOptions = {},
+): Promise<ToolGatewaySiteReadinessResponse> {
+  const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  options.signal?.throwIfAborted();
+  await options.reauthorize?.();
+  const published = isPublishedSiteToolAuthorization(authorization);
+  const { declared } = await readSiteVersionDeclarations(deps, authorization, request, options);
+  const inventory = await (options.readAccounts ?? readSiteToolAccountInventory)(deps, grant);
+  // Only a person's own standing choices; a published page has none.
+  const allowances = published
+    ? []
+    : await (options.listAllowances ?? listSiteToolAllowances)(deps.db, {
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        siteId: request.siteArtifactId,
+      });
+  const policiesByConnection = new Map<
+    string,
+    Promise<Awaited<ReturnType<typeof listConnectorToolPermissionPolicies>>>
+  >();
+  const policiesFor = (connectionId: string, workspaceId: string = grant.workspaceId) => {
+    const cacheKey = JSON.stringify([workspaceId, connectionId]);
+    let read = policiesByConnection.get(cacheKey);
+    if (!read) {
+      read = (options.listPolicies ?? listConnectorToolPermissionPolicies)(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        connectionId,
+      });
+      policiesByConnection.set(cacheKey, read);
+    }
+    return read;
+  };
+  const allowed = (allowance: DirectSiteRouting["allowance"]) =>
+    allowances.some(
+      (candidate) =>
+        candidate.serverId === allowance.serverId &&
+        candidate.toolName === allowance.toolName &&
+        candidate.connectionId === allowance.connectionId,
+    );
+  // Asking needs a person in an Opengeni frame; a service key has no one to ask.
+  const mayConfirm = (() => {
+    try {
+      requireWorkspaceToolApprovalAuthorization(authorization);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  // Read only when some target needs a connector the viewer has no working account for.
+  let reconnect: ReturnType<typeof readSiteToolReconnectAccounts> | undefined;
+  const reconnectFor = async (canonicalServerId: string) => {
+    reconnect ??= (options.readReconnect ?? readSiteToolReconnectAccounts)(deps, grant, [
+      ...inventory.canonical.keys(),
+    ]);
+    return (await reconnect).find((account) => account.canonicalServerId === canonicalServerId);
+  };
+  const tools: ToolGatewaySiteReadinessTool[] = [];
+  for (const target of request.targets) {
+    options.signal?.throwIfAborted();
+    const entry = (
+      state: ToolGatewaySiteReadinessTool["state"],
+      rest: Partial<Omit<ToolGatewaySiteReadinessTool, "target" | "state">> = {},
+    ): ToolGatewaySiteReadinessTool => ({
+      target,
+      state,
+      confirm: rest.confirm ?? "maybe",
+      runsAs: rest.runsAs ?? null,
+      connector: rest.connector ?? null,
+      ...(rest.scopes ? { scopes: rest.scopes } : {}),
+      ...(rest.unavailableReason ? { unavailableReason: rest.unavailableReason } : {}),
+    });
+    let routed: SiteToolRouting;
+    try {
+      routed = routeSiteTool(inventory, declared, declaredTarget(declared, target));
+    } catch (error) {
+      // Not declared by this version: it can't run on this Site.
+      if (error instanceof HTTPException && error.status === 403) {
+        tools.push(entry("unavailable"));
+        continue;
+      }
+      throw error;
+    }
+    if (routed.kind === "connect") {
+      const stale = await reconnectFor(routed.declaredIdentity.serverId);
+      const connector = routed.connect.name;
+      if (stale)
+        tools.push(
+          entry(published ? "open_in_opengeni" : "reconnect", {
+            connector,
+            runsAs: { connector, account: stale.account, shared: stale.shared },
+          }),
+        );
+      else tools.push(entry(published ? "open_in_opengeni" : "connect", { connector }));
+      continue;
+    }
+    let routing: DirectSiteRouting;
+    if (routed.kind === "accounts") {
+      let account = routed.accounts.length === 1 ? routed.accounts[0] : undefined;
+      if (!account) {
+        const remembered = routed.accounts.filter((candidate) =>
+          allowed(directRouting(candidate, routed.declaredIdentity).allowance),
+        );
+        if (remembered.length === 1) account = remembered[0];
+      }
+      if (!account) {
+        tools.push(
+          entry(published ? "open_in_opengeni" : "choose_account", {
+            connector: routed.accounts[0]!.connector,
+          }),
+        );
+        continue;
+      }
+      routing = directRouting(account, routed.declaredIdentity);
+    } else routing = routed;
+    if (routing.unresolved) {
+      tools.push(entry("unavailable"));
+      continue;
+    }
+    const account = routing.account;
+    const connector = account?.connector ?? null;
+    const runsAs = account
+      ? { connector: account.connector, account: account.account, shared: account.shared === true }
+      : null;
+    // The approval identity the gateway decides with (`policyTargets`).
+    const server = inventory.servers?.get(routing.identity.serverId);
+    const policyServerId = account?.canonicalServerId ?? routing.identity.serverId;
+    const connectionId =
+      account?.connectionId ??
+      server?.connectionId ??
+      (server?.url ? sessionMcpApprovalConnectionId(routing.identity.serverId, server.url) : null);
+    const settingsServer = inventory.servers?.get(policyServerId) ?? server;
+    const recommendsApproval =
+      settingsServer?.requireApproval === true ||
+      (Array.isArray(settingsServer?.requireApproval) &&
+        settingsServer.requireApproval.includes(routing.identity.toolName));
+    let permission: "block" | SiteReadinessConfirm = recommendsApproval ? "always" : "maybe";
+    if (connectionId)
+      permission = siteToolPermission(
+        await policiesFor(
+          connectionId,
+          account?.connectionId === connectionId ? account.choicesWorkspaceId : undefined,
+        ),
+        { connectionId, serverId: policyServerId, toolName: routing.identity.toolName },
+        recommendsApproval,
+      );
+    if (permission === "block") {
+      tools.push(entry("blocked", { confirm: "never", runsAs, connector }));
+      continue;
+    }
+    // Access the account must allow first, from the grants it records (the
+    // provider is never asked here). An account whose access is fixed can't
+    // be given more, so the tool is not available on it.
+    const missingScopes =
+      account?.grantedScopes && settingsServer?.url
+        ? mcpToolScopeNeed(
+            {
+              url: settingsServer.url,
+              ...(settingsServer.connectionRef
+                ? { connectionRef: settingsServer.connectionRef }
+                : {}),
+            },
+            routing.identity.toolName,
+            account.grantedScopes,
+          )
+        : null;
+    if (missingScopes) {
+      tools.push(
+        account?.fixedAccess
+          ? entry("unavailable", {
+              confirm: "never",
+              runsAs,
+              connector,
+              unavailableReason: "account",
+            })
+          : entry(published ? "open_in_opengeni" : "grant", {
+              runsAs,
+              connector,
+              scopes: [...missingScopes],
+            }),
+      );
+      continue;
+    }
+    // "Always allow for this Site" answers any question this call would ask.
+    const confirm: SiteReadinessConfirm =
+      permission !== "never" && allowed(routing.allowance) ? "remembered" : permission;
+    const state =
+      confirm !== "always"
+        ? "ready"
+        : published
+          ? "open_in_opengeni"
+          : mayConfirm
+            ? "confirm"
+            : "unavailable";
+    tools.push(entry(state, { confirm, runsAs, connector }));
+  }
+  return ToolGatewaySiteReadinessResponse.parse({ version: 1, tools });
+}
+
+/**
+ * Removes every "Always allow for this Site" choice the caller made on one
+ * Site they can still see: their own choices only, made in an Opengeni frame.
+ * The next call asks again (and chooses an account again where it has several).
+ */
+export async function resetWorkspaceSiteToolAllowances(
+  deps: ApiRouteDeps,
+  authorization: WorkspaceToolGatewayAuthorization,
+  request: ToolGatewaySiteAllowancesResetRequest,
+  options: TargetGatewayOptions = {},
+): Promise<ToolGatewaySiteAllowancesResetResponse> {
+  const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  if (!mayRememberForSite(authorization))
+    throw new HTTPException(403, { message: "site_tool_allowance_requires_person" });
+  options.signal?.throwIfAborted();
+  await options.reauthorize?.();
+  // The Site must still be one this person can see.
+  await readSiteVersionDeclarations(deps, authorization, request, options);
+  const removed = await (options.clearAllowances ?? clearSiteToolAllowances)(deps.db, {
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    siteId: request.siteArtifactId,
+  });
+  return ToolGatewaySiteAllowancesResetResponse.parse({ version: 1, removed });
 }

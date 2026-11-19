@@ -1,5 +1,404 @@
 # @opengeni/db
 
+## 6.30.1
+
+### Patch Changes
+
+- 24939b2: Migration 1499 grants the runtime EXECUTE on the Nango in-use check (1482) and the live Nango connection owners listing (1487), which both shipped withheld. Deleting a Nango connection is then decided from every non-revoked row that names it, and the Nango sweep also visits a person whose only connection is gone. Readiness now requires both grants. Migration 1500 validates `connections_account_identity_key_check`, which 1480 added `NOT VALID`. These must reach production only in a release after the one that contains 1487: the previous binary rejects an unknown granted definer.
+- c3d6b66: Pages now say where they are. In the macOS app the window bar shows a clickable trail before the page's title, such as "Agents › Meeting preparation" or "Organization settings › People"; on a detail page the back link moves into that trail and the page keeps its own title. An agent's Memory opened from the agent reads "Agents › Meeting preparation › Memory" and goes back to the agent, and a Knowledge entry's back link says "Knowledge". The web app keeps its layout.
+
+  History diffs are easier to read: a change is a tinted row with a coloured rule on its left edge instead of a boxed table, blank lines are dropped outside code, and the first version shows its text instead of every line marked as added.
+
+  Knowledge history now says "You" for the versions you saved, instead of "A teammate". Migration 1498 adds knowledge_entry_read's read-only `history_authors` operation, which returns only the ids of the asking person's own versions; the history route returns them as an extra `savedByYou` field, which is an empty list before the migration.
+
+- 9cd3256: A workspace whose Microsoft Teams bot was disconnected can now be connected to a different Teams organization through the normal setup. Setup releases the old organization's binding in the same transaction: its account links, stored chat choices, routes, pending deliveries and chat context in the workspace are removed, the old organization can no longer reach the workspace, and the release is audited. A workspace that is still connected to another organization is refused with a message that says to disconnect the bot first.
+  - @opengeni/codemode@6.30.1
+  - @opengeni/codex@6.30.1
+  - @opengeni/config@6.30.1
+  - @opengeni/contracts@6.30.1
+  - @opengeni/network@6.30.1
+  - @opengeni/observability@6.30.1
+  - @opengeni/subscriptions@6.30.1
+  - @opengeni/xai-subscription@6.30.1
+
+## 6.30.0
+
+### Minor Changes
+
+- 133db2c: A card verification gate for the Free plan, off until an operator turns it on (`--card-verification-mode enforce`). While it is on, an unpaid organization needs a card its owner verified through Stripe Checkout (a SetupIntent, no charge) before it starts a sandbox box or receives Free monthly credit; chat without a box keeps working. One card and one person get Free credit for one organization, and another organization of the same owner inherits the card for sandboxes only. A refused box start has code `sandbox_card_required`, and the console offers one Add a card action that continues the chat once the card is added. Paid, Enterprise, host-provisioned and credit-buying organizations are unaffected; nothing is deleted and the Free amount is unchanged. New routes: `GET /v1/billing/card-verification`, `POST /v1/billing/card-verification/setup` and `POST /v1/billing/card-verification/confirm`.
+- df0c5ac: Each turn reports the Opengeni credits it charged. `turn.completed`, `turn.failed`, `turn.cancelled` and `turn.superseded` carry `usage` (`{ creditsMicros, tokens: { input, output }, breakdown: { model, webSearch, imageGeneration, other } }`, USD micros) in the event payload, in the turn webhooks' `data`, and on each turn from the turns API (`TurnUsage` in `@opengeni/contracts` and `@opengeni/sdk`). It is computed from durable usage and ledger records when the terminal event is written (migrations 1496 and 1497), so it holds after worker recovery or a new attempt; `creditsMicros` is `null` when a charge has no known price, and turns from before this release return `usage: null`. Chat completions add OpenRouter's `usage.cost` (USD) to non-streamed responses and the final usage chunk. Opengeni leaves both out of reads a session proxy relays and of published Sites, and `sessionEventsToSseStream` drops turn `usage` unless `includeCreditUsage: true` is passed, and the Console shows each answer's cost beside the reply.
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/codemode@6.30.0
+  - @opengeni/codex@6.30.0
+  - @opengeni/config@6.30.0
+  - @opengeni/observability@6.30.0
+  - @opengeni/network@6.30.0
+  - @opengeni/subscriptions@6.30.0
+  - @opengeni/xai-subscription@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- 2c58048: Per-tool approvals work for connectors served through Nango, the same as for native ones.
+
+  - A connector's approvals page resolves the connector exactly as a session does, including the integration backend switch. A Gmail, Calendar or Drive account connected through Nango is the account its approvals are managed for, with the same tools and defaults (Drive: the tools its bridge serves), instead of the page asking to connect an account. Choices are stored for that account and apply to its calls.
+  - Choices belong to the provider account, not the backend. When the same person connects the same account under the other backend, its connection starts with the choices already made, and every later change is mirrored to both. Switching a connector between native and Nango no longer resets "Ask first" or "Always allow".
+  - Drive through Nango lists the tools its REST bridge serves.
+  - A Personal workspace carries a connector its owner connected through Nango in another workspace, as it does for a native account.
+  - Site tools and the workspace tool gateway read a personal account's choices from the workspace it was connected from, as an agent turn does, so a choice applies wherever the account is used.
+  - Gmail approvals through Nango get the same review titles as native Gmail.
+  - @opengeni/codemode@6.29.2
+  - @opengeni/codex@6.29.2
+  - @opengeni/config@6.29.2
+  - @opengeni/contracts@6.29.2
+  - @opengeni/network@6.29.2
+  - @opengeni/observability@6.29.2
+  - @opengeni/subscriptions@6.29.2
+  - @opengeni/xai-subscription@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- a641523: Fleet pressure counts only boxes on managed providers. Self-hosted (Connected Machine) boxes cost the deployment nothing and are exempt from the unpaid fleet limits, so they no longer keep pressure engaged. Migration 1492 adds the `opengeni_private.sandbox_fleet_warm_boxes_v1()` count withheld; until a later release grants it, pressure keeps reading every lease. Without subscription plans the reaper no longer reads or reports pressure (`OpenGeniSandboxFleetPressureEngaged`, `opengeni_sandbox_fleet_warm_boxes`), since `none` is not unpaid there; admission still applies pressure to any organization it finds unpaid.
+- 4884618: New self-serve organizations (first and additional) start held when the owner's mail domain, or its MX host, is a temporary-inbox service (rule `disposable-mail-v1`; the API checks the MX at setup with a bounded, cached lookup that fails open, and records only the flag), and when 3 or more owners of one company domain set up within 24 hours and none of their organizations ever used the product (`email-slow-domain-v1`). Both legs enforce by default and have their own mode in the signup settings (migration 1493). New settings: `OPENGENI_SIGNUP_DISPOSABLE_MAIL_DOMAINS` (more providers) and `OPENGENI_SIGNUP_MAIL_MX_LOOKUP_TIMEOUT_MS` (1500; 0 turns the lookup off).
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [a641523]
+- Updated dependencies [4884618]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/config@6.29.1
+  - @opengeni/codemode@6.29.1
+  - @opengeni/codex@6.29.1
+  - @opengeni/observability@6.29.1
+  - @opengeni/network@6.29.1
+  - @opengeni/subscriptions@6.29.1
+  - @opengeni/xai-subscription@6.29.1
+
+## 6.29.0
+
+### Patch Changes
+
+- 7b590d3: An unpaid person's second and later additional organizations created within 24 hours of their first organization start held (rule `additional-organization-v1`, migration 1491). The first additional organization and people with a paying organization are unaffected. A detector hold on an additional organization restricts only that organization: it doesn't follow the person to their other organizations (no linked restriction or linked-owner hold). A manual denial still does.
+- 59e5248: A parent that reads a child's complete answer through Codemode (for example `ogtool call` in a shell command) no longer gets that child's terminal result delivered again after its turn ends. The read is recorded on the turn and counts once the turn's own tool results hold the whole answer, so the result is superseded as `consumed_by_parent_read` instead of starting a turn that repeats the answer. A script that returned only a summary still delivers the result normally.
+- 30bd11c: A turn resolves its workspace governance (instruction policies and organization profile) when it starts running instead of when it was accepted. A turn that waited in the session queue or for subscription capacity now runs under the governance activated while it waited. Once a turn has run, its later attempts (recovery, approval, resume) keep that governance, and changes reach the next turn, as before. Migration 1488 changes when the snapshot routines resolve; the model-visible governance block and its text are unchanged.
+- b34167e: Every Modal box now starts with its CPU and memory ceilings. A cold start without a durable admission callback (the desktop viewer, Channel A, rematerialization and rig verification) used the pinned Agents adapter's create, which sent only the reservation (0.125 cores, 128 MiB), no ceilings or egress allowlists, and skipped the create boundary that refuses a box without ceilings. It now takes Opengeni's bounded create, so these boxes get the tier's ceilings (2 cores / 4096 MiB unpaid, 16 cores / 32768 MiB otherwise) and fail closed when they are missing.
+
+  A box of an organization that review holds or denies is now stopped in the next reaper sweep. The closed-organization drain runs in every sweep's inventory instead of only in the maintenance pass after it, skips the reconnect grace, and also closes an unpaid organization whose self-serve owner or a viewer runs a held or denied one. Before, a denial took a maintenance pass, the 60 second grace and another sweep before the box was stopped.
+
+- c64d1e4: Follow-ups to one Nango connection per account.
+
+  - **Missing connections:** the Nango sweep now asks an active row to reconnect (`nango_connection_missing`) when Nango confirms its connection is gone (a 404 for that connection), for example after an older release deleted a shared connection during a rollout or rollback. A row whose account has another healthy connection that covers its scopes is moved onto that one instead. People whose only connection is gone are found through a new deployment-wide listing (migration 1487) once a later migration grants it; until then only people with a connection Nango lists for this deployment are visited. Too many missing connections at once (as with a wrong Nango environment), or a pass that could not plan everyone, marks none; the worker reports the former as `missingBreakerTripped`. When nothing listed carries this deployment's tag, the deployment-wide listing is not used.
+  - **Legacy duplicates keep running turns:** a legacy duplicate row moved onto the shared connection without its account key keeps its `authority_generation`, so turns already running on it keep working.
+  - **Scopes count as a grant only when confirmed:** a row's scopes count as a grant for sharing only when it carries `nangoScopesConfirmed` naming its own Nango connection (Nango reported them for that connection). Rows without reported scopes still carry the older `nangoScopesUnconfirmed` for the previous release during a rollout or rollback. Rows saved before the marker no longer move another organization's row onto their connection on their stored scopes; for such connections the scopes Nango reports count instead, so older duplicates still merge.
+  - **Deletes after commit:** the sweep deletes connections Nango can no longer refresh only after the rows' writes commit, under the person lock in a transaction that writes no connection rows.
+  - **Deployment tag mismatch:** a worker whose deployment tag matches none of the listed connections logs once that its tag is possibly mismatched.
+  - **Reconnect attempts:** reconnecting a Nango-backed account through `POST /v1/workspaces/:workspaceId/connect/attempts` with `reconnectAccountId` no longer answers 404 while the integration is served through Nango; the attempt starts Nango Connect. A reconnect must name the person's own account of that same integration.
+
+- 60f6dea: Plan-less organizations on a deployment without subscription plans are no longer bounded like Free, and turns parked at an organization's running-box limit no longer count as sandbox recoveries.
+
+  - **`none` without subscription plans:** with `OPENGENI_SUBSCRIPTION_PLANS_ENABLED` off, no organization ever gets a plan row, so `none` is every organization's ordinary tier. It is no longer unpaid: the default plan limits leave it unbounded (`DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS`), and none of the free compute bounds, unpaid fleet limits or unpaid Modal ceilings apply to it. With subscription plans on, `none` is still a self-serve organization waiting for Free enrollment and stays bounded like Free. Promotion decisions (`restricted`, linked restriction, suspension) apply either way. Operators can still bound `none` in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. New `sandboxPlanTierUnpaid`; `parseSandboxPlanLimitsJson` takes `{ subscriptionPlansEnabled }`, `settingsForSandboxPlanTier` reads `subscriptionPlansEnabled` from its settings, and `acquireLease` accepts `subscriptionPlansEnabled` (omitted means on).
+  - **Recovery cause `organization_limit`:** a turn parked because its organization already runs as many boxes as its plan allows counts in `opengeni_turn_recoveries_total` as `cause="organization_limit"` instead of `sandbox`, and `OpenGeniTurnRecoveryRatioHigh` excludes it like `route_change`.
+
+- bdecc33: `db:provision-roles` now grants `CONNECT` on the Opengeni database to the runtime app role and the host-export role, as it already did for the artifact roles. Installs on a PostgreSQL host that revokes `CONNECT` from `PUBLIC` no longer fail `db:assert-runtime-posture` with "permission denied for database".
+- 41414cf: Rig verification now takes a sandbox only within the organization's plan and fleet compute limits: an organization whose tier allows no running box (held or denied) is refused before a verification sandbox starts, and the verification records a failed outcome instead of retrying. Creating a sandbox environment, change or version is refused with 403 for a suspended organization. `acquireLease` now requires `sandboxPlanLimits`; a caller that must bypass the limits passes the named opt-out `"unbounded_test_fixture"`.
+- 7b590d3: New self-serve organizations (first and additional) start held when they arrive as a farm (rule `email-cluster-v1`, migration 1489), with a mode per leg in the signup network velocity settings:
+
+  - Burst (`burstMode`, enforce): four setups within ten seconds through the same shared relay, or with the same mail domain group and the same signup network. Bursts that share only a network, or only a company or academic domain (a workshop, classroom or office onboarding), and bursts of unrelated domains are only observed.
+  - Denied domain (`deniedDomainMode`, enforce): two denied organizations in the last 30 days on the same company or personal-relay domain; an academic domain is only observed.
+  - Domain (`emailDomainMode`, observe): three owners with one company or personal-relay domain within an hour.
+
+  Per-person subdomains of addy.io, anonaddy, 33mail and dynamic DNS hosts (DuckDNS, No-IP, Dynu, FreeDDNS and similar) group on the full subdomain; a burst through one such provider counts like one shared relay, and one denied organization on such a name holds the next.
+
+  Only a keyed hash of the domain is stored. Public providers and shared relays (Apple private relay, DuckDuckGo, Firefox Relay, SimpleLogin) never group on the domain or denied legs, academic domains never group on the domain leg, and reserved test domains never count.
+
+  An unpaid organization in its first day in which no turn was ever started gets 15 box-minutes (`youngTurnlessBoxSeconds` in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`). Past it, the reaper drains a box no turn holds once nothing on it was active for `youngTurnlessIdleMs` (5 minutes; `compute_turnless`). Running commands and Browser/ComputerSessions are never cut off. A box that is not running does not start again without a turn (`young_turnless`), and starting a chat always works and lifts the bound.
+
+- 7b590d3: Migration 1490 grants the runtime EXECUTE on the unpaid sandbox fleet counts that 1486 created withheld, so the unpaid fleet running cap, the pressure cap and the daily unpaid box-time budget apply at admission. Readiness now requires the grant. It must reach production only in a release after the one that contains 1486: the previous binary rejects an unknown granted definer.
+- Updated dependencies [c5a628c]
+- Updated dependencies [6581a0f]
+- Updated dependencies [60f6dea]
+- Updated dependencies [7b590d3]
+- Updated dependencies [ea75565]
+  - @opengeni/config@6.29.0
+  - @opengeni/codex@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/codemode@6.29.0
+  - @opengeni/contracts@6.29.0
+  - @opengeni/network@6.29.0
+  - @opengeni/observability@6.29.0
+  - @opengeni/subscriptions@6.29.0
+
+## 6.28.0
+
+### Minor Changes
+
+- 4ef5ef6: Operators can now see turns parked waiting for subscription capacity. A turn that finds no account with capacity (a usage limit or no eligible account) parks as its chat's active turn, so `opengeni_turns_queued_by_hold{hold="waiting_capacity"}`, which counts only prompts queued behind it, read 0 while turns waited for hours. The control worker now publishes `opengeni_turns_waiting_capacity{provider}`, the turns parked right now that run as soon as capacity returns, by the provider they wait on (`codex`, `claude`, `xai`; 0 when none), and `opengeni_turns_waiting_capacity_oldest_age_seconds{provider}`, the seconds since the oldest of them parked. A wait in a paused or stopped chat (its own Pause or Stop, an ancestor's or the workspace's) or one the capacity reconcile would supersede is not counted. The worker logs `Turn started waiting for subscription capacity` when a turn parks and `Turn stopped waiting for subscription capacity` (with `outcome`, `reason` and `waitedSeconds`) when capacity returns or the wait is superseded.
+
+  Migration 1485 extends the already granted `opengeni_private.summarize_queued_turns_by_hold()` with these rows (an earlier worker ignores them), so a normal deploy publishes the gauges with no further migration. The summary now reads inside the session inventory window, and `subscription_capacity_waiters` and `workspace_inference_controls` gain the owner-only inventory read policy sessions and turns already have: under a database owner that does not bypass row security, the queued-turn split also counts queued turns and workspace pauses it used to miss. `@opengeni/db` exports `summarizeTurnHolds`, `summarizeCapacityWaitingTurns` and `CAPACITY_WAITING_TURN_PROVIDERS`, and a resumed or superseded capacity reconcile reports when the turn parked.
+
+### Patch Changes
+
+- e09a38b: Unpaid sandboxes are now bounded across the whole fleet, not only per organization and person, so many new accounts cannot add up to a large fleet. All unpaid organizations together share a running-box cap (default 40) and a daily box-time budget (default 300 box-hours per UTC day); an unpaid organization in its first 24 hours runs one box and gets 6 box-hours; and when more than 50 boxes of every plan are warm, unpaid boxes are capped at 15 until the warm count stays below 40 for 15 minutes. A refused start says the shared free capacity is busy (`sandbox_capacity_unpaid_busy`); an agent turn fails with that message instead of retrying, and a turn already on a running box keeps working. Unpaid admissions fail closed when the fleet cannot be read. Paid, Enterprise, host-provisioned and credit-buying organizations are never counted or limited.
+
+  Values are runtime settings in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`, separate from the plan limits; unknown fields are ignored, so it can be set during a rolling deploy. The reaper records the fleet's state as metrics, with a page while the daily budget is spent. The running caps (including the pressure cap) and the daily budget read a new database function (migration 1486) that a later release grants; until then the young-organization limits apply, and pressure only with a cap of 0.
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+- Updated dependencies [e09a38b]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/codemode@6.28.0
+  - @opengeni/config@6.28.0
+  - @opengeni/codex@6.28.0
+  - @opengeni/observability@6.28.0
+  - @opengeni/network@6.28.0
+  - @opengeni/subscriptions@6.28.0
+  - @opengeni/xai-subscription@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- afcb2d6: `goal_update` with the goal's own text, success criteria and policy is now an idempotent no-op: it writes no revision, proposal or event and returns `outcome: "unchanged"` with a plain message, instead of failing on the objective-revision trigger. The files and Knowledge MCP surfaces now share the first-party guard that turns raw database errors into typed tool results, which name the kind of refusal (conflict, missing reference, broken data rule, value too long, not allowed) and log the error server-side only.
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/codemode@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/observability@6.27.1
+  - @opengeni/network@6.27.1
+  - @opengeni/subscriptions@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- c3ca657: A parent no longer repeats its final answer when a child's result arrives after the parent already read it in a turn that was recovered from an interrupted attempt. The worker now tells the first-party server the model's call id for each direct tool call, the read record keeps it, and the turn's completion counts the read when its durable history holds that call's output.
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- d85f57f: Finishing owed model-usage ledger writes no longer scans the usage ledger. The check that a recorded response is already settled now looks its completion key up in the ledger's unique index under the runtime role's row-level security, so it costs a few milliseconds per session however large the ledger is. Before, PostgreSQL could not use that index under row-level security and scanned every usage row the tenant could see for each response, which took minutes per idle, failure or worker-death boundary and could occupy every database connection of the control worker, stalling turn starts across the deployment.
+- d51e6e5: A Steer no longer lets a later message be answered before one sent earlier. Steering a queued message, or sending a new message as a Steer, used to move it to the front of the queue. When nothing was running yet, that turn started first and answered without ever seeing the earlier message, which then ran on its own afterwards. A Steer now keeps the order messages were sent in. The running turn, and each message still waiting ahead of the Steer, hands over to it before its first model request, so the agent reads every message up to the Steer, in order, before it answers. A pending Agent Steer still runs ahead of queued messages, but no longer lets a human Steer skip an earlier human message. Only an explicit queue Move changes the order.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codemode@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/subscriptions@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- b6b3579: Less waiting between a model response and the next model request. A tool's result is now recorded as soon as its response's usage and tool calls are saved, instead of waiting for that response's billing writes and history checkpoint; the next model request still waits for both. The task usage receipt that the saved usage event already records is no longer written a second time, and the model-call slot is released before the response's history checkpoint, which the next request still makes durable before it is sent.
+
+  Recovery of owed model usage no longer counts a response twice against a task's usage limit when its provider response id is stored encoded (one containing a lone surrogate or starting with the lossless codec's prefix), and such a response is no longer listed as owed again after its ledger is settled.
+
+- 47eb375: One verified account is now one connection, on every backend. Connections record a server-owned `account_identity_key` (the integration and the verified provider account), and the database allows one live connection per organization, owner and key, so a racing or legacy writer can no longer save a second connection to the same account; it fails as "already connected" instead. OAuth MCP logins, Nango connections and provider OAuth connections (personal GitHub and others) set it.
+
+  Opengeni also no longer pays for two Nango connections for the same account. When a person connects the same verified account to the same Nango integration in several organizations, every organization's row now points at one shared Nango connection, and that connection is deleted in Nango only when the last row referencing it is gone. Reconnects, refused or failed connect attempts and disconnects release the replaced connection through the same reference check, and the worker now sweeps Nango every 15 minutes: for connections this release made (tagged with the deployment), it merges leftover duplicates, deletes abandoned and cascade-orphaned connections, and deletes connections whose refresh has failed for 24 hours. Older, untagged connections are left to `integrations:nango orphans`. Disconnecting a Nango-managed Google app still does not revoke the grant at Google, because Nango's OAuth client is shared across the person's connections.
+
+  Email accounts are matched case-insensitively, and scopes Nango could not report never move another organization's connection onto a narrower one.
+
+  Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
+
+  While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+
+- 5e3441a: Adding a column during a rolling deploy no longer fails requests on pods still running the previous release. Postgres refuses a prepared `select *`, `table.*` or `returning *` statement whose row gained a column ("cached plan must not change result type", SQLSTATE 0A000); a transaction refused this way is now repeated, and the refusing connection forgets all of its prepared statements so it is refused at most once. Statements sent together on one connection outside a transaction no longer hang when such a refusal is repeated. During the 6.25.0 rollout this caused about 25 failed requests while migration 1477 added a column to `sandbox_leases`.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/network@6.26.0
+  - @opengeni/subscriptions@6.26.0
+
+## 6.25.0
+
+### Minor Changes
+
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+
+### Patch Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- 43435d5: Connected-command output release sweeps no longer reread output that cannot be released yet. When a command's runner is offline, its output is due again after its age since exit (at least 30 seconds, at most 5 minutes) instead of being checked by every claim, and it is still released once the runner returns. A final output acknowledgement that the runner keeps answering as retained now backs off (30 seconds, doubling to 5 minutes) instead of retrying every reaper period. Foreground command completions no longer take the fenced command lookup or write anything; only runner processes with a matching background command (or one recorded before this release) do.
+- 61abc98: Opengeni Console on its own host now signs in with the person's Opengeni account on the app host: signed in to the app, they reach Console without a second sign-in; signed out, the app's sign-in runs first (email, Google, GitHub and passkeys) and brings them back to the Console page and organization they were opening. The app hands Console a single-use code that expires in sixty seconds, is stored only as a hash, and is bound to the person, a verifier in a host-only Console cookie and a configured Console origin; Console redeems it for its own session (`/v1/console-sign-in/start`, `/authorize`, `/callback`) and records each handoff in the audit log as `auth.console_sign_in_handoff`. Console's Sign out waits on a signed-out page with Continue, so it never signs straight back in. Console's own email and Google sign-in stay available as a fallback. No new settings; the handoff is off in the `dual` and `broker` browser session-set modes.
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- 7f09ad6: Migration 1479 grants the runtime EXECUTE on the organization-wide sandbox counts that 1475 created withheld, so the per-organization, per-member and running-box plan limits apply at admission. Readiness now requires the grant. It must reach production only in a release after the one that contains 1475: the previous binary rejects an unknown granted definer.
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [43435d5]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/codemode@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/subscriptions@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- f041392: A viewer can no longer keep unlimited sandboxes running with no task. Opening a desktop, terminal or file editor starts a sandbox, and a heartbeating viewer kept it warm indefinitely; under `usage_only` warm billing that compute was free, so scripted accounts could hold hundreds of boxes. A workspace now keeps at most `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` boxes (default 3, `0` = unbounded) warm with only viewers attached; a viewer that would add one more gets HTTP 429, which the web client already shows as the viewer cap. Joining a box a task or another viewer already holds is unaffected. When the monthly warm allowance (`OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE`) is exhausted, viewers on boxes with no running task are now detached on their next heartbeat so those boxes drain, instead of staying warm until the viewer closes; boxes a task holds keep running.
+
+  Organizations now also get sandbox limits by subscription plan, counted across every workspace and member (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`). Defaults: Free 2 viewer-only boxes per organization and 1 per person, Pro 10/3, Max 30/5, Enterprise unbounded; a Free organization whose promotion decision is `held` or `denied` keeps none. Each plan also caps running boxes, including those agent turns hold (Free 3, Pro 20, Max 50): a turn that needs a new box beyond it waits for a slot, retrying every minute without holding a worker, instead of starting one. The organization-wide counts use a new database function (migration 1475) whose runtime grant follows in a later release; until then only the zero limits and the per-workspace viewer limit apply.
+
+- e4c5c29: Free-credit farm detection now sees organizations created through the legacy `POST /v1/organizations` route, and counts the networks new owners sign in from. That route writes the same self-serve setup receipt and Free eligibility as organization onboarding but never passed the signup network, so the per-network rate limit, the velocity rule and its observations never saw it; a farm used it for 664 organizations from 52 addresses in one evening without a single hold. The route now records the trusted client network, applies the same rate limit (HTTP 429) and evaluates the new and recent same-network organizations after commit. The velocity rule (`ip-velocity-v1`) also counts, per exact network an owner signed in from around setup, the new organizations whose owners signed in from it around their own setup, and holds at the existing threshold (rule `ip-velocity-sign-in-v1`), so a setup without a signup network or from a rotating address is still caught. Same mode, window and threshold; manual decisions and operator releases kept; invited members never counted; prefixes alone never hold; keyed hashes only; bounded and fail-open.
+- Updated dependencies [f041392]
+- Updated dependencies [5fd2c21]
+  - @opengeni/config@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/codemode@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/subscriptions@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 0ad29b9: Approving a tool call that changes connector permissions no longer stops the session. When an approved call, such as an update of the GitHub action approvals, changed connector permissions while its turn was running, the turn's next step refused to continue with "conflicts with a different or closed ownership chain". A running turn now keeps the permissions it started with when it picks up new messages or replays its claim, and the change applies from the next turn.
+- 8924854: Connecting an API integration (OpenAPI, GraphQL or built-in definition) no longer fails with a 500 when another person in the workspace already has a personal instance of it at an older revision. A new revision moves every instance to it, and the facet binding check looked up the other person's personal Connection as the caller, who cannot see it; an update that keeps a binding's Connection and tenant is no longer checked again (migration 1453). Inserts and Connection changes are checked as before.
+
+  A failed preview or install in Connect now frees the attempt, so "Add selected tools" can be tried again instead of answering 409 "in flight or uncertain". Only operations that read their source and write in one transaction opt in (`releaseClaimOnFailure`); operations with provider effects keep their claim.
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+- 8924854: Outlook Mail, Outlook Calendar, Outlook Contacts and OneDrive now offer a reviewed set of tools with hand-written names and descriptions (25, 20, 13 and 19 operations, down from 150, 177, 76 and 452), instead of every Graph operation under their path prefixes. Retained operations keep their tool ids. When an install moves to a new revision (including other people's instances moved by someone else's install), one that had every tool gets every tool of the new revision, and one whose chosen tools left the set gets the generic tools so those operations stay reachable; other choices are kept as they were. Free/busy schedules no longer need approval (they only read).
+
+  A reviewed definition can opt in to `genericPathScope`: a find tool searches the reviewed document's operations under its prefixes, and a read tool (GET) and a change tool (other methods, Ask by default) call one of them by its concrete path, which must match an in-scope operation segment by segment. The four Graph definitions above opt in with their earlier prefixes, so rare operations stay reachable.
+
+  Reviewed allowlist entries accept `put` and `delete`, a reviewed `summary` and `operationId`, and a `requestPath` naming other path parameters than the provider's (unnamed ones are dropped, new ones described with `pathParameterDescriptions`).
+
+  Every Microsoft Graph definition now reads a commit-pinned Graph OpenAPI document checked against its SHA-256 (`source.pinned`), not msgraph-metadata's moving master branch, so upstream changes no longer create new revisions on their own. `bun scripts/graph-openapi-pin.ts --diff <commit>` shows the operation changes before the pin is moved.
+
+- 1b544b0: Session event writes wait less for database locks. Session lock reads that do not use the session's stored inputs no longer fetch them, and background-command output bookkeeping now locks only its own command row instead of queueing behind, and blocking, the session's event appends. Session deletion, the only frequent holder of the exclusive workspace-control lock, is much faster because every foreign key its cascade checks now has a supporting index.
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [24104b1]
+- Updated dependencies [c0248a5]
+- Updated dependencies [477f1db]
+  - @opengeni/codex@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/codemode@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/subscriptions@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
+## 6.23.0
+
+### Minor Changes
+
+- c0089e1: Agents legacy drop: the `bot_templates` and `slack_agents` tables and their trigger functions are dropped, `agent_slack_installs.install_workspace_id` is required (a row still missing it is repaired from its Slack connection's workspace first), and the per-agent unique keys on Slack user states and intro records are gone, so the same Slack person or channel in two installations of one agent gets a record in each. "Anyone in the organization" is read only from `agents.organization_access`, backfilled from the installations' `open` (still written, for the previous release). Every agent revision's older First message is joined into its Instructions ("When a chat starts:"), and the revision check allows Instructions up to 40,022 characters for that; `first_message` stays, empty. Apply it only after the release with the agents contract (#7555) runs everywhere.
+
+  Breaking for direct `@opengeni/db` users: removed the Drizzle `botTemplates` and `slackAgents` tables, `AGENTS_LEGACY_TRIGGER_ROUTINES`, the `agentsLegacy` retiring-feature entry and `agentInstructionsSql`; `AgentRecord.hasFirstMessage`, `AgentContent.firstMessage`/`stored` and `AgentRevisionRecord.firstMessage` are gone, and `firstMessage` is optional on create and update inputs. The API's `firstMessage`/`hasFirstMessage` fields, the bot template and Slack agent endpoints, their MCP tools, `?botTemplateId=` links and `slack-agent:<id>` principals keep working on top of agents.
+
+### Patch Changes
+
+- 9dd96b0: Restoring a large workspace archive no longer multiplies worker memory. Byte copies used `Uint8Array.from(buffer)`, which Bun runs element by element through its generic iterator path when the source is a Node Buffer (the result of base64 decoding, file reads, object storage and Postgres bytea). That used about 16 times the archive size in transient memory and was about 100 times slower. A cold restore did it at least twice, so restoring a workspace archive of a few hundred MB could take a worker past 15 GB and kill it. Byte copies now use `new Uint8Array(buffer)`, which makes the same copy at native speed. Archive base64 is decoded once into a view of the decoded bytes. Canonical form is now checked from the decoded length and the final four characters instead of re-encoding the whole archive. Object-storage restores verify the fetched bytes directly instead of decoding the base64 copy again. Native snapshot receipts are recognised from their ASCII prefix without decoding a whole tar archive as text. Restoring a 48 MB archive now raises peak memory by about 2 times the archive size instead of 37 times, and takes 0.2 seconds instead of 3.4 seconds.
+- 1d7e007: Migrations 1419 to 1430 drop the seven retired Knowledge sync tables (`knowledge_source_sync_states`, `knowledge_source_sync_wakes`, `knowledge_source_sync_object_observations`, `knowledge_source_sync_item_outcomes`, `knowledge_source_sync_index_obligations`, `google_drive_object_acl_evidence` and `google_drive_object_acl_principals`) and the `knowledge_source_index_wake()` trigger function. 1419 to 1429 first remove their foreign keys into surviving tables, one referenced table per migration, so no migration locks several busy tables at once. Runtime readiness no longer lists them. The scoped-knowledge provenance tables stay.
+
+  Upgrade order: deploy the release containing the Knowledge sync removal (Opengeni PR #6919, migration 1275) first, and only run these migrations once every binary that can still run against the database, including any rollback target, contains it. Do not skip that release, and do not roll back to an earlier one after these migrations have run.
+
+- 892b27b: An agent attempt's request no longer fails with HTTP 500 when the attempt's turn moves on while the request is in flight. This covers the first-party MCP routes (`/mcp`, `/mcp/docs`, `/mcp/files`), the `/files/*` and artifact routes, and every other workspace route that enters the agent's request context. The live-attempt check passed, but the attempt's learning-policy read then went through the database's own attempt fence, which refused ("Knowledge turn attempt is stale"), and that refusal escaped as an internal error. The same happened when a route's own file-owner check found the attempt stale after the request context was entered. These cases now get the same 403 `agent_attempt_caller_stale` answer as any other stale attempt.
+- cfde5ba: Retry of a failed turn that was resumed by an approval or a human-input answer now continues from the conversation, where the decided tool call and its result already are, instead of failing with "Open suffix resume has no interruption rows".
+- 37c35ed: Task-note tools now explain a refused call instead of returning the raw database error. A save into a task tree that already holds its 500 active notes says so and points to task_note_archive; an unknown note, a reused operation ID, a note that is no longer active, a superseded attempt, invalid input and a brief database outage each get their own typed error code and next step. Any other first-party tool that fails with a raw database error now returns a short typed error with its SQLSTATE, and never the query, its parameters or the caller's own text.
+- 32a19a3: Microsoft Teams (with workspace routing): addressing an agent by name (`Name: …`, `Name, …` or `+name`) or the main assistant (`<App name>: …`) now sends that one message, like `in <Workspace>: …`, and no longer changes the chat's stored choice; only **switch** does. A one-off to an agent continues the person's chat with that agent and keeps its "**Agent** · Workspace" header; an app-name one-off's replies carry the "**Workspace**" header. A name on its own no longer switches the chat: it replies how to ask once, or to send **switch <name>** (or **switch** and pick it when a workspace has the same name). An app-name message with no default workspace to go to keeps only the message on the switch card. Feedback on an organization agent's reply, recorded as the agent, now keeps the person who rated it in the report's server-only diagnostics (`onBehalfOf.subjectId`; `createFeedback` accepts `onBehalfOf`).
+- 621f4d2: A turn whose worker dies while it is restoring a workspace from an object-storage archive now gets the same workspace back on retry. The global lease reaper resets such an expired warming lease with `opengeni_private.warming_reset_resume_state_v2`, which only recognised archives held inline in the resume state. Portable tar archives are stored in object storage and referenced by `workspaceArchiveRef`, so the reset erased the archive pointer and the next turn silently started on an empty workspace while the archive object was still intact. Migration 1407 makes the routine keep inline and object-referenced archives, both archive slots and every recovery marker, matching the workspace-scoped reaper, which now shares one helper (`warmingResetResumeState`). A lease that records a published archive generation but has lost its archive pointer now fails closed as unrecoverable, so the next turn is blocked with the workspace recovery choices instead of continuing on an empty workspace.
+- 92a5650: A turn interrupted by a turn worker shutdown, such as a rolling deploy, now resumes on another worker within seconds instead of stalling for about five minutes. This fixes two separate causes.
+
+  First, when the shutdown cancelled the turn while a Connected Machine command was still running (for example a generated-file download or a slow `exec_command`), finalization waited for the machine to prove the command had exited. A slow or silent machine could not do that before the worker's force stop. The worker then died without settling the activity, writing its quiescence receipt or releasing its subscription lease, and recovery waited for the two-minute heartbeat timeout. Now, when the turn ends because its worker is shutting down, each still-running machine command goes to the session's command ledger with a stop request (the custody already used for machines that stop answering), and finalization continues without waiting. Pause, Steer and normal completion still wait for exact exit proof.
+
+  Second, a dead attempt's subscription turn lease was held until its five-minute TTL expired, so the next generation was refused with `subscription_lease_busy`. A newer generation of the same turn can now take over the lease once the holder's attempt has written its quiescence receipt, which proves it can no longer use the account. Renewal, current-lease checks and usage finalization still use the lease's own expiry.
+
+- f0cc559: Listing workspace files now costs about one page instead of the whole account. The listing filtered every ready file in the account with one OR predicate (shared files in this workspace, or the reader's private files that reach it), so Postgres could not use the workspace creation-time index; it ran the Google Drive authorization function on every row, then sorted and limited. That function writes and deletes a runtime row per call, so an account with about 100k files took many minutes for a page of five. The listing now reads newest-first candidates from separate ordered index walks (shared files, the reader's own private files in this workspace, and the reader's own private files that reach it from elsewhere), merges them, and runs the authorization only on the page's candidates, fetching more only when a candidate is rejected. Visibility rules and the cursor format are unchanged. Four partial indexes are built concurrently, and a CHECK records that a private file has exactly one owner (added NOT VALID, then validated). A cancelled or abandoned files request now cancels its database query and returns 499 instead of leaving the query running.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/codemode@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/config@6.23.0
+  - @opengeni/observability@6.23.0
+  - @opengeni/network@6.23.0
+  - @opengeni/subscriptions@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- 1f25da5: Approval run states are checked against their size limits in one linear pass in the worker before any database work, on save and on read. The database no longer counts their JSON nodes with `jsonb_path_query`, which took quadratic time: a run state with a few hundred thousand array elements cost seconds to minutes of database CPU, partly while the session row was locked.
+- 6597d38: The Console sessions list loads again for organizations with many sessions: each page's per-session cost is now one lookup by the credit ledger's idempotency index instead of a full ledger scan per session, which exceeded the Console's 20 s query limit. Spend per organization key also reads the ledger once instead of once per managed workspace. Totals are unchanged.
+- c36183c: Disconnecting a Google account (Gmail, Drive, Calendar or a Google integration) now ends Opengeni's access at Google too: the disconnected connection no longer keeps any Google tokens, and the grant is revoked with Google once the disconnect is saved. Google revokes a grant for every connection of that Google account, so while another of your connections of the same account is still connected, the grant stays at Google and only the disconnected connection's tokens are deleted. When Google can't be reached, the stored tokens are still deleted. Other services disconnect as before.
+
+  `revokeConnection` accepts `replacementCredentialEncrypted` to replace the stored credential in the same write.
+
+- 0d72a8b: Count the JSON nodes and object properties of session history items in linear time. The counts previously came from row-producing `jsonb_path_query('strict $.**')` scans, which Postgres serves in quadratic time for large items; they now come from `jsonb_path_query_array` with the same results and the same history limits.
+- 07ecbcc: Skills whose SKILL.md description is a multi-line YAML block install again: the installed Skill's summary folds line breaks into spaces, and any remaining invalid Skill metadata returns a 422 instead of a server error. Chat titles now work on chat-API routes that report unset usage counters as null, and a failed title logs a content-free reason (the failing stage, error name and provider status or code).
+- c105ed2: Microsoft Teams feedback (thumbs up or down) on replies in routed 1:1 chats, including Personal and other non-home workspaces, and in chats with agents anyone in the organization may use, is now recorded instead of being refused as `feedback_not_permitted`. It is authorized like the chat itself: the reacting person must be the linked owner of that chat, with live organization membership and access to its workspace (organization-agent chats record as `teams-agent:<agentId>` while the agent is still open to them). `TeamsDeliveredReply` adds the chat's `workspace_id`, `actor_id` and `agent_id`. Linking a Teams account with workspace routing now also refuses an agent acting for the person; only the person signed in to Opengeni themselves can link.
+- Updated dependencies [d50092b]
+- Updated dependencies [07ecbcc]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/observability@6.22.0
+  - @opengeni/codemode@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/network@6.22.0
+  - @opengeni/subscriptions@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Minor Changes

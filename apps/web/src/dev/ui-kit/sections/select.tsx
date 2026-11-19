@@ -161,7 +161,7 @@ function ForkDemo({ variant }: { variant: SelectMenuVariant }) {
               value={model}
               query="astra"
               searchPlaceholder="Search models"
-              activeValue="codex:gpt-6-astra"
+              activeValue="codex:gpt-6.2-astra"
             />
           </>
         )}

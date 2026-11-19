@@ -8,7 +8,6 @@ import { createDb, type DbClient } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import {
-  AGENTS_LEGACY_TRIGGER_ROUTINES,
   assertRuntimeDatabasePosture,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
@@ -54,10 +53,6 @@ realTest(
     await database!.admin.unsafe(
       `DROP TABLE IF EXISTS ${names.map((name) => `"${database!.schema}"."${name}"`).join(", ")} CASCADE`,
     );
-    // The retired Knowledge-source sync tables take their wake trigger with them.
-    await database!.admin.unsafe(
-      `DROP FUNCTION "${database!.schema}".knowledge_source_index_wake() CASCADE`,
-    );
     await database!.admin.unsafe(`
     DROP FUNCTION opengeni_private.subscription_provider_cutover_committed(text) CASCADE;
     DROP FUNCTION opengeni_private.subscription_codex_cutover_v1_active() CASCADE;
@@ -74,11 +69,6 @@ realTest(
       await database!.admin.unsafe(
         `DROP FUNCTION IF EXISTS "${database!.schema}".${signature} CASCADE`,
       );
-    }
-    // The agents legacy drop removes the legacy tables' trigger functions with
-    // them, so this release must stay ready without them too.
-    for (const signature of AGENTS_LEGACY_TRIGGER_ROUTINES) {
-      await database!.admin.unsafe(`DROP FUNCTION "${database!.schema}".${signature}`);
     }
     const posture = await assertRuntimeDatabasePosture(client!.db, options);
     expect(posture.retiringFeatureTablesPresent).toEqual({

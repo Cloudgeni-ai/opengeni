@@ -51,7 +51,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
- * control worker's content-free queued-turn hold summary (0988), the API's
+ * control worker's content-free queued-turn hold summary (0988; since 1485
+ * also the turns parked waiting for subscription capacity), the API's
  * inventory of browsers an agent session holds (1002), the only writer of
  * the EU-only inference setting and its history (1060), the secret history
  * scrub's reader and cell writer (1091), the subscription
@@ -66,7 +67,12 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * compact (1240), and the session storage pass's inventory of sessions with
  * content to collect and its collector of unreferenced content blobs (1359),
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
- * archived (1404).
+ * archived (1404), the organization-wide sandbox counts behind
+ * plan-tiered sandbox limits (1475), and the deployment-wide check of
+ * which Nango connections a live connection still stands for (1482), the
+ * unpaid sandbox fleet counts behind the fleet limits (1486), and the
+ * deployment-wide listing of live Nango rows' owners for the Nango sweep
+ * (1487), and the managed warm box count fleet pressure reads (1492).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -103,6 +109,12 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+  "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
+  "nango_connections_in_use_v1(text[])",
+  "nango_live_connection_owners_v1(text, text, text, integer)",
+  "sandbox_unpaid_fleet_v1(uuid, boolean)",
+  "sandbox_fleet_warm_boxes_v1()",
+  "discard_refused_session_create_v1(uuid, uuid)",
 ] as const;
 
 /**
@@ -140,7 +152,16 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
  * 1404 withheld the inventory of cold sandboxes whose chats are all archived
- * and 1407 grants it.
+ * and 1502 grants it.
+ * 1475 withheld the organization-wide sandbox counts and 1479 granted them.
+ * 1482 withheld the check of which Nango connections a live connection
+ * stands for and 1487 the listing of live Nango rows' owners; 1499 granted
+ * both.
+ * 1486 withheld the unpaid sandbox fleet counts and 1490 granted them.
+ * 1492 withholds the managed warm box count; until it is granted, fleet
+ * pressure reads the warm count of every lease, self-hosted ones included.
+ * 1501 withholds the discard of a refused keyed session create; until it is
+ * granted, such a shell stays (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -151,6 +172,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
+  "sandbox_fleet_warm_boxes_v1()",
+  "discard_refused_session_create_v1(uuid, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -178,7 +201,14 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
-  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
+  "summarize_queued_turns_by_hold()": [
+    "session_turns",
+    "sessions",
+    "workspace_inference_controls",
+    "subscription_capacity_waiters",
+    "session_turn_attempts",
+    "session_goals",
+  ],
   "list_agent_held_browser_sessions(integer, bigint)": [
     "browser_sessions",
     "browser_session_associations",
@@ -270,6 +300,28 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)": [
     "sandbox_leases",
     "sessions",
+  ],
+  "organization_warm_sandbox_counts_v1(uuid, text, uuid)": [
+    "sandbox_leases",
+    "sandbox_lease_holders",
+    "workspaces",
+  ],
+  "nango_connections_in_use_v1(text[])": ["connections"],
+  "nango_live_connection_owners_v1(text, text, text, integer)": ["connections"],
+  "sandbox_unpaid_fleet_v1(uuid, boolean)": [
+    "sandbox_leases",
+    "usage_events",
+    "opengeni_private.modal_inventory_read_capabilities",
+  ],
+  "sandbox_fleet_warm_boxes_v1()": [
+    "sandbox_leases",
+    "opengeni_private.modal_inventory_read_capabilities",
+  ],
+  "discard_refused_session_create_v1(uuid, uuid)": [
+    "sessions",
+    "session_events",
+    "session_turns",
+    "session_create_idempotency_guard",
   ],
 };
 
@@ -921,20 +973,6 @@ export const RETIRING_FEATURE_TABLES = {
     "workspace_variable_set_variables",
     "workspace_variable_sets",
   ],
-  // Migration 1275 removes the retired Knowledge-source sync rows and stops
-  // every SQL routine from reading these tables; a later release drops them.
-  knowledgeSourceSync: [
-    "google_drive_object_acl_evidence",
-    "google_drive_object_acl_principals",
-    "knowledge_source_sync_index_obligations",
-    "knowledge_source_sync_item_outcomes",
-    "knowledge_source_sync_object_observations",
-    "knowledge_source_sync_states",
-    "knowledge_source_sync_wakes",
-  ],
-  // The agents contract (1380 to 1399): nothing reads or writes the legacy bot
-  // templates and Slack agents tables any more; the legacy drop removes them.
-  agentsLegacy: ["bot_templates", "slack_agents"],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
   Object.values(RETIRING_FEATURE_TABLES).flat(),
@@ -1899,21 +1937,6 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
  */
 const AGENTS_TRIGGER_ROUTINES = ["guard_session_agent_id_immutable()"] as const;
 
-/**
- * Agents trigger functions bound to the legacy tables: 1243's sync functions
- * (their triggers were dropped by 1397) and 1380's installation workspace
- * fill. Checked like any owner-internal helper while present; the legacy drop
- * removes them with the tables, so readiness also accepts them absent.
- */
-export const AGENTS_LEGACY_TRIGGER_ROUTINES = [
-  "sync_agent_from_bot_template()",
-  "sync_agent_from_slack_agent()",
-  "fill_agent_slack_install_workspace()",
-] as const;
-const AGENTS_LEGACY_TRIGGER_ROUTINE_SET: ReadonlySet<string> = new Set(
-  AGENTS_LEGACY_TRIGGER_ROUTINES,
-);
-
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "guard_session_agent_creation_provenance()",
@@ -1938,7 +1961,6 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
-  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
@@ -1971,7 +1993,6 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
-  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
@@ -2015,13 +2036,13 @@ export const FORCE_RLS_TABLES = [
   "billing_auto_top_up_mutations",
   "billing_auto_top_up_operations",
   "billing_auto_top_up_settings",
+  "billing_card_verifications",
   "billing_credit_alert_settings",
   "billing_credit_notification_deliveries",
   "billing_credit_notification_recipients",
   "billing_credit_notifications",
   "billing_customers",
   "billing_subscription_operations",
-  "bot_templates",
   "browser_identities",
   "browser_revision_components",
   "browser_revisions",
@@ -2048,6 +2069,7 @@ export const FORCE_RLS_TABLES = [
   "capability_plugins",
   "capability_skill_facets",
   "capability_skill_files",
+  "card_verification_gate_revisions",
   "channels",
   "claude_capacity_waiters",
   "claude_credential_leases",
@@ -2128,8 +2150,6 @@ export const FORCE_RLS_TABLES = [
   "github_installation_repositories",
   "github_installation_repository_removals",
   "github_installations",
-  "google_drive_object_acl_evidence",
-  "google_drive_object_acl_principals",
   "governed_learning_activation_receipts",
   "governed_learning_activation_undo_receipts",
   "governed_learning_decision_receipts",
@@ -2186,11 +2206,6 @@ export const FORCE_RLS_TABLES = [
   "knowledge_review_batches",
   "knowledge_source_acl_versions",
   "knowledge_source_objects",
-  "knowledge_source_sync_index_obligations",
-  "knowledge_source_sync_item_outcomes",
-  "knowledge_source_sync_object_observations",
-  "knowledge_source_sync_states",
-  "knowledge_source_sync_wakes",
   "knowledge_sources",
   "knowledge_sync_runs",
   "machine_metrics_latest",
@@ -2438,7 +2453,6 @@ export const FORCE_RLS_TABLES = [
   "slack_agent_update_recipients",
   "slack_agent_update_settings",
   "slack_agent_user_states",
-  "slack_agents",
   "slack_app_home_refreshes",
   "slack_ask_forms",
   "slack_bot_delete_operations",
@@ -2621,7 +2635,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "billing_credit_notification_deliveries",
   "billing_credit_notifications",
   "billing_customers",
-  "bot_templates",
   "browser_session_associations",
   "capability_catalog_items",
   "capability_component_owners",
@@ -2674,11 +2687,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "integration_oauth_clients",
   "integration_oauth_pending_states",
   "integration_oauth_state_nonces",
-  "knowledge_source_sync_index_obligations",
-  "knowledge_source_sync_item_outcomes",
-  "knowledge_source_sync_object_observations",
-  "knowledge_source_sync_states",
-  "knowledge_source_sync_wakes",
   "machine_metrics_latest",
   "machine_metrics_series",
   "machine_removal_operations",
@@ -2822,7 +2830,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "slack_agent_update_recipients",
   "slack_agent_update_settings",
   "slack_agent_user_states",
-  "slack_agents",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
   "slack_ask_forms",
@@ -2936,6 +2943,7 @@ export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, read
 export const RUNTIME_READ_ONLY_TABLES = [
   "billing_credit_notification_recipients",
   "billing_subscription_operations",
+  "card_verification_gate_revisions",
   "codex_turn_source_bindings",
   "company_profile_activation_events",
   "company_profile_heads",
@@ -3004,8 +3012,6 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "external_link_task_authorities",
   "external_link_turn_authorities",
   "feedback_submissions",
-  "google_drive_object_acl_evidence",
-  "google_drive_object_acl_principals",
   "host_mcp_resolver_operations",
   "host_mcp_task_authorities",
   "host_mcp_turn_authorities",
@@ -3061,6 +3067,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "auth_runs",
   "billing_auto_top_up_operations",
   "billing_auto_top_up_settings",
+  "billing_card_verifications",
   "browser_identities",
   "browser_session_retained_downloads",
   "browser_sessions",
@@ -4741,7 +4748,6 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
-    if (matches.length === 0 && AGENTS_LEGACY_TRIGGER_ROUTINE_SET.has(forbiddenRoutine)) continue;
     if (
       matches.length === 0 &&
       notYetCreatedTargetRoutines.has(forbiddenRoutine.slice(0, forbiddenRoutine.indexOf("(")))

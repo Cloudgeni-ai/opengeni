@@ -910,6 +910,7 @@ describe("computeRunners", () => {
     expect(runner.args).toContain("--warm-prepare=bun install --frozen-lockfile");
     expect(runner.args).toContain("--warm-every-s=1800");
     expect(runner.args).toContain("--warm-within-s=3600");
+    expect(runner.args).toContain("--warm-fetch-depth=1");
     expect(runner.args.some((a: string) => a.startsWith("--warm-branch"))).toBe(false);
     expect(runner.args).toContain("--cache-store=gs://example-cache/runners");
     expect(runner.args).toContain("--cache-url=https://runner-cache.example.com");
@@ -943,6 +944,22 @@ describe("computeRunners", () => {
     expect(pools.spec.ingress).toEqual([]);
     expect(container(manifests, "cc-opengeni-runners-light").args).not.toContain(
       "--cache-store=gs://example-cache/runners",
+    );
+  });
+
+  test("keep a warm template with every branch and tag in full for checkouts of depth 0", async () => {
+    const manifests = await render({
+      ...front,
+      computeRunners: {
+        pools: [
+          { ...pool, warm: { repo: "example-org/monorepo", fetchDepth: 0 } },
+          { ...pool, name: "deep", warm: { repo: "example-org/monorepo", fetchDepth: 50 } },
+        ],
+      },
+    });
+    expect(container(manifests).args).toContain("--warm-fetch-depth=0");
+    expect(container(manifests, "cc-opengeni-runners-deep").args).toContain(
+      "--warm-fetch-depth=50",
     );
   });
 

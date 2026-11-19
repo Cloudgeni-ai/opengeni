@@ -123,6 +123,7 @@ import {
   currentAgentLearningToolSelection,
   DraftTimelineAnnotations,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  renamedFirstPartyMcpToolSuccessor,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSkills,
   resolveBundledSkillSelection,
@@ -267,6 +268,7 @@ import {
   type AccessGrantAuthorization,
 } from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
+import { withPersonCreatorLabel } from "./session-creator-label";
 import { resolveMemberExecutionDefault } from "./member-execution-defaults";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
@@ -518,6 +520,8 @@ export function resolveFirstPartyMcpToolsForCreate(
  * `retained` names tools the caller may echo from its stored selection; those
  * stay deployment-filtered like any default, so a later policy change never
  * blocks an unrelated edit.
+ * A tool's old name from before a one-to-one rename stands for its successor,
+ * so clients built against an older contract keep working.
  */
 export function requireDeploymentFirstPartyMcpTools(
   requested: readonly FirstPartyMcpToolName[],
@@ -526,7 +530,15 @@ export function requireDeploymentFirstPartyMcpTools(
   hint = "",
 ): void {
   const permitted = new Set([...allowed, ...retained]);
-  const disallowed = [...new Set(requested.filter((tool) => !permitted.has(tool)))];
+  const disallowed = [
+    ...new Set(
+      requested.filter((tool) => {
+        if (permitted.has(tool)) return false;
+        const successor = renamedFirstPartyMcpToolSuccessor(tool);
+        return successor === undefined || !permitted.has(successor);
+      }),
+    ),
+  ];
   if (disallowed.length > 0) {
     throw new HTTPException(422, {
       message: `first-party MCP tools are disabled by deployment policy: ${disallowed.join(", ")}. Allowed tools: ${allowed.join(", ") || "(none)"}.${hint ? ` ${hint}` : ""}`,
@@ -1441,7 +1453,7 @@ export async function createAndStartSessionWithOutcome(input: {
     const { session: keyed, created } = keyedResult;
     if (!created) {
       const persistedPolicy = readTurnExecutionPolicyV1(keyed.metadata);
-      const finished = await finishStartSession(
+      const finished = await finishCreatedSessionShell(
         keyed.temporalWorkflowId
           ? {
               ...input,
@@ -1457,6 +1469,7 @@ export async function createAndStartSessionWithOutcome(input: {
                 : {}),
             },
         keyed,
+        "keyed",
       );
       return {
         session: finished.session,
@@ -1465,11 +1478,13 @@ export async function createAndStartSessionWithOutcome(input: {
         changed: finished.changed,
       };
     }
-    // A keyed shell whose start fails stays durable: a retry with the same key
-    // repairs it with the parameters it was first accepted with.
-    const finished = await finishStartSession(
+    // A keyed shell whose start fails for an unknown reason stays durable: a
+    // retry with the same key repairs it with the parameters it was first
+    // accepted with. A start the server refused is discarded instead.
+    const finished = await finishCreatedSessionShell(
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
+      "keyed",
     );
     recordCreatedSessionUsage(input);
     return {
@@ -1555,9 +1570,10 @@ export async function createAndStartSessionWithOutcome(input: {
     }
     throw repositoryRemovedHttpError(error);
   }
-  const finished = await finishNewlyCreatedSession(
+  const finished = await finishCreatedSessionShell(
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
     session,
+    "unkeyed",
   );
   recordCreatedSessionUsage(input);
   return {
@@ -1569,24 +1585,30 @@ export async function createAndStartSessionWithOutcome(input: {
 }
 
 /**
- * Start an unkeyed shell this call just inserted. If the start fails before
- * the first event or turn commits, the caller gets the error and has no way to
- * resume that session, so the bare shell is discarded instead of lingering as
- * a queued session nothing runs. A shell that did initialize (including an
- * outcome-unknown commit) is kept.
+ * Start a committed shell, discarding it when the start fails before the first
+ * event or turn commits and the caller could not resume it: always for an
+ * unkeyed shell, and for a keyed shell when the server refused the start (the
+ * request is answered with a 4xx). A refused start would only be refused again,
+ * so a keyed retry recreates the session and gets the same answer, and a
+ * corrected request may reuse its requested session id. A keyed shell whose
+ * start failed for any other reason stays for its retry to repair. A shell that
+ * did initialize (including an outcome-unknown commit) is kept.
  */
-async function finishNewlyCreatedSession(
+async function finishCreatedSessionShell(
   input: Parameters<typeof finishStartSession>[0],
   session: Session,
+  key: "keyed" | "unkeyed",
 ): Promise<Awaited<ReturnType<typeof finishStartSession>>> {
   try {
     return await finishStartSession(input, session);
   } catch (error) {
+    if (key === "keyed" && !sessionStartRefused(error)) throw error;
     try {
       await discardUninitializedSessionShell(input.db, {
         accountId: session.accountId,
         workspaceId: session.workspaceId,
         sessionId: session.id,
+        discardKeyed: key === "keyed",
       });
     } catch {
       // The original start failure is the actionable error; a shell that
@@ -1594,6 +1616,20 @@ async function finishNewlyCreatedSession(
     }
     throw error;
   }
+}
+
+/**
+ * A start failure that is a definite decision rather than an outage: an HTTP
+ * 4xx, or a typed refusal `createSessionForRequest` answers with one. Its
+ * initializer transaction rolled back, so nothing of the start committed.
+ */
+function sessionStartRefused(error: unknown): boolean {
+  return (
+    (error instanceof HTTPException && error.status >= 400 && error.status < 500) ||
+    error instanceof PersonalResourceAttachmentAcceptanceError ||
+    error instanceof AgentCommandAuthorityError ||
+    error instanceof NewSessionDraftConflictError
+  );
 }
 
 function recordCreatedSessionUsage(input: {
@@ -2039,7 +2075,7 @@ export async function requireQueuedTurnForApi(
  * Appends a `user.message` to an existing session and enqueues the resulting
  * turn, merging requested resources/tools into the session and waking the
  * workflow. Shared by the public events route and the first-party MCP
- * `session_send_message` tool so the two surfaces cannot drift. Callers own
+ * `session_queue_message` tool so the two surfaces cannot drift. Callers own
  * resource/tool validation and the per-message usage limit before calling.
  */
 type PostUserMessageTurnResult = {
@@ -2954,7 +2990,14 @@ async function createSessionForRequestInFileScope(
   // visibility: presence is read from the raw request because the Zod
   // defaults erase absent-vs-explicit, and the parent side comes from the
   // durable row rather than anything the caller sent.
-  const creationInitiator = creationInitiatorForGrant(grant);
+  // A person's work started outside the app (Slack, Teams, a Personal
+  // workspace grant, an API call for them) may carry no display label; freeze
+  // the one the app would, so the sidebar never shows an id fragment.
+  const grantCreationInitiator = creationInitiatorForGrant(grant);
+  const labeledCreator = await withPersonCreatorLabel(db, grantCreationInitiator.initiator);
+  const creationInitiator: FrozenCreationInitiator = labeledCreator
+    ? { ...grantCreationInitiator, initiator: labeledCreator }
+    : grantCreationInitiator;
   const scopeUser =
     creationInitiator.initiator?.kind === "subject" ? creationInitiator.initiator.subjectId : null;
   const sessionScope = resolveSessionCreateScope({
@@ -4230,7 +4273,7 @@ async function createSessionForRequestInFileScope(
                     ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
                   }
                 : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
-            grant.subjectLabel,
+            grant.subjectLabel ?? creationInitiator.initiator?.label,
           ),
         ),
     );
@@ -4610,7 +4653,7 @@ function sessionPromptBoundaryRequestHash(input: {
 
 /**
  * Full accept-user-message flow shared by the `user.message` branch of
- * `POST /sessions/:id/events` and the first-party MCP `session_send_message`
+ * `POST /sessions/:id/events` and the first-party MCP `session_queue_message`
  * tool: resource/tool validation, usage limits, the locked append + turn
  * enqueue, and usage recording. `toolsProvided: false` durably preserves an
  * Tool selection is durable session state and never rides a follow-up prompt.

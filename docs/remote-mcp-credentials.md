@@ -154,8 +154,13 @@ works for their messages only where they turned it on:
   a switch for each. The Personal workspace is always on. A workspace where
   they may not add their own things shows the switch off with the reason; a
   login that is on can always be turned off.
-- When a chat asks for a connector whose login the person added elsewhere, the
-  Connect card offers it with one click ("Use it here") instead of a new sign-in.
+- When a chat asks for a connector whose login is off here, or a connector not
+  set up in this workspace yet for which the person has one login of their own
+  (on here or not), the Connect card offers it with one click ("Use it here")
+  instead of a new sign-in. That sets the connector up for each person's own
+  account when it isn't yet, and turns the login on here only when it is off.
+  Where other people could use a shared connection, the card first asks who
+  can use it, and offers the login once the person chooses "Only me".
 - In a chat shared with the workspace, the owner sees one quiet line above the
   composer, "N personal connections in this chat", counting the accounts that
   are on. It opens a menu that says people in the workspace see what the agent
@@ -237,6 +242,15 @@ Drive and Atlassian duplicates saved under different clients before this rule
 keeps the one that refreshed most recently, since that proves its client still
 works; a login a Slack agent depends on is also left in place.
 
+A service's account check (its reviewed identity verifier) is read once more
+when the first read times out or fails briefly, within the same bounded
+budget, so one slow answer doesn't save a login without its account. Before a
+new, verified account is refused as `account_reconnect_required`, the person's
+live logins of that service whose account was never confirmed (at most three)
+are checked again with their own saved sign-in, and each confirmed account is
+recorded on its login; the connection is then decided from the stored logins
+as before, so a login that still can't be confirmed keeps the refusal.
+
 Google accounts also have a stable account ID. Gmail, Google Calendar and
 Google Drive sign-ins record Google's OpenID subject as `metadata.googleSubject`
 beside the verified email. They ask for `openid` as well as the service's
@@ -258,6 +272,38 @@ other signal (such as a
 send-as address, which proves only that someone once verified it) stands in for
 the ID, so a login whose address changed before it recorded the ID is removed
 and added again.
+
+The database holds the same rule for every backend. A writer that verified
+which provider account a connection is stores `connections.account_identity_key`
+(`connectionAccountIdentityKey`: SHA-256 of the integration and the account),
+and migration 1481 allows one live (not revoked) row per organization, owner (a
+person, or a workspace for a shared connection) and key. OAuth MCP logins use
+the provider, issuer, resource group and Google's account ID when recorded,
+else the verified identity; Nango connections use the Nango integration and
+the verified account; provider OAuth (personal GitHub and others) uses the
+workspace, provider family and provider principal. A racing or legacy writer
+that would add a second live row for the account fails as
+`account_already_connected` instead. Connections whose account is not verified
+(API keys, Fiken, vaults, auto-connected logins) have no key and keep their
+per-writer rules. Rows saved before the key get it when they are next
+connected or reconnected, and a credential replaced by a writer that sets no
+key (a pasted token, an auto-connect) loses it, so it neither keeps the
+account's slot nor vouches for that account later.
+
+Reconnecting the same account into its row is not an authority change: when
+the update carries the row's own key and its new grant includes every scope
+the row had, `authority_generation` stays, so a turn accepted on the row
+keeps using it with the new token. A row saved before keys existed counts
+when the writer derives the same key from the stored row's own verified
+account (`previousAccountIdentityKey`). A different account, fewer scopes, a
+writer without a key, a revoke or a status change still advance it. The MCP
+key includes the authorization server issuer and the identity the provider
+verified (its account ID when recorded); if either changes between connects,
+the key changes and that one reconnect advances the generation.
+
+Provider OAuth keys are per workspace (the workspace is part of the key), as
+those connections are. Reconnecting picks the live row of the provider
+principal before any revoked duplicate.
 
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit

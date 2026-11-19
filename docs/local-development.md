@@ -311,6 +311,10 @@ registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 image identity for every Sandbox Environment. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
 `OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
 memory for every new box and remain stable through resume and replacement.
+Every new box also carries hard ceilings (`OPENGENI_MODAL_SANDBOX_CPU_LIMIT`,
+`OPENGENI_MODAL_SANDBOX_MEMORY_LIMIT_MIB`, and the `OPENGENI_MODAL_UNPAID_*`
+values for unpaid organizations; see [deployment](deployment.md), "Free
+compute bounds").
 Optional `OPENGENI_MODAL_REGIONS` (comma-separated, for example `eu`) pins every
 new box, including snapshot restores, to Modal regions near the workers. Every
 setup step and tool call is a worker-to-box round trip, so distance shows up in

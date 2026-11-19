@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, type NavigateOptions } from "@tanstack/react-router";
 import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import {
   useEffect,
@@ -47,6 +47,7 @@ import {
   windowBarRowActive,
 } from "@opengeni/react/app/components/window-bar";
 import { desktopPlatform } from "@opengeni/react/app/lib/desktop";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
@@ -137,6 +138,12 @@ export interface SettingsShellProps {
   currentPage: string;
   /** The current page's scope for the narrow header: "Organization · Acme Robotics". */
   currentScope?: string;
+  /**
+   * Which settings the page belongs to, first in the macOS window bar's
+   * trail: "Workspace settings", "Organization settings" or "Account
+   * settings". Defaults to `label`.
+   */
+  windowBarSection?: string;
   /**
    * The page header of a settings page. `null` when the page brings its own: a
    * sub-page (an account, a key, a form) or a full page (Agents, Secrets).
@@ -253,6 +260,7 @@ function SettingsRail({
   onNavigate?: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const { productName } = useSimplifiedInterface();
   const [query, setQuery] = useState("");
   const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
   const results = useMemo(() => searchSettings(entries, query), [entries, query]);
@@ -322,7 +330,11 @@ function SettingsRail({
           <div className="flex min-w-0 flex-col gap-3">
             {/* The nav's own 8px inset stands in for the row's. */}
             <RailBrandRow className="px-0">
-              <LinkShell link={home} aria-label="Opengeni home" className={RAIL_BRAND_LINK_CLASS}>
+              <LinkShell
+                link={home}
+                aria-label={`${productName} home`}
+                className={RAIL_BRAND_LINK_CLASS}
+              >
                 <RailBrandMark />
               </LinkShell>
             </RailBrandRow>
@@ -448,6 +460,7 @@ export function SettingsShell({
   activeId,
   currentPage,
   currentScope,
+  windowBarSection,
   page,
   layout = "settings",
   notice,
@@ -475,6 +488,30 @@ export function SettingsShell({
   const canvasRef = useRef<HTMLElement | null>(null);
   const titleInWindowBar = windowBarRowActive({ platform: desktopPlatform, mobile: narrow });
   const windowBarRow = useWindowBarRow(canvasRef, titleInWindowBar);
+  // "Organization settings › People": which settings the page belongs to, by
+  // the scope's kind (its name is in the rail's picker).
+  // The crumb opens that settings' first page.
+  const navigate = useNavigate();
+  const sectionHome = settingsSectionHome(sections, activeId);
+  const sectionHomeRef = useRef(sectionHome);
+  useLayoutEffect(() => {
+    sectionHomeRef.current = sectionHome;
+  });
+  const hasSectionHome = sectionHome !== null;
+  const barSection = useMemo(
+    () => ({
+      label: windowBarSection ?? label,
+      ...(hasSectionHome
+        ? {
+            onClick: () => {
+              const target = sectionHomeRef.current;
+              if (target) void navigate(target.link.props as NavigateOptions);
+            },
+          }
+        : {}),
+    }),
+    [label, windowBarSection, hasSectionHome, navigate],
+  );
 
   const navigation = narrow ? (
     <header className="flex min-w-0 items-center gap-2 border-b border-border bg-bg px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
@@ -581,7 +618,11 @@ export function SettingsShell({
         {...windowBarRow}
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
-        <WindowBarPageTitle enabled={titleInWindowBar} fallbackTitle={page?.title ?? currentPage}>
+        <WindowBarPageTitle
+          enabled={titleInWindowBar}
+          fallbackTitle={page?.title ?? currentPage}
+          section={barSection}
+        >
           {notice}
           <SettingsActionsSlotContext.Provider value={actionsSlot}>
             <PageHeaderStyleProvider icon="hide">
@@ -610,6 +651,18 @@ export function SettingsShell({
       </section>
     </div>
   );
+}
+
+/** The first page of the settings the active page belongs to, which its window-bar crumb opens. */
+export function settingsSectionHome(
+  sections: SettingsRailSection[],
+  activeId: string | null,
+): SettingsRailItem | null {
+  if (!activeId) return null;
+  const section = sections.find((candidate) =>
+    candidate.groups.some((group) => group.items.some((item) => item.id === activeId)),
+  );
+  return section?.groups.find((group) => group.items.length > 0)?.items[0] ?? null;
 }
 
 /** Home link for a settings rail: sessions of a workspace, or the app root. */

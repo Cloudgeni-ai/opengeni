@@ -51,8 +51,8 @@ export const AGENT_FIRST_MESSAGE_LEAD = "When a chat starts:";
  * An agent's Instructions with an older First message joined as its own
  * paragraph after them, led by `AGENT_FIRST_MESSAGE_LEAD`. Nothing is added
  * when there is no First message or the Instructions already contain it, so
- * joining twice changes nothing. The database's `agentInstructionsSql` reads
- * stored revisions the same way.
+ * joining twice changes nothing. Migration 1452 joined stored revisions the
+ * same way.
  */
 export function agentInstructionsWithFirstMessage(
   instructions: string,
@@ -414,6 +414,12 @@ export const AgentSlackInstall = /* @__PURE__ */ defineSchema(() =>
     connectionId: Uuid,
     slackTeamId: z.string(),
     slackTeamName: z.string().nullable(),
+    /**
+     * The Opengeni app's name in this Slack workspace, which people mention
+     * (`Opengeni Staging`). Absent from older servers and for an installation
+     * no longer linked here; read it as `Opengeni`.
+     */
+    botDisplayName: z.string().optional(),
     /** Null when the agent is not available in this Slack workspace. */
     availability: AgentSlackAvailability.nullable(),
     /**
@@ -422,6 +428,18 @@ export const AgentSlackInstall = /* @__PURE__ */ defineSchema(() =>
      * Slack workspace unless something here stops it.
      */
     unavailable: z.enum(AGENT_ERROR_CODES).nullable().default(null),
+    /**
+     * False when this Slack app can't sign posts with the agent's name and
+     * icon (no `chat:write.customize`): its replies show as Opengeni until
+     * Slack is updated. Absent from older servers and for an installation no
+     * longer linked here.
+     */
+    postsAsAgent: z.boolean().optional(),
+    /**
+     * The Opengeni workspace that holds this Slack installation, where an
+     * admin updates it. Absent with `postsAsAgent`.
+     */
+    installWorkspaceId: Uuid.optional(),
   }),
 );
 export type AgentSlackInstall = z.infer<typeof AgentSlackInstall>;

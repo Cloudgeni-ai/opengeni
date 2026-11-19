@@ -1,4 +1,8 @@
 import { prepareAgentChatCreate } from "../agent-chats";
+import {
+  noteCreditUsageAudience,
+  stripCreditUsageForRelayedBrowsers,
+} from "../http/credit-usage-audience";
 import { readSessionResponsePair } from "./session-response-reads";
 import { sessionChatResponse, type SessionChatResponse } from "./session-chat-response";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
@@ -391,6 +395,8 @@ import {
   readGroupLease,
   resolveActiveDesktopTransport,
   viewerHeartbeatIntervalMs,
+  viewerIdleDrainMs,
+  viewerInteractionAgeFor,
   type DesktopStreamMint,
   type TerminalStreamMint,
   type ViewerServices,
@@ -817,6 +823,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return await resolveSessionHttp(c, next);
   };
   app.use("/v1/workspaces/:workspaceId/sessions/:sessionId/*", authorizeSessionHttp);
+  // Turn usage is the product server's billing data, never a relayed browser's.
+  for (const route of ["events", "events/stream", "turns"]) {
+    app.use(
+      `/v1/workspaces/:workspaceId/sessions/:sessionId/${route}`,
+      stripCreditUsageForRelayedBrowsers,
+    );
+  }
 
   const viewerServices: ViewerServices = {
     db,
@@ -3934,7 +3947,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    noteCreditUsageAudience(c, grant);
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const rawAfter = c.req.query("after");
@@ -4236,6 +4250,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    noteCreditUsageAudience(c, grant);
     const sessionId = c.req.param("sessionId");
     let authorization;
     try {
@@ -4279,7 +4294,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/turns", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    noteCreditUsageAudience(c, grant);
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     // Exact turn that most recently emitted durable `turn.started` — the same
@@ -5345,6 +5361,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         archiveComplete: false,
         sandboxGroupId: session.sandboxGroupId,
         viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+        viewerIdleDrainMs: viewerIdleDrainMs(settings),
         dataPlaneUrl: null,
       };
       if (
@@ -5387,6 +5404,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         grant,
         waitSignal: c.req.raw.signal,
         ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
+        ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
       });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
@@ -5489,6 +5507,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sandboxGroupId: session.sandboxGroupId,
           viewerId: c.req.param("viewerId"),
           expectedEpoch: parsed.leaseEpoch,
+          ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
         },
       );
       return c.json({ alive });

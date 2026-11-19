@@ -944,6 +944,49 @@ fn negative_zero_is_rejected_from_canonical_document_numbers() {
 }
 
 #[test]
+fn table_exactly_as_wide_as_a_fractional_text_area_fits_the_page() {
+    // A4 with 1in margins: 595.3 - 72 - 72 is 451.29999999999995 in f64, while
+    // a DOCX full-width table is 9026 twips, exactly 451.3pt.
+    let page = PageGeometry {
+        width_pt: 595.3,
+        height_pt: 841.9,
+        ..PageGeometry::default()
+    };
+    let fits = |columns: usize, style: TableStyle| {
+        super::model::validate_table_style_parts(&style, 1, columns, page).is_ok()
+    };
+    assert!(fits(
+        2,
+        TableStyle {
+            width_pt: Some(451.3),
+            column_widths_pt: Some(vec![225.65, 225.65]),
+            ..TableStyle::default()
+        }
+    ));
+    assert!(fits(
+        1,
+        TableStyle {
+            column_widths_pt: Some(vec![451.3]),
+            ..TableStyle::default()
+        }
+    ));
+    assert!(!fits(
+        1,
+        TableStyle {
+            width_pt: Some(451.4),
+            ..TableStyle::default()
+        }
+    ));
+    assert!(!fits(
+        1,
+        TableStyle {
+            column_widths_pt: Some(vec![451.4]),
+            ..TableStyle::default()
+        }
+    ));
+}
+
+#[test]
 fn table_style_errors_name_the_field_value_and_bound() {
     let page = PageGeometry::default();
     let usable = page.width_pt - page.margin_left_pt - page.margin_right_pt;

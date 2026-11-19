@@ -199,6 +199,26 @@ export function learningRefusalClass(message: string): LearningRefusalClass {
   return LEARNING_REFUSAL_MESSAGES.get(message) ?? NOT_PERMITTED;
 }
 
+/**
+ * The fences that mean the agent attempt itself is no longer its session's
+ * live attempt: its turn moved on, its execution generation changed, or it
+ * was interrupted. A request carrying that attempt's credential is answered
+ * like any other stale attempt, never as a server fault.
+ */
+const AGENT_ATTEMPT_LIVENESS_FENCES: ReadonlySet<string> = new Set([
+  "Knowledge attempt is stale",
+  "Knowledge attempt is interrupted",
+  "Knowledge session attempt is stale",
+  "Knowledge turn attempt is stale",
+]);
+
+/** Whether a 42501 refusal says the calling agent attempt is no longer live. */
+export function isAgentAttemptLivenessFence(message: string): boolean {
+  return (
+    AGENT_ATTEMPT_LIVENESS_FENCES.has(message) && learningRefusalClass(message).kind === "fence"
+  );
+}
+
 /** The correction the agent can make itself, or null. */
 export function learningSaveCorrection(message: string): LearningSaveCorrection | null {
   const value = learningRefusalClass(message);

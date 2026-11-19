@@ -366,6 +366,27 @@ function organizationPrivateSessionAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+/** Tables the turn hold summary (0988, 1485) reads as their owner. */
+function turnHoldSummaryTables(): RuntimeTablePosture[] {
+  return ["session_goals", "subscription_capacity_waiters"].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function xaiAuthorityTables(): RuntimeTablePosture[] {
   return ["workspace_memberships", "xai_subscription_credentials"].map((name) => ({
     name,
@@ -454,6 +475,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...organizationMembershipLifecycleAuthorityTables(),
       ...organizationPrivateSessionAuthorityTables(),
       ...xaiAuthorityTables(),
+      ...turnHoldSummaryTables(),
       ...[
         "usage_allowance_attribution_receipts",
         "workspace_usage_allowances",
@@ -610,6 +632,28 @@ function safePosture(): RuntimeDatabasePosture {
       // 1343 activates the read-only identity lookup introduced by 1172.
       {
         name: "read_external_identity_v1(uuid, text, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
+      // 1482 and 1487 read only connections, present in every current posture;
+      // 1499 grants them to the runtime.
+      {
+        name: "nango_connections_in_use_v1(text[])",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
+      {
+        name: "nango_live_connection_owners_v1(text, text, text, integer)",
         owner: "opengeni_migrator",
         execute: true,
         publicExecute: false,
@@ -1821,6 +1865,15 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 1430 drops the seven retired Knowledge sync tables: five with full
+          // runtime DML and two append-only ACL evidence tables.
+          -(tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 7
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 5
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 2
+                : 0) +
           // 1106 adds the workspace-isolated external member revocation
           // markers: runtime read, insert and update, no delete.
           (tables === FORCE_RLS_TABLES ||
@@ -2144,6 +2197,12 @@ describe("runtime database posture evaluator", () => {
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 2 : 0) +
           // Migrations with an entry in runtime-posture-migrations/, one file each.
           migrationTableCount(tableClass(tables)) +
+          // 1445 and 1446 drop slack_agents and bot_templates: two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? -2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2234,8 +2293,11 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
       expect(RUNTIME_FULL_DML_TABLES).toContain("automation_templates");
-      expect(FORCE_RLS_TABLES).toContain("bot_templates");
-      expect(RUNTIME_FULL_DML_TABLES).toContain("bot_templates");
+      // 1445 and 1446 dropped the legacy Slack agents and bot templates tables.
+      expect(FORCE_RLS_TABLES).not.toContain("bot_templates" as never);
+      expect(RUNTIME_FULL_DML_TABLES).not.toContain("bot_templates" as never);
+      expect(FORCE_RLS_TABLES).not.toContain("slack_agents" as never);
+      expect(RUNTIME_FULL_DML_TABLES).not.toContain("slack_agents" as never);
       expect(FORCE_RLS_TABLES).toContain("secret_use_approvals");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_use_approvals");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
@@ -2300,6 +2362,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          -7 + // 1430 drops the retired Knowledge sync tables.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2313,10 +2376,12 @@ describe("runtime database posture evaluator", () => {
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
-          8,
+          8 -
+          2, // 1445 and 1446 dropped slack_agents and bot_templates.
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          -7 + // 1430 drops the retired Knowledge sync tables.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2330,7 +2395,8 @@ describe("runtime database posture evaluator", () => {
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
-          8,
+          8 -
+          2, // 1445 and 1446 dropped slack_agents and bot_templates.
       );
       expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
@@ -3740,6 +3806,7 @@ describe("runtime database posture evaluator", () => {
       ...organizationRecoveryAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
+      ...turnHoldSummaryTables(),
     ];
     const inertOptions: RuntimeDatabasePostureOptions = {
       ...options,
@@ -3933,6 +4000,7 @@ describe("runtime database posture evaluator", () => {
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),
+      ...turnHoldSummaryTables(),
     ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",
@@ -4199,15 +4267,22 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "vault_items",
     "slack_agent_update_settings",
     "sandbox_leases",
+    "sandbox_lease_holders",
+    "usage_events",
+    "session_turns",
+    "session_create_idempotency_guard",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
     "native_push_devices",
     "native_push_deliveries",
     "session_content_collections",
+    "modal_inventory_read_capabilities",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
+    // The event fixture's version of a table replaces the safe posture's.
+    posture.tables = posture.tables.filter((table) => !deferredTables.includes(table.name));
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
     posture.privateTables.push(
       ...definerPrivateTables.map((name) => ({ ...eventTable(name, false), policyCount: 0 })),
@@ -4219,6 +4294,12 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     posture.privateRoutines.push(
       ...runtimePosture.RUNTIME_DEFINER_ROUTINES.map((name) => routine(name, execute)),
     );
+    // The Modal inventory capability (a definer's table) is checked with its
+    // own granted inventory definer.
+    posture.privateRoutines.push({
+      ...routine("list_live_modal_sandbox_leases()", true),
+      configuration: ["search_path=pg_catalog"],
+    });
     return posture;
   }
   const eventOptions: RuntimeDatabasePostureOptions = {
@@ -4279,6 +4360,12 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+      "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
+      "nango_connections_in_use_v1(text[])",
+      "nango_live_connection_owners_v1(text, text, text, integer)",
+      "sandbox_unpaid_fleet_v1(uuid, boolean)",
+      "sandbox_fleet_warm_boxes_v1()",
+      "discard_refused_session_create_v1(uuid, uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4289,6 +4376,8 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
+      "sandbox_fleet_warm_boxes_v1()",
+      "discard_refused_session_create_v1(uuid, uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4373,6 +4462,9 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+      "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
+      "nango_connections_in_use_v1(text[])",
+      "nango_live_connection_owners_v1(text, text, text, integer)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

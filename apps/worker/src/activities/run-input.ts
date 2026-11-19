@@ -21,6 +21,7 @@ import {
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
   listTurnOpenSuffixToolCalls,
+  turnHasPendingToolCalls,
   readActiveSessionHistory,
   readSubscriptionHistoryProvenance,
   type ActiveSessionHistoryFootprint,
@@ -1064,7 +1065,16 @@ async function openSuffixMessageInput(
     trigger.sessionId,
     options.turnId,
   );
-  if (suffixRows.length === 0 && !options.programmaticApprovalAcknowledged) {
+  // Terminal settlement (a failed or cancelled turn) pairs every call of the
+  // turn in durable history and deletes its receipts, and Retry reopens such
+  // a turn only when none remain. That run continues from durable history:
+  // the decided call and its result are already there. A missing suffix while
+  // receipts remain is still an inconsistent resume.
+  if (
+    suffixRows.length === 0 &&
+    !options.programmaticApprovalAcknowledged &&
+    (await turnHasPendingToolCalls(db, trigger.workspaceId, trigger.sessionId, options.turnId))
+  ) {
     throw new Error("Open suffix resume has no interruption rows");
   }
   if (suffixRows.some((row) => row.resultItem == null)) {

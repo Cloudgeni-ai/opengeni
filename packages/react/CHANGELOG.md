@@ -1,5 +1,222 @@
 # @opengeni/react
 
+## 6.30.1
+
+### Patch Changes
+
+- e9692c2: Show "Add a card" when a box is refused inside a tool call and on the empty-credits notice for new Free organizations. Box refusals raised inside a tool call (card required, daily budget, fleet cap) now keep their failure code.
+- c3d6b66: Pages now say where they are. In the macOS app the window bar shows a clickable trail before the page's title, such as "Agents › Meeting preparation" or "Organization settings › People"; on a detail page the back link moves into that trail and the page keeps its own title. An agent's Memory opened from the agent reads "Agents › Meeting preparation › Memory" and goes back to the agent, and a Knowledge entry's back link says "Knowledge". The web app keeps its layout.
+
+  History diffs are easier to read: a change is a tinted row with a coloured rule on its left edge instead of a boxed table, blank lines are dropped outside code, and the first version shows its text instead of every line marked as added.
+
+  Knowledge history now says "You" for the versions you saved, instead of "A teammate". Migration 1498 adds knowledge_entry_read's read-only `history_authors` operation, which returns only the ids of the asking person's own versions; the history route returns them as an extra `savedByYou` field, which is an empty list before the migration.
+
+  - @opengeni/connect@6.30.1
+  - @opengeni/contracts@6.30.1
+  - @opengeni/sdk@6.30.1
+
+## 6.30.0
+
+### Minor Changes
+
+- 133db2c: A card verification gate for the Free plan, off until an operator turns it on (`--card-verification-mode enforce`). While it is on, an unpaid organization needs a card its owner verified through Stripe Checkout (a SetupIntent, no charge) before it starts a sandbox box or receives Free monthly credit; chat without a box keeps working. One card and one person get Free credit for one organization, and another organization of the same owner inherits the card for sandboxes only. A refused box start has code `sandbox_card_required`, and the console offers one Add a card action that continues the chat once the card is added. Paid, Enterprise, host-provisioned and credit-buying organizations are unaffected; nothing is deleted and the Free amount is unchanged. New routes: `GET /v1/billing/card-verification`, `POST /v1/billing/card-verification/setup` and `POST /v1/billing/card-verification/confirm`.
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/sdk@6.30.0
+  - @opengeni/connect@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/connect@6.29.2
+- @opengeni/contracts@6.29.2
+- @opengeni/sdk@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- 5b05b73: Connecting an integration from the catalog now finishes on the server. `OAuthStartRequest` takes an optional `capabilityId`; when the provider sign-in (MCP OAuth or Nango connect) completes, the callback turns that capability on with the new account as the person who started it, with the same permission rules as enabling it, and reports `capability=enabled|on` on the return. Closing the browser tab, or a desktop hand-back the browser blocks, no longer leaves the connection saved but unused. The console's return handling only shows the result and never re-enables something already on, so members are no longer refused when the capability was turned on meanwhile.
+- b23ec3f: Connecting an integration from the desktop app no longer depends on the browser handing the person back. The Connections page watches for the new connection and finishes as soon as it appears, and the browser page now just says the connection is done and the tab can be closed. When the browser that finishes the consent is not signed in to Opengeni, it asks for one sign-in and then completes the same connection (new `/connect-continue` page and `oauthSignInToFinishPath`/`oauthSignInToFinishTarget` helpers), instead of failing with a browser mismatch. A browser signed in as someone else is still refused, with clearer copy.
+- 825e714: Chats started for a person from Slack, Teams, a schedule or the API now freeze that person's name like chats started in the app, and the sidebar resolves older unlabeled chats to the person's name instead of showing an id fragment. Session list entries carry `agentId`, so agent chats show the agent's icon in the sidebar and chat switcher. Agents' Slack installs report `postsAsAgent`; when the Slack app lacks `chat:write.customize`, the Slack integration page and the agent's Slack row say replies show as Opengeni, with one Update action.
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/sdk@6.29.1
+  - @opengeni/connect@6.29.1
+
+## 6.29.0
+
+### Patch Changes
+
+- 6581a0f: GPT-6.2 Astra (`gpt-6.2-astra`) and GPT-6.2 Sol (`gpt-6.2-sol`) replace GPT-6 Astra as Opengeni's default models. The built-in OpenAI defaults are now `OPENGENI_OPENAI_MODEL=gpt-6.2-astra` and `OPENGENI_OPENAI_ALLOWED_MODELS=gpt-6.2-astra,gpt-6.2-sol,gpt-6-sol,gpt-6-luna`, and the built-in Codex subscription models are GPT-6.2 Astra, GPT-6.2 Sol, GPT-6 Sol and GPT-6 Luna. Both new models offer Fast and, where OpenAI serves it, Ultrafast, and get compact labels ("6.2 Astra", "6.2 Sol").
+
+  Their OpenAI list prices per million tokens: GPT-6.2 Astra $8 input, $0.40 cached input, $10 cache write and $40 output; GPT-6.2 Sol $2, $0.10, $2.50 and $10. Above 272K input tokens the whole request pays twice the input and cache rates and 1.5 times the output rate. Ultrafast is priced at OpenAI's launch rate of 3 times Standard, which OpenAI raises to 6 times on 1 March 2027.
+
+  GPT-6 Astra is no longer offered by default. Deployments that list it explicitly keep it, and it keeps its price, so Azure deployments of it, accepted turns and recorded usage stay priced. Chats on it keep their history and ask for another model on the next message; database-mode catalogs retire it with `retired: true` as before. GPT-6.1 Sol is unchanged.
+
+  - @opengeni/sdk@6.29.0
+  - @opengeni/connect@6.29.0
+  - @opengeni/contracts@6.29.0
+
+## 6.28.0
+
+### Patch Changes
+
+- d5cadac: Artifacts in the phone app. A bottom bar moves between Chats, Artifacts, Meetings and Inbox (with a count of what waits on you; Automations stays in the chats menu), and on iOS a swipe right from the left edge opens the chats menu. Artifacts lists the workspace's Sites, documents, presentations, spreadsheets, images and files as cards with a still, with search and type chips; a card opens a full-screen viewer with Share and the web library's menu (Open chat, Pin, Duplicate, Copy link, Download, Delete…). An artifact linked on its own line in a chat is a card that opens the same viewer.
+
+  `createWebMarkdownRenderer` takes `renderOpenGeniLink` to draw a standalone Opengeni object link as a block. The native icon set adds `presentation`, `share` and `link`. `SiteViewRoute` takes `embedded` to show the Site alone, without its toolbar or chat. The inbox row's snooze fade no longer crashes dev builds with a non-increasing range, and `useNativeInbox` starts empty when its client changes (another account) instead of showing the last account's items, and takes `enabled` to read nothing while signed out. The client page list adds `native-view`.
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/sdk@6.28.0
+  - @opengeni/connect@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/sdk@6.27.1
+  - @opengeni/connect@6.27.1
+
+## 6.27.0
+
+### Minor Changes
+
+- 5d63995: Sites can ask what each of their tools needs for the current viewer before a click: `site.tools.$readiness(targets)` (`POST /v1/workspaces/:id/tools/readiness`) answers `ready`, `confirm`, `choose_account`, `connect`, `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the account the tool runs as, and `site.tools.$onReadinessChange` fires after a connect, a reconnect, an "Always allow" or a reset. It reads the same authority as a call and never reaches the provider; calls still enforce everything.
+
+  The Site tool confirmation shows which account the action runs as ("Shared with workspace" for a workspace account, "You" when none is involved). The checkbox now reads "Always allow on this Site from this account". The Site menu has "Reset allowed actions" (`POST /v1/workspaces/:id/tools/site-allowances/reset`).
+
+  Typed failures: a tool set to Block answers 403 with `details.code` `tool_blocked` (Site code: `site_tool_blocked`); a confirmation a published address can't show is `site_tool_open_in_opengeni`. A tool server that couldn't be reached before anything was sent (refused connection, DNS failure, a tunnel that is gone, decided only at the MCP transport's own request) now answers 503 `upstream_unavailable` with `details.code` `tool_server_unreachable`, `retryable: true` and `outcomeUnknown: false` for every gateway caller instead of a 500 (Site code: `site_tool_upstream_unavailable`).
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- 5d63995: Connection health now reads the same account inventory the tool runtime resolves: shared accounts here plus your own accounts from every workspace, each saying whether it is turned on here. A personal account connected in another workspace and turned on with "Use it here" reads Connected everywhere. "Needs attention" names its reason (signed out, connection failed, account removed, no account connected, off in this workspace), and the list row and the connector's page offer the same one repair (Reconnect, Connect, or Turn on here). A failed inventory read still leaves health unverified.
+- 5d63995: An active account on either backend of a connector (its own sign-in or Nango) now counts as that connector's account. Connection health, the connector's account list and `GET /connect/accounts` match a Nango account to the connector it serves, so a working Nango account reads Connected, and removed or replaced native accounts no longer raise "Needs attention". `GET /connect/accounts` also lists Nango accounts and reads native accounts of a Nango-backed connector as needing sign-in, as the account inventory does. Your own account from another workspace that is off here and signed out now reads "Signed out" with Reconnect instead of offering a new sign-in.
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- 5d63995: Accounts held by Nango are listed by `GET /connect/accounts` with `backend: "nango"`, and the chat and Settings never start a native reconnect for them; a chat Reconnect opens the connector's own Connect instead. A workspace-shared Nango Google account reads as connected.
+- 5d63995: A Site tool on an account with fixed access is refused as unavailable for that account instead of asking to reconnect, and a signed-out integration-platform account in the embeddable accounts list never starts a native sign-in: it reconnects through the host's `onReconnectViaConnector`, or says to sign in again from its connector.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+  - @opengeni/connect@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/connect@6.26.0
+
+## 6.25.0
+
+### Minor Changes
+
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+
+### Patch Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- f99f940: Connecting an integration no longer gets stuck on a sign-in client the provider has forgotten. Opengeni reuses the OAuth client it registered with a provider such as Supabase, and when that provider has since deleted it, Connect ended on the provider's "Unrecognized client_id" page every time. Opengeni now checks that the provider still knows the client before reusing it, and registers a new one when the provider says it doesn't.
+
+  A connection this deployment can't connect, because the provider only accepts apps it has approved (Dropbox, for one) and no client is registered with it here, now shows up when you search Capabilities for it. It's marked Unavailable and its page says why, instead of the search saying nothing matches. Other listings of the same provider, such as a server a plugin brings, are marked the same way and no longer offer a Connect that can't finish, and a provider that refuses to let apps register now gets a plain explanation instead of "dynamic client registration failed with HTTP 403".
+
+- e126cb5: Deleting a slide that has objects is now one atomic edit. The presentation kernel rejected a batch that deleted a slide's objects and then the slide with "unknown presentation slide", so the editor saved two separate edits. The kernel now applies such a batch, and the same for layouts and masters deleted together with their objects; a rejected batch also restores the deleted slide's hit-testing index. The editor deletes a slide and its objects in a single batch. Presentations edited this way need this kernel or newer, so don't roll the API back below this release.
+- f99f940: Sentry and Apollo connections now show the signed-in account (email or name, plus the Sentry organization when there is only one) instead of a generic "Sentry account" or "Apollo.io account", and you can connect more than one account of each. Stripe connections are recognised again with Stripe's current account answer and are labelled with the account's email and business name when it has them. When an Atlassian tool needs a site and several are available, the message the agent gets now lists each site's URL next to its name and cloud ID.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/connect@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- f041392: A viewer can no longer keep unlimited sandboxes running with no task. Opening a desktop, terminal or file editor starts a sandbox, and a heartbeating viewer kept it warm indefinitely; under `usage_only` warm billing that compute was free, so scripted accounts could hold hundreds of boxes. A workspace now keeps at most `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` boxes (default 3, `0` = unbounded) warm with only viewers attached; a viewer that would add one more gets HTTP 429, which the web client already shows as the viewer cap. Joining a box a task or another viewer already holds is unaffected. When the monthly warm allowance (`OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE`) is exhausted, viewers on boxes with no running task are now detached on their next heartbeat so those boxes drain, instead of staying warm until the viewer closes; boxes a task holds keep running.
+
+  Organizations now also get sandbox limits by subscription plan, counted across every workspace and member (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`). Defaults: Free 2 viewer-only boxes per organization and 1 per person, Pro 10/3, Max 30/5, Enterprise unbounded; a Free organization whose promotion decision is `held` or `denied` keeps none. Each plan also caps running boxes, including those agent turns hold (Free 3, Pro 20, Max 50): a turn that needs a new box beyond it waits for a slot, retrying every minute without holding a worker, instead of starting one. The organization-wide counts use a new database function (migration 1475) whose runtime grant follows in a later release; until then only the zero limits and the per-workspace viewer limit apply.
+
+- e5ce845: Deleting a slide no longer makes a presentation unopenable. The editor sent a bare `slide.delete` for slides that still had objects, which the kernel always rejects; the SDK saved that edit to the browser's local pending queue before validating it, so every later open replayed it and failed with `[ARTIFACT_PRESENTATION_BATCH_REJECTED] presentation scene is not empty`. Document and presentation edits are now checked against the current state before they are saved, a retained edit the kernel rejects is discarded on open so affected presentations open again, and slide deletion removes the slide's own objects first. The editor's two unlabelled trash buttons are replaced by one labelled Delete control with a tooltip that targets the selected object, or the current slide when nothing is selected, and asks for confirmation.
+- Updated dependencies [e5ce845]
+- Updated dependencies [5fd2c21]
+  - @opengeni/sdk@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/connect@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 0d981bd: The app shell supports a simplified interface for people who arrive from gogeni.ai. It is a per-browser presentation flag (`?simplified_interface=1` on the landing URL, `=0` to turn it off) that the web app stores locally and never sends to the server. While it is on, the product reads "Geni", the rail and settings list fewer destinations (Knowledge and Automations move under "Advanced"), the composer offers only files and voice, new chats and schedules use one credit-billed model, and suggestions and automation templates speak to business work. Off is the default and nothing changes for other browsers; every page still opens by its address, and no permission depends on the flag. `useSimplifiedInterface()` from `@opengeni/react/app/lib/simplified-interface` reads it, and components rendered without its provider behave as before.
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/sdk@6.24.0
+  - @opengeni/connect@6.24.0
+
+## 6.23.0
+
+### Minor Changes
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+- c0089e1: Linking a Slack account from a Slack link now ends on a page that stays put: "Linked. Go back to Slack and ask again." Before, the app revalidated access right after linking and someone without access to the link's workspace (an organization member, for example) was sent silently to their own workspace. Someone in the workspace sees the same words in a dialog they close. `AppContextValue` gains optional `slackLinkLinkedWorkspaceId` and `completeSlackLinkContinuation`.
+
+### Patch Changes
+
+- c0089e1: The agent editor shows an agent's image icon and keeps it when other fields are saved, instead of clearing it.
+
+  An agent's Slack rows (`GET /agents/:id/slack`) carry the Opengeni app's name in each Slack workspace as optional `botDisplayName`, so the agent page shows how people really ask it there (for example `@Opengeni Staging Release Scribe`); without it, clients use `@Opengeni`.
+
+- f6f8c51: Links in chat replies are easy to see. A new `link` color token (`--og-color-link` on web, `link` in the native theme) colors every text link a calm blue in both themes, readable on every chat surface. The native chat now underlines links like the web chat, announces them as links and shows a soft wash while one is pressed. Web URLs, autolinked URLs, artifact, Site, chat and file links, and links in lists and tables all share the style. Hosts that rebranded links through `--og-color-accent-strong` set `--og-color-link` instead.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/sdk@6.23.0
+  - @opengeni/connect@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/sdk@6.22.0
+  - @opengeni/connect@6.22.0
+
 ## 6.21.0
 
 ### Minor Changes

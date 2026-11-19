@@ -10,6 +10,10 @@ import {
   sandboxRouteTransitionCode,
 } from "../src/activities/agent-turn/errors";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
+import {
+  isLazySandboxProvisionRetryable,
+  ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS,
+} from "../src/activities/agent-turn/sandbox-provision";
 
 describe("Connected Machine to managed-home turn transition", () => {
   test("recognizes sandbox lifecycle transitions through SDK aggregate wrappers only", () => {
@@ -139,6 +143,8 @@ describe("Connected Machine to managed-home turn transition", () => {
       expect(acknowledgeRecoveryQuiescence).toHaveBeenCalledTimes(1);
       expect(control.activityStatus).toBe("recovering");
       expect(control.turnMetricOutcome).toBe("recovering");
+      // A lifecycle transition of the box itself is still a sandbox recovery.
+      expect((control as Record<string, unknown>).turnRecoveryCause).toBe("sandbox");
     } finally {
       requestRecovery.mockRestore();
       readLease.mockRestore();
@@ -220,6 +226,121 @@ describe("Connected Machine to managed-home turn transition", () => {
         attemptId: "attempt-1",
       });
       expect(requestRecovery.mock.calls[0]?.[2]).not.toHaveProperty("sandboxLifecycleWait");
+    } finally {
+      requestRecovery.mockRestore();
+      readLease.mockRestore();
+    }
+  });
+
+  test("parks a turn at its organization's running-box limit for a minute, with no retry budget", async () => {
+    const transition = new opengeniDb.SandboxLeaseTransitionError(
+      "group-1",
+      0,
+      "organization_sandbox_capacity",
+      "modal",
+      null,
+      "cold",
+      3,
+    );
+    expect(
+      sandboxLifecycleTransitionDiagnostic(
+        new Error("Failed to run function tools", {
+          cause: new AggregateError([transition], "tool failures"),
+        }),
+      ),
+    ).toEqual({
+      sandboxGroupId: "group-1",
+      leaseEpoch: 0,
+      reason: "organization_sandbox_capacity",
+      organizationBoxLimit: 3,
+    });
+    // The lazy provisioner never retries it in place: that would hold the
+    // turn worker while waiting for another box to drain.
+    expect(isLazySandboxProvisionRetryable(transition)).toBe(false);
+
+    const requestRecovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    });
+    const readLease = spyOn(opengeniDb, "readLease").mockResolvedValue({
+      rotationRequestedAt: null,
+      rotationReason: null,
+    } as never);
+    const control: Record<string, unknown> = {
+      cancellationRequestedAt: null,
+      activityStatus: "unknown",
+      turnMetricOutcome: null,
+      activityError: null,
+      acknowledgeQuiescence: false,
+    };
+    try {
+      const result = await settleTurnFailure({
+        error: transition,
+        input: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+        },
+        settings: { sandboxLeaseReaperPeriodMs: 10_000 },
+        db: {},
+        bus: {},
+        observability: {},
+        wakeSessionWorkflow: async () => undefined,
+        signalCodexCapacityWorkflow: async () => undefined,
+        cancellationSignal: undefined,
+        sandboxRotationController: new AbortController(),
+        noteCancellationRequested: () => undefined,
+        codexWorkspaceKey: "workspace-key",
+        control,
+        attempt: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 1,
+          providerRecoveryCount: 0,
+          modelRequestStarted: true,
+          redispatchesAtDispatch: 0,
+          triggerType: "user",
+        },
+        billingState: {},
+        eventing: { publish: async () => [], turnStartedPublished: true },
+        providerTurn: {},
+        leases: {},
+        historySink: { reconcileConversationTruth: async () => undefined },
+        claimedResult: (value: Record<string, unknown>) => ({
+          ...value,
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+        }),
+        flushRuntimeBatcher: async () => undefined,
+        acknowledgeLostAttemptOwnership: () => undefined,
+        acknowledgeRecoveryQuiescence: () => undefined,
+      } as never);
+
+      expect(result).toEqual({
+        status: "recovering",
+        continueDelayMs: ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS,
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+      });
+      // A designed wait for one of the organization's own boxes, not a
+      // sandbox fault: it counts under its own recovery cause.
+      expect(control).toMatchObject({
+        turnMetricOutcome: "recovering",
+        turnRecoveryCause: "organization_limit",
+      });
+      const recovery = requestRecovery.mock.calls[0]?.[2] as Record<string, unknown>;
+      expect(recovery).toMatchObject({
+        reason: "sandbox_lifecycle_transition",
+        detail: {
+          sandboxGroupId: "group-1",
+          leaseEpoch: 0,
+          transitionReason: "organization_sandbox_capacity",
+          organizationBoxLimit: 3,
+        },
+        retryAfterMs: ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS,
+      });
+      expect(recovery).not.toHaveProperty("sandboxLifecycleWait");
     } finally {
       requestRecovery.mockRestore();
       readLease.mockRestore();

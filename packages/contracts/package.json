@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.21.0",
+  "version": "6.30.1",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -189,6 +189,10 @@
     "./console": {
       "types": "./src/console.ts",
       "default": "./src/console.ts"
+    },
+    "./console-sign-in": {
+      "types": "./src/console-sign-in.ts",
+      "default": "./src/console-sign-in.ts"
     },
     ".": {
       "types": "./src/index.ts",
@@ -385,6 +389,10 @@
     "./microsoft-dynamics": {
       "types": "./src/microsoft-dynamics.ts",
       "default": "./src/microsoft-dynamics.ts"
+    },
+    "./capability-connect-inputs": {
+      "types": "./src/capability-connect-inputs.ts",
+      "default": "./src/capability-connect-inputs.ts"
     }
   },
   "publishConfig": {

@@ -137,6 +137,136 @@ export async function readEffectiveNangoIntegrations(
 }
 
 // ---------------------------------------------------------------------------
+// One person's Nango connections
+// ---------------------------------------------------------------------------
+
+/**
+ * Serializes, deployment-wide, every change to which Nango connection one
+ * person's rows of one Nango integration stand for: storing a connect,
+ * sharing it across organizations, and deciding that a Nango connection is
+ * no longer used and may be deleted. Holds a transaction-scoped advisory lock
+ * on the caller's open transaction.
+ */
+export async function lockNangoPersonIntegration(
+  tx: Database,
+  input: { subjectId: string; providerConfigKey: string },
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`nango-person:${input.providerConfigKey}:${input.subjectId}`}, 0))`,
+  );
+}
+
+/** `fn` in one transaction that holds `lockNangoPersonIntegration`. */
+export async function withNangoPersonIntegrationLock<T>(
+  db: Database,
+  input: { subjectId: string; providerConfigKey: string },
+  fn: (tx: Database) => Promise<T>,
+): Promise<T> {
+  return await db.transaction(async (tx) => {
+    const scoped = tx as unknown as Database;
+    await lockNangoPersonIntegration(scoped, input);
+    return await fn(scoped);
+  });
+}
+
+/** Migration 1482's check; created withheld, granted to the runtime by 1499. */
+export const NANGO_CONNECTIONS_IN_USE_ROUTINE =
+  "opengeni_private.nango_connections_in_use_v1(text[])";
+
+/** False on a database without 1499's grant of the check (1482). */
+export async function nangoConnectionsInUseAvailable(db: Database): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${NANGO_CONNECTIONS_IN_USE_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  return row?.granted === true;
+}
+
+/**
+ * The ids among `nangoConnectionIds` that some live (not revoked) Nango-backed
+ * connection row still stands for, in any organization; null while the check
+ * is not granted (a database before 1499; see
+ * nangoConnectionsInUseAvailable). The check opens and closes a
+ * one-transaction capability, so call it from a read-write transaction (every
+ * caller holds the person lock in one).
+ */
+export async function nangoConnectionsInUse(
+  db: Database,
+  nangoConnectionIds: readonly string[],
+): Promise<Set<string> | null> {
+  if (nangoConnectionIds.length === 0) return new Set();
+  if (!(await nangoConnectionsInUseAvailable(db))) return null;
+  const used = new Set<string>();
+  for (let start = 0; start < nangoConnectionIds.length; start += 1000) {
+    const rows = await rawRows<{ nango_connection_id: string }>(
+      db,
+      sql`select nango_connection_id from opengeni_private.nango_connections_in_use_v1(
+        ${sql.param(nangoConnectionIds.slice(start, start + 1000))}::text[])`,
+    );
+    for (const row of rows) used.add(row.nango_connection_id);
+  }
+  return used;
+}
+
+/** Migration 1487's listing; created withheld, granted to the runtime by 1499. */
+export const NANGO_LIVE_CONNECTION_OWNERS_ROUTINE =
+  "opengeni_private.nango_live_connection_owners_v1(text, text, text, integer)";
+
+export type NangoLiveConnectionOwner = {
+  subjectId: string;
+  providerConfigKey: string;
+  nangoConnectionId: string;
+};
+
+/**
+ * Every active Nango-backed row's owner, Nango integration and Nango
+ * connection id, deployment-wide (each triple once), in pages of `pageSize`;
+ * null on a database without 1499's grant. Like nangoConnectionsInUse it opens
+ * and closes a one-transaction capability, so each page runs in its own
+ * read-write transaction.
+ */
+export async function listNangoLiveConnectionOwners(
+  db: Database,
+  options: { pageSize?: number; maxRows?: number } = {},
+): Promise<NangoLiveConnectionOwner[] | null> {
+  const [granted] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${NANGO_LIVE_CONNECTION_OWNERS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  if (granted?.granted !== true) return null;
+  const pageSize = Math.min(Math.max(options.pageSize ?? 1000, 1), 1000);
+  const maxRows = options.maxRows ?? 100_000;
+  const owners: NangoLiveConnectionOwner[] = [];
+  let after: NangoLiveConnectionOwner | null = null;
+  while (owners.length < maxRows) {
+    const cursor: NangoLiveConnectionOwner | null = after;
+    const page = await db.transaction(async (tx) =>
+      rawRows<{ subject_id: string; provider_config_key: string; nango_connection_id: string }>(
+        tx as unknown as Database,
+        sql`select subject_id, provider_config_key, nango_connection_id
+          from opengeni_private.nango_live_connection_owners_v1(
+            ${cursor?.subjectId ?? null}::text,
+            ${cursor?.providerConfigKey ?? null}::text,
+            ${cursor?.nangoConnectionId ?? null}::text,
+            ${pageSize}::integer)`,
+      ),
+    );
+    for (const row of page)
+      owners.push({
+        subjectId: row.subject_id,
+        providerConfigKey: row.provider_config_key,
+        nangoConnectionId: row.nango_connection_id,
+      });
+    if (page.length < pageSize) return owners;
+    after = owners[owners.length - 1]!;
+  }
+  console.warn("[nango] live Nango rows listing stopped at its cap", { maxRows });
+  return owners;
+}
+
+// ---------------------------------------------------------------------------
 // Usage events
 // ---------------------------------------------------------------------------
 

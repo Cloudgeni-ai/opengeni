@@ -207,6 +207,7 @@ import { creationHandoffReconciled } from "../lib/session-creation-handoff";
 import { FollowUpRepositoryMenuBody } from "../components/follow-up-repository-picker";
 import { MarkdownText } from "../components/markdown";
 import { ModelPicker, type SessionToolSelection } from "../components/pickers";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 import {
   TerminalSessionArchive,
   TerminalSessionBanner,
@@ -332,6 +333,7 @@ import {
 } from "../lib/session-tools";
 import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
 import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
+import { findConnectRecoveryTarget } from "../lib/connect-recovery-account";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -1190,13 +1192,28 @@ export function SessionRoute({
       }
       if (item.connectionId) {
         const { findConnectRecoveryAccount } = await import("@opengeni/connect");
-        const account = findConnectRecoveryAccount(
-          await reconnectTransport.accounts(workspaceId),
-          item.connectionId,
-        );
-        if (account) {
+        // The exact account, in the workspace that owns it: an own account
+        // turned on here from another workspace reconnects there.
+        const target = await findConnectRecoveryTarget({
+          workspaceId,
+          connectionId: item.connectionId,
+          accounts: (id) => reconnectTransport.accounts(id),
+          ownAccounts: () =>
+            context.client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
+          find: findConnectRecoveryAccount,
+        });
+        if (target?.via === "connector") {
+          // An integration platform's account signs in again through its
+          // connector's own Connect, never a native reconnect attempt.
+          page.assign(
+            `/workspaces/${encodeURIComponent(target.workspaceId)}/capabilities?reconnect_domain=${encodeURIComponent(item.providerDomain)}`,
+          );
+          return;
+        }
+        if (target) {
+          const { account } = target;
           const request: NativeConnectRequest = {
-            scope: { workspaceId, transport: reconnectTransport },
+            scope: { workspaceId: target.workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
             ownership: account.ownership,
             reconnectAccountId: account.id,
@@ -2393,6 +2410,7 @@ function SessionChatPane(props: {
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const focusEvents = useUiEventTarget("window");
   const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
+  const { simplified: simplifiedInterface } = useSimplifiedInterface();
   // The API's authoritative "model is not available" refusal for this session,
   // which also covers connection-owned models the catalog cannot judge.
   const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
@@ -4867,35 +4885,39 @@ function SessionChatPane(props: {
                 })}
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
-                    <ModelPicker
-                      hasImageAttachments={attachments.attachments.some(
-                        (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
-                      )}
-                      open={modelPickerSession === props.session.id && !pendingRetryInput}
-                      onOpenChange={(open) => {
-                        setModelPickerSession(open ? props.session.id : null);
-                        if (open) void modelCatalog.refresh();
-                      }}
-                      rows={modelCatalog.rows}
-                      model={model}
-                      effort={reasoningEffort}
-                      latencyMode={latencyMode}
-                      disabled={modelPickerDisabled}
-                      loading={modelCatalog.loading || composer.draftLoading}
-                      error={modelCatalog.error ?? composerPolicyError}
-                      sessionKey={props.session.id}
-                      menuSide="top"
-                      connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
-                      claudeSubscriptionAvailable={
-                        context.clientConfig.claudeSubscriptionEnabled === true
-                      }
-                      onModelChange={(modelId) => {
-                        composer.setModel(modelId);
-                        usageModelSwitch.modelPicked(modelId);
-                      }}
-                      onEffortChange={composer.setReasoningEffort}
-                      onLatencyModeChange={composer.setLatencyMode}
-                    />
+                    {/* The simplified interface has one model policy: a chat keeps the one it started with. */}
+                    {simplifiedInterface ? null : (
+                      <ModelPicker
+                        hasImageAttachments={attachments.attachments.some(
+                          (file) =>
+                            file.status !== "failed" && file.contentType.startsWith("image/"),
+                        )}
+                        open={modelPickerSession === props.session.id && !pendingRetryInput}
+                        onOpenChange={(open) => {
+                          setModelPickerSession(open ? props.session.id : null);
+                          if (open) void modelCatalog.refresh();
+                        }}
+                        rows={modelCatalog.rows}
+                        model={model}
+                        effort={reasoningEffort}
+                        latencyMode={latencyMode}
+                        disabled={modelPickerDisabled}
+                        loading={modelCatalog.loading || composer.draftLoading}
+                        error={modelCatalog.error ?? composerPolicyError}
+                        sessionKey={props.session.id}
+                        menuSide="top"
+                        connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
+                        claudeSubscriptionAvailable={
+                          context.clientConfig.claudeSubscriptionEnabled === true
+                        }
+                        onModelChange={(modelId) => {
+                          composer.setModel(modelId);
+                          usageModelSwitch.modelPicked(modelId);
+                        }}
+                        onEffortChange={composer.setReasoningEffort}
+                        onLatencyModeChange={composer.setLatencyMode}
+                      />
+                    )}
                     {durableToolsError ? (
                       <span className="sr-only" role="alert">
                         {durableToolsError}

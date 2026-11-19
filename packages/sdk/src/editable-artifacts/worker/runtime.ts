@@ -23,7 +23,11 @@ import type {
   ArtifactWorkerKernelAdapterFactory,
   ArtifactWorkerKernelSession,
 } from "./kernel-adapter";
-import { ArtifactWorkerPendingProjectionError } from "./kernel-adapter";
+import {
+  ArtifactWorkerPendingProjectionError,
+  isSerializedCommandRejection,
+  SERIALIZED_COMMAND_REJECTED,
+} from "./kernel-adapter";
 import {
   ArtifactWorkerProtocolError,
   ArtifactWorkerRpcKind,
@@ -524,6 +528,7 @@ export class ArtifactWorkerRuntime {
           "serialized pending command was not authored over the speculative head",
         );
       }
+      this.requireSerializedCommandApplies(canonicalCommand);
       pending = Object.freeze({
         ...commonPending,
         modality: input.modality,
@@ -537,6 +542,29 @@ export class ArtifactWorkerRuntime {
     const command = transferableOwnedBuffer(canonicalCommand);
     const intent = transferableOwnedBuffer(intentBytes);
     this.respond(frame.requestId, metadata, [command, intent]);
+  }
+
+  /**
+   * The caller writes an authored intent to its durable WAL before projecting
+   * it. Prove the exact command applies over the speculative head first, so a
+   * rejected edit fails here and never becomes a retained intent that every
+   * later open would have to replay.
+   */
+  private requireSerializedCommandApplies(commandBytes: Uint8Array): void {
+    const trial = this.requireSpeculative().fork();
+    try {
+      trial.applyCommands(commandBytes);
+    } catch (error) {
+      if (isSerializedCommandRejection(error)) {
+        throw runtimeError(
+          SERIALIZED_COMMAND_REJECTED,
+          error instanceof Error ? error.message : "artifact command was rejected",
+        );
+      }
+      throw error;
+    } finally {
+      this.disposeSession(trial);
+    }
   }
 
   private queryArtifact(frame: ReturnType<typeof decodeArtifactWorkerRpcMessage>): void {
@@ -715,11 +743,19 @@ export class ArtifactWorkerRuntime {
           baseSequence += 1;
         }
       } catch (error) {
-        if (!(error instanceof ArtifactWorkerPendingProjectionError)) throw error;
+        // A serialized command is replayed over the exact head it was authored
+        // against, so a kernel batch rejection there is permanent. Report it as
+        // blocked instead of failing the whole projection: one invalid local
+        // edit must never make the artifact unopenable.
+        const code =
+          error instanceof ArtifactWorkerPendingProjectionError
+            ? error.code
+            : transaction.modality !== "spreadsheet" && isSerializedCommandRejection(error)
+              ? SERIALIZED_COMMAND_REJECTED
+              : null;
+        if (code === null) throw error;
         blockedIds.add(transaction.clientTransactionId);
-        blocked.push(
-          Object.freeze({ clientTransactionId: transaction.clientTransactionId, code: error.code }),
-        );
+        blocked.push(Object.freeze({ clientTransactionId: transaction.clientTransactionId, code }));
       }
     }
     return Object.freeze(blocked);

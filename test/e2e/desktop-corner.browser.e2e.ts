@@ -311,16 +311,43 @@ describe("the desktop window bar", () => {
     // A chat's bar (desktop-rail.browser.e2e.ts): the sidebar toggle 84
     // window points from the left and the page's title line from the
     // canvas's left edge (never before 120), both centred on the traffic
-    // lights, in a bar of the same height, with the title shown once. Here
+    // lights, in a bar of the same height. The bar names where the page is:
+    // its section's trail, then its title. A section page's title is shown
+    // once (in the bar); a detail page keeps its title on the page too. Here
     // the settings shell (also without the app's rail, as personal settings),
     // a list page, a form page and a detail page, with the current shell and
     // one that doesn't report its bar (0.1.33 and older), open and collapsed.
     const views = [
-      { view: "", title: "General" },
-      { view: "&apprail=none", title: "General" },
-      { view: "&view=content", title: "Automations" },
-      { view: "&view=content&page=form", title: "New automation" },
-      { view: "&view=content&page=detail", title: "Nightly report" },
+      // The settings crumb opens that settings' first page.
+      {
+        view: "",
+        title: "General",
+        trail: ["Settings"],
+        links: ["Settings"],
+        headingOnPage: false,
+      },
+      {
+        view: "&apprail=none",
+        title: "General",
+        trail: ["Settings"],
+        links: ["Settings"],
+        headingOnPage: false,
+      },
+      { view: "&view=content", title: "Automations", trail: [], links: [], headingOnPage: false },
+      {
+        view: "&view=content&page=form",
+        title: "New automation",
+        trail: [],
+        links: [],
+        headingOnPage: false,
+      },
+      {
+        view: "&view=content&page=detail",
+        title: "Nightly report",
+        trail: [],
+        links: [],
+        headingOnPage: true,
+      },
     ];
     const shells = [
       { bar: "44", lights: MAC_TRAFFIC_LIGHT_POSITION },
@@ -328,7 +355,7 @@ describe("the desktop window bar", () => {
     ];
     for (const { bar, lights } of shells) {
       const centre = trafficLightCentre(lights);
-      for (const { view, title } of views) {
+      for (const { view, title, trail, links, headingOnPage } of views) {
         const { page, errors } = await open("macos", `${view}&bar=${bar}`, 1280, 600);
         for (const rail of ["open", "collapsed"]) {
           const where = `${view || "settings"} bar=${bar} ${rail}`;
@@ -360,11 +387,20 @@ describe("the desktop window bar", () => {
             const header = rows[0];
             const canvas = header?.parentElement;
             if (!header || !canvas) return { count: rows.length };
-            const text = header.querySelector("span")!.getBoundingClientRect();
+            const titleText = header.querySelector<HTMLElement>("[data-window-bar-title-text]")!;
+            const text = titleText.getBoundingClientRect();
             const box = header.getBoundingClientRect();
             return {
               count: rows.length,
-              text: header.textContent,
+              text: titleText.textContent,
+              trail: [
+                ...header.querySelectorAll<HTMLElement>('nav[aria-label="Location"] > span'),
+              ].map((crumb) => crumb.textContent),
+              links: [
+                ...header.querySelectorAll<HTMLElement>(
+                  'nav[aria-label="Location"] > span > :is(a, button)',
+                ),
+              ].map((crumb) => crumb.textContent),
               left: box.left,
               canvasLeft: canvas.getBoundingClientRect().left,
               textCentre: text.top + text.height / 2,
@@ -373,13 +409,18 @@ describe("the desktop window bar", () => {
           });
           expect(row.count, where).toBe(1);
           expect(row.text, where).toBe(title);
+          expect(row.trail, where).toEqual(trail);
+          expect(row.links, where).toEqual(links);
           expect(row.left, where).toBe(Math.max(row.canvasLeft!, MACOS_BAR_ROW_LEFT));
           expect(Math.abs(row.textCentre! - centre), where).toBeLessThanOrEqual(0.5);
           expect(row.drag, where).toBe("drag");
-          // Shown once: the page's own heading stays for assistive tech only.
+          // A section page's heading stays for assistive tech only; a detail
+          // page keeps its title on the page, under the bar's trail.
           const heading = page.getByRole("heading", { name: title, exact: true });
           expect(await heading.count(), where).toBe(1);
-          expect((await heading.boundingBox())!.width, where).toBeLessThanOrEqual(1);
+          const headingWidth = (await heading.boundingBox())!.width;
+          if (headingOnPage) expect(headingWidth, where).toBeGreaterThan(1);
+          else expect(headingWidth, where).toBeLessThanOrEqual(1);
           if (bar === "44") await expectWindowTop(page, "macos");
         }
         expect(errors).toEqual([]);

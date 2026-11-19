@@ -129,6 +129,8 @@ export async function listArtifactCatalogCandidates(
           : sql`NULL::uuid`
       } AS source_session_id, NULL::text AS version_id, 'editable_artifact'::text AS origin, a.visibility, a.owner_subject_id
     FROM editable_artifacts a WHERE a.account_id = ${scope.accountId}::uuid AND a.workspace_id = ${scope.workspaceId}::uuid
+      -- Archiving removes a document, spreadsheet or presentation: it no longer opens.
+      AND a.lifecycle_state = 'active'
       AND a.modality IN (${sql.join(
         editableKinds.map((kind) => sql`${kind}`),
         sql`, `,

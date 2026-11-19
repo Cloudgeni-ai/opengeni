@@ -336,7 +336,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             "The sandbox image reference exceeds the per-image byte limit.",
           );
         }
-        return Uint8Array.from(Buffer.from(read.content, "base64"));
+        return new Uint8Array(Buffer.from(read.content, "base64"));
       },
     });
   const unrestrictedImageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
@@ -1097,6 +1097,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               processingResidency: decisionModelProcessingResidency(runSettings),
             }),
         }),
+        toolSearchLoadThreshold: runSettings.toolSearchLoadThreshold,
         // The search result says only that it fell back; the deployment
         // keeps why, so slow or failing selections can be fixed.
         onToolSelectionError: (failure) => {

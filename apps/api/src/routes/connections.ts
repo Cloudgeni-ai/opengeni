@@ -38,6 +38,7 @@ import {
 } from "@opengeni/db/organization-integration-policy";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
+import { normalizeConnectionLabel } from "@opengeni/contracts/connection-account-label";
 import {
   startSlackBotInstall,
   requireOpenGeniSlackOAuthSettings,
@@ -375,6 +376,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const directModelKey = payload.metadata?.directModelProvider !== undefined;
+    const label = normalizeConnectionLabel(payload.label);
     // All writes in this closure must use the caller-owned scoped transaction.
     // eslint-disable-next-line no-shadow
     const persist = async (db: Database) => {
@@ -485,6 +487,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             grantedScopes: payload.grantedScopes,
             expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
             metadata: payload.metadata,
+            ...(label ? { label } : {}),
             createdBySubjectId: grant.subjectId,
             ...(directModelKey && detectedListPrice
               ? {
@@ -514,6 +517,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                         ? new Date(payload.expiresAt).toISOString()
                         : null,
                       metadata: payload.metadata,
+                      ...(label ? { label } : {}),
                     }),
                   },
                 }
@@ -777,14 +781,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           );
         }
       }
-      const reason = slackInstallErrorReason(error);
+      // A provider refusal can arrive without state; report the refusal.
+      const failure = state
+        ? null
+        : oauthStateFailureReturn(settings, c.req.query("state"), {
+            providerError: c.req.query("error"),
+          });
+      const reason = failure?.reason.startsWith("provider_")
+        ? failure.reason
+        : slackInstallErrorReason(error);
       return c.redirect(
-        slackInstallReturnUrl(
-          baseUrl,
-          state?.returnPath ?? oauthStateFailureReturn(settings, c.req.query("state")).returnPath,
-          "error",
-          reason,
-        ),
+        slackInstallReturnUrl(baseUrl, state?.returnPath ?? failure!.returnPath, "error", reason),
         302,
       );
     }
@@ -933,6 +940,40 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const { grant } = authorization;
     const payload = await parseRequestJson(c, UpdateConnectionRequest);
+    if (payload.label !== undefined) {
+      // A rename is display only: it changes neither the credential, its
+      // version nor the authority generation, so work already accepted keeps
+      // its account and its frozen label. It goes on its own, so it can never
+      // ride along with a change that needs the checks below.
+      const { label: _label, expectedVersion, operationId: _operationId, ...changes } = payload;
+      if (Object.values(changes).some((value) => value !== undefined))
+        throw new HTTPException(422, {
+          message: "Rename a connection on its own, without other changes",
+        });
+      const connection = await withWorkspaceSubjectRls(
+        db,
+        workspaceId,
+        grant.subjectId,
+        async (tx) =>
+          await updateConnection(tx, {
+            workspaceId,
+            connectionId: c.req.param("connectionId"),
+            visibleToSubjectId: grant.subjectId,
+            ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+            label: normalizeConnectionLabel(payload.label),
+            updatedBySubjectId: grant.subjectId,
+          }),
+      );
+      if (!connection) {
+        throw new HTTPException(expectedVersion === undefined ? 404 : 409, {
+          message:
+            expectedVersion === undefined
+              ? "connection not found"
+              : "connection changed; reload before renaming it",
+        });
+      }
+      return c.json(ConnectionResponse.parse({ connection }));
+    }
     // Knowledge in this workspace is a workspace setting (requireWorkspaceSettingsGrant).
     const canManageWorkspaceDestination = await workspaceSettingsAuthorized(
       deps,
@@ -1525,7 +1566,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
       ? await completeApiIntegrationProviderOAuth(deps, input)
       : await completeMcpOAuthCallback(
-          { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
+          {
+            db,
+            settings,
+            observability,
+            oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs,
+            mcpServerLogoStorage: deps.objectStorage,
+          },
           input,
         );
     if ("exactReturn" in result && result.exactReturn)

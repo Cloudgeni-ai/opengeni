@@ -349,6 +349,66 @@ export type ToolGatewaySiteConsentResponse = {
   review: ToolGatewaySiteConsentReview | null;
   connect: { capabilityId: string | null; name: string; providerDomain: string } | null;
 };
+/**
+ * What the current viewer can do with a Site's declared tool, asked before
+ * anything runs. Advisory: every call is still checked in full.
+ *
+ * - `ready`: it runs when called (`confirm` says whether it may still ask).
+ * - `confirm`: it runs after the viewer confirms in the Opengeni frame.
+ * - `choose_account`: the viewer picks one of several accounts in the frame.
+ * - `connect`: the viewer has no account for it yet; the frame offers Connect.
+ * - `reconnect`: the viewer's account for it must sign in again.
+ * - `grant`: the viewer's account must allow more access (`scopes`) first.
+ * - `blocked`: tool permissions block it on this account.
+ * - `open_in_opengeni`: it needs the viewer in Opengeni (a published address has no frame).
+ * - `unavailable`: it can't run for this viewer on this Site; `unavailableReason`
+ *   `account` means the connected account can't run it, whatever it signs in with.
+ */
+export type ToolGatewaySiteReadinessState =
+  | "ready"
+  | "confirm"
+  | "choose_account"
+  | "connect"
+  | "reconnect"
+  | "grant"
+  | "blocked"
+  | "open_in_opengeni"
+  | "unavailable";
+export type ToolGatewaySiteReadinessTool = {
+  /** The target as it was asked for. */
+  target: ToolGatewayTarget;
+  state: ToolGatewaySiteReadinessState;
+  /**
+   * Whether a call asks first: `never`, `always`, `remembered` (the viewer
+   * chose "Always allow" for it on this Site) or `maybe` (it depends on the
+   * call or on the provider).
+   */
+  confirm: "never" | "always" | "remembered" | "maybe";
+  /** The account it runs as, when one is known. */
+  runsAs: { connector: string; account: string; shared: boolean } | null;
+  /** The connector it uses ("Gmail"), when it uses one. */
+  connector: string | null;
+  /** The access a `grant` asks the account for. */
+  scopes?: string[];
+  /** `account`: the connected account can't run it (its access is fixed). */
+  unavailableReason?: "account";
+};
+export type ToolGatewaySiteReadinessRequest = {
+  targets: ToolGatewayTarget[];
+  siteArtifactId: string;
+  siteVersionId: string;
+};
+export type ToolGatewaySiteReadinessResponse = {
+  version: 1;
+  /** One entry per requested target, in order. */
+  tools: ToolGatewaySiteReadinessTool[];
+};
+/** Remove every "Always allow for this Site" choice the caller made on one Site (host code only). */
+export type ToolGatewaySiteAllowancesResetRequest = {
+  siteArtifactId: string;
+  siteVersionId: string;
+};
+export type ToolGatewaySiteAllowancesResetResponse = { version: 1; removed: number };
 export type ToolGatewayManifestRequest = {
   identities: ToolGatewayIdentity[];
   siteArtifactId?: string;
@@ -747,6 +807,9 @@ export type AttachViewerRequest = {
   desktop?: boolean | undefined;
   terminal?: boolean | undefined;
   files?: boolean | undefined;
+  /** How long ago the person last interacted with the page; omit when
+   * unknown. */
+  lastInteractionAgeMs?: number | undefined;
 };
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
@@ -761,6 +824,10 @@ export type ViewerHolder = {
   archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   dataPlaneUrl: string | null;
+  /** How long the viewer may go without reporting interaction on its
+   * heartbeat before a box held only by viewers may be drained. Null when the
+   * idle drain is disabled; absent from older servers. */
+  viewerIdleDrainMs?: number | null | undefined;
 };
 export type AttachViewerResponse = ViewerHolder & {
   // The scoped desktop-stream address minted for THIS holder (P4.2). Null when
@@ -797,7 +864,12 @@ export type AcknowledgeStreamResponse = {
 // Mirror of `@opengeni/contracts` ViewerHeartbeatRequest/Response — the
 // Channel-A viewer-liveness ping, epoch-fenced (a stale-epoch beat → alive:false
 // → the client re-attaches).
-export type ViewerHeartbeatRequest = { leaseEpoch: number };
+// `lastInteractionAgeMs`: how long ago the person last interacted with the
+// page; omit it when unknown.
+export type ViewerHeartbeatRequest = {
+  leaseEpoch: number;
+  lastInteractionAgeMs?: number | undefined;
+};
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -1108,6 +1180,12 @@ export type ConnectionMetadata = {
   verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
   /**
+   * The name the person gave this connection. Shown when the provider doesn't
+   * say which account it is (an API key); a provider identity such as an
+   * email always comes first. Absent when unnamed and from older servers.
+   */
+  label?: string | null | undefined;
+  /**
    * Whether this OAuth MCP account can be told apart from another account of
    * the same service: `verified` (its account is known), `reconnect` (sign in
    * again once before adding another), or `single` (the service doesn't say
@@ -1178,6 +1256,8 @@ type CreateConnectionRequestBase = {
   operationId?: string | undefined;
   /** Direct OpenAI/Azure keys only: verify the provider/model before saving. */
   verifyModelAccess?: boolean | undefined;
+  /** A name for the connection (at most 80 characters), shown when the provider gives no account identity. */
+  label?: string | null | undefined;
 };
 
 export type CreateConnectionRequest = CreateConnectionRequestBase &
@@ -1636,6 +1716,12 @@ export type UpdateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Rename the connection (at most 80 characters); null or blank removes the
+   * name. Send it on its own: a rename never changes the credential, its
+   * version or the account already-accepted work uses.
+   */
+  label?: string | null | undefined;
   expectedVersion?: number | undefined;
   operationId?: string | undefined;
 };
@@ -1663,6 +1749,9 @@ export type OAuthStartRequest = {
    * Never combined with connectionId. */
   newAccount?: true | undefined;
   ownership?: ConnectionOwnership | undefined;
+  /** The catalog capability this sign-in is for; the callback turns it on
+   * with the new account, so setup finishes even if no page loads afterwards. */
+  capabilityId?: string | undefined;
   oauthClient?:
     | {
         clientId: string;
@@ -2018,6 +2107,11 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
+  /**
+   * The agent this chat was started with; null for an ordinary chat. Fixed at
+   * create. Omitted by older servers.
+   */
+  agentId?: string | null | undefined;
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -2216,6 +2310,7 @@ export type SessionListEntry = Pick<
   | "titleSource"
   | "description"
   | "avatar"
+  | "agentId"
   | "createdBy"
   | "channelId"
   | "parentSessionId"
@@ -2615,6 +2710,25 @@ export type PersonalResourceAttachmentSummary = {
   sharedOutputWarningVersion: 1;
 };
 
+/**
+ * The Opengeni credits one turn charged: `usage` on the payload of its
+ * terminal event (`turn.completed`, `turn.failed`, `turn.cancelled`,
+ * `turn.superseded`), on the turn webhooks' `data`, and on turns from
+ * `listTurns`. Amounts are integer USD micros (1,000,000 = $1).
+ *
+ * `creditsMicros` is the total: model calls (title and compaction calls made
+ * within the turn too), web search, image generation, the bring-your-own-key
+ * platform fee and anything else. Subscription and customer-key calls cost 0
+ * apart from that fee. It is `null` when a charge of the turn has no recorded
+ * price, never a false 0. `breakdown` splits the known amounts by kind.
+ * Sub-agents are separate sessions and report on their own turn events.
+ */
+export type TurnUsage = {
+  creditsMicros: number | null;
+  tokens: { input: number; output: number };
+  breakdown: { model: number; webSearch: number; imageGeneration: number; other: number };
+};
+
 export type SessionTurn = {
   id: string;
   workspaceId: string;
@@ -2649,6 +2763,11 @@ export type SessionTurn = {
   finishedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The credits this turn charged, from its terminal event. Null while it
+   * runs and on turns from before this field existed.
+   */
+  usage?: TurnUsage | null | undefined;
 };
 
 export type HumanInputQuestionKind = "text" | "single_select" | "multi_select" | "secret";
@@ -3166,7 +3285,8 @@ export type ToolAuthNeededPayload = {
     | "personal_authority_unavailable"
     | "unsupported_auth"
     | "resource_scope_unavailable"
-    | "designated_credential_unavailable";
+    | "designated_credential_unavailable"
+    | "account_scope_fixed";
   hostReason?:
     | "missing_connection"
     | "expired"
@@ -3176,7 +3296,14 @@ export type ToolAuthNeededPayload = {
     | "unsupported_auth"
     | "resource_scope_unavailable"
     | "designated_credential_unavailable"
+    | "account_scope_fixed"
     | undefined;
+  /**
+   * Exact account reason beside the legacy-safe `unsupported_auth`: the
+   * connected account cannot get the access this tool needs (`scopes`), so no
+   * step-up is offered.
+   */
+  accountReason?: "account_scope_fixed" | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
   selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
@@ -3191,6 +3318,15 @@ export type ToolAuthNeededPayload = {
         action: "connect" | "add_credentials" | "enable";
         rationale: string;
         requiredVariables: string[];
+        /** Values the person enters on the card before connecting; `value` is the agent's prefill. */
+        inputs?:
+          | Array<{
+              id: string;
+              label: string;
+              placeholder?: string | undefined;
+              value?: string | undefined;
+            }>
+          | undefined;
       }
     | undefined;
   /** Agent suggestion; never a connection or permission grant. */
@@ -4410,6 +4546,7 @@ export type FirstPartyMcpToolName =
   | "command_read"
   | "command_wait"
   | "session_create"
+  | "session_queue_message"
   | "session_send_message"
   | "session_message_status"
   | "session_target_get"
@@ -5702,6 +5839,8 @@ export type CodexUsagePayload = {
     fiveHour: CodexUsageWindow | null;
     weekly: CodexUsageWindow | null;
     unknownWindowExhausted: boolean;
+    /** The provider flags this feature limit as spent. */
+    limitReached?: boolean;
   }>;
   credits?: {
     hasCredits: boolean;
@@ -6518,6 +6657,13 @@ export type OwnResourceReachWorkspace = {
   alwaysOn: boolean;
   /** You may turn it on or off here. */
   canChange: boolean;
+  /**
+   * A connector's login whose connector this shared workspace hasn't turned
+   * on: nothing here uses it yet, even when it is on. Turning it on here
+   * turns the connector on too, for each person's own account, where you
+   * may. Absent otherwise.
+   */
+  connectorOff?: boolean;
 };
 export type OwnResourceReachResponse = {
   resourceKind: OwnResourceReachKind;
@@ -7581,6 +7727,37 @@ export type NativeAppAuthorizeInput = {
   deviceName?: string;
 };
 
+/**
+ * A sign-in for an app that can't receive a redirect (the Excel add-in on
+ * desktop Office). The app shows `confirmationCode`, opens
+ * `/native-sign-in?relay=<relayId>` in the person's browser, and polls with
+ * its verifier until the browser approves.
+ */
+export type NativeAppRelayInput = {
+  redirectUri: string;
+  codeChallenge: string;
+  codeChallengeMethod: "S256";
+  platform: NativeAppPlatform;
+  deviceName?: string;
+};
+
+export type NativeAppRelay = {
+  relayId: string;
+  /** Shown in the app; the person types it on the approval page. */
+  confirmationCode: string;
+  expiresAt: string;
+};
+
+/**
+ * `approved` hands out the one-time code once (redeem it with
+ * `exchangeNativeAppCode`); `gone` means expired, already taken or unknown.
+ */
+export type NativeAppRelayPoll =
+  | { status: "pending" }
+  | { status: "approved"; code: string }
+  | { status: "refused" }
+  | { status: "gone" };
+
 export type NativeAppTokenInput = {
   code: string;
   codeVerifier: string;
@@ -7880,6 +8057,7 @@ export type SessionGoalContinuationReason =
   | "system_work_pending"
   | "held_for_input"
   | "backoff_pending"
+  | "compaction_failed"
   | "missing_obligation";
 
 export type SessionGoalContinuation = {
@@ -8764,7 +8942,8 @@ export type ScheduledTaskAccessFailureReason =
   | "personal_authority_unavailable"
   | "unsupported_auth"
   | "resource_scope_unavailable"
-  | "designated_credential_unavailable";
+  | "designated_credential_unavailable"
+  | "account_scope_fixed";
 
 /** A connector a scheduled run's own turn could not use (a `tool.auth_needed` fact). */
 export type ScheduledTaskRunAccessFailure = {
@@ -10033,6 +10212,10 @@ export type CreateCapabilityCatalogItemRequest = {
   installUrl?: string | undefined;
   authModel?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** The catalog entry whose Connect card asked for this connection's inputs. */
+  connectFor?: string | undefined;
+  /** With `connectFor`: the values the person entered on that card, by input id. */
+  connectInputs?: Record<string, string> | undefined;
 };
 
 export type EnableCapabilityRequest = {
@@ -10833,6 +11016,10 @@ export type {
   UpdateBillingAutoTopUpRequest,
   CreateBillingAutoTopUpSetupSessionRequest,
   CreateBillingAutoTopUpSetupSessionResponse,
+  BillingCardVerificationStatus,
+  CreateBillingCardVerificationSessionRequest,
+  CreateBillingCardVerificationSessionResponse,
+  ConfirmBillingCardVerificationRequest,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,

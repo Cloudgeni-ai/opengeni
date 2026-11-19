@@ -289,11 +289,14 @@ and `newChatFinishingUploads` in `labels`.
 ```css
 .assistant-panel {
   --og-color-accent: oklch(0.55 0.2 280);
+  --og-color-link: oklch(0.5 0.2 280);
   --og-color-bg: #ffffff;
   --og-font-sans: "Inter", system-ui, sans-serif;
   --og-radius-md: 8px;
 }
 ```
+
+`--og-color-link` colors text links in chat replies and across the components; they are always underlined too.
 
 Dark is the default. Add `data-og-theme="light"` for the light theme and `data-og-density="compact"` for narrow panels:
 

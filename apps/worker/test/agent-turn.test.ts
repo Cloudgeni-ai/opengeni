@@ -2,7 +2,11 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
-import { RoutingMutationOutcomeUnknownError } from "../../../packages/runtime/src/sandbox/routing/routing-session";
+import {
+  RoutingMutationOutcomeUnknownError,
+  RoutingWorkspaceRootChangedError,
+} from "../../../packages/runtime/src/sandbox/routing/routing-session";
+import { APIConnectionError, APIConnectionTimeoutError } from "openai";
 import { ModelItem } from "@openai/agents-core/types";
 import {
   withWorkspaceGatewayCredential,
@@ -135,6 +139,7 @@ import {
   shouldDeferRepositorySkillIndex,
   shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
+  sandboxRouteTransitionCode,
   compactionFailureTurnEventPayload,
   COMPACTION_PROVIDER_REJECTION_GUIDANCE,
   shouldRunTurnEndWorkspacePersistence,
@@ -158,6 +163,7 @@ import {
 } from "../src/activities/agent-turn/credential-leases";
 import { preemptSandboxTurnForDeadlineRotation } from "../src/activities/agent-turn/sandbox-runtime";
 import {
+  connectedMcpConnectors,
   mcpAccountsNeedingReconnect,
   unavailableMcpConnectorsForPolicy,
 } from "../src/activities/agent-turn/tool-environment";
@@ -467,7 +473,7 @@ describe("unavailable connector operational context", () => {
         '- "cap-linear": it is disconnected, turned off, or no longer available to this chat in this workspace. Whoever manages this workspace\'s connectors can reconnect it or turn it back on.',
         '- "Acme Tickets" (tickets): no signed-in account for it was available to this turn. The person may not be signed in to it here, their sign-in may have expired or been removed, or their sign-in was not usable in this workspace yet when the message was sent (this can last a few minutes after their workspace access changes). They can sign in to it again, or send the message again shortly if their access just changed.',
         "- 2 more connectors are unavailable for the same kinds of reasons.",
-        "When the person's request needs one of them, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
+        "Prefer loaded tools that can do the task: one of these connectors is needed only when the person named it or no loaded tool can do it, and an answer from other tools says which of these was not checked. When one is needed, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
       ].join("\n"),
     );
   });
@@ -513,6 +519,157 @@ describe("unavailable connector operational context", () => {
     expect(unavailableMcpOperationalContext({ connectors })).toBe(
       unavailableMcpOperationalContext({ connectors: [...connectors].reverse() }),
     );
+  });
+
+  test("names the connected connectors beside the unavailable ones", () => {
+    // A connected calendar whose tools wait behind tool search must not be
+    // the one connector the notice is silent about while an unavailable
+    // calendar of another provider is named.
+    const notice = unavailableMcpOperationalContext({
+      connectors: [{ id: "cap-other-calendar", name: "Other Calendar", reason: "no_account" }],
+      connected: [
+        { id: "acme-1", name: "Acme Calendar" },
+        { id: "tickets", name: "Tickets" },
+        { id: "acme-1", name: "Acme Calendar" },
+        { id: "lines", name: "Line\nbreak" },
+      ],
+    })!;
+    const lines = notice.split("\n");
+    expect(lines[0]!.startsWith("Connector availability for this turn:")).toBe(true);
+    expect(lines.at(-1)).toBe(
+      'Connected for this turn: "Acme Calendar", "Line break", "Tickets" (their tools may appear only through tool search). A connector the person names may be one of these rather than a similarly named one above.',
+    );
+    // Beside accounts that stopped working too.
+    expect(
+      unavailableMcpOperationalContext({
+        connectors: [],
+        needsReconnect: [
+          {
+            connector: { id: "mail", name: "Mail" },
+            account: "ada@example.test",
+            ownership: "personal",
+            stoppedWorkingOn: "2026-10-29",
+            reconnectHere: true,
+          },
+        ],
+        connected: [{ id: "tickets", name: "Tickets" }],
+      })!.endsWith(
+        '\nConnected for this turn: "Tickets" (their tools may appear only through tool search). A connector the person names may be one of these rather than a similarly named one above.',
+      ),
+    ).toBe(true);
+  });
+
+  test("a connected connector named like an unavailable or broken one carries its ID", () => {
+    const notice = unavailableMcpOperationalContext({
+      connectors: [{ id: "mail-old", name: "Mail", reason: "not_available" }],
+      needsReconnect: [
+        {
+          connector: { id: "tickets-a", name: "Tickets" },
+          account: "ada@example.test",
+          ownership: "personal",
+          stoppedWorkingOn: "2026-10-29",
+          reconnectHere: true,
+        },
+      ],
+      connected: [
+        { id: "mail-new", name: "Mail" },
+        { id: "tickets-b", name: "Tickets" },
+        { id: "calendar", name: "Calendar" },
+      ],
+    })!;
+    expect(notice.split("\n").at(-1)).toBe(
+      'Connected for this turn: "Calendar", "Mail" (mail-new), "Tickets" (tickets-b) (their tools may appear only through tool search). A connector the person names may be one of these rather than a similarly named one above.',
+    );
+  });
+
+  test("says nothing about connected connectors when none is unavailable, and bounds the list", () => {
+    expect(
+      unavailableMcpOperationalContext({
+        connectors: [],
+        connected: [{ id: "tickets", name: "Tickets" }],
+      }),
+    ).toBeUndefined();
+    const notice = unavailableMcpOperationalContext({
+      connectors: [{ id: "a", reason: "no_account" }],
+      connected: Array.from({ length: 20 }, (_, index) => ({
+        id: `c${index}`,
+        name: `C${String(index).padStart(2, "0")}`,
+      })),
+    })!;
+    expect(notice).toContain('"C15" and 4 more (their tools');
+    expect(notice).not.toContain('"C16"');
+  });
+});
+
+describe("connectors connected for a turn", () => {
+  const base = {
+    servers: [
+      { id: "opengeni", name: "Opengeni" },
+      { id: "cap-tickets", name: "Tickets" },
+      { id: "cap-mail", name: "Mail" },
+      { id: "cap-unselected", name: "Unselected" },
+      { id: "cap-unnamed" },
+    ],
+    tools: [
+      { id: "opengeni" },
+      { id: "cap-tickets" },
+      { id: "cap-mail" },
+      { id: "cap-unnamed" },
+      { id: "api_calendar_a" },
+      { id: "api_calendar_b" },
+    ],
+    unavailableIds: ["cap-mail"],
+    bindings: null,
+    apiIntegrations: [
+      { serverId: "api_calendar_a", name: "Acme Calendar", connectionRef: { connectionId: "c-a" } },
+      { serverId: "api_calendar_b", name: "Acme Calendar", connectionRef: { connectionId: "c-b" } },
+    ],
+    brokenConnectionIds: new Set<string>(),
+  };
+
+  test("selected connectors not reported unavailable, and routed API integrations once", () => {
+    expect(connectedMcpConnectors(base)).toEqual([
+      { id: "cap-tickets", name: "Tickets" },
+      { id: "cap-unnamed", name: "cap-unnamed" },
+      { id: "api_calendar_a", name: "Acme Calendar" },
+    ]);
+  });
+
+  test("a selection narrowed to no tools is not connected", () => {
+    expect(
+      connectedMcpConnectors({
+        ...base,
+        tools: [
+          { id: "cap-tickets", allowedTools: [] },
+          { id: "cap-unnamed", allowedTools: ["read"] },
+          { id: "api_calendar_a", allowedTools: [] },
+          { id: "api_calendar_b", allowedTools: [] },
+        ],
+      }),
+    ).toEqual([{ id: "cap-unnamed", name: "cap-unnamed" }]);
+  });
+
+  test("a connector whose every routed account stopped working is left to the reconnect list", () => {
+    const bindings = [
+      { canonicalServerId: "cap-tickets", connectionId: "t-1" },
+      { canonicalServerId: "cap-tickets", connectionId: "t-2" },
+      { canonicalServerId: "cap-unnamed", connectionId: "u-1" },
+    ];
+    // One working account keeps a connector connected.
+    expect(
+      connectedMcpConnectors({
+        ...base,
+        bindings,
+        brokenConnectionIds: new Set(["t-1", "c-a"]),
+      }).map((connector) => connector.id),
+    ).toEqual(["cap-tickets", "cap-unnamed", "api_calendar_a"]);
+    expect(
+      connectedMcpConnectors({
+        ...base,
+        bindings,
+        brokenConnectionIds: new Set(["t-1", "t-2", "c-a", "c-b"]),
+      }).map((connector) => connector.id),
+    ).toEqual(["cap-unnamed"]);
   });
 });
 
@@ -4822,6 +4979,40 @@ describe("worker shutdown preemption", () => {
     expect(receipts).toBe(1);
   });
 
+  test("a worker shutdown hands remote operations to the command ledger before the drain", async () => {
+    for (const handOffRemoteOperations of [true, false]) {
+      const steps: string[] = [];
+      await drainAttemptOwnedSandboxWriters({
+        toolCancellationFence: {
+          handOffRemoteOperations: () => steps.push("hand-off"),
+          cancel: () => steps.push("cancel"),
+          waitForQuiescence: async () => {
+            steps.push("drain");
+          },
+        },
+        handOffRemoteOperations,
+        gitCredentialRenewals: [],
+        codemodeTokenRenewal: null,
+        runCredentialRenewal: null,
+      });
+      expect(steps).toEqual(
+        handOffRemoteOperations ? ["hand-off", "cancel", "drain"] : ["cancel", "drain"],
+      );
+    }
+    // The finalizer asks for it exactly when Temporal cancelled the attempt
+    // because its worker is shutting down (Pause and Steer keep exit proof).
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/finalization.ts", import.meta.url),
+    ).text();
+    const drainAt = source.indexOf("await drainAttemptOwnedSandboxWriters({");
+    expect(
+      source.indexOf(
+        "handOffRemoteOperations: isWorkerShutdownCancellation(cancellationSignal?.reason),",
+        drainAt,
+      ),
+    ).toBeGreaterThan(drainAt);
+  });
+
   test("retries the proof-bearing turn release outside Temporal cancellation", async () => {
     const proofFlags: boolean[] = [];
     const delays: number[] = [];
@@ -6646,6 +6837,46 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(false);
     expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+  });
+
+  test("a checkpoint request that got no provider answer retries the same turn", () => {
+    // Wrapped exactly as the summarizer wraps a client failure: the SDK turns
+    // anything a custom fetch throws into a connection error with no status.
+    const wrap = (cause: unknown) =>
+      new CompactionProviderResponseError(compactionProviderFailureDiagnostics(cause), cause);
+    for (const cause of [
+      new APIConnectionError({ message: "Connection error." }),
+      new APIConnectionTimeoutError(),
+      new TypeError("fetch failed"),
+      new Error("socket closed"),
+    ]) {
+      const wrapped = wrap(cause);
+      expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
+      expect(agentRunFailurePayload(wrapped)).toMatchObject({
+        error: "The context checkpoint request did not finish. The same turn will retry it.",
+        code: "provider_unavailable",
+        retryable: true,
+        detail: wrapped.message,
+      });
+    }
+    // An answered refusal stays terminal.
+    const rejected = wrap(
+      Object.assign(new Error("Invalid request"), { status: 400, code: "invalid_request_error" }),
+    );
+    expect(shouldRecoverCompactionProviderFailure(rejected)).toBe(false);
+    expect(agentRunFailurePayload(rejected).retryable).not.toBe(true);
+  });
+
+  test("a route move that refused the checkpoint request recovers like any route transition", () => {
+    const moved = new RoutingWorkspaceRootChangedError("/home/user", "/Users/user");
+    const viaSdk = new APIConnectionError({ cause: moved });
+    for (const error of [
+      moved,
+      new CompactionProviderResponseError(compactionProviderFailureDiagnostics(viaSdk), viaSdk),
+    ]) {
+      expect(sandboxRouteTransitionCode(error)).toBe("workspace_root_changed_this_turn");
+      expect(shouldRecoverCompactionProviderFailure(error)).toBe(true);
+    }
   });
 
   test("a checkpoint stream that ends early or times out retries the same turn", () => {

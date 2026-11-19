@@ -13,6 +13,7 @@ import {
   directIntegrationTransport,
   extractMcpToolManifest,
   filterOpenApiDocumentForDefinition,
+  genericPathScopeOperations,
   googleDiscoveryToOpenApi,
   IntegrationInvocationError,
   invokeGraphqlOperation,
@@ -66,11 +67,23 @@ describe("OpenAPI compiler and local MCP invocation", () => {
         "/users",
       ].map((path) => [path, { get: { responses: { "200": { description: "OK" } } } }]),
     );
+    const document = { openapi: "3.1.0", info: { title: "Graph", version: "1" }, paths };
     const filtered = filterOpenApiDocumentForDefinition(
-      { openapi: "3.1.0", info: { title: "Graph", version: "1" }, paths },
+      document,
       MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
     );
     expect(Object.keys(filtered.paths as object)).toEqual([
+      file,
+      "/drives/{drive-id}/root:/{path}",
+      `${file}/children`,
+      "/shares/{sharedDriveItem-id}/driveItem",
+    ]);
+    // The generic tools reach the rest of the file API, never the Excel API.
+    expect(
+      genericPathScopeOperations(document, MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION).map(
+        (operation) => operation.path,
+      ),
+    ).toEqual([
       file,
       `${file}/children`,
       `${file}/workbookOther`,
@@ -84,15 +97,20 @@ describe("OpenAPI compiler and local MCP invocation", () => {
         (path) => [path, { post: { responses: { "200": { description: "OK" } } } }],
       ),
     );
+    const document = { openapi: "3.1.0", info: { title: "Graph", version: "1" }, paths };
     const filtered = filterOpenApiDocumentForDefinition(
-      { openapi: "3.1.0", info: { title: "Graph", version: "1" }, paths },
+      document,
       MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
     );
     expect(Object.keys(filtered.paths as object)).toEqual([
       "/me/calendar/getSchedule",
       "/me/events",
-      "/me/reminderView",
     ]);
+    expect(
+      genericPathScopeOperations(document, MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION).map(
+        (operation) => operation.path,
+      ),
+    ).toEqual(["/me/calendar/getSchedule", "/me/events", "/me/reminderView"]);
   });
 
   const document = {
@@ -459,7 +477,7 @@ describe("provider adapters and MCP manifest", () => {
         info: { title: "Graph", version: "v1" },
         paths: {
           "/me/messages": { get: {} },
-          "/me/messages/{id}": { delete: {} },
+          "/me/messages/{message-id}": { delete: {} },
           "/me/drive": { get: {} },
         },
       },
@@ -467,7 +485,7 @@ describe("provider adapters and MCP manifest", () => {
     );
     expect(Object.keys(filtered.paths as Record<string, unknown>)).toEqual([
       "/me/messages",
-      "/me/messages/{id}",
+      "/me/messages/{message-id}",
     ]);
     expect(filtered.servers).toEqual([{ url: "https://graph.microsoft.com/v1.0" }]);
     expect(MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.provider).toEqual({

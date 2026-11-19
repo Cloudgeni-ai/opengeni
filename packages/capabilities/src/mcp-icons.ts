@@ -119,7 +119,7 @@ export function decodeDataUriIcon(
   const contentType = normalizedContentType(parts[0] || null);
   try {
     const bytes = base64
-      ? Uint8Array.from(Buffer.from(payload.replace(/\s+/g, ""), "base64"))
+      ? new Uint8Array(Buffer.from(payload.replace(/\s+/g, ""), "base64"))
       : new TextEncoder().encode(decodeURIComponent(payload));
     return { contentType, bytes };
   } catch {

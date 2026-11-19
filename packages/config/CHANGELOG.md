@@ -1,5 +1,208 @@
 # @opengeni/config
 
+## 6.30.1
+
+### Patch Changes
+
+- @opengeni/codex@6.30.1
+- @opengeni/contracts@6.30.1
+- @opengeni/xai-subscription@6.30.1
+
+## 6.30.0
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/codex@6.30.0
+  - @opengeni/xai-subscription@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/codex@6.29.2
+- @opengeni/contracts@6.29.2
+- @opengeni/xai-subscription@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- a641523: Fleet pressure counts only boxes on managed providers. Self-hosted (Connected Machine) boxes cost the deployment nothing and are exempt from the unpaid fleet limits, so they no longer keep pressure engaged. Migration 1492 adds the `opengeni_private.sandbox_fleet_warm_boxes_v1()` count withheld; until a later release grants it, pressure keeps reading every lease. Without subscription plans the reaper no longer reads or reports pressure (`OpenGeniSandboxFleetPressureEngaged`, `opengeni_sandbox_fleet_warm_boxes`), since `none` is not unpaid there; admission still applies pressure to any organization it finds unpaid.
+- 4884618: New self-serve organizations (first and additional) start held when the owner's mail domain, or its MX host, is a temporary-inbox service (rule `disposable-mail-v1`; the API checks the MX at setup with a bounded, cached lookup that fails open, and records only the flag), and when 3 or more owners of one company domain set up within 24 hours and none of their organizations ever used the product (`email-slow-domain-v1`). Both legs enforce by default and have their own mode in the signup settings (migration 1493). New settings: `OPENGENI_SIGNUP_DISPOSABLE_MAIL_DOMAINS` (more providers) and `OPENGENI_SIGNUP_MAIL_MX_LOOKUP_TIMEOUT_MS` (1500; 0 turns the lookup off).
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/codex@6.29.1
+  - @opengeni/xai-subscription@6.29.1
+
+## 6.29.0
+
+### Minor Changes
+
+- c5a628c: Decision models can run on Azure AI Foundry (for example Microsoft-Decision-1.1). `OPENGENI_DECISION_MODEL_ENDPOINT` (and `OPENGENI_PUBLIC_DECISION_MODEL_ENDPOINT`) sets the exact URL an `openai` or `openrouter` decision model posts to, `OPENGENI_DECISION_MODEL_AUTH=deployment_identity` now works for `openrouter` as well as `openai`, and an `openrouter` decision model at the operator's own endpoint can be declared EU in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` under `decision_model.openrouter` (OpenRouter's own host keeps its global rule). `OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD` sets the probability above which tool search loads a judged tool; unset keeps 0.5. `selectFromJudgments` takes an optional threshold, `createToolSelector` an optional `loadThreshold`, and `BuildAgentOptions` an optional `toolSearchLoadThreshold`.
+- 6581a0f: GPT-6.2 Astra (`gpt-6.2-astra`) and GPT-6.2 Sol (`gpt-6.2-sol`) replace GPT-6 Astra as Opengeni's default models. The built-in OpenAI defaults are now `OPENGENI_OPENAI_MODEL=gpt-6.2-astra` and `OPENGENI_OPENAI_ALLOWED_MODELS=gpt-6.2-astra,gpt-6.2-sol,gpt-6-sol,gpt-6-luna`, and the built-in Codex subscription models are GPT-6.2 Astra, GPT-6.2 Sol, GPT-6 Sol and GPT-6 Luna. Both new models offer Fast and, where OpenAI serves it, Ultrafast, and get compact labels ("6.2 Astra", "6.2 Sol").
+
+  Their OpenAI list prices per million tokens: GPT-6.2 Astra $8 input, $0.40 cached input, $10 cache write and $40 output; GPT-6.2 Sol $2, $0.10, $2.50 and $10. Above 272K input tokens the whole request pays twice the input and cache rates and 1.5 times the output rate. Ultrafast is priced at OpenAI's launch rate of 3 times Standard, which OpenAI raises to 6 times on 1 March 2027.
+
+  GPT-6 Astra is no longer offered by default. Deployments that list it explicitly keep it, and it keeps its price, so Azure deployments of it, accepted turns and recorded usage stay priced. Chats on it keep their history and ask for another model on the next message; database-mode catalogs retire it with `retired: true` as before. GPT-6.1 Sol is unchanged.
+
+### Patch Changes
+
+- 60f6dea: Plan-less organizations on a deployment without subscription plans are no longer bounded like Free, and turns parked at an organization's running-box limit no longer count as sandbox recoveries.
+
+  - **`none` without subscription plans:** with `OPENGENI_SUBSCRIPTION_PLANS_ENABLED` off, no organization ever gets a plan row, so `none` is every organization's ordinary tier. It is no longer unpaid: the default plan limits leave it unbounded (`DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS`), and none of the free compute bounds, unpaid fleet limits or unpaid Modal ceilings apply to it. With subscription plans on, `none` is still a self-serve organization waiting for Free enrollment and stays bounded like Free. Promotion decisions (`restricted`, linked restriction, suspension) apply either way. Operators can still bound `none` in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. New `sandboxPlanTierUnpaid`; `parseSandboxPlanLimitsJson` takes `{ subscriptionPlansEnabled }`, `settingsForSandboxPlanTier` reads `subscriptionPlansEnabled` from its settings, and `acquireLease` accepts `subscriptionPlansEnabled` (omitted means on).
+  - **Recovery cause `organization_limit`:** a turn parked because its organization already runs as many boxes as its plan allows counts in `opengeni_turn_recoveries_total` as `cause="organization_limit"` instead of `sandbox`, and `OpenGeniTurnRecoveryRatioHigh` excludes it like `route_change`.
+
+- 7b590d3: New self-serve organizations (first and additional) start held when they arrive as a farm (rule `email-cluster-v1`, migration 1489), with a mode per leg in the signup network velocity settings:
+
+  - Burst (`burstMode`, enforce): four setups within ten seconds through the same shared relay, or with the same mail domain group and the same signup network. Bursts that share only a network, or only a company or academic domain (a workshop, classroom or office onboarding), and bursts of unrelated domains are only observed.
+  - Denied domain (`deniedDomainMode`, enforce): two denied organizations in the last 30 days on the same company or personal-relay domain; an academic domain is only observed.
+  - Domain (`emailDomainMode`, observe): three owners with one company or personal-relay domain within an hour.
+
+  Per-person subdomains of addy.io, anonaddy, 33mail and dynamic DNS hosts (DuckDNS, No-IP, Dynu, FreeDDNS and similar) group on the full subdomain; a burst through one such provider counts like one shared relay, and one denied organization on such a name holds the next.
+
+  Only a keyed hash of the domain is stored. Public providers and shared relays (Apple private relay, DuckDuckGo, Firefox Relay, SimpleLogin) never group on the domain or denied legs, academic domains never group on the domain leg, and reserved test domains never count.
+
+  An unpaid organization in its first day in which no turn was ever started gets 15 box-minutes (`youngTurnlessBoxSeconds` in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`). Past it, the reaper drains a box no turn holds once nothing on it was active for `youngTurnlessIdleMs` (5 minutes; `compute_turnless`). Running commands and Browser/ComputerSessions are never cut off. A box that is not running does not start again without a turn (`young_turnless`), and starting a chat always works and lifts the bound.
+
+- Updated dependencies [6581a0f]
+- Updated dependencies [ea75565]
+  - @opengeni/codex@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/contracts@6.29.0
+
+## 6.28.0
+
+### Patch Changes
+
+- e09a38b: Unpaid sandboxes are now bounded across the whole fleet, not only per organization and person, so many new accounts cannot add up to a large fleet. All unpaid organizations together share a running-box cap (default 40) and a daily box-time budget (default 300 box-hours per UTC day); an unpaid organization in its first 24 hours runs one box and gets 6 box-hours; and when more than 50 boxes of every plan are warm, unpaid boxes are capped at 15 until the warm count stays below 40 for 15 minutes. A refused start says the shared free capacity is busy (`sandbox_capacity_unpaid_busy`); an agent turn fails with that message instead of retrying, and a turn already on a running box keeps working. Unpaid admissions fail closed when the fleet cannot be read. Paid, Enterprise, host-provisioned and credit-buying organizations are never counted or limited.
+
+  Values are runtime settings in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`, separate from the plan limits; unknown fields are ignored, so it can be set during a rolling deploy. The reaper records the fleet's state as metrics, with a page while the daily budget is spent. The running caps (including the pressure cap) and the daily budget read a new database function (migration 1486) that a later release grants; until then the young-organization limits apply, and pressure only with a cap of 0.
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/codex@6.28.0
+  - @opengeni/xai-subscription@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/codex@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- f041392: A viewer can no longer keep unlimited sandboxes running with no task. Opening a desktop, terminal or file editor starts a sandbox, and a heartbeating viewer kept it warm indefinitely; under `usage_only` warm billing that compute was free, so scripted accounts could hold hundreds of boxes. A workspace now keeps at most `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` boxes (default 3, `0` = unbounded) warm with only viewers attached; a viewer that would add one more gets HTTP 429, which the web client already shows as the viewer cap. Joining a box a task or another viewer already holds is unaffected. When the monthly warm allowance (`OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE`) is exhausted, viewers on boxes with no running task are now detached on their next heartbeat so those boxes drain, instead of staying warm until the viewer closes; boxes a task holds keep running.
+
+  Organizations now also get sandbox limits by subscription plan, counted across every workspace and member (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`). Defaults: Free 2 viewer-only boxes per organization and 1 per person, Pro 10/3, Max 30/5, Enterprise unbounded; a Free organization whose promotion decision is `held` or `denied` keeps none. Each plan also caps running boxes, including those agent turns hold (Free 3, Pro 20, Max 50): a turn that needs a new box beyond it waits for a slot, retrying every minute without holding a worker, instead of starting one. The organization-wide counts use a new database function (migration 1475) whose runtime grant follows in a later release; until then only the zero limits and the per-workspace viewer limit apply.
+
+- Updated dependencies [5fd2c21]
+  - @opengeni/contracts@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [24104b1]
+- Updated dependencies [c0248a5]
+  - @opengeni/codex@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Minor Changes

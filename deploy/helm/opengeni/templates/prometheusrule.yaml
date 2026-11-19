@@ -488,7 +488,7 @@ spec:
         - alert: OpenGeniTurnRecoveryRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!~"provider|route_change"}[10m]))
+              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!~"provider|route_change|organization_limit"}[10m]))
               /
               clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
@@ -498,12 +498,12 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider or a deliberate sandbox move over the last 10 minutes.'
+            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider, a deliberate sandbox move or an organization at its running-box limit over the last 10 minutes.'
             headline: 'Many agent turns needing automatic retries'
             value: '{{ "{{ $value | humanizePercentage }}" }} of turns retried (10 min)'
             user_impact: 'Replies are slower and may pause briefly while turns retry automatically; no work is lost.'
             next_step: 'Split opengeni_turn_recoveries_total by cause (sandbox, tool, worker, database, control, other) and follow the matching sandbox, MCP, worker or Postgres evidence.'
-            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Deliberate active-sandbox moves mid-turn (cause route_change) continue on the new route by design and are excluded too. Inspect the dominant remaining cause.
+            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Deliberate active-sandbox moves mid-turn (cause route_change) continue on the new route by design and are excluded too, as are turns parked because their organization already runs as many boxes as its plan allows (cause organization_limit), which wait a minute for one of its own boxes with no retry budget. Inspect the dominant remaining cause.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerRestarted
           expr: |
@@ -786,14 +786,18 @@ spec:
           # (reason="destination_*") is the website's failure, not ours: it is
           # left out of both sides of the ratio, so an agent retrying a site
           # that is down neither pages nor dilutes our own failures.
+          # The same holds for the agent's own addressing mistakes: a locator
+          # that matched nothing or several elements (reason="locator_*") or an
+          # action the page cannot take (reason="invalid_action") means the
+          # browser answered correctly; the agent re-observes and retries.
           expr: |
             (
-              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+"}[15m]))
+              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+|locator_.+|invalid_action"}[15m]))
               /
-              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},reason!~"destination_.+"}[15m])), 1)
+              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},reason!~"destination_.+|locator_.+|invalid_action"}[15m])), 1)
             ) > 0.25
             and on (resource, operation)
-            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+"}[15m])) >= 5
+            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+|locator_.+|invalid_action"}[15m])) >= 5
           for: 10m
           labels:
             severity: warning
@@ -804,7 +808,7 @@ spec:
             value: '{{ "{{ $value | humanizePercentage }}" }} failed or refused (15 min)'
             user_impact: 'The agent (or a person) cannot drive the browser or computer: pages do not open, observations fail, or actions are refused, so tasks that need a browser stall.'
             next_step: 'Split opengeni_interaction_operations_total by reason in Grafana: permission_denied/access_denied is an authorization bug, control_* is a Connected Machine problem, timeout/controller_lost/driver_failed/tab_* point at the browser or its controller, stale is usually benign churn.'
-            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal. Websites that did not answer or could not be reached (reason destination_*) are excluded; if every site fails that way at once, check the browser''s network.'
+            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal. Websites that did not answer or could not be reached (reason destination_*) are excluded; if every site fails that way at once, check the browser''s network. The agent''s own addressing mistakes (reason locator_* or invalid_action) are excluded too.'
         - alert: OpenGeniHandoffsExpiringUnanswered
           expr: |
             (
@@ -1004,6 +1008,32 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} timeout(s) (15 min)'
             user_impact: 'Some users'' agent turns waited and then failed because their sandbox did not become ready in time.'
             next_step: 'Check the sandbox provider''s capacity and status; occasional timeouts usually clear on their own.'
+        # Unpaid fleet limits (docs/deployment.md, "Unpaid fleet limits"). The
+        # reaper counts its passes by the unpaid fleet's state, so these stop
+        # on their own when the state clears or the reaper moves replicas.
+        - alert: OpenGeniUnpaidSandboxDailyBudgetExhausted
+          expr: sum(increase(opengeni_sandbox_unpaid_fleet_checks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="daily_budget_exhausted"}[10m])) > 0
+          labels:
+            severity: critical
+            notification_policy: page
+          annotations:
+            summary: 'Unpaid organizations used the whole day''s fleet sandbox time; no new Free sandbox starts until 00:00 UTC.'
+            headline: 'Free sandbox fleet budget exhausted'
+            value: '{{ "{{ printf `%.0f` $value }}" }} reaper pass(es) over budget (10 min)'
+            user_impact: 'New Free and plan-less users cannot start sandboxes until midnight UTC; paid, Enterprise and embedded organizations are unaffected.'
+            next_step: 'Find which unpaid organizations used the box time (opengeni_sandbox_unpaid_fleet_box_seconds_today, usage_events sandbox.warm_seconds) and stop abuse; raise unpaidBoxSecondsPerDay in OPENGENI_SANDBOX_FLEET_LIMITS_JSON only if the use is legitimate.'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#unpaid-fleet-limits
+        - alert: OpenGeniSandboxFleetPressureEngaged
+          expr: sum(increase(opengeni_sandbox_unpaid_fleet_checks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="pressure"}[10m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: 'More boxes are warm than the fleet-pressure threshold, so new Free sandboxes are limited automatically.'
+            headline: 'Free sandboxes limited by fleet pressure'
+            value: '{{ "{{ printf `%.0f` $value }}" }} reaper pass(es) under pressure (10 min)'
+            user_impact: 'New Free and plan-less users may be refused a sandbox until the warm count falls; paid organizations are unaffected.'
+            next_step: 'Check which accounts hold the warm boxes (opengeni_sandbox_fleet_warm_boxes); pressure releases on its own below pressureReleaseWarmBoxes.'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#unpaid-fleet-limits
         {{- if $opensandboxEnabled }}
         - alert: OpenGeniOpenSandboxApiThrottled
           expr: |

@@ -155,7 +155,8 @@ RUN --mount=type=cache,id=opengeni-speakers-cargo-registry,target=/usr/local/car
     install -D -m 0755 "target/${rust_target}/release/opengeni-speakers" /out/bin/opengeni-speakers; \
     xx-verify /out/bin/opengeni-speakers
 ADD --checksum=sha256:24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 /tmp/segmentation.tar.bz2
-ADD --checksum=sha256:aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx /tmp/embedding.onnx
+# Commit-pinned: upstream re-uploaded the GitHub release asset with new bytes.
+ADD --checksum=sha256:aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx /tmp/embedding.onnx
 ADD --checksum=sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 https://raw.githubusercontent.com/modelscope/3D-Speaker/065629c313eaf1a01c65c640c46d77e61e9607b4/LICENSE /tmp/embedding-LICENSE
 # The word aligner: Meta's Omnilingual ASR CTC 300M (Apache-2.0, about 1,600
 # languages) as exported to int8 ONNX by sherpa-onnx, 365 MB.

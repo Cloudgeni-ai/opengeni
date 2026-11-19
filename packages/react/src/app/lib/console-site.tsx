@@ -18,6 +18,30 @@ export function useConsoleSiteViewer(): SiteViewer {
   );
 }
 
+/** Listeners per Site for changes the console makes to what its viewer can do. */
+const readinessListeners = new Map<string, Set<() => void>>();
+
+/** Tell every open frame of this Site that what the viewer can do may have changed. */
+export function notifySiteToolReadinessChanged(siteId: string): void {
+  for (const listener of [...(readinessListeners.get(siteId) ?? [])]) {
+    try {
+      listener();
+    } catch {
+      // One frame's failure must not stop the others.
+    }
+  }
+}
+
+function subscribeSiteToolReadiness(siteId: string, listener: () => void): () => void {
+  const listeners = readinessListeners.get(siteId) ?? new Set<() => void>();
+  listeners.add(listener);
+  readinessListeners.set(siteId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) readinessListeners.delete(siteId);
+  };
+}
+
 /** Console tool access for a `SiteView`, pinned to the loaded Site version. */
 export function useConsoleSiteToolBridge(workspaceId: string): SiteToolBridgeFactory {
   const { client } = useAppContext();
@@ -33,6 +57,7 @@ export function useConsoleSiteToolBridge(workspaceId: string): SiteToolBridgeFac
             siteVersionId: site.siteVersionId,
             requestedTools: site.requestedTools,
             consent,
+            readinessChanges: (listener) => subscribeSiteToolReadiness(site.artifactId, listener),
           })
         : createSiteToolBridge(api, scope);
     },

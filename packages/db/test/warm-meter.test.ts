@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
+import { DEFAULT_SANDBOX_PLAN_LIMITS } from "@opengeni/config";
 import {
   accrueWarmSeconds,
   acquireLease as acquireLeaseUnscoped,
@@ -15,7 +16,11 @@ import {
   reArmDrainingLease,
   releaseLeaseHolder,
   SandboxViewerAdmissionBlockedError,
+  SandboxViewerBoxLimitError,
+  SandboxOrganizationBoxLimitError,
   SandboxPaidComputeAdmissionError,
+  resolveSandboxPlanTier,
+  withRlsContext,
   heartbeatLeaseHolderStatus,
   type Database,
   type DbClient,
@@ -56,6 +61,27 @@ let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
+async function workspaceOf(accountId: string): Promise<{ accountId: string; workspaceId: string }> {
+  const [w] = await admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${accountId}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${accountId})`;
+  return { accountId, workspaceId: w!.id };
+}
+
+// The restricted tier applies only while promotion enforcement is on.
+async function setPromotionEnforcement(enabled: boolean): Promise<void> {
+  await admin`insert into promotion_enforcement (singleton, enabled) values (true, ${enabled})
+    on conflict (singleton) do update set enabled = excluded.enabled`;
+}
+
+// Migration 1475 created the definer withheld and 1479 grants it; granting it
+// again here is harmless and keeps these tests independent of that order.
+async function grantOrganizationCounts(): Promise<void> {
+  await admin.unsafe(
+    "grant execute on function opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid) to opengeni_app",
+  );
+}
+
 async function freshWorkspace(): Promise<{
   accountId: string;
   workspaceId: string;
@@ -81,6 +107,7 @@ async function warmGroup(
   for (const h of holders) {
     await withCreditDebitAttribution(attribution, () =>
       acquireLeaseUnscoped(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.groupId,
@@ -266,6 +293,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       } = paid,
     ) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...ws,
         sandboxGroupId: ws.groupId,
         kind,
@@ -310,6 +338,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     await seedBalance(paidWs.accountId, -500);
     const paidAcquire = (kind: "turn" | "viewer" | "direct" | "interaction", holderId: string) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...paidWs,
         sandboxGroupId: paidWs.groupId,
         kind,
@@ -324,6 +353,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       );
       await expect(
         acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...paidWs,
           sandboxGroupId: paidWs.groupId,
           kind,
@@ -456,6 +486,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(
       (
         await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...ws,
           sandboxGroupId: ws.groupId,
           kind: "viewer",
@@ -517,6 +548,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(
       (
         await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...ws,
           sandboxGroupId: ws.groupId,
           kind: "viewer",
@@ -891,6 +923,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
 
     // Re-warm a new box on the same group through the real cold->warming->warm path.
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       sandboxGroupId: ws.groupId,
@@ -1048,6 +1081,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
 
     const acquireViewer = (holderId: string) =>
       acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: ws.accountId,
         workspaceId: ws.workspaceId,
         sandboxGroupId: ws.groupId,
@@ -1086,6 +1120,428 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     });
     expect(await listSandboxViewerForceDrainWorkspaceIds(db)).not.toContain(ws.workspaceId);
     expect((await acquireViewer("v4")).role).toBe("attached");
+  }, 60_000);
+
+  test("(6d) viewers alone keep at most the configured number of boxes warm per workspace", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const groupA = crypto.randomUUID();
+    const groupB = crypto.randomUUID();
+    const groupC = crypto.randomUUID();
+    const groupT = crypto.randomUUID();
+    const viewer = (sandboxGroupId: string, holderId: string) =>
+      acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId,
+        kind: "viewer",
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        viewerOnlyBoxLimit: 2,
+      });
+    const refusal = async (attempt: Promise<unknown>) => {
+      try {
+        await attempt;
+      } catch (error) {
+        return error;
+      }
+      return null;
+    };
+
+    // Two viewer-only boxes fit; one warming, one warm.
+    expect((await viewer(groupA, "a1")).role).toBe("spawner");
+    await warmGroup({ ...ws, groupId: groupB }, [{ kind: "viewer", holderId: "b1" }]);
+
+    // A third task-less box is refused before any provider work; the refusal
+    // rolls back the whole admission, so not even a cold lease row remains.
+    const refused = await refusal(viewer(groupC, "c1"));
+    expect(refused).toBeInstanceOf(SandboxViewerBoxLimitError);
+    expect((refused as SandboxViewerBoxLimitError).limit).toBe(2);
+    expect(await readLiveness(ws.workspaceId, groupC)).toBeUndefined();
+
+    // Joining a box a viewer already keeps warm adds no compute, and an exact
+    // holder replay is never refused.
+    expect((await viewer(groupB, "b2")).role).toBe("attached");
+    expect((await viewer(groupB, "b1")).role).toBe("attached");
+
+    // A box a turn holds never counts and is never refused.
+    await warmGroup({ ...ws, groupId: groupT }, [{ kind: "turn", holderId: "t1" }]);
+    expect((await viewer(groupT, "tv")).role).toBe("attached");
+
+    // Once a viewer-only box drains, its slot is free again.
+    for (const holderId of ["b1", "b2"]) {
+      await releaseLeaseHolder(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: groupB,
+        kind: "viewer",
+        holderId,
+        idleGraceMs: 60_000,
+      });
+    }
+    expect(await readLiveness(ws.workspaceId, groupB)).toBe("draining");
+    expect((await viewer(groupC, "c1")).role).toBe("spawner");
+
+    // Without a limit, admission is unchanged.
+    const unlimited = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: crypto.randomUUID(),
+      kind: "viewer",
+      holderId: "free",
+      backend: "modal",
+      leaseTtlMs: 90_000,
+    });
+    expect(unlimited.role).toBe("spawner");
+  }, 60_000);
+
+  test("(6f) plan tiers: paid plans by status, restricted Free and plan-less organizations", async () => {
+    if (!available) return;
+    const tierOf = async (accountId: string, workspaceId: string) =>
+      withRlsContext(db, { accountId, workspaceId }, (scoped) =>
+        resolveSandboxPlanTier(scoped, accountId),
+      );
+    const ws = await freshWorkspace();
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("none");
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'held', 1, 'test')`;
+    // A held decision restricts only while promotion enforcement is on.
+    await setPromotionEnforcement(false);
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("none");
+    await setPromotionEnforcement(true);
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("restricted");
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("restricted");
+    await admin`update promotion_decisions set decision = 'eligible' where account_id = ${ws.accountId}`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("free");
+    await admin`update organization_plans set plan_key = 'pro', status = 'past_due' where account_id = ${ws.accountId}`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("pro");
+    await admin`update organization_plans set status = 'canceled' where account_id = ${ws.accountId}`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("free");
+    // A paying organization is never restricted by a promotional-credit decision.
+    await admin`update organization_plans set plan_key = 'max', status = 'active' where account_id = ${ws.accountId}`;
+    await admin`update promotion_decisions set decision = 'denied' where account_id = ${ws.accountId}`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("max");
+  }, 60_000);
+
+  test("(6g) a restricted organization gets no box of any kind, even before the count definer is granted", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'denied', 1, 'test')`;
+    await setPromotionEnforcement(true);
+    let refused: unknown;
+    try {
+      await acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "viewer",
+        holderId: "v1",
+        viewerSubjectId: "user:denied",
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    expect((refused as SandboxOrganizationBoxLimitError).reason).toBe("closed");
+    // Nor does agent work in the same organization start one: the turn fails
+    // with the same message instead of waiting for a slot.
+    let turnRefused: unknown;
+    try {
+      await acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t1",
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      });
+    } catch (error) {
+      turnRefused = error;
+    }
+    expect(turnRefused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    expect((turnRefused as SandboxOrganizationBoxLimitError).reason).toBe("closed");
+  }, 60_000);
+
+  test("(6j) a restricted organization's viewer is refused whatever credential keeps it alive", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'held', 1, 'test')`;
+    await setPromotionEnforcement(true);
+    // A browser session and a personal API key name the person; a workspace
+    // or organization API key names the key, or nobody. The tier belongs to
+    // the organization, so each is refused the same way: it allows no box.
+    for (const viewerSubjectId of ["user:held", "api_key:held-key", undefined]) {
+      let refused: unknown;
+      try {
+        await acquireLease(db, {
+          accountId: ws.accountId,
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: crypto.randomUUID(),
+          kind: "viewer",
+          holderId: `v-${viewerSubjectId ?? "none"}`,
+          ...(viewerSubjectId ? { viewerSubjectId } : {}),
+          backend: "modal",
+          leaseTtlMs: 90_000,
+          sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+        });
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    }
+  }, 60_000);
+
+  test("(6k) a young Free self-serve organization is on the new tier until it ages out", async () => {
+    if (!available) return;
+    const tierOf = async (
+      accountId: string,
+      workspaceId: string,
+      limits = DEFAULT_SANDBOX_PLAN_LIMITS,
+    ) =>
+      withRlsContext(db, { accountId, workspaceId }, (scoped) =>
+        resolveSandboxPlanTier(scoped, accountId, limits),
+      );
+    const ws = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("new");
+    // Without the plan-limit table, or with a `new` tier that sets no age, it is Free.
+    expect(
+      await withRlsContext(db, ws, (scoped) => resolveSandboxPlanTier(scoped, ws.accountId)),
+    ).toBe("free");
+    expect(await tierOf(ws.accountId, ws.workspaceId, { free: {}, new: {} })).toBe("free");
+
+    // One viewer-only box, whatever credential keeps it alive.
+    const viewer = (holderId: string, viewerSubjectId?: string) =>
+      acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: crypto.randomUUID(),
+        kind: "viewer",
+        holderId,
+        ...(viewerSubjectId ? { viewerSubjectId } : {}),
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      });
+    await grantOrganizationCounts();
+    expect((await viewer("first", "user:new-owner")).role).toBe("spawner");
+    await expect(viewer("second")).rejects.toBeInstanceOf(SandboxViewerBoxLimitError);
+
+    // A held decision still restricts a young organization.
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'held', 1, 'test')`;
+    await setPromotionEnforcement(true);
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("restricted");
+    await admin`delete from promotion_decisions where account_id = ${ws.accountId}`;
+
+    // Paid and older organizations are not new.
+    await admin`update managed_accounts set created_at = now() - interval '4 days'
+      where id = ${ws.accountId}`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("free");
+    const paid = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${paid.accountId}, 'pro', 'active')`;
+    expect(await tierOf(paid.accountId, paid.workspaceId)).toBe("pro");
+
+    // A young organization a host provisioned stays embedded.
+    const embedded = await freshWorkspace();
+    await admin`update managed_accounts set external_source = 'opengeni-sdk:young'
+      where id = ${embedded.accountId}`;
+    expect(await tierOf(embedded.accountId, embedded.workspaceId)).toBe("embedded");
+  }, 60_000);
+
+  test("(6h) organization and member viewer limits count every workspace of the organization", async () => {
+    if (!available) return;
+    await grantOrganizationCounts();
+    const ws1 = await freshWorkspace();
+    const ws2 = await workspaceOf(ws1.accountId);
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws1.accountId}, 'free', 'active')`;
+    const limits = { free: { viewerOnlyBoxesPerOrganization: 2, viewerOnlyBoxesPerMember: 1 } };
+    const viewer = (
+      workspaceId: string,
+      sandboxGroupId: string,
+      subject: string,
+      holderId: string,
+    ) =>
+      acquireLease(db, {
+        accountId: ws1.accountId,
+        workspaceId,
+        sandboxGroupId,
+        kind: "viewer",
+        holderId,
+        viewerSubjectId: subject,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: limits,
+      });
+    const refusal = async (attempt: Promise<unknown>) => {
+      try {
+        await attempt;
+      } catch (error) {
+        return error as SandboxViewerBoxLimitError;
+      }
+      throw new Error("expected a refusal");
+    };
+    const groupA = crypto.randomUUID();
+    const groupB = crypto.randomUUID();
+    const groupC = crypto.randomUUID();
+
+    expect((await viewer(ws1.workspaceId, groupA, "user:one", "a1")).role).toBe("spawner");
+    // The same person cannot add a second task-less box in another workspace.
+    const member = await refusal(viewer(ws2.workspaceId, groupB, "user:one", "b1"));
+    expect(member).toBeInstanceOf(SandboxViewerBoxLimitError);
+    expect([member.scope, member.limit]).toEqual(["member", 1]);
+    // A colleague can, up to the organization's limit across workspaces.
+    expect((await viewer(ws2.workspaceId, groupB, "user:two", "b2")).role).toBe("spawner");
+    const organization = await refusal(viewer(ws1.workspaceId, groupC, "user:three", "c3"));
+    expect([organization.scope, organization.limit]).toEqual(["organization", 2]);
+    // Joining a box someone already keeps warm is always admitted.
+    expect((await viewer(ws1.workspaceId, groupA, "user:three", "a3")).role).toBe("attached");
+    // Another organization is unaffected.
+    const other = await freshWorkspace();
+    const otherViewer = await acquireLease(db, {
+      accountId: other.accountId,
+      workspaceId: other.workspaceId,
+      sandboxGroupId: other.groupId,
+      kind: "viewer",
+      holderId: "o1",
+      viewerSubjectId: "user:one",
+      backend: "modal",
+      leaseTtlMs: 90_000,
+      sandboxPlanLimits: limits,
+    });
+    expect(otherViewer.role).toBe("spawner");
+  }, 60_000);
+
+  test("(6i) a new box beyond the organization's running-box limit parks a turn and refuses other holders", async () => {
+    if (!available) return;
+    await grantOrganizationCounts();
+    const ws1 = await freshWorkspace();
+    const ws2 = await workspaceOf(ws1.accountId);
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws1.accountId}, 'pro', 'active')`;
+    const limits = { pro: { runningBoxesPerOrganization: 1 } };
+    const acquire = (
+      workspaceId: string,
+      sandboxGroupId: string,
+      kind: "turn" | "viewer" | "direct",
+      holderId: string,
+      backend = "modal",
+    ) =>
+      acquireLease(db, {
+        accountId: ws1.accountId,
+        workspaceId,
+        sandboxGroupId,
+        kind,
+        holderId,
+        backend,
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: limits,
+      });
+
+    // The first box (a turn's, in workspace 1) fits.
+    const groupA = crypto.randomUUID();
+    expect((await acquire(ws1.workspaceId, groupA, "turn", "t1")).role).toBe("spawner");
+
+    // A turn electing a second box in another workspace parks instead of
+    // creating one: no holder, no warming transition.
+    const groupB = crypto.randomUUID();
+    const parked = await acquire(ws2.workspaceId, groupB, "turn", "t2");
+    expect(parked).toMatchObject({
+      role: "fenced",
+      reason: "organization_sandbox_capacity",
+      organizationBoxLimit: 1,
+    });
+    expect(await readLiveness(ws2.workspaceId, groupB)).toBe("cold");
+
+    // Holders that cannot wait are refused outright.
+    for (const kind of ["viewer", "direct"] as const) {
+      let refused: unknown;
+      try {
+        await acquire(ws2.workspaceId, groupB, kind, `${kind}-1`);
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+      expect((refused as SandboxOrganizationBoxLimitError).limit).toBe(1);
+    }
+
+    // Joining the box that already runs adds none and is admitted.
+    expect((await acquire(ws1.workspaceId, groupA, "viewer", "joins")).role).toBe("attached");
+    // A Connected Machine is the user's own computer and never counts.
+    expect(
+      (await acquire(ws2.workspaceId, crypto.randomUUID(), "turn", "machine", "selfhosted")).role,
+    ).toBe("spawner");
+
+    // Once the running box drains cold, the parked turn's retry elects its box.
+    await admin`update sandbox_leases set liveness = 'cold', refcount = 0, turn_holders = 0,
+      viewer_holders = 0 where workspace_id = ${ws1.workspaceId} and sandbox_group_id = ${groupA}`;
+    await admin`delete from sandbox_lease_holders where workspace_id = ${ws1.workspaceId}`;
+    expect((await acquire(ws2.workspaceId, groupB, "turn", "t2")).role).toBe("spawner");
+  }, 60_000);
+
+  test("(6e) an exhausted warm allowance detaches viewers from task-less boxes, never from a running turn", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const viewerOnly = { ...ws, groupId: crypto.randomUUID() };
+    const turnHeld = { ...ws, groupId: crypto.randomUUID() };
+    const viewerEpoch = await warmGroup(viewerOnly, [{ kind: "viewer", holderId: "v1" }]);
+    const turnEpoch = await warmGroup(turnHeld, [
+      { kind: "turn", holderId: "t1" },
+      { kind: "viewer", holderId: "v2" },
+    ]);
+    const heartbeat = (groupId: string, holderId: string, expectedEpoch: number) =>
+      heartbeatLeaseHolderStatus(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: groupId,
+        kind: "viewer",
+        holderId,
+        leaseTtlMs: 90_000,
+        expectedEpoch,
+      });
+
+    // Before the allowance is exhausted both viewers renew normally.
+    expect((await heartbeat(viewerOnly.groupId, "v1", viewerEpoch)).leaseExtended).toBe(true);
+
+    await admin`insert into usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at)
+      values (${ws.accountId}, ${ws.workspaceId}, 'sandbox.warm_seconds', 10, 'seconds', ${crypto.randomUUID()}, now())`;
+    const gate = await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId: ws.workspaceId,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
+      idleGraceMs: 60_000,
+    });
+    expect(gate.reason).toBe("warm_cap");
+
+    expect(await heartbeat(viewerOnly.groupId, "v1", viewerEpoch)).toEqual({
+      holderAlive: true,
+      leaseExtended: false,
+      fence: "viewer_allowance_exhausted",
+    });
+    expect(await heartbeat(turnHeld.groupId, "v2", turnEpoch)).toEqual({
+      holderAlive: true,
+      leaseExtended: true,
+      fence: null,
+    });
   }, 60_000);
 
   test("(7) credits settles the full signed warm cost, idempotently, below zero", async () => {

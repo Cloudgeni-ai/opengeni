@@ -108,6 +108,19 @@ async function recordedFor(address: string) {
   return row?.count ?? 0;
 }
 
+/** The legacy first-organization route, which writes the same setup receipt. */
+async function createOrganization(cookie: string, address: string | null) {
+  return await app().request(
+    "/v1/organizations",
+    {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json", origin: "http://opengeni.test" },
+      body: JSON.stringify({ name: "Legacy Network Test", operationId: crypto.randomUUID() }),
+    },
+    apiRequestBindingsForTransportPeer(address),
+  );
+}
+
 describe("signup network velocity on organization onboarding", () => {
   test("hashes are keyed and never contain the address; unknown sources yield nothing", () => {
     const source = signupNetworkSource("192.0.2.10", "secret-a-at-least-32-bytes-long-xx")!;
@@ -194,6 +207,52 @@ describe("signup network velocity on organization onboarding", () => {
       const byAccount = new Map(decisions.map((row) => [row.accountId, row.decision]));
       for (const organization of organizations) expect(byAccount.get(organization)).toBe("held");
       expect(byAccount.get(singleId)).not.toBe("held");
+    } finally {
+      await configure({ mode: "off" });
+    }
+  }, 300_000);
+
+  test("the legacy organization route records the network, applies the rate limit and holds like onboarding", async () => {
+    if (!shared || !client) return;
+    // The test server signs every user up from one address; reset Better
+    // Auth's per-address sign-up counter so earlier tests do not trip it.
+    await shared.admin`delete from auth_rate_limits`;
+    const recorded = await createOrganization(await signedInUser(), "192.0.2.60");
+    expect(recorded.status).toBe(201);
+    expect(await recordedFor("192.0.2.60")).toBe(1);
+    await configure({ rateLimitEnabled: true });
+    try {
+      const address = "192.0.2.61";
+      for (let i = 0; i < 5; i++) {
+        expect((await createOrganization(await signedInUser(), address)).status).toBe(201);
+      }
+      const refused = await createOrganization(await signedInUser(), address);
+      expect(refused.status).toBe(429);
+      const body = (await refused.json()) as {
+        error: { code: string; message: string; details?: { managedAuthCode?: string } };
+      };
+      expect(body.error.code).toBe("limit_exceeded");
+      expect(body.error.message).toBe(SIGNUP_NETWORK_RATE_LIMIT_MESSAGE);
+      expect(body.error.details?.managedAuthCode).toBe("organization_setup_rate_limited");
+      expect(await recordedFor(address)).toBe(5);
+    } finally {
+      await configure({ rateLimitEnabled: false });
+    }
+    await configure({ mode: "enforce" });
+    try {
+      const address = "203.0.113.60";
+      const organizations: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const response = await createOrganization(await signedInUser(), address);
+        expect(response.status).toBe(201);
+        organizations.push(
+          ((await response.json()) as { organization: { id: string } }).organization.id,
+        );
+      }
+      const decisions = await shared.admin<Array<{ accountId: string; decision: string }>>`
+        select account_id::text as "accountId", decision from promotion_decisions
+        where account_id = any(${organizations}::uuid[])`;
+      expect(decisions.map((row) => row.decision)).toEqual(["held", "held", "held"]);
     } finally {
       await configure({ mode: "off" });
     }

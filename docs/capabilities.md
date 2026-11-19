@@ -365,6 +365,23 @@ and returns the exact revision id and SHA-256. Install re-fetches the source and
 returns `409` if either immutable fact changed, so unreviewed tools are never
 installed from a stale preview.
 
+The Microsoft Graph definitions read one commit-pinned copy of Graph's OpenAPI
+document (`MICROSOFT_GRAPH_OPENAPI_PIN`, a msgraph-metadata commit URL plus its
+SHA-256), never the moving upstream branch, so their tools change only when the
+pin is reviewed and moved; a document whose digest differs is refused. `bun
+scripts/graph-openapi-pin.ts` checks the pin, and `--diff <commit>` prints, per
+definition, the reviewed operations a candidate lacks and the operations
+entering or leaving each generic path scope. Each definition offers a reviewed
+operation allowlist with hand-written names and descriptions (an allowlist entry
+may name its own `operationId` and `requestPath`; path parameters follow the
+request path). A definition may also opt in to `genericPathScope`: three more
+tools find operations under its path prefixes in the pinned document and call
+one by its concrete path, one tool for GET (read) and one for other methods
+(change, Ask by default). The path must match an in-scope operation segment by
+segment, each value is encoded into its segment, and the call takes the same
+credential, redirect and response handling as any reviewed tool. Outlook Mail,
+Calendar, Contacts and OneDrive opt in with their earlier prefix scopes.
+
 Authenticated Integrations require an existing active Connection for the exact
 provider domain. The selected Connection's Personal/workspace ownership and
 required scopes are checked during install; caller-supplied ownership cannot
@@ -998,6 +1015,12 @@ Ordinary new sessions include two first-party Opengeni tools:
   `eventId`). `tool_search` posts the same card itself, through this tool,
   when a search clearly names one integration the person can connect (see
   `docs/mcp-surfaces.md`, "Human integration setup in chat").
+- An integration whose connections each need a value first (for example one
+  environment's address) declares those connect-time inputs in
+  `@opengeni/contracts/capability-connect-inputs`. Its catalog match lists
+  them as `setup.connectInputs`, and its card asks the person for them, filled
+  in with any `inputs` the agent passed that follow the entry's rule. The card
+  adds the connection with `connectFor`, and the API applies the same rule.
 - `custom_mcp_setup_request` posts a human review card for a remote HTTPS MCP
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human

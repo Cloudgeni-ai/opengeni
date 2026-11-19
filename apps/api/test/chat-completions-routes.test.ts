@@ -325,6 +325,68 @@ describe("chat completions route", () => {
     expect(new Set(chunks.map((chunk) => chunk.id)).size).toBe(1);
   });
 
+  test("usage.cost is the Opengeni credits the call charged, in USD", async () => {
+    const charged = (creditsChargedMicros: number | null) =>
+      fakeService(async (input) => {
+        await input.onTextDelta?.("Hei");
+        return { ...OUTPUT, creditsChargedMicros };
+      }).service;
+    const whole = async (micros: number | null) =>
+      (
+        (await (await post(charged(micros), { model: "m", messages: MESSAGES })).json()) as {
+          usage: Record<string, unknown>;
+        }
+      ).usage;
+    expect((await whole(41_230)).cost).toBe(0.04123);
+    // Subscription and customer-key calls charge no credits.
+    expect((await whole(0)).cost).toBe(0);
+    // An unknown amount (settlement failed) is left out, never a false 0.
+    expect(await whole(null)).not.toHaveProperty("cost");
+    const streamed = await post(charged(1_500), {
+      model: "m",
+      messages: MESSAGES,
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+    const chunks = (await streamed.text())
+      .split("\n\n")
+      .filter(Boolean)
+      .map((event) => event.replace(/^data: /, ""))
+      .filter((event) => event !== "[DONE]")
+      .map((event) => JSON.parse(event));
+    expect(chunks.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15, cost: 0.0015 },
+    });
+    // Only the final usage chunk carries usage.
+    expect(chunks.slice(0, -1).every((chunk) => chunk.usage === null)).toBe(true);
+  });
+
+  test("a browser relayed through a session proxy never sees usage.cost", async () => {
+    const { service } = fakeService(async (input) => {
+      await input.onTextDelta?.("Hei");
+      return { ...OUTPUT, creditsChargedMicros: 41_230 };
+    });
+    const relayed = async (body: Record<string, unknown>) =>
+      await app(service).request(URL, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "content-type": "application/json",
+          accept: "application/json, application/json; opengeni-session=chat",
+        },
+        body: JSON.stringify({ model: "m", messages: MESSAGES, ...body }),
+      });
+    const whole = (await (await relayed({})).json()) as { usage: Record<string, unknown> };
+    expect(whole.usage).toMatchObject({ total_tokens: 15 });
+    expect(whole.usage).not.toHaveProperty("cost");
+    const streamed = await (
+      await relayed({ stream: true, stream_options: { include_usage: true } })
+    ).text();
+    expect(streamed).toContain('"total_tokens":15');
+    expect(streamed).not.toContain('"cost"');
+  });
+
   test("a streamed call refused before any output is a plain JSON error", async () => {
     const { service } = fakeService(async () => {
       throw new ModelCallError({

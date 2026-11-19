@@ -24,6 +24,12 @@ export type StoredFeedbackScreenshot = FeedbackScreenshot & { objectKey: string 
  */
 export interface FeedbackDiagnostics {
   server: { version?: string; revision?: string };
+  /**
+   * The person a service principal recorded the report for, such as the
+   * Teams user rating an organization agent's reply, which is recorded as
+   * the agent.
+   */
+  onBehalfOf?: { subjectId: string };
   session?: {
     id: string;
     status: string;
@@ -103,6 +109,8 @@ export async function createFeedback(
     screenshots?: StoredFeedbackScreenshot[];
     /** The receiving server's version and deployment revision, when known. */
     server?: { version?: string | undefined; revision?: string | undefined };
+    /** See FeedbackDiagnostics.onBehalfOf. */
+    onBehalfOf?: { subjectId: string };
   },
 ): Promise<FeedbackSubmissionResponse> {
   const request = CreateFeedbackRequest.parse(input.request);
@@ -137,6 +145,7 @@ export async function createFeedback(
         ...(input.server?.version ? { version: input.server.version } : {}),
         ...(input.server?.revision ? { revision: input.server.revision } : {}),
       },
+      ...(input.onBehalfOf ? { onBehalfOf: { subjectId: input.onBehalfOf.subjectId } } : {}),
     };
     // The chat in view, read with the author's own access: a chat they cannot
     // read is simply not described.

@@ -37,7 +37,9 @@ const BUSINESS_CENTRAL_TENANT =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63})$/iu;
 const BUSINESS_CENTRAL_ENVIRONMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 // Web client pages that are not an environment name (sign-in and link landing pages).
-const BUSINESS_CENTRAL_WEB_PAGES = new Set(["signin", "signout", "deeplink", "oauthlanding"]);
+const BUSINESS_CENTRAL_WEB_PAGES = new Set(["signin", "signout", "oauthlanding"]);
+// Web client pages that may follow the environment (deep links and device clients).
+const BUSINESS_CENTRAL_WEB_CLIENT_PAGES = new Set(["deeplink", "tablet.aspx", "phone.aspx"]);
 export const BUSINESS_CENTRAL_API_SCOPE = `https://${BUSINESS_CENTRAL_API_HOST}/Financials.ReadWrite.All`;
 /** Every Business Central environment's API is below this root. */
 export const BUSINESS_CENTRAL_API_ROOT = `https://${BUSINESS_CENTRAL_API_HOST}/v2.0/`;
@@ -117,18 +119,34 @@ export function microsoftDynamicsEnvironmentAddress(mcpUrl: string): string | nu
   return `${BUSINESS_CENTRAL_WEB_HOST}/${tenant ? `${tenant}/` : ""}${environment}`;
 }
 
+/** What to paste instead of a Business Central address that can't be read unambiguously. */
+const BUSINESS_CENTRAL_ADDRESS_HINT = `Paste the address from the browser's address bar while Business Central is open (${BUSINESS_CENTRAL_WEB_HOST}/<tenant ID>/<environment>), or ${BUSINESS_CENTRAL_WEB_HOST}/<tenant>.onmicrosoft.com/<environment>.`;
+
+/**
+ * A Business Central address: its connection URL, or why it can't be read
+ * unambiguously. Null when the address is not on a Business Central host.
+ */
+type BusinessCentralAddress = { mcpUrl: string } | { problem: string };
+
 /**
  * The connection URL for a Business Central address: the web client
- * (`businesscentral.dynamics.com/<tenant>/<environment>?company=…`; a missing
- * environment is the default `Production`) or any API URL of the environment.
- * Connections are per environment; tools name the company.
+ * (`businesscentral.dynamics.com/[<tenant>/][<environment>][/deeplink]?company=…`;
+ * a missing environment is the default `Production`) or any API URL of the
+ * environment. Connections are per environment; tools name the company.
+ *
+ * No part of the path is ever ignored: a first segment that is neither a
+ * tenant ID nor a domain, but is followed by more, is refused rather than
+ * guessed (taking it as the environment would drop the real one).
  */
-function businessCentralEndpoint(url: URL): string | null {
+function businessCentralAddress(url: URL): BusinessCentralAddress | null {
   const host = url.hostname.toLowerCase();
   if (host === BUSINESS_CENTRAL_API_HOST) {
     const parsed = businessCentralApiEnvironment(url);
-    if (!parsed || (parsed.rest[0] && parsed.rest[0] !== "v2.0")) return null;
-    return businessCentralApiRoot(parsed.environment);
+    if (!parsed || (parsed.rest[0] && parsed.rest[0] !== "v2.0"))
+      return {
+        problem: `That Business Central API address isn't one an environment can be read from (only the standard API, /v2.0/<tenant>/<environment>/api/v2.0, is). ${BUSINESS_CENTRAL_ADDRESS_HINT}`,
+      };
+    return { mcpUrl: businessCentralApiRoot(parsed.environment) };
   }
   if (host !== BUSINESS_CENTRAL_WEB_HOST) return null;
   const segments = url.pathname
@@ -141,20 +159,34 @@ function businessCentralEndpoint(url: URL): string | null {
         return segment;
       }
     });
-  const queryTenant = url.searchParams.get("tenant")?.trim().toLowerCase() ?? "";
-  const tenant =
-    segments[0] && BUSINESS_CENTRAL_TENANT.test(segments[0])
-      ? segments.shift()!.toLowerCase()
-      : BUSINESS_CENTRAL_TENANT.test(queryTenant)
-        ? queryTenant
-        : null;
-  const environment = segments[0] ?? BUSINESS_CENTRAL_DEFAULT_ENVIRONMENT;
+  const isClientPage = (segment: string | undefined) =>
+    segment !== undefined && BUSINESS_CENTRAL_WEB_CLIENT_PAGES.has(segment.toLowerCase());
+  let tenant: string | null = null;
+  // A web client page (tablet.aspx) looks like a domain but is never a tenant.
+  if (segments[0] && !isClientPage(segments[0]) && BUSINESS_CENTRAL_TENANT.test(segments[0])) {
+    tenant = segments.shift()!.toLowerCase();
+  } else if (segments.length > 1 && !(segments.length === 2 && isClientPage(segments[1]))) {
+    return {
+      problem: `In that Business Central address, "${segments[0]}" isn't a tenant ID or domain, so the environment after it can't be used. ${BUSINESS_CENTRAL_ADDRESS_HINT}`,
+    };
+  } else {
+    const queryTenant = url.searchParams.get("tenant")?.trim().toLowerCase() ?? "";
+    if (BUSINESS_CENTRAL_TENANT.test(queryTenant)) tenant = queryTenant;
+  }
+  const environment = segments.shift() ?? BUSINESS_CENTRAL_DEFAULT_ENVIRONMENT;
   if (
     !BUSINESS_CENTRAL_ENVIRONMENT.test(environment) ||
-    BUSINESS_CENTRAL_WEB_PAGES.has(environment.toLowerCase())
+    BUSINESS_CENTRAL_WEB_PAGES.has(environment.toLowerCase()) ||
+    isClientPage(environment)
   )
-    return null;
-  return businessCentralApiRoot({ tenant, environment });
+    return {
+      problem: `That Business Central address doesn't name an environment. ${BUSINESS_CENTRAL_ADDRESS_HINT}`,
+    };
+  if (segments.length > 1 || (segments.length === 1 && !isClientPage(segments[0])))
+    return {
+      problem: `That Business Central address has more after the environment "${environment}" than an environment address has. ${BUSINESS_CENTRAL_ADDRESS_HINT}`,
+    };
+  return { mcpUrl: businessCentralApiRoot({ tenant, environment }) };
 }
 
 /** The Dynamics product an exact connection URL belongs to, or null. */
@@ -174,6 +206,12 @@ export function microsoftDynamicsProductForMcpUrl(mcpUrl: string): MicrosoftDyna
   return MCP_PATHS[product].includes(path) ? product : null;
 }
 
+function parseEnvironmentAddress(environmentUrl: string): URL | null {
+  const trimmed = environmentUrl.trim();
+  if (!trimmed) return null;
+  return parseHttps(/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`);
+}
+
 /**
  * The MCP endpoint for an environment URL as a person would copy it from
  * their browser (any page of the environment, with or without `https://`),
@@ -182,20 +220,31 @@ export function microsoftDynamicsProductForMcpUrl(mcpUrl: string): MicrosoftDyna
 export function microsoftDynamicsMcpEndpoint(
   environmentUrl: string,
 ): { product: MicrosoftDynamicsProduct; mcpUrl: string } | null {
-  const trimmed = environmentUrl.trim();
-  if (!trimmed) return null;
-  const url = parseHttps(
-    /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`,
-  );
+  const url = parseEnvironmentAddress(environmentUrl);
   if (!url) return null;
-  const businessCentral = businessCentralEndpoint(url);
-  if (businessCentral) return { product: "business_central", mcpUrl: businessCentral };
+  const businessCentral = businessCentralAddress(url);
+  if (businessCentral)
+    return "mcpUrl" in businessCentral
+      ? { product: "business_central", mcpUrl: businessCentral.mcpUrl }
+      : null;
   const host = url.hostname.toLowerCase();
   const product = productForHost(host);
   if (!product) return null;
   const path = url.pathname.replace(/\/+$/u, "");
   const mcpPath = MCP_PATHS[product].includes(path) ? path : MCP_PATHS[product][0]!;
   return { product, mcpUrl: `https://${host}${mcpPath}` };
+}
+
+/**
+ * Why an address on a Dynamics product's own host can't be turned into its
+ * connection URL, in words to show the person (with what to paste instead),
+ * or null when it can be, or when it is not such an address.
+ */
+export function microsoftDynamicsAddressProblem(environmentUrl: string): string | null {
+  const url = parseEnvironmentAddress(environmentUrl);
+  if (!url) return null;
+  const businessCentral = businessCentralAddress(url);
+  return businessCentral && "problem" in businessCentral ? businessCentral.problem : null;
 }
 
 /**

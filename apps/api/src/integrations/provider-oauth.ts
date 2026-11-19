@@ -6,6 +6,7 @@ import {
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import {
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthCallbackBrowser,
   type OAuthStateBrowserBinding,
@@ -31,6 +32,7 @@ import {
   type ApiIntegrationOAuthStartRequest,
   type ConnectionOwnership,
   type OrganizationIntegrationPolicy,
+  oauthSignInToFinishPath,
 } from "@opengeni/contracts";
 import {
   integrationKeyForConnectProvider,
@@ -47,6 +49,7 @@ import {
   persistProviderOAuthConnection,
   getConnectAttempt,
   finishConnectOperation,
+  isConnectionAccountIdentityConflict,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -330,8 +333,13 @@ export async function completeApiIntegrationProviderOAuth(
     state = readProviderOAuthState(input.state, deps.settings);
     // Before any attempt is claimed or nonce consumed: a consent finished in
     // someone else's browser leaves the starter's attempt untouched (CASA 3.2.2).
-    if (!oauthCallbackBrowserAccepted(state, input.browser))
+    if (!oauthCallbackBrowserAccepted(state, input.browser)) {
+      // Started in the app and returned to a browser signed in to no one: the
+      // browser signs in and this callback runs again, as that person.
+      if (input.code && !input.error && oauthCallbackNeedsSignIn(state, input.browser))
+        return { redirectTo: `${returnBaseUrl}${oauthSignInToFinishPath(input.requestUrl)}` };
       throw new ProviderOAuthCallbackError("browser_mismatch");
+    }
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
       if (
@@ -544,8 +552,13 @@ export async function completeApiIntegrationProviderOAuth(
           }
         : {}),
     };
+    // Another live row already holds this account: a conflict, not a crash.
     const persist = (database: import("@opengeni/db").Database) =>
-      persistProviderOAuthConnection(database, persistenceInput);
+      persistProviderOAuthConnection(database, persistenceInput).catch((error: unknown) => {
+        if (isConnectionAccountIdentityConflict(error))
+          throw new ProviderOAuthCallbackError("connection_conflict");
+        throw error;
+      });
     if (connectOperation) {
       // Null (unreadable in time) saves the account and finishes it later.
       const owner = state;
@@ -649,7 +662,11 @@ export async function completeApiIntegrationProviderOAuth(
     const reason = providerOAuthFailureReason(error);
     // An unreadable state carries no return path; an authentic but aged one
     // still names its workspace and is reported as expired.
-    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
+    const failure = state
+      ? null
+      : oauthStateFailureReturn(deps.settings, input.state, {
+          providerError: input.error,
+        });
     return {
       redirectTo: providerOAuthReturnUrl(
         returnBaseUrl,

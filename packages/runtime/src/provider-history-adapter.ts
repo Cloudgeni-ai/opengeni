@@ -48,6 +48,10 @@ export type ProviderHistoryOptions = {
    * provider receives exactly the item it returned. Claude checks its finer
    * binding on the wire, where it knows Claude's turn boundaries
    * (`buildAnthropicRequest`).
+   *
+   * On Responses and Chat requests, a Chat tool call's provider fields (see
+   * `withToolCallArtifactOrigin`) likewise reach only the provider that
+   * returned them.
    */
   artifactScope?: string;
   /** True for an opaque item (ciphertext or a Claude signature) this provider refused. */
@@ -282,6 +286,7 @@ export function withArtifactOrigin<T>(item: T, origin: string): T {
 // Projections are memoized per canonical item so a repeated request reuses the
 // same projected object (the append-only Responses converter matches by identity).
 const nativeArtifactProjections = new WeakMap<object, Record<string, unknown>>();
+const foreignArtifactProjections = new WeakMap<object, Record<string, unknown>>();
 
 function memoized(
   cache: WeakMap<object, Record<string, unknown>>,
@@ -300,6 +305,72 @@ function withoutArtifactOrigin(item: Record<string, unknown>): Record<string, un
   const { [ARTIFACT_ORIGIN_KEY]: _origin, ...providerData } = providerDataOf(item) ?? {};
   const { providerData: _metadata, ...rest } = item;
   return Object.keys(providerData).length ? { ...rest, providerData } : rest;
+}
+
+/** Opengeni's own records on an item (`opengeni.*` keys); never provider wire fields. */
+function isOpengeniRecordKey(key: string): boolean {
+  return key.startsWith("opengeni.");
+}
+
+/**
+ * The fields a Chat Completions provider returned on a tool call beyond the
+ * call itself (for example Gemini's `extra_content` thought signature). The
+ * SDK spreads them back onto the replayed call, and the SDK's own `type` and
+ * `function` envelope from a non-streamed reply is not one of them.
+ */
+function chatToolCallProviderFields(item: Record<string, unknown>): string[] {
+  return Object.keys(providerDataOf(item) ?? {}).filter(
+    (key) => key !== "type" && key !== "function" && !isOpengeniRecordKey(key),
+  );
+}
+
+/**
+ * Record the issuing provider on a Chat Completions tool call that carries
+ * provider fields (see {@link chatToolCallProviderFields}). Only that provider
+ * understands them: Gemini requires its thought signature back on the call,
+ * and another provider may reject the unknown field. Every other item, and
+ * one already recorded, is returned by reference.
+ */
+export function withToolCallArtifactOrigin<T>(item: T, origin: string): T {
+  if (!item || typeof item !== "object") return item;
+  const record = item as Record<string, unknown>;
+  if (
+    record.type !== "function_call" ||
+    chatToolCallProviderFields(record).length === 0 ||
+    artifactOrigin(record) !== undefined
+  )
+    return item;
+  return {
+    ...record,
+    providerData: { ...providerDataOf(record), [ARTIFACT_ORIGIN_KEY]: origin },
+  } as T;
+}
+
+/**
+ * A tool call's provider fields go back only to the provider that returned
+ * them; every other provider gets the plain call. The origin record itself
+ * never reaches the wire. Without a scope (or an origin) the item is kept, so
+ * a provider-neutral pass leaves the decision to the request's own route.
+ */
+function scopedToolCallArtifact(
+  item: Record<string, unknown>,
+  options: ProviderHistoryOptions,
+): Record<string, unknown> | undefined {
+  if (item.type !== "function_call") return undefined;
+  const scope = options.artifactScope;
+  const origin = artifactOrigin(item);
+  if (scope === undefined || origin === undefined) return undefined;
+  if (origin === scope)
+    return memoized(nativeArtifactProjections, item, () => withoutArtifactOrigin(item));
+  return memoized(foreignArtifactProjections, item, () => {
+    const providerData = Object.fromEntries(
+      Object.entries(providerDataOf(item) ?? {}).filter(
+        ([key]) => key !== ARTIFACT_ORIGIN_KEY && isOpengeniRecordKey(key),
+      ),
+    );
+    const { providerData: _metadata, ...rest } = item;
+    return Object.keys(providerData).length ? { ...rest, providerData } : rest;
+  });
 }
 
 /**
@@ -559,6 +630,7 @@ function projectWireHistory(
         : item.type === "message" && item.role === "developer"
           ? { type: "unknown", providerData: item }
           : (scopedOpaqueArtifact(item, options) ??
+            scopedToolCallArtifact(item, options) ??
             foreignReasoning(item, providerApi) ??
             portableChatMetadata(item));
       changed ||= next !== item;
@@ -614,7 +686,10 @@ function projectWireHistory(
   const machineOrigin = new Set<Record<string, unknown>>();
   const isRuntimeNotice = (item: Record<string, unknown>) =>
     isSystemMessage(item) || machineOrigin.has(item) || isHostedSearchEvidenceRecord(item);
-  const projected = items.map((item): Projected => {
+  const projected = items.map((canonical): Projected => {
+    const scoped = scopedToolCallArtifact(canonical, options);
+    if (scoped) changed = true;
+    const item = scoped ?? canonical;
     if (disclosedTools(item)) {
       changed = true;
       if (!options.hoistsSystemMessages)

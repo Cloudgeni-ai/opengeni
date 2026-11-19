@@ -1053,6 +1053,7 @@ describe("embedding host session authorization routes", () => {
       sandboxGroupId: value.child.sandboxGroupId,
     });
     const acquired = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: value.grant.accountId,
       workspaceId: value.grant.workspaceId,
       sandboxGroupId: value.child.sandboxGroupId,

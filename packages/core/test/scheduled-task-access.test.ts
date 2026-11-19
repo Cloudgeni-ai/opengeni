@@ -423,6 +423,25 @@ describe("scheduled run access failures", () => {
       },
     ]);
   });
+
+  test("a fixed-access account is reported by its exact account reason", () => {
+    const failures = scheduledTaskRunAccessFailures(
+      [
+        {
+          occurredAt: "2026-09-17T08:00:10.000Z",
+          payload: {
+            serverId: "gmail",
+            providerDomain: "gmailmcp.googleapis.com",
+            reason: "unsupported_auth",
+            accountReason: "account_scope_fixed",
+            toolName: "create_draft",
+          },
+        },
+      ],
+      names,
+    );
+    expect(failures.map((failure) => failure.reason)).toEqual(["account_scope_fixed"]);
+  });
 });
 
 describe("who sees and refreshes scheduled task access", () => {

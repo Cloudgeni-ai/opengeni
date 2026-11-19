@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import {
   addSessionSystemUpdateWithSourceMutation,
+  appendSessionHistoryItems,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimPendingSessionSystemUpdateOutbox,
@@ -16,9 +17,12 @@ import {
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   listOutstandingSessionSystemUpdatesForAttempt,
+  markSessionAttemptQuiesced,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   materializeGoalContinuation,
+  nextSessionHistoryPosition,
   peekSessionWork,
+  requestSessionTurnRecovery,
   sessionSystemUpdateOutboxKindPayload,
   setSessionGoalStatus,
   recordConsumedChildAnswers,
@@ -979,4 +983,436 @@ describe("a held wait and a goal-owned child's continuation", () => {
       });
     });
   }
+});
+
+describe("a read by an attempt the parent's turn recovered from", () => {
+  const READ_CALL_ID = "call_read_child_answer";
+  /** A direct model call, as the gateway marks it: caller and the model's call id. */
+  const MODEL_READ = { _meta: { opengeniCaller: "model", opengeniModelCallId: READ_CALL_ID } };
+
+  /** The parent's model reads the child's whole answer with `session_events`. */
+  async function readChildAnswer(ws: Workspace, parent: Attempt, child: Attempt, answer: string) {
+    const read = await callTool(
+      agentMcp(ws, parent),
+      "session_events",
+      { sessionId: child.sessionId, view: "results", limit: 3 },
+      MODEL_READ,
+    );
+    expect(JSON.stringify(read)).toContain(answer);
+    return read;
+  }
+
+  /** The worker checkpoints the read's call and output into the turn's history. */
+  async function checkpointRead(ws: Workspace, parent: Attempt, output: unknown) {
+    const position = await nextSessionHistoryPosition(client.db, ws.workspaceId, parent.sessionId);
+    const appended = await appendSessionHistoryItems(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      expectedExecutionGeneration: parent.executionGeneration,
+      expectedAttemptId: parent.attemptId,
+      items: [
+        {
+          position,
+          item: {
+            type: "function_call",
+            callId: READ_CALL_ID,
+            name: "opengeni__session_events",
+            arguments: "{}",
+          },
+        },
+        {
+          position: position + 1,
+          item: {
+            type: "function_call_result",
+            callId: READ_CALL_ID,
+            name: "opengeni__session_events",
+            status: "completed",
+            output: { type: "text", text: JSON.stringify(output) },
+          },
+        },
+      ],
+    });
+    expect(appended).toBe(true);
+  }
+
+  /** The provider stream breaks: the attempt ends recoverably and the same
+   * turn continues in a new attempt, which resumes from the turn's history. */
+  async function recoverInNewAttempt(ws: Workspace, parent: Attempt): Promise<Attempt> {
+    const recovery = await requestSessionTurnRecovery(client.db, ws.workspaceId, {
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      triggerEventId: parent.triggerEventId,
+      attemptId: parent.attemptId,
+      reason: "provider_unavailable",
+    });
+    expect(recovery.action).toBe("recovering");
+    await markSessionAttemptQuiesced(client.db, {
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      attemptId: parent.attemptId,
+      temporalWorkflowId: `session-${parent.sessionId}`,
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ws.workspaceId, {
+      sessionId: parent.sessionId,
+      workflowId: `session-${parent.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("recovered turn was not claimed");
+    expect(claimed.turn.id).toBe(parent.turnId);
+    return {
+      sessionId: parent.sessionId,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      triggerEventId: claimed.turn.triggerEventId,
+    };
+  }
+
+  test("a pending result is consumed when the recovered attempt completes the turn", async () => {
+    // The reported sequence: the child's result waits in the parent's queue,
+    // the parent reads the answer, the provider stream breaks, the same turn
+    // continues in a new attempt and finishes with the final answer.
+    const ws = await workspace();
+    const parent = await start(ws, "Fill in the price schedule.");
+    const answer = "Rack storage at 5 m needs in-rack sprinklers; pump capacity is unverified.";
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+    const read = await readChildAnswer(ws, parent, child, answer);
+    await checkpointRead(ws, parent, read);
+
+    const recovered = await recoverInNewAttempt(ws, parent);
+    // The recovered attempt holds the answer: the result is nothing to wait for.
+    expect(
+      await listOutstandingSessionSystemUpdatesForAttempt(
+        client.db,
+        ws.workspaceId,
+        parent.sessionId,
+        recovered,
+      ),
+    ).toEqual([]);
+    await completeParentTurn(ws, recovered);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, ws.workspaceId, parent.sessionId),
+    ).toEqual([]);
+    const [event] = await consumedEvents(parent.sessionId);
+    expect(event?.payload).toMatchObject({ reason: "consumed_by_parent_read", count: 1 });
+  });
+
+  test("a result committed after the recovered turn completed arrives already consumed", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Fill in the price schedule.");
+    const answer = "Rack storage at 5 m needs in-rack sprinklers.";
+    const child = await start(ws, "Check the sprinkler basis.", parent);
+    await settleChildAnswer(ws, child, answer);
+    const read = await readChildAnswer(ws, parent, child, answer);
+    await checkpointRead(ws, parent, read);
+    await completeParentTurn(ws, await recoverInNewAttempt(ws, parent));
+
+    await deliverIdleResult(ws, child);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    const [session] = await shared.admin<Array<{ status: string }>>`
+      select status from sessions where id = ${parent.sessionId}`;
+    expect(session?.status).toBe("idle");
+  });
+
+  test("stays pending when the read never reached the turn's durable history", async () => {
+    // The stream broke before the read's output was checkpointed: the
+    // recovered attempt never received the answer, so the result is input.
+    const ws = await workspace();
+    const parent = await start(ws, "Fill in the price schedule.");
+    const answer = "Rack storage at 5 m needs in-rack sprinklers.";
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+    await readChildAnswer(ws, parent, child, answer);
+
+    const recovered = await recoverInNewAttempt(ws, parent);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdatesForAttempt(
+          client.db,
+          ws.workspaceId,
+          parent.sessionId,
+          recovered,
+        )
+      ).map((update) => update.kind),
+    ).toEqual(["child_terminal_result"]);
+    await completeParentTurn(ws, recovered);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+    expect(await consumedEvents(parent.sessionId)).toEqual([]);
+  });
+
+  test("another call's output in history does not prove this read", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Fill in the price schedule.");
+    const answer = "Rack storage at 5 m needs in-rack sprinklers.";
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+    // A read the gateway did not identify, followed by an unrelated checkpoint.
+    await callTool(
+      agentMcp(ws, parent),
+      "session_events",
+      { sessionId: child.sessionId, view: "results", limit: 3 },
+      MODEL_CALL,
+    );
+    await checkpointRead(ws, parent, { unrelated: true });
+
+    await completeParentTurn(ws, await recoverInNewAttempt(ws, parent));
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+  });
+});
+
+describe("a Codemode read whose output reached the model's history", () => {
+  const SHELL_CALL_ID = "call_shell_reads_child";
+  /** How the worker's gateway marks a call a Codemode client made. */
+  const CODEMODE_CALL = { _meta: { opengeniCaller: "codemode" } };
+
+  /** A Codemode client (for example `ogtool call` in a shell command) reads
+   * the child's results; returns the exact text the first-party server sent. */
+  async function codemodeRead(ws: Workspace, parent: Attempt, child: Attempt): Promise<string> {
+    const tool = (
+      agentMcp(ws, parent) as unknown as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (
+              args: Record<string, unknown>,
+              extra: unknown,
+            ) => Promise<{ content: Array<{ text: string }> }>;
+          }
+        >;
+      }
+    )._registeredTools.session_events!;
+    const result = await tool.handler(
+      { sessionId: child.sessionId, view: "results", limit: 1 },
+      CODEMODE_CALL,
+    );
+    return result.content[0]!.text;
+  }
+
+  /** What `ogtool call` prints: the tool result as indented JSON. */
+  function ogtoolCallOutput(serverText: string): string {
+    return JSON.stringify({ content: [{ type: "text", text: serverText }] }, null, 2);
+  }
+
+  /** The worker checkpoints the shell command and the output its model saw. */
+  async function checkpointShellCommand(ws: Workspace, parent: Attempt, printed: string) {
+    const position = await nextSessionHistoryPosition(client.db, ws.workspaceId, parent.sessionId);
+    const appended = await appendSessionHistoryItems(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      expectedExecutionGeneration: parent.executionGeneration,
+      expectedAttemptId: parent.attemptId,
+      items: [
+        {
+          position,
+          item: {
+            type: "function_call",
+            callId: SHELL_CALL_ID,
+            name: "exec_command",
+            arguments: JSON.stringify({ cmd: "ogtool call opengeni.session_events '{}'" }),
+          },
+        },
+        {
+          position: position + 1,
+          item: {
+            type: "function_call_result",
+            callId: SHELL_CALL_ID,
+            name: "exec_command",
+            status: "completed",
+            output: {
+              type: "text",
+              text: `Process exited with code 0\n\nOutput:\n${printed}\n`,
+            },
+          },
+        },
+      ],
+    });
+    expect(appended).toBe(true);
+  }
+
+  test("a pending result is consumed when the turn whose shell printed the answer completes", async () => {
+    // The reported sequence: the children finish while the parent's turn runs,
+    // the parent reads each answer with `ogtool call opengeni.session_events`
+    // in a shell command, uses them, and ends its turn with the final answer.
+    const ws = await workspace();
+    const parent = await start(ws, "Detail the plumbing prices.");
+    const answer =
+      'Done: `/workspace/plan.json`\n\n29 resource plans, 134 components. The "valve set" stays an estimate.';
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+
+    await checkpointShellCommand(
+      ws,
+      parent,
+      ogtoolCallOutput(await codemodeRead(ws, parent, child)),
+    );
+    await completeParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, ws.workspaceId, parent.sessionId),
+    ).toEqual([]);
+    const [event] = await consumedEvents(parent.sessionId);
+    expect(event?.payload).toMatchObject({ reason: "consumed_by_parent_read", count: 1 });
+  });
+
+  test("counts output a shell filter unwrapped to the tool's own JSON", async () => {
+    // For example `ogtool call ... | jq -r '.content[0].text'`.
+    const ws = await workspace();
+    const parent = await start(ws, "Detail the plumbing prices.");
+    const answer = "Sprinkler basis checked: 23 items, no pump change.";
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+
+    await checkpointShellCommand(ws, parent, await codemodeRead(ws, parent, child));
+    // The answer is already in this attempt's history: nothing to wait for.
+    expect(
+      await listOutstandingSessionSystemUpdatesForAttempt(
+        client.db,
+        ws.workspaceId,
+        parent.sessionId,
+        parent,
+      ),
+    ).toEqual([]);
+    await completeParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+  });
+
+  test("a result committed after that turn completed arrives already consumed", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Detail the plumbing prices.");
+    const answer = "Sprinkler basis checked: 23 items, no pump change.";
+    const child = await start(ws, "Check the sprinkler basis.", parent);
+    await settleChildAnswer(ws, child, answer);
+    await checkpointShellCommand(
+      ws,
+      parent,
+      ogtoolCallOutput(await codemodeRead(ws, parent, child)),
+    );
+    await completeParentTurn(ws, parent);
+
+    await deliverIdleResult(ws, child);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    const [session] = await shared.admin<Array<{ status: string }>>`
+      select status from sessions where id = ${parent.sessionId}`;
+    expect(session?.status).toBe("idle");
+  });
+
+  test("stays pending when the script returned only a summary to the model", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Detail the plumbing prices.");
+    const answer = "Sprinkler basis checked: 23 items, no pump change.";
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+
+    await codemodeRead(ws, parent, child);
+    await checkpointShellCommand(ws, parent, "child finished: 1 result");
+    await completeParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+    expect(await consumedEvents(parent.sessionId)).toEqual([]);
+  });
+
+  test("stays pending when the answer reached history only as part of other text", async () => {
+    // Only a whole JSON string value is the answer itself; text that merely
+    // contains it proves nothing.
+    const ws = await workspace();
+    const parent = await start(ws, "Detail the plumbing prices.");
+    const answer = "Done.";
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+
+    await codemodeRead(ws, parent, child);
+    await checkpointShellCommand(ws, parent, JSON.stringify({ log: "Done. Next step pending." }));
+    await completeParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+  });
+
+  test("stays pending when the printed answer was never read through Codemode", async () => {
+    // History text alone is not a read: only an answer this turn fetched counts.
+    const ws = await workspace();
+    const parent = await start(ws, "Detail the plumbing prices.");
+    const answer = "Sprinkler basis checked: 23 items, no pump change.";
+    await childAnswersIntoBusyParent(ws, parent, answer);
+
+    await checkpointShellCommand(ws, parent, JSON.stringify({ text: answer }));
+    await completeParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+  });
+
+  test("a person's turn that read the result this way retires a held wait", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Detail the plumbing prices.");
+    const child = await start(ws, "Check the sprinkler basis.", parent);
+    await callTool(agentMcp(ws, parent), "wait_for_input", {
+      reason: "Waiting for the worker to finish.",
+      timeoutSeconds: 600,
+    });
+    await completeParentTurn(ws, parent);
+    expect(await peekSessionWork(client.db, ws.workspaceId, parent.sessionId)).toMatchObject({
+      kind: "input-wait",
+      disposition: "held",
+    });
+
+    // A person asks for status; the turn reads the answer through a shell.
+    await settleChildAnswer(ws, child, "Sprinkler basis checked: 23 items.");
+    await enqueueSessionTurn(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${parent.sessionId}`,
+      source: "user",
+      prompt: "How is it going?",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: ws.subjectId },
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ws.workspaceId, {
+      sessionId: parent.sessionId,
+      workflowId: `session-${parent.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`question not claimed: ${claimed.action}`);
+    const question: Attempt = {
+      sessionId: parent.sessionId,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      triggerEventId: claimed.turn.triggerEventId,
+    };
+    await checkpointShellCommand(
+      ws,
+      question,
+      ogtoolCallOutput(await codemodeRead(ws, question, child)),
+    );
+    await completeParentTurn(ws, question);
+    await deliverIdleResult(ws, child);
+
+    // The result never wakes the parent, so the question ends the wait.
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    expect(await peekSessionWork(client.db, ws.workspaceId, parent.sessionId)).toMatchObject({
+      kind: "input-wait",
+      disposition: "superseded",
+    });
+  });
 });

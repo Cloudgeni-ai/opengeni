@@ -612,9 +612,9 @@ pub enum Action {
         /// The sandbox.
         sandbox: SandboxId,
     },
-    /// Set the sandbox's running VM's `memory.low` to `low` and its
-    /// `memory.high` to `high` (`None` for none). A VM starts, resumes and
-    /// is adopted with its request as `memory.low` and no `memory.high`;
+    /// Set the sandbox's running VM's `memory.min` (ADR 44) to `low` and
+    /// its `memory.high` to `high` (`None` for none). A VM starts, resumes
+    /// and is adopted with its request as `memory.min` and no `memory.high`;
     /// this comes only when that or the last setting changes, or when the
     /// kernel holds the VM above it and the VM has since come down
     /// (ADR 24). The engine never sets a high below what the VM holds: it

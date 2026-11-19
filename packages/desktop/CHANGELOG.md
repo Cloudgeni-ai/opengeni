@@ -1,5 +1,123 @@
 # @opengeni/desktop
 
+## 6.30.1
+
+### Patch Changes
+
+- @opengeni/agent-host@6.30.1
+- @opengeni/sdk@6.30.1
+
+## 6.30.0
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/sdk@6.30.0
+  - @opengeni/agent-host@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/agent-host@6.29.2
+- @opengeni/sdk@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- Updated dependencies [5b05b73]
+- Updated dependencies [825e714]
+  - @opengeni/sdk@6.29.1
+  - @opengeni/agent-host@6.29.1
+
+## 6.29.0
+
+### Patch Changes
+
+- @opengeni/sdk@6.29.0
+- @opengeni/agent-host@6.29.0
+
+## 6.28.0
+
+### Patch Changes
+
+- @opengeni/sdk@6.28.0
+- @opengeni/agent-host@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- @opengeni/sdk@6.27.1
+- @opengeni/agent-host@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/sdk@6.27.0
+  - @opengeni/agent-host@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+  - @opengeni/sdk@6.26.0
+  - @opengeni/agent-host@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [81570f9]
+- Updated dependencies [bfd2970]
+  - @opengeni/sdk@6.25.0
+  - @opengeni/agent-host@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [e5ce845]
+  - @opengeni/sdk@6.24.1
+  - @opengeni/agent-host@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- Updated dependencies [e6c9e45]
+  - @opengeni/agent-host@6.24.0
+  - @opengeni/sdk@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [f6a7c28]
+  - @opengeni/sdk@6.23.0
+  - @opengeni/agent-host@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [aff49c5]
+- Updated dependencies [3bf1c71]
+- Updated dependencies [d50092b]
+  - @opengeni/agent-host@6.22.0
+  - @opengeni/sdk@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

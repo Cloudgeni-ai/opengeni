@@ -43,6 +43,24 @@ const { values } = parseArgs({
     "rate-limit-max": { type: "string" },
     // Denied network rule (migration 1368).
     "denied-network-mode": { type: "string" },
+    // Sign-in network velocity (migration 1471).
+    "sign-in-network-mode": { type: "string" },
+    // Email clusters (migration 1489).
+    "email-domain-mode": { type: "string" },
+    "email-domain-threshold": { type: "string" },
+    "email-domain-window-minutes": { type: "string" },
+    "burst-mode": { type: "string" },
+    "burst-threshold": { type: "string" },
+    "burst-window-seconds": { type: "string" },
+    "denied-domain-mode": { type: "string" },
+    "denied-domain-threshold": { type: "string" },
+    "denied-domain-lookback-days": { type: "string" },
+    // Disposable mail and slow domain legs (migration 1493).
+    "disposable-mail-mode": { type: "string" },
+    "slow-domain-mode": { type: "string" },
+    "card-verification-mode": { type: "string" },
+    "slow-domain-threshold": { type: "string" },
+    "slow-domain-window-hours": { type: "string" },
     rule: { type: "string" },
     "network-holds": { type: "boolean" },
     "network-capture-flagged": { type: "boolean" },
@@ -115,9 +133,60 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
       throw new Error("--denied-network-mode must be off, observe or enforce");
     changes.deniedNetworkMode = values["denied-network-mode"] as "off" | "observe" | "enforce";
   }
+  if (values["sign-in-network-mode"] !== undefined) {
+    if (!["off", "observe", "enforce"].includes(values["sign-in-network-mode"]))
+      throw new Error("--sign-in-network-mode must be off, observe or enforce");
+    changes.signInNetworkMode = values["sign-in-network-mode"] as "off" | "observe" | "enforce";
+  }
+  const legModes = [
+    ["email-domain-mode", "emailDomainMode"],
+    ["burst-mode", "burstMode"],
+    ["denied-domain-mode", "deniedDomainMode"],
+    ["disposable-mail-mode", "disposableMailMode"],
+    ["slow-domain-mode", "slowDomainMode"],
+  ] as const;
+  for (const [flag, key] of legModes) {
+    const value = values[flag];
+    if (value === undefined) continue;
+    if (value !== "off" && value !== "observe" && value !== "enforce")
+      throw new Error(`--${flag} must be off, observe or enforce`);
+    changes[key] = value;
+  }
+  if (values["card-verification-mode"] !== undefined) {
+    const mode = values["card-verification-mode"];
+    if (mode !== "off" && mode !== "enforce")
+      throw new Error("--card-verification-mode must be off or enforce");
+    changes.cardVerificationMode = mode;
+  }
+  const emailDomainThreshold = integer("email-domain-threshold", values["email-domain-threshold"]);
+  if (emailDomainThreshold !== undefined) changes.emailDomainHoldThreshold = emailDomainThreshold;
+  const emailDomainWindow = integer(
+    "email-domain-window-minutes",
+    values["email-domain-window-minutes"],
+  );
+  if (emailDomainWindow !== undefined) changes.emailDomainWindowMinutes = emailDomainWindow;
+  const burstThreshold = integer("burst-threshold", values["burst-threshold"]);
+  if (burstThreshold !== undefined) changes.burstHoldThreshold = burstThreshold;
+  const burstWindow = integer("burst-window-seconds", values["burst-window-seconds"]);
+  if (burstWindow !== undefined) changes.burstWindowSeconds = burstWindow;
+  const deniedDomainThreshold = integer(
+    "denied-domain-threshold",
+    values["denied-domain-threshold"],
+  );
+  if (deniedDomainThreshold !== undefined)
+    changes.deniedDomainHoldThreshold = deniedDomainThreshold;
+  const deniedDomainLookback = integer(
+    "denied-domain-lookback-days",
+    values["denied-domain-lookback-days"],
+  );
+  if (deniedDomainLookback !== undefined) changes.deniedDomainLookbackDays = deniedDomainLookback;
+  const slowDomainThreshold = integer("slow-domain-threshold", values["slow-domain-threshold"]);
+  if (slowDomainThreshold !== undefined) changes.slowDomainHoldThreshold = slowDomainThreshold;
+  const slowDomainWindow = integer("slow-domain-window-hours", values["slow-domain-window-hours"]);
+  if (slowDomainWindow !== undefined) changes.slowDomainWindowHours = slowDomainWindow;
   if (Object.keys(changes).length === 0)
     throw new Error(
-      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode",
+      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days, --disposable-mail-mode, --slow-domain-mode, --slow-domain-threshold, --slow-domain-window-hours, --card-verification-mode",
     );
   return changes;
 }
@@ -159,7 +228,7 @@ try {
     console.log(JSON.stringify(await captureFlaggedSignupNetworkOwners(client.db), null, 2));
   } else if (values["network-release-holds"]) {
     // Rollback: releases current detector holds of the network rules (both,
-    // or one with --rule ip-velocity-v1|denied-network-v1).
+    // or one with --rule ip-velocity-v1|denied-network-v1|email-cluster-v1|additional-organization-v1).
     if (!values.operator?.trim() || !values.reason || values.reason.trim().length < 6)
       throw new Error("Provide --operator and --reason (six characters)");
     const limit = values.limit && /^\d+$/.test(values.limit) ? Number(values.limit) : undefined;

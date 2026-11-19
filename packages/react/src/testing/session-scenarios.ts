@@ -13,6 +13,7 @@ export type LabScenarioId =
   | "media"
   | "previewing"
   | "math"
+  | "links"
   | "options"
   | "writing-options";
 
@@ -420,6 +421,38 @@ function math(): LabScenario {
   return { id: "math", title: "Math", events: r.events, running: false };
 }
 
+/** Every kind of link a reply carries, inline, on its own line, in a list and in a table. */
+function links(): LabScenario {
+  const r = recorder("lab-links");
+  const t = "turn-links";
+  r.push(
+    "user.message",
+    { text: "Build a small dashboard for the Q3 revenue numbers and share it." },
+    t,
+  );
+  r.push("turn.started", {}, t, 400);
+  const text = [
+    "I published the dashboard and kept the data and script behind it.",
+    "",
+    "[Open Q3 revenue dashboard](artifact:5b0f3c1e-8a7d-4e2b-9c41-2f6d8e1a7b30)",
+    "",
+    "- Data: [q3-revenue.csv](artifact:9d2e4f60-1b3c-4a5d-8e7f-0a1b2c3d4e5f)",
+    "- Script: [build_dashboard.py](sandbox:/workspace/build_dashboard.py:12)",
+    "- Earlier review: [Q2 revenue review](session:3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f)",
+    "",
+    "The totals match the [finance export notes](https://example.com/finance/q3) and the published rates at https://example.com/rates.",
+    "",
+    "| Region | Revenue | Source |",
+    "| --- | --- | --- |",
+    "| North | 1.2M | [ledger](https://example.com/north) |",
+    "| South | 0.9M | [ledger](https://example.com/south) |",
+  ].join("\n");
+  r.push("agent.message.delta", { text }, t, 2_500);
+  r.push("agent.message.completed", { text }, t, 300);
+  r.push("turn.completed", { output: text }, t, 200);
+  return { id: "links", title: "Links", events: r.events, running: false };
+}
+
 const OPTIONS_BODY = JSON.stringify(
   {
     title: "Light laptops for travel",
@@ -514,6 +547,7 @@ export function labScenarios(): LabScenario[] {
     media(),
     previewing(),
     math(),
+    links(),
     options(),
     writingOptions(),
   ];

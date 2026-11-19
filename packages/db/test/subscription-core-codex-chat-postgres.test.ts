@@ -1836,6 +1836,102 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       },
     ]);
   });
+
+  test("an older attempt's lease stops holding the turn once that attempt is quiesced", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "quiesced",
+    });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    // The previous generation's worker died before it could release its lease.
+    const previous = await withSessionRlsActorContext(
+      subscriptionCoreTurnActor(turn.identity),
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+          (db) =>
+            acquireSubscriptionTurnLease(db, {
+              ...turn.identity,
+              provider: "codex",
+              connectionId,
+              holderId: "codex-turn:previous",
+              generation: turn.executionGeneration,
+              ttlMs: 300_000,
+            }),
+        ),
+    );
+    expect(previous).not.toBeNull();
+    await shared!.admin`
+      update session_turns set execution_generation = execution_generation + 1
+      where id = ${turn.identity.turnId}::uuid`;
+    const redispatched = { ...turn, executionGeneration: turn.executionGeneration + 1 };
+    // Its attempt has not quiesced yet: the lease still holds the turn.
+    expect(await place(redispatched)).toMatchObject({ kind: "lease_busy" });
+    // Its quiescence receipt ends the hold long before the lease expires.
+    await shared!.admin`
+      update session_turn_attempts set quiesced_at = clock_timestamp()
+      where turn_id = ${turn.identity.turnId}::uuid
+        and execution_generation = ${turn.executionGeneration}`;
+    expect(await place(redispatched)).toMatchObject({ kind: "run", connectionId });
+    expect(await leaseRows(org, turn)).toEqual([
+      {
+        connection_id: connectionId,
+        holder_id: turn.holderId,
+        generation: String(turn.executionGeneration + 1),
+      },
+    ]);
+  });
+
+  test("a dead worker's lease stops holding the turn once its attempt is closed for worker death", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "worker-death",
+    });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    // The previous generation's worker was force-stopped before it could
+    // hand off, quiesce or release its lease.
+    const previous = await withSessionRlsActorContext(
+      subscriptionCoreTurnActor(turn.identity),
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+          (db) =>
+            acquireSubscriptionTurnLease(db, {
+              ...turn.identity,
+              provider: "codex",
+              connectionId,
+              holderId: "codex-turn:dead-worker",
+              generation: turn.executionGeneration,
+              ttlMs: 300_000,
+            }),
+        ),
+    );
+    expect(previous).not.toBeNull();
+    await shared!.admin`
+      update session_turns set execution_generation = execution_generation + 1
+      where id = ${turn.identity.turnId}::uuid`;
+    const redispatched = { ...turn, executionGeneration: turn.executionGeneration + 1 };
+    expect(await place(redispatched)).toMatchObject({ kind: "lease_busy" });
+    // The heartbeat timeout closed its attempt for worker death and admitted
+    // the redispatch; no quiescence receipt will ever come from that worker.
+    await shared!.admin`
+      update session_turn_attempts
+      set state = 'closed', outcome = 'lease_lost_recoverable', closed_at = clock_timestamp()
+      where turn_id = ${turn.identity.turnId}::uuid
+        and execution_generation = ${turn.executionGeneration}`;
+    expect(await place(redispatched)).toMatchObject({ kind: "run", connectionId });
+    expect(await leaseRows(org, turn)).toEqual([
+      {
+        connection_id: connectionId,
+        holder_id: turn.holderId,
+        generation: String(turn.executionGeneration + 1),
+      },
+    ]);
+  });
 });
 
 describe("core Codex resolver single-flight", () => {

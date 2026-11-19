@@ -8,7 +8,7 @@ import { ApiHttpError } from "../src/http/api-error";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 describe("actual MCP orchestration handler allowance refusals", () => {
-  for (const tool of ["session_create", "session_send_message", "session_steer"] as const) {
+  for (const tool of ["session_create", "session_queue_message", "session_steer"] as const) {
     for (const scope of ["workspace", "member"] as const) {
       test(`${tool} retains ${scope} fields on first call and repeat`, async () => {
         const refusal = {

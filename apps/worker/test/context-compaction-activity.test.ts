@@ -23,6 +23,7 @@ import {
   getLatestRunState,
   getSession,
   getSessionGoal,
+  getSessionGoalWithContinuation,
   getSessionQueueSnapshot,
   getSessionTurn,
   initializeSessionStartAtomically,
@@ -41,6 +42,7 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { eq, sql } from "drizzle-orm";
+import { APIConnectionError } from "openai";
 import {
   AnthropicProviderRejection,
   CompactionNeededError,
@@ -56,6 +58,7 @@ import {
   TRIMMED_CONTEXT_NOTICE,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
+import { RoutingWorkspaceRootChangedError } from "@opengeni/runtime/sandbox";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { ScriptedModel } from "@opengeni/testing/scripted-model";
@@ -3144,6 +3147,273 @@ describe("standalone context compaction execution", () => {
         (update) => update.id,
       ),
     ).toEqual([]);
+  });
+
+  /**
+   * A goal session whose next model boundary needs a checkpoint, and whose
+   * checkpoint request fails with `summaryError` before any provider answer.
+   */
+  async function runGoalCheckpointThatThrows(summaryError: () => unknown) {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Unanswered checkpoint test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Unanswered checkpoint test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      { type: "message", role: "user", content: "keep working on the goal" },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "durable work already completed" }],
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    const goal = await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      text: "Keep going after a checkpoint that got no answer",
+      createdBy: "api",
+    });
+    const goalContinuation = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "goal_continuation",
+      classification: "info",
+      sourceId: goal.id,
+      dedupeKey: `goal-continuation:${goal.id}:${goal.version}:1`,
+      summary: "Continue the goal",
+      payload: {
+        type: "goal_continuation",
+        goalId: goal.id,
+        goalVersion: goal.version,
+        autoContinuation: 1,
+        prompt: "Continue the goal",
+      },
+    });
+    if (!goalContinuation.added) throw new Error("goal update was not inserted");
+
+    const scriptedModel = new ScriptedModel([
+      {
+        error: new CompactionNeededError({
+          signalTokens: 250_000,
+          thresholdTokens: 225_000,
+          signalSource: "provider",
+        }),
+      },
+    ]);
+    let summaryCalls = 0;
+    const summarizerClient = {
+      chat: {
+        completions: {
+          create: async () => {
+            summaryCalls += 1;
+            throw summaryError();
+          },
+        },
+      },
+    } as unknown as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>["client"];
+    const runtime: OpenGeniRuntime = {
+      ...createProductionAgentRuntime({ model: scriptedModel }),
+      configure: () => undefined,
+      resolveTurnModel: () => ({
+        provider: {
+          id: "test-chat",
+          label: "Test chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
+        client: summarizerClient,
+        model: scriptedModel,
+        configured: {
+          id: "scripted-model",
+          label: "Scripted model",
+          providerId: "test-chat",
+          providerLabel: "Test chat",
+          api: "chat",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactTokenLimit: 225_000,
+          reasoningEffort: false,
+          hostedWebSearch: false,
+        },
+      }),
+    };
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiModel: "scripted-model",
+        sandboxBackend: "none",
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      runtime,
+    });
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (result.status === "unclaimed") throw new Error("goal turn was not claimed");
+    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
+      after: 0,
+      limit: 200,
+    });
+    const history = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    return {
+      grant,
+      session,
+      result,
+      attemptId,
+      events,
+      history,
+      originalItems,
+      summaryCalls: () => summaryCalls,
+    };
+  }
+
+  test("a route move before the checkpoint request continues the same goal turn in a fresh attempt", async () => {
+    // The active sandbox route moved to a machine with another workspace
+    // root. The transport's pre-dispatch route check refuses the checkpoint
+    // request, and the SDK wraps that refusal as a connection error with no
+    // status or request id. This is the same route transition an ordinary
+    // request recovers from, not a summarization failure.
+    const run = await runGoalCheckpointThatThrows(
+      () =>
+        new APIConnectionError({
+          cause: new RoutingWorkspaceRootChangedError("/home/user", "/Users/user"),
+        }),
+    );
+
+    expect(run.summaryCalls()).toBe(1);
+    expect(run.result).toMatchObject({ status: "recovering", attemptId: run.attemptId });
+    expect(
+      await getSessionTurn(client.db, run.grant.workspaceId!, run.result.turnId),
+    ).toMatchObject({ source: "goal", status: "recovering" });
+    expect(await getSession(client.db, run.grant.workspaceId!, run.session.id)).toMatchObject({
+      status: "recovering",
+      activeTurnId: run.result.turnId,
+    });
+    const types = run.events.map((event) => event.type);
+    expect(types).not.toContain("turn.failed");
+    expect(
+      run.events.filter(
+        (event) =>
+          event.type === "session.context.compaction.skipped" &&
+          (event.payload as { reason?: unknown }).reason === "summarization_failed",
+      ),
+    ).toEqual([]);
+    expect(run.events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.recovery.requested",
+        payload: expect.objectContaining({
+          code: "workspace_root_changed_this_turn",
+          reason: "sandbox_route_transition",
+        }),
+      }),
+    );
+    expect(run.history.slice(0, run.originalItems.length)).toEqual(run.originalItems);
+  });
+
+  test("a checkpoint request that got no provider answer retries the same goal turn", async () => {
+    // No status, no request id, no provider code: nothing was answered, so the
+    // next request may pass. The same turn retries under the bounded provider
+    // recovery policy instead of failing and parking the goal.
+    const run = await runGoalCheckpointThatThrows(
+      () => new APIConnectionError({ message: "Connection error." }),
+    );
+
+    expect(run.summaryCalls()).toBe(1);
+    expect(run.result).toMatchObject({ status: "recovering", attemptId: run.attemptId });
+    const turn = await getSessionTurn(client.db, run.grant.workspaceId!, run.result.turnId);
+    expect(turn).toMatchObject({ source: "goal", status: "recovering" });
+    expect(turn?.metadata).toMatchObject({ providerRecoveryCount: 1 });
+    expect(run.events.map((event) => event.type)).not.toContain("turn.failed");
+    expect(run.events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
+    expect(run.history.slice(0, run.originalItems.length)).toEqual(run.originalItems);
+  });
+
+  test("a terminal checkpoint failure shows the goal as blocked until new input arrives", async () => {
+    // The provider answered and refused the request: retrying the unchanged
+    // history gives the same answer, so the turn fails and machine input that
+    // was already pending stays held. The goal must say so instead of
+    // claiming it will continue automatically.
+    const run = await runGoalCheckpointThatThrows(() =>
+      Object.assign(new Error("Invalid request"), {
+        status: 400,
+        code: "invalid_request_error",
+      }),
+    );
+
+    expect(run.result).toMatchObject({ status: "idle", deferredUntilWake: true });
+    expect(run.events.map((event) => event.type)).toContain("turn.failed");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, run.grant.workspaceId!, run.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "blocked", reason: "compaction_failed" });
+
+    const newUpdate = await addSessionSystemUpdate(client.db, {
+      accountId: run.grant.accountId,
+      workspaceId: run.grant.workspaceId!,
+      sessionId: run.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "A child completed after the failure",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    if (!newUpdate.added) throw new Error("new update was not inserted");
+    // Input committed after the failure is new truth and makes one new
+    // attempt, so the goal is no longer blocked by the failure.
+    expect(await peekSessionWork(client.db, run.grant.workspaceId!, run.session.id)).toEqual({
+      kind: "runnable",
+    });
+    expect(
+      (await getSessionGoalWithContinuation(client.db, run.grant.workspaceId!, run.session.id))
+        ?.continuation,
+    ).not.toMatchObject({ reason: "compaction_failed" });
   });
 
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {

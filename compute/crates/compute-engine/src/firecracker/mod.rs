@@ -52,7 +52,7 @@ use self::snapshot::{
     check_source, create_request, lacks_realtime_clock, load_failure, load_request,
 };
 use crate::Readable;
-use crate::cgroup::{Cgroup, MemoryStats, Writes};
+use crate::cgroup::{Cgroup, MemoryStats, Protection, Writes};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
@@ -231,7 +231,8 @@ impl Firecracker {
 
     /// Lets the kernel compress running VMs' memory into zswap, never to a
     /// disk, when the host is short or a VM is past its `memory.high`
-    /// (ADR 24). Their requests stay protected (`memory.low`). Needs a
+    /// (ADR 24). Their requests are then kept by `memory.min`, never taken
+    /// for others (ADR 44), where elsewhere `memory.low` keeps them. Needs a
     /// profile that compresses, with zswap on and a swap device for its
     /// slots; without, running VMs are never compressed, as before.
     pub fn with_running_compression(mut self, on: bool) -> Result<Self, ProfileError> {
@@ -297,6 +298,7 @@ impl Firecracker {
                 // memory holds above that is its VMM's, the host's cost.
                 compress_running: self.compress_running
                     && spec.memory_request_mib < spec.memory_mib,
+                protection: protection(self.compress_running),
             },
         );
         let (console, log) = {
@@ -418,7 +420,7 @@ impl Firecracker {
             api,
             cgroup: self.cgroup_of(spec),
             jail: jail.clone(),
-            memory_low: AtomicU64::new(request),
+            request: AtomicU64::new(request),
             memory: u64::from(spec.memory_mib) << 20,
             bounds: Arc::new(bounds::Bounds::default()),
             compress_running: self.compress_running,
@@ -560,6 +562,22 @@ fn prepare(
     logs::open(dir)
 }
 
+/// How a running VM's request is kept from reclaim for others. Where the
+/// kernel may compress running VMs, `memory.min`: the kernel's reclaim for
+/// the whole host takes from a group under its `memory.low` once it has
+/// moved it to the back of its queue (multi-generation LRU), and with swap
+/// open what it takes is the VM's memory, compressed (ADR 44). Elsewhere
+/// `memory.low`, which can only cost a running VM page cache: admission
+/// keeps the requests within the host, so the kernel finds other memory
+/// first, and should it not, slowing a VM beats the out-of-memory killer.
+fn protection(compress_running: bool) -> Protection {
+    if compress_running {
+        Protection::Min
+    } else {
+        Protection::Low
+    }
+}
+
 /// A running Firecracker VM.
 #[derive(Debug)]
 pub struct FirecrackerVm {
@@ -568,8 +586,9 @@ pub struct FirecrackerVm {
     api: Api,
     cgroup: Cgroup,
     jail: Jail,
-    /// Bytes of its memory protected from reclaim for others while it runs.
-    memory_low: AtomicU64,
+    /// Bytes of its memory protected from reclaim for others while it runs:
+    /// its request.
+    request: AtomicU64,
     /// Bytes of guest memory it has.
     memory: u64,
     /// The bounds the host asks of it while it runs (ADR 24).
@@ -681,15 +700,18 @@ impl FirecrackerVm {
     }
 
     /// Gives the VM what a running VM starts with: its memory guarantee
-    /// (its request as `memory.low`), no `memory.high`, and zswap open
+    /// (its request, kept as [`protection`] says), no `memory.high`, and
+    /// zswap open
     /// only if it may be compressed while it runs. Drops any bound asked
     /// before (see [`bounds`]), and lifts a `memory.high` an earlier
     /// bound or an earlier agent left.
     fn guard_running(&self) -> io::Result<()> {
         self.bounds.reset(|| {
             self.launched_zswap()?;
-            self.cgroup
-                .set_memory_low(self.memory_low.load(Ordering::Acquire))?;
+            self.cgroup.protect_memory(
+                self.request.load(Ordering::Acquire),
+                protection(self.compress_running),
+            )?;
             self.lift_high()
         })
     }
@@ -710,7 +732,7 @@ impl FirecrackerVm {
     /// its memory, so that it may borrow (ADR 24). One guaranteed all of it
     /// never borrows; what it holds above that is its VMM's own.
     fn compressible(&self) -> bool {
-        self.compress_running && self.memory_low.load(Ordering::Acquire) < self.memory
+        self.compress_running && self.request.load(Ordering::Acquire) < self.memory
     }
 
     /// Gives the VM what a paused VM has: no guarantee, no `memory.high`,
@@ -719,7 +741,8 @@ impl FirecrackerVm {
     fn guard_paused(&self) -> io::Result<()> {
         self.bounds.reset(|| {
             self.cgroup.close_zswap()?;
-            self.cgroup.set_memory_low(0)?;
+            self.cgroup
+                .protect_memory(0, protection(self.compress_running))?;
             self.lift_high()
         })
     }
@@ -899,7 +922,8 @@ impl Engine for Firecracker {
         // and its high goes, so that a save is not slowed by it. Its swap
         // goes back to what it was launched with.
         let _ = vm.bounds.reset(|| {
-            vm.cgroup.set_memory_low(0)?;
+            vm.cgroup
+                .protect_memory(0, protection(vm.compress_running))?;
             vm.lift_high()?;
             vm.launched_zswap()
         });
@@ -1044,9 +1068,12 @@ impl Engine for Firecracker {
         else {
             return Ok(None);
         };
+        // Cache a VM keeps under its `memory.min` is held: neither the
+        // kernel nor a drop takes it for the others.
         let held = self
             .cgroups
             .memory_held()
+            .and_then(|held| Ok(held.saturating_add(self.cgroups.kept_cache_of_children()?)))
             .map_err(|error| EngineError::io("memory_room", error))?;
         Ok(Some(high.saturating_sub(held)))
     }
@@ -1078,7 +1105,7 @@ impl Engine for Firecracker {
         // Applied by its next resume, as every running VM's is. Its
         // out-of-memory score follows its request at once.
         let request = u64::from(memory_request_mib) << 20;
-        vm.memory_low.store(request, Ordering::Release);
+        vm.request.store(request, Ordering::Release);
         vm.process
             .protect_from_oom(self.oom_score_adj(request))
             .map_err(|error| EngineError::io("set_guarantees", error))?;

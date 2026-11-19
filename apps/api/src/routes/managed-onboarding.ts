@@ -14,7 +14,6 @@ import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import {
   completeSelfServiceOrganizationSetupWithSignupNetwork,
   completeOrganizationUserSetup,
-  evaluateSignupNetworkAccounts,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getSelfServiceOrganizationOnboardingState,
   nestedPostgresSqlState,
@@ -35,11 +34,11 @@ import {
 } from "../auth/organization-user-setup";
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import {
+  evaluateSignupNetworkAccountsAfterSetup,
+  requestSignupMailSignal,
   requestSignupNetworkSource,
-  SIGNUP_NETWORK_RATE_LIMIT_CODE,
-  SIGNUP_NETWORK_RATE_LIMIT_MESSAGE,
+  signupNetworkRateLimitError,
 } from "../auth/signup-network";
-import { ApiHttpError } from "../http/api-error";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import {
   MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
@@ -139,6 +138,9 @@ export function registerManagedOnboardingRoutes(
       });
     }
     const organizationName = parsed.data.organizationName.trim();
+    // Bounded and failing open (migration 1493): only the flag is recorded.
+    // Started now so the MX lookup overlaps the fingerprint; never throws.
+    const pendingSignupMailSignal = requestSignupMailSignal(session.user.email, deps.settings);
     try {
       const requestFingerprint = await selfServiceOrganizationSetupRequestFingerprint({
         authUserId: session.user.id,
@@ -159,19 +161,14 @@ export function registerManagedOnboardingRoutes(
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,
           signupNetwork,
+          signupMailSignal: await pendingSignupMailSignal,
         });
       const completed = CompleteSelfServiceOrganizationSetupResponse.parse(setup);
       // Committed. Evaluate this organization and recent same-network ones,
       // each in its own account transaction, so reserve accounts of a burst
       // are held before they spend. Best-effort: Free issuance and admission
       // evaluate each account lazily anyway.
-      if (evaluateAccountIds.length > 0) {
-        await evaluateSignupNetworkAccounts(deps.db, evaluateAccountIds, (_accountId, error) => {
-          console.warn("[api] could not evaluate a signup network account", {
-            sqlState: nestedPostgresSqlState(error) ?? null,
-          });
-        });
-      }
+      await evaluateSignupNetworkAccountsAfterSetup(deps.db, evaluateAccountIds);
       // An idempotent replay of the same operation returns the same committed
       // setup and is counted again; clients retry only on an ambiguous response.
       recordOrganizationSetupOutcome(deps.observability, "created");
@@ -206,12 +203,7 @@ export function registerManagedOnboardingRoutes(
         sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE ? "rate_limited" : "failed",
       );
       if (sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
-        throw new ApiHttpError(429, {
-          code: "limit_exceeded",
-          message: SIGNUP_NETWORK_RATE_LIMIT_MESSAGE,
-          retryable: true,
-          details: { managedAuthCode: SIGNUP_NETWORK_RATE_LIMIT_CODE },
-        });
+        throw signupNetworkRateLimitError();
       }
       if (sqlState === "22023") {
         throw new HTTPException(422, {

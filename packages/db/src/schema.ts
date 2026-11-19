@@ -85,7 +85,6 @@ import {
 
 export * from "./agents-schema";
 export * from "./automation-templates-schema";
-export * from "./bot-templates-schema";
 export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
@@ -2005,6 +2004,14 @@ export const connections = pgTable(
     verifiedInstallAt: timestamp("verified_install_at", { withTimezone: true }),
     verifiedInstallVersion: integer("verified_install_version"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // Opaque key of the integration and verified provider account behind this
+    // connection (see connectionAccountIdentityKey); null when unverified. At
+    // most one live row per organization, owner and key (migration 1481).
+    accountIdentityKey: text("account_identity_key"),
+    // The person's own name for the connection, shown when the provider gives
+    // no account identity. Display only: never part of `version` or the
+    // authority generation, and never used to select credentials.
+    label: text("label"),
     // A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
     // only: what its model's usage costs, for usage estimates and spend limits
     // (see organizationModelProviderCustomModels). The catalogue model whose
@@ -2056,6 +2063,17 @@ export const connections = pgTable(
     workspaceExpires: index("connections_workspace_expires_idx").on(
       table.workspaceId,
       table.expiresAt,
+    ),
+    liveAccountIdentity: uniqueIndex("connections_live_account_identity_uq")
+      .on(
+        table.accountId,
+        sql`coalesce(${table.subjectId}, ${table.workspaceId}::text)`,
+        table.accountIdentityKey,
+      )
+      .where(sql`${table.accountIdentityKey} is not null and ${table.status} <> 'revoked'`),
+    accountIdentityKeyValid: check(
+      "connections_account_identity_key_check",
+      sql`${table.accountIdentityKey} is null or ${table.accountIdentityKey} ~ '^[0-9a-f]{64}$'`,
     ),
     authorityIdentity: uniqueIndex("connections_authority_identity_uq")
       .on(table.accountId, table.authorityId)
@@ -2398,79 +2416,6 @@ export const slackInstallationBindings = pgTable(
   }),
 );
 
-/**
- * A named Slack agent of one Slack installation.
- *
- * HOME (`accountId`/`workspaceId`/`connectionId`) is the installation binding,
- * exactly like {@link slackChannelRoutes}. TARGET is the one fixed workspace the
- * agent's chats run in; it never changes after creation. Everyone in the
- * organization can read the directory; only the HOME tenancy writes.
- */
-export const slackAgents = pgTable(
-  "slack_agents",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    connectionId: uuid("connection_id")
-      .notNull()
-      .references(() => connections.id, { onDelete: "cascade" }),
-    slackTeamId: text("slack_team_id").notNull(),
-    targetAccountId: uuid("target_account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    targetWorkspaceId: uuid("target_workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    name: text("name").notNull(),
-    nameKey: text("name_key").notNull(),
-    description: text("description").notNull(),
-    avatar: jsonb("avatar").$type<SessionAvatar>().notNull(),
-    instructions: text("instructions").notNull().default(""),
-    knowledgeCollectionId: uuid("knowledge_collection_id"),
-    open: boolean("open").notNull().default(false),
-    createdBySubjectId: text("created_by_subject_id").notNull(),
-    version: integer("version").notNull().default(1),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    nameKey: unique("slack_agents_name_key_uq").on(table.connectionId, table.nameKey),
-    workspaceAccount: foreignKey({
-      name: "slack_agents_workspace_account_fk",
-      columns: [table.workspaceId, table.accountId],
-      foreignColumns: [workspaces.id, workspaces.accountId],
-    }).onDelete("cascade"),
-    targetWorkspaceAccount: foreignKey({
-      name: "slack_agents_target_workspace_account_fk",
-      columns: [table.targetWorkspaceId, table.targetAccountId],
-      foreignColumns: [workspaces.id, workspaces.accountId],
-    }).onDelete("cascade"),
-    target: index("slack_agents_target_idx").on(table.targetWorkspaceId),
-    account: index("slack_agents_account_idx").on(table.accountId),
-    sameAccount: check(
-      "slack_agents_same_account_check",
-      sql`${table.targetAccountId} = ${table.accountId}`,
-    ),
-    bounded: check(
-      "slack_agents_bounds_check",
-      sql`octet_length(${table.slackTeamId}) between 1 and 64
-        and char_length(btrim(${table.name})) between 1 and 80
-        and ${table.nameKey} ~ '^[^[:space:]-]{1,80}$'
-        and char_length(btrim(${table.description})) between 1 and 200
-        and jsonb_typeof(${table.avatar}) = 'object'
-        and pg_column_size(${table.avatar}) <= 4096
-        and char_length(${table.instructions}) <= 8000
-        and octet_length(${table.createdBySubjectId}) between 1 and 1024
-        and ${table.version} > 0`,
-    ),
-  }),
-);
-
 /** Per Slack person and agent: the one-time "next time" hint and first use. */
 export const slackAgentUserStates = pgTable(
   "slack_agent_user_states",
@@ -2497,11 +2442,7 @@ export const slackAgentUserStates = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentUser: unique("slack_agent_user_states_agent_user_uq").on(
-      table.slackAgentId,
-      table.slackUserId,
-    ),
-    // 1398: per installation, now that an agent may be in several.
+    // 1398: per installation (1440 dropped the per-agent key).
     installUser: uniqueIndex("slack_agent_user_states_install_user_uq").on(
       table.connectionId,
       table.slackAgentId,
@@ -2716,11 +2657,7 @@ export const slackAgentIntroPosts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentChannel: unique("slack_agent_intro_posts_agent_channel_uq").on(
-      table.slackAgentId,
-      table.slackChannelId,
-    ),
-    // 1399: per installation, now that an agent may be in several.
+    // 1399: per installation (1441 dropped the per-agent key).
     installChannel: uniqueIndex("slack_agent_intro_posts_install_channel_uq").on(
       table.connectionId,
       table.slackAgentId,
@@ -6613,6 +6550,44 @@ export const files = pgTable(
   },
   (table) => ({
     workspaceCreated: index("files_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    // File lists read one page newest first from each of these (migrations
+    // 1409-1412): a workspace's shared files, a person's own files in one
+    // workspace, and a person's own files that may reach other workspaces or
+    // stay in their own. A private file has one owner (1431).
+    sharedCreated: index("files_shared_created_idx")
+      .on(table.workspaceId, table.status, table.createdAt, table.id)
+      .where(sql`private_owner_subject_ids IS NULL`),
+    privateWorkspaceCreated: index("files_private_workspace_created_idx")
+      .on(
+        table.workspaceId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(sql`private_owner_subject_ids IS NOT NULL`),
+    privateRoamingCreated: index("files_private_roaming_created_idx")
+      .on(
+        table.accountId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(
+        sql`private_owner_subject_ids IS NOT NULL AND (reach_workspace_ids IS NULL OR cardinality(reach_workspace_ids) > 0)`,
+      ),
+    privateLocalCreated: index("files_private_local_created_idx")
+      .on(
+        table.accountId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(
+        sql`private_owner_subject_ids IS NOT NULL AND reach_workspace_ids IS NOT NULL AND cardinality(reach_workspace_ids) = 0`,
+      ),
     objectKey: uniqueIndex("files_object_key_idx").on(table.objectKey),
     scopeIdentity: uniqueIndex("files_scope_id_uq").on(
       table.accountId,
@@ -10877,6 +10852,9 @@ export const sandboxLeases = pgTable(
     refcount: integer("refcount").notNull().default(0),
     turnHolders: integer("turn_holders").notNull().default(0),
     viewerHolders: integer("viewer_holders").notNull().default(0),
+    // Admission elected this box for an unpaid organization (unpaid tier, no
+    // paid history): it counts toward the fleet limits (1486).
+    computeUnpaid: boolean("compute_unpaid"),
 
     instanceId: text("instance_id"),
     backend: text("backend").notNull(),
@@ -11021,6 +10999,10 @@ export const sandboxLeases = pgTable(
     rotationReason: text("rotation_reason", {
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
+    // The reaper released this box's viewers because nobody used the page for
+    // the viewer idle window (1477). A viewer attach that reports no newer
+    // interaction is refused until a person or a turn uses the session again.
+    viewerIdleDrainedAt: timestamp("viewer_idle_drained_at", { withTimezone: true }),
     // A chat or workspace deletion ended this compute lease's group: its
     // sandbox is deleted without a workspace capture (0861).
     groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
@@ -11199,6 +11181,9 @@ export const sandboxLeaseHolders = pgTable(
     viewerSubjectId: text("viewer_subject_id"),
     viewerAuthorityEpoch: integer("viewer_authority_epoch"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+    // Viewer holders only (1476): the last real user interaction the viewer
+    // reported on a heartbeat. Null when never reported (older clients).
+    lastInteractionAt: timestamp("last_interaction_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -13397,6 +13382,10 @@ export const usageEvents = pgTable(
       table.sessionId,
       table.occurredAt,
     ),
+    // A turn's charges, summed onto its terminal event (migrations 1496, 1497).
+    workspaceTurn: index("usage_events_workspace_turn_idx")
+      .on(table.workspaceId, table.turnId)
+      .where(sql`${table.turnId} is not null`),
     contextHierarchy: check(
       "usage_events_context_hierarchy_check",
       sql`(${table.turnId} is null or ${table.sessionId} is not null)

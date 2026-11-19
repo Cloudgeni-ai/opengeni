@@ -655,6 +655,7 @@ describe("durable ComputerSession lifecycle", () => {
     );
     const computerHolderId = `computer-session:${computer.session.id}`;
     const acquired = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
       sandboxGroupId: scope.sandboxGroupId,
@@ -720,6 +721,7 @@ describe("durable ComputerSession lifecycle", () => {
     expect(
       (
         await acquireLease(client.db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId: scope.accountId,
           workspaceId: scope.workspaceId,
           sandboxGroupId: scope.sandboxGroupId,
@@ -799,6 +801,7 @@ describe("durable ComputerSession lifecycle", () => {
     const operationId = crypto.randomUUID();
     const computer = await prepareComputerSessionCreate(client.db, createInput(scope, operationId));
     const acquired = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
       sandboxGroupId: scope.sandboxGroupId,

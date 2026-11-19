@@ -12,6 +12,7 @@ import {
   type ChatRecord,
 } from "../../lib/actions/chat-directory";
 import { chatStatusIsCurrent, type ChatStatus } from "../../lib/actions/chat-status";
+import { useResolvedCreator } from "../../lib/creator-labels";
 import { RailTrailingMetadata } from "../rail/session-row-content";
 
 /** A workspace's newest chats are read at most this often for the lists. */
@@ -30,6 +31,7 @@ const askedParents = new Set<string>();
 
 /** The working, needs-you, waiting, automation and creator marks, as on the chat's sidebar row. */
 export function ChatStatusMarks({ status }: { status: ChatStatus | null }) {
+  const creator = useResolvedCreator(status?.workspaceId ?? "", status?.creator ?? null);
   if (!status) return null;
   const { summary } = status;
   return (
@@ -39,7 +41,7 @@ export function ChatStatusMarks({ status }: { status: ChatStatus | null }) {
         summary={summary}
         automationWait={status.automationWait}
         automationWaitLabel={status.automationWaitLabel ?? undefined}
-        creator={status.creator}
+        creator={creator}
       />
     </>
   );

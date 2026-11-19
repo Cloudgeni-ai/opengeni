@@ -2396,7 +2396,14 @@ colliding paths get identity-suffixed paths, and invalid definitions are
 skipped, each with a structured `tool_catalog_degraded` warning. Runtime MCP
 listing also collapses repeated tool names per server.
 Event metadata preserves identity and approvals. Local tools use the
-final combined attempt environment.
+final combined attempt environment. Agent Codemode paths are
+`[namespace, tool]` with the same readable server namespace as model wire names
+([MCP surfaces](mcp-surfaces.md#tool-names-the-name-to-call-and-the-name-to-ask-by));
+the workspace gateway behind Sites keeps `[serverId, tool]`. Codemode clients
+resolve reference names with `resolveCatalogTool` (`@opengeni/codemode`), and
+the native client mirrors it. A definition's in-process `discloses` hook names
+tools a model call makes available (a Skill's `tools:`); the lazy transport
+freezes them on the call like an entry tool's companions.
 
 First-party contract projection, opacity checks, omission preservation:
 `apps/api/src/mcp/contract-input.ts`. Union diagnostics:
@@ -3381,7 +3388,7 @@ Topics: [`README.md`](README.md).
 | Event-triggered automations | `packages/core/src/domain/event-triggers/` | [`automations-and-events.md`](design/automations-and-events.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/agents.ts` (bot templates are agents) | [`bots.md`](bots.md) |
-| Agents (Slack agents and bot templates merged; expand/contract) | `packages/db/src/agents-schema.ts`, `packages/db/src/agents.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql`, `packages/db/drizzle/1380_agent_slack_install_workspace.sql` (contract) | [`agents.md`](agents.md) |
+| Agents (Slack agents and bot templates merged; expand/contract, legacy drop) | `packages/db/src/agents-schema.ts`, `packages/db/src/agents.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql`, `packages/db/drizzle/1380_agent_slack_install_workspace.sql` (contract), `packages/db/drizzle/1445_slack_agents_drop.sql` (legacy drop) | [`agents.md`](agents.md) |
 | Agents in the app: Agents page, agent page and form, composer agent chip, chat header chip, Slack availability | `packages/react/src/app/components/agents/`, `packages/react/src/app/lib/agents.tsx`, `packages/react/src/app/lib/composer-agent.tsx`, `packages/react/src/app/lib/session-agent.ts`, `apps/web/src/routes/agents.tsx`, `apps/web/src/components/agents/` | [`agents.md`](agents.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |

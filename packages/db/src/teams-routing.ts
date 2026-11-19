@@ -10,7 +10,6 @@
  * message, at session admission and on delivery.
  */
 import { sql } from "drizzle-orm";
-import { AGENT_ORGANIZATION_ACCESS_SQL } from "./agents";
 import { rawRows, withRlsContext, type Database } from "./database";
 import { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
 import { teamsScoped, type TeamsInstallation } from "./teams-conversations";
@@ -500,7 +499,7 @@ export async function listTeamsAgentDirectory(
       tx,
       sql`select * from (
           select a.id,a.account_id,a.workspace_id,w.name as workspace_name,a.name,a.name_key,a.avatar,
-            a.created_at,${sql.raw(AGENT_ORGANIZATION_ACCESS_SQL)} as organization_access
+            a.created_at,a.organization_access
           from agents a
           join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
           where a.account_id=${input.accountId}::uuid and a.visibility='workspace'
@@ -548,7 +547,7 @@ export async function getTeamsAgentInWorkspace(
     }>(
       tx,
       sql`select a.id,a.account_id,a.workspace_id,w.name as workspace_name,a.name,a.name_key,a.avatar,
-          ${sql.raw(AGENT_ORGANIZATION_ACCESS_SQL)} as organization_access
+          a.organization_access
         from agents a
         join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
         where a.id=${input.agentId}::uuid and a.account_id=${input.accountId}::uuid

@@ -9,6 +9,7 @@ import {
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
+export * from "./billing-card-verification";
 export * from "./secret-value";
 export * from "./citation-urls";
 export * from "./claude-cite-tags";
@@ -25,6 +26,7 @@ import {
 } from "./integration-sources";
 export * from "./integration-sources";
 import { defineSchema } from "./define-schema";
+import { CONNECTION_LABEL_MAX_LENGTH } from "./connection-account-label";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
@@ -1164,6 +1166,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "command_wait",
   "command_read",
   "session_create",
+  "session_queue_message",
   "session_send_message",
   "session_message_status",
   "session_target_get",
@@ -1398,13 +1401,42 @@ export const RETIRED_SECRET_TOOL_NAMES = [
   "environment_set_variable",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredSecretTools = new Set<FirstPartyMcpToolName>(RETIRED_SECRET_TOOL_NAMES);
-const RETIRED_SECRET_TOOL_SUCCESSORS = {
+
+/**
+ * Session tools renamed so an agent's two ways of messaging a session read
+ * like a person's Queue and Steer. Stored tool selections naming the old name
+ * still parse and select its successor; the remote server never registers the
+ * old name, so it is not an alias a model can call.
+ */
+export const RETIRED_SESSION_TOOL_NAMES = [
+  "session_send_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredSessionTools = new Set<FirstPartyMcpToolName>(RETIRED_SESSION_TOOL_NAMES);
+
+const RETIRED_TOOL_SUCCESSORS = {
   variable_set_list: "secret_search",
   environment_list: "secret_search",
   variable_set_get_variable: "secret_get",
   variable_set_set_variable: "secret_save",
   environment_set_variable: "secret_save",
-} as const satisfies Record<(typeof RETIRED_SECRET_TOOL_NAMES)[number], FirstPartyMcpToolName>;
+  session_send_message: "session_queue_message",
+} as const satisfies Record<
+  (typeof RETIRED_SECRET_TOOL_NAMES)[number] | (typeof RETIRED_SESSION_TOOL_NAMES)[number],
+  FirstPartyMcpToolName
+>;
+
+/**
+ * The current name of a first-party tool that was renamed one-to-one, or
+ * undefined. Clients built against an older contract still send the old name;
+ * it stands for its successor wherever a selection is checked or stored.
+ */
+export function renamedFirstPartyMcpToolSuccessor(
+  name: FirstPartyMcpToolName,
+): FirstPartyMcpToolName | undefined {
+  return Object.hasOwn(RETIRED_TOOL_SUCCESSORS, name)
+    ? RETIRED_TOOL_SUCCESSORS[name as keyof typeof RETIRED_TOOL_SUCCESSORS]
+    : undefined;
+}
 
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
@@ -1428,7 +1460,7 @@ export function currentAgentLearningToolSelection(
     selected.add("instruction_policy_save");
     selected.add("instruction_policy_get");
   }
-  for (const [retired, successor] of Object.entries(RETIRED_SECRET_TOOL_SUCCESSORS)) {
+  for (const [retired, successor] of Object.entries(RETIRED_TOOL_SUCCESSORS)) {
     if (selected.has(retired as FirstPartyMcpToolName)) selected.add(successor);
   }
   // Only already-selected legacy confirmations survive for paused turn recovery.
@@ -1436,7 +1468,9 @@ export function currentAgentLearningToolSelection(
   return [...selected].filter(
     (name) =>
       name === "remember_confirm" ||
-      (!retiredLearningTools.has(name) && !retiredSecretTools.has(name)),
+      (!retiredLearningTools.has(name) &&
+        !retiredSecretTools.has(name) &&
+        !retiredSessionTools.has(name)),
   );
 }
 
@@ -1448,6 +1482,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
   ...RETIRED_SECRET_TOOL_NAMES,
+  ...RETIRED_SESSION_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1521,6 +1556,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     !retiredLearningTools.has(name) &&
     !retiredSecretTools.has(name) &&
+    !retiredSessionTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -1818,6 +1854,13 @@ export const OwnResourceReachWorkspace = /* @__PURE__ */ defineSchema(() =>
     alwaysOn: primitives.boolean,
     /** You may turn it on or off here. Turning off is always allowed when it is on. */
     canChange: primitives.boolean,
+    /**
+     * A connector's login whose connector this shared workspace hasn't turned
+     * on: nothing here uses it yet, even when it is on. Turning it on here
+     * turns the connector on too, for each person's own account, where you
+     * may. Absent otherwise.
+     */
+    connectorOff: primitives.boolean.optional(),
   }),
 );
 export const OwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
@@ -9298,6 +9341,10 @@ export const SessionGoalContinuationReason = /* @__PURE__ */ defineSchema(() =>
     // Idle backoff: consecutive no-input continuations are paced, and the next
     // evaluation is armed as a delayed workflow wake at `nextAttemptAt`.
     "backoff_pending",
+    // The last turn ended with a terminal context-compaction failure, and the
+    // input pending at that failure (this goal's own continuation included)
+    // stays held until a person or newer input starts another attempt.
+    "compaction_failed",
     "missing_obligation",
   ]),
 );
@@ -10879,6 +10926,49 @@ export function renderUserMessageContentForModel(
   ];
 }
 
+/**
+ * The Opengeni credits one turn charged, carried as `usage` on its terminal
+ * event (`turn.completed`, `turn.failed`, `turn.cancelled`,
+ * `turn.superseded`), on the turn webhooks' `data`, and on the turn itself.
+ * Amounts are integer USD micros (1,000,000 = $1).
+ *
+ * - `creditsMicros`: every credit debit of this session's turn: model calls
+ *   (title and compaction calls made within it too), web search, image
+ *   generation, the bring-your-own-key platform fee and anything else.
+ *   Subscription and customer-key calls cost 0 apart from that fee. `null`
+ *   when a charge of the turn has no recorded price; it is never a false 0.
+ * - `breakdown`: the known amounts by kind; they add up to `creditsMicros`
+ *   when it is known.
+ * - `tokens`: input and output tokens of the turn's model calls.
+ *
+ * Sub-agents are separate sessions and report on their own turn events.
+ * Absent on turns from before this field existed. Stripped from what end-user
+ * browsers receive through the session proxy and published Sites.
+ */
+export const TurnUsage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    creditsMicros: primitives.nonnegativeInteger.nullable(),
+    tokens: z.object({
+      input: primitives.nonnegativeInteger,
+      output: primitives.nonnegativeInteger,
+    }),
+    breakdown: z.object({
+      model: primitives.nonnegativeInteger,
+      webSearch: primitives.nonnegativeInteger,
+      imageGeneration: primitives.nonnegativeInteger,
+      other: primitives.nonnegativeInteger,
+    }),
+  }),
+);
+export type TurnUsage = z.infer<typeof TurnUsage>;
+
+/** The turn's `usage` read from an event payload, or null when absent or malformed. */
+export function turnUsageFromPayload(payload: unknown): TurnUsage | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const parsed = TurnUsage.safeParse((payload as Record<string, unknown>).usage);
+  return parsed.success ? parsed.data : null;
+}
+
 export const SessionTurn = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -10921,6 +11011,12 @@ export const SessionTurn = /* @__PURE__ */ defineSchema(() =>
       finishedAt: primitives.nullableString,
       createdAt: primitives.string,
       updatedAt: primitives.string,
+      /**
+       * The credits this turn charged, from its terminal event. Null while it
+       * runs and on turns from before this field existed. The turns API fills
+       * it; other reads of a turn may leave it out.
+       */
+      usage: TurnUsage.nullable().optional(),
     })
     .superRefine((turn, ctx) => {
       if (turn.prompt.length === 0 && turn.annotations.length === 0) {
@@ -13037,9 +13133,30 @@ export const ToolAuthNeededReason = /* @__PURE__ */ defineSchema(() =>
     // The workspace's explicitly designated credential (for example Codex Apps)
     // cannot be used; distinct from a token refresh failure.
     "designated_credential_unavailable",
+    // The connected account lacks access this tool needs and its access is
+    // fixed (managed outside Opengeni), so it cannot be given more here. Sent
+    // as `accountReason` beside the legacy-safe `unsupported_auth`.
+    "account_scope_fixed",
   ]),
 );
 export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
+
+/**
+ * The reason fields of a `tool.auth_needed` notice for a tool whose access the
+ * connected account lacks. An account whose access can be extended gets the
+ * step-up `insufficient_scope`; a fixed-access account gets the legacy-safe
+ * `unsupported_auth` (older clients show the tools as unavailable, with no
+ * action) and the exact `accountReason` for newer clients.
+ */
+export function toolScopeShortfallReason(
+  fixedAccess: boolean,
+):
+  | { reason: "insufficient_scope" }
+  | { reason: "unsupported_auth"; accountReason: "account_scope_fixed" } {
+  return fixedAccess
+    ? { reason: "unsupported_auth", accountReason: "account_scope_fixed" }
+    : { reason: "insufficient_scope" };
+}
 
 export const ScheduledTaskStatus = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "paused"]),
@@ -15226,6 +15343,12 @@ export const FikenOAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
+/** A person's name for a connection as sent; the server trims it and drops control characters. */
+export const ConnectionLabelInput = /* @__PURE__ */ defineSchema(() =>
+  z.string().max(CONNECTION_LABEL_MAX_LENGTH),
+);
+export type ConnectionLabelInput = z.infer<typeof ConnectionLabelInput>;
+
 export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -15248,6 +15371,13 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     verifiedInstallAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     verifiedInstallVersion: z.number().int().positive().nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()),
+    /**
+     * The name the person gave this connection, such as "Team inbox key".
+     * People and agents see it when the provider doesn't say which account a
+     * connection is (API keys, services without an identity); a provider
+     * identity such as an email always comes first. Absent when unnamed.
+     */
+    label: z.string().min(1).max(CONNECTION_LABEL_MAX_LENGTH).nullable().optional(),
     /**
      * Whether this OAuth MCP account can be told apart from another account of
      * the same service: `verified` (its account is known), `reconnect` (the
@@ -15409,6 +15539,8 @@ export const CreateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
     grantedScopes: z.array(primitives.nonEmptyString).default([]),
     expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()).default({}),
+    /** A name for this connection, shown when the provider gives no account identity. */
+    label: ConnectionLabelInput.nullable().optional(),
     operationId: primitives.optionalUuid,
     /** For direct OpenAI/Azure keys: run a short provider check before saving. */
     verifyModelAccess: primitives.optionalBoolean,
@@ -15481,6 +15613,12 @@ export const UpdateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
     grantedScopes: z.array(primitives.nonEmptyString).optional(),
     expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()).optional(),
+    /**
+     * Rename the connection: the name shown when the provider gives no account
+     * identity. Null or blank removes it. Send it on its own; a rename never
+     * changes the credential, its version or what already-accepted work uses.
+     */
+    label: ConnectionLabelInput.nullable().optional(),
     expectedVersion: z.number().int().positive().optional(),
     operationId: primitives.optionalUuid,
   }),
@@ -15515,6 +15653,11 @@ export const OAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
        * active account for this provider. Never combined with connectionId. */
       newAccount: z.literal(true).optional(),
       ownership: ConnectionOwnership.optional(),
+      /** The catalog capability this sign-in is for. When it finishes, the
+       * callback turns the capability on with the new account (as the person
+       * who started it, with the same checks as enabling it), so setup is done
+       * even if no page loads afterwards. */
+      capabilityId: z.string().min(1).max(512).optional(),
       oauthClient: z
         .object({
           clientId: primitives.nonEmptyString,
@@ -15802,6 +15945,21 @@ export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema((
     installUrl: z.string().url().optional(),
     authModel: z.string().min(1).optional(),
     metadata: z.record(primitives.string, z.unknown()).default({}),
+    /**
+     * The catalog entry whose Connect card asked for this connection's
+     * inputs. The endpoint must then follow that entry's rule (see
+     * `@opengeni/contracts/capability-connect-inputs`), or the request is refused.
+     */
+    connectFor: z.string().min(1).max(512).optional(),
+    /**
+     * With `connectFor`: the values the person entered on that card, by
+     * input id. The API turns them into the endpoint by the entry's rule.
+     * Ignored without `connectFor`.
+     */
+    connectInputs: z
+      .record(z.string().min(1).max(64), z.string().max(2048))
+      .refine((values) => Object.keys(values).length <= 8, "At most 8 inputs.")
+      .optional(),
   }),
 );
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
@@ -17475,6 +17633,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     titleSource: true,
     description: true,
     avatar: true,
+    agentId: true,
     createdBy: true,
     channelId: true,
     parentSessionId: true,
@@ -18629,6 +18788,12 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
       reason: ToolAuthNeededReason,
       /** Exact host recovery reason consumed by host-aware clients. */
       hostReason: ToolAuthNeededReason.optional(),
+      /**
+       * Exact account reason for clients that know it, beside the legacy-safe
+       * `unsupported_auth`: the connected account cannot get the access this
+       * tool needs (`scopes`), so no step-up is offered.
+       */
+      accountReason: z.literal("account_scope_fixed").optional(),
       scopes: z.array(primitives.nonEmptyString).optional(),
       resource: z.string().min(1).optional(),
       selectedResources: McpConnectionResourceScopes.optional(),
@@ -18647,6 +18812,24 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
           action: z.enum(["connect", "add_credentials", "enable"]),
           rationale: z.string().min(1).max(2000),
           requiredVariables: z.array(EnvironmentVariableName).max(64).default([]),
+          /**
+           * Values the person enters on the card before connecting (see
+           * `@opengeni/contracts/capability-connect-inputs`). `value` is what
+           * the agent filled in; the person can change it.
+           */
+          inputs: z
+            .array(
+              z
+                .object({
+                  id: z.string().min(1).max(64),
+                  label: z.string().min(1).max(128),
+                  placeholder: z.string().min(1).max(256).optional(),
+                  value: z.string().max(2048).optional(),
+                })
+                .strict(),
+            )
+            .max(8)
+            .optional(),
         })
         .optional(),
       /** An agent suggestion, not a catalog entry or authority to contact this URL. */
@@ -18693,6 +18876,13 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
           code: "custom",
           message: "hostReason is reserved for host-owned auth-needed events",
           path: ["hostReason"],
+        });
+      }
+      if (payload.accountReason && payload.reason !== "unsupported_auth") {
+        context.addIssue({
+          code: "custom",
+          message: "accountReason requires the legacy-safe unsupported_auth reason",
+          path: ["reason"],
         });
       }
     }),
@@ -22205,6 +22395,11 @@ export const AttachViewerRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
     desktop: primitives.optionalBoolean,
     terminal: primitives.optionalBoolean,
     files: primitives.optionalBoolean,
+    // How long ago the person last interacted with the page, as on the viewer
+    // heartbeat. A box the server stopped because its page went unused is only
+    // warmed again by an attach that reports interaction since then (or after
+    // the session is used). Optional; older clients omit it.
+    lastInteractionAgeMs: z.number().finite().nonnegative().optional(),
   }),
 );
 export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;
@@ -22223,6 +22418,11 @@ export const ViewerHolder = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
     // The desktop pixel tunnel URL the viewer connects to directly; null until
     // a viewer grant is minted (gated until then).
     dataPlaneUrl: primitives.nullableString,
+    // How long a viewer may go without reporting interaction on its heartbeat
+    // (`lastInteractionAgeMs`) before the server may release it and drain a box
+    // held only by viewers. Null when the deployment disables the idle drain.
+    // Absent from older servers.
+    viewerIdleDrainMs: z.number().int().nonnegative().nullable().optional(),
   }),
 );
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
@@ -22276,9 +22476,14 @@ export type AcknowledgeStreamResponse = z.infer<typeof AcknowledgeStreamResponse
 
 // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
 // a stale-epoch beat (a box re-established under a newer epoch) is rejected.
+// `lastInteractionAgeMs` (optional) is how long ago the person last interacted
+// with the page (pointer, keyboard, touch, focus). A box held only by viewers
+// that reported no interaction for the server's idle window is drained; older
+// clients that omit it fall back to the attach time and session activity.
 export const ViewerHeartbeatRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     leaseEpoch: primitives.nonnegativeInteger,
+    lastInteractionAgeMs: z.number().finite().nonnegative().optional(),
   }),
 );
 export type ViewerHeartbeatRequest = z.infer<typeof ViewerHeartbeatRequest>;
@@ -24210,7 +24415,7 @@ export * from "./console";
 
 export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
 export { mcpEndpointIdentity } from "./mcp-endpoint";
-export { pluginMcpUnavailableReason } from "./mcp-endpoint";
+export { mcpHostsDeploymentCannotConnect, pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
 export * from "./session-mcp-tool-permissions";
 export * from "./mcp-catalog-limits";

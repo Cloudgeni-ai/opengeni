@@ -10,6 +10,7 @@ import type {
   SocialConnection,
 } from "../types";
 import { errorMessage } from "@opengeni/contracts/values";
+import { sameConnectorProviderDomain } from "@opengeni/contracts/nango";
 
 export type CapabilityFilter = "all" | CapabilityKind;
 
@@ -610,21 +611,102 @@ export type ConnectionHealth =
   | { state: "none" }
   | { state: "unverified" }
   | { state: "connected"; connection: ConnectionMetadata }
-  | { state: "attention"; connection: ConnectionMetadata | null };
+  | {
+      state: "attention";
+      connection: ConnectionMetadata | null;
+      reason: ConnectionAttentionReason;
+    };
 
 /**
- * Health of an enabled item. Workspace bindings resolve by their exact id;
- * subject bindings intentionally store no id and resolve only among the current
- * caller's visible personal rows by provider and kind. `loaded` distinguishes a
- * failed connection-list read from a genuinely missing or inactive row.
- * Host bindings are not represented in that native list and therefore remain
- * enabled without a native health or repair action.
- *
- * The `loaded` gate matters because listConnections needs a distinct
- * `connections:read` scope: a grant with catalog access but not that sctracking-403s,
- * and a failed load must not read as "every connection was deleted" and paint
- * healthy integrations amber.
+ * Why an enabled item needs attention:
+ * - `signed_out`: its account needs signing in again;
+ * - `failed`: its account stopped working for another reason;
+ * - `removed`: its account was removed;
+ * - `not_connected`: there is no account for this person;
+ * - `off_here`: the person's own account works but is not turned on here.
  */
+export type ConnectionAttentionReason =
+  | "signed_out"
+  | "failed"
+  | "removed"
+  | "not_connected"
+  | "off_here";
+
+/** The one action that repairs an item needing attention. */
+export type ConnectionRepair = "reconnect" | "connect" | "turn_on_here";
+
+const ATTENTION_REASON_LABELS: Record<ConnectionAttentionReason, string> = {
+  signed_out: "Signed out",
+  failed: "Connection failed",
+  removed: "Account removed",
+  not_connected: "No account connected",
+  off_here: "Off in this workspace",
+};
+
+/** The short reason shown wherever an item reads "Needs attention". */
+export function connectionAttentionLabel(reason: ConnectionAttentionReason): string {
+  return ATTENTION_REASON_LABELS[reason];
+}
+
+/** The single repair for an item needing attention; null otherwise. */
+export function connectionRepair(health: ConnectionHealth): ConnectionRepair | null {
+  if (health.state !== "attention") return null;
+  if (health.reason === "off_here") return "turn_on_here";
+  return health.connection ? "reconnect" : "connect";
+}
+
+/** The label of `connectionRepair`, for the list row and the detail button. */
+export function connectionRepairLabel(repair: ConnectionRepair, title: string): string {
+  return repair === "turn_on_here"
+    ? "Turn on here"
+    : repair === "reconnect"
+      ? "Reconnect"
+      : `Connect ${title}`;
+}
+
+function attentionFromStatus(connection: ConnectionMetadata): ConnectionAttentionReason {
+  return connection.status === "needs_reauth"
+    ? "signed_out"
+    : connection.status === "revoked"
+      ? "removed"
+      : "failed";
+}
+
+function attention(
+  connection: ConnectionMetadata | null,
+  reason?: ConnectionAttentionReason,
+): ConnectionHealth {
+  return {
+    state: "attention",
+    connection,
+    reason: reason ?? (connection ? attentionFromStatus(connection) : "removed"),
+  };
+}
+
+/** Whether this account is one the tool runtime resolves here: a shared
+ * workspace account, or the person's own account turned on in this workspace. */
+function usableHere(connection: ConnectionMetadata): boolean {
+  return connection.subjectId === null || connection.turnedOnHere !== false;
+}
+
+/**
+ * Read the account inventory `connectionHealth` takes: this workspace's shared
+ * accounts and the caller's own accounts from every workspace, inactive ones
+ * included for repair. Rejects when the read fails, so callers keep the
+ * `loaded` gate.
+ */
+export async function loadConnectionHealthAccounts(
+  client: {
+    listOwnConnectionAccounts: (
+      workspaceId: string,
+      options: { includeInactive: boolean },
+    ) => Promise<ConnectionMetadata[]>;
+  },
+  workspaceId: string,
+): Promise<ConnectionMetadata[]> {
+  return await client.listOwnConnectionAccounts(workspaceId, { includeInactive: true });
+}
+
 /**
  * The workspace-shared Fiken connection the first-party fiken tools resolve:
  * usable status first, then newest update. Mirrors the server-side selection.
@@ -654,50 +736,74 @@ export function fikenWorkspaceConnection(
   );
 }
 
+/**
+ * Health of an enabled item, from the account inventory the tool runtime
+ * resolves (`listOwnConnectionAccounts` with inactive accounts included): this
+ * workspace's shared accounts plus the person's own accounts from any
+ * workspace, each saying whether it is turned on here. Workspace bindings
+ * resolve by their exact id; subject bindings intentionally store no id and
+ * resolve among the person's own accounts by provider and kind, so an account
+ * connected in another workspace and turned on here ("Use it here") counts.
+ * `loaded` distinguishes a failed inventory read from a genuinely missing or
+ * inactive account.
+ * Host bindings are not represented in that native list and therefore remain
+ * enabled without a native health or repair action.
+ *
+ * The `loaded` gate matters because a grant with catalog access but without
+ * connection access 403s on the read, and a failed load must not read as
+ * "every connection was deleted" and paint healthy integrations amber.
+ */
 export function connectionHealth(
   item: CapabilityCatalogItem,
-  connections: ConnectionMetadata[],
+  accounts: ConnectionMetadata[],
   loaded: boolean,
 ): ConnectionHealth {
   // The Fiken tile carries no installation connectionRef; its health is the
   // workspace-shared Fiken row itself.
   if (item.surfaceType === "first_party_fiken") {
     if (!loaded) return { state: "unverified" };
-    const connection = fikenWorkspaceConnection(connections);
+    const connection = fikenWorkspaceConnection(accounts);
     if (!connection) return { state: "none" };
-    if (connection.status !== "active") return { state: "attention", connection };
+    if (connection.status !== "active") return attention(connection);
     return { state: "connected", connection };
   }
   const ref = installedConnectionRef(item);
   if (!ref) return { state: "none" };
   if (ref.authoritySource === "host") return { state: "none" };
   if (!loaded) return { state: "unverified" };
-  if (ref.accountSelection === "all_eligible" && !ref.connectionId) {
-    const connection = healthiestConnection(
-      connections.filter(
-        (candidate) =>
-          candidate.kind === ref.kind &&
-          normalizeProviderDomain(candidate.providerDomain) ===
-            normalizeProviderDomain(ref.providerDomain),
-      ),
-    );
-    return connection?.status === "active"
-      ? { state: "connected", connection }
-      : { state: "attention", connection };
-  }
-  const connection =
+  const sameProvider = (candidate: ConnectionMetadata) =>
+    candidate.kind === ref.kind &&
+    // Either backend's account counts for its connector (native or Nango).
+    sameConnectorProviderDomain(candidate.providerDomain, ref.providerDomain);
+  if (
+    (ref.accountSelection === "all_eligible" && !ref.connectionId) ||
     ref.subjectScope === "subject"
-      ? healthiestConnection(
-          connections.filter(
-            (candidate) =>
-              candidate.subjectId !== null &&
-              normalizeProviderDomain(candidate.providerDomain) ===
-                normalizeProviderDomain(ref.providerDomain) &&
-              candidate.kind === ref.kind,
-          ),
-        )
-      : (connections.find((candidate) => candidate.id === ref.connectionId) ?? null);
-  if (!connection || connection.status !== "active") return { state: "attention", connection };
+  ) {
+    const matching = accounts.filter(
+      (candidate) =>
+        sameProvider(candidate) && (ref.subjectScope !== "subject" || candidate.subjectId !== null),
+    );
+    const here = matching.filter(usableHere);
+    const connection = healthiestConnection(here);
+    if (connection?.status === "active") return { state: "connected", connection };
+    // A working own account that is only turned on elsewhere: turning it on
+    // here is the repair, never a fresh sign-in.
+    const offHere = matching.find(
+      (candidate) => !usableHere(candidate) && candidate.status === "active",
+    );
+    if (offHere) return attention(offHere, "off_here");
+    if (connection) return attention(connection);
+    // An own account from elsewhere that stopped working: reconnecting it is
+    // the repair, never a duplicate sign-in.
+    const elsewhere = healthiestConnection(matching.filter((candidate) => !usableHere(candidate)));
+    if (elsewhere) return attention(elsewhere);
+    return attention(
+      null,
+      matching.some((candidate) => candidate.status === "revoked") ? "removed" : "not_connected",
+    );
+  }
+  const connection = accounts.find((candidate) => candidate.id === ref.connectionId) ?? null;
+  if (!connection || connection.status !== "active") return attention(connection);
   return { state: "connected", connection };
 }
 
@@ -728,6 +834,8 @@ export type ReconnectPlan =
       kind: "oauth";
       connectionId: string | null;
       ownership: ConnectionOwnership;
+      /** The account's own workspace; a personal account can come from another one. */
+      connectionWorkspaceId?: string;
     }
   | {
       kind: "api_key";
@@ -739,16 +847,21 @@ export function capabilityReconnectPlan(
   item: CapabilityCatalogItem,
   health: ConnectionHealth,
 ): ReconnectPlan | null {
-  if (!item.enabled || health.state !== "attention") return null;
+  if (!item.enabled || health.state !== "attention" || health.reason === "off_here") return null;
   const ref = item.connectionRef;
   if (!ref) return null;
   if (ref.authoritySource === "host") return null;
   const connectionId = health.connection?.id ?? null;
+  const connectionWorkspaceId =
+    health.connection && health.connection.subjectId !== null
+      ? health.connection.workspaceId
+      : null;
   return ref.kind === "oauth2"
     ? {
         kind: "oauth",
         connectionId,
         ownership: ref.subjectScope === "subject" ? "personal" : "workspace",
+        ...(connectionWorkspaceId ? { connectionWorkspaceId } : {}),
       }
     : {
         kind: "api_key",
@@ -860,6 +973,13 @@ export function oauthResumeAction(
   // valid and must never be rewritten with a private UUID.
   if (item.enabled && item.connectionRef?.subjectScope === "subject") return "reconnect";
   if (item.enabled && item.connectionRef?.connectionId === connectionId) return "reconnect";
+  // Every eligible account is already included, the new one too.
+  if (
+    item.enabled &&
+    !item.connectionRef?.connectionId &&
+    item.connectionRef?.accountSelection === "all_eligible"
+  )
+    return "reconnect";
   return "enable";
 }
 
@@ -958,6 +1078,11 @@ export function apiKeyConnectionRef(
 
 export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {
   return value === "workspace" || value === "personal" ? value : null;
+}
+
+/** What the sign-in callback did with the capability (`capability=` on the return). */
+export function oauthServerFinish(value: string | null): "enabled" | "on" | null {
+  return value === "enabled" || value === "on" ? value : null;
 }
 
 /** First one or two initials for the logo monogram fallback. */

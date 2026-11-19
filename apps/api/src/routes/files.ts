@@ -65,7 +65,12 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit, sanitizeWorkspaceFilename } from "@opengeni/core";
+import {
+  assertOrganizationNotSuspended,
+  recordWorkspaceUsage,
+  requireLimit,
+  sanitizeWorkspaceFilename,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import { createApiMcpTransport } from "../mcp/transport";
@@ -185,6 +190,12 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/files/uploads", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    // A suspended organization cannot upload (docs/deployment.md,
+    // "Free compute bounds").
+    await assertOrganizationNotSuspended(db, {
+      accountId: grant.accountId,
+      subjectId: grant.subjectId,
+    });
     if (!objectStorage) {
       throw new HTTPException(503, {
         message: "object storage is not configured",
@@ -478,20 +489,26 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       { status: 422, message: "Invalid file list request" },
     );
     c.header("cache-control", "private, no-store");
-    return c.json(
-      FileListResponse.parse(
-        await listFilesForSubject(db, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          ...parsed,
-        }).catch((error: unknown) => {
-          if (error instanceof ZodError)
-            throw new HTTPException(422, { message: "Invalid file cursor" });
-          throw error;
-        }),
-      ),
-    );
+    // A caller that goes away (a closed tab, a timed-out agent tool call)
+    // cancels the database read instead of leaving it running for nobody.
+    const signal = c.req.raw.signal;
+    let listed: Awaited<ReturnType<typeof listFilesForSubject>>;
+    try {
+      listed = await listFilesForSubject(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        ...parsed,
+        signal,
+      });
+    } catch (error) {
+      // The client-gone convention (mcp/request-abort.ts): 499, empty body.
+      if (signal.aborted) return c.body(null, 499 as never);
+      if (error instanceof ZodError)
+        throw new HTTPException(422, { message: "Invalid file cursor" });
+      throw error;
+    }
+    return c.json(FileListResponse.parse(listed));
   });
 
   const readRequestedFile = async (

@@ -28,7 +28,14 @@ export const CODEX_MODEL_ID_PREFIX = "codex/";
 // The only Codex subscription models Opengeni exposes. Older families are not
 // advertised. A slug stays in this list before every account has rollout access
 // so the picker can offer it without another Opengeni release.
-export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] as const;
+// GPT-6.2 Astra replaced GPT-6 Astra on 2026-11-17 (both GPT-6.2 slugs need
+// Codex client 0.166.0 or newer; CODEX_CLIENT_VERSION is above that).
+export const CODEX_FALLBACK_MODEL_SLUGS = [
+  "gpt-6.2-astra",
+  "gpt-6.2-sol",
+  "gpt-6-sol",
+  "gpt-6-luna",
+] as const;
 
 // Live Codex model-catalog values for every exposed subscription slug.
 // Verified 2026-09-04 against Codex CLI 0.153.2's bundled model catalog:

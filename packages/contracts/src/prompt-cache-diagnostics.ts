@@ -51,7 +51,11 @@ export const PROMPT_CACHE_WARM_MISS_CLASSES = [
   "system_changed",
   /** An item the previous request already sent changed. */
   "history_rewritten",
-  /** The prefix was identical but the provider dropped signed thinking. */
+  /**
+   * The prefix was identical but the provider dropped signed thinking it did
+   * not drop for the previous call. Blocks dropped the same way on every call
+   * leave the effective prompt unchanged and do not explain a miss.
+   */
   "thinking_dropped",
   "account_changed",
   /** Long enough since the previous call that the cache may have expired. */
@@ -150,6 +154,23 @@ export function promptCacheThinkingBlocksDropped(observation: PromptCacheObserva
 }
 
 /**
+ * Signed thinking blocks the provider dropped for the current call beyond what
+ * it dropped for the previous one, summed over reasons. A long conversation can
+ * drop the same old blocks on every call; that steady drop changes nothing
+ * between the two requests, so only the increase can explain a cache miss.
+ */
+export function promptCacheThinkingBlocksNewlyDropped(
+  previous: PromptCacheObservation | null,
+  current: PromptCacheObservation | null,
+) {
+  const before = previous?.thinkingBlocksDropped ?? {};
+  let added = 0;
+  for (const [reason, count] of Object.entries(current?.thinkingBlocksDropped ?? {}))
+    added += Math.max(0, count - (before[reason] ?? 0));
+  return added;
+}
+
+/**
  * The first history checkpoint, up to the shorter request, whose digests
  * differ; null when every shared checkpoint matches.
  */
@@ -173,7 +194,7 @@ export function firstDivergentHistoryCheckpoint(
  * baseline or the call read what a warm cache should serve.
  *
  * Causes the request itself proves (tools, system, history) win over effects
- * (dropped thinking) and circumstances (account, time).
+ * (newly dropped thinking) and circumstances (account, time).
  */
 export function classifyPromptCacheWarmMiss(
   previous: PromptCacheCallSample | null,
@@ -199,7 +220,7 @@ export function classifyPromptCacheWarmMiss(
     if (diverged !== null)
       return { class: "history_rewritten", ...base, divergedWithinItems: diverged };
   }
-  if (promptCacheThinkingBlocksDropped(current.observation) > 0)
+  if (promptCacheThinkingBlocksNewlyDropped(previous.observation, current.observation) > 0)
     return { class: "thinking_dropped", ...base };
   if (
     previous.connectionId !== null &&

@@ -52,7 +52,8 @@ pub struct VmSpec {
     pub memory_mib: u32,
     /// Guest memory in MiB the VM is guaranteed: the host keeps at least
     /// this much of its memory from being reclaimed for others (the VM
-    /// cgroup's `memory.low`). At most `memory_mib`.
+    /// cgroup's `memory.low`, or `memory.min` where running VMs may be
+    /// compressed). At most `memory_mib`.
     pub memory_request_mib: u32,
     /// The VM's share of processor time when processors are contended,
     /// relative to other VMs: its cgroup's `cpu.weight`, 1 to 10000, where

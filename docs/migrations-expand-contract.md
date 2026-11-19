@@ -287,7 +287,14 @@ production still ran `6327db2c`, which predates 1240 and rejects the grant.
 1283 withholds it again and the caller check is back; 1283 takes the free
 ordinal after 1282 so a database that has not applied 1282 runs the two back
 to back. 1361 grants it again and removes the check, now that a release containing
-1283 is the pinned previous production binary. Pin only the binary production really runs
+1283 is the pinned previous production binary. 1475 created the organization-wide
+sandbox counts withheld, with the same caller check, and 1479 granted them and
+removed the check; 1479 ships in the release after the one that contains 1475.
+1486 created the unpaid sandbox fleet counts withheld and 1490 grants them; 1490
+ships in the release after the one that contains 1486.
+1482 and 1487 created the Nango in-use check and live owner listing withheld
+and 1499 grants them; 1499 ships in the release after the one that contains 1487.
+Pin only the binary production really runs
 (its healthz `deploymentRevision`), never one that merely reached staging.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
@@ -376,9 +383,9 @@ steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 
 `RETIRING_FEATURE_TABLES` in `packages/db/src/runtime-posture.ts` is the explicit
 release-N inventory for the removed Variable Sets, subscription pools, first
-automation API, PR Review and resumable-transcription features, and the legacy
-bot templates and Slack agents tables the agents contract stopped using
-(`agentsLegacy`: `bot_templates`, `slack_agents`). Readiness permits
+automation API, PR Review and resumable-transcription features. (The agents
+legacy drop removed `bot_templates` and `slack_agents`, and with them their
+`agentsLegacy` entry.) Readiness permits
 those tables to be absent but retains their exact ownership, grants and RLS
 checks while present. No prefix rule makes other tables optional. Modern
 subscription-core tables, vaults, automation templates, event sources and meeting
@@ -417,6 +424,14 @@ from the pin** as the restricted runtime login. The checked-out source's full
 named-object contracts are used, not a reconstructed subset of tables.
 This is the deterministic readiness-code equivalent of starting the old API
 and workers; it does not test their other queries or writer protocols.
+
+The job also reads the revision production reports from its public `/healthz`.
+When that differs from the pin, it warns that the pin is stale and runs the same
+readiness check with that live revision's inspector and evaluator, in addition
+to the pin. An unreadable live revision only warns. The release operator in
+opengeni-ops independently repeats this check against the revisions the live
+production workloads run before any production migration, so a stale pin can no
+longer let an incompatible rolling release through.
 
 The test also adds safe unknown objects and deliberately weakens RLS, adds
 unsafe grants/definers and revokes known EXECUTE privileges. Both the current

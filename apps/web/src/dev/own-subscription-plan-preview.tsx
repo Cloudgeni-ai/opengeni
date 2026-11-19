@@ -53,7 +53,7 @@ function subscription(
 const rows = projectPickerRows(t, [
   model({ id: "gpt-5.6-sol", label: "GPT-5.6 Sol", shortLabel: "5.6 Sol" }),
   model({ id: "gpt-5.6-luna", label: "GPT-5.6 Luna", shortLabel: "5.6 Luna" }),
-  subscription("codex/gpt-6-astra", "GPT-6 Astra", "codex", "Codex"),
+  subscription("codex/gpt-6.2-astra", "GPT-6.2 Astra", "codex", "Codex"),
   subscription("codex/gpt-5.6-sol", "GPT-5.6 Sol", "codex", "Codex"),
   subscription("supergrok/grok-4.6", "Grok 4.6", "supergrok", "SuperGrok"),
 ]);
@@ -87,7 +87,7 @@ export function OwnSubscriptionPlanPreview() {
     }
     if (desktop === "macos") document.documentElement.dataset.desktop = "macos";
   }, [theme, desktop]);
-  const [selected, setSelected] = useState("codex/gpt-6-astra");
+  const [selected, setSelected] = useState("codex/gpt-6.2-astra");
   const [dismissed, setDismissed] = useState(false);
 
   return (

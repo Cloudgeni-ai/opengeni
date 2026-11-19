@@ -137,6 +137,22 @@ describe("Nango Connect", () => {
     expect(() => readNangoConnectState(settings, "forged.state")).toThrow();
   });
 
+  test("the capability a catalog connect is for rides in the state, so completion turns it on", async () => {
+    const { createSignedState } = await import("@opengeni/github");
+    const base = readNangoConnectState(settings, await startedState());
+    const { capabilityId: _none, ...payload } = base;
+    expect(_none).toBeUndefined();
+    const sign = (extra: Record<string, unknown>) =>
+      createSignedState(settings.integrationsStateSecret!, { ...payload, ...extra });
+    expect(
+      readNangoConnectState(settings, await sign({ capabilityId: "mcp:gmail" })).capabilityId,
+    ).toBe("mcp:gmail");
+    // An oversized value is not a capability id.
+    expect(
+      readNangoConnectState(settings, await sign({ capabilityId: "x".repeat(513) })).capabilityId,
+    ).toBeUndefined();
+  });
+
   test("the page opens a session for exactly this integration, tagged with this attempt", async () => {
     const token = await startedState();
     const nango = fakeNango([]);
@@ -161,13 +177,17 @@ describe("Nango Connect", () => {
     expect(session.headers.get("authorization")).toBe("Bearer nango-secret-test");
     const state = readNangoConnectState(settings, token);
     expect(session.body).toEqual({
-      tags: nangoAttemptTags({
-        accountId: ACCOUNT,
-        workspaceId: WORKSPACE,
-        subjectId: SUBJECT,
-        attemptId: state.nonce,
-        integrationKey: "gmail",
-      }),
+      tags: {
+        ...nangoAttemptTags({
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          subjectId: SUBJECT,
+          attemptId: state.nonce,
+          integrationKey: "gmail",
+        }),
+        // Only this deployment's sweep may delete it.
+        opengeni_deployment: "https://api.opengeni.test",
+      },
       allowed_integrations: ["google-mail"],
     });
     const html = await response.text();
@@ -227,7 +247,7 @@ describe("Nango Connect", () => {
     ).toEqual({ status: "pending" });
   });
 
-  test("an account Nango cannot name is never stored and is deleted in Nango", async () => {
+  test("an account Nango cannot name is never stored; it is deleted only once its references are read", async () => {
     const token = await startedState();
     const state = readNangoConnectState(settings, token);
     const nango = fakeNango(
@@ -262,12 +282,44 @@ describe("Nango Connect", () => {
     expect(identity.headers.get("base-url-override")).toBe("https://gmail.googleapis.com");
     expect(identity.headers.get("connection-id")).toBe("nango-conn-1");
     expect(identity.headers.get("provider-config-key")).toBe("google-mail");
+    // A replayed completion may already stand for it: with the database
+    // unreachable nothing is deleted, and the sweep decides later.
     expect(
       nango.requests.some(
         (request) =>
           request.method === "DELETE" && request.url.includes("/connections/nango-conn-1"),
       ),
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  test("a desktop start opened in a signed-out browser signs in first, then opens again", async () => {
+    const { createSignedState } = await import("@opengeni/github");
+    const token = createSignedState(settings.integrationsStateSecret!, {
+      ...readNangoConnectState(settings, await startedState()),
+      browserProof: "session",
+    });
+    const requestUrl = `https://app.example.test/v1/integrations/nango/connect?state=${encodeURIComponent(token)}`;
+    const response = await nangoConnectPage(
+      { db: unreachableDb, settings, nangoBackends: async () => backends },
+      { state: token, browser: { bindingDigests: [], signedInSubjectId: null }, requestUrl },
+    );
+    expect(response.status).toBe(302);
+    const signIn = new URL(response.headers.get("location")!);
+    // The console signs the browser in; the step itself stays on the API.
+    expect(signIn.origin).toBe("https://app.opengeni.test");
+    expect(signIn.pathname).toBe("/connect-continue");
+    expect(new URL(signIn.searchParams.get("next")!, requestUrl).toString()).toBe(requestUrl);
+    // Signed in as someone else, it is refused as before.
+    await expect(
+      nangoConnectPage(
+        { db: unreachableDb, settings, nangoBackends: async () => backends },
+        {
+          state: token,
+          browser: { bindingDigests: [], signedInSubjectId: "user:someone-else" },
+          requestUrl,
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
   });
 
   test("a completion from another browser is refused", async () => {
@@ -322,5 +374,30 @@ describe("Nango webhook", () => {
         { rawBody: body, signature: sign(body) },
       ),
     ).toBe("ignored");
+  });
+
+  test("asks Nango to retry when the person's connections cannot be read", async () => {
+    for (const operation of ["refresh", "deletion"]) {
+      const event = JSON.stringify({
+        type: "auth",
+        operation,
+        connectionId: "nango-conn",
+        providerConfigKey: "google-mail",
+        success: operation !== "refresh",
+        tags: {
+          organization_id: "00000000-0000-4000-8000-000000000001",
+          opengeni_workspace_id: "00000000-0000-4000-8000-000000000002",
+          end_user_id: "user:00000000-0000-4000-8000-000000000003",
+          opengeni_integration: "gmail",
+          opengeni_attempt_id: "attempt",
+        },
+      });
+      await expect(
+        handleNangoWebhook(
+          { db: unreachableDb, settings, nangoBackends: async () => backends },
+          { rawBody: event, signature: sign(event) },
+        ),
+      ).rejects.toMatchObject({ status: 503 });
+    }
   });
 });

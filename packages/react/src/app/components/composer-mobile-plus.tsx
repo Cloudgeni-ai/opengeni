@@ -1,4 +1,4 @@
-import { PlusIcon } from "lucide-react";
+import { PaperclipIcon, PlusIcon } from "lucide-react";
 import {
   Suspense,
   useEffect,
@@ -23,6 +23,7 @@ import {
   preloadComposerMenuPanels,
 } from "../../ui/composer-menu";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "../../ui/dropdown-menu";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 
 export type { ComposerPlusProps, Panel as ComposerPlusPanel } from "./composer-mobile-plus-panel";
 
@@ -69,13 +70,46 @@ function ComposerPanelLoadFailed(props: ComposerPlusProps) {
   return <ComposerPanelNotice {...props} failed />;
 }
 
+type ComposerMobilePlusProps = ComposerPlusProps & {
+  /** Opens the menu on one panel, for example from the capabilities chip. */
+  openRequest?: { panel: Panel; nonce: number } | undefined;
+};
+
+/**
+ * The composer's "+". The simplified interface has one action left there, so
+ * it shows that action as a button instead of a menu with a single row.
+ */
+export function ComposerMobilePlus(props: ComposerMobilePlusProps) {
+  const { simplified } = useSimplifiedInterface();
+  if (!simplified) return <ComposerActionsMenu {...props} />;
+  return props.fileUploadsEnabled ? <ComposerAttachButton disabled={props.disabled} /> : null;
+}
+
+/** Opens the composer's own file picker, like "+" > Add photos & files. */
+function ComposerAttachButton(props: { disabled?: boolean | undefined }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-xs"
+      disabled={props.disabled}
+      aria-label="Add photos & files"
+      title="Add photos & files"
+      onClick={(event) => {
+        event.currentTarget
+          .closest<HTMLElement>("[data-og-composer-id]")
+          ?.querySelector<HTMLInputElement>("[data-og-composer-attach]")
+          ?.click();
+      }}
+      className="size-8 pointer-coarse:size-11 shrink-0 rounded-full text-fg-muted hover:text-fg"
+    >
+      <PaperclipIcon className="size-4" />
+    </Button>
+  );
+}
+
 /** Keep the composer trigger/state eager; load its optional menu only when opened. */
-export function ComposerMobilePlus(
-  props: ComposerPlusProps & {
-    /** Opens the menu on one panel, for example from the capabilities chip. */
-    openRequest?: { panel: Panel; nonce: number } | undefined;
-  },
-) {
+function ComposerActionsMenu(props: ComposerMobilePlusProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogFocusOwnerRef = useRef(false);
   const [open, setOpen] = useState(false);

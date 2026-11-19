@@ -7,8 +7,10 @@ import { gradeCase } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts, type EventLike } from "./receipts";
 import {
+  applyDefaultWorkspaces,
   cellsFromConfig,
   countFlag,
+  DEFAULT_EVAL_WORKSPACES,
   errorCode,
   gradeEvents,
   latestRecords,
@@ -67,6 +69,50 @@ describe("gradeCase", () => {
       pass: false,
       category: "hallucinated_result",
     });
+  });
+
+  test("account rows may be answered from the account line tool search showed", () => {
+    const accountRow: EvalCase = {
+      id: "outlook_calendar.read.account.test",
+      integration: "outlook_calendar",
+      kind: "read",
+      prompt: "Whose account is my Outlook Calendar connection signed in as?",
+      expectAnswer: [/iris\.tenley@opengenitest2026/i],
+      answerFromAccountLine: true,
+    };
+    const notice =
+      "Close candidates this search did not load:\n- mcp_a__me_calendarview: Account: Outlook Calendar — bendik@opengenitest2026.onmicrosoft.com · Shared. Get events\n- mcp_b__me_calendarview: Account: Outlook Calendar — iris.tenley@opengenitest2026.onmicrosoft.com · Yours. Get events";
+    const search = (lines: string) =>
+      events(
+        {
+          type: "agent.toolCall.created",
+          payload: {
+            id: "s1",
+            name: "tool_search",
+            arguments: { query: "Outlook Calendar account" },
+            toolFamily: "tool_search",
+            raw: { providerData: { opengeni: { lazy_search: { notice: lines } } } },
+          },
+        },
+        { type: "agent.toolCall.output", payload: { id: "s1", output: "Disclosed tools: none" } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "It is signed in as iris.tenley@opengenitest2026.onmicrosoft.com." },
+        },
+      );
+    expect(gradeCase(accountRow, parseReceipts(search(notice)))).toMatchObject({ pass: true });
+    // Without the line in this chat, the same answer has no receipt.
+    expect(gradeCase(accountRow, parseReceipts(search("no accounts")))).toMatchObject({
+      pass: false,
+      category: "hallucinated_result",
+    });
+    // Another integration's line doesn't count.
+    expect(
+      gradeCase(
+        accountRow,
+        parseReceipts(search(notice.replaceAll("Outlook Calendar", "Outlook Mail"))),
+      ),
+    ).toMatchObject({ pass: false });
   });
 
   test("reports no_tool when nothing ran", () => {
@@ -680,6 +726,25 @@ describe("catalogue", () => {
     for (const testCase of selectCases("all")) expect(skipped).not.toContain(testCase.integration);
     expect(selectCases("linear").every((testCase) => testCase.integration === "linear")).toBe(true);
   });
+
+  test("a close-date range that restates the request is not an invented close date", () => {
+    const row = CASES.find((item) => item.id === "microsoft_dynamics.clarify.unnamed-crm")!;
+    const invented = (answer: string) =>
+      (row.forbidAnswer ?? []).some((pattern) => pattern.test(answer));
+    for (const answer of [
+      "Which CRM should I check for opportunities closing November 1–30, 2026?",
+      "Opportunities closing Nov 1 - Nov 30 need a connected CRM. Which one do you use?",
+      "Deals closing 2026-11-01 to 2026-11-30: which system are they in?",
+      "Should I count deals that close in 30 days?",
+    ])
+      expect(invented(answer)).toBe(false);
+    for (const answer of [
+      "Acme renewal closes November 14, 2026 for $48,000.",
+      "Two opportunities: Contoso closing on Nov 21 and Fabrikam closing the 28th.",
+      "Northwind closes 2026-11-30.",
+    ])
+      expect(invented(answer)).toBe(true);
+  });
 });
 
 describe("grid", () => {
@@ -769,5 +834,24 @@ describe("grid", () => {
     );
     expect(stoppedAtDeadline(stopped)).toBe(true);
     expect(stoppedAtDeadline(events({ type: "turn.cancelled", payload: {} }))).toBe(false);
+  });
+});
+
+describe("applyDefaultWorkspaces", () => {
+  test("fills unset workspaces the caller can open; an explicit one wins", async () => {
+    const environment: Record<string, string | undefined> = {
+      OPENGENI_EVAL_CONNECTED_WORKSPACE_ID: "ws-mine",
+    };
+    await applyDefaultWorkspaces(async () => true, environment);
+    expect(environment.OPENGENI_EVAL_CONNECTED_WORKSPACE_ID).toBe("ws-mine");
+    expect(environment.OPENGENI_EVAL_EMPTY_WORKSPACE_ID).toBe(
+      DEFAULT_EVAL_WORKSPACES.OPENGENI_EVAL_EMPTY_WORKSPACE_ID,
+    );
+  });
+
+  test("leaves them unset where the shared workspaces don't exist", async () => {
+    const environment: Record<string, string | undefined> = {};
+    await applyDefaultWorkspaces(async () => false, environment);
+    expect(environment).toEqual({});
   });
 });

@@ -455,6 +455,35 @@ describe("production facade over the real native addon", () => {
     disposeArtifact(customEdges);
   });
 
+  test("imports a full-width table on an A4 page through native authority", async () => {
+    // A4 text width is 595.3 - 72 - 72 = 451.29999999999995 in floating point,
+    // while the serialized full-width table is 9026 twips, exactly 451.3pt.
+    const source = ReferenceDocument.create({
+      idNamespace: "8899aabbccddee01",
+      page: {
+        widthPt: 595.3,
+        heightPt: 841.9,
+        marginTopPt: 72,
+        marginRightPt: 72,
+        marginBottomPt: 72,
+        marginLeftPt: 72,
+      },
+    });
+    source.blocks.addTable([
+      ["Metric", "Value"],
+      ["Revenue", "120"],
+    ]);
+    const restored = await DocumentFile.importDocx(await ReferenceDocumentFile.exportDocx(source));
+    try {
+      const table = restored.blocks.items[0];
+      if (table?.kind !== "table") throw new Error("Fixture table missing");
+      expect(table.style.widthPt).toBeCloseTo(451.3, 10);
+      expect(getArtifactCompositeDiagnostics(restored).nativeRevision).toBeGreaterThan(0n);
+    } finally {
+      disposeArtifact(restored);
+    }
+  });
+
   test("keeps presentation object identity while native reconciliation changes", () => {
     const presentation = Presentation.create();
     const slide = presentation.slides.add();

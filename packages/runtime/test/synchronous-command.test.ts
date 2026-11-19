@@ -135,7 +135,9 @@ test("unknown observation preserves locator/output and never starts again or adv
   expect(error).toMatchObject({ sessionId: 44, output: { stdout: "already written", stderr: "" } });
   expect(starts).toBe(1);
   const rendered = mcpToolErrorOutput(error).content[0].text;
-  expect(rendered).toContain("pending or unknown");
+  expect(rendered).toContain("outcome of an internal filesystem step is unknown");
+  expect(rendered).toContain("not a background command");
+  expect(rendered).not.toMatch(/pending/i);
   expect(rendered).not.toMatch(/try again|retry|already written/i);
 });
 

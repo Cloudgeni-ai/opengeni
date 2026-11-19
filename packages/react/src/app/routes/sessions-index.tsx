@@ -102,6 +102,7 @@ import {
   type SessionUsageLimitDraft,
 } from "../lib/session-usage-limit";
 import { ModelPicker, type SessionToolSelection } from "../components/pickers";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
@@ -413,6 +414,17 @@ function SessionsIndexRouteContent({
         agentCapabilities: requestFromDraft(next, agentAvailability),
       })),
   };
+  // The simplified interface has no capability choice: a new chat always gets
+  // the workspace's capabilities, so a choice made in the full console is dropped.
+  const { simplified: simplifiedInterface } = useSimplifiedInterface();
+  const draftHasOwnCapabilities = draft.agentCapabilities !== undefined;
+  useEffect(() => {
+    if (!simplifiedInterface || !draftHasOwnCapabilities) return;
+    setDraft((current) => {
+      const { agentCapabilities: _dropped, ...rest } = current;
+      return rest;
+    });
+  }, [simplifiedInterface, draftHasOwnCapabilities]);
   // "+" > Secrets: which vaults this chat may use. Shown only while its agent
   // can use secrets (the workspace default or this chat's own capabilities).
   const draftSecretsOn =
@@ -2173,7 +2185,7 @@ function SessionsIndexRouteContent({
                       }
                     : {})}
                 />
-                {composerAgentCapabilities.customized ? (
+                {composerAgentCapabilities.customized && !simplifiedInterface ? (
                   <ComposerCapabilitiesChip
                     summary={capabilitySummary(
                       composerAgentCapabilities.draft.values,
@@ -2588,6 +2600,10 @@ function SessionModelControl({
   onPolicyChosen: () => void;
 }) {
   const context = useAppContext();
+  const { simplified } = useSimplifiedInterface();
+  // The simplified interface has one model policy (see
+  // lib/simplified-interface-model), so there is nothing to pick.
+  if (simplified) return null;
   return (
     <ModelPicker
       hasImageAttachments={hasImageAttachments}
