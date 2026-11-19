@@ -339,9 +339,18 @@ describe("write-through", () => {
   test('"none" keeps runtime mechanics; notifications are their own capability', () => {
     // "none" still lets the agent ask the person (request_human_input), but
     // phone notifications, calls and inbox tidying are switched on separately.
+    // Derived tools stay in the stored selection; the turn gate decides them.
     expect(
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
-    ).toEqual(["command_read", "command_wait", "set_session_title", "wait_for_input"].sort());
+    ).toEqual(
+      [
+        "capability_authorization_request",
+        "command_read",
+        "command_wait",
+        "set_session_title",
+        "wait_for_input",
+      ].sort(),
+    );
   });
 
   test("each capability keeps exactly its tools", () => {
