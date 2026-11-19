@@ -7257,7 +7257,7 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
  * object; the core create resolves and validates it, so the early check reads
  * the rest of the body. Every other body is returned unchanged.
  */
-function withoutOrgAgentFieldsForPreflight(payload: unknown): unknown {
+export function withoutOrgAgentFieldsForPreflight(payload: unknown): unknown {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
   const request = payload as Record<string, unknown>;
   if (!sessionAgentFieldNamesOrgAgent(request["agent"])) return payload;
