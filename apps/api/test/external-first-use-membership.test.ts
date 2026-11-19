@@ -661,6 +661,26 @@ test("display details sent with the user are stored for Console and never change
   ).toEqual({ display_name: "Grace B. Hopper", email: null });
 }, 60_000);
 
+test("null or non-string display details from a raw caller are ignored, never a rejected request", async () => {
+  const org = await organization(CAPABLE, { composition: "production" });
+  const externalId = `auth0|${crypto.randomUUID()}`;
+  const subjectId = await subjectOf(org.accountId, externalId);
+  const response = await productionApp.request(`/v1/workspaces/${org.workspace.id}`, {
+    headers: {
+      authorization: `Bearer ${org.token}`,
+      "x-opengeni-external-actor": org.actorHeader({
+        mode: "external",
+        identity: { externalId, source: "product", displayName: null, email: 42 },
+      }),
+    },
+  });
+  expect(response.status).toBe(200);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(
+    await shared.admin`select 1 from organization_end_user_profiles where subject_id = ${subjectId}`,
+  ).toHaveLength(0);
+}, 60_000);
+
 test("an organization key with workspace:admin renames a shared workspace; without it, it cannot", async () => {
   const narrow = await organization(CAPABLE, { composition: "production" });
   expect(

@@ -387,19 +387,25 @@ export type ToolRow = {
  * version names that the server no longer offers. A tool not in the version's
  * catalog is "new"; for `selected` mode its state follows `newTools` only
  * when it is not already listed.
+ *
+ * `live` is null while the list is loading or when the server couldn't list
+ * its tools: the rows then come from the version's catalog and selection, and
+ * nothing is marked new or gone.
  */
 export function toolRows(
   server: OrgAgentToolServerConfig,
-  live: readonly OrgAgentToolCatalogEntry[],
+  live: readonly OrgAgentToolCatalogEntry[] | null,
   catalog: OrgAgentToolCatalog | null | undefined,
 ): ToolRow[] {
   const known = catalog?.[server.server];
-  const knownNames = known ? new Set(known.map((tool) => tool.name)) : null;
-  const liveNames = new Set(live.map((tool) => tool.name));
+  const liveKnown = live !== null;
+  const offered = live ?? known ?? [];
+  const knownNames = known && liveKnown ? new Set(known.map((tool) => tool.name)) : null;
+  const liveNames = new Set(offered.map((tool) => tool.name));
   const askAll = server.approval.ask === true;
   const askList = new Set(server.approval.ask === true ? [] : server.approval.ask);
   const enabled = new Set(server.tools.enabled);
-  const rows: ToolRow[] = live.map((tool) => {
+  const rows: ToolRow[] = offered.map((tool) => {
     const isNew = knownNames !== null && !knownNames.has(tool.name);
     const listed = enabled.has(tool.name);
     const on =
@@ -418,7 +424,7 @@ export function toolRows(
       on: true,
       ask: askAll || askList.has(name),
       isNew: false,
-      gone: true,
+      gone: liveKnown,
     });
   }
   return rows;
@@ -529,6 +535,22 @@ export function overrideValueText(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The value the chat runs with. A tool server change names only the fields it
+ * changes, so it is shown on top of the agent's server settings and the diff
+ * shows just those fields.
+ */
+function effectiveChatValue(setting: string, agent: unknown, chat: unknown): unknown {
+  if (!setting.startsWith("toolServers.") || !isPlainObject(agent) || !isPlainObject(chat)) {
+    return chat;
+  }
+  return { ...agent, ...chat };
+}
+
 /** What a chat changed from its agent version, one entry per setting, in a stable order. */
 export function overrideEntries(
   overrides: OrgAgentSessionOverrides | null | undefined,
@@ -544,7 +566,7 @@ export function overrideEntries(
       setting,
       label: overrideLabel(setting),
       agent: overrideValueText(change?.agent),
-      chat: overrideValueText(change?.chat),
+      chat: overrideValueText(effectiveChatValue(setting, change?.agent, change?.chat)),
     }))
     .sort(
       (left, right) =>

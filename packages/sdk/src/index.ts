@@ -260,6 +260,7 @@ export {
   getOrganizationAgentUsage,
   getOrganizationAgentVersion,
   getOrganizationToolServer,
+  isOrgAgentRef,
   listOrganizationAgentCompute,
   listOrganizationAgentSessions,
   listOrganizationAgentVersions,

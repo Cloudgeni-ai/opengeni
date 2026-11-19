@@ -127,25 +127,54 @@ export type OrgAgentRunsOnProblem = {
   message: string;
 };
 
-/** Why a `runsOn` names nothing usable, or null. `tx` is in the account's RLS context. */
-export async function orgAgentRunsOnProblem(
+/**
+ * The machine or sandbox environment a version's `runsOn` resolved to when the
+ * version was saved (`agent_revisions.runs_on_target`): chats then use this id,
+ * so a later rename or a second machine with the same name can't move or break
+ * the agent. `runsOn` keeps what was written, for display and the config hash.
+ */
+export type OrgAgentRunsOnTarget = {
+  /** The organization machine's enrollment id. */
+  machineId?: string;
+  /** The organization sandbox environment's (rig's) id. */
+  environmentId?: string;
+};
+
+/** Reads a stored `runs_on_target`; anything else is null (resolve by `runsOn`). */
+export function parseOrgAgentRunsOnTarget(value: unknown): OrgAgentRunsOnTarget | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const target: OrgAgentRunsOnTarget = {};
+  if (typeof record["machineId"] === "string") target.machineId = record["machineId"];
+  if (typeof record["environmentId"] === "string") target.environmentId = record["environmentId"];
+  return target.machineId || target.environmentId ? target : null;
+}
+
+/**
+ * What a `runsOn` names: the ids to save with the version (null when it names
+ * no machine or environment), or why it names nothing usable. `tx` is in the
+ * account's RLS context.
+ */
+export async function resolveOrgAgentRunsOn(
   tx: Database,
   accountId: string,
   runsOn: OrgAgentRunsOn | undefined,
-): Promise<OrgAgentRunsOnProblem | null> {
-  if (!runsOn) return null;
+): Promise<{ target: OrgAgentRunsOnTarget | null } | { problem: OrgAgentRunsOnProblem }> {
+  if (!runsOn) return { target: null };
   if (runsOn.kind === "machine" && runsOn.machine !== undefined) {
     const match = findOrgCompute(
       await listOrganizationComputeInAccount(tx, accountId, "machine"),
       runsOn.machine,
     );
-    if (match.status === "found") return null;
+    if (match.status === "found") return { target: { machineId: match.entry.id } };
     return {
-      code: "machine_not_found",
-      message:
-        match.status === "ambiguous"
-          ? `${match.count} organization machines are named '${runsOn.machine}'. Name the machine by its id.`
-          : `'${runsOn.machine}' is not an organization machine of this organization. Organization agents run only on organization machines, never on Personal (Only me) or workspace machines.`,
+      problem: {
+        code: "machine_not_found",
+        message:
+          match.status === "ambiguous"
+            ? `${match.count} organization machines are named '${runsOn.machine}'. Name the machine by its id.`
+            : `'${runsOn.machine}' is not an organization machine of this organization. Organization agents run only on organization machines, never on Personal (Only me) or workspace machines.`,
+      },
     };
   }
   if (runsOn.kind === "sandbox" && runsOn.environment !== undefined) {
@@ -153,16 +182,28 @@ export async function orgAgentRunsOnProblem(
       await listOrganizationComputeInAccount(tx, accountId, "rig"),
       runsOn.environment,
     );
-    if (match.status === "found") return null;
+    if (match.status === "found") return { target: { environmentId: match.entry.id } };
     return {
-      code: "environment_not_found",
-      message:
-        match.status === "ambiguous"
-          ? `${match.count} organization sandbox environments are named '${runsOn.environment}'. Name it by its id.`
-          : `'${runsOn.environment}' is not an organization sandbox environment of this organization. Organization agents use only organization sandbox environments.`,
+      problem: {
+        code: "environment_not_found",
+        message:
+          match.status === "ambiguous"
+            ? `${match.count} organization sandbox environments are named '${runsOn.environment}'. Name it by its id.`
+            : `'${runsOn.environment}' is not an organization sandbox environment of this organization. Organization agents use only organization sandbox environments.`,
+      },
     };
   }
-  return null;
+  return { target: null };
+}
+
+/** Why a `runsOn` names nothing usable, or null. `tx` is in the account's RLS context. */
+export async function orgAgentRunsOnProblem(
+  tx: Database,
+  accountId: string,
+  runsOn: OrgAgentRunsOn | undefined,
+): Promise<OrgAgentRunsOnProblem | null> {
+  const resolved = await resolveOrgAgentRunsOn(tx, accountId, runsOn);
+  return "problem" in resolved ? resolved.problem : null;
 }
 
 /** {@link orgAgentRunsOnProblem} in its own account-scoped transaction. */
@@ -173,4 +214,16 @@ export async function checkOrgAgentRunsOn(
 ): Promise<OrgAgentRunsOnProblem | null> {
   if (!runsOn || (runsOn.machine === undefined && runsOn.environment === undefined)) return null;
   return await withAccountRls(db, accountId, (tx) => orgAgentRunsOnProblem(tx, accountId, runsOn));
+}
+
+/** {@link resolveOrgAgentRunsOn} in its own account-scoped transaction. */
+export async function resolveOrgAgentRunsOnInAccount(
+  db: Database,
+  accountId: string,
+  runsOn: OrgAgentRunsOn | undefined,
+): Promise<{ target: OrgAgentRunsOnTarget | null } | { problem: OrgAgentRunsOnProblem }> {
+  if (!runsOn || (runsOn.machine === undefined && runsOn.environment === undefined)) {
+    return { target: null };
+  }
+  return await withAccountRls(db, accountId, (tx) => resolveOrgAgentRunsOn(tx, accountId, runsOn));
 }

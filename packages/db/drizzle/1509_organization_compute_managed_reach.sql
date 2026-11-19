@@ -37,6 +37,15 @@
 -- previous release never sets the new column (its reach updates leave it as
 -- it is), ignores the extra `reach` key, and through these definers sees
 -- the same reach for every row it can write. No CHECK is widened.
+--
+-- agent_revisions.runs_on_target: the organization machine or sandbox
+-- environment an organization agent version's Runs on named when the version
+-- was saved, by id ({"machineId"} or {"environmentId"}). Chats use it, so a
+-- later rename or a second machine with the same name can't move or break the
+-- agent; `config.runsOn` keeps what was written (display, config hash).
+-- Nullable without a default: nothing is rewritten, the previous release
+-- never writes it (its rows resolve by name, as before), and the existing
+-- SELECT/INSERT grants on agent_revisions cover the new column.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
@@ -45,6 +54,9 @@ ALTER TABLE enrollments
 
 ALTER TABLE rigs
   ADD COLUMN allow_managed_workspaces boolean NOT NULL DEFAULT false;
+
+ALTER TABLE agent_revisions ADD COLUMN runs_on_target jsonb;
+COMMENT ON COLUMN agent_revisions.runs_on_target IS 'The organization machine (machineId) or sandbox environment (environmentId) an organization agent version''s Runs on resolved to when saved; NULL otherwise.';
 
 -- Whether an organization machine or rig works in a workspace: always where
 -- it lives, in a Personal workspace when the Personal switch is on, and in a

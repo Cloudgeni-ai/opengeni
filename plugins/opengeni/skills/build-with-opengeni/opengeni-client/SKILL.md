@@ -150,7 +150,8 @@ Server-side code gets the same workspace with
 return the user's `displayName` and `email` (display only, never identity) so
 Console shows who each end user is instead of the opaque id; send them on
 every request or when they change (the latest wins, omitted keeps). Server code
-sends the same with `asUser(id, { displayName, email })`. Name tenant
+sends the same with `asUser(id, { displayName, email })`; a self-hosted API
+from before these fields rejects them, so update it first. Name tenant
 workspaces with the facade's `workspaceName`, and rename one with
 `updateWorkspace(workspaceId, { name })` (needs `workspace:admin`).
 

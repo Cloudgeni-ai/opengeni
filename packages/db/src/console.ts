@@ -448,13 +448,12 @@ export async function listConsoleAuditEvents(
 // ---------------------------------------------------------------------------
 // End-user labels
 
+// Labels never change once stored, so a process may skip ones it already
+// wrote. Display details are not remembered: another replica may have stored a
+// different value since, and the latest one sent must win. Their write is a
+// conditional upsert that changes nothing when the stored value is the same.
 const rememberedLabels = new Set<string>();
 const REMEMBERED_LABELS_MAX = 20_000;
-/** Display details this process last stored, so repeated requests write nothing. */
-const rememberedProfiles = new Map<string, { fingerprint: string; at: number }>();
-// Another replica may store a different value in between; a short memory
-// lets the latest value win again soon.
-const REMEMBERED_PROFILE_TTL_MS = 5 * 60_000;
 
 /**
  * Remember the product's own id for an external user subject so Console can
@@ -479,13 +478,7 @@ export async function rememberEndUserLabel(
   const displayName = input.displayName ? input.displayName.slice(0, 256) : null;
   const email = input.email && input.email.length <= 320 ? input.email : null;
   const hasProfile = displayName !== null || email !== null;
-  const fingerprint = JSON.stringify([displayName, email]);
-  const remembered = rememberedProfiles.get(key);
-  const profileCurrent =
-    !hasProfile ||
-    (remembered?.fingerprint === fingerprint &&
-      Date.now() - remembered.at < REMEMBERED_PROFILE_TTL_MS);
-  if (rememberedLabels.has(key) && profileCurrent) return;
+  if (rememberedLabels.has(key) && !hasProfile) return;
   try {
     await withAccountRls(db, input.accountId, async (tx) => {
       if (!rememberedLabels.has(key))
@@ -493,7 +486,7 @@ export async function rememberEndUserLabel(
           values (${input.accountId}::uuid, ${input.subjectId}, ${input.source.slice(0, 200)},
             ${input.externalId.slice(0, 1024)})
           on conflict (account_id, subject_id) do nothing`);
-      if (!profileCurrent)
+      if (hasProfile)
         await tx.execute(sql`insert into organization_end_user_profiles as p
             (account_id, subject_id, display_name, email)
           values (${input.accountId}::uuid, ${input.subjectId}, ${displayName}, ${email})
@@ -506,10 +499,6 @@ export async function rememberEndUserLabel(
     });
     if (rememberedLabels.size >= REMEMBERED_LABELS_MAX) rememberedLabels.clear();
     rememberedLabels.add(key);
-    if (hasProfile) {
-      if (rememberedProfiles.size >= REMEMBERED_LABELS_MAX) rememberedProfiles.clear();
-      rememberedProfiles.set(key, { fingerprint, at: Date.now() });
-    }
   } catch {
     // A label is cosmetic; the next request retries.
   }
@@ -518,7 +507,11 @@ export async function rememberEndUserLabel(
 /** Forget what this process stored (tests). */
 export function resetRememberedEndUserLabels(): void {
   rememberedLabels.clear();
-  rememberedProfiles.clear();
+}
+
+/** After the stored profile was erased: the next value the product sends is stored again. */
+export function forgetRememberedEndUserProfile(accountId: string, subjectId: string): void {
+  rememberedProfiles.delete(`${accountId}:${subjectId}`);
 }
 
 export type ConsoleEndUserRow = {

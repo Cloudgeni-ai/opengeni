@@ -27,6 +27,7 @@ import {
   decodeEndUserToolCredentialMaterial,
   ensureExternalIdentity,
   ensureOrgAgentTestWorkspace,
+  failPendingOrgAgentPublishOperation,
   findOrgAgentTestWorkspace,
   getEndUserToolCredential,
   getOrgAgent,
@@ -282,6 +283,21 @@ describe("organization agents: versions and publishing", () => {
     const operations = await listOrgAgentPublishOperations(app.db, org.accountId, agent.id);
     expect(operations!.map((operation) => operation.status)).toEqual(["pending", "succeeded"]);
 
+    // A move that could not start is marked failed with its reason, once.
+    const failed = await failPendingOrgAgentPublishOperation(app.db, {
+      accountId: org.accountId,
+      operationId: rollback.operation.id,
+      reason: "move_start_failed",
+    });
+    expect(failed).toMatchObject({ status: "failed", failureReason: "move_start_failed" });
+    expect(failed!.finishedAt).not.toBeNull();
+    const again = await failPendingOrgAgentPublishOperation(app.db, {
+      accountId: org.accountId,
+      operationId: rollback.operation.id,
+      reason: "move_unavailable",
+    });
+    expect(again).toMatchObject({ status: "failed", failureReason: "move_start_failed" });
+
     const [rollbackAudit] = await shared.admin<{ detail: Record<string, unknown> }[]>`
       select detail from organization_console_audit_events
       where account_id = ${org.accountId} and action = 'agent.published'
@@ -293,6 +309,24 @@ describe("organization agents: versions and publishing", () => {
       "agent.published",
       "agent.published",
     ]);
+    // A move that already began is left to the move workflow.
+    const running = await publishOrgAgent(app.db, {
+      accountId: org.accountId,
+      agentId: agent.id,
+      actor,
+      version: 2,
+      moveRunningChats: true,
+      expectedVersion: rollback.agent.rowVersion,
+    });
+    await shared.admin`update agent_publish_operations set status = 'running'
+      where id = ${running.operation.id}`;
+    expect(
+      await failPendingOrgAgentPublishOperation(app.db, {
+        accountId: org.accountId,
+        operationId: running.operation.id,
+        reason: "move_start_failed",
+      }),
+    ).toMatchObject({ status: "running", failureReason: null });
   }, 120_000);
 
   test("apply by key: dry run, create, unchanged, update and publish, and 409s", async () => {
@@ -344,6 +378,15 @@ describe("organization agents: versions and publishing", () => {
     const back = await apply("One.", { publish: true });
     expect(back).toMatchObject({ outcome: "unchanged", version: 1, published: true });
     expect(back.operation).toMatchObject({ fromVersion: 2, toVersion: 1 });
+    // The earlier move that never started will not run after this publish.
+    const applyOperations = await listOrgAgentPublishOperations(
+      app.db,
+      org.accountId,
+      created.agent!.id,
+    );
+    expect(
+      applyOperations!.find((operation) => operation.id === updated.operation!.id),
+    ).toMatchObject({ status: "failed", failureReason: "superseded" });
 
     // Code agents are not edited or published from Console.
     const draft = await refusal(
@@ -844,6 +887,18 @@ describe("organization tool servers and end users' logins", () => {
       (sql) => sql`select count(*)::int as count from end_user_tool_credentials`,
     );
     expect(ownWorkspace[0]!.count).toBe(1);
+    // The account context sees the organization's logins (to delete them
+    // across workspaces); another organization sees none.
+    const accountContext = await asApp(
+      { accountId: org.accountId },
+      (sql) => sql`select count(*)::int as count from end_user_tool_credentials`,
+    );
+    expect(accountContext[0]!.count).toBe(1);
+    const otherOrganization = await asApp(
+      { accountId: crypto.randomUUID() },
+      (sql) => sql`select count(*)::int as count from end_user_tool_credentials`,
+    );
+    expect(otherOrganization[0]!.count).toBe(0);
 
     expect(await deleteEndUserToolCredential(app.db, { ...target(org.managed), actor })).toBe(true);
     expect(await deleteEndUserToolCredential(app.db, { ...target(org.managed), actor })).toBe(
@@ -871,6 +926,131 @@ describe("organization tool servers and end users' logins", () => {
       "tool_credential.written",
       "tool_server.deleted",
     ]);
+  }, 120_000);
+
+  test("moving a tool server to another origin drops its secrets and end users' logins", async () => {
+    const org = await organization();
+    const created = await createOrgToolServer(app.db, {
+      accountId: org.accountId,
+      actor,
+      encryptionKey,
+      request: {
+        key: "crm",
+        name: "CRM",
+        url: "https://crm.example.com/mcp",
+        authMode: "shared_key",
+        sharedHeaders: { Authorization: "Bearer shared" },
+        oauthRefresh: {
+          tokenUrl: "https://crm.example.com/token",
+          clientId: "client",
+          clientSecret: "client-secret",
+        },
+      },
+    });
+    const login = (workspaceId: string, kind: "headers" | "oauth") =>
+      putEndUserToolCredential(app.db, {
+        accountId: org.accountId,
+        workspaceId,
+        endUserSubjectId: "external_user:customer-1",
+        toolServerKey: "crm",
+        actor,
+        encryptionKey,
+        credential:
+          kind === "headers"
+            ? { kind, headers: { Authorization: "Bearer end-user" } }
+            : { kind, accessToken: "end-user", refreshToken: "refresh" },
+      });
+    await login(org.managed, "oauth");
+    await login(org.managedOther, "headers");
+    const logins = async () =>
+      (
+        await shared.admin<{ kind: string }[]>`
+          select kind from end_user_tool_credentials where account_id = ${org.accountId}
+          order by kind`
+      ).map((row) => row.kind);
+    const secrets = () =>
+      getOrgToolServerWithSecrets(app.db, { accountId: org.accountId, key: "crm", encryptionKey });
+    let rowVersion = created.rowVersion;
+    const update = async (
+      request: Omit<Parameters<typeof updateOrgToolServer>[1]["request"], "expectedVersion">,
+    ) => {
+      const updated = await updateOrgToolServer(app.db, {
+        accountId: org.accountId,
+        key: "crm",
+        actor,
+        encryptionKey,
+        request: { expectedVersion: rowVersion, ...request },
+      });
+      rowVersion = updated.rowVersion;
+      return updated;
+    };
+
+    // Same origins: everything stays.
+    await update({ name: "CRM 2", url: "https://crm.example.com/v2/mcp" });
+    expect(await logins()).toEqual(["headers", "oauth"]);
+    expect((await secrets())!.sharedHeaders).toEqual({ Authorization: "Bearer shared" });
+
+    // OAuth refresh at another origin: the client secret and OAuth logins go.
+    const tokenMoved = await update({
+      oauthRefresh: { tokenUrl: "https://login.other.example/token", clientId: "client" },
+    });
+    expect(tokenMoved.oauthRefresh).toMatchObject({ hasClientSecret: false });
+    expect(tokenMoved.hasSharedKey).toBe(true);
+    expect(await logins()).toEqual(["headers"]);
+
+    // The server at another origin: the shared key and every login go.
+    await login(org.managed, "oauth");
+    const moved = await update({ url: "https://crm.other.example/mcp" });
+    expect(moved).toMatchObject({ hasSharedKey: false, sharedHeaderNames: [] });
+    expect((await secrets())!.sharedHeaders).toBeNull();
+    expect(await logins()).toEqual([]);
+
+    // A new key in the same request is kept; re-supplied client secrets too.
+    await login(org.managed, "headers");
+    const resupplied = await update({
+      url: "https://crm.example.com/mcp",
+      sharedHeaders: { Authorization: "Bearer new" },
+      oauthRefresh: {
+        tokenUrl: "https://crm.example.com/token",
+        clientId: "client",
+        clientSecret: "new-secret",
+      },
+    });
+    expect(resupplied).toMatchObject({
+      hasSharedKey: true,
+      oauthRefresh: { hasClientSecret: true },
+    });
+    expect((await secrets())!.sharedHeaders).toEqual({ Authorization: "Bearer new" });
+    expect(await logins()).toEqual([]);
+
+    const audits = await shared.admin<{ detail: Record<string, unknown> }[]>`
+      select detail from organization_console_audit_events
+      where account_id = ${org.accountId} and action = 'tool_server.updated'
+      order by created_at, id`;
+    const fields = [
+      "urlOriginChanged",
+      "tokenUrlOriginChanged",
+      "sharedKeyDropped",
+      "clientSecretDropped",
+      "endUserLoginsRemoved",
+    ];
+    const moves = audits.map(
+      ({ detail }): Record<string, unknown> =>
+        Object.fromEntries(
+          fields
+            .filter((field) => detail[field] !== undefined)
+            .map((field) => [field, detail[field]]),
+        ),
+    );
+    expect(moves).toEqual([
+      {},
+      { tokenUrlOriginChanged: true, clientSecretDropped: true, endUserLoginsRemoved: 1 },
+      { urlOriginChanged: true, sharedKeyDropped: true, endUserLoginsRemoved: 2 },
+      { urlOriginChanged: true, tokenUrlOriginChanged: true, endUserLoginsRemoved: 1 },
+    ]);
+    for (const value of ["client-secret", "new-secret", "Bearer"]) {
+      expect(JSON.stringify(audits)).not.toContain(value);
+    }
   }, 120_000);
 });
 
