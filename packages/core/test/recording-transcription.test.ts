@@ -11,6 +11,7 @@ import {
   planRecordingTracks,
   recordingDiarizationKind,
   RecordingTranscriptionError,
+  MAX_TRANSCRIPT_LANGUAGES,
   transcriptLanguages,
   transcriptionProviderOutOfCredit,
   withoutMicrophoneEchoes,
@@ -99,6 +100,16 @@ describe("transcriptLanguages", () => {
   test("without a language asked for, every language heard counts", () => {
     expect(transcriptLanguages(undefined, ["nb", "en", "nb"])).toEqual(["nb", "en"]);
     expect(transcriptLanguages(null, [])).toEqual([]);
+  });
+
+  test("a long meeting labelled phrase by phrase keeps the most heard languages a transcript stores", () => {
+    // One locale guess per phrase over hours of audio names dozens of languages.
+    const rare = Array.from({ length: 30 }, (_, index) => `x${index}`);
+    const heard = [...rare, "en", "nb", "nb", "nb", "en", "da"];
+    const languages = transcriptLanguages(undefined, heard);
+    expect(languages).toHaveLength(MAX_TRANSCRIPT_LANGUAGES);
+    expect(languages.slice(0, 3)).toEqual(["nb", "en", "x0"]);
+    expect(transcriptLanguages("en", ["en-US", "en-GB", "en-GB"])).toEqual(["en-GB", "en-US"]);
   });
 });
 
