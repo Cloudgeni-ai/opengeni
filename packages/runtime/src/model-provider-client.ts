@@ -204,10 +204,12 @@ export function buildOpenAIClientFromSettings(
       ),
     },
     {
-      // Only the OpenAI platform; a compatible server keeps its own contract.
+      // Storeless only on the OpenAI platform; a compatible server keeps its own
+      // `store` contract. The system prompt leads the cached prefix everywhere
+      // (see systemPromptRoleForProvider for the role).
       modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
         ? withCacheableSystemPrompt(withStorelessResponses(chatModelRequestPolicy))
-        : chatModelRequestPolicy,
+        : withCacheableSystemPrompt(chatModelRequestPolicy, "system"),
     },
   );
 }

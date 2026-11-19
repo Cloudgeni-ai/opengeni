@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { ResolvedModelProvider } from "@opengeni/config";
+import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
+import { codexRequestStorage, normalizedCodexRequestBody } from "@opengeni/codex";
+import { xaiSubscriptionRequestStorage } from "@opengeni/xai-subscription";
 
 import {
   azureModelRequestPolicy,
   modelRequestPolicyForProvider,
+  storelessResponsesBody,
+  systemPromptRoleForProvider,
 } from "../src/model-provider-request-policy";
 import {
   cacheableSystemPromptBody,
@@ -93,7 +98,7 @@ describe("system prompt as the leading developer input item", () => {
     );
   });
 
-  test("applies on Azure and OpenAI platform Responses, not on other providers", () => {
+  test("applies on Azure, the OpenAI platform and compatible Responses servers", () => {
     const body = { model: "m", instructions: SYSTEM, input: [] };
     expect(azureModelRequestPolicy({ path: "/responses", body })!.body).toEqual({
       model: "m",
@@ -127,7 +132,143 @@ describe("system prompt as the leading developer input item", () => {
       api: "responses",
       builtin: false,
       wireProfile: "openai",
+      baseUrl: "https://llm.example.test/v1",
     } as const;
-    expect(modelRequestPolicyForProvider(compatible)({ path: "/responses", body })).toBeUndefined();
+    // A compatible server keeps its own `store` contract.
+    expect(modelRequestPolicyForProvider(compatible)({ path: "/responses", body })!.body).toEqual({
+      model: "m",
+      input: [{ ...developer, role: "system" }],
+    });
+  });
+});
+
+describe("the system prompt leads the cached prefix on every Responses route", () => {
+  const body = Object.freeze({
+    model: "m",
+    instructions: SYSTEM,
+    input: Object.freeze([{ type: "message", role: "user", content: "hi" }]),
+    tools: [],
+  });
+  const provider = (fields: Partial<ResolvedModelProvider>): ResolvedModelProvider => ({
+    id: "fixture",
+    label: "Fixture",
+    kind: "api-key",
+    api: "responses",
+    builtin: false,
+    wireProfile: "openai",
+    ...fields,
+  });
+  const leading = (projected: Record<string, unknown> | undefined) =>
+    (projected?.input as Record<string, unknown>[] | undefined)?.[0];
+
+  test("OpenAI-run routes keep the exact bytes they sent before", () => {
+    // Codex: the leading developer item, then the Codex normalization.
+    const context = {
+      clientVersion: "test",
+      getToken: async () => ({ accessToken: "fixture", chatgptAccountId: null, isFedramp: false }),
+      refresh: async () => ({ accessToken: "fixture", chatgptAccountId: null, isFedramp: false }),
+      resolveModel: (model: string) => model,
+      nextRequestId: () => "request-1",
+    };
+    const codex = codexRequestStorage.run(context, () =>
+      modelRequestPolicyForProvider(
+        provider({ id: "codex", kind: "codex-subscription", baseUrl: "https://codex.test" }),
+      )({ path: "/responses", body }),
+    );
+    expect(JSON.stringify(codex!.body)).toBe(
+      JSON.stringify(
+        normalizedCodexRequestBody(cacheableSystemPromptBody("/responses", body)!, (m) => m),
+      ),
+    );
+    // OpenAI platform: storeless, then the leading developer item.
+    const platform = modelRequestPolicyForProvider(
+      provider({ id: "openai-workspace", kind: "direct-openai-workspace" }),
+    )({ path: "/responses", body });
+    expect(JSON.stringify(platform!.body)).toBe(
+      JSON.stringify(
+        cacheableSystemPromptBody("/responses", storelessResponsesBody("/responses", body)!),
+      ),
+    );
+    // Azure: the Azure projection, storeless, then the leading developer item.
+    const azure = modelRequestPolicyForProvider(
+      provider({ id: "azure", kind: "direct-azure-workspace", wireProfile: "azure-openai" }),
+    )({ path: "/responses", body });
+    expect(JSON.stringify(azure!.body)).toBe(
+      JSON.stringify(azureModelRequestPolicy({ path: "/responses", body })!.body),
+    );
+  });
+
+  test("OpenAI-run backends get a developer item, every other route a system item", () => {
+    expect(systemPromptRoleForProvider(provider({ kind: "codex-subscription" }))).toBe("developer");
+    expect(systemPromptRoleForProvider(provider({ wireProfile: "azure-openai" }))).toBe(
+      "developer",
+    );
+    expect(systemPromptRoleForProvider(provider({ kind: "direct-openai-organization" }))).toBe(
+      "developer",
+    );
+    // An operator's provider on the OpenAI platform, named or by the SDK default.
+    expect(systemPromptRoleForProvider(provider({ baseUrl: "https://api.openai.com/v1" }))).toBe(
+      "developer",
+    );
+    expect(systemPromptRoleForProvider(provider({}))).toBe("developer");
+    expect(
+      systemPromptRoleForProvider(
+        provider({ kind: "xai-subscription", baseUrl: "https://grok-proxy.test/v1" }),
+      ),
+    ).toBe("system");
+    expect(
+      systemPromptRoleForProvider(
+        provider({ kind: "vercel-gateway-managed", baseUrl: "https://gateway.test/v1" }),
+      ),
+    ).toBe("system");
+    expect(
+      systemPromptRoleForProvider(
+        provider({ kind: "direct-compatible-workspace", baseUrl: "https://llm.example.test/v1" }),
+      ),
+    ).toBe("system");
+  });
+
+  test("SuperGrok subscription requests lead with the system prompt", () => {
+    const token = { accessToken: "fixture", userId: "fixture-user" };
+    const result = xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "test",
+        sessionId: "fixture-session",
+        turnId: "fixture-turn",
+        getToken: async () => token,
+        refresh: async () => token,
+        resolveModel: (slug) => slug,
+      },
+      () =>
+        modelRequestPolicyForProvider(
+          provider({ kind: "xai-subscription", baseUrl: "https://grok-proxy.test/v1" }),
+        )({ path: "/responses", body }),
+    );
+    expect("instructions" in result!.body!).toBe(false);
+    expect(leading(result!.body)).toEqual({ type: "message", role: "system", content: SYSTEM });
+    expect(result!.body!.store).toBe(false);
+  });
+
+  test("Gateway requests lead with the system prompt and keep their routing", () => {
+    const result = modelRequestPolicyForProvider(
+      provider({ kind: "vercel-gateway-managed", baseUrl: "https://gateway.test/v1" }),
+    )({
+      path: "/responses",
+      body: { ...body, model: OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId },
+    });
+    expect("instructions" in result!.body!).toBe(false);
+    expect(leading(result!.body)).toEqual({ type: "message", role: "system", content: SYSTEM });
+    expect(result!.body!.providerOptions).toBeDefined();
+  });
+
+  test("Chat Completions keeps its leading system message untouched", () => {
+    const messages = [
+      { role: "system", content: SYSTEM },
+      { role: "user", content: "hi" },
+    ];
+    const chat = modelRequestPolicyForProvider(
+      provider({ api: "chat", baseUrl: "https://llm.example.test/v1" }),
+    )({ path: "/chat/completions", body: { model: "m", messages } });
+    expect(chat).toBeUndefined();
   });
 });
