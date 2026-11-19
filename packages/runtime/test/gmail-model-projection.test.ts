@@ -482,7 +482,7 @@ describe("Gmail projection at the per-caller seam", () => {
           throw new Error("must not store");
         },
         inlineMaxBytes: () => modelToolTextBudgetBytes() + 512,
-        readers: () => ({ reader: "listed", shell: false }),
+        readers: () => ({ reader: "searchable", shell: false }),
       },
       { serverId: "gmail", toolName: "search_messages" },
       (value) =>
@@ -581,7 +581,7 @@ describe("Gmail projection at the per-caller seam", () => {
             throw new Error("must not store");
           },
           inlineMaxBytes: () => policyTokens * 4,
-          readers: () => ({ reader: "listed", shell: false }),
+          readers: () => ({ reader: "searchable", shell: false }),
         },
         // Read per call: the projection is sized to the current model's policy.
         modelToolOutputTruncationTokens: () => policyTokens,

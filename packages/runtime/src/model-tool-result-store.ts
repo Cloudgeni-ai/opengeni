@@ -51,12 +51,14 @@ const LINE_SNAP_WINDOW_BYTES = 4_096;
 
 /**
  * How the model of this session can read a stored result:
- * - `reader`: `listed` when `tool_result_read` is in its tool list,
- *   `searchable` when it is found by tool search, `none` when it has no reader;
+ * - `reader`: `searchable` when the turn's tool search router can load
+ *   `tool_result_read` by exact name, `none` when it has no reader. The reader
+ *   is never in a first-request tool list, so no session's prompt prefix
+ *   changes for it;
  * - `shell`: whether a shell can open a copy saved in the sandbox.
  */
 export type StoredToolResultReaders = {
-  reader: "listed" | "searchable" | "none";
+  reader: "searchable" | "none";
   shell: boolean;
 };
 
@@ -163,8 +165,6 @@ function readInstruction(
       ? ` A copy is at ${stored.sandboxPath} where your shell runs.`
       : "";
   switch (readers.reader) {
-    case "listed":
-      return `Read on with ${readCall(stored.resultId, offset)}.${copy}`;
     case "searchable":
       return `Read on with ${readCall(stored.resultId, offset)}; load ${STORED_TOOL_RESULT_READER_NAME} by that exact name with tool search first.${copy}`;
     case "none":

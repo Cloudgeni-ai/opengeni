@@ -5593,9 +5593,6 @@ export const sessions = pgTable(
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
-    // Migration 1502: `tool_result_read` is in this chat's first-request tool
-    // list. Existing chats keep false; new chats start with true. Never changed.
-    toolResultReaderListed: boolean("tool_result_reader_listed").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Top-level xid, assigned by a BEFORE trigger in the original row write.

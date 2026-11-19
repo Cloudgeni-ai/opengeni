@@ -4342,7 +4342,7 @@ describe("runtime event normalization", () => {
               };
             },
             inlineMaxBytes: () => 100_000,
-            readers: () => ({ reader: "listed", shell: false }),
+            readers: () => ({ reader: "searchable", shell: false }),
           },
         });
         try {

@@ -158,8 +158,6 @@ type FixtureOptions = {
   nestedAgentDepth?: number;
   /** The deployment Files server's allow-list (default: only the fixture tool). */
   filesAllowedTools?: string[];
-  /** Whether the session lists `tool_result_read` from its first request (migration 1502). */
-  toolResultReaderListed?: boolean;
   /**
    * The product connector needs the person's own sign-in, and none was
    * admitted for this turn (no accepted account binding).
@@ -308,9 +306,6 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     ...(typeof db.sessionHasToolRouterHistory === "function"
       ? [spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false)]
       : []),
-    spyOn(db, "sessionListsToolResultReader").mockResolvedValue(
-      options.toolResultReaderListed ?? false,
-    ),
     spyOn(db, "persistAttemptToolCatalog").mockImplementation(async (_db, catalog) => catalog),
     spyOn(db, "cancelQueuedCodemodeOperationsForAttempt").mockResolvedValue(0),
   ];
@@ -1939,8 +1934,8 @@ describe("request_human_input follows who can answer", () => {
   });
 });
 
-// `tool_result_read` reads tool results too large to show whole. A session's
-// first-request tool list never changes, so only new sessions list it.
+// `tool_result_read` reads tool results too large to show whole. It is never
+// in a first-request tool list, so no session's prompt prefix changes for it.
 describe("stored tool result reader", () => {
   const embedding: FixtureOptions = {
     agent: agentConfig("none"),
@@ -1949,29 +1944,20 @@ describe("stored tool result reader", () => {
     hasSkills: false,
   };
 
-  test("a new session lists it from its first request", async () => {
-    const listed = await captureWorkerRequest({ ...embedding, toolResultReaderListed: true });
-    expect(listed.names).toContain("tool_result_read");
-    expect(listed.toolResultReaders.at(-1)).toEqual({ reader: "listed", shell: false });
-    const withRouter = await captureWorkerRequest({ toolResultReaderListed: true });
-    expect(withRouter.names).toContain("tool_result_read");
+  test("with a search router it is a deferred tool, loaded by exact name; the tool list is unchanged", async () => {
+    const turn = await captureWorkerRequest({ lazy: true });
+    expect(turn.names).not.toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)?.reader).toBe("searchable");
+    expect(turn.deferredNames).toContain("tool_result_read");
   });
 
-  test("an earlier session without a search router keeps its tool list exactly", async () => {
-    const earlier = await captureWorkerRequest(embedding);
-    expect(earlier.names).not.toContain("tool_result_read");
-    expect(earlier.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: false });
-    const listed = await captureWorkerRequest({ ...embedding, toolResultReaderListed: true });
-    expect(listed.names.filter((name) => name !== "tool_result_read")).toEqual(earlier.names);
+  test("without a search router the tool list is unchanged and the sandbox copy is the reader", async () => {
+    const turn = await captureWorkerRequest(embedding);
+    expect(turn.names).not.toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: false });
     const machine = await captureWorkerRequest({ ...embedding, machineAttached: true });
+    expect(machine.names).not.toContain("tool_result_read");
     expect(machine.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: true });
-  });
-
-  test("an earlier session with a search router finds it by search; its tool list is unchanged", async () => {
-    const earlier = await captureWorkerRequest({ lazy: true });
-    expect(earlier.names).not.toContain("tool_result_read");
-    expect(earlier.toolResultReaders.at(-1)?.reader).toBe("searchable");
-    expect(earlier.deferredNames).toContain("tool_result_read");
   });
 });
 

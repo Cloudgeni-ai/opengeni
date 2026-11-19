@@ -48,7 +48,6 @@ import {
   listSandboxGroupRepositoryResources,
   settleSessionRepositoryCleanup,
   sessionHasToolRouterHistory,
-  sessionListsToolResultReader,
   recordNangoUsageEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -1383,16 +1382,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   // Frozen per turn: router history, the prepared refs, the first-party
   // selection and the function tools. Decides whether anything is deferred.
-  const [toolRouterInHistory, toolResultReaderListed] = await Promise.all([
-    session.agent
-      ? sessionHasToolRouterHistory(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-        })
-      : Promise.resolve(false),
-    sessionListsToolResultReader(db, input.workspaceId, input.sessionId),
-  ]);
+  const toolRouterInHistory = session.agent
+    ? await sessionHasToolRouterHistory(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      })
+    : false;
   const toolRouterExpected = turnToolRouterExpected({
     agentConfig: session.agent,
     routerInHistory: toolRouterInHistory,
@@ -1415,24 +1411,22 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolRouterExpected || !routerInstallable
       ? titleToolPlan.remoteFirstPartyMcpTools
       : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
-  // `tool_result_read` reads tool results too large to show whole. A session
-  // created since migration 1502 lists it from its first request. An earlier
-  // session's tool list must stay as its requests sent it, so the reader joins
-  // only as a deferred tool behind its search router, and not at all without
-  // one (the shell copy, when a sandbox runs, is then its only reader). The
-  // router decision above never counts the reader.
+  // `tool_result_read` reads tool results too large to show whole. It is only
+  // needed after such a result, whose note names the exact call, so it is never
+  // in a first-request tool list: it joins as a deferred tool behind the
+  // turn's search router, loaded by exact name, and no session's prompt
+  // prefix changes for it. A turn without a router (tool search turned off, or
+  // an agent whose every tool is eager) has no reader: the shell copy, when a
+  // sandbox runs, is then its reader, otherwise the note says to narrow the
+  // call. The router decision above never counts the reader.
   const searchRouterPresent =
     toolRouterExpected &&
     routerInstallable &&
     (lazyToolTransport !== undefined || (Boolean(session.agent) && toolRouterInHistory));
-  const toolResultReader: "listed" | "searchable" | "none" =
-    !attemptToolFamilies.allowsFunctionTool(TOOL_RESULT_READ_TOOL_NAME)
-      ? "none"
-      : toolResultReaderListed
-        ? "listed"
-        : searchRouterPresent
-          ? "searchable"
-          : "none";
+  const toolResultReader: "searchable" | "none" =
+    searchRouterPresent && attemptToolFamilies.allowsFunctionTool(TOOL_RESULT_READ_TOOL_NAME)
+      ? "searchable"
+      : "none";
   toolResultStore.setReaders({
     reader: toolResultReader,
     shell: (activeSandboxBackend ?? groupBoxBackend) !== "none",
@@ -1786,7 +1780,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     preparationIndependentToolNames: [
       ...titleToolPlan.preparationIndependentToolNames,
       "skill_read",
-      ...(toolResultReader === "listed" ? [TOOL_RESULT_READ_TOOL_NAME] : []),
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
     promptToolAvailability:

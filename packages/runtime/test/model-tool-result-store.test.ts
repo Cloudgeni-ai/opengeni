@@ -34,7 +34,7 @@ function context(kind: "model" | "codemode"): AttemptToolExecutionContext {
 
 /** An in-memory store: what a reader would read back by id and offset. */
 function memoryStore(
-  readers: StoredToolResultReaders = { reader: "listed", shell: false },
+  readers: StoredToolResultReaders = { reader: "searchable", shell: false },
   options: { fail?: boolean; sandboxPath?: string | null } = {},
 ) {
   const saved = new Map<string, { key: StoredToolResultKey; text: string }>();
@@ -122,7 +122,7 @@ describe("lossless model tool results", () => {
     const head = Buffer.from(full).subarray(0, receipt.notShownFrom).toString("utf8");
     expect(head.endsWith("\n")).toBe(true);
     expect(shown).toBe(
-      `${head}\n[Opengeni: this tool result is ${receipt.byteSize} bytes, more than the ${INLINE_MAX} bytes one result may show, so it is stored whole. Shown above: bytes 0 to ${receipt.notShownFrom}. Read on with tool_result_read {"resultId":"${RESULT_ID}","offset":${receipt.notShownFrom}}.]`,
+      `${head}\n[Opengeni: this tool result is ${receipt.byteSize} bytes, more than the ${INLINE_MAX} bytes one result may show, so it is stored whole. Shown above: bytes 0 to ${receipt.notShownFrom}. Read on with tool_result_read {"resultId":"${RESULT_ID}","offset":${receipt.notShownFrom}}; load tool_result_read by that exact name with tool search first.]`,
     );
     // Nothing is lost: the shown start and the read from its offset are the whole.
     expect(head + readFrom(full, receipt.notShownFrom)).toBe(full);
@@ -249,13 +249,13 @@ describe("stored result notes", () => {
   };
 
   test("name the reader the session has", () => {
-    expect(note({ reader: "listed", shell: false })).toContain(
+    expect(note({ reader: "searchable", shell: false })).toContain(
       `Read on with tool_result_read {"resultId":"${RESULT_ID}","offset":`,
     );
     expect(note({ reader: "searchable", shell: false })).toContain(
       "; load tool_result_read by that exact name with tool search first.]",
     );
-    expect(note({ reader: "listed", shell: true }, "/workspace/tool-results/x.txt")).toContain(
+    expect(note({ reader: "searchable", shell: true }, "/workspace/tool-results/x.txt")).toContain(
       " A copy is at /workspace/tool-results/x.txt where your shell runs.]",
     );
     expect(note({ reader: "none", shell: true }, "/workspace/tool-results/x.txt")).toMatch(
@@ -283,7 +283,7 @@ describe("function tool output", () => {
     });
     expect(Buffer.byteLength(view)).toBeLessThanOrEqual(INLINE_MAX);
     const match = view.match(
-      /\n\[Opengeni: bytes (\d+) to (\d+) of this (\d+)-byte output are not shown; the whole output is stored\. Read on with tool_result_read \{"resultId":"[0-9a-f-]+","offset":(\d+)\}\.\]\n/,
+      /\n\[Opengeni: bytes (\d+) to (\d+) of this (\d+)-byte output are not shown; the whole output is stored\. Read on with tool_result_read \{"resultId":"[0-9a-f-]+","offset":(\d+)\}; load tool_result_read by that exact name with tool search first\.\]\n/,
     );
     expect(match).not.toBeNull();
     const [note, from, to, total, offset] = match!;

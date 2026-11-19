@@ -123,7 +123,7 @@ function toolResultStore(
       return await mutation();
     },
   });
-  store.setReaders({ reader: "listed", shell: backend !== "none" });
+  store.setReaders({ reader: "searchable", shell: backend !== "none" });
   return store;
 }
 
@@ -219,7 +219,7 @@ describe("tool result store", () => {
     );
     // The model's next call, exactly as the note names it, reads the rest.
     const shown = textOf(view);
-    const call = shown.match(/tool_result_read (\{.*?\})\./);
+    const call = shown.match(/tool_result_read (\{.*?\});/);
     expect(call).not.toBeNull();
     const args = JSON.parse(call![1]!) as { resultId: string; offset: number };
     expect(args).toEqual({ resultId: receipt.resultId, offset: receipt.notShownFrom });
@@ -252,7 +252,7 @@ describe("tool result store", () => {
       store,
     })) as string;
     const note = view.match(
-      /\n\[Opengeni: bytes (\d+) to (\d+) of this \d+-byte output are not shown; the whole output is stored\. Read on with tool_result_read \{"resultId":"([0-9a-f-]+)","offset":\d+\}\.\]\n/,
+      /\n\[Opengeni: bytes (\d+) to (\d+) of this \d+-byte output are not shown; the whole output is stored\. Read on with tool_result_read \{"resultId":"([0-9a-f-]+)","offset":\d+\}; load tool_result_read by that exact name with tool search first\.\]\n/,
     )!;
     const [head, tail] = view.split(note[0]);
     const reader = createToolResultReadAttemptToolDefinition({

@@ -5399,12 +5399,14 @@ recovery replays the stored bytes. The instructions never contain a clock.
    could not be kept. Codemode callers receive exact results (the 16 MiB
    Codemode journal cap is unchanged). An attempt-gateway MCP result is
    bounded only by the 8 MiB MCP transport cap before this seam.
-   Which reader the note names is fixed per session, because a session's
-   first-request tool list never changes: a session created since migration
-   1502 (`sessions.tool_result_reader_listed`) lists `tool_result_read` from
-   its first request; an earlier session reaches it as a deferred tool through
-   its search router, or, without a router, has only the shell copy when a
-   sandbox runs, and is otherwise told to narrow the call. Only results
+   `tool_result_read` is never in a first-request tool list: it is needed only
+   after an oversized result, whose note names the exact call, so it joins as
+   a deferred tool behind the turn's search router and the model loads it by
+   exact name, which changes no prompt prefix. It is offered only on turns
+   that expect the router for other deferred tools, so it never brings the
+   router in by itself. A turn without a router (tool search turned off, or an
+   agent whose every tool is eager) has the shell copy when a sandbox runs and
+   is otherwise told to narrow the call. Only results
    produced from now on pass through the store; history already sent is never
    re-rendered. The request-time truncation behind the store applies 1.2x the
    policy (120,000 bytes by default), so it never cuts a view or an inline
