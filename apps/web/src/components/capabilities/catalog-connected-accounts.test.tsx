@@ -2,7 +2,11 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  OwnResourceReachWorkspace,
+} from "@opengeni/sdk";
 // The Radix dialog is a portal; this inline stand-in keeps its contract.
 mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
@@ -869,7 +873,10 @@ describe("catalog connected accounts", () => {
 
     test("your own login that is on where the connector isn't says so, and offers Use it here", async () => {
       const mine = account({ metadata: { email: "mine@example.test", mcpUrl: item.mcpUrl } });
-      const row = (overrides: Record<string, unknown>) => ({
+      const row = (
+        overrides: Pick<OwnResourceReachWorkspace, "workspaceId" | "name"> &
+          Partial<OwnResourceReachWorkspace>,
+      ): OwnResourceReachWorkspace => ({
         personal: false,
         current: false,
         on: true,
