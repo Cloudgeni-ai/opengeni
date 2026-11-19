@@ -63,6 +63,7 @@ export {
 } from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
+import { connectedMachineGuidance } from "./agent-instructions/modules/machines";
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
@@ -284,6 +285,7 @@ import {
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
+  type AgentRenderer,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 export {
@@ -3357,6 +3359,23 @@ function skillCatalogLayerApplies(
   return !(options.agentConfig && options.skillCatalog.length === 0);
 }
 
+/**
+ * The kind of compute the system prompt describes. While the turn has compute,
+ * this is the deployment's own sandbox backend rather than the active machine,
+ * so moving a session between a managed sandbox and a Connected Machine leaves
+ * the system prompt byte-identical (earlier requests already sent it). The
+ * workspace filesystem layout item describes the machine the session is on
+ * (`workspaceFilesystemLayout`). Whether the turn has compute at all still
+ * follows the turn.
+ */
+export function promptSandboxBackend(
+  settings: Pick<Settings, "sandboxBackend">,
+  activeSandboxBackend?: Settings["sandboxBackend"],
+): Settings["sandboxBackend"] {
+  const turn = activeSandboxBackend ?? settings.sandboxBackend;
+  return turn === "none" || settings.sandboxBackend === "none" ? turn : settings.sandboxBackend;
+}
+
 export function agentPromptResourcesFor(
   settings: Settings,
   resources: readonly ResourceRef[],
@@ -3374,7 +3393,7 @@ export function agentPromptResourcesFor(
     | "skillCatalog"
   >,
 ): AgentPromptResources {
-  const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  const backend = promptSandboxBackend(settings, options.activeSandboxBackend);
   const connectedMachine = backend === "selfhosted";
   const managedSandbox = backend !== "none" && !connectedMachine;
   const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
@@ -3487,7 +3506,10 @@ function inspectModularAgentInstructions(
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(options.agentInstructions ? { agentInstructions: options.agentInstructions } : {}),
-    ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
+    ...(gitBindingDiscoveryApplies(
+      options.gitCredentialBindings,
+      promptSandboxBackend(settings, options.activeSandboxBackend),
+    )
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
     ...(skillCatalogLayerApplies(options)
@@ -3571,7 +3593,12 @@ export function inspectPersistentAgentInstructions(
       add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
     pushAgentInstructions();
-    if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
+    if (
+      gitBindingDiscoveryApplies(
+        options.gitCredentialBindings,
+        promptSandboxBackend(settings, options.activeSandboxBackend),
+      )
+    ) {
       add({
         id: "git_bindings",
         title: "Git credential bindings",
@@ -3600,7 +3627,12 @@ export function inspectPersistentAgentInstructions(
     if (options.codeSearchAvailable) {
       add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
-    if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
+    if (
+      gitBindingDiscoveryApplies(
+        options.gitCredentialBindings,
+        promptSandboxBackend(settings, options.activeSandboxBackend),
+      )
+    ) {
       add({
         id: "git_bindings",
         title: "Git credential bindings",
@@ -14129,6 +14161,8 @@ export function workspaceFilesystemLayout(
   options: {
     activeSandboxBackend?: Settings["sandboxBackend"];
     sandboxWorkspaceRoot?: string;
+    /** The configured agent's renderer; omitted for a plain chat. */
+    renderer?: AgentRenderer;
   } = {},
 ): string | null {
   if (settings.sandboxBackend === "none") return null;
@@ -14147,10 +14181,30 @@ export function workspaceFilesystemLayout(
       ? { root: options.sandboxWorkspaceRoot!, includeResourceEntries: false }
       : {},
   );
-  return renderManifestDescription(manifestWithoutFileResourceEntries(manifest, layoutResources), {
-    depth: 3,
-  }).text;
+  const layout = renderManifestDescription(
+    manifestWithoutFileResourceEntries(manifest, layoutResources),
+    {
+      depth: 3,
+    },
+  ).text;
+  // The system prompt describes the deployment's own kind of compute
+  // (promptSandboxBackend). A session that moved onto a Connected Machine
+  // learns what that means here, with the layout that changes with the move.
+  if (
+    options.activeSandboxBackend !== "selfhosted" ||
+    promptSandboxBackend(settings, "selfhosted") === "selfhosted"
+  )
+    return layout;
+  return [
+    layout,
+    connectedMachineGuidance(options.renderer),
+    CONNECTED_MACHINE_NOT_MANAGED_GUIDANCE,
+  ].join("\n\n");
 }
+
+/** What the managed-sandbox guidance in the system prompt does not cover on a Connected Machine. */
+const CONNECTED_MACHINE_NOT_MANAGED_GUIDANCE =
+  "Guidance about managed sandboxes does not apply on this machine: repository resources are not mounted under repos/, no brokered Git credentials or credential bindings are installed, and git, gh and other provider CLIs use whatever this machine is already signed in to.";
 
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
   workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
