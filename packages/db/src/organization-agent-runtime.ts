@@ -992,6 +992,35 @@ export async function readOrgAgentPublishedVersion(
 }
 
 /**
+ * Whether a chat's organization agent may still use the organization's
+ * secrets in the chat's workspace, read in one statement each turn: the agent
+ * is not archived (a missing agent counts as archived) and still reaches the
+ * workspace (a managed workspace, or an `agent_workspace_access` row).
+ */
+export async function readOrgAgentRuntimeStanding(
+  db: Database,
+  input: { accountId: string; workspaceId: string; agentId: string },
+): Promise<{ archived: boolean; reaches: boolean }> {
+  const [row] = await withOrgAgentScope(db, input, (tx) =>
+    rawRows<{ archived: boolean; reaches: boolean }>(
+      tx,
+      sql`select
+        coalesce((select a.archived_at is not null from agents a
+          where a.account_id = ${input.accountId}::uuid and a.scope = 'organization'
+            and a.id = ${input.agentId}::uuid), true) as archived,
+        (exists (select 1 from organization_managed_workspaces m
+            where m.account_id = ${input.accountId}::uuid
+              and m.workspace_id = ${input.workspaceId}::uuid)
+          or exists (select 1 from agent_workspace_access w
+            where w.account_id = ${input.accountId}::uuid
+              and w.agent_id = ${input.agentId}::uuid
+              and w.workspace_id = ${input.workspaceId}::uuid)) as reaches`,
+    ),
+  );
+  return { archived: row?.archived !== false, reaches: row?.reaches === true };
+}
+
+/**
  * Workspaces whose chats a publish may move: the organization's managed
  * workspaces (except its Console test workspace, whose chats try drafts) and
  * the workspaces the agent was added to.

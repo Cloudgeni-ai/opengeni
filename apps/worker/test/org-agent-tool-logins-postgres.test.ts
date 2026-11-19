@@ -315,6 +315,73 @@ describe("organization agent tool server logins", () => {
     expect(orgAgentEndUserSubject(null, "external_user:b")).toBe("external_user:b");
     expect(orgAgentEndUserSubject("user:a", null)).toBeNull();
   }, 180_000);
+  test("removing access or archiving the agent stops existing chats using organization secrets", async () => {
+    const f = await fixture();
+    await f.storeLogin("stored", { kind: "headers", headers: { "X-Api-Key": "stored-key" } }, null);
+    const servers = () =>
+      sessionServers().filter((server) =>
+        ["stored", "team", "open", "chatonly", "provider"].includes(server.id),
+      );
+    const resolve = async () => {
+      const published: OrgToolServerUnavailable[] = [];
+      const result = await resolveOrgAgentToolLogins({
+        db: client.db,
+        settings,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        orgAgent: { agentId: f.agentId, version: 1 },
+        endUserSubjectId: END_USER,
+        mcpServers: servers(),
+        turnTools: servers().map((server) => ({ kind: "mcp" as const, id: server.id })),
+        providerManaged: (id) => id === "provider",
+        publishUnavailable: async (payload) => {
+          published.push(payload);
+        },
+      });
+      const byId = new Map(result!.mcpServers.map((server) => [server.id, server.headers]));
+      return { byId, unavailable: result!.unavailable, published };
+    };
+    const cutOff = [
+      { serverKey: "stored", name: "STORED", reason: "missing_credentials" },
+      { serverKey: "team", name: "TEAM", reason: "missing_credentials" },
+    ];
+
+    // The agent reaches the workspace (managed): both organization secrets run.
+    const before = await resolve();
+    expect(before.byId.get("stored")).toEqual({ "X-Api-Key": "stored-key" });
+    expect(before.byId.get("team")).toEqual({ "X-Team-Key": "team-secret" });
+    expect(before.unavailable).toEqual([]);
+
+    // Access removed: the workspace is no longer managed and has no access row.
+    await shared.admin`delete from organization_managed_workspaces
+      where account_id = ${f.accountId} and workspace_id = ${f.workspaceId}`;
+    const removed = await resolve();
+    expect(removed.byId.has("stored")).toBe(false);
+    expect(removed.byId.has("team")).toBe(false);
+    expect(removed.unavailable).toEqual(cutOff);
+    expect(removed.published).toEqual(cutOff);
+    // The end user's own provider, the chat's own headers and servers without a login still run.
+    expect(removed.byId.has("provider")).toBe(true);
+    expect(removed.byId.get("chatonly")).toEqual({ "X-Chat": "chat-login" });
+    expect(removed.byId.has("open")).toBe(true);
+    expect(JSON.stringify(removed.published)).not.toMatch(/secret|stored-key/);
+
+    // Added to the workspace by an access row: the secrets run again.
+    await shared.admin`insert into agent_workspace_access (agent_id, account_id, workspace_id)
+      values (${f.agentId}, ${f.accountId}, ${f.workspaceId})`;
+    const granted = await resolve();
+    expect(granted.byId.get("stored")).toEqual({ "X-Api-Key": "stored-key" });
+    expect(granted.byId.get("team")).toEqual({ "X-Team-Key": "team-secret" });
+    expect(granted.unavailable).toEqual([]);
+
+    // Archived: cut off although it still reaches the workspace.
+    await shared.admin`update agents set archived_at = now() where id = ${f.agentId}`;
+    const archived = await resolve();
+    expect(archived.byId.has("stored")).toBe(false);
+    expect(archived.byId.has("team")).toBe(false);
+    expect(archived.unavailable).toEqual(cutOff);
+    expect(archived.byId.get("chatonly")).toEqual({ "X-Chat": "chat-login" });
+  }, 180_000);
   test("stored logins are the person's who started the turn, never another person's", () => {
     // The person who sent the message: their own login.
     expect(orgAgentEndUserSubject("external_user:a", "external_user:a")).toBe("external_user:a");
