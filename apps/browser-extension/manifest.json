@@ -41,5 +41,6 @@
       "matches": ["<all_urls>"],
       "use_dynamic_url": true
     }
-  ]
+  ],
+  "minimum_chrome_version": "130"
 }

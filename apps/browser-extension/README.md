@@ -25,8 +25,10 @@ use. `src/tab-indicator.ts` owns this: it sets the page's own icon links aside
 and adds the mark, again after each new page, and puts them back exactly once
 control has stayed ended for a moment. The page's title and content are left
 alone. Pages load the mark from the extension (`web_accessible_resources`, at
-a URL that changes per session) because many sites' Content-Security-Policy
-refuses `data:` icons. Pages the extension cannot script (Chrome's own pages,
+a URL that changes per browser session, hence Chrome 130 or later) because
+many sites' Content-Security-Policy refuses `data:` icons. Sites cannot probe
+for that URL, but a page showing the mark can read it, and so that it is
+controlled. Pages the extension cannot script (Chrome's own pages,
 the Web Store, PDFs) keep their icon. Marked tabs are kept in local storage,
 so they get their icons back after the extension updates or reloads.
 

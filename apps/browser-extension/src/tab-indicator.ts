@@ -39,20 +39,34 @@ export type TabIndicatorState = {
 };
 
 export type TabIndicatorOptions = {
-  /** The mark, as an image URL a page can load (a data: URL). */
+  /** The mark, as an image URL a page can load (a web-accessible resource of
+   * the extension: page CSPs often refuse data: icons). */
   icon: () => Promise<string>;
   releaseDelayMs: number;
+  /** How long one page may take to run a script before the next change to its
+   * tab goes ahead (a page with an open dialog or paused in the debugger runs
+   * none). */
+  injectTimeoutMs?: number;
   /** Called after every change, to record the state for the next run. */
   onChange?: (state: TabIndicatorState) => void;
   setTimeout?: (callback: () => void, ms: number) => unknown;
   clearTimeout?: (timer: unknown) => void;
 };
 
+const INJECT_TIMEOUT_MS = 5_000;
+
 export class TabIndicator {
   private readonly marked = new Set<number>();
+  // Tabs whose mark this run took away: a page kept in the back-forward cache
+  // still has it and may come back.
+  private readonly unmarked = new Set<number>();
+  // Chrome never reuses a tab's ID.
+  private readonly closedTabs = new Set<number>();
   private readonly releases = new Map<number, unknown>();
-  // Every change runs in order, so a release never overtakes a later show.
-  private queue: Promise<void> = Promise.resolve();
+  // Each tab's changes run in order, so a release never overtakes a later
+  // show; a page that runs no scripts holds up only its own tab.
+  private readonly queues = new Map<number, Promise<void>>();
+  private resumed: Promise<void> = Promise.resolve();
   private readonly schedule: (callback: () => void, ms: number) => unknown;
   private readonly cancel: (timer: unknown) => void;
 
@@ -68,7 +82,9 @@ export class TabIndicator {
   /** The extension is controlling the tab: show the mark. */
   show(tabId: number): Promise<void> {
     this.cancelRelease(tabId);
-    return this.run(async () => {
+    return this.run(tabId, async () => {
+      if (this.closedTabs.has(tabId)) return;
+      this.unmarked.delete(tabId);
       if (!this.marked.has(tabId)) {
         this.marked.add(tabId);
         this.changed();
@@ -77,11 +93,13 @@ export class TabIndicator {
     });
   }
 
-  /** A new page committed in the tab (webNavigation.onCommitted, top frame). */
+  /** A new page committed in the tab (webNavigation.onCommitted, top frame),
+   * possibly one restored from the back-forward cache. */
   navigated(tabId: number): Promise<void> {
-    if (!this.marked.has(tabId)) return this.queue;
-    return this.run(async () => {
+    if (!this.marked.has(tabId) && !this.unmarked.has(tabId)) return Promise.resolve();
+    return this.run(tabId, async () => {
       if (this.marked.has(tabId)) await this.mark(tabId);
+      else if (this.unmarked.has(tabId)) await this.unmark(tabId);
     });
   }
 
@@ -101,36 +119,49 @@ export class TabIndicator {
   /** Give the tab its own icon back now. */
   releaseNow(tabId: number): Promise<void> {
     this.cancelRelease(tabId);
-    return this.run(async () => {
-      if (!this.marked.delete(tabId)) return;
-      this.changed();
+    return this.run(tabId, async () => {
+      if (!this.marked.has(tabId)) return;
       await this.unmark(tabId);
+      // Recorded only once done, so a run that ends meanwhile leaves the tab
+      // to the next one.
+      this.marked.delete(tabId);
+      this.unmarked.add(tabId);
+      this.changed();
     });
   }
 
   /** The tab was closed. */
   closed(tabId: number): void {
     this.cancelRelease(tabId);
+    this.closedTabs.add(tabId);
+    this.unmarked.delete(tabId);
     if (this.marked.delete(tabId)) this.changed();
+    void this.run(tabId, async () => {
+      this.queues.delete(tabId);
+    });
   }
 
   /** A new run carries on: recorded tabs no longer controlled get their own
-   * icons back, controlled tabs show the mark. */
+   * icons back, controlled tabs show the mark. `controlled` is read once the
+   * record is, so a tab attached meanwhile counts. */
   resume(
     recorded: TabIndicatorState | null | Promise<TabIndicatorState | null>,
-    controlled: Iterable<number>,
+    controlled: () => Iterable<number>,
   ): Promise<void> {
-    const live = new Set(controlled);
-    return this.run(async () => {
+    this.resumed = this.resumed.then(async () => {
       const state = await Promise.resolve(recorded).catch(() => null);
-      for (const tabId of state?.tabs ?? []) this.marked.add(tabId);
-    }).then(async () => {
-      const ended = [...this.marked].filter((tabId) => !live.has(tabId));
+      for (const tabId of state?.tabs ?? []) {
+        if (!this.closedTabs.has(tabId)) this.marked.add(tabId);
+      }
+      const live = new Set(controlled());
       await Promise.all([
-        ...ended.map((tabId) => this.releaseNow(tabId)),
+        ...[...this.marked]
+          .filter((tabId) => !live.has(tabId))
+          .map((tabId) => this.releaseNow(tabId)),
         ...[...live].map((tabId) => this.show(tabId)),
       ]);
     });
+    return this.resumed;
   }
 
   state(): TabIndicatorState {
@@ -138,8 +169,13 @@ export class TabIndicator {
   }
 
   /** Resolves once every change asked for so far is done. */
-  settled(): Promise<void> {
-    return this.queue;
+  async settled(): Promise<void> {
+    await this.resumed;
+    let pending: Promise<void>[];
+    do {
+      pending = [...this.queues.values()];
+      await Promise.all(pending);
+    } while ([...this.queues.values()].some((queue) => !pending.includes(queue)));
   }
 
   private async mark(tabId: number): Promise<void> {
@@ -156,18 +192,27 @@ export class TabIndicator {
     func: (...args: never[]) => unknown,
     args: unknown[],
   ): Promise<void> {
+    let timer: unknown;
+    const timedOut = new Promise<void>((resolve) => {
+      timer = this.schedule(resolve, this.options.injectTimeoutMs ?? INJECT_TIMEOUT_MS);
+    });
     try {
-      await this.chrome.scripting.executeScript({
-        target: { tabId },
-        // The page's scripts cannot see or undo it there.
-        world: "ISOLATED",
-        // At once: a new page gets the mark before it has loaded.
-        injectImmediately: true,
-        func,
-        args,
-      });
+      await Promise.race([
+        this.chrome.scripting.executeScript({
+          target: { tabId },
+          // The page's scripts cannot see or undo it there.
+          world: "ISOLATED",
+          // At once: a new page gets the mark before it has loaded.
+          injectImmediately: true,
+          func,
+          args,
+        }),
+        timedOut,
+      ]);
     } catch {
       // A closed tab, or a page Chrome lets no extension script.
+    } finally {
+      this.cancel(timer);
     }
   }
 
@@ -178,11 +223,13 @@ export class TabIndicator {
     this.releases.delete(tabId);
   }
 
-  private run(work: () => Promise<void>): Promise<void> {
-    const next = this.queue.then(work).catch((error: unknown) => {
-      console.warn("could not update a controlled tab's icon", error);
-    });
-    this.queue = next;
+  private run(tabId: number, work: () => Promise<void>): Promise<void> {
+    const next = (this.queues.get(tabId) ?? Promise.resolve())
+      .then(work)
+      .catch((error: unknown) => {
+        console.warn("could not update a controlled tab's icon", error);
+      });
+    if (!this.closedTabs.has(tabId) || this.queues.has(tabId)) this.queues.set(tabId, next);
     return next;
   }
 
@@ -203,35 +250,55 @@ export function parseTabIndicatorState(value: unknown): TabIndicatorState | null
 }
 
 /** The state showMark keeps in the extension's isolated world of a page. */
-type MarkState = { link: HTMLLinkElement; observer: MutationObserver; icon: string };
+type MarkState = {
+  link: HTMLLinkElement;
+  observer: MutationObserver;
+  icon: string;
+  /** When the observer last put the mark back, to stop fighting a page that
+   * insists on its own icon. */
+  repairs: number[];
+  /** A repair put off by that limit. */
+  later?: ReturnType<typeof setTimeout>;
+};
 
 /**
  * Runs in the page's top frame, in this extension's isolated world: shows
- * `icon` as the tab's icon. The page's own icon links are set aside by
- * renaming their `rel` (kept in `data-opengeni-rel`), the mark is added as
- * the only icon in the head, and an observer keeps it so while the page
- * changes its head. Running it again only updates the icon. An observer left
- * by a version of the extension that was since reloaded stops on its own.
+ * `icon` as the tab's icon. The page's own icon links in the head (the only
+ * ones Chrome reads) are set aside by renaming their `rel` (kept in
+ * `data-opengeni-rel`), the mark is added as the only icon in the head, and
+ * an observer keeps it so while the page changes its links, at most a few
+ * times a second. Running it again only updates the icon. An observer left by
+ * a version of the extension that was since reloaded stops on its own.
  * Self-contained, since Chrome runs it from its source.
  */
 export function showMark(icon: string): void {
   const KEPT = "data-opengeni-rel";
   const MARK = "data-opengeni-icon";
+  const REPAIRS_PER_SECOND = 10;
   const scope = globalThis as typeof globalThis & { __opengeniMark?: MarkState };
   const isPageIcon = (node: Node): node is HTMLLinkElement =>
     node instanceof HTMLLinkElement &&
     !node.hasAttribute(MARK) &&
     /(^|\s)icon(\s|$)/iu.test(node.getAttribute("rel") ?? "");
   const ensure = (state: MarkState) => {
-    for (const link of Array.from(document.querySelectorAll("link"))) {
+    const head = document.head;
+    if (!head) return;
+    for (const link of Array.from(head.children)) {
       if (!isPageIcon(link)) continue;
       link.setAttribute(KEPT, link.getAttribute("rel") ?? "");
       link.setAttribute("rel", "opengeni-kept-icon");
     }
-    const head = document.head;
-    if (head && state.link.parentNode !== head) head.append(state.link);
+    if (state.link.parentNode !== head) head.append(state.link);
     if (state.link.getAttribute("href") !== state.icon) state.link.setAttribute("href", state.icon);
   };
+  const touchesLinks = (records: MutationRecord[]) =>
+    records.some((record) =>
+      record.type === "attributes"
+        ? record.target instanceof HTMLLinkElement
+        : [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)].some(
+            (node) => node.nodeName === "LINK" || node.nodeName === "HEAD",
+          ),
+    );
   let state = scope.__opengeniMark;
   if (!state) {
     // A mark a version of the extension that was since reloaded left.
@@ -239,15 +306,27 @@ export function showMark(icon: string): void {
     const link = document.createElement("link");
     link.setAttribute("rel", "icon");
     link.setAttribute(MARK, "");
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((records) => {
       // The extension was reloaded or removed: its next run cleans up.
       if (!(globalThis as { chrome?: { runtime?: { id?: string } } }).chrome?.runtime?.id) {
         observer.disconnect();
         return;
       }
-      if (scope.__opengeniMark === state) ensure(state!);
+      const current = state!;
+      if (scope.__opengeniMark !== current || !touchesLinks(records)) return;
+      const now = Date.now();
+      current.repairs = current.repairs.filter((at) => now - at < 1_000);
+      if (current.repairs.length >= REPAIRS_PER_SECOND) {
+        current.later ??= setTimeout(() => {
+          current.later = undefined;
+          if (scope.__opengeniMark === current) ensure(current);
+        }, 1_000);
+        return;
+      }
+      current.repairs.push(now);
+      ensure(current);
     });
-    state = { link, observer, icon };
+    state = { link, observer, icon, repairs: [] };
     scope.__opengeniMark = state;
     observer.observe(document, {
       subtree: true,
@@ -269,6 +348,7 @@ export function removeMark(): void {
   const MARK = "data-opengeni-icon";
   const scope = globalThis as typeof globalThis & { __opengeniMark?: MarkState };
   scope.__opengeniMark?.observer.disconnect();
+  clearTimeout(scope.__opengeniMark?.later);
   delete scope.__opengeniMark;
   for (const link of Array.from(document.querySelectorAll(`link[${MARK}]`))) link.remove();
   for (const link of Array.from(document.querySelectorAll(`link[${KEPT}]`))) {

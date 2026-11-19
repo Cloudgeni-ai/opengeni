@@ -42,5 +42,7 @@ describe("packaged manifest", () => {
     expect(source.web_accessible_resources).toEqual([
       { resources: ["icons/tab-mark.png"], matches: ["<all_urls>"], use_dynamic_url: true },
     ]);
+    // runtime.getURL returns the dynamic URL from Chrome 130.
+    expect(source.minimum_chrome_version).toBe("130");
   });
 });

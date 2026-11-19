@@ -88,6 +88,45 @@ describe("the mark in a page", () => {
     expect(tab.icons()).toEqual(["/favicon-32.png", "/favicon.ico", "/unread.png"]);
   });
 
+  test("does not fight a page that insists on its own icon", async () => {
+    const tab = page(PAGE);
+    const extension = tab.world("abc");
+    extension.run(showMark, ICON);
+    // The page puts its icon back whenever it is set aside.
+    let fights = 0;
+    const insist = new tab.window.MutationObserver(() => {
+      for (const link of Array.from(
+        tab.document.head.querySelectorAll("link[data-opengeni-rel]"),
+      )) {
+        if (link.getAttribute("rel") === "icon") continue;
+        fights++;
+        link.setAttribute("rel", "icon");
+      }
+    });
+    insist.observe(tab.document.head, { subtree: true, attributes: true });
+    tab.document.head.querySelector("link[data-opengeni-icon]")!.remove();
+    await flush();
+    insist.disconnect();
+    const repairs = (extension.scope.__opengeniMark as { repairs: number[] }).repairs;
+    expect(repairs.length).toBeLessThanOrEqual(10);
+    expect(fights).toBeLessThanOrEqual(12);
+    extension.run(removeMark);
+  });
+
+  test("changes elsewhere in the page are left alone", async () => {
+    const tab = page(PAGE);
+    const extension = tab.world("abc");
+    extension.run(showMark, ICON);
+    await flush();
+    const repairs = (extension.scope.__opengeniMark as { repairs: number[] }).repairs;
+    const settled = repairs.length;
+    const before = tab.document.head.innerHTML;
+    for (let i = 0; i < 20; i++) tab.document.body.append(tab.document.createElement("div"));
+    await flush();
+    expect(repairs.length).toBe(settled);
+    expect(tab.document.head.innerHTML).toBe(before);
+  });
+
   test("a page with no icon of its own goes back to having none", async () => {
     const tab = page("<html><head><title>Plain</title></head><body></body></html>");
     const extension = tab.world("abc");
@@ -149,7 +188,15 @@ describe("the mark in a page", () => {
   });
 });
 
-function indicator(options: { failing?: Set<number>; saved?: TabIndicatorState[] } = {}) {
+function indicator(
+  options: {
+    failing?: Set<number>;
+    saved?: TabIndicatorState[];
+    /** Holds a script until the returned promise settles (a page with an
+     * open dialog runs none). */
+    gate?: (call: string) => Promise<void> | undefined;
+  } = {},
+) {
   const calls: string[] = [];
   const timers: (() => void)[] = [];
   const instance = new TabIndicator(
@@ -160,7 +207,9 @@ function indicator(options: { failing?: Set<number>; saved?: TabIndicatorState[]
           expect(injectImmediately).toBe(true);
           if (options.failing?.has(target.tabId))
             throw new Error("Cannot access contents of the page.");
-          calls.push(`${func.name} ${target.tabId}${args.length > 0 ? ` ${String(args[0])}` : ""}`);
+          const call = `${func.name} ${target.tabId}${args.length > 0 ? ` ${String(args[0])}` : ""}`;
+          await options.gate?.(call);
+          calls.push(call);
           return [];
         },
       },
@@ -245,9 +294,72 @@ describe("the controlled tabs' icons", () => {
     const recorded = parseTabIndicatorState(JSON.parse(JSON.stringify(saved.at(-1))));
     // Tab 5 is still controlled, tab 4 no longer, tab 7 is now.
     const next = indicator();
-    await next.tabs.resume(Promise.resolve(recorded), [5, 7]);
+    await next.tabs.resume(Promise.resolve(recorded), () => [5, 7]);
     expect(next.calls.sort()).toEqual(["removeMark 4", `showMark 5 ${ICON}`, `showMark 7 ${ICON}`]);
     expect(next.tabs.state().tabs.sort()).toEqual([5, 7]);
+  });
+
+  test("a page that runs no scripts holds up only its own tab, and only for a while", async () => {
+    const stuck = new Promise<void>(() => {});
+    const { tabs, calls, elapse } = indicator({
+      gate: (call) => (call.startsWith("showMark 8") ? stuck : undefined),
+    });
+    void tabs.show(8);
+    await tabs.show(4);
+    expect(calls).toEqual([`showMark 4 ${ICON}`]);
+    // The injection gives up; the tab's later changes go ahead.
+    tabs.release(8);
+    await elapse();
+    await elapse();
+    expect(tabs.state()).toEqual({ tabs: [4] });
+  });
+
+  test("a page back from the back-forward cache loses a mark it kept", async () => {
+    const { tabs, calls, elapse } = indicator();
+    await tabs.show(4);
+    tabs.release(4);
+    await elapse();
+    await tabs.navigated(4);
+    await tabs.navigated(9);
+    expect(calls).toEqual([`showMark 4 ${ICON}`, "removeMark 4", "removeMark 4"]);
+  });
+
+  test("a tab attached while the record is read stays marked", async () => {
+    const { tabs, calls } = indicator();
+    const attached = new Set<number>();
+    let read!: (state: TabIndicatorState) => void;
+    const resumed = tabs.resume(new Promise((resolve) => (read = resolve)), () => attached);
+    attached.add(4);
+    read({ tabs: [4] });
+    await resumed;
+    expect(calls).toEqual([`showMark 4 ${ICON}`]);
+    expect(tabs.state()).toEqual({ tabs: [4] });
+  });
+
+  test("a tab closed before its mark was shown is not recorded", async () => {
+    const saved: TabIndicatorState[] = [];
+    const { tabs, calls } = indicator({ saved });
+    const shown = tabs.show(4);
+    tabs.closed(4);
+    await shown;
+    expect(calls).toEqual([]);
+    expect(tabs.state()).toEqual({ tabs: [] });
+  });
+
+  test("a tab counts as marked until its own icon is back", async () => {
+    let open!: () => void;
+    const { tabs } = indicator({
+      gate: (call) =>
+        call === "removeMark 4" ? new Promise<void>((resolve) => (open = resolve)) : undefined,
+    });
+    await tabs.show(4);
+    const released = tabs.releaseNow(4);
+    await flush();
+    // An extension reload now leaves the tab to the next run.
+    expect(tabs.state()).toEqual({ tabs: [4] });
+    open();
+    await released;
+    expect(tabs.state()).toEqual({ tabs: [] });
   });
 
   test("parses only well-formed recorded state", () => {

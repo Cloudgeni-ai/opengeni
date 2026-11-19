@@ -66,8 +66,8 @@ does not erase information already sent to a deployment or its providers.
 Contact your deployment operator for access, deletion, retention, and provider
 details. Chrome displays a debugger notification when the extension attaches
 to a tab, and a tab an agent is controlling shows the product's icon in place
-of the site's own until control ends. Chrome-restricted pages cannot be
-controlled.
+of the site's own until control ends. That page can see the icon, and so that
+it is being controlled. Chrome-restricted pages cannot be controlled.
 
 ## Contact
 

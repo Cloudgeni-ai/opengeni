@@ -113,8 +113,9 @@ const TAB_INDICATOR_RELEASE_MS = 2_000;
 // so the next run gives those tabs their own icons back.
 const TAB_INDICATOR_KEY = "tabIndicator";
 // The mark as a tab icon. Pages load it from the extension because many sites'
-// Content-Security-Policy refuses data: images as icons; its URL is dynamic
-// (manifest), so a site cannot use it to detect the extension.
+// Content-Security-Policy refuses data: images as icons. Its URL is dynamic
+// (manifest), so a site cannot probe for the extension; a page it is shown in
+// can see it, and so that the tab is controlled.
 const TAB_ICON_PATH = "icons/tab-mark.png";
 
 let nativePort: chrome.runtime.Port | null = null;
@@ -196,14 +197,14 @@ async function resumeLiveState(): Promise<string> {
   } catch {
     // Without session storage this worker's state is all there is.
     currentStateGeneration = crypto.randomUUID();
-    void tabIndicator?.resume(recordedTabIndicator(), []);
+    void tabIndicator?.resume(recordedTabIndicator(), () => []);
     return currentStateGeneration;
   }
   if (!stored) {
     currentStateGeneration = crypto.randomUUID();
     // The extension reloaded or updated (or Chrome restarted): no tab an
     // earlier run marked is controlled now.
-    void tabIndicator?.resume(recordedTabIndicator(), []);
+    void tabIndicator?.resume(recordedTabIndicator(), () => []);
     await recordLiveState();
     return currentStateGeneration;
   }
@@ -227,7 +228,7 @@ async function resumeLiveState(): Promise<string> {
   }
   // Only now: until then nothing records the attachments or applies an update.
   currentStateGeneration = stored.stateGeneration;
-  void tabIndicator?.resume(recordedTabIndicator(), attachedDebuggerTabs.keys());
+  void tabIndicator?.resume(recordedTabIndicator(), () => attachedDebuggerTabs.keys());
   await recordLiveState();
   await recordResumption({ attachmentsKept: kept, attachmentsEnded: detached, tabsClosed: closed });
   maybeApplyUpdate();
