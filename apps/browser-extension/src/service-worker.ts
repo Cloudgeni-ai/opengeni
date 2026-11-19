@@ -1483,13 +1483,18 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // A new page in a controlled tab gets the cursor again.
-chrome.webNavigation?.onCommitted?.addListener(({ tabId, frameId }) => {
-  if (frameId === 0) void tabIcon?.navigated(tabId);
+chrome.webNavigation?.onCommitted?.addListener(({ tabId, frameId, transitionQualifiers }) => {
+  if (frameId === 0) void tabIcon?.navigated(tabId, transitionQualifiers.includes("forward_back"));
 });
 
 // A tab the person takes out of the group stays out until control ends.
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.groupId !== undefined) void tabGroup?.groupChanged(tabId);
+});
+
+// Chrome puts a tab opened from a controlled tab in the group.
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.id !== undefined) tabGroup?.opened(tab.id);
 });
 
 function appendDebuggerEvent(event: Omit<BridgeDebuggerEvent, "sequence">): void {

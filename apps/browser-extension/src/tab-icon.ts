@@ -97,15 +97,17 @@ export class TabIcon {
     });
   }
 
-  /** A new page committed in the tab (webNavigation.onCommitted, top frame),
-   * possibly one restored from the back-forward cache. */
-  navigated(tabId: number): Promise<void> {
-    if (!this.marked.has(tabId) && !this.unmarked.has(tabId) && !this.releasing.has(tabId))
+  /** A new page committed in the tab (webNavigation.onCommitted, top frame);
+   * `backForward` when it came from the history, possibly from the
+   * back-forward cache with a mark it kept. */
+  navigated(tabId: number, backForward = false): Promise<void> {
+    const unmarked = backForward && this.unmarked.has(tabId);
+    if (!this.marked.has(tabId) && !unmarked && !this.releasing.has(tabId))
       return Promise.resolve();
     return this.run(tabId, async () => {
       if (this.marked.has(tabId)) await this.mark(tabId);
       else if (this.releasing.has(tabId)) await this.unmarkAndRecord(tabId);
-      else if (this.unmarked.has(tabId)) await this.unmark(tabId);
+      else if (unmarked) await this.unmark(tabId);
     });
   }
 
@@ -219,7 +221,7 @@ export class TabIcon {
             target: { tabId },
             // The page's scripts cannot see or undo it there.
             world: "ISOLATED",
-            // At once: a new page gets the mark before it has loaded.
+            // At once, even while a page loads: showMark waits for the load.
             injectImmediately: true,
             func,
             args,
@@ -278,7 +280,13 @@ type MarkState = {
   repairs: number[];
   /** A repair put off by that limit. */
   later?: ReturnType<typeof setTimeout>;
+  /** An icon the page set on the mark (an unread count, say), for its own
+   * icon once the mark goes. */
+  pageHref?: string;
 };
+
+/** A mark waiting for its page to load. */
+type PendingMark = { icon: string; cancel: () => void };
 
 /**
  * Runs in the page's top frame, in this extension's isolated world: shows
@@ -286,15 +294,21 @@ type MarkState = {
  * ones Chrome reads) are set aside by renaming their `rel` (kept in
  * `data-opengeni-rel`), the mark is added as the only icon in the head, and
  * an observer keeps it so while the page changes its links, at most a few
- * times a second. Running it again only updates the icon. An observer left by
- * a version of the extension that was since reloaded stops on its own.
+ * times a second. A page still loading gets the mark once it has loaded (and
+ * its scripts have had a moment), so the head is not changed under scripts
+ * that hydrate it. Running it again only updates the icon. An observer left
+ * by a version of the extension that was since reloaded stops on its own.
  * Self-contained, since Chrome runs it from its source.
  */
 export function showMark(icon: string): void {
   const KEPT = "data-opengeni-rel";
   const MARK = "data-opengeni-icon";
   const REPAIRS_PER_SECOND = 10;
-  const scope = globalThis as typeof globalThis & { __opengeniMark?: MarkState };
+  const LOAD_WAIT_MS = 10_000;
+  const scope = globalThis as typeof globalThis & {
+    __opengeniMark?: MarkState;
+    __opengeniPendingMark?: PendingMark;
+  };
   const isPageIcon = (node: Node): node is HTMLLinkElement =>
     node instanceof HTMLLinkElement &&
     !node.hasAttribute(MARK) &&
@@ -320,45 +334,85 @@ export function showMark(icon: string): void {
             ["LINK", "HEAD", "HTML"].includes(node.nodeName),
           ),
     );
-  let state = scope.__opengeniMark;
-  if (!state) {
-    // A mark a version of the extension that was since reloaded left.
-    for (const old of Array.from(document.querySelectorAll(`link[${MARK}]`))) old.remove();
-    const link = document.createElement("link");
-    link.setAttribute("rel", "icon");
-    link.setAttribute(MARK, "");
-    const observer = new MutationObserver((records) => {
-      // The extension was reloaded or removed: its next run cleans up.
-      if (!alive()) {
-        observer.disconnect();
-        return;
-      }
-      const current = state!;
-      if (scope.__opengeniMark !== current || !touchesLinks(records)) return;
-      const now = Date.now();
-      current.repairs = current.repairs.filter((at) => now - at < 1_000);
-      if (current.repairs.length >= REPAIRS_PER_SECOND) {
-        current.later ??= setTimeout(() => {
-          current.later = undefined;
-          if (!alive()) observer.disconnect();
-          else if (scope.__opengeniMark === current) ensure(current);
-        }, 1_000);
-        return;
-      }
-      current.repairs.push(now);
-      ensure(current);
-    });
-    state = { link, observer, icon, repairs: [] };
-    scope.__opengeniMark = state;
-    observer.observe(document, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ["rel", "href"],
-    });
+  const apply = (url: string) => {
+    let state = scope.__opengeniMark;
+    if (!state) {
+      // A mark a version of the extension that was since reloaded left.
+      for (const old of Array.from(document.querySelectorAll(`link[${MARK}]`))) old.remove();
+      const link = document.createElement("link");
+      link.setAttribute("rel", "icon");
+      link.setAttribute(MARK, "");
+      const observer = new MutationObserver((records) => {
+        // The extension was reloaded or removed: its next run cleans up.
+        if (!alive()) {
+          observer.disconnect();
+          return;
+        }
+        const current = state!;
+        if (scope.__opengeniMark !== current || !touchesLinks(records)) return;
+        for (const record of records) {
+          const href = current.link.getAttribute("href");
+          if (record.target === current.link && href !== null && href !== current.icon)
+            current.pageHref = href;
+        }
+        const now = Date.now();
+        current.repairs = current.repairs.filter((at) => now - at < 1_000);
+        if (current.repairs.length >= REPAIRS_PER_SECOND) {
+          current.later ??= setTimeout(() => {
+            current.later = undefined;
+            if (!alive()) observer.disconnect();
+            else if (scope.__opengeniMark === current) ensure(current);
+          }, 1_000);
+          return;
+        }
+        current.repairs.push(now);
+        ensure(current);
+      });
+      state = { link, observer, icon: url, repairs: [] };
+      scope.__opengeniMark = state;
+      observer.observe(document, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["rel", "href"],
+      });
+    }
+    state.icon = url;
+    ensure(state);
+  };
+  if (scope.__opengeniMark || document.readyState === "complete") {
+    scope.__opengeniPendingMark?.cancel();
+    delete scope.__opengeniPendingMark;
+    apply(icon);
+    return;
   }
-  state.icon = icon;
-  ensure(state);
+  const pending = scope.__opengeniPendingMark;
+  if (pending) {
+    pending.icon = icon;
+    return;
+  }
+  const next: PendingMark = { icon, cancel: () => {} };
+  scope.__opengeniPendingMark = next;
+  const run = () => {
+    if (scope.__opengeniPendingMark !== next) return;
+    delete scope.__opengeniPendingMark;
+    if (alive()) apply(next.icon);
+  };
+  const loaded = () => {
+    next.cancel();
+    if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 1_000 });
+    else setTimeout(run, 0);
+  };
+  const onState = () => {
+    if (document.readyState === "complete") loaded();
+  };
+  // A page whose load never ends gets the mark anyway.
+  const cap = setTimeout(loaded, LOAD_WAIT_MS);
+  document.addEventListener("readystatechange", onState);
+  next.cancel = () => {
+    clearTimeout(cap);
+    document.removeEventListener("readystatechange", onState);
+  };
 }
 
 /** Runs in the page's top frame, in this extension's isolated world: takes
@@ -368,13 +422,31 @@ export function showMark(icon: string): void {
 export function removeMark(): void {
   const KEPT = "data-opengeni-rel";
   const MARK = "data-opengeni-icon";
-  const scope = globalThis as typeof globalThis & { __opengeniMark?: MarkState };
+  const scope = globalThis as typeof globalThis & {
+    __opengeniMark?: MarkState;
+    __opengeniPendingMark?: PendingMark;
+  };
+  scope.__opengeniPendingMark?.cancel();
+  delete scope.__opengeniPendingMark;
+  const pageHref = scope.__opengeniMark?.pageHref;
   scope.__opengeniMark?.observer.disconnect();
   clearTimeout(scope.__opengeniMark?.later);
   delete scope.__opengeniMark;
   for (const link of Array.from(document.querySelectorAll(`link[${MARK}]`))) link.remove();
+  let first: Element | null = null;
   for (const link of Array.from(document.querySelectorAll(`link[${KEPT}]`))) {
     link.setAttribute("rel", link.getAttribute(KEPT) ?? "icon");
     link.removeAttribute(KEPT);
+    if (!first && /(^|\s)icon(\s|$)/iu.test(link.getAttribute("rel") ?? "")) first = link;
+  }
+  // The icon the page set on the mark meanwhile is its latest.
+  if (pageHref !== undefined) {
+    if (first) first.setAttribute("href", pageHref);
+    else {
+      const link = document.createElement("link");
+      link.setAttribute("rel", "icon");
+      link.setAttribute("href", pageHref);
+      document.head?.append(link);
+    }
   }
 }

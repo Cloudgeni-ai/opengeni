@@ -6,10 +6,12 @@
  * something is being debugged, not which tabs.
  *
  * - A tab the person had in a group of their own goes back to that group when
- *   control ends, if it still exists; any other tab is ungrouped, and one the
- *   group moved goes back to where it was in the window. A group left with
- *   no controlled tab is dissolved, along with any tab the person dragged
- *   into it.
+ *   control ends (made again, as it looked, if the tab was its only one);
+ *   any other tab is ungrouped, and one the group moved goes back to where it
+ *   was in the window. A group left with no controlled tab is dissolved,
+ *   along with any tab the person dragged into it.
+ * - A tab opened from a controlled tab, which Chrome puts in the group,
+ *   leaves it unless an agent takes it within `releaseDelayMs`.
  * - Control often ends for a moment and starts again (a dialog the agent lets
  *   Chrome close, a navigation Chrome detaches on), so a tab leaves the group
  *   only once control has stayed ended for `releaseDelayMs`.
@@ -42,9 +44,9 @@ export type TabGroupChrome = {
     ungroup(tabIds: number[]): Promise<void>;
   };
   tabGroups: {
-    get(groupId: number): Promise<{ title?: string; color: TabGroupColor }>;
+    get(groupId: number): Promise<GroupLook>;
     query(query: { title: string; color: TabGroupColor }): Promise<{ id: number }[]>;
-    update(groupId: number, properties: { title: string; color: TabGroupColor }): Promise<unknown>;
+    update(groupId: number, properties: GroupLook): Promise<unknown>;
   };
 };
 
@@ -67,14 +69,20 @@ export type TabGroupColor =
   | "cyan"
   | "orange";
 
+/** How a group looks in the tab strip. */
+export type GroupLook = { title?: string; color: TabGroupColor; collapsed?: boolean };
+
 /** Chrome's groupId for a tab in no group. */
 const NO_GROUP = -1;
 
-/** A tab in the group: the group, the person's own group the tab came from,
- * and where it was in its window when joining the group moved it. */
+/** A tab in the group: the group, the person's own group the tab came from
+ * (and how that group looked, if the tab was its only one: Chrome deletes a
+ * group with its last tab), and where it was in its window when joining the
+ * group moved it. */
 export type GroupedTabEntry = {
   groupId: number;
   restoreGroupId: number | null;
+  restoreGroup?: GroupLook | null;
   restoreIndex: number | null;
 };
 
@@ -126,12 +134,16 @@ export class TabGroup {
   show(tabId: number): Promise<void> {
     this.cancelRelease(tabId);
     return this.run(async () => {
+      // A release refused while the person dragged a tab may have been
+      // retried since.
+      this.cancelRelease(tabId);
       if (this.indicated.has(tabId) || this.declined.has(tabId)) return;
       const tab = await this.chrome.tabs.get(tabId).catch(() => null);
       if (!tab || tab.pinned) return;
       const existing = await this.groupInWindow(tab.windowId);
       const restoreGroupId =
         tab.groupId !== NO_GROUP && tab.groupId !== existing ? tab.groupId : null;
+      const restoreGroup = restoreGroupId === null ? null : await this.lookIfOnly(tab);
       let groupId: number;
       try {
         groupId =
@@ -145,9 +157,24 @@ export class TabGroup {
       const moved = await this.chrome.tabs.get(tabId).catch(() => null);
       const restoreIndex =
         moved && moved.windowId === tab.windowId && moved.index !== tab.index ? tab.index : null;
-      this.indicated.set(tabId, { groupId, restoreGroupId, restoreIndex });
+      this.indicated.set(tabId, { groupId, restoreGroupId, restoreGroup, restoreIndex });
       this.changed();
     });
+  }
+
+  /** A tab was created (tabs.onCreated). Chrome puts a tab opened from a
+   * grouped tab in that group: one opened from a controlled tab leaves the
+   * group unless an agent takes it within the release delay. */
+  opened(tabId: number): void {
+    this.schedule(() => {
+      void this.run(async () => {
+        if (this.indicated.has(tabId)) return;
+        const tab = await this.chrome.tabs.get(tabId).catch(() => null);
+        if (!tab || tab.groupId === NO_GROUP) return;
+        if (![...this.indicated.values()].some((entry) => entry.groupId === tab.groupId)) return;
+        await this.edit(() => this.chrome.tabs.ungroup([tabId])).catch(() => undefined);
+      });
+    }, this.options.releaseDelayMs);
   }
 
   /** Control of the tab ended: take it out of the group unless control
@@ -258,10 +285,12 @@ export class TabGroup {
       if (lost) await this.dissolveLeftBehind();
       this.changed();
     }).then(async () => {
-      const ended = [...this.indicated.keys()].filter((tabId) => !live.has(tabId));
+      // Read again: a tab attached while the record was checked counts.
+      const now = new Set([...live, ...controlled()]);
+      const ended = [...this.indicated.keys()].filter((tabId) => !now.has(tabId));
       await Promise.all([
         ...ended.map((tabId) => this.releaseNow(tabId)),
-        ...[...live].map((tabId) => this.show(tabId)),
+        ...[...now].map((tabId) => this.show(tabId)),
       ]);
     });
   }
@@ -297,8 +326,19 @@ export class TabGroup {
     return groupId;
   }
 
+  /** How the tab's group looks, if the tab is its only one. */
+  private async lookIfOnly(tab: GroupedTab): Promise<GroupLook | null> {
+    const members = await this.chrome.tabs.query({ groupId: tab.groupId }).catch(() => []);
+    if (members.length !== 1) return null;
+    const group = await this.chrome.tabGroups.get(tab.groupId).catch(() => null);
+    return group
+      ? { title: group.title ?? "", color: group.color, collapsed: group.collapsed ?? false }
+      : null;
+  }
+
   /** Takes a tab still in its group out of it: back to the person's group it
-   * came from, or else to where it was. */
+   * came from (made again if the tab was its only one), or else to where it
+   * was. */
   private async putBack(tabId: number, entry: GroupedTabEntry): Promise<void> {
     const tab = await this.chrome.tabs.get(tabId).catch(() => null);
     if (!tab || tab.groupId !== entry.groupId) return;
@@ -314,13 +354,20 @@ export class TabGroup {
       return;
     }
     await this.edit(() => this.chrome.tabs.ungroup([tabId]));
-    if (entry.restoreIndex === null) return;
-    const count = (await this.chrome.tabs.query({ windowId: tab.windowId })).length;
-    const index = Math.min(entry.restoreIndex, count - 1);
-    await this.edit(() => this.chrome.tabs.move(tabId, { index }));
-    // Tabs have moved since, so that place may now be inside a group.
-    const moved = await this.chrome.tabs.get(tabId);
-    if (moved.groupId !== NO_GROUP) await this.edit(() => this.chrome.tabs.ungroup([tabId]));
+    if (entry.restoreIndex !== null) {
+      const count = (await this.chrome.tabs.query({ windowId: tab.windowId })).length;
+      const index = Math.min(entry.restoreIndex, count - 1);
+      await this.edit(() => this.chrome.tabs.move(tabId, { index }));
+      // Tabs have moved since, so that place may now be inside a group.
+      const moved = await this.chrome.tabs.get(tabId);
+      if (moved.groupId !== NO_GROUP) await this.edit(() => this.chrome.tabs.ungroup([tabId]));
+    }
+    const look = entry.restoreGroup;
+    if (!look) return;
+    const groupId = await this.edit(() =>
+      this.chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } }),
+    );
+    await this.edit(() => this.chrome.tabGroups.update(groupId, look)).catch(() => undefined);
   }
 
   /** Dissolves groups with this title and colour holding no controlled tab. */
@@ -401,11 +448,15 @@ export function parseTabGroupState(value: unknown): TabGroupState | null {
     for (const [tab, entry] of Object.entries(raw.tabs as Record<string, unknown>)) {
       if (!Number.isSafeInteger(Number(tab)) || entry === null || typeof entry !== "object")
         continue;
-      const { groupId, restoreGroupId, restoreIndex } = entry as Record<string, unknown>;
+      const { groupId, restoreGroupId, restoreGroup, restoreIndex } = entry as Record<
+        string,
+        unknown
+      >;
       if (!Number.isSafeInteger(groupId)) continue;
       tabs[tab] = {
         groupId: groupId as number,
         restoreGroupId: Number.isSafeInteger(restoreGroupId) ? (restoreGroupId as number) : null,
+        restoreGroup: parseLook(restoreGroup),
         restoreIndex: Number.isSafeInteger(restoreIndex) ? (restoreIndex as number) : null,
       };
     }
@@ -414,4 +465,27 @@ export function parseTabGroupState(value: unknown): TabGroupState | null {
     ? raw.declined.filter((tabId): tabId is number => Number.isSafeInteger(tabId))
     : [];
   return { tabs, declined };
+}
+
+const COLORS: readonly TabGroupColor[] = [
+  "grey",
+  "blue",
+  "red",
+  "yellow",
+  "green",
+  "pink",
+  "purple",
+  "cyan",
+  "orange",
+];
+
+function parseLook(value: unknown): GroupLook | null {
+  if (value === null || typeof value !== "object") return null;
+  const { title, color, collapsed } = value as Record<string, unknown>;
+  if (!COLORS.includes(color as TabGroupColor)) return null;
+  return {
+    title: typeof title === "string" ? title : "",
+    color: color as TabGroupColor,
+    collapsed: collapsed === true,
+  };
 }

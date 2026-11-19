@@ -257,7 +257,8 @@ class FakeChrome {
         };
       },
       detached: (tabId: number, reason: string) => debuggerEvents.onDetach.emit({ tabId }, reason),
-      navigated: (tabId: number, frameId = 0) => navigation.onCommitted.emit({ tabId, frameId }),
+      navigated: (tabId: number, frameId = 0, transitionQualifiers: string[] = []) =>
+        navigation.onCommitted.emit({ tabId, frameId, transitionQualifiers }),
     };
     this.current = started;
     return started;

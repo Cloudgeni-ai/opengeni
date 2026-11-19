@@ -8,7 +8,13 @@ import {
   type TabGroupState,
 } from "../src/tab-group";
 
-type Group = { id: number; windowId: number; title: string; color: TabGroupColor };
+type Group = {
+  id: number;
+  windowId: number;
+  title: string;
+  color: TabGroupColor;
+  collapsed?: boolean;
+};
 
 /** Chrome's tab strip as far as groups go: a group disappears with its last
  * tab, a group's tabs stay in its window, and pinned tabs or tabs of popup
@@ -297,14 +303,49 @@ describe("the controlled tabs' group", () => {
     expect(strip.strip()).toEqual([1, 2, 3, 4]);
   });
 
-  test("a tab whose own group is gone by then is just ungrouped", async () => {
-    const strip = new TabStrip([{ id: 1 }]);
-    strip.move(1, strip.userGroup(1, "Work"));
+  test("a tab that was its own group's only one gets that group back", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const work = strip.userGroup(1, "Work");
+    strip.groups.get(work)!.collapsed = true;
+    strip.move(1, work);
     const { indicator: tabs } = indicator(strip);
     await tabs.show(1);
+    // Chrome deletes a group with its last tab.
+    expect(strip.groups.has(work)).toBe(false);
+    await tabs.releaseNow(1);
+    expect(strip.groupOf(1)).toMatchObject({ title: "Work", color: "green", collapsed: true });
     expect(strip.groups.size).toBe(1);
+  });
+
+  test("a tab whose own group the person removed meanwhile is just ungrouped", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const work = strip.userGroup(1, "Work");
+    strip.move(1, work);
+    strip.move(2, work);
+    const { indicator: tabs } = indicator(strip);
+    await tabs.show(1);
+    strip.move(2, -1);
+    expect(strip.groups.has(work)).toBe(false);
     await tabs.releaseNow(1);
     expect(strip.groupOf(1)).toBeNull();
+    expect(strip.groups.size).toBe(0);
+  });
+
+  test("a tab opened from a controlled tab leaves the group unless an agent takes it", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    const { indicator: tabs, elapse } = indicator(strip);
+    await tabs.show(1);
+    const group = strip.groupOf(1)!.id;
+    // Chrome put the tabs opened from tab 1 in its group.
+    strip.move(2, group);
+    strip.move(3, group);
+    tabs.opened(2);
+    tabs.opened(3);
+    await tabs.show(3);
+    await elapse();
+    expect(strip.groupOf(2)).toBeNull();
+    expect(strip.groupOf(3)?.id).toBe(group);
+    expect(strip.groupOf(1)?.id).toBe(group);
   });
 
   test("a tab the person drags out stays out until control ends", async () => {
@@ -427,6 +468,21 @@ describe("the controlled tabs' group", () => {
     expect(tabs.state().tabs).toEqual({});
   });
 
+  test("control that starts again while a refused release waits keeps the tab", async () => {
+    const strip = new TabStrip([{ id: 1 }]);
+    const { indicator: tabs, elapse } = indicator(strip);
+    await tabs.show(1);
+    strip.dragging = 20;
+    const released = tabs.releaseNow(1);
+    const shown = tabs.show(1);
+    await released;
+    await shown;
+    strip.dragging = 0;
+    await elapse();
+    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(Object.keys(tabs.state().tabs)).toEqual(["1"]);
+  });
+
   test("a group it cannot title is not left behind", async () => {
     const strip = new TabStrip([{ id: 1 }]);
     strip.failTitles = true;
@@ -457,6 +513,22 @@ describe("the controlled tabs' group", () => {
     expect(strip.strip().indexOf(2)).toBe(1);
     expect(strip.groupOf(1)?.id).toBe(theirs);
     expect(Object.keys(second.state().tabs).sort()).toEqual(["3", "5"]);
+  });
+
+  test("a tab attached while a new run checks the record keeps its group", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const saved: TabGroupState[] = [];
+    await indicator(strip, saved).indicator.show(1);
+    const live: number[] = [];
+    let reads = 0;
+    const next = indicator(strip).indicator;
+    await next.resume(saved.at(-1)!, () => {
+      // The agent attaches again right after the first read.
+      if (reads++ === 1) live.push(1);
+      return [...live];
+    });
+    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(Object.keys(next.state().tabs)).toEqual(["1"]);
   });
 
   test("after an update or reload, tabs go back to the person's groups", async () => {
@@ -503,13 +575,24 @@ describe("the controlled tabs' group", () => {
       parseTabGroupState({
         tabs: {
           "4": { groupId: 7, restoreGroupId: "x", restoreIndex: 2 },
+          "6": { groupId: 8, restoreGroupId: 9, restoreGroup: { title: "Work", color: "green" } },
+          "7": { groupId: 8, restoreGroupId: 9, restoreGroup: { color: "beige" } },
           x: { groupId: 1 },
           "5": { groupId: "y" },
         },
         declined: [3, "z"],
       }),
     ).toEqual({
-      tabs: { "4": { groupId: 7, restoreGroupId: null, restoreIndex: 2 } },
+      tabs: {
+        "4": { groupId: 7, restoreGroupId: null, restoreGroup: null, restoreIndex: 2 },
+        "6": {
+          groupId: 8,
+          restoreGroupId: 9,
+          restoreGroup: { title: "Work", color: "green", collapsed: false },
+          restoreIndex: null,
+        },
+        "7": { groupId: 8, restoreGroupId: 9, restoreGroup: null, restoreIndex: null },
+      },
       declined: [3],
     });
   });

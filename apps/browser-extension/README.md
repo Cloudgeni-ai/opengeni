@@ -25,17 +25,21 @@ the agent's cursor as its icon, so the tab strip shows which tabs are in use.
 Both end once control has stayed ended for a moment.
 
 - `src/tab-group.ts`: a tab leaves the group and goes back to where it was, or
-  to the person's own group it came from. A tab the person drags out stays
-  out until that control ends. Groups left behind when Chrome restarts are
+  to the person's own group it came from (made again if the tab was its only
+  one). A tab the person drags out stays out until that control ends, and a
+  tab opened from a controlled tab leaves the group unless an agent takes it. Groups left behind when Chrome restarts are
   found by their title and colour. A group still open when Chrome closes may
   be kept in Chrome's saved groups, out of the extension's reach.
 - `src/tab-icon.ts`: the page's own icon links are set aside and the cursor
-  added, again after each new page, and they are put back exactly. Titles and
+  added once each page has loaded, and they are put back exactly, with any
+  icon the page set meanwhile. Titles and
   content are left alone. Pages load the cursor from the extension
   (`web_accessible_resources`, at a URL that changes per browser session,
   hence Chrome 130 or later) because many sites' Content-Security-Policy
   refuses `data:` icons. Sites cannot probe for that URL, but a page showing
-  the cursor can read it, and so that it is controlled. Pages the extension
+  the cursor can read it, and so that it is controlled; it stays the same
+  until Chrome restarts, so sites could use it to link visits made while
+  controlled. Pages the extension
   cannot script (Chrome's own pages, the Web Store, PDFs) keep their icon.
 
 Both are kept in local storage, so tabs get their place and icon back after

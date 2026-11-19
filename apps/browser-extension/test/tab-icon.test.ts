@@ -20,6 +20,8 @@ const flush = async () => {
 function page(html: string) {
   const window = new Window({ url: "https://example.com/" });
   window.document.write(html);
+  // A page that has loaded.
+  Object.defineProperty(window.document, "readyState", { value: "complete" });
   const world = (extensionId: string | undefined) => {
     const scope: Record<string, unknown> = { chrome: { runtime: { id: extensionId } } };
     const run = (func: (...args: never[]) => unknown, ...args: unknown[]) =>
@@ -166,10 +168,12 @@ describe("the mark in a page", () => {
     expect(tab.document.head.querySelectorAll("link").length).toBe(0);
   });
 
-  test("a page still loading gets the mark once its head exists", async () => {
+  test("a page still loading gets the mark once it has loaded", async () => {
     const window = new Window({ url: "https://example.com/" });
     const document = window.document;
     document.documentElement.remove();
+    let readyState = "loading";
+    Object.defineProperty(document, "readyState", { get: () => readyState });
     const scope = { chrome: { runtime: { id: "abc" } } };
     new Function(
       "document",
@@ -186,11 +190,57 @@ describe("the mark in a page", () => {
     own.setAttribute("rel", "icon");
     own.setAttribute("href", "/own.png");
     head.append(own);
+    const icons = () =>
+      Array.from(head.querySelectorAll("link"))
+        .filter((link) => link.getAttribute("rel") === "icon")
+        .map((link) => link.getAttribute("href"));
     await flush();
-    const icons = Array.from(head.querySelectorAll("link"))
-      .filter((link) => link.getAttribute("rel") === "icon")
-      .map((link) => link.getAttribute("href"));
-    expect(icons).toEqual([ICON]);
+    // The page's scripts may still be hydrating its head.
+    expect(icons()).toEqual(["/own.png"]);
+    readyState = "interactive";
+    document.dispatchEvent(new window.Event("readystatechange"));
+    await flush();
+    expect(icons()).toEqual(["/own.png"]);
+    readyState = "complete";
+    document.dispatchEvent(new window.Event("readystatechange"));
+    await flush();
+    expect(icons()).toEqual([ICON]);
+  });
+
+  test("a mark taken away before the page loaded never shows", async () => {
+    const window = new Window({ url: "https://example.com/" });
+    const document = window.document;
+    document.write(PAGE);
+    let readyState = "interactive";
+    Object.defineProperty(document, "readyState", { get: () => readyState });
+    const scope = { chrome: { runtime: { id: "abc" } } };
+    const run = (func: (...args: never[]) => unknown, ...args: unknown[]) =>
+      new Function(
+        "document",
+        "HTMLLinkElement",
+        "MutationObserver",
+        "globalThis",
+        `return (${func.toString()})(...arguments[4]);`,
+      )(document, window.HTMLLinkElement, window.MutationObserver, scope, args);
+    const before = document.documentElement.outerHTML;
+    run(showMark, ICON);
+    run(removeMark);
+    readyState = "complete";
+    document.dispatchEvent(new window.Event("readystatechange"));
+    await flush();
+    expect(document.documentElement.outerHTML).toBe(before);
+  });
+
+  test("an icon the page sets on the mark is its own once the mark goes", async () => {
+    const tab = page(PAGE);
+    const extension = tab.world("abc");
+    extension.run(showMark, ICON);
+    // A page that shows a count in its icon updates the first icon link.
+    tab.document.querySelector('link[rel~="icon"]')!.setAttribute("href", "/unread-3.png");
+    await flush();
+    expect(tab.icons()).toEqual([ICON]);
+    extension.run(removeMark);
+    expect(tab.icons()).toEqual(["/unread-3.png", "/favicon.ico"]);
   });
 
   test("a reloaded extension's next run cleans up what the last one left", async () => {
@@ -352,8 +402,10 @@ describe("the controlled tabs' icons", () => {
     await tabs.show(4);
     tabs.release(4);
     await elapse();
+    // Other new pages need nothing.
     await tabs.navigated(4);
-    await tabs.navigated(9);
+    await tabs.navigated(4, true);
+    await tabs.navigated(9, true);
     expect(calls).toEqual([`showMark 4 ${ICON}`, "removeMark 4", "removeMark 4"]);
   });
 
