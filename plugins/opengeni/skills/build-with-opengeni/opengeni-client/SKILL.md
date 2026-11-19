@@ -72,7 +72,8 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: async (request) => {
     const user = await getSignedInUser(request); // the product's own auth
     if (!user) return new Response("Unauthorized", { status: 401 });
-    return { user: user.id, tenant: user.teamId };
+    // displayName and email are optional; Console shows them for the user.
+    return { user: user.id, tenant: user.teamId, displayName: user.name, email: user.email };
   },
   createSession: ({ initialMessage, idempotencyKey }) => ({
     initialMessage,
@@ -145,7 +146,13 @@ the handler sets `visitorUploads: true`. Live voice is off in the stock chat
 unless the component turns it on
 (`<OpenGeniChat conversationProps={{ realtimeVoice: true }} />`).
 Server-side code gets the same workspace with
-`og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
+`og.workspaceId({ tenant })` or `og.workspaceId({ user })`. `resolve` may also
+return the user's `displayName` and `email` (display only, never identity) so
+Console shows who each end user is instead of the opaque id; send them on
+every request or when they change (the latest wins, omitted keeps). Server code
+sends the same with `asUser(id, { displayName, email })`. Name tenant
+workspaces with the facade's `workspaceName`, and rename one with
+`updateWorkspace(workspaceId, { name })`.
 
 Workspaces the product's organization key creates are managed by the product.
 Organization owners and admins read those users' sessions, cost and an audit

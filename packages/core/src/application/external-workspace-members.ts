@@ -72,7 +72,10 @@ async function addExternalWorkspaceMember(
   // Display details never reach the identity, the keyed operation or its replay.
   const { identity: reference, profile } = splitExternalIdentityProfile(parsed.identity);
   const payload = { ...parsed, identity: reference };
-  return { identity: await addExternalWorkspaceMemberIdentity(c, deps, workspaceId, payload), profile };
+  return {
+    identity: await addExternalWorkspaceMemberIdentity(c, deps, workspaceId, payload),
+    profile,
+  };
 }
 
 async function addExternalWorkspaceMemberIdentity(

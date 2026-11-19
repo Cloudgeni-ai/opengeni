@@ -91,11 +91,14 @@ test("the session proxy forwards the host's display details as the user's", asyn
       resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42", ...resolution }),
     });
     await handler(
-      new Request(`https://product.example.test/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ initialMessage: "Hi", idempotencyKey: crypto.randomUUID() }),
-      }),
+      new Request(
+        `https://product.example.test/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ initialMessage: "Hi", idempotencyKey: crypto.randomUUID() }),
+        },
+      ),
     );
   };
   await run({});

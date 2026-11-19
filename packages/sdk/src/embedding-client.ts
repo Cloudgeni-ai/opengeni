@@ -275,10 +275,7 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
    * authority on each request. `displayName` and `email` are display details
    * Console shows for the user (the latest sent wins; omit to keep them);
    * they never change who the user is. */
-  asUser(
-    externalId: string,
-    options: AsUserOptions = {},
-  ): this {
+  asUser(externalId: string, options: AsUserOptions = {}): this {
     if (typeof window !== "undefined")
       throw new Error("asUser is a server-side API; keep organization keys on your backend");
     if (

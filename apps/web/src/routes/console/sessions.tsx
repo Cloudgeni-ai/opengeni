@@ -213,7 +213,9 @@ export function ConsoleSessionsRoute() {
   // People and workspace names are searchable at every review level; questions only with full review.
   const searchable = state.reviewLevel !== null;
   const searchPlaceholder =
-    state.reviewLevel === "full" ? "Search questions, people and workspaces" : "Search people and workspaces";
+    state.reviewLevel === "full"
+      ? "Search questions, people and workspaces"
+      : "Search people and workspaces";
   const filtered = Boolean(workspaceFilter || debounced);
   const workspaceOptions = [
     { value: ALL, label: "All workspaces" },

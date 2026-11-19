@@ -268,9 +268,11 @@ test("end-user display details: the latest wins, omitted fields keep, and Consol
   });
   const teamSession = await session(accountId, teamId, { title: "Team chat" });
   const read = async (subject: string) =>
-    (await withAccountRls(client.db, accountId, (tx) =>
-      readConsoleEndUsers(tx, accountId, [subject]),
-    )).get(subject);
+    (
+      await withAccountRls(client.db, accountId, (tx) =>
+        readConsoleEndUsers(tx, accountId, [subject]),
+      )
+    ).get(subject);
 
   // Without display details nothing is stored beside the label (today's behaviour).
   await rememberEndUserLabel(client.db, {
