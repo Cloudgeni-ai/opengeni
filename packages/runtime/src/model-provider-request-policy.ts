@@ -28,6 +28,7 @@ import {
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
 import { geminiFunctionResponseRefPolicy } from "./gemini-function-response";
+import { cacheableSystemPromptBody, withCacheableSystemPrompt } from "./responses-system-prompt";
 import {
   chatReasoning,
   chatReasoningDetails,
@@ -281,8 +282,8 @@ function azureModelRequestProjection({
 }
 
 /** Azure's request projection, then storeless Responses (Azure accepts `store: false`). */
-export const azureModelRequestPolicy: ModelJsonRequestPolicy = withStorelessResponses(
-  azureModelRequestProjection,
+export const azureModelRequestPolicy: ModelJsonRequestPolicy = withCacheableSystemPrompt(
+  withStorelessResponses(azureModelRequestProjection),
 );
 
 /**
@@ -395,7 +396,10 @@ export function modelRequestPolicyForProvider(
       const context = codexRequestStorage.getStore();
       if (!context) throw new CodexSubscriptionUnavailableError(fallbackModel);
 
-      const normalizedBody = normalizedCodexRequestBody(body, context.resolveModel);
+      const normalizedBody = normalizedCodexRequestBody(
+        cacheableSystemPromptBody(path, body) ?? body,
+        context.resolveModel,
+      );
       const requestId = context.nextRequestId?.() ?? randomUUID();
       context.onRequestOpaqueArtifacts?.({
         requestId,
@@ -453,8 +457,9 @@ export function modelRequestPolicyForProvider(
       };
     }
     if (isOpenAIPlatformResponsesProvider(provider)) {
-      const storeless = storelessResponsesBody(path, body);
-      return storeless ? { body: storeless } : undefined;
+      const storeless = storelessResponsesBody(path, body) ?? body;
+      const projected = cacheableSystemPromptBody(path, storeless) ?? storeless;
+      return projected === body ? undefined : { body: projected };
     }
     return undefined;
   };
