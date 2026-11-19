@@ -27,6 +27,8 @@ export type SiteSqlGatewayConfig = {
   origin: string;
   secret: string;
   timeoutMs: number;
+  /** Record each call's round trip (seconds); measuring never fails a call. */
+  observe?: (operation: SiteDbOperation, outcome: "ok" | "error", seconds: number) => void;
 };
 
 export type SiteSqlGatewaySettings = Pick<
@@ -88,7 +90,24 @@ export function signSiteDbRequest(
   body: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): { url: string; headers: Record<string, string> } {
-  const path = siteDbInternalPath(siteId, operation);
+  return signGatewayInternalRequest(
+    config,
+    siteDbInternalPath(siteId, operation),
+    body,
+    nowSeconds,
+  );
+}
+
+/**
+ * Sign one API -> gateway internal POST to `path` (Site database and live
+ * hint routes alike): no viewer fields, the gateway's host, the body digest.
+ */
+export function signGatewayInternalRequest(
+  config: Pick<SiteSqlGatewayConfig, "origin" | "secret">,
+  path: string,
+  body: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): { url: string; headers: Record<string, string> } {
   const url = new URL(path, config.origin);
   const canonical = siteGatewayCanonicalString({
     method: "POST",
@@ -134,6 +153,28 @@ export async function callSiteDb<T>(
   operation: SiteDbOperation,
   payload: Record<string, unknown>,
   fetchImpl: SiteDbFetch = fetch,
+): Promise<T> {
+  const started = performance.now();
+  let outcome: "ok" | "error" = "error";
+  try {
+    const result = await callSiteDbOnce<T>(config, siteId, operation, payload, fetchImpl);
+    outcome = "ok";
+    return result;
+  } finally {
+    try {
+      config.observe?.(operation, outcome, (performance.now() - started) / 1000);
+    } catch {
+      // Measuring never fails a call.
+    }
+  }
+}
+
+async function callSiteDbOnce<T>(
+  config: SiteSqlGatewayConfig,
+  siteId: string,
+  operation: SiteDbOperation,
+  payload: Record<string, unknown>,
+  fetchImpl: SiteDbFetch,
 ): Promise<T> {
   const body = JSON.stringify({ requestId: crypto.randomUUID(), ...payload });
   const signed = signSiteDbRequest(config, siteId, operation, body);

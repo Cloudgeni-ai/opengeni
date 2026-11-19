@@ -8,7 +8,9 @@ import {
   SiteDataQueryRequest,
   SiteDataWriteRequest,
   SITE_DATA_ERROR_STATUS,
+  SITE_LIVE_TTL_SECONDS,
   type ErrorCode,
+  type SiteLiveTicketResponse,
 } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import { SiteDataError } from "@opengeni/db";
@@ -29,8 +31,15 @@ import {
   querySiteData,
   resetSiteDataCollection,
   uploadSiteDataFile,
+  watchSiteData,
   writeSiteData,
 } from "../site-data/operations";
+import {
+  SITE_LIVE_TICKET_SECONDS,
+  createSiteLiveTicket,
+  siteLiveConfigured,
+  siteLiveConsoleUrl,
+} from "../site-live/service";
 import type { SiteDataSurface } from "../site-data/service";
 
 const SiteId = z.string().uuid();
@@ -236,6 +245,55 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
         "X-OpenGeni-Export-Truncated": exported.truncated ? "true" : "false",
       },
     });
+  });
+
+  /**
+   * A short-lived ticket for the console's live connection to this Site
+   * (new versions, and changes to the collections the Site's frame may
+   * read). 404 when this deployment has no live hints; the console then
+   * keeps checking for new versions on its own.
+   */
+  app.post(`${base}/live`, async (context) => {
+    const grant = await grantFor(context, "artifacts:read");
+    if (framed(context))
+      throw siteDataHttpError(
+        new SiteDataError("forbidden", "A Site cannot open the console's live connection"),
+      );
+    const id = siteId(context);
+    const url = siteLiveConsoleUrl(deps.settings);
+    if (!url || !siteLiveConfigured(deps.settings) || !deps.settings.sitesGatewaySecret)
+      throw siteDataHttpError(
+        new SiteDataError("not_found", "Live updates are not available here"),
+      );
+    let watched: { seq: number; collections: string[]; ttlSeconds: number } = {
+      seq: 0,
+      collections: [],
+      ttlSeconds: SITE_LIVE_TTL_SECONDS,
+    };
+    try {
+      // What the Site's own frame may read: the hints feed that frame.
+      watched = await watchSiteData(deps, grant, id, { frameSiteId: id });
+    } catch (error) {
+      // An archived Site still hears about versions; an unknown one is 404.
+      if (!(error instanceof SiteDataError) || error.code === "not_found")
+        throw error instanceof SiteDataError ? siteDataHttpError(error) : error;
+    }
+    const expiresAt = Math.floor(Date.now() / 1000) + SITE_LIVE_TICKET_SECONDS;
+    const ticket = createSiteLiveTicket(deps.settings.sitesGatewaySecret, {
+      siteId: id,
+      collections: watched.collections,
+      seq: watched.seq,
+      expiresAt,
+      // The ticket may be used up to its own lifetime later: never outlive the watch.
+      ttlSeconds: Math.max(30, watched.ttlSeconds - SITE_LIVE_TICKET_SECONDS),
+    });
+    const response: SiteLiveTicketResponse = {
+      url: `${url}?ticket=${encodeURIComponent(ticket)}`,
+      expiresAt: new Date(expiresAt * 1000).toISOString(),
+      seq: watched.seq,
+    };
+    context.header("cache-control", "no-store");
+    return context.json(response);
   });
 
   app.post(`${base}/data/query`, async (context) => {

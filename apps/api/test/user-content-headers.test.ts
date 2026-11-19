@@ -68,9 +68,9 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
   },
   "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
   "site-runtime.ts": {
-    count: 1,
+    count: 2,
     userContent: true,
-    why: "published Site version HTML for the gateway (scripts sandboxed in an opaque origin)",
+    why: "published Site version HTML for the gateway (scripts sandboxed in an opaque origin); a header-preserving copy to add Server-Timing",
   },
   "site-sql.ts": { count: 1, userContent: true, why: "Site SQL export download (sql, csv, json)" },
   "workspace-artifacts.ts": { count: 1, userContent: true, why: "Site HTML (opaque origin)" },

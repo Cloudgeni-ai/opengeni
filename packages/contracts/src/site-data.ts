@@ -53,7 +53,9 @@ export const SiteDataFilter = /* @__PURE__ */ defineSchema(() =>
     value: z
       .union([Scalar, z.array(Scalar).max(100)])
       .optional()
-      .describe("The value to compare with; an array for in. $owner accepts me."),
+      .describe(
+        "The value to compare with; an array for in. $owner accepts me. For gt, gte, lt and lte on $createdAt, $updatedAt or an ISO timestamp field, $now (optionally $now+30s, $now-5m, h or d) is the server's current time.",
+      ),
   }),
 );
 export type SiteDataFilter = z.infer<typeof SiteDataFilter>;
@@ -117,6 +119,14 @@ export const SiteDataWriteOperation = /* @__PURE__ */ defineSchema(() =>
       collection: CollectionName,
       key: RecordKey.optional(),
       data: RecordData,
+      idempotencyKey: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe(
+          "Retrying with the same key returns the record the first attempt created (replayed: true) instead of adding another.",
+        ),
     }),
     z.object({
       op: z.literal("put").describe("Create or replace the record with this key."),
@@ -318,7 +328,8 @@ export type SiteDataQueryResponse = {
 };
 
 export type SiteDataWriteResultResponse =
-  | { op: "insert" | "put" | "patch" | "increment"; record: SiteDataRecordResponse }
+  | { op: "insert"; record: SiteDataRecordResponse; replayed?: boolean }
+  | { op: "put" | "patch" | "increment"; record: SiteDataRecordResponse }
   | { op: "delete"; deleted: { id: string } };
 
 export type SiteDataWriteResponse = { results: SiteDataWriteResultResponse[] };

@@ -39,6 +39,8 @@ describe("console Content-Security-Policy sources", () => {
     expect(result.directives["img-src"]).toContain("https://avatars.githubusercontent.com");
     expect(result.directives["form-action"]).toEqual([]);
     expect(result.htmlFrameHost).toBe("https://og.example.site");
+    // The console's live connection to a Site it shows.
+    expect(result.directives["connect-src"]).toContain("wss://og.example.site");
     expect(result.imageProxyPath).toBe("/v1/image-proxy");
     for (const source of allSources(result)) {
       expect(source).not.toBe("*");

@@ -40,6 +40,7 @@ const FORWARD_RESPONSE_HEADERS = [
   "etag",
   "last-modified",
   "retry-after",
+  "server-timing",
   "x-opengeni-api-contract",
   "x-opengeni-correlation-id",
 ] as const;
@@ -206,6 +207,7 @@ export async function handleApi(site: SiteContext): Promise<Response> {
     signal: request.signal,
   });
   let response: Response;
+  const upstreamStarted = Date.now();
   try {
     response = await fetch(upstreamRequest);
   } catch {
@@ -234,6 +236,8 @@ export async function handleApi(site: SiteContext): Promise<Response> {
     if (value !== null) out.set(name, value);
   }
   if (!out.has("cache-control")) out.set("Cache-Control", "no-store");
+  // The API's own Server-Timing (auth, app) plus the whole upstream round trip.
+  out.append("Server-Timing", `upstream;dur=${Date.now() - upstreamStarted}`);
   applySecurityHeaders(out, security);
   return new Response(response.body, { status: response.status, headers: out });
 }

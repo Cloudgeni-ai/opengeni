@@ -325,7 +325,10 @@ function cookiePair(setCookie: string): string {
 
 /** API calls made for Site requests (background platform reports excluded). */
 function siteCalls(): number {
-  return received.filter((entry) => !entry.path.endsWith("/platform/requests")).length;
+  return received.filter(
+    (entry) =>
+      !entry.path.endsWith("/platform/requests") && !entry.path.endsWith("/platform/timings"),
+  ).length;
 }
 
 function lastTo(suffix: string): Received | undefined {

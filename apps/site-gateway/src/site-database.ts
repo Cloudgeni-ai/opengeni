@@ -433,6 +433,16 @@ export class SiteDatabase {
   }
 
   async fetch(request: Request): Promise<Response> {
+    // Server-Timing for the API's round-trip measurement. Workers clocks
+    // advance only across I/O, so this mostly shows storage waits.
+    const started = Date.now();
+    const response = await this.handle(request);
+    const headers = new Headers(response.headers);
+    headers.append("Server-Timing", `db;dur=${Date.now() - started}`);
+    return new Response(response.body, { status: response.status, headers });
+  }
+
+  private async handle(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname.replace(/^\/+/u, "");
     if (request.method !== "POST") return errorResponse("not_found", "Unknown operation");
     const role = request.headers.get(SITE_DB_ROLE_HEADER);
