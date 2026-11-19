@@ -26,3 +26,11 @@ test("apply_patch `then` is on and its prompt sentence off by default; both swit
   expect(switched.experimentApplyPatchThen).toBe(false);
   expect(switched.experimentApplyPatchThenGuidance).toBe(true);
 });
+
+test("robust apply_patch is off by default and can be switched on", () => {
+  expect(getSettings({ OPENGENI_ENV: "test" }).experimentApplyPatchRobust).toBe(false);
+  expect(
+    getSettings({ OPENGENI_ENV: "test", OPENGENI_EXPERIMENT_APPLY_PATCH_ROBUST: "true" })
+      .experimentApplyPatchRobust,
+  ).toBe(true);
+});

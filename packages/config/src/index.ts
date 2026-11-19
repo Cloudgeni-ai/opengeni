@@ -1403,6 +1403,10 @@ const SettingsSchema = z.object({
   // One system-prompt sentence next to the apply_patch guidance that suggests
   // `then` for the check after an edit (off by default; for A/B evaluation).
   experimentApplyPatchThenGuidance: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_APPLY_PATCH_THEN_GUIDANCE
+  // Robust function `apply_patch`: an empty Add File section creates an empty
+  // file, and an Invalid Context failure shows the closest region of the file
+  // (and retries out-of-order hunks in file order). Off by default; A/B arm.
+  experimentApplyPatchRobust: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_APPLY_PATCH_ROBUST
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -6600,6 +6604,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     experimentApplyPatchThen: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_THEN"),
     experimentApplyPatchThenGuidance: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_THEN_GUIDANCE"),
+    experimentApplyPatchRobust: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_ROBUST"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),

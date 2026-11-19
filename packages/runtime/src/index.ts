@@ -739,6 +739,7 @@ import {
 } from "./retained-session-image";
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import { APPLY_PATCH_THEN_PARAMETER, linkApplyPatchThen } from "./apply-patch-then";
+import { linkApplyPatchRobust } from "./apply-patch-robust";
 import { APPLY_PATCH_THEN_GUIDANCE } from "./agent-instructions/modules/sandbox";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
@@ -6350,6 +6351,12 @@ function buildAgentCapabilitiesFromComposition(
   // `then` on the function apply_patch runs through the final exec_command
   // above, so this link is installed after every other tool wrapper.
   const shellCapability = caps.find((capability) => capability.type === "shell");
+  // Robust apply_patch sits just inside `then`, which strips `then` first.
+  if (settings.experimentApplyPatchRobust) {
+    linkApplyPatchRobust(
+      filesystemCapability as unknown as Parameters<typeof linkApplyPatchRobust>[0],
+    );
+  }
   if (settings.experimentApplyPatchThen && shellCapability) {
     linkApplyPatchThen(
       filesystemCapability as unknown as Parameters<typeof linkApplyPatchThen>[0],
