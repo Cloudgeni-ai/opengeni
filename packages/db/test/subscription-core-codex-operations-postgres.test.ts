@@ -579,7 +579,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
         {},
         lease,
       ),
-    ).toEqual({ applied: false, recovered: false });
+    ).toEqual({ applied: false, recovered: false, notApplied: "credential_changed" });
     expect(
       (
         await shared!
@@ -601,7 +601,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
         {},
         lease,
       ),
-    ).toEqual({ applied: false, recovered: false });
+    ).toEqual({ applied: false, recovered: false, notApplied: "not_visible" });
     expect(
       (
         await shared!
@@ -1091,7 +1091,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
         connectionId,
         observation(0, 99),
       ),
-    ).toEqual({ applied: false, recovered: false });
+    ).toEqual({ applied: false, recovered: false, notApplied: "credential_changed" });
     expect(
       await recordSubscriptionCoreCodexUsageObservation(
         client!.db,
@@ -1099,7 +1099,7 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
         connectionId,
         observation(1, 99),
       ),
-    ).toEqual({ applied: false, recovered: false });
+    ).toEqual({ applied: false, recovered: false, notApplied: "not_visible" });
     const [quota] = await shared!.admin<{ used: number }[]>`
       select (quota->'windows'->0->>'usedPercent')::int as used
       from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
