@@ -1183,8 +1183,8 @@ export async function acceptOrganizationInvitation(
       if (!row) throw new Error("Organization invitation acceptance returned no result");
       // Their Console role becomes the invitation's (none when it carried
       // none), in this transaction, once per invitation.
-      const subjectId = (row.result as { membership?: { subjectId?: unknown } } | null)
-        ?.membership?.subjectId;
+      const subjectId = (row.result as { membership?: { subjectId?: unknown } } | null)?.membership
+        ?.subjectId;
       if (typeof subjectId === "string" && subjectId.startsWith("user:")) {
         await applyInvitationConsoleRole(scopedDb, {
           accountId: input.organizationId,
@@ -1255,7 +1255,8 @@ export async function updateOrganizationMember(
           subjectId: member.subjectId,
           actorSubjectId: input.actorSubjectId,
           actorLabel: null,
-          reason: transition.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
+          reason:
+            transition.kind === "offboard" ? "member_offboarded" : "organization_role_changed",
         });
       }
       return member;

@@ -10,11 +10,7 @@
  * rows, and the API resolves a reader's role before every Console read. Every
  * change is written to the Console audit log in the same transaction.
  */
-import type {
-  ConsoleMemberRole,
-  ConsoleMemberRoleEntry,
-  Permission,
-} from "@opengeni/contracts";
+import type { ConsoleMemberRole, ConsoleMemberRoleEntry, Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { insertConsoleAuditEvent } from "./console";
 import { rawRows, withAccountRls, withWorkspaceRls, type Database } from "./database";

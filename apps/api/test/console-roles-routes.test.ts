@@ -791,7 +791,9 @@ describe("Console roles: authorization matrix", () => {
         if (reply.status === 401 || reply.status === 403 || reply.status === 404) {
           const after = await stateFingerprint(fixture.accountId);
           if (after !== before) {
-            failures.push(`${route} as ${caller}: refused, but changed ${changedTables(before, after)}`);
+            failures.push(
+              `${route} as ${caller}: refused, but changed ${changedTables(before, after)}`,
+            );
           }
         }
       }
@@ -939,12 +941,17 @@ describe("Console roles: reads, writes and lifecycle", () => {
     if (!fixture) return;
     const { accountId, people } = fixture;
     const invite = async (role: "member" | "admin") => {
-      const invited = await call("POST", `/v1/organizations/${accountId}/invitations`, people.owner.headers, {
-        email: `console-roles-${crypto.randomUUID()}@example.test`,
-        role,
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-        operationId: crypto.randomUUID(),
-      });
+      const invited = await call(
+        "POST",
+        `/v1/organizations/${accountId}/invitations`,
+        people.owner.headers,
+        {
+          email: `console-roles-${crypto.randomUUID()}@example.test`,
+          role,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          operationId: crypto.randomUUID(),
+        },
+      );
       expect(invited.status).toBe(201);
       return invited.body.id as string;
     };
@@ -1239,12 +1246,9 @@ describe("Console roles: the Console test workspace", () => {
     ).toHaveLength(1);
     // A membership left behind starts no chat there, with or without an agent.
     await leaveMembershipBehind(probe.subjectId);
-    const leftover = await call(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions`,
-      probe.headers,
-      { initialMessage: "hi" },
-    );
+    const leftover = await call("POST", `/v1/workspaces/${workspaceId}/sessions`, probe.headers, {
+      initialMessage: "hi",
+    });
     expect({ status: leftover.status, refused: refusedForRole(leftover) }).toEqual({
       status: 403,
       refused: true,
