@@ -1265,10 +1265,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
     const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile).filter(
       (scope) => !(scope === "openid" && stableAccountSubjectKeyFor(state.mcpUrl)),
     );
-    if (
-      profile?.fullRequestedScopesRequired &&
-      profile.requestedScopes?.some((scope) => !scopes.includes(scope))
-    ) {
+    if (profile && missingRequiredScopes(profile, state.authorizeScopes, scopes).length > 0) {
       throw new OAuthCallbackStageError(
         "token_exchange",
         "insufficient_scope",
@@ -4566,6 +4563,29 @@ function chooseProfileAuthorizeScopes(
   return input.authorizationServerScopesSupported?.includes("offline_access")
     ? uniqueStrings([...scopes, "offline_access"])
     : scopes;
+}
+
+/**
+ * Scopes a full-grant profile asked for that the provider left out: its fixed
+ * list, plus any added access this sign-in asked for (a step-up). A person
+ * who unticks the added access on the consent page gets a failed attempt
+ * with the account unchanged, not an "allowed" that still can't act.
+ */
+export function missingRequiredScopes(
+  profile: Pick<
+    OAuthProviderProfile,
+    "fullRequestedScopesRequired" | "requestedScopes" | "incrementalScopes"
+  >,
+  asked: readonly string[],
+  granted: readonly string[],
+): string[] {
+  if (!profile.fullRequestedScopesRequired) return [];
+  const incremental = new Set(profile.incrementalScopes ?? []);
+  const required = uniqueStrings([
+    ...(profile.requestedScopes ?? []),
+    ...asked.filter((scope) => incremental.has(scope)),
+  ]);
+  return required.filter((scope) => !granted.includes(scope));
 }
 
 function grantedScopes(

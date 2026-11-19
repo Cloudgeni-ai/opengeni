@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing/settings";
 import { GMAIL_REST_MCP_TOOLS } from "@opengeni/runtime";
-import { gmailOAuthClientConfigured } from "../src/integrations/oauth-client";
+import {
+  gmailOAuthClientConfigured,
+  missingRequiredScopes,
+} from "../src/integrations/oauth-client";
 import {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
@@ -160,5 +163,16 @@ describe("Gmail REST OAuth profile", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  test("a step-up whose added access was unticked on Google's page is not a grant", () => {
+    const read = "https://www.googleapis.com/auth/gmail.readonly";
+    const modify = "https://www.googleapis.com/auth/gmail.modify";
+    const compose = "https://www.googleapis.com/auth/gmail.compose";
+    expect(missingRequiredScopes(profile, [read, modify], [read])).toEqual([modify]);
+    expect(missingRequiredScopes(profile, [read, modify], [read, modify])).toEqual([]);
+    // Added access this sign-in didn't ask for is not required.
+    expect(missingRequiredScopes(profile, [read], [read])).toEqual([]);
+    expect(missingRequiredScopes(profile, [read, compose], [])).toEqual([read, compose]);
   });
 });

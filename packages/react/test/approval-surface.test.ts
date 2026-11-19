@@ -796,6 +796,124 @@ describe("ApprovalSurface: an action whose account lacks access", () => {
     );
   });
 
+  test("pressing Approve again while the provider's window is open asks again", async () => {
+    const signals: AbortSignal[] = [];
+    const second = deferred<boolean>();
+    const approved: string[] = [];
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: (_access, _approval, abort) => {
+          signals.push(abort);
+          if (signals.length === 2) return second.promise;
+          // The first window was closed: it never answers on its own.
+          return new Promise<boolean>((_resolve, reject) =>
+            abort.addEventListener("abort", () => reject(abort.reason)),
+          );
+        },
+        onApprove: async (value) => {
+          approved.push(value.id);
+        },
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(approveButton()?.hasAttribute("disabled")).toBe(false);
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(signals).toHaveLength(2);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals[1]!.aborted).toBe(false);
+    second.resolve(true);
+    await settle();
+    expect(approved).toEqual([approval.id]);
+  });
+
+  test("leaving the chat stops waiting for the provider's window", async () => {
+    let signal: AbortSignal | undefined;
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [approval],
+        loadReview: async () => ({ ...savedReview(), accessNeeded }),
+        onAllowAccess: (_access, _approval, abort) => {
+          signal = abort;
+          return new Promise<boolean>(() => undefined);
+        },
+        onApprove: noDecision,
+        onReject: noDecision,
+      }),
+    );
+    await settle();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    expect(signal?.aborted).toBe(false);
+    const current = mounted;
+    mounted = null;
+    await current.unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test("one consent covers the account's other waiting actions", async () => {
+    const allowed: string[] = [];
+    const approved: string[] = [];
+    const items = ["a", "b", "c"].map((id) => ({ ...approval, id, arguments: { projectId: id } }));
+    const loadReview = async (value: PendingApproval) => ({
+      ...savedReview(),
+      id: value.id,
+      ...(value.id === "c" ? {} : { accessNeeded }),
+    });
+    const onAllowAccess = async (access: { connectionId: string }) => {
+      allowed.push(access.connectionId);
+      return true;
+    };
+    const onApprove = async (value: PendingApproval) => {
+      approved.push(value.id);
+    };
+    const surface = (approvals: PendingApproval[]) =>
+      createElement(ApprovalSurface, {
+        approvals,
+        loadReview,
+        onAllowAccess,
+        onApprove,
+        onReject: noDecision,
+      });
+    mounted = await renderComponent(surface(items));
+    await settle();
+    const allButton = () =>
+      [...mounted!.container.querySelectorAll("button")].find((button) =>
+        /^Approve all/.test(button.textContent ?? ""),
+      );
+    // Only "c" can be approved without asking Google, so there is no "all".
+    expect(allButton()).toBeUndefined();
+    await act(async () => {
+      approveButton()!.click();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(allowed).toEqual(["conn-1"]);
+    expect(approved).toEqual(["a"]);
+    // The host stops listing the approved action.
+    await mounted.rerender(surface(items.slice(1)));
+    await settle();
+    // "b" no longer asks: it joins approve all, and Google isn't asked again.
+    expect(allButton()?.textContent).toBe("Approve all 2");
+    await act(async () => {
+      allButton()!.click();
+    });
+    await settle();
+    expect(allowed).toEqual(["conn-1"]);
+    expect(approved).toEqual(["a", "b", "c"]);
+  });
+
   test("approve all leaves it out, so its access is asked on its own card", async () => {
     const approved: string[] = [];
     const items = ["a", "b", "c"].map((id) => ({ ...approval, id, arguments: { projectId: id } }));

@@ -64,8 +64,6 @@ const MUTATION_TOOLS = new Set([
 ]);
 /** Tools whose review composes the email, which needs the tool's own access. */
 const GMAIL_COMPOSE_REVIEW_TOOLS = ["send_draft", "send_message", "create_draft", "update_draft"];
-/** Read tools whose access builds that preview when the tool's own is missing. */
-const GMAIL_REVIEW_READ_TOOLS = ["get_message", "get_draft"];
 /**
  * The account was connected with less access than this tool needs. The person
  * is asked in the chat to allow more, through the same connect card.
@@ -550,13 +548,14 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     }
     // The email being approved must be shown. It is read with the account's
     // read access; without that the review is refused and access asked first.
-    if (
-      GMAIL_COMPOSE_REVIEW_TOOLS.includes(toolName) &&
-      !GMAIL_REVIEW_READ_TOOLS.every((tool) =>
-        gmailToolSupportsScopes(tool, account.grantedScopes ?? []),
-      )
-    )
-      await this.checkToolGrant(toolName, account);
+    const canRead = (tool: string) => gmailToolSupportsScopes(tool, account.grantedScopes ?? []);
+    if (GMAIL_COMPOSE_REVIEW_TOOLS.includes(toolName)) {
+      if (!canRead(toolName === "send_draft" ? "get_draft" : "get_message"))
+        await this.checkToolGrant(toolName, account);
+    } else if (!canRead("get_message")) {
+      // Message samples only enrich the card; without read access it lists ids.
+      return { accessNeeded };
+    }
     return { ...(await this.reviewFacts(toolName, args, true)), accessNeeded };
   }
 

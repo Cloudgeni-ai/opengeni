@@ -725,6 +725,15 @@ describe("Gmail REST MCP adapter", () => {
       gmail.reviewContext("send_draft", { draftId: "draft-1", expectedContentSha256: "0" }),
     ).rejects.toThrow("Gmail has not been given access for this action yet.");
     expect(requests).toEqual([]);
+    // Organizing mail only labels the selection with read access: without
+    // it the review still offers the step-up, listing the messages by id.
+    const review = await gmail.reviewContext("batch_modify_messages", {
+      messageIds: ["m-1"],
+      removeLabelIds: ["UNREAD"],
+    });
+    expect(review.accessNeeded?.scopes).toEqual(["https://www.googleapis.com/auth/gmail.modify"]);
+    expect(review.samples).toBeUndefined();
+    expect(requests).toEqual([]);
   });
 
   test("never replays send_message or send_draft after a provider 401", async () => {

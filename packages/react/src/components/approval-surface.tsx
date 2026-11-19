@@ -150,6 +150,19 @@ function reviewOutcome(
 }
 
 /**
+ * Whether access a review asked for was since allowed on the same account. A
+ * review is read once, so after the first consent the other waiting actions
+ * on that account no longer ask the provider again.
+ */
+export function accessAlreadyAllowed(
+  access: ToolReviewAccessNeeded,
+  allowed: Readonly<Record<string, readonly string[]>>,
+): boolean {
+  const scopes = allowed[access.connectionId];
+  return scopes !== undefined && access.scopes.every((scope) => scopes.includes(scope));
+}
+
+/**
  * Which bulk decisions include an approval: exactly the buttons its own card
  * offers without asking for anything more. `outcome` is undefined while its
  * review is still being read, which includes it in neither.
@@ -157,6 +170,8 @@ function reviewOutcome(
 export function bulkApprovalDecisions(
   approval: PendingApproval,
   review: { loader: boolean; outcome?: ReviewOutcome | undefined },
+  /** Access the person already allowed here since the review was read. */
+  accessAllowed: (access: ToolReviewAccessNeeded) => boolean = () => false,
 ): { approve: boolean; reject: boolean } {
   // A server's question is answered on its own card; it can only be declined in bulk.
   if (approval.elicitation) return { approve: false, reject: true };
@@ -170,7 +185,9 @@ export function bulkApprovalDecisions(
   if (saved.status !== "pending") return { approve: false, reject: false };
   return {
     // Access its account lacks is asked for on the action's own card.
-    approve: saved.availableActions.includes("approve") && !saved.accessNeeded,
+    approve:
+      saved.availableActions.includes("approve") &&
+      (!saved.accessNeeded || accessAllowed(saved.accessNeeded)),
     reject: saved.availableActions.includes("reject"),
   };
 }
@@ -206,6 +223,10 @@ export function ApprovalSurface({
   const pendingRef = useRef<string | null>(null);
   /** The open consent wait, which a new decision on the same action ends. */
   const consentRef = useRef<{ id: string; controller: AbortController } | null>(null);
+  /** Scopes allowed here per account, so one consent covers every waiting action. */
+  const [allowedAccess, setAllowedAccess] = useState<Record<string, readonly string[]>>({});
+  const accessAllowed = (access: ToolReviewAccessNeeded) =>
+    accessAlreadyAllowed(access, allowedAccess);
   const [decisionError, setDecisionError] = useState<{ cause: unknown } | null>(null);
   const [localSelectedId, setLocalSelectedId] = useState<string | null>(null);
   const selectedId = selectedApprovalId === undefined ? localSelectedId : selectedApprovalId;
@@ -412,7 +433,10 @@ export function ApprovalSurface({
     }
     if (pendingRef.current) return;
     pendingRef.current = approval.id;
-    const consentFirst = decision === "approve" && access && onAllowAccess ? access : undefined;
+    const consentFirst =
+      decision === "approve" && access && onAllowAccess && !accessAllowed(access.needed)
+        ? access
+        : undefined;
     const consent = consentFirst
       ? { id: approval.id, controller: new AbortController() }
       : undefined;
@@ -437,6 +461,13 @@ export function ApprovalSurface({
           }
           return;
         }
+        const granted = consentFirst.needed;
+        setAllowedAccess((current) => ({
+          ...current,
+          [granted.connectionId]: [
+            ...new Set([...(current[granted.connectionId] ?? []), ...granted.scopes]),
+          ],
+        }));
         setPending({ id: approval.id, decision });
       }
       await (decision === "approve"
@@ -465,10 +496,11 @@ export function ApprovalSurface({
       read && read.loader === loadReview && dequal(read.approval, approval)
         ? read.outcome
         : undefined;
-    const decisions = bulkApprovalDecisions(approval, {
-      loader: Boolean(loadReview),
-      outcome,
-    });
+    const decisions = bulkApprovalDecisions(
+      approval,
+      { loader: Boolean(loadReview), outcome },
+      accessAllowed,
+    );
     if (decisions.approve) bulkEligible.approve.push(approval);
     if (decisions.reject) bulkEligible.reject.push(approval);
   }
@@ -657,6 +689,7 @@ export function ApprovalSurface({
             submitting={pending?.id === approval.id ? pending.decision : decidedBy(approval)}
             consentPending={pending?.id === approval.id ? pending.consent : undefined}
             allowsAccess={Boolean(onAllowAccess)}
+            accessAllowed={accessAllowed}
             disabled={
               // Waiting on the provider's window leaves this card's own
               // buttons pressable, so the person can stop that wait.
@@ -719,6 +752,7 @@ function ApprovalRequest({
   onAnswer,
   consentPending,
   allowsAccess,
+  accessAllowed,
   ...actions
 }: {
   approval: PendingApproval;
@@ -732,6 +766,8 @@ function ApprovalRequest({
   consentPending: string | undefined;
   /** Approving can ask the provider for access the account lacks. */
   allowsAccess: boolean;
+  /** Access already allowed here, which this card no longer asks for. */
+  accessAllowed: (access: ToolReviewAccessNeeded) => boolean;
   disabled: boolean;
   onApprove: (access?: { needed: ToolReviewAccessNeeded; consent: string }) => void;
   onAnswer: (content: McpElicitationContent) => void;
@@ -974,9 +1010,10 @@ function ApprovalRequest({
     );
   const saved = loaded ?? fallback;
   const review = answer ? { ...saved, approveLabel: answer.approve } : saved;
-  const access = review.accessNeeded
-    ? { needed: review.accessNeeded, ...accessNeededWording(t, review.accessNeeded) }
-    : undefined;
+  const access =
+    review.accessNeeded && !accessAllowed(review.accessNeeded)
+      ? { needed: review.accessNeeded, ...accessNeededWording(t, review.accessNeeded) }
+      : undefined;
   if (detailPath !== null)
     return (
       <ToolActionReviewDetails

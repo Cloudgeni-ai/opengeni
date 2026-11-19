@@ -67,6 +67,19 @@ test("a single oversized fact links to complete review rather than truncating or
   expect(JSON.stringify(slackToolReviewBlocks(oversized, true))).not.toContain("x".repeat(2801));
 });
 
+test("an action whose account still needs access is approved in the chat, not in Slack", () => {
+  const needsAccess: ToolActionReview = {
+    ...review,
+    accessNeeded: {
+      providerDomain: "gmail.googleapis.com",
+      connectionId: "synthetic-connection",
+      scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+    },
+  };
+  expect(slackToolReviewCanDecide(review)).toBe(true);
+  expect(slackToolReviewCanDecide(needsAccess)).toBe(false);
+});
+
 test("only a server's confirmation is answerable in Slack; a form is answered in Opengeni", () => {
   const confirm = slackServerQuestion({
     server: "Docs",
