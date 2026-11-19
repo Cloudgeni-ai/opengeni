@@ -49,7 +49,9 @@ const appContext = () => ({
   handleManagedSignOut: mock(async () => undefined),
 });
 // The Radix dialog is a portal; this inline stand-in keeps its contract.
+const ConfirmDialogModule = await import("@opengeni/react/ui/confirm-dialog");
 mock.module("@opengeni/react/ui/confirm-dialog", () => ({
+  ...ConfirmDialogModule,
   ConfirmDialog: ({
     open,
     title,

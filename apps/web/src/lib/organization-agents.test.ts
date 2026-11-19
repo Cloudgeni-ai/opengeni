@@ -183,7 +183,7 @@ describe("overrides", () => {
 
 describe("labels", () => {
   test("keys, sources and hashes", () => {
-    expect(agentKeyFromName("Støtte  Desk!")).toBe("stotte-desk");
+    expect(agentKeyFromName("Café  Desk!")).toBe("cafe-desk");
     expect(versionSourceLabel("inline")).toBe("Chat");
     expect(versionSourceLabel("deploy")).toBe("Deploy");
     expect(shortConfigHash(`sha256:${"a".repeat(64)}`)).toBe("a".repeat(12));
