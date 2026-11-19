@@ -366,15 +366,22 @@ describe("organization agent tool server logins", () => {
     expect(removed.byId.has("open")).toBe(true);
     expect(JSON.stringify(removed.published)).not.toMatch(/secret|stored-key/);
 
-    // Added to the workspace by an access row: the secrets run again.
+    // Added to the workspace by an access row: the shared key runs again
+    // (stored logins live only in managed workspaces and went with the marker).
     await shared.admin`insert into agent_workspace_access (agent_id, account_id, workspace_id)
       values (${f.agentId}, ${f.accountId}, ${f.workspaceId})`;
     const granted = await resolve();
-    expect(granted.byId.get("stored")).toEqual({ "X-Api-Key": "stored-key" });
     expect(granted.byId.get("team")).toEqual({ "X-Team-Key": "team-secret" });
-    expect(granted.unavailable).toEqual([]);
+    expect(granted.unavailable).toEqual([cutOff[0]]);
 
-    // Archived: cut off although it still reaches the workspace.
+    // Managed again with a stored login, then archived: cut off although it
+    // still reaches the workspace and the login is still stored.
+    await shared.admin`insert into organization_managed_workspaces (account_id, workspace_id, source)
+      values (${f.accountId}, ${f.workspaceId}, 'console')`;
+    await f.storeLogin("stored", { kind: "headers", headers: { "X-Api-Key": "stored-key" } }, null);
+    const restored = await resolve();
+    expect(restored.byId.get("stored")).toEqual({ "X-Api-Key": "stored-key" });
+    expect(restored.unavailable).toEqual([]);
     await shared.admin`update agents set archived_at = now() where id = ${f.agentId}`;
     const archived = await resolve();
     expect(archived.byId.has("stored")).toBe(false);
