@@ -19,8 +19,10 @@ import {
 import { rawRows } from "../src/database";
 
 const TABLES = [
+  "site_data_changes",
   "site_data_collections",
   "site_data_files",
+  "site_data_insert_keys",
   "site_data_rate_windows",
   "site_data_record_values",
   "site_data_records",

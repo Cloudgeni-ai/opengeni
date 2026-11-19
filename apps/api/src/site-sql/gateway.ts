@@ -86,7 +86,19 @@ export function signSiteDbRequest(
   body: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): { url: string; headers: Record<string, string> } {
-  const path = siteDbInternalPath(siteId, operation);
+  return signGatewayInternalRequest(config, siteDbInternalPath(siteId, operation), body, nowSeconds);
+}
+
+/**
+ * Sign one API -> gateway internal POST to `path` (Site database and live
+ * hint routes alike): no viewer fields, the gateway's host, the body digest.
+ */
+export function signGatewayInternalRequest(
+  config: Pick<SiteSqlGatewayConfig, "origin" | "secret">,
+  path: string,
+  body: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): { url: string; headers: Record<string, string> } {
   const url = new URL(path, config.origin);
   const canonical = siteGatewayCanonicalString({
     method: "POST",

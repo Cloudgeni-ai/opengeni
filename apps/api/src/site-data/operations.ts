@@ -42,6 +42,7 @@ import {
   type SiteDataValidationMeter,
 } from "./service";
 import { errorMessage } from "@opengeni/contracts/values";
+import { SITE_LIVE_TTL_SECONDS } from "@opengeni/contracts";
 
 /** Shared Site Data operations for HTTP routes, the Site bridge and agent tools. */
 
@@ -265,6 +266,20 @@ export async function resetSiteDataCollection(
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   await consume(access, "write", 1);
   return access.store.resetCollection(access.caller, name);
+}
+
+/**
+ * Mark the Site watched by a live connection and return its change number
+ * and the collections this caller may read (live hints name only those).
+ */
+export async function watchSiteData(
+  deps: SiteDataDeps,
+  grant: SiteDataAuthority,
+  siteId: string,
+  surface: SiteDataSurface = {},
+): Promise<{ seq: number; collections: string[] }> {
+  const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  return access.store.watch(access.caller, SITE_LIVE_TTL_SECONDS);
 }
 
 export async function querySiteData(
@@ -509,7 +524,11 @@ export async function importSiteData(
     // Each batch is atomic; a failure reports how many records were imported.
     for (let start = 0; start < operations.length; start += SITE_DATA_MAX_BATCH) {
       await access.store
-        .write(access.caller, operations.slice(start, start + SITE_DATA_MAX_BATCH), options)
+        .write(access.caller, operations.slice(start, start + SITE_DATA_MAX_BATCH), {
+          ...options,
+          // One coarse change event per batch, without record ids.
+          changeKind: "import",
+        })
         .catch(failed);
       imported.count += Math.min(SITE_DATA_MAX_BATCH, operations.length - start);
     }

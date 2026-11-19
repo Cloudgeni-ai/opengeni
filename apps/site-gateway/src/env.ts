@@ -45,6 +45,13 @@ export interface GatewayEnv {
    * database route answers 404; see `src/site-db.ts`.
    */
   SITE_DB?: unknown;
+  /**
+   * Optional live change hints: the `SiteLive` Durable Object namespace
+   * (`idFromName(siteId)`). Without it `/_og/live` and the internal notice
+   * route answer 404 and pages keep their fallback checks; see
+   * `src/site-live.ts`.
+   */
+  SITE_LIVE?: unknown;
 }
 
 export type WaitUntil = { waitUntil(promise: Promise<unknown>): void };

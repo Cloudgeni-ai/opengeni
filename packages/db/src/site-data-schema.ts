@@ -7,6 +7,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -164,9 +165,60 @@ export const siteDataUsage = pgTable(
     fileCount: integer("file_count").notNull().default(0),
     fileBytes: bigint("file_bytes", { mode: "number" }).notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // 1502_site_data_change_events: per-Site change counter and live listener lease.
+    changeSeq: bigint("change_seq", { mode: "number" }).notNull().default(0),
+    liveUntil: timestamp("live_until", { withTimezone: true }),
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.siteId] }),
+  }),
+);
+
+/** 1502: outbox of Site Data change facts, written only while a Site has a live listener. */
+export const siteDataChanges = pgTable(
+  "site_data_changes",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    changeSeq: bigint("change_seq", { mode: "number" }).notNull(),
+    kind: text("kind").$type<"write" | "import" | "reset" | "collection" | "files">().notNull(),
+    collections: jsonb("collections").$type<string[]>().notNull().default([]),
+    opCounts: jsonb("op_counts").$type<Record<string, number>>().notNull().default({}),
+    recordIds: jsonb("record_ids").$type<string[]>().notNull().default([]),
+    truncated: boolean("truncated").notNull().default(false),
+    actorKind: text("actor_kind").notNull(),
+    chainDepth: smallint("chain_depth").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.siteId, table.changeSeq] }),
+  }),
+);
+
+/** 1502: the record a keyed insert created, so a retried insert returns it. */
+export const siteDataInsertKeys = pgTable(
+  "site_data_insert_keys",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    collectionId: uuid("collection_id").notNull(),
+    principal: text("principal").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    recordId: uuid("record_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.workspaceId, table.collectionId, table.principal, table.idempotencyKey],
+    }),
+    siteCreated: index("site_data_insert_keys_site_created_idx").on(
+      table.workspaceId,
+      table.siteId,
+      table.createdAt,
+    ),
+    record: index("site_data_insert_keys_record_idx").on(table.workspaceId, table.recordId),
   }),
 );
 

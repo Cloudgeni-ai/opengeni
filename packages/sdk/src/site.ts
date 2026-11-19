@@ -246,7 +246,17 @@ export type OpenGeniSiteBridgeReadyMessage = {
   location?: 1;
   /** The host answers the `readiness` bridge method and posts `tool_readiness` events. */
   toolReadiness?: 1;
+  /** The host posts `data_changed` events when the Site's data changes (live hints). */
+  dataChanges?: 1;
 };
+
+/**
+ * A hint that the Site's data changed: the collections that changed (the
+ * pseudo-collection `$files` for files), or null for "anything may have
+ * changed" (after a reconnect). `seq` is the Site's change number when
+ * known. Hints carry no records: read the data again with your usual calls.
+ */
+export type OpenGeniSiteDataChange = { collections: string[] | null; seq: number | null };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
 export type OpenGeniSiteToolCallRequest = Omit<
@@ -294,7 +304,11 @@ export type OpenGeniSiteBridgeRequestMessage = {
 export type OpenGeniSiteBridgeEventMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_EVENT;
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
-} & ({ event: "location"; location: OpenGeniSiteLocationValue } | { event: "tool_readiness" });
+} & (
+  | { event: "location"; location: OpenGeniSiteLocationValue }
+  | { event: "tool_readiness" }
+  | ({ event: "data_changed" } & OpenGeniSiteDataChange)
+);
 
 export type OpenGeniSiteBridgeCancelMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_CANCEL;
@@ -458,6 +472,7 @@ export function createOpenGeniSiteClient(
   const siteData = createOpenGeniSiteData(
     (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
     () => transport.siteDataSupported(),
+    (listener) => transport.subscribeDataChanges(listener),
   );
   const siteSql = createOpenGeniSiteSql(
     (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
@@ -518,6 +533,7 @@ type SiteLocationTransport = {
   navigate(to: string, replace: boolean): Promise<OpenGeniSiteLocationValue>;
   subscribeLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void;
   subscribeToolReadiness(listener: () => void): () => void;
+  subscribeDataChanges(listener: (change: OpenGeniSiteDataChange) => void): () => void;
 };
 
 function readinessUnsupported(): OpenGeniSiteBridgeError {
@@ -619,6 +635,11 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport, SiteL
 
   /** A local preview has no Opengeni frame to change what the viewer can do. */
   subscribeToolReadiness(_listener: () => void): () => void {
+    return () => undefined;
+  }
+
+  /** A local preview has no published Site, so no data change hints. */
+  subscribeDataChanges(_listener: (change: OpenGeniSiteDataChange) => void): () => void {
     return () => undefined;
   }
 
@@ -821,8 +842,41 @@ export function isOpenGeniSiteBridgeEventMessage(
     value.type === OPENGENI_SITE_BRIDGE_EVENT &&
     value.version === OPENGENI_SITE_BRIDGE_VERSION &&
     ((value.event === "location" && openGeniSiteLocationValue(value.location) !== null) ||
-      value.event === "tool_readiness")
+      value.event === "tool_readiness" ||
+      (value.event === "data_changed" && isOpenGeniSiteDataChange(value)))
   );
+}
+
+/** A well-formed data change hint (bounded collection names, an optional change number). */
+export function isOpenGeniSiteDataChange(value: unknown): value is OpenGeniSiteDataChange {
+  if (!isRecord(value)) return false;
+  const { collections, seq } = value;
+  const validCollections =
+    collections === null ||
+    (Array.isArray(collections) &&
+      collections.length <= 200 &&
+      collections.every((name) => typeof name === "string" && name.length > 0 && name.length <= 64));
+  const validSeq = seq === null || (typeof seq === "number" && Number.isInteger(seq) && seq >= 0);
+  return validCollections && validSeq;
+}
+
+/** Call every data change listener, keeping one listener's failure from reaching the others. */
+function notifyDataChangeListeners(
+  listeners: ReadonlySet<(change: OpenGeniSiteDataChange) => void>,
+  change: OpenGeniSiteDataChange,
+): void {
+  for (const listener of [...listeners]) {
+    try {
+      listener({
+        collections: change.collections === null ? null : [...change.collections],
+        seq: change.seq,
+      });
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
+  }
 }
 
 export function isOpenGeniSiteBridgeCancelMessage(
@@ -869,8 +923,10 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
   private viewerSupported = false;
   private locationSupported = false;
   private toolReadiness = false;
+  private dataChanges = false;
   private readonly locationListeners = new Set<(location: OpenGeniSiteLocationValue) => void>();
   private readonly readinessListeners = new Set<() => void>();
+  private readonly dataChangeListeners = new Set<(change: OpenGeniSiteDataChange) => void>();
   private readonly options: OpenGeniSiteClientOptions;
   private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
@@ -993,6 +1049,21 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
     attempt(2);
     return () => {
       this.readinessListeners.delete(listener);
+    };
+  }
+
+  subscribeDataChanges(listener: (change: OpenGeniSiteDataChange) => void): () => void {
+    this.dataChangeListeners.add(listener);
+    // Connect so the host's events reach this client (see subscribeLocation).
+    const attempt = (retries: number): void => {
+      this.connect().catch(() => {
+        if (retries > 0 && !this.closed && this.dataChangeListeners.size > 0)
+          setTimeout(() => attempt(retries - 1), 1_000);
+      });
+    };
+    attempt(2);
+    return () => {
+      this.dataChangeListeners.delete(listener);
     };
   }
 
@@ -1197,7 +1268,8 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         this.viewerSupported = message.viewer === 1;
         this.locationSupported = message.location === 1;
         this.toolReadiness = message.toolReadiness === 1;
-        if (this.locationSupported || this.toolReadiness)
+        this.dataChanges = message.dataChanges === 1;
+        if (this.locationSupported || this.toolReadiness || this.dataChanges)
           channel.port1.addEventListener("message", (hostEvent: MessageEvent<unknown>) => {
             const data = hostEvent.data;
             if (!isOpenGeniSiteBridgeEventMessage(data)) return;
@@ -1207,6 +1279,12 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
                   this.locationListeners,
                   openGeniSiteLocationValue(data.location)!,
                 );
+            } else if (data.event === "data_changed") {
+              if (this.dataChanges)
+                notifyDataChangeListeners(this.dataChangeListeners, {
+                  collections: data.collections,
+                  seq: data.seq,
+                });
             } else if (this.toolReadiness) notifyReadinessListeners(this.readinessListeners);
           });
         this.port = channel.port1;
