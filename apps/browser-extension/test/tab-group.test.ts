@@ -317,6 +317,18 @@ describe("the controlled tabs' group", () => {
     expect(strip.groups.size).toBe(1);
   });
 
+  test("an active tab's group comes back open, so it stays the active tab", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const work = strip.userGroup(1, "Work");
+    strip.groups.get(work)!.collapsed = true;
+    strip.move(1, work);
+    strip.tabs.get(1)!.active = true;
+    const { indicator: tabs } = indicator(strip);
+    await tabs.show(1);
+    await tabs.releaseNow(1);
+    expect(strip.groupOf(1)).toMatchObject({ title: "Work", collapsed: false });
+  });
+
   test("a tab whose own group the person removed meanwhile is just ungrouped", async () => {
     const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
     const work = strip.userGroup(1, "Work");
@@ -483,6 +495,18 @@ describe("the controlled tabs' group", () => {
     expect(Object.keys(tabs.state().tabs)).toEqual(["1"]);
   });
 
+  test("control that ends before its start was handled still ends", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const { indicator: tabs, elapse } = indicator(strip);
+    void tabs.show(1);
+    void tabs.show(2);
+    tabs.release(2);
+    await tabs.settled();
+    await elapse();
+    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(strip.groupOf(2)).toBeNull();
+  });
+
   test("a group it cannot title is not left behind", async () => {
     const strip = new TabStrip([{ id: 1 }]);
     strip.failTitles = true;
@@ -529,6 +553,18 @@ describe("the controlled tabs' group", () => {
     });
     expect(strip.groupOf(1)?.title).toBe("Opengeni");
     expect(Object.keys(next.state().tabs)).toEqual(["1"]);
+  });
+
+  test("a tab detached while a new run checks the record leaves the group", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const saved: TabGroupState[] = [];
+    await indicator(strip, saved).indicator.show(1);
+    let reads = 0;
+    const next = indicator(strip).indicator;
+    // Controlled when the record is read, no longer right after.
+    await next.resume(saved.at(-1)!, () => (reads++ === 0 ? [1] : []));
+    expect(strip.groupOf(1)).toBeNull();
+    expect(next.state().tabs).toEqual({});
   });
 
   test("after an update or reload, tabs go back to the person's groups", async () => {

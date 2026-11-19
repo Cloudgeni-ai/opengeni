@@ -56,6 +56,7 @@ export type GroupedTab = {
   groupId: number;
   pinned: boolean;
   index: number;
+  active?: boolean;
 };
 
 export type TabGroupColor =
@@ -115,6 +116,8 @@ export class TabGroup {
   private readonly indicated = new Map<number, GroupedTabEntry>();
   private readonly declined = new Set<number>();
   private readonly releases = new Map<number, unknown>();
+  // Releases refused while the person dragged a tab, tried again later.
+  private readonly retries = new Map<number, unknown>();
   // Every change of the tab strip runs in order, so each one sees the last
   // one's result.
   private queue: Promise<void> = Promise.resolve();
@@ -134,9 +137,9 @@ export class TabGroup {
   show(tabId: number): Promise<void> {
     this.cancelRelease(tabId);
     return this.run(async () => {
-      // A release refused while the person dragged a tab may have been
-      // retried since.
-      this.cancelRelease(tabId);
+      // A release refused while the person dragged a tab may be waiting to
+      // be tried again.
+      this.cancelRetry(tabId);
       if (this.indicated.has(tabId) || this.declined.has(tabId)) return;
       const tab = await this.chrome.tabs.get(tabId).catch(() => null);
       if (!tab || tab.pinned) return;
@@ -207,7 +210,13 @@ export class TabGroup {
         if (dragging(error)) {
           // The person is still dragging a tab: try again later.
           this.indicated.set(tabId, entry);
-          this.release(tabId);
+          this.retries.set(
+            tabId,
+            this.schedule(() => {
+              this.retries.delete(tabId);
+              void this.releaseNow(tabId);
+            }, this.options.releaseDelayMs),
+          );
           return;
         }
         // Closed meanwhile.
@@ -267,10 +276,9 @@ export class TabGroup {
     recorded: TabGroupState | null | Promise<TabGroupState | null>,
     controlled: () => Iterable<number>,
   ): Promise<void> {
-    let live = new Set<number>();
     return this.run(async () => {
       const state = await Promise.resolve(recorded).catch(() => null);
-      live = new Set(controlled());
+      const live = new Set(controlled());
       let lost = false;
       for (const [tab, entry] of Object.entries(state?.tabs ?? {})) {
         const tabId = Number(tab);
@@ -285,8 +293,9 @@ export class TabGroup {
       if (lost) await this.dissolveLeftBehind();
       this.changed();
     }).then(async () => {
-      // Read again: a tab attached while the record was checked counts.
-      const now = new Set([...live, ...controlled()]);
+      // Read again: a tab attached or detached while the record was checked
+      // counts as it is now.
+      const now = new Set(controlled());
       const ended = [...this.indicated.keys()].filter((tabId) => !now.has(tabId));
       await Promise.all([
         ...ended.map((tabId) => this.releaseNow(tabId)),
@@ -362,8 +371,9 @@ export class TabGroup {
       const moved = await this.chrome.tabs.get(tabId);
       if (moved.groupId !== NO_GROUP) await this.edit(() => this.chrome.tabs.ungroup([tabId]));
     }
-    const look = entry.restoreGroup;
-    if (!look) return;
+    if (!entry.restoreGroup) return;
+    // Collapsing the group of the active tab would make another tab active.
+    const look = tab.active ? { ...entry.restoreGroup, collapsed: false } : entry.restoreGroup;
     const groupId = await this.edit(() =>
       this.chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } }),
     );
@@ -420,10 +430,18 @@ export class TabGroup {
   }
 
   private cancelRelease(tabId: number): void {
+    this.cancelRetry(tabId);
     const timer = this.releases.get(tabId);
     if (timer === undefined) return;
     this.cancel(timer);
     this.releases.delete(tabId);
+  }
+
+  private cancelRetry(tabId: number): void {
+    const timer = this.retries.get(tabId);
+    if (timer === undefined) return;
+    this.cancel(timer);
+    this.retries.delete(tabId);
   }
 
   private run(work: () => Promise<void>): Promise<void> {
