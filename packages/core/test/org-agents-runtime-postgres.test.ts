@@ -195,6 +195,42 @@ describe("session create with an organization agent", () => {
     expect(strict.payload["agentOverrides"]).toBeUndefined();
   }, 180_000);
 
+  test("Runs on: the version's placement, the request on top, recorded and refusable", async () => {
+    const org = await organization();
+    await org.agent("tools-only", [{ instructions: "Hi.", config: { runsOn: { kind: "none" } } }]);
+    const placed = await org.prepare({ initialMessage: "hi", agent: "tools-only" });
+    expect(placed.payload).toEqual({ initialMessage: "hi", sandboxBackend: "none", rigId: null });
+    expect(placed.binding.overrides).toBeNull();
+
+    // The same placement asked for again is no change.
+    const same = await org.prepare({ agent: "tools-only", sandboxBackend: "none" });
+    expect(same.binding.overrides).toBeNull();
+
+    // Code has the final say for one chat, recorded as a change.
+    const own = await org.prepare({ agent: "tools-only", sandboxBackend: "modal" });
+    expect(own.payload["sandboxBackend"]).toBe("modal");
+    expect(own.binding.overrides).toEqual({
+      runsOn: { agent: { kind: "none" }, chat: { sandboxBackend: "modal" } },
+    });
+    expect(
+      await refusal(
+        org.prepare({ agent: "tools-only", sandboxBackend: "modal", agentOverrides: "reject" }),
+      ),
+    ).toEqual({ status: 422, code: "agent_override_rejected" });
+
+    // A machine the organization doesn't have is refused when a chat starts.
+    await org.agent("on-box", [
+      { instructions: "Hi.", config: { runsOn: { kind: "machine", machine: "Gone box" } } },
+    ]);
+    expect(await refusal(org.prepare({ agent: "on-box" }))).toEqual({
+      status: 422,
+      code: "machine_not_found",
+    });
+    // Unless the chat picks its own computer.
+    const elsewhere = await org.prepare({ agent: "on-box", sandboxBackend: "none" });
+    expect(elsewhere.payload["sandboxBackend"]).toBe("none");
+  }, 180_000);
+
   test("drafts and explicit versions run only in the Console test workspace", async () => {
     const org = await organization();
     const agentId = await org.agent("support", [{ instructions: "v1" }, { instructions: "v2" }], {

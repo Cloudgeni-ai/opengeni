@@ -690,6 +690,18 @@ describe("Runs on: organization machines and environments only", () => {
     expect(
       await checkOrgAgentRunsOn(client.db, org.accountId, { kind: "sandbox", environment: "Nope" }),
     ).toMatchObject({ code: "environment_not_found" });
+    // A Personal (Only me) machine: the create path sees its scope and refuses
+    // it; saves never find it among the organization's.
+    const personalMachine = await organizationMachine(org, { scope: "user", name: "My laptop" });
+    expect(
+      (await getSandbox(client.db, access(org, org.home), personalMachine.sandboxId))?.scope,
+    ).toBe("user");
+    expect(listed.machines.map((entry) => entry.id)).not.toContain(personalMachine.enrollmentId);
+    for (const ref of ["My laptop", personalMachine.sandboxId, personalMachine.enrollmentId]) {
+      expect(
+        await checkOrgAgentRunsOn(client.db, org.accountId, { kind: "machine", machine: ref }),
+      ).toMatchObject({ code: "machine_not_found" });
+    }
 
     // Create, draft and deploy (also a dry run) refuse them.
     const actor = { subjectId: org.owner, label: "Owner" };
