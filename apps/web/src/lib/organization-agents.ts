@@ -458,19 +458,6 @@ export const NEW_TOOLS_OPTIONS: readonly { value: OrgAgentNewToolsPolicy; label:
   { value: "on_with_approval", label: "On, ask first" },
 ];
 
-/** Catalog to save with a draft: the live tool list of each server the agent uses. */
-export function catalogFromLive(
-  live: Readonly<Record<string, readonly OrgAgentToolCatalogEntry[]>>,
-  servers: readonly OrgAgentToolServerConfig[],
-): OrgAgentToolCatalog {
-  const catalog: OrgAgentToolCatalog = {};
-  for (const server of servers) {
-    const tools = live[server.server];
-    if (tools) catalog[server.server] = tools.map((tool) => ({ ...tool }));
-  }
-  return catalog;
-}
-
 /* --------------------------------------------------------------- overrides */
 
 export type OverrideEntry = {

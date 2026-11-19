@@ -97,6 +97,14 @@ const NAV: { group: string | null; items: NavEntry[] }[] = [
 ];
 
 /** The nav entry a path belongs to: its longest matching prefix. */
+/** Console's nav: Agents and Tool servers only for organizations with Console agents. */
+export function consoleNavSections(agentsOn: boolean) {
+  return NAV.map((section) => ({
+    ...section,
+    items: section.items.filter((item) => !item.orgAgents || agentsOn),
+  }));
+}
+
 export function consoleNavDestination(pathname: string): ConsoleDestination {
   const path = pathname.replace(/\/+$/u, "") || CONSOLE_PATH;
   let best: ConsoleDestination = "/console";
@@ -205,10 +213,7 @@ export function ConsoleShellRoute() {
 
   const active = consoleNavDestination(pathname);
   const agentsOn = orgAgentsEnabled(context.clientConfig, organization?.accountId ?? null);
-  const nav = NAV.map((section) => ({
-    ...section,
-    items: section.items.filter((item) => !item.orgAgents || agentsOn),
-  }));
+  const nav = consoleNavSections(agentsOn);
   const switchable = administered.length > 0 ? administered : orgs;
   const displayName =
     context.authSession?.user.name ||
