@@ -100040,7 +100040,10 @@ export async function appendSessionEventsWithLockedSessionUpdate(
                     eq(schema.sessionMcpServers.sessionId, sessionId),
                   ),
                 )
-                .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId))
+                .orderBy(
+                  asc(schema.sessionMcpServers.createdAt),
+                  asc(schema.sessionMcpServers.serverId),
+                )
             ).map((row) => ({
               id: row.serverId,
               name: row.name ?? null,

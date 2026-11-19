@@ -68,8 +68,7 @@ const agentsPath = (organizationId: string) =>
   `/v1/organizations/${segment(organizationId)}/agents`;
 const agentPath = (organizationId: string, agentId: string) =>
   `${agentsPath(organizationId)}/${segment(agentId)}`;
-const toolServersPath = (organizationId: string) =>
-  `${agentsPath(organizationId)}/tool-servers`;
+const toolServersPath = (organizationId: string) => `${agentsPath(organizationId)}/tool-servers`;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const credentialPath = (workspaceId: string, externalUserId: string, toolServerKey: string) =>
   `/v1/workspaces/${segment(workspaceId)}/end-users/${segment(externalUserId)}/tool-credentials/${segment(toolServerKey)}`;

@@ -175,14 +175,17 @@ describe("session create with an organization agent", () => {
     expect(await refusal(org.prepare({ agent: crypto.randomUUID() }))).toEqual(notFound);
     expect(await refusal(org.prepare({ agent: "Not A Key!" }))).toEqual(notFound);
     expect(await refusal(org.prepare({ agent: "old" }))).toEqual(notFound);
-    expect(await refusal(org.prepare({ agent: "support" }, { workspaceId: other }))).toEqual(notFound);
+    expect(await refusal(org.prepare({ agent: "support" }, { workspaceId: other }))).toEqual(
+      notFound,
+    );
     expect(await refusal(org.prepare({ agent: "draft" }))).toEqual({
       status: 409,
       code: "agent_not_published",
     });
-    expect(
-      await refusal(org.prepare({ agent: "support", agentId: crypto.randomUUID() })),
-    ).toEqual({ status: 422, code: "agent_ref_conflict" });
+    expect(await refusal(org.prepare({ agent: "support", agentId: crypto.randomUUID() }))).toEqual({
+      status: 422,
+      code: "agent_ref_conflict",
+    });
     // Strict mode: any change is refused; no change passes.
     expect(
       await refusal(org.prepare({ agent: "support", model: "other", agentOverrides: "reject" })),
@@ -194,19 +197,16 @@ describe("session create with an organization agent", () => {
 
   test("drafts and explicit versions run only in the Console test workspace", async () => {
     const org = await organization();
-    const agentId = await org.agent(
-      "support",
-      [{ instructions: "v1" }, { instructions: "v2" }],
-      { published: 1 },
-    );
+    const agentId = await org.agent("support", [{ instructions: "v1" }, { instructions: "v2" }], {
+      published: 1,
+    });
     await org.agent("draft", [{ instructions: "d1" }], { published: null });
     const testWorkspace = await org.workspace("console_test");
-    expect(
-      await refusal(org.prepare({ agent: { ref: "support", version: 2 } })),
-    ).toEqual({ status: 404, code: "agent_not_found" });
-    expect(
-      (await org.prepare({ agent: { ref: "support", version: 1 } })).binding.version,
-    ).toBe(1);
+    expect(await refusal(org.prepare({ agent: { ref: "support", version: 2 } }))).toEqual({
+      status: 404,
+      code: "agent_not_found",
+    });
+    expect((await org.prepare({ agent: { ref: "support", version: 1 } })).binding.version).toBe(1);
     expect(
       (await org.prepare({ agent: { ref: "support", version: 2 } }, { workspaceId: testWorkspace }))
         .binding,
@@ -238,7 +238,9 @@ describe("session create with an organization agent", () => {
     // The same config reuses the version, also for callers who may not write.
     const again = await org.prepare({ agent: { ref: "coder", config } });
     expect(again.binding).toEqual(first.binding);
-    const [stored] = await shared.admin<{ managed_by: string; published_revision: number | null }[]>`
+    const [stored] = await shared.admin<
+      { managed_by: string; published_revision: number | null }[]
+    >`
       select managed_by, published_revision from agents where id = ${first.binding.agentId}`;
     // Inline versions are never published.
     expect(stored).toEqual({ managed_by: "code", published_revision: null });
@@ -328,8 +330,7 @@ describe("publish move of one chat", () => {
           sessionId,
           agentId,
           to: { version: 2, config: OrgAgentVersionConfig.parse(v2), toolCatalog: {} },
-          fromConfig: async (version) =>
-            version === 1 ? OrgAgentVersionConfig.parse(v1) : null,
+          fromConfig: async (version) => (version === 1 ? OrgAgentVersionConfig.parse(v1) : null),
           toolServers,
         },
       );
@@ -340,7 +341,12 @@ describe("publish move of one chat", () => {
     // The next turn delivers the newer Instructions; the prompt version stays.
     expect(row).toEqual({ agent_version: 2, agent_prompt_version: 1, agent_overrides: overrides });
     const servers = await shared.admin<
-      { server_id: string; allowed_tools: string[] | null; require_approval: unknown; headers_encrypted: unknown }[]
+      {
+        server_id: string;
+        allowed_tools: string[] | null;
+        require_approval: unknown;
+        headers_encrypted: unknown;
+      }[]
     >`select server_id, allowed_tools, require_approval, headers_encrypted
       from session_mcp_servers where session_id = ${session.id} order by server_id`;
     expect(servers).toEqual([

@@ -73,7 +73,12 @@ async function fixture() {
     ["chatonly", "per_user", null, null],
     ["expired", "per_user", null, null],
     ["nologin", "per_user", null, null],
-    ["team", "shared_key", encryptEnvironmentValue(key, JSON.stringify({ "X-Team-Key": "team-secret" })), null],
+    [
+      "team",
+      "shared_key",
+      encryptEnvironmentValue(key, JSON.stringify({ "X-Team-Key": "team-secret" })),
+      null,
+    ],
     ["open", "none", null, null],
   ];
   for (const [serverKey, authMode, sharedHeaders, oauthRefresh] of seeds) {
@@ -116,7 +121,13 @@ const sessionServers = () => [
     url: url(id),
     cacheToolsList: false,
   })),
-  { id: "chatonly", name: "CHATONLY", url: url("chatonly"), cacheToolsList: false, headers: { "X-Chat": "chat-login" } },
+  {
+    id: "chatonly",
+    name: "CHATONLY",
+    url: url("chatonly"),
+    cacheToolsList: false,
+    headers: { "X-Chat": "chat-login" },
+  },
   // The chat replaced this agent server with its own URL: left alone.
   { id: "mine", url: "https://mine.example.com/mcp", cacheToolsList: false, headers: { k: "v" } },
 ];

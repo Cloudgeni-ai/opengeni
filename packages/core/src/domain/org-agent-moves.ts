@@ -37,9 +37,7 @@ export type OrgAgentMoveVersion = {
 };
 
 /** Whether a chat must not be moved now: a turn runs or it waits on a person. */
-export function orgAgentMoveDeferred(
-  session: Pick<Session, "status" | "activeTurnId">,
-): boolean {
+export function orgAgentMoveDeferred(session: Pick<Session, "status" | "activeTurnId">): boolean {
   return (
     session.activeTurnId != null ||
     session.status === "running" ||

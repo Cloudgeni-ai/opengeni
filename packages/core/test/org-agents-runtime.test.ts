@@ -70,7 +70,9 @@ async function plan(
     request,
     config: OrgAgentVersionConfig.parse(options.config ?? VERSION),
     toolCatalog: CATALOG,
-    toolServers: new Map((options.toolServers ?? [CRM, DOCS]).map((server) => [server.key, server])),
+    toolServers: new Map(
+      (options.toolServers ?? [CRM, DOCS]).map((server) => [server.key, server]),
+    ),
     liveTools: async (server) => {
       listed.push(server.key);
       const live = options.live ?? LIVE;
@@ -137,7 +139,10 @@ describe("organization agent session create plan", () => {
     ]);
     expect(result.overrides?.["model"]).toEqual({ agent: "gpt-5", chat: "claude-x" });
     // Extra instructions are added after the agent's, never replacing them.
-    expect(result.overrides?.["instructions"]).toEqual({ agent: null, chat: "Answer in Norwegian." });
+    expect(result.overrides?.["instructions"]).toEqual({
+      agent: null,
+      chat: "Answer in Norwegian.",
+    });
     expect(result.overrides?.["toolServers.crm"]?.chat).toEqual({ disableTools: ["update"] });
     expect(result.overrides?.["toolServers.docs"]?.chat).toEqual({ enabled: false });
     expect(result.payload["model"]).toBe("claude-x");
@@ -197,7 +202,11 @@ describe("organization agent session create plan", () => {
     const result = await plan({
       ref: "support",
       toolServers: [
-        { server: "crm", tools: { mode: "selected", enabled: ["delete"] }, approval: { ask: true } },
+        {
+          server: "crm",
+          tools: { mode: "selected", enabled: ["delete"] },
+          approval: { ask: true },
+        },
         { server: "docs", disableTools: ["drop"], eager: ["read"] },
       ],
     });
@@ -206,7 +215,10 @@ describe("organization agent session create plan", () => {
     // "all" with a disabled tool needs the server's tool list.
     expect(docs).toMatchObject({ allowedTools: ["read"], eager: ["read"] });
     expect(result.listed.sort()).toEqual(["crm", "docs"]);
-    expect(Object.keys(result.overrides ?? {}).sort()).toEqual(["toolServers.crm", "toolServers.docs"]);
+    expect(Object.keys(result.overrides ?? {}).sort()).toEqual([
+      "toolServers.crm",
+      "toolServers.docs",
+    ]);
   });
 
   test("newTools off, an unlisted server and a deleted tool server", async () => {
@@ -226,10 +238,9 @@ describe("organization agent session create plan", () => {
     expect(result.payload["agent"]).toBeUndefined();
     // A server that cannot be listed gets only the version's tools.
     const unlisted = await plan("support", {}, { live: { crm: null } });
-    expect((unlisted.payload["mcpServers"] as { allowedTools?: string[] }[])[0]?.allowedTools).toEqual([
-      "lookup",
-      "update",
-    ]);
+    expect(
+      (unlisted.payload["mcpServers"] as { allowedTools?: string[] }[])[0]?.allowedTools,
+    ).toEqual(["lookup", "update"]);
   });
 });
 
@@ -246,7 +257,12 @@ describe("tool server materialization", () => {
       catalogNames: ["lookup", "delete"],
       liveNames: ["lookup", "delete", "export"],
     });
-    expect(server).toEqual({ id: "crm", name: "CRM", url: CRM.url, allowedTools: ["lookup", "export"] });
+    expect(server).toEqual({
+      id: "crm",
+      name: "CRM",
+      url: CRM.url,
+      allowedTools: ["lookup", "export"],
+    });
   });
 
   test("without a catalog no tool counts as new", () => {
@@ -265,7 +281,9 @@ describe("tool server materialization", () => {
   });
 
   test("built-ins merge per capability", () => {
-    expect(mergeOrgAgentCapabilities({ from: "all", webSearch: false }, { from: "all", media: false })).toEqual({
+    expect(
+      mergeOrgAgentCapabilities({ from: "all", webSearch: false }, { from: "all", media: false }),
+    ).toEqual({
       from: "all",
       webSearch: false,
       media: false,
@@ -302,11 +320,15 @@ describe("config hash and logins", () => {
   });
 
   test("stored logins become request headers", () => {
-    expect(endUserLoginHeaders(JSON.stringify({ kind: "headers", headers: { "X-Key": "k", n: 1 } }))).toEqual({
+    expect(
+      endUserLoginHeaders(JSON.stringify({ kind: "headers", headers: { "X-Key": "k", n: 1 } })),
+    ).toEqual({
       "X-Key": "k",
     });
     expect(
-      endUserLoginHeaders(JSON.stringify({ kind: "oauth", accessToken: "tok", tokenType: "bearer" })),
+      endUserLoginHeaders(
+        JSON.stringify({ kind: "oauth", accessToken: "tok", tokenType: "bearer" }),
+      ),
     ).toEqual({ Authorization: "Bearer tok" });
     expect(endUserLoginHeaders(JSON.stringify({ kind: "oauth", accessToken: "tok" }))).toEqual({
       Authorization: "Bearer tok",
@@ -377,7 +399,9 @@ describe("publish move plan", () => {
       allowedTools: null,
       headersEncrypted: {},
     });
-    expect(result.servers.find((server) => server.id === "mine")?.headersEncrypted).toEqual({ k: "v" });
+    expect(result.servers.find((server) => server.id === "mine")?.headersEncrypted).toEqual({
+      k: "v",
+    });
     expect(result.tools).toEqual([
       { kind: "mcp", id: "crm" },
       { kind: "mcp", id: "mine" },

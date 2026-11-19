@@ -275,7 +275,11 @@ function mapToolServer(row: ToolServerRow): OrgToolServerRuntime {
     name: row.name,
     url: row.url,
     authMode:
-      row.auth_mode === "shared_key" ? "shared_key" : row.auth_mode === "none" ? "none" : "per_user",
+      row.auth_mode === "shared_key"
+        ? "shared_key"
+        : row.auth_mode === "none"
+          ? "none"
+          : "per_user",
     sharedHeadersEncrypted: row.shared_headers_encrypted,
     oauthRefresh:
       refresh &&
@@ -480,8 +484,8 @@ export function orgAgentConfigSharesInstructions(config: unknown): boolean {
   const workers = (config as Record<string, unknown>)["workers"];
   return Boolean(
     workers &&
-      typeof workers === "object" &&
-      (workers as Record<string, unknown>)["shareInstructions"] === true,
+    typeof workers === "object" &&
+    (workers as Record<string, unknown>)["shareInstructions"] === true,
   );
 }
 
@@ -624,48 +628,51 @@ export async function refreshEndUserToolCredential(
   | { outcome: "refreshed" | "current" | "failed"; credential: EndUserToolCredentialRow }
 > {
   return await withoutSessionRlsActor(() =>
-    withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (tx) => {
-      const [row] = await rawRows<CredentialRow>(
-        tx,
-        sql`select ${CREDENTIAL_COLUMNS}
+    withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        const [row] = await rawRows<CredentialRow>(
+          tx,
+          sql`select ${CREDENTIAL_COLUMNS}
           from end_user_tool_credentials c
           where c.account_id = ${input.accountId}::uuid
             and c.workspace_id = ${input.workspaceId}::uuid
             and c.id = ${input.credentialId}::uuid
           for update skip locked`,
-      );
-      if (!row) {
-        const [exists] = await rawRows<{ found: number }>(
-          tx,
-          sql`select 1 as found from end_user_tool_credentials c
+        );
+        if (!row) {
+          const [exists] = await rawRows<{ found: number }>(
+            tx,
+            sql`select 1 as found from end_user_tool_credentials c
             where c.workspace_id = ${input.workspaceId}::uuid
               and c.id = ${input.credentialId}::uuid`,
-        );
-        return { outcome: exists ? ("locked" as const) : ("missing" as const) };
-      }
-      const current = mapCredential(row);
-      if (!current.expiresAt || current.expiresAt > input.refreshBefore)
-        return { outcome: "current" as const, credential: current };
-      let refreshed: { materialEncrypted: string; expiresAt: Date | null } | null = null;
-      try {
-        refreshed = await input.refresh(current);
-      } catch {
-        refreshed = null;
-      }
-      if (!refreshed) {
-        const [failed] = await rawRows<CredentialRow>(
-          tx,
-          sql`update end_user_tool_credentials c
+          );
+          return { outcome: exists ? ("locked" as const) : ("missing" as const) };
+        }
+        const current = mapCredential(row);
+        if (!current.expiresAt || current.expiresAt > input.refreshBefore)
+          return { outcome: "current" as const, credential: current };
+        let refreshed: { materialEncrypted: string; expiresAt: Date | null } | null = null;
+        try {
+          refreshed = await input.refresh(current);
+        } catch {
+          refreshed = null;
+        }
+        if (!refreshed) {
+          const [failed] = await rawRows<CredentialRow>(
+            tx,
+            sql`update end_user_tool_credentials c
             set refresh_failed_at = now(), updated_at = now()
             where c.workspace_id = ${input.workspaceId}::uuid
               and c.id = ${input.credentialId}::uuid
             returning ${CREDENTIAL_COLUMNS}`,
-        );
-        return { outcome: "failed" as const, credential: mapCredential(failed ?? row) };
-      }
-      const [updated] = await rawRows<CredentialRow>(
-        tx,
-        sql`update end_user_tool_credentials c
+          );
+          return { outcome: "failed" as const, credential: mapCredential(failed ?? row) };
+        }
+        const [updated] = await rawRows<CredentialRow>(
+          tx,
+          sql`update end_user_tool_credentials c
           set material_encrypted = ${refreshed.materialEncrypted},
             expires_at = ${refreshed.expiresAt ? refreshed.expiresAt.toISOString() : null}::timestamptz,
             refresh_failed_at = null, version = c.version + 1, updated_at = now(),
@@ -673,10 +680,11 @@ export async function refreshEndUserToolCredential(
           where c.workspace_id = ${input.workspaceId}::uuid
             and c.id = ${input.credentialId}::uuid
           returning ${CREDENTIAL_COLUMNS}`,
-      );
-      if (!updated) throw new Error("End-user tool login refresh lost its row");
-      return { outcome: "refreshed" as const, credential: mapCredential(updated) };
-    }),
+        );
+        if (!updated) throw new Error("End-user tool login refresh lost its row");
+        return { outcome: "refreshed" as const, credential: mapCredential(updated) };
+      },
+    ),
   );
 }
 

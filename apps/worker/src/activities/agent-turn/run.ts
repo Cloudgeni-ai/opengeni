@@ -1720,10 +1720,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnTools,
             providerManaged: (serverId) => runMcpCredentials?.has(serverId) ?? false,
             publishUnavailable: async (payload) => {
-              await eventing.publish!(
-                [{ type: "session.tool_server.unavailable", payload }],
-                true,
-              );
+              await eventing.publish!([{ type: "session.tool_server.unavailable", payload }], true);
             },
           });
           if (orgAgentLogins) {

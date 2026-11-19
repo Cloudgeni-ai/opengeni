@@ -207,7 +207,10 @@ async function organization() {
   async function deliver(sessionId: string, turn: Turn) {
     const current = await readPrompt(sessionId, turn);
     if (!current) throw new Error("no agent prompt");
-    return ensureSessionAgentInstructions(client.db, { ...identity(sessionId, turn), prompt: current });
+    return ensureSessionAgentInstructions(client.db, {
+      ...identity(sessionId, turn),
+      prompt: current,
+    });
   }
   const delivered = async (sessionId: string) =>
     (await getActiveSessionHistoryItems(client.db, workspaceId, sessionId))
@@ -268,7 +271,13 @@ describe("organization agents at runtime", () => {
     expect(
       await readOrgAgentForSessionCreate(client.db, { ...org.scope, ref: { key: "support" } }),
     ).toMatchObject({
-      agent: { id: agentId, key: "support", publishedVersion: 1, currentVersion: 1, archived: false },
+      agent: {
+        id: agentId,
+        key: "support",
+        publishedVersion: 1,
+        currentVersion: 1,
+        archived: false,
+      },
       reach: { managedSource: "console", access: false },
     });
     const other = await org.workspace(null);
@@ -292,8 +301,12 @@ describe("organization agents at runtime", () => {
     // Another organization never sees it.
     const stranger = await organization();
     expect(
-      (await readOrgAgentForSessionCreate(client.db, { ...stranger.scope, ref: { key: "support" } }))
-        .agent,
+      (
+        await readOrgAgentForSessionCreate(client.db, {
+          ...stranger.scope,
+          ref: { key: "support" },
+        })
+      ).agent,
     ).toBeNull();
   }, 180_000);
 
@@ -563,9 +576,9 @@ describe("organization agents at runtime", () => {
     expect(
       await save({ key: "console-agent", configHash: hash("c"), mayWrite: true }),
     ).toMatchObject({ outcome: "managed_in_console" });
-    expect(
-      await save({ id: crypto.randomUUID(), configHash: hash("d"), mayWrite: true }),
-    ).toEqual({ outcome: "not_found" });
+    expect(await save({ id: crypto.randomUUID(), configHash: hash("d"), mayWrite: true })).toEqual({
+      outcome: "not_found",
+    });
   }, 180_000);
 
   test("end-user login refresh runs under SKIP LOCKED and records failures", async () => {
@@ -673,9 +686,9 @@ describe("organization agents at runtime", () => {
         limit: 500,
       }),
     ).toEqual(candidates.slice(1));
-    expect(
-      await readSessionOrgAgentState(client.db, { ...org.scope, sessionId: idle.id }),
-    ).toEqual({ agentId, version: 1, promptVersion: 1, overrides: null });
+    expect(await readSessionOrgAgentState(client.db, { ...org.scope, sessionId: idle.id })).toEqual(
+      { agentId, version: 1, promptVersion: 1, overrides: null },
+    );
 
     const testWorkspace = await org.workspace("console_test");
     const added = await org.workspace(null);

@@ -174,7 +174,8 @@ describe("publish move activities", () => {
     const current = await f.chat(2);
     const settleBusy = await f.claim(busy.id);
     const activities = createOrgAgentPublishMoveActivities(
-      async () => ({ db: client.db, bus: null, observability }) as unknown as ControlActivityServices,
+      async () =>
+        ({ db: client.db, bus: null, observability }) as unknown as ControlActivityServices,
       { batchSize: 2 },
     );
     const input = { accountId: f.accountId, agentId: f.agentId, operationId: f.operationId };
@@ -200,17 +201,31 @@ describe("publish move activities", () => {
       }
     }
     // Four chats on version 1 in batches of two; the busy one waits.
-    expect(await scan()).toEqual({ batches: 3, moved: 3, deferred: 1, failed: 0, superseded: false });
+    expect(await scan()).toEqual({
+      batches: 3,
+      moved: 3,
+      deferred: 1,
+      failed: 0,
+      superseded: false,
+    });
     for (const session of idle) expect(await f.versionOf(session.id)).toBe(2);
     expect(await f.versionOf(busy.id)).toBe(1);
     expect(await f.versionOf(current.id)).toBe(2);
-    expect(await f.operationRow()).toMatchObject({ status: "running", moved_count: 3, failed_count: 0 });
+    expect(await f.operationRow()).toMatchObject({
+      status: "running",
+      moved_count: 3,
+      failed_count: 0,
+    });
 
     // After its turn, the next scan moves it.
     await settleBusy();
     expect(await scan()).toMatchObject({ moved: 1, deferred: 0, failed: 0 });
     expect(await f.versionOf(busy.id)).toBe(2);
-    await activities.finishOrgAgentPublishMove({ ...input, status: "succeeded", remainingDeferred: 0 });
+    await activities.finishOrgAgentPublishMove({
+      ...input,
+      status: "succeeded",
+      remainingDeferred: 0,
+    });
     const finished = await f.operationRow();
     expect(finished).toMatchObject({ status: "succeeded", moved_count: 4, failed_count: 0 });
     expect(finished.finished_at).toBeInstanceOf(Date);
@@ -222,7 +237,8 @@ describe("publish move activities", () => {
     const f = await fixture();
     await f.chat(1);
     const activities = createOrgAgentPublishMoveActivities(
-      async () => ({ db: client.db, bus: null, observability }) as unknown as ControlActivityServices,
+      async () =>
+        ({ db: client.db, bus: null, observability }) as unknown as ControlActivityServices,
     );
     const input = { accountId: f.accountId, agentId: f.agentId, operationId: f.operationId };
     await activities.beginOrgAgentPublishMove(input);

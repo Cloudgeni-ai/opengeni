@@ -289,8 +289,7 @@ async function storedLoginHeaders(
         workspaceId: input.workspaceId,
         credentialId: credential!.id,
         refreshBefore,
-        refresh: async (current) =>
-          await refreshOAuthLogin(input, toolServer, key, current, now),
+        refresh: async (current) => await refreshOAuthLogin(input, toolServer, key, current, now),
       });
     let outcome = await attempt();
     if (outcome.outcome === "locked") {
