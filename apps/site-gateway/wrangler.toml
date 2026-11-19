@@ -31,8 +31,9 @@ namespace_id = "1001"
 simple = { limit = 600, period = 60 }
 
 # Optional per-Site Cloudflare storage: one SQLite-backed Durable Object per
-# Site (`SITE_DB.idFromName(siteId)`), reached only through the API's signed
-# internal route `/_og/internal/site-db`. Remove the binding to turn the
+# Site, in the EU jurisdiction (`SITE_DB.jurisdiction("eu").idFromName(siteId)`,
+# chosen in code), reached only through the API's signed internal route
+# `/_og/internal/site-db`. Remove the binding to turn the
 # route off (404). The migration tag is permanent once deployed.
 [[durable_objects.bindings]]
 name = "SITE_DB"

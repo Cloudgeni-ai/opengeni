@@ -151,7 +151,7 @@ async function startWorker(
         APP_ORIGIN: "https://app.test",
         GATEWAY_SECRET: TEST_SECRET,
         GATEWAY_SECRET_PREVIOUS: PREVIOUS_SECRET,
-        ENVIRONMENT: "production",
+        ENVIRONMENT: "test",
         ...bindings,
       },
       ...(options.siteDb === false

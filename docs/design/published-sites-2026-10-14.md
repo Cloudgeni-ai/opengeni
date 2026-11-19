@@ -239,7 +239,8 @@ Gateway (Wrangler vars and secrets): `SITES_DOMAIN`, `API_ORIGIN`,
 
 ## PR B: optional Cloudflare storage
 
-One SQLite-backed Durable Object per Site (`idFromName(siteId)`), offered
+One SQLite-backed Durable Object per Site (`idFromName(siteId)`; since
+2026-11 in the EU jurisdiction, see `docs/site-data.md#location`), offered
 next to Site Data. Sites call named, parameterized queries through
 `site.sql.run(name, params)`; `:viewer` is bound from the verified principal
 by the API, never by the Site. Owners define schema migrations and named
