@@ -99,6 +99,7 @@ export * from "./organization-slack-bots";
 export * from "./slack-agents";
 export * from "./agents";
 export * from "./organization-agents";
+export * from "./organization-agent-compute";
 export { WorkspaceNotFoundError } from "./database";
 export * from "./slack-agent-proposals";
 export * from "./slack-agent-updates";
@@ -23923,12 +23924,14 @@ function organizationComputeReach(row: {
   workspaceId: string;
   allowedWorkspaceIds: string[] | null;
   allowPersonalWorkspaces: boolean;
+  allowManagedWorkspaces: boolean;
 }): OrganizationComputeReach | null {
   if (row.authorityScope !== "organization") return null;
   return {
     homeWorkspaceId: row.workspaceId,
     allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
     allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+    allowManagedWorkspaces: row.allowManagedWorkspaces,
   };
 }
 
@@ -24519,6 +24522,8 @@ export type OrganizationComputeReachInput = {
   homeWorkspaceId: string;
   allowedWorkspaceIds: string[] | null;
   allowPersonalWorkspaces: boolean;
+  /** Every workspace the product manages (1509); omitted keeps the current setting. */
+  allowManagedWorkspaces?: boolean | undefined;
   subjectId: string;
 };
 
@@ -24581,6 +24586,7 @@ export async function updateOrganizationRigReach(
         .select({
           allowedWorkspaceIds: schema.rigs.allowedWorkspaceIds,
           allowPersonalWorkspaces: schema.rigs.allowPersonalWorkspaces,
+          allowManagedWorkspaces: schema.rigs.allowManagedWorkspaces,
         })
         .from(schema.rigs)
         .where(where)
@@ -24592,6 +24598,9 @@ export async function updateOrganizationRigReach(
         .set({
           allowedWorkspaceIds: normalized.allowedWorkspaceIds,
           allowPersonalWorkspaces: input.allowPersonalWorkspaces,
+          ...(input.allowManagedWorkspaces !== undefined
+            ? { allowManagedWorkspaces: input.allowManagedWorkspaces }
+            : {}),
           updatedAt: new Date(),
         })
         .where(where)
@@ -24609,6 +24618,7 @@ export async function updateOrganizationRigReach(
           to: {
             allowedWorkspaceIds: row.allowedWorkspaceIds,
             allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+            allowManagedWorkspaces: row.allowManagedWorkspaces,
           },
         },
       });
@@ -24618,6 +24628,7 @@ export async function updateOrganizationRigReach(
           homeWorkspaceId: row.workspaceId,
           allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
           allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+          allowManagedWorkspaces: row.allowManagedWorkspaces,
         },
       };
     },
@@ -71331,6 +71342,7 @@ export async function updateOrganizationMachineReach(
         .select({
           allowedWorkspaceIds: schema.enrollments.allowedWorkspaceIds,
           allowPersonalWorkspaces: schema.enrollments.allowPersonalWorkspaces,
+          allowManagedWorkspaces: schema.enrollments.allowManagedWorkspaces,
         })
         .from(schema.enrollments)
         .where(where)
@@ -71342,6 +71354,9 @@ export async function updateOrganizationMachineReach(
         .set({
           allowedWorkspaceIds: normalized.allowedWorkspaceIds,
           allowPersonalWorkspaces: input.allowPersonalWorkspaces,
+          ...(input.allowManagedWorkspaces !== undefined
+            ? { allowManagedWorkspaces: input.allowManagedWorkspaces }
+            : {}),
           updatedAt: new Date(),
         })
         .where(where)
@@ -71359,6 +71374,7 @@ export async function updateOrganizationMachineReach(
           to: {
             allowedWorkspaceIds: row.allowedWorkspaceIds,
             allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+            allowManagedWorkspaces: row.allowManagedWorkspaces,
           },
         },
       });
@@ -71368,6 +71384,7 @@ export async function updateOrganizationMachineReach(
           homeWorkspaceId: row.workspaceId,
           allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
           allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+          allowManagedWorkspaces: row.allowManagedWorkspaces,
         },
       };
     },

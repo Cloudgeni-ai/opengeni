@@ -12288,6 +12288,7 @@ export const enrollments = pgTable(
     // Unused for workspace and personal machines.
     allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    allowManagedWorkspaces: boolean("allow_managed_workspaces").notNull().default(false),
     // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
     // Opengeni compute sandbox (migration 0858): bound to its sandbox group,
     // reached through the agent gateway, with no key or bearer, and never
@@ -15340,6 +15341,7 @@ export const rigs = pgTable(
     // (migration 1190), as for organization machines. Unused otherwise.
     allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    allowManagedWorkspaces: boolean("allow_managed_workspaces").notNull().default(false),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -12818,14 +12818,17 @@ export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
  * Where an organization machine or rig works: always in the workspace it was
  * connected from or made in (`homeWorkspaceId`), plus every shared workspace
  * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
- * members' Personal workspaces when `allowPersonalWorkspaces` is on. Only
- * organization machines and rigs have it.
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on, and every
+ * workspace the organization's product manages (including ones it creates
+ * later) when `allowManagedWorkspaces` is on (migration 1509; servers before
+ * it omit the field). Only organization machines and rigs have it.
  */
 export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>
   z.object({
     homeWorkspaceId: primitives.uuid,
     allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
     allowPersonalWorkspaces: primitives.boolean,
+    allowManagedWorkspaces: primitives.boolean.default(false),
   }),
 );
 export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
@@ -12835,12 +12838,14 @@ export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
  * PUT /v1/workspaces/:workspaceId/rigs/:rigId/reach: an organization owner or
  * admin changes where an organization machine or rig works. The ids are the
  * organization's shared workspaces; its home workspace always has it.
+ * `allowManagedWorkspaces` omitted keeps the current setting.
  */
 export const UpdateOrganizationComputeReachRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       allowedWorkspaceIds: z.array(primitives.uuid).max(1000).nullable(),
       allowPersonalWorkspaces: primitives.boolean,
+      allowManagedWorkspaces: primitives.boolean.optional(),
     })
     .strict(),
 );
