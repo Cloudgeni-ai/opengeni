@@ -1517,6 +1517,9 @@ describe("Console roles: Console test chats", () => {
       attemptId,
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
+      // As the worker build that runs organization agents declares.
+      agentInstructionsProtocol: 1,
+      orgAgentProtocol: 1,
     });
     if (claimed.action !== "claimed") throw new Error(`turn not claimed: ${claimed.reason}`);
     const tools = ["session_get", "session_events", "sessions_list", "session_queue_message"];
