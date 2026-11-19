@@ -9,6 +9,7 @@ import type {
 import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
 import { sessionAgentFieldNamesOrgAgent } from "@opengeni/contracts";
 import {
+  assertOrgAgentApprovalPolicyNarrows,
   prepareOrgAgentSessionCreate,
   refuseOrgAgentChatMachine,
   type PreparedOrgAgentSessionCreate,
@@ -5677,6 +5678,7 @@ export async function updateSessionMcpApprovalPolicy(
   sessionId: string,
   serverId: string,
   requireApproval: SessionMcpApprovalPolicy,
+  authorization?: AccessGrantAuthorization,
 ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
   const normalizedPolicy = SessionMcpApprovalPolicy.parse(requireApproval);
   await requireSessionAuthorization(deps, grant, {
@@ -5685,6 +5687,15 @@ export async function updateSessionMcpApprovalPolicy(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  // An organization agent's own tool server: the chat may only ask first for more.
+  await assertOrgAgentApprovalPolicyNarrows(deps, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    serverId,
+    requireApproval: normalizedPolicy,
+    manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage"),
+  });
 
   const outcome: { server?: SessionMcpApprovalPolicyTarget } = {};
   const events = await appendSessionEventsWithLockedSessionUpdate(

@@ -285,6 +285,7 @@ export function WorkspaceReachFields({
   personalWorkspaces,
   seedSelected,
   extraChoice,
+  allDescription,
   emptyText,
   error,
   disabled = false,
@@ -311,6 +312,8 @@ export function WorkspaceReachFields({
   /** The workspaces ticked when switching to Selected workspaces. None by default. */
   seedSelected?: (() => string[]) | undefined;
   extraChoice?: ReachExtraChoice | undefined;
+  /** Replaces the "All workspaces" choice's description, to say what it includes. */
+  allDescription?: string | undefined;
   emptyText?: string | undefined;
   error?: ReactNode;
   disabled?: boolean;
@@ -358,9 +361,10 @@ export function WorkspaceReachFields({
           value="all"
           title={person ? "All my workspaces" : `All workspaces in ${organizationName}`}
           description={
-            person
+            allDescription ??
+            (person
               ? `Every workspace you use in ${organizationName}, including new ones.`
-              : "Every shared workspace, including new ones."
+              : "Every shared workspace, including new ones.")
           }
         />
         <ChoiceCard

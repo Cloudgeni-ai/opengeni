@@ -74,13 +74,19 @@ export function reachNarrows(
 
 /**
  * The managed-workspaces switch: a machine is one computer every end
- * customer's chats share, and Console Editors can run their agents (and test
- * chats) on what reaches those workspaces.
+ * customer's chats share, and the Console test workspace is a managed one.
  */
 export const MANAGED_DESCRIPTION = {
   machine:
-    "Every workspace your product manages, including new ones. All end customers' chats there share this machine, and Console Editors can run agents on it.",
-  rig: "Every workspace your product manages, including new ones. Console Editors can run agents on it.",
+    "Every workspace your product manages, including new ones and the Console test workspace, where Editors run test chats. All end customers' chats there share this machine.",
+  rig: "Every workspace your product manages, including new ones.",
+} as const;
+
+/** "All workspaces" for a machine also covers the Console test workspace. */
+export const ALL_WORKSPACES_DESCRIPTION = {
+  machine:
+    "Every shared workspace, including new ones and the Console test workspace, where Editors run test chats.",
+  rig: undefined,
 } as const;
 
 export function OrganizationComputeReachDialog({
@@ -178,6 +184,7 @@ export function OrganizationComputeReachDialog({
           hereId={hereId}
           alwaysIncluded={{ [reach.homeWorkspaceId]: HOME_REASON[kind] }}
           personalWorkspaces="choice"
+          allDescription={ALL_WORKSPACES_DESCRIPTION[kind]}
         />
         {managedSupported && draft.workspaceIds !== null ? (
           <CheckboxField

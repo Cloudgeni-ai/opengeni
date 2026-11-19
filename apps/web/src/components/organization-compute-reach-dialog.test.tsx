@@ -26,6 +26,7 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
 }));
 
 const {
+  ALL_WORKSPACES_DESCRIPTION,
   MANAGED_DESCRIPTION,
   OrganizationComputeReachDialog,
   organizationComputeReachSummary,
@@ -241,7 +242,30 @@ describe("where an organization machine or rig works", () => {
     expect(document.body.textContent).toContain("All product-managed workspaces");
     expect(document.body.textContent).toContain(MANAGED_DESCRIPTION.machine);
     expect(MANAGED_DESCRIPTION.machine).toContain("share this machine");
-    expect(MANAGED_DESCRIPTION.machine).toContain("Console Editors can run agents on it");
+    // Both choices that cover it say the Console test workspace is included.
+    expect(MANAGED_DESCRIPTION.machine).toContain("Console test workspace");
+    expect(document.body.textContent).toContain(ALL_WORKSPACES_DESCRIPTION.machine);
+    expect(ALL_WORKSPACES_DESCRIPTION.machine).toContain("Console test workspace");
+    await act(async () => root.unmount());
+  });
+
+  test("a Sandbox Environment keeps the usual All workspaces text", async () => {
+    const { root } = await render(
+      <OrganizationComputeReachDialog
+        open
+        onOpenChange={() => undefined}
+        client={client}
+        kind="rig"
+        name="Python 3.13"
+        reach={reach([], false, false)}
+        organizationId="org"
+        organizationName="Acme"
+        hereId={HOME}
+        save={mock(async () => reach([], false, false))}
+      />,
+    );
+    expect(document.body.textContent).toContain("Every shared workspace, including new ones.");
+    expect(document.body.textContent).not.toContain("Console test workspace");
     await act(async () => root.unmount());
   });
 

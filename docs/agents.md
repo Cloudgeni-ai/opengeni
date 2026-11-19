@@ -666,7 +666,13 @@ workspace scope includes the chat's workspace), or the organization's owner or
 an admin. A workspace role never counts. Otherwise the create fails with 403
 `agents_manage_required`. Servers a chat adds under a new id need
 `mcp_servers:attach`, as for any chat. Inline saves are recorded in Console's
-audit log (`agent.created`, `agent.version_saved`).
+audit log (`agent.created`, `agent.version_saved`). Without `agents:manage`, a
+`config` that matches a saved version runs only when that is the published
+version (any version in the Console test workspace); otherwise 404
+`agent_not_found`. After create, changing "Ask first" for one of the agent's
+servers (`PATCH .../mcp-servers/:serverId/approval-policy`) follows the same
+rule: asking first for more is allowed, asking for less than the agent needs
+`agents:manage` (403, `details.code` `agents_manage_required`).
 
 What a chat changed is stored per session (`sessions.agent_overrides`,
 `{setting: {agent, chat}}`), returned as `Session.orgAgent.overrides`, and
@@ -694,7 +700,9 @@ server's login comes from, in order:
 2. the end user's stored login,
    `PUT /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`
    (headers or OAuth, encrypted, refreshed before expiry, never readable back);
-3. the chat's own `headers` for the server.
+3. the chat's own `headers` for the server, only for a turn its creator or
+   its end user started, or no person started (an API key, a schedule, a
+   worker); another person's turn needs their own login.
 
 A `per_user` server never falls back to a shared key. Without a login the
 chat runs without that server and records `session.tool_server.unavailable`.
@@ -711,6 +719,9 @@ every workspace and the display name and email the product sent.
 Tool server writes and publishing with `moveRunningChats` reach every
 workspace of the organization, so an organization key limited to selected
 workspaces gets 403 `organization_key_workspace_limited` for them.
+Such a key sees only its own workspaces in an agent's `workspaceIds`, and a
+`PATCH` with `workspaceIds` changes only those: the agent's access in other
+workspaces stays as it is. Other callers replace the whole list.
 
 ### Runs on
 

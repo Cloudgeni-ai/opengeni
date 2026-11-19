@@ -511,6 +511,31 @@ export type SessionOrgAgentState = {
 };
 
 /**
+ * Whose chat this is, for its own tool server login headers: who created it
+ * (`sessions.created_by_subject_id`) and the end user it acts for
+ * (`scope_subject_id`); null when the chat cannot be read.
+ */
+export async function readSessionLoginOwners(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<{ creatorSubjectId: string | null; scopeSubjectId: string | null } | null> {
+  const [row] = await withoutSessionRlsActor(() =>
+    withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, (tx) =>
+      rawRows<{ created_by_subject_id: string | null; scope_subject_id: string | null }>(
+        tx,
+        sql`select s.created_by_subject_id, s.scope_subject_id from sessions s
+          where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
+      ),
+    ),
+  );
+  if (!row) return null;
+  return {
+    creatorSubjectId: row.created_by_subject_id ?? null,
+    scopeSubjectId: row.scope_subject_id ?? null,
+  };
+}
+
+/**
  * The organization agent binding of the chat an earlier create made with this
  * idempotency key, as the caller sees it; null when there is none or it runs
  * no organization agent. A retry binds the same agent version instead of

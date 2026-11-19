@@ -288,8 +288,8 @@ describe("session create with an organization agent", () => {
     const manage = { manage: true };
     const first = await org.prepare({ agent: { ref: "coder", config } }, manage);
     expect(first.binding).toMatchObject({ key: "coder", version: 1, promptVersion: 1 });
-    // The same config reuses the version, also for callers who may not write.
-    const again = await org.prepare({ agent: { ref: "coder", config } });
+    // The same config reuses the version.
+    const again = await org.prepare({ agent: { ref: "coder", config } }, manage);
     expect(again.binding).toEqual(first.binding);
     const [stored] = await shared.admin<
       { managed_by: string; published_revision: number | null }[]
@@ -297,6 +297,15 @@ describe("session create with an organization agent", () => {
       select managed_by, published_revision from agents where id = ${first.binding.agentId}`;
     // Inline versions are never published.
     expect(stored).toEqual({ managed_by: "code", published_revision: null });
+    // Without agents:manage a saved config runs only as the published version.
+    expect(await refusal(org.prepare({ agent: { ref: "coder", config } }))).toEqual({
+      status: 404,
+      code: "agent_not_found",
+    });
+    await shared.admin`update agents set published_revision = 1
+      where id = ${first.binding.agentId}`;
+    const published = await org.prepare({ agent: { ref: "coder", config } });
+    expect(published.binding).toEqual(first.binding);
     const changed = await org.prepare(
       { agent: { ref: "coder", config: { ...config, instructions: "Write tests." } } },
       manage,
