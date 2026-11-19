@@ -121,17 +121,17 @@ async function auditActions(accountId: string): Promise<string[]> {
 }
 
 /** One runtime-role transaction in a tenancy scope, optionally with organization agents visible. */
-async function asApp<T>(
-  scope: { accountId: string; workspaceId?: string; orgAgents?: boolean },
-  run: (sql: postgres.TransactionSql) => Promise<T>,
-) {
+async function asApp(
+  scope: { accountId: string; workspaceId?: string | undefined; orgAgents?: boolean },
+  run: (sql: postgres.TransactionSql) => PromiseLike<unknown>,
+): Promise<Array<Record<string, any>>> {
   return (await appSql.begin(async (sql) => {
     await sql`select set_config('opengeni.account_id', ${scope.accountId}, true),
       set_config('opengeni.workspace_id', ${scope.workspaceId ?? ""}, true),
       set_config('opengeni.subject_id', '', true),
       set_config('opengeni.org_agents_v1', ${scope.orgAgents ? "1" : ""}, true)`;
     return await run(sql);
-  })) as T;
+  })) as Array<Record<string, any>>;
 }
 
 const definition = (instructions: string, extra: Record<string, unknown> = {}) => ({
@@ -1066,7 +1066,7 @@ describe("organization agent chats: claim gate", () => {
       attemptId: crypto.randomUUID(),
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" as const },
-      agentInstructionsProtocol: 1,
+      agentInstructionsProtocol: 1 as const,
     });
 
     const pinned = await chat(true);
