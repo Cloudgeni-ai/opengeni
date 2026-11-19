@@ -253,9 +253,9 @@ describe("opengeni agents export", () => {
     const before = api.requests.length;
     const exported = await cli(["agents", "export", "support"], api);
     expect(exported.exitCode).toBe(0);
-    expect(
-      api.requests.slice(before).map((request) => `${request.method} ${request.url}`),
-    ).toEqual([`GET https://opengeni.test/v1/organizations/${ORG}/agents/by-key/support`]);
+    expect(api.requests.slice(before).map((request) => `${request.method} ${request.url}`)).toEqual(
+      [`GET https://opengeni.test/v1/organizations/${ORG}/agents/by-key/support`],
+    );
 
     // The id route refuses a key, as the API does; the CLI must never use it for one.
     const byId = await api.fetch(`https://opengeni.test/v1/organizations/${ORG}/agents/support`);
@@ -266,7 +266,17 @@ describe("opengeni agents export", () => {
 describe("the fake API matches the real one", () => {
   test("every route the fake serves is registered by the API", () => {
     const source = readFileSync(
-      join(import.meta.dir, "..", "..", "..", "apps", "api", "src", "routes", "organization-agents.ts"),
+      join(
+        import.meta.dir,
+        "..",
+        "..",
+        "..",
+        "apps",
+        "api",
+        "src",
+        "routes",
+        "organization-agents.ts",
+      ),
       "utf8",
     );
     expect(source).toContain(`const base = "${ORG_AGENTS_BASE}";`);
@@ -294,7 +304,10 @@ describe("the fake API matches the real one", () => {
       "conflict",
       "This agent is managed in Console.",
     ]);
-    const withoutDetails = decodeError(404, JSON.stringify({ error: { code: "not_found", message: "x" } }));
+    const withoutDetails = decodeError(
+      404,
+      JSON.stringify({ error: { code: "not_found", message: "x" } }),
+    );
     expect([withoutDetails.code, withoutDetails.envelopeCode]).toEqual(["not_found", "not_found"]);
     expect(decodeError(502, "Bad gateway").code).toBeUndefined();
     expect(decodeError(502, "Bad gateway").message).toBe("Bad gateway");
