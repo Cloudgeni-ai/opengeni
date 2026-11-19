@@ -10,6 +10,7 @@ import type { Settings } from "@opengeni/config";
 import { sha256Hex } from "@opengeni/contracts/values";
 import { createApiKey, createDb, createWorkspace, listSessionEvents } from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
+import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { startTestServices, type TestServices } from "@opengeni/testing/compose";
@@ -39,6 +40,8 @@ describe("organization agents end to end", () => {
   let accountId: string;
   let workspaceId: string;
   let authorization: string;
+  /** Server-side failures, shown with a failed assertion. */
+  const serverErrors: unknown[] = [];
 
   beforeAll(async () => {
     services = await startTestServices({ temporal: false });
@@ -73,11 +76,18 @@ describe("organization agents end to end", () => {
       environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
     });
     settings.orgAgentsAccountIds = [accountId];
+    const observability = createObservability(settings, { component: "api" });
+    const logError = observability.error.bind(observability);
+    observability.error = (message, attributes) => {
+      serverErrors.push({ message, ...attributes });
+      logError(message, attributes);
+    };
     const app = createApp({
       settings,
       db: dbClient.db,
       bus,
       workflowClient: noopWorkflowClient,
+      observability,
     });
     server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
   }, 180_000);
@@ -206,9 +216,9 @@ describe("organization agents end to end", () => {
       version: 2,
       message: "Try it",
     });
-    expect({ status: chat.status, error: chat.status === 201 ? null : chat.body }).toEqual({
+    expect({ status: chat.status, errors: chat.status === 201 ? [] : serverErrors }).toEqual({
       status: 201,
-      error: null,
+      errors: [],
     });
     const prompt = await runTurn(chat.body.workspaceId, chat.body.sessionId);
     expect(prompt).toContain("Draft rules.");
