@@ -27,7 +27,7 @@ import {
   type SessionMcpServerInput,
 } from "@opengeni/contracts";
 import {
-  checkOrgAgentRunsOn,
+  resolveOrgAgentRunsOnInAccount,
   decryptEnvironmentValue,
   listOrgToolServersByKey,
   readEndUserToolCredential,
@@ -59,6 +59,7 @@ import {
 } from "./org-agent-config";
 import {
   applyOrgAgentRunsOn,
+  assertOrgAgentChatMachine,
   OrgAgentRunsOnError,
   type OrgAgentRunsOnDeps,
 } from "./org-agent-runs-on";
@@ -75,6 +76,26 @@ export class OrgAgentSessionCreateError extends HTTPException {
   ) {
     super(httpStatus, { message });
     this.name = "OrgAgentSessionCreateError";
+  }
+}
+
+/**
+ * Refuses the machine an organization agent chat (named or inherited by a
+ * worker) would finally run on when it is a Personal (Only me) machine or one
+ * this caller can't read; see {@link assertOrgAgentChatMachine}.
+ */
+export async function refuseOrgAgentChatMachine(
+  db: Database,
+  access: { accountId: string; workspaceId: string; subjectId: string },
+  sandboxId: string,
+): Promise<void> {
+  try {
+    await assertOrgAgentChatMachine({ db }, access, sandboxId);
+  } catch (error) {
+    if (error instanceof OrgAgentRunsOnError) {
+      throw new OrgAgentSessionCreateError(error.httpStatus, error.code, error.message);
+    }
+    throw error;
   }
 }
 
@@ -219,13 +240,13 @@ async function prepare(
         `This organization has no tool server ${missing.map((key) => `'${key}'`).join(", ")}.`,
       );
     }
-    const runsOnProblem = await checkOrgAgentRunsOn(
+    const runsOn = await resolveOrgAgentRunsOnInAccount(
       deps.db,
       grant.accountId,
       definition.config.runsOn,
     );
-    if (runsOnProblem) {
-      throw new OrgAgentSessionCreateError(422, runsOnProblem.code, runsOnProblem.message);
+    if ("problem" in runsOn) {
+      throw new OrgAgentSessionCreateError(422, runsOn.problem.code, runsOn.problem.message);
     }
     const saved = await saveInlineOrgAgentVersion(deps.db, {
       accountId: grant.accountId,
@@ -239,6 +260,7 @@ async function prepare(
       },
       toolCatalog: {},
       configHash: orgAgentConfigHash(definition),
+      runsOnTarget: runsOn.target,
       subjectId: grant.subjectId ?? null,
       mayWrite: hasPermission(grant.permissions, "agents:manage"),
     });
@@ -326,6 +348,7 @@ async function bind(
     workspaceId,
     payload: plan.payload,
     runsOn: config.runsOn,
+    target: version.runsOnTarget,
   }).catch((error: unknown) => {
     if (error instanceof OrgAgentRunsOnError) {
       throw new OrgAgentSessionCreateError(error.httpStatus, error.code, error.message);

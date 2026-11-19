@@ -72,6 +72,13 @@ export function reachNarrows(
   return current.allowedWorkspaceIds.some((workspaceId) => !kept.has(workspaceId));
 }
 
+/** The managed-workspaces switch: a machine is one computer every end customer's chats share. */
+export const MANAGED_DESCRIPTION = {
+  machine:
+    "Every workspace your product manages, including new ones. All end customers' chats there share this machine.",
+  rig: "Every workspace your product manages, including new ones.",
+} as const;
+
 export function OrganizationComputeReachDialog({
   open,
   onOpenChange,
@@ -103,7 +110,9 @@ export function OrganizationComputeReachDialog({
   onSaved?: ((reach: OrganizationComputeReach) => void) | undefined;
 }) {
   const [draft, setDraft] = useState<WorkspaceReach>(() => reachDraft(reach));
-  // Servers before the setting omit it; the choice then stays hidden.
+  // A current server always reports the setting. Only a server before
+  // migration 1509 omits it (this response isn't parsed against the contract),
+  // and then the switch stays hidden so a save never sends a field it refuses.
   const managedSupported = reach.allowManagedWorkspaces !== undefined;
   const [managed, setManaged] = useState(reach.allowManagedWorkspaces ?? false);
   const [error, setError] = useState<unknown>(null);
@@ -169,7 +178,7 @@ export function OrganizationComputeReachDialog({
         {managedSupported && draft.workspaceIds !== null ? (
           <CheckboxField
             label="All product-managed workspaces"
-            description="Every workspace your product manages, including new ones."
+            description={MANAGED_DESCRIPTION[kind]}
             checked={managed}
             onCheckedChange={setManaged}
           />

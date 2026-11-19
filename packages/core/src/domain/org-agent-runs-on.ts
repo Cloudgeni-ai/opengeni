@@ -12,10 +12,17 @@
  * `list_scoped_rigs`); it adds two refusals of its own:
  *
  * - a Personal (Only me) machine never runs an organization agent chat, also
- *   when the request names it (`personal_machine_not_allowed`);
+ *   when the request names it (`personal_machine_not_allowed`); the create
+ *   path checks the machine again once placement is final
+ *   ({@link assertOrgAgentChatMachine}), so defaults and a worker joining its
+ *   parent's box are covered too;
  * - the version's machine or sandbox environment must work in this workspace
  *   (`runs_on_unavailable`, with what to change), checked with the same
  *   reach-aware lists the app uses.
+ *
+ * A version saved with a machine or environment keeps its id
+ * (`agent_revisions.runs_on_target`); chats use that id, and the written name
+ * only when the saved one was removed.
  *
  * Omitted `runsOn` keeps today's placement. A chat started from inside
  * another chat (a worker) keeps sharing its parent's computer unless the
@@ -31,6 +38,7 @@ import {
   listOrganizationComputeInAccount,
   withAccountRls,
   type Database,
+  type OrgAgentRunsOnTarget,
   type OrgComputeEntry,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -83,6 +91,36 @@ function samePlacementValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+const PERSONAL_MACHINE_MESSAGE =
+  "A Personal (Only me) machine can't run a chat with an organization agent. Choose an organization machine.";
+
+/**
+ * The final check on where an organization agent chat (named on create, or
+ * inherited by a worker) lands, once placement is settled: the request's
+ * machine, a default, or the parent's box a worker joins. A Personal machine is
+ * refused, and so is a machine this caller can't read, because the create path
+ * reads it with the same caller and could not attach it either.
+ */
+export async function assertOrgAgentChatMachine(
+  deps: { db: Database; sandboxScope?: (sandboxId: string) => Promise<string | null> },
+  access: { accountId: string; workspaceId: string; subjectId: string },
+  sandboxId: string,
+): Promise<void> {
+  const scope = deps.sandboxScope
+    ? await deps.sandboxScope(sandboxId)
+    : ((await getSandbox(deps.db, access, sandboxId))?.scope ?? null);
+  if (scope === null) {
+    throw new OrgAgentRunsOnError(
+      422,
+      "runs_on_unavailable",
+      "The machine this chat would run on isn't available in this workspace.",
+    );
+  }
+  if (scope === "user") {
+    throw new OrgAgentRunsOnError(422, "personal_machine_not_allowed", PERSONAL_MACHINE_MESSAGE);
+  }
+}
+
 /**
  * Whether a reach-aware list shows it here. A list this caller cannot read
  * (for example a person without access to the workspace) answers true: the
@@ -107,8 +145,14 @@ export async function applyOrgAgentRunsOn(input: {
   /** The create body after the agent's other settings were applied. */
   payload: Record<string, unknown>;
   runsOn: OrgAgentRunsOn | undefined;
+  /**
+   * The ids `runsOn` resolved to when the version was saved; chats use these,
+   * and the written name only for versions saved without them.
+   */
+  target?: OrgAgentRunsOnTarget | null;
 }): Promise<{ payload: Record<string, unknown>; overrides: OrgAgentSessionOverrides }> {
   const { deps, grant, workspaceId, runsOn } = input;
+  const target = input.target ?? null;
   const subjectId = grant.subjectId ?? "";
   const access = { accountId: grant.accountId, workspaceId, subjectId };
   const request = requested(input.payload);
@@ -119,11 +163,7 @@ export async function applyOrgAgentRunsOn(input: {
       ? await deps.sandboxScope(request.targetSandboxId)
       : ((await getSandbox(deps.db, access, request.targetSandboxId))?.scope ?? null);
     if (scope === "user") {
-      throw new OrgAgentRunsOnError(
-        422,
-        "personal_machine_not_allowed",
-        "A Personal (Only me) machine can't run a chat with an organization agent. Choose an organization machine.",
-      );
+      throw new OrgAgentRunsOnError(422, "personal_machine_not_allowed", PERSONAL_MACHINE_MESSAGE);
     }
   }
   if (!runsOn) return { payload: input.payload, overrides: {} };
@@ -144,7 +184,7 @@ export async function applyOrgAgentRunsOn(input: {
     request.rigId === undefined &&
     (!requestBackend || (runsOn.kind === "sandbox" && request.sandboxBackend !== "none"));
 
-  const agent = await agentPlacement(deps, access, runsOn, {
+  const agent = await agentPlacement(deps, access, runsOn, target, {
     resolveMachine: takeBackendAndTarget,
     resolveRig: takeRig,
     requireCloudSandbox: takeBackendAndTarget,
@@ -177,6 +217,7 @@ async function agentPlacement(
   deps: OrgAgentRunsOnDeps,
   access: { accountId: string; workspaceId: string; subjectId: string },
   runsOn: OrgAgentRunsOn,
+  target: OrgAgentRunsOnTarget | null,
   wanted: { resolveMachine: boolean; resolveRig: boolean; requireCloudSandbox: boolean },
 ): Promise<Placement> {
   switch (runsOn.kind) {
@@ -194,7 +235,13 @@ async function agentPlacement(
       }
       const placement: Placement = { sandboxBackend: backend };
       if (runsOn.environment !== undefined && wanted.resolveRig) {
-        const rig = await resolveCompute(deps, access.accountId, "rig", runsOn.environment);
+        const rig = await resolveCompute(
+          deps,
+          access.accountId,
+          "rig",
+          runsOn.environment,
+          target?.environmentId,
+        );
         const works = await worksHere(async () =>
           deps.rigWorksHere
             ? await deps.rigWorksHere(rig.id)
@@ -223,11 +270,18 @@ async function agentPlacement(
           access.accountId,
           "machine",
           runsOn.machine,
+          target?.machineId,
         ).catch(() => null);
         if (machine?.sandboxId) placement.targetSandboxId = machine.sandboxId;
         return placement;
       }
-      const machine = await resolveCompute(deps, access.accountId, "machine", runsOn.machine);
+      const machine = await resolveCompute(
+        deps,
+        access.accountId,
+        "machine",
+        runsOn.machine,
+        target?.machineId,
+      );
       const works = await worksHere(async () =>
         deps.machineWorksHere
           ? await deps.machineWorksHere(machine.id)
@@ -248,20 +302,34 @@ async function agentPlacement(
   }
 }
 
+/**
+ * The machine or environment the version names: by the id saved with the
+ * version (`pinnedId`), so a rename or a second one with the same name changes
+ * nothing; by the written `ref` for a version saved without an id or when the
+ * saved one was removed.
+ */
 async function resolveCompute(
   deps: OrgAgentRunsOnDeps,
   accountId: string,
   kind: "machine" | "rig",
   ref: string,
+  pinnedId?: string | undefined,
 ): Promise<OrgComputeEntry> {
   const entries = deps.listOrganizationCompute
     ? await deps.listOrganizationCompute(kind)
     : await withAccountRls(deps.db, accountId, (tx) =>
         listOrganizationComputeInAccount(tx, accountId, kind),
       );
+  const what = kind === "machine" ? "organization machine" : "organization sandbox environment";
+  if (pinnedId) {
+    const pinned = entries.find((entry) => entry.id === pinnedId);
+    if (pinned) return pinned;
+    // The saved one was removed: a replacement under the written name (for
+    // example the same machine connected again) keeps the agent working, and
+    // a redeploy of the same file, which reuses this version, needs no edit.
+  }
   const match = findOrgCompute(entries, ref);
   if (match.status === "found") return match.entry;
-  const what = kind === "machine" ? "organization machine" : "organization sandbox environment";
   throw new OrgAgentRunsOnError(
     422,
     kind === "machine" ? "machine_not_found" : "environment_not_found",

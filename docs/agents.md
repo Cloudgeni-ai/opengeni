@@ -728,12 +728,26 @@ change after a version is saved. `GET /v1/organizations/:organizationId/agents/c
 lists the organization machines and environments with
 `worksInManagedWorkspaces`.
 
+A saved version keeps the machine or environment it named by id
+(`agent_revisions.runs_on_target`, migration 1509), and its chats use that id.
+Renaming the machine, or adding another with the same name, neither moves nor
+breaks the agent. If it is removed, chats look the written name up again
+(for example the same machine connected again), and refuse with
+`machine_not_found` / `environment_not_found` when nothing matches. `runsOn` keeps what
+was written, so the config hash and an exported YAML file stay as they were.
+
 A create may still pass `sandboxBackend`, `targetSandboxId` or `rigId` for one
 chat; the request has the final say, recorded as the `runsOn` override, and
-the usual machine-access and reach checks apply. A Personal machine is refused
-for an organization agent chat (422 `personal_machine_not_allowed`), also when
-the request names it. Workers a chat starts share its computer unless they ask
-for their own (`sandbox: "new"`).
+the usual machine-access and reach checks apply. Workers a chat starts share
+its computer unless they ask for their own (`sandbox: "new"`).
+
+A Personal (Only me) machine never runs an organization agent chat. This is
+checked where the chat finally lands, whatever placed it there: the request's
+`targetSandboxId`, a default, or the parent's machine a worker joins (422
+`personal_machine_not_allowed`). A person's own default machine ("Your default
+machine") is not used for these chats; they follow the agent's Runs on, else
+the workspace default. A machine the caller can't read is refused as well (422
+`runs_on_unavailable`).
 
 ### Workers, publish and moves
 

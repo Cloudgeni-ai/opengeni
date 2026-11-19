@@ -66,7 +66,7 @@ import {
   type Database,
 } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
-import { orgAgentRunsOnProblem } from "./organization-agent-compute";
+import { orgAgentRunsOnProblem, resolveOrgAgentRunsOn } from "./organization-agent-compute";
 import { nestedPostgresSqlState } from "./persistence-errors";
 
 // ---------------------------------------------------------------------------
@@ -520,13 +520,19 @@ async function insertRevision(
     createdBySubjectId: string;
   },
 ): Promise<void> {
+  // The machine or environment `runsOn` names now, saved by id with the version
+  // (callers checked it already; an unresolved name stays null).
+  const resolved = await resolveOrgAgentRunsOn(tx, input.accountId, input.definition.config.runsOn);
+  const runsOnTarget = "target" in resolved ? resolved.target : null;
   await tx.execute(sql`insert into agent_revisions (agent_id, account_id, workspace_id, revision,
-      name, description, instructions, created_by_subject_id, config, tool_catalog, source, config_hash)
+      name, description, instructions, created_by_subject_id, config, tool_catalog, source, config_hash,
+      runs_on_target)
     values (${input.agentId}::uuid, ${input.accountId}::uuid, null, ${input.revision},
       ${input.definition.name}, ${input.definition.description}, ${input.definition.instructions},
       ${input.createdBySubjectId.slice(0, 1024)}, ${JSON.stringify(input.definition.config)}::jsonb,
       ${input.toolCatalog === null ? null : JSON.stringify(input.toolCatalog)}::jsonb,
-      ${input.source}, ${input.configHash})`);
+      ${input.source}, ${input.configHash},
+      ${runsOnTarget === null ? null : JSON.stringify(runsOnTarget)}::jsonb)`);
 }
 
 async function revisionWithHash(
