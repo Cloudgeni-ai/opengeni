@@ -465,8 +465,8 @@ export class SiteDatabase {
         // When that fails, later requests retry it (`home`); the reset stands.
         await this.eraseLegacy(site).catch((error: unknown) => {
           console.error(`site-gateway: could not erase the legacy Site database ${site}`, error);
-          const home = this.kv.get<HomeRecord>(HOME_KEY);
-          if (home) this.kv.put(HOME_KEY, { ...home, erasePending: true } satisfies HomeRecord);
+          const record = this.kv.get<HomeRecord>(HOME_KEY);
+          if (record) this.kv.put(HOME_KEY, { ...record, erasePending: true } satisfies HomeRecord);
         });
       }
       return located(response, "eu");
