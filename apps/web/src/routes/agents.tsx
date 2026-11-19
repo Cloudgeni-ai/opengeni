@@ -17,6 +17,7 @@ import { ErrorMessage } from "@opengeni/react/ui/error-message";
 
 import { AgentSlackIntroPage } from "@/components/agents/agent-slack-intro-page";
 import { AgentSlackSection } from "@/components/agents/agent-slack-section";
+import { ManagedInConsoleAgents } from "@/components/agents/managed-in-console-agents";
 
 /** Detail pages draw their own 960px frame, back link and padding. */
 const PAGE_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
@@ -24,7 +25,10 @@ const PAGE_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
 export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
-      <AgentsPage workspaceId={workspaceId} />
+      <AgentsPage
+        workspaceId={workspaceId}
+        after={<ManagedInConsoleAgents workspaceId={workspaceId} />}
+      />
     </ContentPage>
   );
 }

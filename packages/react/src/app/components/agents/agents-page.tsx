@@ -3,7 +3,7 @@
  * shared. Bot templates and Slack agents became agents, so their old pages
  * land here, with a one-time note saying so.
  */
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { BotIcon, PlusIcon, UploadIcon } from "lucide-react";
 import type { AgentListFilter, AgentSummary } from "@opengeni/contracts";
 
@@ -51,7 +51,14 @@ export function duplicateNamesText(names: readonly string[]): string {
     : `More than one agent is called ${list}. Rename them so people can tell them apart.`;
 }
 
-export function AgentsPage({ workspaceId }: { workspaceId: string }) {
+export function AgentsPage({
+  workspaceId,
+  after,
+}: {
+  workspaceId: string;
+  /** More sections under the workspace's own agents (the app's "Managed in Console" list). */
+  after?: ReactNode | undefined;
+}) {
   const { client } = useAppContext();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<AgentListFilter>("all");
@@ -247,6 +254,7 @@ export function AgentsPage({ workspaceId }: { workspaceId: string }) {
           )}
         </DetailSection>
       )}
+      {after}
     </DetailPage>
   );
 }
