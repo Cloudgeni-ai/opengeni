@@ -1,5 +1,18 @@
 # @opengeni/documents
 
+## 6.30.2
+
+### Patch Changes
+
+- Updated dependencies [d07d727]
+- Updated dependencies [cafa73f]
+- Updated dependencies [ea21b19]
+  - @opengeni/db@6.30.2
+  - @opengeni/contracts@6.30.2
+  - @opengeni/config@6.30.2
+  - @opengeni/storage@6.30.2
+  - @opengeni/network@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes

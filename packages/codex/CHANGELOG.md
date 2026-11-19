@@ -1,5 +1,13 @@
 # @opengeni/codex
 
+## 6.30.2
+
+### Patch Changes
+
+- Updated dependencies [cafa73f]
+  - @opengeni/contracts@6.30.2
+  - @opengeni/network@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes

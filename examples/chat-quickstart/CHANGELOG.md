@@ -1,5 +1,12 @@
 # @opengeni/example-chat-quickstart
 
+## 0.0.95
+
+### Patch Changes
+
+- Updated dependencies [cafa73f]
+  - @opengeni/sdk@6.30.2
+
 ## 0.0.94
 
 ### Patch Changes

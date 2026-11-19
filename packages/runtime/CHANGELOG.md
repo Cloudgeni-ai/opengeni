@@ -1,5 +1,26 @@
 # @opengeni/runtime
 
+## 6.30.2
+
+### Patch Changes
+
+- Updated dependencies [cafa73f]
+  - @opengeni/contracts@6.30.2
+  - @opengeni/sdk@6.30.2
+  - @opengeni/capabilities@6.30.2
+  - @opengeni/codemode@6.30.2
+  - @opengeni/codex@6.30.2
+  - @opengeni/config@6.30.2
+  - @opengeni/decisions@6.30.2
+  - @opengeni/interaction@6.30.2
+  - @opengeni/observability@6.30.2
+  - @opengeni/tool-gateway@6.30.2
+  - @opengeni/vaults@6.30.2
+  - @opengeni/jev@6.30.2
+  - @opengeni/agent-proto@6.30.2
+  - @opengeni/network@6.30.2
+  - @opengeni/xai-subscription@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes
