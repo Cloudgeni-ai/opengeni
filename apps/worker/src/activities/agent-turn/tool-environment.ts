@@ -768,11 +768,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   // Background-command tools need compute: the effective route of this turn,
   // a managed sandbox or an attached Connected Machine, not the durable home.
-  // `goal_resume` follows the goal frozen with the turn, as the goal context
-  // the model reads does, so a session that has never had a goal is not sent it.
+  // Goal tools never follow the session's goal state: a session's first goal
+  // would otherwise change the tool list and system prompt under every earlier
+  // request and re-read the whole history uncached.
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
-    ...(turn.goalSnapshot ? { sessionGoal: turn.goalSnapshot.state !== "none" } : {}),
   });
   const bundledSkillIds = bundledSkillSelectionForAgentConfig(
     session.bundledSkillIds,
