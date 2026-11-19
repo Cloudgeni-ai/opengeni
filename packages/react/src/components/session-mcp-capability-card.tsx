@@ -119,7 +119,8 @@ function ScopedCard({
   const reconnecting = Boolean(reconnectConnectionId);
   const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
   // Your own login, off here or for a connector not set up here yet: one
-  // click uses it here instead of signing in again.
+  // click uses it here instead of signing in again. Where others could use a
+  // shared connection the flow offers it only once "Only me" is chosen.
   const useOwnLoginHere = offHere !== null && !connected && item !== null;
   const ownLoginAccount = useOwnLoginHere
     ? connectionAccountLabel(
@@ -217,6 +218,34 @@ function ScopedCard({
           : null,
       ].filter((row): row is { key: string; label: string; value: string } => row !== null)
     : [];
+
+  // Who can use a new connection: asked only where someone else could.
+  const ownershipChooser =
+    item && !item.connectionRef && !personalOnly && !reconnecting ? (
+      <fieldset disabled={busy}>
+        <legend>
+          {ownershipCopy?.legend ?? t("sessionMcpCapabilityCard.whoCanUseThisConnection")}
+        </legend>
+        <label>
+          <input
+            type="radio"
+            name={`${capabilityId}-ownership`}
+            checked={ownership === "workspace"}
+            onChange={() => flow.setOwnership("workspace")}
+          />
+          {t("sessionMcpCapabilityCard.everyoneInThisWorkspace")}
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`${capabilityId}-ownership`}
+            checked={ownership === "personal"}
+            onChange={() => flow.setOwnership("personal")}
+          />
+          {t("sessionMcpCapabilityCard.onlyMe")}
+        </label>
+      </fieldset>
+    ) : null;
 
   return (
     <SessionCapabilityFrame
@@ -320,6 +349,7 @@ function ScopedCard({
               </button>
             ) : ownLoginQuestion ? (
               <>
+                {ownershipChooser}
                 <p className="og-session-capability-scope">{ownLoginQuestion}</p>
                 <button
                   className="og-session-capability-primary"
@@ -328,7 +358,7 @@ function ScopedCard({
                 >
                   {t("sessionMcpCapabilityCard.useItHere")}
                 </button>
-                <button type="button" disabled={busy} onClick={flow.connectAnother}>
+                <button type="button" disabled={busy} onClick={flow.signIn}>
                   {t("sessionMcpCapabilityCard.connectADifferentAccount")}
                 </button>
               </>
@@ -346,32 +376,7 @@ function ScopedCard({
                 {approvalNote ? (
                   <OrganizationApprovalHelp approval={approvalNote} serviceName={item.name} />
                 ) : null}
-                {!item.connectionRef && !personalOnly && !reconnecting ? (
-                  <fieldset disabled={busy}>
-                    <legend>
-                      {ownershipCopy?.legend ??
-                        t("sessionMcpCapabilityCard.whoCanUseThisConnection")}
-                    </legend>
-                    <label>
-                      <input
-                        type="radio"
-                        name={`${capabilityId}-ownership`}
-                        checked={ownership === "workspace"}
-                        onChange={() => flow.setOwnership("workspace")}
-                      />
-                      {t("sessionMcpCapabilityCard.everyoneInThisWorkspace")}
-                    </label>
-                    <label>
-                      <input
-                        type="radio"
-                        name={`${capabilityId}-ownership`}
-                        checked={ownership === "personal"}
-                        onChange={() => flow.setOwnership("personal")}
-                      />
-                      {t("sessionMcpCapabilityCard.onlyMe")}
-                    </label>
-                  </fieldset>
-                ) : null}
+                {ownershipChooser}
                 <p className="og-session-capability-scope">
                   {reconnecting
                     ? t("sessionMcpCapabilityCard.reconnectsTheSameAccount")

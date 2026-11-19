@@ -111,7 +111,9 @@ export type McpCapabilityConnect = {
   /**
    * Your own login the card offers to use here instead of a sign-in (D-54):
    * one that is off in this workspace, or your one login for a capability
-   * not set up here yet (on here or not). The card asks once whether to use it.
+   * not set up here yet (on here or not). Offered only while the card would
+   * connect your own account: where others could use a shared connection,
+   * once you choose "Only me". The card asks once whether to use it.
    */
   offHere: ConnectionMetadata | null;
   waiting: boolean;
@@ -148,12 +150,6 @@ export type McpCapabilityConnect = {
    * then add it here like `addHere`.
    */
   useHere: () => void;
-  /**
-   * Sign in with another account instead of `offHere`: straight away where
-   * the card connects the person's own account anyway, otherwise after they
-   * choose who can use the connection.
-   */
-  connectAnother: () => void;
   close: () => void;
   stopWaiting: () => void;
 };
@@ -222,9 +218,7 @@ export function useMcpCapabilityConnect({
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [offHere, setOffHere] = useState<ConnectionMetadata | null>(null);
-  // The person chose to connect another account instead of their own login.
-  const ownLoginDeclined = useRef(false);
+  const [ownLogin, setOwnLogin] = useState<ConnectionMetadata | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -238,6 +232,9 @@ export function useMcpCapabilityConnect({
   const [ownership, setOwnership] = useState<ConnectOwnership>(
     personalOnly ? "personal" : "workspace",
   );
+  // Offered only while the card would connect the person's own account: a
+  // shared connection is not theirs to replace with their login.
+  const offHere = ownership === "personal" ? ownLogin : null;
   const lifetime = useRef<AbortController | null>(null);
   const authorization = useRef<AbortController | null>(null);
   const operation = useRef<AbortController | null>(null);
@@ -326,16 +323,15 @@ export function useMcpCapabilityConnect({
     } else if (
       !resolved.enabled &&
       !reconnectConnectionId &&
-      !ownLoginDeclined.current &&
       // A shared account it was set up with before stays its account: turning
       // it on again connects that, not someone's own login.
       (!resolved.connectionRef || resolved.connectionRef.subjectScope === "subject")
     ) {
       // Not set up here yet, but the person may already have their own login
-      // for it, turned on here or not. Using it sets the capability up for
-      // each person's own account, so the card offers it even where it would
-      // otherwise ask who can use a new connection; another account remains
-      // a choice. Only an offer: if this read fails the card signs in as usual.
+      // for it, turned on here or not. Where someone else could use a shared
+      // connection the card asks who can use it first, and offers the login
+      // once that is only the person (see `offHere`). Only an offer: if
+      // this read fails the card signs in as usual.
       const accounts = await Promise.resolve()
         .then(() => client.listOwnConnectionAccounts(workspaceId))
         .catch((): ConnectionMetadata[] => []);
@@ -344,7 +340,7 @@ export function useMcpCapabilityConnect({
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     setConnected(accountReady);
-    setOffHere(ownLoginElsewhere);
+    setOwnLogin(ownLoginElsewhere);
     // Already used in this chat: read from the session the way adding it
     // does, so a reload shows the same finished card.
     setComplete(accountReady && !!session && sessionUsesCapability(session, resolved));
@@ -835,7 +831,7 @@ export function useMcpCapabilityConnect({
         await turnOnOwnLoginHere(client, workspaceId, login);
         if (!active()) return;
       }
-      setOffHere(null);
+      setOwnLogin(null);
       let capability = item;
       if (enabling) {
         const enabled = await load(active);
@@ -848,18 +844,6 @@ export function useMcpCapabilityConnect({
     });
     // Started from the closed card: open it so a failure is shown, not lost.
     if (!finished && current()) setExpanded(true);
-  }
-
-  function connectAnother() {
-    // The card connects the person's own account here anyway: sign in.
-    if (ownership === "personal") {
-      signIn();
-      return;
-    }
-    // Otherwise who can use the new connection is theirs to choose first.
-    ownLoginDeclined.current = true;
-    setOffHere(null);
-    setExpanded(true);
   }
 
   function close() {
@@ -927,7 +911,6 @@ export function useMcpCapabilityConnect({
     signIn,
     addHere: () => void addHere(),
     useHere: () => void useHere(),
-    connectAnother,
     close,
     stopWaiting: () => authorization.current?.abort(new ConnectPopupClosedError()),
   };
