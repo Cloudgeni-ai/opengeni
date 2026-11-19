@@ -166,7 +166,7 @@ Console shows who each end user is instead of the opaque id; send them on
 every request or when they change (the latest wins, omitted keeps). Server code
 sends the same with `asUser(id, { displayName, email })`. Name tenant
 workspaces with the facade's `workspaceName`, and rename one with
-`updateWorkspace(workspaceId, { name })`.
+`updateWorkspace(workspaceId, { name })` (needs `workspace:admin`).
 
 Workspaces the product's organization key creates are managed by the product.
 Organization owners and admins read those users' sessions, cost and an audit

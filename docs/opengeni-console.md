@@ -200,7 +200,8 @@ Console names an end user by display name, then email, then the product's id;
 the id shows on hover and can be copied on the session page. Workspace names
 show in full; the product sets them when it creates a workspace (`name`, or the
 chat facade's `workspaceName`) and renames one with
-`updateWorkspace(workspaceId, { name })` (`PATCH /v1/workspaces/:workspaceId`).
+`updateWorkspace(workspaceId, { name })` (`PATCH /v1/workspaces/:workspaceId`; the
+key needs `workspace:admin`, which full-access keys have).
 
 Search (`q`) matches the workspace name and the end user's id, name or email
 at every review level, and the title and opening messages with full

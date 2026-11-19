@@ -16,7 +16,7 @@ A workspace is where sessions, files, knowledge, and connections live. Hundreds 
 
 Return immutable ids from your auth system, never an email or username. Take them from your server-side session, never from the request body or URL.
 
-To show who each user is in Console, also return their `displayName` and `email`: `return { user: user.id, tenant: user.teamId, displayName: user.name, email: user.email }`. They are display details, never the identity: the latest you send wins, and leaving one out keeps the stored value. Server code sends them with `asUser(user.id, { displayName, email })` on an `OpenGeniClient`. Name tenant workspaces with `workspaceName` on the `Opengeni` facade, and rename one later with `updateWorkspace(workspaceId, { name })`.
+To show who each user is in Console, also return their `displayName` and `email`: `return { user: user.id, tenant: user.teamId, displayName: user.name, email: user.email }`. They are display details, never the identity: the latest you send wins, and leaving one out keeps the stored value. Server code sends them with `asUser(user.id, { displayName, email })` on an `OpenGeniClient`. Name tenant workspaces with `workspaceName` on the `Opengeni` facade, and rename one later with `updateWorkspace(workspaceId, { name })` (the key needs `workspace:admin`, which full-access keys have).
 
 New users get conversation permissions: read the workspace, create and control their sessions, upload and read files, and attach the tools you pass per session. They never get admin. The API key must hold `members:manage`; a full-access key does.
 
