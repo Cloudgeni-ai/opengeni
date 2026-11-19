@@ -154,8 +154,13 @@ works for their messages only where they turned it on:
   a switch for each. The Personal workspace is always on. A workspace where
   they may not add their own things shows the switch off with the reason; a
   login that is on can always be turned off.
-- When a chat asks for a connector whose login the person added elsewhere, the
-  Connect card offers it with one click ("Use it here") instead of a new sign-in.
+- When a chat asks for a connector whose login is off here, or a connector not
+  set up in this workspace yet for which the person has one login of their own
+  (on here or not), the Connect card offers it with one click ("Use it here")
+  instead of a new sign-in. That sets the connector up for each person's own
+  account when it isn't yet, and turns the login on here only when it is off.
+  Where other people could use a shared connection, the card first asks who
+  can use it, and offers the login once the person chooses "Only me".
 - In a chat shared with the workspace, the owner sees one quiet line above the
   composer, "N personal connections in this chat", counting the accounts that
   are on. It opens a menu that says people in the workspace see what the agent

@@ -71,10 +71,11 @@ export function personalReconnectTarget(
 }
 
 /**
- * The person's one own login for this endpoint, added in another workspace
- * and not turned on in this one, for a capability not yet set up here: the
- * card offers to use it here instead of signing in again. None when they have
- * no such login, or more than one (a sign-in then says which account).
+ * The person's one own login for this endpoint, for a capability not yet set
+ * up here: the card offers to use it here instead of signing in again (D-54).
+ * Whether the login is already turned on here doesn't matter; using it turns
+ * it on only when it is off. None when they have no such login, or more than
+ * one (a sign-in then says which account).
  */
 export function ownLoginToUseHere(
   accounts: readonly ConnectionMetadata[],
@@ -88,7 +89,7 @@ export function ownLoginToUseHere(
       entry.status === "active" &&
       entry.metadata.mcpUrl === mcpUrl,
   );
-  return logins.length === 1 && ownLoginOffHere(logins[0]!) ? logins[0]! : null;
+  return logins.length === 1 ? logins[0]! : null;
 }
 
 function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
@@ -108,8 +109,11 @@ export type McpCapabilityConnect = {
   /** An account is connected; the capability still has to be added here. */
   connected: boolean;
   /**
-   * Your own login for this, added in another workspace and not turned on in
-   * this one: the card asks once whether to use it here too (D-54).
+   * Your own login the card offers to use here instead of a sign-in (D-54):
+   * one that is off in this workspace, or your one login for a capability
+   * not set up here yet (on here or not). Offered only while the card would
+   * connect your own account: where others could use a shared connection,
+   * once you choose "Only me". The card asks once whether to use it.
    */
   offHere: ConnectionMetadata | null;
   waiting: boolean;
@@ -140,7 +144,11 @@ export type McpCapabilityConnect = {
   open: () => void;
   signIn: () => void;
   addHere: () => void;
-  /** Turn `offHere` on in this workspace, then add it here like `addHere`. */
+  /**
+   * Use `offHere` here: set the capability up for each person's own account
+   * when it isn't yet, turn the login on in this workspace when it is off,
+   * then add it here like `addHere`.
+   */
   useHere: () => void;
   close: () => void;
   stopWaiting: () => void;
@@ -210,7 +218,7 @@ export function useMcpCapabilityConnect({
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [offHere, setOffHere] = useState<ConnectionMetadata | null>(null);
+  const [ownLogin, setOwnLogin] = useState<ConnectionMetadata | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [reconciling, setReconciling] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -224,6 +232,9 @@ export function useMcpCapabilityConnect({
   const [ownership, setOwnership] = useState<ConnectOwnership>(
     personalOnly ? "personal" : "workspace",
   );
+  // Offered only while the card would connect the person's own account: a
+  // shared connection is not theirs to replace with their login.
+  const offHere = ownership === "personal" ? ownLogin : null;
   const lifetime = useRef<AbortController | null>(null);
   const authorization = useRef<AbortController | null>(null);
   const operation = useRef<AbortController | null>(null);
@@ -312,18 +323,15 @@ export function useMcpCapabilityConnect({
     } else if (
       !resolved.enabled &&
       !reconnectConnectionId &&
-      (resolved.connectionRef
-        ? resolved.connectionRef.subjectScope === "subject"
-        : // Only where the card would connect the person's own account anyway;
-          // otherwise they first choose who can use the connection.
-          personalOnly ||
-          nobodyToShareWith ||
-          personalOnlyService(resolved) ||
-          resolved.metadata?.defaultConnectionOwnership === "personal")
+      // A shared account it was set up with before stays its account: turning
+      // it on again connects that, not someone's own login.
+      (!resolved.connectionRef || resolved.connectionRef.subjectScope === "subject")
     ) {
       // Not set up here yet, but the person may already have their own login
-      // for it from another workspace. Only an offer: if this read fails the
-      // card still signs in as usual.
+      // for it, turned on here or not. Where someone else could use a shared
+      // connection the card asks who can use it first, and offers the login
+      // once that is only the person (see `offHere`). Only an offer: if
+      // this read fails the card signs in as usual.
       const accounts = await Promise.resolve()
         .then(() => client.listOwnConnectionAccounts(workspaceId))
         .catch((): ConnectionMetadata[] => []);
@@ -332,7 +340,7 @@ export function useMcpCapabilityConnect({
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
     setConnected(accountReady);
-    setOffHere(ownLoginElsewhere);
+    setOwnLogin(ownLoginElsewhere);
     // Already used in this chat: read from the session the way adding it
     // does, so a reload shows the same finished card.
     setComplete(accountReady && !!session && sessionUsesCapability(session, resolved));
@@ -817,9 +825,13 @@ export function useMcpCapabilityConnect({
         await enableWith(item, login, "personal");
         if (!active()) return;
       }
-      await turnOnOwnLoginHere(client, workspaceId, login);
-      if (!active()) return;
-      setOffHere(null);
+      // Already on here (a standing grant, where it was added, or the
+      // Personal workspace): there is nothing to turn on.
+      if (ownLoginOffHere(login)) {
+        await turnOnOwnLoginHere(client, workspaceId, login);
+        if (!active()) return;
+      }
+      setOwnLogin(null);
       let capability = item;
       if (enabling) {
         const enabled = await load(active);

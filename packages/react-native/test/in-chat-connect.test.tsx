@@ -680,6 +680,8 @@ describe("native MCP saved sign-in attempts", () => {
         {
           listCapabilities: async () => ({ items: [item] }),
           listConnections: async () => [],
+          // No own login to offer instead of a sign-in.
+          listOwnConnectionAccounts: async () => [],
           connectTransport: () => fakeTransport({ get: () => settled }).transport,
           getSession: async () => ({ toolPolicy: { mode: "custom" }, tools: [] }),
         },

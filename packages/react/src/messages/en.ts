@@ -5062,6 +5062,8 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
   "sessionMcpCapabilityCard.useItHere": "Use it here",
+  "sessionMcpCapabilityCard.useYourLoginHere":
+    "You already connected {account}. Use it for your messages here?",
   "sessionMcpCapabilityCard.useYourLoginHereScope":
     "Only you can use it. In shared chats here, people see what the agent does with it.",
   "sessionMcpCapabilityCard.useYourLoginHereToo":
