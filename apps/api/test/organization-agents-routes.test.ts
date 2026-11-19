@@ -771,6 +771,30 @@ describe("Console agents routes", () => {
       ["failed", "move_start_failed"],
       ["failed", "move_unavailable"],
     ]);
+
+    // The API stopped between the publish and starting its move: listing
+    // re-drives a stale pending move, and fails it when it cannot start.
+    const pendingId = operations.body.operations[0].id as string;
+    await shared!.admin`update agent_publish_operations
+      set created_at = now() - interval '5 minutes' where id = ${pendingId}`;
+    const byId = (body: { operations: Array<Record<string, unknown>> }) =>
+      body.operations.find((operation) => operation.id === pendingId);
+    const restarted: string[] = [];
+    try {
+      deps.orgAgentPublishMoveStarter = async (input) => {
+        restarted.push(input.operationId);
+      };
+      const listed = await call("GET", `${org()}/${agentId}/publish-operations`, keys.agentsRead);
+      expect(byId(listed.body)).toMatchObject({ status: "pending", failureReason: null });
+      expect(restarted).toEqual([pendingId]);
+    } finally {
+      delete deps.orgAgentPublishMoveStarter;
+    }
+    const swept = await call("GET", `${org()}/${agentId}/publish-operations`, keys.agentsRead);
+    expect(byId(swept.body)).toMatchObject({
+      status: "failed",
+      failureReason: "move_unavailable",
+    });
   }, 120_000);
 
   test("workspaces list their published organization agents; the test workspace is created once", async () => {

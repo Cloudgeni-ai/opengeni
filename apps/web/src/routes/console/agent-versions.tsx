@@ -45,6 +45,9 @@ export function operationText(operation: OrgAgentPublishOperation): string {
     case "running":
       return `Moving running chats to v${operation.toVersion}: ${moved}${failed}.`;
     case "succeeded":
+      if (operation.failureReason === "superseded") {
+        return `v${operation.toVersion} was published. ${moved}${failed} before a newer publish took over.`;
+      }
       return `v${operation.toVersion} is published. ${moved}${failed}.`;
     case "failed":
       return `Moving chats to v${operation.toVersion} stopped: ${moved}${failed}.`;

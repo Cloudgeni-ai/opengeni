@@ -393,6 +393,33 @@ async function startMove(
   );
 }
 
+/** A `pending` move older than this was left behind by an API that stopped before starting it. */
+const STALE_PENDING_MOVE_MS = 2 * 60_000;
+
+/**
+ * Re-drives moves left `pending` when the API stopped between committing a
+ * publish and starting its move. Starting is idempotent (the workflow id is
+ * the operation id), so a move that is merely queued stays `pending`; one
+ * that cannot start is marked `failed` as in `startMove`.
+ */
+async function redriveStalePendingMoves(
+  deps: ApiRouteDeps,
+  organizationId: string,
+  operations: OrgAgentPublishOperation[],
+): Promise<OrgAgentPublishOperation[]> {
+  const now = Date.now();
+  return await Promise.all(
+    operations.map(async (operation) => {
+      if (operation.status !== "pending") return operation;
+      const createdAt = Date.parse(operation.createdAt);
+      if (!Number.isFinite(createdAt) || now - createdAt < STALE_PENDING_MOVE_MS) {
+        return operation;
+      }
+      return (await startMove(deps, organizationId, operation)) ?? operation;
+    }),
+  );
+}
+
 function workspaceLimit(deps: ApiRouteDeps): number | null {
   if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
     return null;
@@ -769,12 +796,13 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.get(`${base}/:agentId/publish-operations`, async (c) => {
     const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
-    const operations = await listOrgAgentPublishOperations(
+    const listed = await listOrgAgentPublishOperations(
       deps.db,
       caller.organizationId,
       uuidParam(c, "agentId"),
     );
-    if (!operations) throw agentNotFound();
+    if (!listed) throw agentNotFound();
+    const operations = await redriveStalePendingMoves(deps, caller.organizationId, listed);
     return c.json(ListOrgAgentPublishOperationsResponse.parse({ operations }));
   });
 

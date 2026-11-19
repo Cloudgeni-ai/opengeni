@@ -63,11 +63,13 @@ export async function orgAgentPublishMoveWorkflow(input: OrgAgentPublishMoveInpu
       if (batch.done) break;
     }
     if (superseded) {
-      // A newer publish moves the chats; this one ends with what it moved.
+      // A newer publish moves the chats; this one ends with what it moved and
+      // records why it stopped early.
       await moveActivity.finishOrgAgentPublishMove({
         ...input,
         status: "succeeded",
         remainingDeferred: 0,
+        failureReason: "superseded",
       });
       return;
     }

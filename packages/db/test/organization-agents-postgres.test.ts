@@ -659,6 +659,38 @@ describe("organization agents: versions and publishing", () => {
     expect(byId.get(internal)).toBeNull();
   }, 120_000);
 
+  test("a Console create waits for the key's lock, like deploys and inline saves", async () => {
+    const org = await organization();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked!: () => void;
+    const lockHeld = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const holder = shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`org-agent-key:${org.accountId}:locked`}, 0))`;
+      locked();
+      await released;
+    });
+    await lockHeld;
+    let settled = false;
+    const creating = createOrgAgent(app.db, {
+      accountId: org.accountId,
+      actor,
+      key: "locked",
+      definition: definition("Wait."),
+    }).finally(() => {
+      settled = true;
+    });
+    await Bun.sleep(500);
+    expect(settled).toBe(false);
+    release();
+    await holder;
+    expect((await creating).key).toBe("locked");
+  }, 60_000);
+
   test("the Console test workspace is created once and marked console_test", async () => {
     const org = await organization();
     expect(await findOrgAgentTestWorkspace(app.db, org.accountId)).toBeNull();

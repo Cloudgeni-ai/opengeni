@@ -195,6 +195,8 @@ export function createOrgAgentPublishMoveActivities(
       input: OrgAgentPublishMoveInput & {
         status: "succeeded" | "failed";
         remainingDeferred: number;
+        /** Set when a newer publish took over before this move finished. */
+        failureReason?: "superseded";
       },
     ): Promise<void> {
       const { db, observability } = await services();
@@ -203,6 +205,7 @@ export function createOrgAgentPublishMoveActivities(
         operationId: input.operationId,
         status: input.status,
         failed: input.remainingDeferred,
+        ...(input.failureReason ? { failureReason: input.failureReason } : {}),
       });
       recordOrgAgentPublishMove(observability, "failed", input.remainingDeferred);
       recordOrgAgentPublishMove(
