@@ -19395,6 +19395,11 @@ export const GitDiffRequest = /* @__PURE__ */ defineSchema(() =>
     includeUntracked: primitives.boolean.default(false),
     fromRef: z.string().optional(),
     toRef: z.string().optional(),
+    // With fromRef: compare against the merge base of fromRef and toRef (HEAD
+    // when toRef is omitted, then including the working tree), i.e. only the
+    // changes made on this branch, like a pull request. Without it a branch that
+    // is behind fromRef also shows every later change on fromRef, reversed.
+    mergeBase: primitives.boolean.default(false),
     pathspec: z.array(primitives.string).default([]),
     contextLines: z.number().int().min(0).max(10).default(3),
     maxBytesPerFile: primitives.positiveInteger.max(2 * 1024 * 1024).default(512 * 1024),
