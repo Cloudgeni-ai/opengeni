@@ -19529,6 +19529,11 @@ export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
 // The single manifest blob (one per revision). Holds everything the workbench
 // needs for a cold paint: the tree index, per-repo status+diff, and the file
 // index (after-image refs). The M2 API serves this inline when small (≤2MB).
+// A capture never publishes a manifest larger than
+// WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES: diff hunks are shed (the entry is kept
+// with `truncated: true`) until it fits, so every reader can afford to parse
+// one. The API never parses a larger (legacy) manifest.
+export const WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
 export const WorkspaceCaptureManifest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     version: z.literal(1),
