@@ -1141,6 +1141,11 @@ pub struct CpuStatus {
     pub reserved: u64,
     /// Millicores a wake can still reserve.
     pub free: u64,
+    /// Processors the VMs of sandboxes awake or waking have in all, which
+    /// may be more than the host has when they share them. Missing from
+    /// what a host of an earlier release wrote: none.
+    #[serde(default)]
+    pub vcpus: u64,
 }
 
 /// How much of a host's local disk the next saves of VMs not saved yet may
