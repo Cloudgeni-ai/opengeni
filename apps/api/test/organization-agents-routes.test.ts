@@ -741,11 +741,6 @@ describe("Console agents routes", () => {
     expect(read.body.agent.workspaceIds).toEqual([]);
     const byKey = await call("GET", `${org()}/by-key/scoped-access`, limited);
     expect(byKey.body.agent.workspaceIds).toEqual([]);
-    const listed = await call("GET", org(), limited);
-    expect(
-      listed.body.agents.find((agent: Record<string, unknown>) => agent.id === agentId)
-        .workspaceIds,
-    ).toEqual([]);
     const draft = await call("PUT", `${org()}/${agentId}/draft`, limited, {
       name: "Scoped access",
       instructions: "Two.",

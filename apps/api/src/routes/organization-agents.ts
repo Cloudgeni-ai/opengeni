@@ -621,9 +621,8 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const agents = await listOrgAgents(deps.db, caller.organizationId, {
       includeArchived: c.req.query("includeArchived") === "true",
     });
-    return c.json(ListOrgAgentsResponse.parse({
-        agents: agents.map((agent) => agentForCaller(caller, agent)),
-      }));
+    // Summaries: no `workspaceIds` to scope.
+    return c.json(ListOrgAgentsResponse.parse({ agents }));
   });
 
   // Runs on: the organization machines and sandbox environments an agent can
@@ -781,10 +780,13 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         toolCatalog,
       }),
     );
-    return c.json(SaveOrgAgentDraftResponse.parse({
+    return c.json(
+      SaveOrgAgentDraftResponse.parse({
         ...result,
         agent: agentForCaller(caller, result.agent),
-      }), result.created ? 201 : 200);
+      }),
+      result.created ? 201 : 200,
+    );
   });
 
   app.get(`${base}/:agentId/versions`, async (c) => {
@@ -825,11 +827,13 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       }),
     );
     const operation = await startMove(deps, caller.organizationId, result.operation);
-    return c.json(PublishOrgAgentResponse.parse({
+    return c.json(
+      PublishOrgAgentResponse.parse({
         ...result,
         agent: agentForCaller(caller, result.agent),
         operation,
-      }));
+      }),
+    );
   });
 
   app.get(`${base}/:agentId/publish-operations`, async (c) => {
