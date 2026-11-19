@@ -112,6 +112,18 @@ export function signSiteDbRequest(
   };
 }
 
+/** Sites logged as not in the EU yet, and when: at most once per Site per hour per process. */
+const notInEuLogged = new Map<string, number>();
+const NOT_IN_EU_LOG_MS = 60 * 60_000;
+
+function shouldLogNotInEu(siteId: string, now = Date.now()): boolean {
+  const last = notInEuLogged.get(siteId);
+  if (last !== undefined && now - last < NOT_IN_EU_LOG_MS) return false;
+  if (notInEuLogged.size >= 1000) notInEuLogged.clear();
+  notInEuLogged.set(siteId, now);
+  return true;
+}
+
 /** Read-only operations: a lost response cannot have changed anything. */
 const READ_ONLY: ReadonlySet<SiteDbOperation> = new Set(["inspect", "export"]);
 
@@ -154,7 +166,7 @@ export async function callSiteDb<T>(
   }
   // A database not yet in the EU is served from its earlier location (apps/site-gateway, "Location").
   const relocationError = response.headers.get(SITE_DB_RELOCATION_ERROR_HEADER);
-  if (relocationError)
+  if (relocationError && shouldLogNotInEu(siteId))
     console.warn("[site-sql] Site database is not in the EU yet", {
       siteId,
       location: response.headers.get(SITE_DB_LOCATION_HEADER),

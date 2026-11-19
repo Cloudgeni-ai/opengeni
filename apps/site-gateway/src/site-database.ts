@@ -236,6 +236,25 @@ function unavailable(message: string): Response {
   );
 }
 
+/**
+ * A call to the Site's other object failed after it was sent: a write may have
+ * run there, so only a read is safe to call not run.
+ */
+function lostResponse(operation: SiteDbOperation): Response {
+  const readOnly = operation === "inspect" || operation === "export";
+  return Response.json(
+    {
+      error: {
+        code: "internal",
+        message: "The Site database is temporarily unavailable",
+        retryable: true,
+        outcomeUnknown: !readOnly,
+      },
+    },
+    { status: 503 },
+  );
+}
+
 /** Whether an operation erases the database (so its frozen legacy copy goes too). */
 function erasesDatabase(operation: SiteDbOperation, body: ArrayBuffer): boolean {
   if (operation === "reset") return true;
@@ -538,7 +557,7 @@ export class SiteDatabase {
       response = await this.relay(site, operation, body);
     } catch (error) {
       console.error("site-gateway: legacy Site database unreachable", error);
-      return unavailable("The Site database is temporarily unavailable");
+      return lostResponse(operation);
     }
     const relayed = located(response, "legacy");
     relayed.headers.set(SITE_DB_RELOCATION_ERROR_HEADER, headerText(reason));
@@ -798,7 +817,7 @@ export class SiteDatabase {
       return new Response(response.body, { status: response.status, headers: response.headers });
     } catch (error) {
       console.error("site-gateway: EU Site database unreachable", error);
-      return unavailable("The Site database is temporarily unavailable");
+      return lostResponse(operation);
     }
   }
 

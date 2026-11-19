@@ -468,7 +468,12 @@ describe("Site database location", () => {
         maxResponseBytes: 1024 * 1024,
         maxDatabaseBytes: MAX_DB,
       });
-    expect((await write()).status).toBe(503);
+    const refused = await write();
+    expect(refused.status).toBe(503);
+    // Nothing ran, so the API may retry it.
+    expect(await refused.json()).toMatchObject({
+      error: { retryable: true, outcomeUnknown: false },
+    });
     // Another token cannot take a page or commit while this one holds it.
     expect(
       (await legacy(site, "relocation/page", { token: crypto.randomUUID() }, "relay")).status,
