@@ -103,7 +103,6 @@ import {
   inheritedSessionOrgAgentInTransaction,
   readOrgAgentKeysInTransaction,
   readOrgAgentVersion,
-  readOrgAgentVersionInTransaction,
   withOrgAgentsVisible,
 } from "./organization-agent-runtime";
 export * from "./organization-agents";

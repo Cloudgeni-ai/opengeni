@@ -163,7 +163,7 @@ describe("organization agents", () => {
         `DELETE ${login}`,
       ],
     );
-    expect(requests[20]!.body).toEqual({
+    expect(requests[19]!.body).toEqual({
       kind: "headers",
       headers: { authorization: "Bearer end-user-token" },
     });
