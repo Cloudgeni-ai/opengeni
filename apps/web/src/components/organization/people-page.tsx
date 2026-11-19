@@ -1356,9 +1356,7 @@ function InvitationPage({
         >
           <p className="text-sm text-fg">{ORGANIZATION_ROLE_LABELS[invitation.role]}</p>
         </DetailSection>
-        {invitation.role === "member" ? (
-          <ConsoleRoleForInvitation invitation={invitation} />
-        ) : null}
+        {invitation.role === "member" ? <ConsoleRoleForInvitation invitation={invitation} /> : null}
         <DetailSection
           title="Workspace access"
           description="Where they can work once they join. Invitations give access as Member."

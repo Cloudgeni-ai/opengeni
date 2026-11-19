@@ -1710,9 +1710,9 @@ describe("Console roles: Console test chats", () => {
     const other = await start(people.owner.headers);
     expect(other.status).toBe(201);
     expect(other.body.sessionId).not.toBe(first.body.sessionId);
-    // A different start under the same key is refused, not merged.
+    // The key names one start: the same key never starts a second chat.
     const changed = await start(people.editor.headers, "Something else");
-    expect(changed.status).toBe(409);
+    expect([changed.status, changed.body.sessionId]).toEqual([200, first.body.sessionId]);
   }, 120_000);
 
   /** A live agent attempt on a test chat, as the worker runs it: its token and its tools. */

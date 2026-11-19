@@ -193,127 +193,127 @@ const toolServer = {
 
 const requestJson = mock(
   async (method: string, path: string, _body?: unknown, query?: Record<string, string>) => {
-  const base = `/v1/organizations/${organizationId}`;
-  if (!path.startsWith("/v1/workspaces/") && !flagOn) {
-    throw Object.assign(new Error("Agent not found."), { status: 404 });
-  }
-  if (method === "GET" && path === `${base}/agents`) {
-    return {
-      agents: [
-        summary(),
-        summary({
-          id: "99999999-9999-4999-8999-999999999999",
-          key: "triage",
-          name: "Triage",
-          managedBy: "code",
-          publishedVersion: 4,
-          latestVersion: 4,
-        }),
-      ],
-    };
-  }
-  if (method === "GET" && path === `${base}/agents/${agentId}`) return { agent: agentRecord };
-  if (method === "GET" && path === `${base}/agents/compute`) return compute;
-  if (method === "GET" && path === `${base}/agents/tool-servers`)
-    return { toolServers: [toolServer] };
-  if (method === "GET" && path === `${base}/agents/tool-servers/billing/tools`) {
-    return {
-      tools: [{ name: "lookup_invoice" }, { name: "refund" }, { name: "void_invoice" }],
-      error: null,
-    };
-  }
-  if (method === "GET" && path === `${base}/agents/${agentId}/movable-chats`) return { count: 7 };
-  if (method === "GET" && path === `${base}/agents/${agentId}/sessions`) {
-    return {
-      sessions: [
-        {
-          id: chatId,
-          workspaceId,
-          title: "Refund for invoice 1042",
-          status: "idle",
-          agentVersion: 2,
-          overrides: {
-            model: { agent: "azure-sol/gpt-6.1-sol", chat: "anthropic/claude-opus-5.5" },
-            instructions: { agent: "Be brief.", chat: "Be brief.\n\nAnswer in Norwegian." },
+    const base = `/v1/organizations/${organizationId}`;
+    if (!path.startsWith("/v1/workspaces/") && !flagOn) {
+      throw Object.assign(new Error("Agent not found."), { status: 404 });
+    }
+    if (method === "GET" && path === `${base}/agents`) {
+      return {
+        agents: [
+          summary(),
+          summary({
+            id: "99999999-9999-4999-8999-999999999999",
+            key: "triage",
+            name: "Triage",
+            managedBy: "code",
+            publishedVersion: 4,
+            latestVersion: 4,
+          }),
+        ],
+      };
+    }
+    if (method === "GET" && path === `${base}/agents/${agentId}`) return { agent: agentRecord };
+    if (method === "GET" && path === `${base}/agents/compute`) return compute;
+    if (method === "GET" && path === `${base}/agents/tool-servers`)
+      return { toolServers: [toolServer] };
+    if (method === "GET" && path === `${base}/agents/tool-servers/billing/tools`) {
+      return {
+        tools: [{ name: "lookup_invoice" }, { name: "refund" }, { name: "void_invoice" }],
+        error: null,
+      };
+    }
+    if (method === "GET" && path === `${base}/agents/${agentId}/movable-chats`) return { count: 7 };
+    if (method === "GET" && path === `${base}/agents/${agentId}/sessions`) {
+      return {
+        sessions: [
+          {
+            id: chatId,
+            workspaceId,
+            title: "Refund for invoice 1042",
+            status: "idle",
+            agentVersion: 2,
+            overrides: {
+              model: { agent: "azure-sol/gpt-6.1-sol", chat: "anthropic/claude-opus-5.5" },
+              instructions: { agent: "Be brief.", chat: "Be brief.\n\nAnswer in Norwegian." },
+            },
+            createdAt: at,
+            updatedAt: at,
           },
-          createdAt: at,
-          updatedAt: at,
-        },
-        {
-          id: "12121212-1212-4121-8121-121212121212",
-          workspaceId,
-          title: "Where is my order",
-          status: "idle",
-          agentVersion: 2,
-          overrides: null,
-          createdAt: at,
-          updatedAt: at,
-        },
-      ],
-      nextCursor: null,
-    };
-  }
-  // Test chats: only through the agent's test-chats routes, never the app's session routes.
-  if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}`) {
-    return {
-      workspaceId,
-      sessionId: chatId,
-      agentId,
-      version: 3,
-      status: "running",
-      paused: false,
-    };
-  }
-  if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}/events`) {
-    // One event at sequence 1: nothing new after it.
-    const after = Number(query?.after ?? 0);
-    return after >= 1
-      ? { events: [], hasMore: false, nextAfter: after }
-      : {
-          events: [
-            {
-              id: "13131313-1313-4131-8131-131313131313",
-              sessionId: chatId,
-              sequence: 1,
-              type: "user.message",
-              payload: { text: "Refund invoice 1042" },
-              createdAt: at,
-            },
-          ],
-          hasMore: false,
-          nextAfter: 1,
-        };
-  }
-  if (method === "POST" && path === `${base}/agents/${agentId}/test-chats/${chatId}/messages`) {
-    return { id: "14141414-1414-4141-8141-141414141414" };
-  }
-  if (
-    method === "POST" &&
-    path === `${base}/agents/${agentId}/test-chats/${chatId}/approvals/call_refund`
-  ) {
-    return { id: "15151515-1515-4151-8151-151515151515" };
-  }
-  if (method === "POST" && path === `${base}/agents/${agentId}/test-chats/${chatId}/control`) {
-    return { paused: (_body as { action?: string }).action === "pause" };
-  }
-  if (method === "GET" && path === `/v1/workspaces/${workspaceId}/organization-agents`) {
-    // The server lists only published agents, and none while the flag is off.
-    return {
-      agents: flagOn
-        ? [
-            {
-              id: agentId,
-              key: "support-desk",
-              name: "Support desk",
-              description: "Answers billing questions",
-              managedBy: "console",
-              publishedVersion: 2,
-            },
-          ]
-        : [],
-    };
-  }
-  throw new Error(`Unexpected ${method} ${path}`);
+          {
+            id: "12121212-1212-4121-8121-121212121212",
+            workspaceId,
+            title: "Where is my order",
+            status: "idle",
+            agentVersion: 2,
+            overrides: null,
+            createdAt: at,
+            updatedAt: at,
+          },
+        ],
+        nextCursor: null,
+      };
+    }
+    // Test chats: only through the agent's test-chats routes, never the app's session routes.
+    if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}`) {
+      return {
+        workspaceId,
+        sessionId: chatId,
+        agentId,
+        version: 3,
+        status: "running",
+        paused: false,
+      };
+    }
+    if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}/events`) {
+      // One event at sequence 1: nothing new after it.
+      const after = Number(query?.after ?? 0);
+      return after >= 1
+        ? { events: [], hasMore: false, nextAfter: after }
+        : {
+            events: [
+              {
+                id: "13131313-1313-4131-8131-131313131313",
+                sessionId: chatId,
+                sequence: 1,
+                type: "user.message",
+                payload: { text: "Refund invoice 1042" },
+                createdAt: at,
+              },
+            ],
+            hasMore: false,
+            nextAfter: 1,
+          };
+    }
+    if (method === "POST" && path === `${base}/agents/${agentId}/test-chats/${chatId}/messages`) {
+      return { id: "14141414-1414-4141-8141-141414141414" };
+    }
+    if (
+      method === "POST" &&
+      path === `${base}/agents/${agentId}/test-chats/${chatId}/approvals/call_refund`
+    ) {
+      return { id: "15151515-1515-4151-8151-151515151515" };
+    }
+    if (method === "POST" && path === `${base}/agents/${agentId}/test-chats/${chatId}/control`) {
+      return { paused: (_body as { action?: string }).action === "pause" };
+    }
+    if (method === "GET" && path === `/v1/workspaces/${workspaceId}/organization-agents`) {
+      // The server lists only published agents, and none while the flag is off.
+      return {
+        agents: flagOn
+          ? [
+              {
+                id: agentId,
+                key: "support-desk",
+                name: "Support desk",
+                description: "Answers billing questions",
+                managedBy: "console",
+                publishedVersion: 2,
+              },
+            ]
+          : [],
+      };
+    }
+    throw new Error(`Unexpected ${method} ${path}`);
   },
 );
 

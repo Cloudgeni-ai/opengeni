@@ -1146,7 +1146,8 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         }),
       );
       created = result.session;
-      replayed = result.replay;
+      // A start this key already made (finished again if it was cut short).
+      replayed = result.outcome !== "created";
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }

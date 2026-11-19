@@ -7506,6 +7506,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/approvals/:approvalId",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/approvals/:approvalId",
+    "request": [
+      "DecideOrgAgentTestChatApprovalRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/control",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/control",
+    "request": [
+      "ControlOrgAgentTestChatRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/messages",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/messages",
