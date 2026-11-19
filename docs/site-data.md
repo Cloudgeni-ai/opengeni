@@ -558,7 +558,8 @@ a different object, so each database moves once, inside the gateway
   it, and retries after a backoff (1 minute, doubling to 1 hour). Databases
   that cannot move this way stay where they are and are reported: an FTS5
   table without its own content, a virtual table other than FTS5, a rowid
-  table whose columns take all of `rowid`, `_rowid_` and `oid`, and databases
+  table whose columns take all of `rowid`, `_rowid_` and `oid`, a table with
+more than 99 columns (SQLite's limits in a Durable Object), and databases
   over 32 MiB (the copy runs inside one request). A legacy object still on the
   previous release (Cloudflare can defer a busy object's code update) is
   served as it is and asked again after 30 seconds. Responses say where they

@@ -90,6 +90,8 @@ const PAGE_MAX_ROWS = 2_000;
 /** UTF-8 bytes of the rows in one page (a page always holds at least one row). */
 const PAGE_MAX_BYTES = 1024 * 1024;
 const DIGEST_CHUNK_ROWS = 500;
+/** SQLite's limits in Durable Objects are 100 result columns and 100 bound parameters. */
+const MAX_COPIED_COLUMNS = 99;
 const INTERNAL_NAME = /^(?:sqlite_|_cf_|_og_)/iu;
 
 // --- reading ----------------------------------------------------------------
@@ -168,6 +170,13 @@ export function copiedTables(sql: SqlStorage, schema = schemaEntries(sql)): Copi
       : withoutRowid
         ? null
         : (["rowid", "_rowid_", "oid"].find((name) => !names.has(name)) ?? null);
+    const columns = info.filter((column) => Number(column.hidden) === 0).map((c) => String(c.name));
+    // Read as one result column per column plus one; staged with one bound
+    // parameter per column plus the rowid.
+    if (columns.length > MAX_COPIED_COLUMNS)
+      throw new RelocationError(
+        `Table ${entry.name} has too many columns (${columns.length}) to be copied row by row`,
+      );
     if (!withoutRowid && alias === null)
       throw new RelocationError(
         `Table ${entry.name} has columns named rowid, _rowid_ and oid, so its rowids cannot be copied`,
@@ -176,7 +185,7 @@ export function copiedTables(sql: SqlStorage, schema = schemaEntries(sql)): Copi
       name: entry.name,
       virtual,
       alias,
-      columns: info.filter((column) => Number(column.hidden) === 0).map((c) => String(c.name)),
+      columns,
     });
   }
   return tables;
@@ -221,29 +230,58 @@ function encodeValue(type: SqlStorageValue, value: SqlStorageValue): EncodedValu
   }
 }
 
-/** SELECT list that reads each column's storage class and exact value (integers as text). */
-function selectList(table: CopiedTable): string {
-  const parts = table.alias === null ? [] : [`CAST(${table.alias} AS TEXT)`];
-  for (const column of table.columns) {
-    const quoted = quoteSiteSqlIdentifier(column);
-    parts.push(
-      `typeof(${quoted})`,
-      `CASE typeof(${quoted}) WHEN 'integer' THEN CAST(${quoted} AS TEXT) WHEN 'text' THEN CAST(${quoted} AS BLOB) ELSE ${quoted} END`,
-    );
-  }
-  return parts.join(", ");
+/** Storage classes by the first letter of `typeof()`. */
+const STORAGE_CLASS: Record<string, string> = {
+  n: "null",
+  i: "integer",
+  r: "real",
+  t: "text",
+  b: "blob",
+};
+
+/** `a || b || ...` as a balanced tree: SQLite in a Durable Object caps expression depth at 100. */
+function balancedConcat(parts: string[]): string {
+  if (parts.length === 1) return parts[0]!;
+  const half = Math.ceil(parts.length / 2);
+  return `(${balancedConcat(parts.slice(0, half))} || ${balancedConcat(parts.slice(half))})`;
 }
 
-function decodeRow(table: CopiedTable, raw: SqlStorageValue[]): EncodedValue[] {
-  const row: EncodedValue[] = [];
-  let index = 0;
-  if (table.alias !== null) {
-    row.push({ i: String(raw[0]) });
-    index = 1;
-  }
-  for (let column = 0; column < table.columns.length; column += 1, index += 2)
-    row.push(encodeValue(raw[index] ?? "null", raw[index + 1] ?? null));
-  return row;
+/**
+ * SELECT list that reads each column's exact value (integers as text, text
+ * as its bytes) plus one leading column holding the rowid and every value's
+ * storage class (`<rowid>|<letters>`), so a row is one result column per
+ * table column plus one, within SQLite's result-column limit.
+ */
+function selectList(table: CopiedTable): string {
+  const classes = table.columns.map(
+    (column) => `substr(typeof(${quoteSiteSqlIdentifier(column)}), 1, 1)`,
+  );
+  const meta = balancedConcat([
+    table.alias === null ? "''" : `CAST(${table.alias} AS TEXT)`,
+    "'|'",
+    ...classes,
+  ]);
+  const values = table.columns.map((column) => {
+    const quoted = quoteSiteSqlIdentifier(column);
+    return `CASE typeof(${quoted}) WHEN 'integer' THEN CAST(${quoted} AS TEXT) WHEN 'text' THEN CAST(${quoted} AS BLOB) ELSE ${quoted} END`;
+  });
+  return [meta, ...values].join(", ");
+}
+
+function decodeRow(
+  table: CopiedTable,
+  raw: SqlStorageValue[],
+): { row: EncodedValue[]; rowid: string | null } {
+  const meta = String(raw[0]);
+  const bar = meta.indexOf("|");
+  const classes = meta.slice(bar + 1);
+  if (bar < 0 || classes.length !== table.columns.length)
+    throw new RelocationError(`Could not read a row of table ${table.name}`);
+  const rowid = table.alias === null ? null : meta.slice(0, bar);
+  const row: EncodedValue[] = rowid === null ? [] : [{ i: rowid }];
+  for (let column = 0; column < table.columns.length; column += 1)
+    row.push(encodeValue(STORAGE_CLASS[classes[column]!] ?? "?", raw[column + 1] ?? null));
+  return { row, rowid };
 }
 
 /**
@@ -268,10 +306,7 @@ function readRows(
             after.r,
             limit,
           );
-  return Array.from(cursor.raw(), (raw) => ({
-    row: decodeRow(table, raw),
-    rowid: table.alias === null ? null : String(raw[0]),
-  }));
+  return Array.from(cursor.raw(), (raw) => decodeRow(table, raw));
 }
 
 const utf8 = new TextEncoder();

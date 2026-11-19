@@ -144,6 +144,8 @@ const LOCATION_PREFIX = "loc:";
 const HOME_KEY = "loc:home";
 /** EU object: the last failed copy and when to try again. */
 const FAILURE_KEY = "loc:failure";
+/** EU object: the fence token a failed copy could not release yet. */
+const RELEASE_KEY = "loc:release";
 /** EU object: a copy in progress (left behind when the object stopped mid-copy). */
 const ATTEMPT_KEY = "loc:attempt";
 /**
@@ -255,16 +257,23 @@ function lostResponse(operation: SiteDbOperation): Response {
   );
 }
 
-/** Whether an operation erases the database (so its frozen legacy copy goes too). */
-function erasesDatabase(operation: SiteDbOperation, body: ArrayBuffer): boolean {
-  if (operation === "reset") return true;
-  if (operation !== "migrate") return false;
+/** The request body as an object with a request id, or null (`serve` refuses it). */
+function requestBody(body: ArrayBuffer): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
-    return isRecord(parsed) && parsed.rebuild === true;
+    return isRecord(parsed) && typeof parsed.requestId === "string" && UUID.test(parsed.requestId)
+      ? parsed
+      : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Whether an operation erases the database (so its frozen legacy copy goes too). */
+function erasesDatabase(operation: SiteDbOperation, body: Record<string, unknown> | null): boolean {
+  return (
+    body !== null && (operation === "reset" || (operation === "migrate" && body.rebuild === true))
+  );
 }
 
 /** A response (possibly from another object) that says where it was served. */
@@ -406,6 +415,8 @@ export class SiteDatabase {
   private readonly kv: SyncKvStorage;
   /** The copy from the legacy object in progress, which other requests wait for. */
   private relocation: Promise<Home | null> | null = null;
+  /** Requests relayed to the legacy object and not answered yet. */
+  private readonly relays = new Set<Promise<Response>>();
   /** When this instance may next try to mark the legacy object moved. */
   private markRetryAt = 0;
 
@@ -433,27 +444,39 @@ export class SiteDatabase {
       const site = request.headers.get(SITE_DB_SITE_HEADER) ?? "";
       if (!UUID.test(site)) return errorResponse("validation", "The Site id is missing");
       const body = await request.arrayBuffer();
-      const erasing = erasesDatabase(operation, body);
+      const erasing = erasesDatabase(operation, requestBody(body));
       let home: Home;
       try {
-        // A reset needs no copy: the legacy database is erased instead.
-        home = await this.home(site, operation === "reset");
+        // A well-formed reset needs no copy: the legacy database is erased instead.
+        home = await this.home(site, erasing && operation === "reset");
       } catch (error) {
         console.error("site-gateway: Site database location check failed", error);
         return unavailable("The Site database is temporarily unavailable");
       }
       if (home.location === "legacy") return this.relayToLegacy(site, operation, body, home.reason);
-      if (erasing) {
-        // Erasing the database erases its frozen legacy copy too, first, so
-        // a reset or rebuild never leaves the old data behind.
+      const response = await this.serve(operation, body);
+      if (erasing && response.ok) {
+        // The database was erased here; erase its frozen legacy copy too, so a
+        // reset or rebuild never leaves the old data behind.
         try {
           await this.eraseLegacy(site);
         } catch (error) {
           console.error(`site-gateway: could not erase the legacy Site database ${site}`, error);
-          return unavailable("The Site database is temporarily unavailable");
+          return Response.json(
+            {
+              error: {
+                code: "internal",
+                message:
+                  "The database was erased, but its earlier copy could not be erased yet; run it again",
+                retryable: true,
+                outcomeUnknown: true,
+              },
+            },
+            { status: 503 },
+          );
         }
       }
-      return located(await this.serve(operation, body), "eu");
+      return located(response, "eu");
     }
     // A legacy object: relayed by the Site's EU object, or called by an
     // earlier gateway release that does not know about locations.
@@ -552,12 +575,25 @@ export class SiteDatabase {
     body: ArrayBuffer,
     reason: string,
   ): Promise<Response> {
+    const pendingRelease = this.kv.get<string>(RELEASE_KEY);
+    if (pendingRelease) {
+      // A failed copy could not release the legacy object; earlier gateway
+      // releases are refused until it does.
+      await this.relocationCall(site, "release", { token: pendingRelease })
+        .then(() => this.kv.delete(RELEASE_KEY))
+        .catch(() => null);
+    }
     let response: Response;
+    // A copy starts only after relays in flight finish, so none lands after its read.
+    const call = this.relay(site, operation, body);
+    this.relays.add(call);
     try {
-      response = await this.relay(site, operation, body);
+      response = await call;
     } catch (error) {
       console.error("site-gateway: legacy Site database unreachable", error);
       return lostResponse(operation);
+    } finally {
+      this.relays.delete(call);
     }
     const relayed = located(response, "legacy");
     relayed.headers.set(SITE_DB_RELOCATION_ERROR_HEADER, headerText(reason));
@@ -664,11 +700,12 @@ export class SiteDatabase {
     if (stale) {
       // An earlier copy stopped midway (object restarted or ran out of time):
       // release the legacy object and count it as a failed attempt.
-      await this.relocationCall(site, "release", { token: stale.token }).catch(() => null);
+      await this.release(site, stale.token);
       await this.wipeKeepingLocation();
       this.kv.delete(ATTEMPT_KEY);
       return this.recordFailure("An earlier copy to the EU did not finish");
     }
+    await Promise.allSettled([...this.relays]);
     const token = crypto.randomUUID();
     let begun: BeginResult;
     try {
@@ -730,7 +767,7 @@ export class SiteDatabase {
     } catch (error) {
       console.error(`site-gateway: Site database ${site} did not move to the EU`, error);
       await this.wipeKeepingLocation();
-      await this.relocationCall(site, "release", { token }).catch(() => null);
+      await this.release(site, token);
       this.kv.delete(ATTEMPT_KEY);
       return this.recordFailure(
         error instanceof RelocationError
@@ -752,6 +789,17 @@ export class SiteDatabase {
     this.markRetryAt = Date.now() + MARK_RETRY_MS;
     await this.markLegacyMoved(site, home);
     return null;
+  }
+
+  /** Release the legacy object after a failed copy; retried on later relays when it fails. */
+  private async release(site: string, token: string): Promise<void> {
+    try {
+      await this.relocationCall(site, "release", { token });
+      this.kv.delete(RELEASE_KEY);
+    } catch (error) {
+      console.error(`site-gateway: could not release the legacy Site database ${site}`, error);
+      this.kv.put(RELEASE_KEY, token);
+    }
   }
 
   /** Mark the legacy object moved, so it sends earlier releases' requests here. */

@@ -386,6 +386,8 @@ describe("Site database location", () => {
         "CREATE TABLE wide (t TEXT)",
         "CREATE TABLE big (b BLOB)",
         "CREATE VIRTUAL TABLE s USING fts5(body)",
+        // As wide as SQLite in a Durable Object allows a copy to read.
+        `CREATE TABLE many (${Array.from({ length: 99 }, (_, index) => `c${index}`).join(", ")})`,
       ].join(";\n"),
     );
     await ok(await legacy(site, "migrate", { migrations: [odd], maxDatabaseBytes: MAX_DB }));
@@ -398,6 +400,7 @@ describe("Site database location", () => {
           "INSERT INTO s (s, rank) VALUES ('rank', 'bm25(10.0)')",
           "INSERT INTO s (s, rank) VALUES ('automerge', 2)",
           "INSERT INTO s (rowid, body) VALUES (3, 'hello there')",
+          `INSERT INTO many VALUES (${Array.from({ length: 99 }, (_, index) => (index % 2 === 0 ? String(index) : `'v${index}'`)).join(", ")})`,
         ].join(";\n"),
         maxDatabaseBytes: MAX_DB,
       }),
@@ -423,6 +426,10 @@ describe("Site database location", () => {
       await agentRun(site, "SELECT length(b) AS n, typeof(b) AS t FROM big"),
     );
     expect(big.rows).toEqual([{ n: 1_900_000, t: "blob" }]);
+    const many = await ok<SiteDbRunResponse>(
+      await agentRun(site, "SELECT c0, c1, c97, c98, typeof(c98) AS t FROM many"),
+    );
+    expect(many.rows).toEqual([{ c0: 0, c1: "v1", c97: "v97", c98: 98, t: "integer" }]);
     const config = await ok<SiteDbRunResponse>(
       await agentRun(site, "SELECT k, v FROM s_config WHERE k <> 'version' ORDER BY k"),
     );
