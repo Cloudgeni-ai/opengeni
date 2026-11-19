@@ -9,6 +9,7 @@ import type {
 import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
 import { sessionAgentFieldNamesOrgAgent } from "@opengeni/contracts";
 import {
+  assertOrgAgentApprovalPolicyNarrows,
   prepareOrgAgentSessionCreate,
   refuseOrgAgentChatMachine,
   type PreparedOrgAgentSessionCreate,

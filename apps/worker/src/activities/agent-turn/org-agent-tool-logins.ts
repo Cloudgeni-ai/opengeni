@@ -137,7 +137,9 @@ async function orgAgentChatHeadersAllowed(input: OrgAgentToolLoginsInput): Promi
     workspaceId: input.workspaceId,
     sessionId: input.chat.sessionId,
   });
-  return owners !== null && (owners.creatorSubjectId === starter || owners.scopeSubjectId === starter);
+  return (
+    owners !== null && (owners.creatorSubjectId === starter || owners.scopeSubjectId === starter)
+  );
 }
 
 function sameUrl(left: string, right: string): boolean {
