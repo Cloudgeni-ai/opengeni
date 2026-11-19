@@ -204,12 +204,12 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
 export type OrgAgentsApi = ReturnType<typeof orgAgentsApi>;
 
 /** The app's read-only list: organization agents available in one workspace. */
-export function listWorkspaceOrgAgents(
+export async function listWorkspaceOrgAgents(
   client: OrgAgentsTransport,
   workspaceId: string,
   signal?: AbortSignal,
 ): Promise<ListWorkspaceOrgAgentsResponse> {
-  return client.requestJson<ListWorkspaceOrgAgentsResponse>(
+  return await client.requestJson<ListWorkspaceOrgAgentsResponse>(
     "GET",
     `/v1/workspaces/${encode(workspaceId)}/organization-agents`,
     undefined,

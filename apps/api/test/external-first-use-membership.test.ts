@@ -567,3 +567,112 @@ test("a fresh re-check of an open connection never re-creates a removed membersh
   expect((await org.raw(fresh, external)).status).toBe(403);
   expect(await memberships(org.workspace.id, subjectId)).toHaveLength(0);
 }, 60_000);
+
+async function endUserProfile(accountId: string, subjectId: string) {
+  // Recorded best effort after authentication; wait briefly for it.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const rows = await shared.admin<{ display_name: string | null; email: string | null }[]>`
+      select display_name, email from organization_end_user_profiles
+      where account_id = ${accountId}::uuid and subject_id = ${subjectId}`;
+    if (rows.length > 0) return rows[0];
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return null;
+}
+
+async function waitForProfile(
+  accountId: string,
+  subjectId: string,
+  expected: { display_name: string | null; email: string | null },
+) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const row = await endUserProfile(accountId, subjectId);
+    if (row?.display_name === expected.display_name && row?.email === expected.email) return row;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return await endUserProfile(accountId, subjectId);
+}
+
+test("display details sent with the user are stored for Console and never change the identity", async () => {
+  const org = await organization(CAPABLE, { composition: "production" });
+  const externalId = `auth0|${crypto.randomUUID()}`;
+  const subjectId = await subjectOf(org.accountId, externalId);
+  // Without display details: today's behaviour, no profile row.
+  const plain = org.service.asUser(externalId, { source: "product" });
+  expect((await plain.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(
+    await shared.admin`select 1 from organization_end_user_profiles where subject_id = ${subjectId}`,
+  ).toHaveLength(0);
+
+  const named = org.service.asUser(externalId, {
+    source: "product",
+    displayName: "Ada Lovelace",
+    email: "ada@example.com",
+  });
+  expect((await named.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
+  expect(
+    await waitForProfile(org.accountId, subjectId, {
+      display_name: "Ada Lovelace",
+      email: "ada@example.com",
+    }),
+  ).toEqual({ display_name: "Ada Lovelace", email: "ada@example.com" });
+  // Same identity, same membership.
+  expect(await subjectOf(org.accountId, externalId)).toBe(subjectId);
+  expect(await memberships(org.workspace.id, subjectId)).toHaveLength(1);
+
+  // The latest name wins; an omitted email keeps its value; a malformed one never fails.
+  const renamed = org.service.asUser(externalId, { source: "product", displayName: "Ada King" });
+  expect((await renamed.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
+  expect(
+    await waitForProfile(org.accountId, subjectId, {
+      display_name: "Ada King",
+      email: "ada@example.com",
+    }),
+  ).toEqual({ display_name: "Ada King", email: "ada@example.com" });
+  const odd = org.service.asUser(externalId, { source: "product", email: "x".repeat(400) });
+  expect((await odd.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
+
+  // Explicit onboarding carries them too; the keyed operation replays on the identity alone.
+  const member = `auth0|${crypto.randomUUID()}`;
+  const operationId = crypto.randomUUID();
+  const added = await org.service.addExternalWorkspaceMember(org.workspace.id, {
+    identity: { externalId: member, source: "product", displayName: "Grace Hopper" },
+    permissions: [...CONVERSATION_PERMISSIONS],
+    operationId,
+  });
+  expect(
+    await waitForProfile(org.accountId, added.subjectId, {
+      display_name: "Grace Hopper",
+      email: null,
+    }),
+  ).toEqual({ display_name: "Grace Hopper", email: null });
+  const replay = await org.service.addExternalWorkspaceMember(org.workspace.id, {
+    identity: { externalId: member, source: "product", displayName: "Grace B. Hopper" },
+    permissions: [...CONVERSATION_PERMISSIONS],
+    operationId,
+  });
+  expect(replay.subjectId).toBe(added.subjectId);
+  expect(
+    await waitForProfile(org.accountId, added.subjectId, {
+      display_name: "Grace B. Hopper",
+      email: null,
+    }),
+  ).toEqual({ display_name: "Grace B. Hopper", email: null });
+}, 60_000);
+
+test("an organization key with workspace:admin renames a shared workspace; without it, it cannot", async () => {
+  const narrow = await organization(CAPABLE, { composition: "production" });
+  expect(
+    await status(narrow.service.updateWorkspace(narrow.workspace.id, { name: "Renamed" })),
+  ).toBe(403);
+  // A full-access organization key holds workspace:admin.
+  const org = await organization([...CAPABLE, "workspace:admin"], { composition: "production" });
+  const renamed = await org.service.updateWorkspace(org.workspace.id, {
+    name: "Kontali dev: Acme Holdings AS",
+  });
+  expect(renamed.name).toBe("Kontali dev: Acme Holdings AS");
+  expect((await org.service.getWorkspace(org.workspace.id)).name).toBe(
+    "Kontali dev: Acme Holdings AS",
+  );
+}, 60_000);

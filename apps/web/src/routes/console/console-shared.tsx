@@ -27,6 +27,7 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { onConsoleHost } from "@/lib/console-route";
@@ -247,12 +248,84 @@ export function formatDuration(ms: number): string {
   return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
 }
 
-/** The product's own id for the person, else a short form of their subject. */
-export function endUserLabel(endUser: ConsoleEndUser | null | undefined): string {
-  if (!endUser) return "—";
-  if (endUser.externalId) return endUser.externalId;
-  const subject = endUser.subjectId.replace(/^(?:external_user|user):/u, "");
+export type EndUserDisplay = {
+  /** Name, else email, else the product's id, else a short form of the subject. */
+  primary: string;
+  /** The email under a name; null when the primary line already is the email or there is none. */
+  secondary: string | null;
+  /** The product's own id (else the subject): shown on hover and copied. */
+  id: string;
+};
+
+function shortSubject(subjectId: string): string {
+  const subject = subjectId.replace(/^(?:external_user|user):/u, "");
   return subject.length > 14 ? `${subject.slice(0, 12)}…` : subject;
+}
+
+/** How Console names an end user: name, then email, then the product's id. */
+export function endUserDisplay(endUser: ConsoleEndUser | null | undefined): EndUserDisplay | null {
+  if (!endUser) return null;
+  const name = endUser.displayName?.trim() || null;
+  const email = endUser.email?.trim() || null;
+  const id = endUser.externalId ?? endUser.subjectId;
+  const primary = name ?? email ?? endUser.externalId ?? shortSubject(endUser.subjectId);
+  return { primary, secondary: name && email ? email : null, id };
+}
+
+/** One line: the end user's name, else email, else the product's id. */
+export function endUserLabel(endUser: ConsoleEndUser | null | undefined): string {
+  return endUserDisplay(endUser)?.primary ?? "—";
+}
+
+/** Matches a search against the end user's name, email and id (client-side lists). */
+export function endUserMatches(endUser: ConsoleEndUser | null | undefined, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  if (!endUser) return false;
+  return [endUser.displayName, endUser.email, endUser.externalId, endUser.subjectId].some(
+    (value) => value?.toLowerCase().includes(needle) ?? false,
+  );
+}
+
+/**
+ * The end user in a table cell or detail row: name and email, wrapping
+ * instead of cutting off, with the product's id on hover. `copyable` adds the
+ * id with a copy button (detail pages).
+ */
+export function EndUserName({
+  endUser,
+  copyable = false,
+}: {
+  endUser: ConsoleEndUser | null | undefined;
+  copyable?: boolean;
+}) {
+  const display = endUserDisplay(endUser);
+  if (!display) return <span className="text-fg-subtle">—</span>;
+  return (
+    <span className="flex min-w-0 flex-col whitespace-normal" title={display.id}>
+      <span className="break-words">{display.primary}</span>
+      {display.secondary ? (
+        <span className="text-xs break-words text-fg-subtle">{display.secondary}</span>
+      ) : null}
+      {copyable ? (
+        <CopyField
+          value={display.id}
+          label="end user ID"
+          truncate="middle"
+          className="text-xs text-fg-subtle"
+        />
+      ) : null}
+    </span>
+  );
+}
+
+/** A workspace name in full: wraps instead of cutting off, with the name on hover. */
+export function WorkspaceName({ name }: { name: string }) {
+  return (
+    <span className="block whitespace-normal break-words" title={name}>
+      {name}
+    </span>
+  );
 }
 
 export function auditActionText(action: ConsoleAuditAction): string {
