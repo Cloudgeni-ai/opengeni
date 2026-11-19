@@ -13,9 +13,10 @@
 #      (PLAYWRIGHT_DEB_DIR), with no network. The cache holds the debs for
 #      every browser, so any job that fills it serves every other job.
 #   3. Only then use the network: download into the cache and install, with
-#      apt retries and backoff. Archive mirrors whose host does not resolve
-#      are dropped first, and a fallback mirror outside ubuntu.com takes the
-#      lead, so apt never spends its budget on dead DNS names.
+#      apt retries and backoff. Archive mirrors whose host does not resolve,
+#      or resolves but does not answer HTTP, are dropped first, and a fallback
+#      mirror outside ubuntu.com takes the lead, so apt never spends its budget
+#      on dead DNS names or hosts that accept no connections.
 #   4. If that also fails, continue when every shared library the browsers
 #      link resolves (only fonts or tools are missing), and fail otherwise.
 #
@@ -69,6 +70,14 @@ resolves() {
   timeout 5 getent ahosts "$1" >/dev/null 2>&1
 }
 
+# The mirror resolves and answers HTTP at all (any status). A host that
+# resolves but accepts no connections would otherwise cost apt its timeout on
+# every retry of every file before the mirror method moves on.
+answers() {
+  resolves "$(mirror_host "$1")" &&
+    curl --silent --output /dev/null --head --connect-timeout 5 --max-time 8 "$1" >/dev/null 2>&1
+}
+
 mirror_host() {
   sed -E 's#^[a-z+]+://([^/:]+).*#\1#' <<<"$1"
 }
@@ -89,22 +98,22 @@ prepare_mirrors() {
     case "${line}" in "" | "#"*) continue ;; esac
     uri="${line%%[[:space:]]*}"
     case " ${FALLBACK_MIRRORS} " in *" ${uri} "*) continue ;; esac
-    if resolves "$(mirror_host "${uri}")"; then
+    if answers "${uri}"; then
       live+=("${line}")
     else
-      echo "::warning::apt mirror $(mirror_host "${uri}") does not resolve; skipping it."
+      echo "::warning::apt mirror $(mirror_host "${uri}") does not resolve or answer; skipping it."
       dropped=$((dropped + 1))
     fi
   done <"${APT_MIRRORS}"
   for uri in ${FALLBACK_MIRRORS}; do
-    if resolves "$(mirror_host "${uri}")"; then
+    if answers "${uri}"; then
       fallbacks+=("${uri}")
     else
-      echo "::warning::Fallback apt mirror $(mirror_host "${uri}") does not resolve; skipping it."
+      echo "::warning::Fallback apt mirror $(mirror_host "${uri}") does not resolve or answer; skipping it."
     fi
   done
   if [ "${#live[@]}" -eq 0 ] && [ "${#fallbacks[@]}" -eq 0 ]; then
-    echo "::warning::No apt mirror resolves; keeping the runner's mirror list."
+    echo "::warning::No apt mirror resolves and answers; keeping the runner's mirror list."
     return 0
   fi
   local priority=10
