@@ -23,7 +23,8 @@ A code agent is read-only in Console ("Managed by code"). An organization owner 
 {/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
 
 ```ts
-agent: "support";
+initialMessage: "Where is my order?",
+agent: "support",
 ```
 
 A chat can change settings for itself. Extra `instructions` are added after the agent's, never replacing them:

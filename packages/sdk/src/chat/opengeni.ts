@@ -232,7 +232,13 @@ export class OpenGeni {
       );
     }
     const client = options.user
-      ? this.client.asUser(options.user, { source: this.source })
+      ? this.client.asUser(options.user, {
+          source: this.source,
+          ...(options.userProfile?.displayName
+            ? { displayName: options.userProfile.displayName }
+            : {}),
+          ...(options.userProfile?.email ? { email: options.userProfile.email } : {}),
+        })
       : this.client;
     const workspaceId =
       options.chats === "isolated"

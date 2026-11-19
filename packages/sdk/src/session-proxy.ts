@@ -86,6 +86,14 @@ export type SessionProxyResolution = (
    */
   membership?: ExternalActorStatedMembership | undefined;
   /**
+   * Name Console shows for the user, for example "Ada Lovelace", forwarded as
+   * `asUser(user, { displayName })`. Display only; the latest sent wins and
+   * omitting it keeps the stored one.
+   */
+  displayName?: string | undefined;
+  /** Email Console shows for the user, as given (not verified). Same rules as `displayName`. */
+  email?: string | undefined;
+  /**
    * The user is an anonymous visitor your product has not signed in, for
    * example a website visitor keyed by a cookie. Visitors cannot upload
    * files unless the handler sets `visitorUploads: true`; everything else is
@@ -630,6 +638,8 @@ export function createSessionProxyHandler(
       const client = service.asUser(resolved.user, {
         source,
         ...(resolved.membership ? { membership: resolved.membership } : {}),
+        ...(resolved.displayName ? { displayName: resolved.displayName } : {}),
+        ...(resolved.email ? { email: resolved.email } : {}),
       });
       const context: SessionProxyContext = {
         request,

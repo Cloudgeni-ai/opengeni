@@ -2,6 +2,7 @@ import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/conf
 import {
   ExternalActorSelection,
   ExternalActorAttribution,
+  splitExternalIdentityProfile,
   type ExternalActorContinuation,
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
@@ -2544,6 +2545,10 @@ async function apiKeyAccessContext(
     } catch {
       throw new HTTPException(400, { message: "invalid external actor selection" });
     }
+    // Display details (name, email) are never part of the identity.
+    const { identity: actorIdentity, profile: actorProfile } = splitExternalIdentityProfile(
+      selection.identity,
+    );
     const statedPermissions =
       selection.mode === "external" && selection.membership
         ? [...new Set(selection.membership.permissions)].sort()
@@ -2565,7 +2570,7 @@ async function apiKeyAccessContext(
         await lockExternalWorkspaceMembershipLifecycleShared(tx, apiKey.accountId);
         const existing = await readExternalIdentity(tx, {
           accountId: apiKey.accountId,
-          ...selection.identity,
+          ...actorIdentity,
         });
         if (!existing) return null;
         // Under the same fence as every revoke: a revoke stamped above this
@@ -2585,7 +2590,7 @@ async function apiKeyAccessContext(
           await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
           const ensured = await ensureExternalIdentity(tx, {
             accountId: apiKey.accountId,
-            ...selection.identity,
+            ...actorIdentity,
           });
           return {
             identity: ensured,
@@ -2605,6 +2610,7 @@ async function apiKeyAccessContext(
       subjectId: identity.subjectId,
       source: identity.source,
       externalId: identity.externalId,
+      ...actorProfile,
     });
     const linked =
       selection.mode === "linked_native"
