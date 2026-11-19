@@ -8,7 +8,6 @@ import { toast } from "sonner";
 
 import { canInviteOrganizationRole } from "@opengeni/react/app/lib/organization-admin";
 import { Button } from "@opengeni/react/ui/button";
-import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { Section } from "@opengeni/react/ui/section";
