@@ -1,8 +1,8 @@
 /**
  * Shows a person which of their tabs an agent controls: while the extension's
- * debugger is attached to a tab, the tab shows the product's mark as its icon
- * in the tab strip. Chrome's own debugger notification says only that
- * something is being debugged, not which tabs.
+ * debugger is attached to a tab, the tab shows a mark (the agent's cursor) as
+ * its icon in the tab strip, alongside the tab group (tab-group.ts), which
+ * pinned tabs and some windows cannot join.
  *
  * - The page's own icons stay in the page, set aside (their `rel` kept in a
  *   data attribute) while the mark is shown, and come back exactly when
@@ -20,7 +20,7 @@
  */
 
 /** The part of Chrome's scripting API this uses. */
-export type TabIndicatorChrome = {
+export type TabIconChrome = {
   scripting: {
     executeScript(injection: {
       target: { tabId: number };
@@ -33,12 +33,12 @@ export type TabIndicatorChrome = {
 };
 
 /** What the next run carries on with. */
-export type TabIndicatorState = {
+export type TabIconState = {
   /** Tabs showing the mark. */
   tabs: number[];
 };
 
-export type TabIndicatorOptions = {
+export type TabIconOptions = {
   /** The mark, as an image URL a page can load (a web-accessible resource of
    * the extension: page CSPs often refuse data: icons). */
   icon: () => Promise<string>;
@@ -48,14 +48,14 @@ export type TabIndicatorOptions = {
    * none). */
   injectTimeoutMs?: number;
   /** Called after every change, to record the state for the next run. */
-  onChange?: (state: TabIndicatorState) => void;
+  onChange?: (state: TabIconState) => void;
   setTimeout?: (callback: () => void, ms: number) => unknown;
   clearTimeout?: (timer: unknown) => void;
 };
 
 const INJECT_TIMEOUT_MS = 5_000;
 
-export class TabIndicator {
+export class TabIcon {
   private readonly marked = new Set<number>();
   // Tabs whose mark this run took away: a page kept in the back-forward cache
   // still has it and may come back.
@@ -74,8 +74,8 @@ export class TabIndicator {
   private readonly cancel: (timer: unknown) => void;
 
   constructor(
-    private readonly chrome: TabIndicatorChrome,
-    private readonly options: TabIndicatorOptions,
+    private readonly chrome: TabIconChrome,
+    private readonly options: TabIconOptions,
   ) {
     this.schedule = options.setTimeout ?? ((callback, ms) => setTimeout(callback, ms));
     this.cancel =
@@ -148,7 +148,7 @@ export class TabIndicator {
    * icons back, controlled tabs show the mark. `controlled` is read once the
    * record is, so a tab attached meanwhile counts. */
   resume(
-    recorded: TabIndicatorState | null | Promise<TabIndicatorState | null>,
+    recorded: TabIconState | null | Promise<TabIconState | null>,
     controlled: () => Iterable<number>,
   ): Promise<void> {
     this.resumed = this.resumed.then(async () => {
@@ -167,7 +167,7 @@ export class TabIndicator {
     return this.resumed;
   }
 
-  state(): TabIndicatorState {
+  state(): TabIconState {
     return { tabs: [...this.marked, ...this.releasing] };
   }
 
@@ -257,8 +257,8 @@ export class TabIndicator {
   }
 }
 
-/** Parses a recorded TabIndicatorState, or null. */
-export function parseTabIndicatorState(value: unknown): TabIndicatorState | null {
+/** Parses a recorded TabIconState, or null. */
+export function parseTabIconState(value: unknown): TabIconState | null {
   if (value === null || typeof value !== "object") return null;
   const tabs = (value as { tabs?: unknown }).tabs;
   return {

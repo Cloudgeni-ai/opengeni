@@ -37,10 +37,15 @@ describe("packaged manifest", () => {
     expect(store.version).toBe("0.1.3");
   });
 
-  test("lets pages load only the tab mark, at a URL that changes", async () => {
+  test("may group tabs, to show which ones an agent controls", async () => {
+    const { permissions } = await readJson("manifest.json");
+    expect(permissions).toContain("tabGroups");
+  });
+
+  test("lets pages load only the agent's cursor, at a URL that changes", async () => {
     const source = await readJson("manifest.json");
     expect(source.web_accessible_resources).toEqual([
-      { resources: ["icons/tab-mark.png"], matches: ["<all_urls>"], use_dynamic_url: true },
+      { resources: ["icons/agent-cursor.png"], matches: ["<all_urls>"], use_dynamic_url: true },
     ]);
     // runtime.getURL returns the dynamic URL from Chrome 130.
     expect(source.minimum_chrome_version).toBe("130");

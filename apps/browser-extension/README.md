@@ -20,17 +20,27 @@ to the configured deployment.
 ## Controlled tabs
 
 While an agent controls a tab (the extension's debugger is attached), the tab
-shows the product's mark as its icon, so the tab strip shows which tabs are in
-use. `src/tab-indicator.ts` owns this: it sets the page's own icon links aside
-and adds the mark, again after each new page, and puts them back exactly once
-control has stayed ended for a moment. The page's title and content are left
-alone. Pages load the mark from the extension (`web_accessible_resources`, at
-a URL that changes per browser session, hence Chrome 130 or later) because
-many sites' Content-Security-Policy refuses `data:` icons. Sites cannot probe
-for that URL, but a page showing the mark can read it, and so that it is
-controlled. Pages the extension cannot script (Chrome's own pages,
-the Web Store, PDFs) keep their icon. Marked tabs are kept in local storage,
-so they get their icons back after the extension updates or reloads.
+sits in a blue tab group named after the product, one per window, and shows
+the agent's cursor as its icon, so the tab strip shows which tabs are in use.
+Both end once control has stayed ended for a moment.
+
+- `src/tab-group.ts`: a tab leaves the group and goes back to where it was, or
+  to the person's own group it came from. A tab the person drags out stays
+  out until that control ends. Groups left behind when Chrome restarts are
+  found by their title and colour. A group still open when Chrome closes may
+  be kept in Chrome's saved groups, out of the extension's reach.
+- `src/tab-icon.ts`: the page's own icon links are set aside and the cursor
+  added, again after each new page, and they are put back exactly. Titles and
+  content are left alone. Pages load the cursor from the extension
+  (`web_accessible_resources`, at a URL that changes per browser session,
+  hence Chrome 130 or later) because many sites' Content-Security-Policy
+  refuses `data:` icons. Sites cannot probe for that URL, but a page showing
+  the cursor can read it, and so that it is controlled. Pages the extension
+  cannot script (Chrome's own pages, the Web Store, PDFs) keep their icon.
+
+Both are kept in local storage, so tabs get their place and icon back after
+the extension updates or reloads. Chrome's debugger notification, with its
+Cancel button, stays the way to stop every agent at once.
 
 ## Site permissions
 
@@ -95,8 +105,7 @@ its people never see Opengeni. Write a brand file:
 ```
 
 `iconsDir` (relative to the brand file) holds `brand-mark.svg` and
-`icon-16.png`, `icon-32.png`, `icon-48.png`, `icon-128.png`, and optionally
-`tab-mark.png`, the icon of a tab an agent controls (else `icon-32.png`);
+`icon-16.png`, `icon-32.png`, `icon-48.png`, `icon-128.png`;
 `bun run brand:icons --mark logo.svg --out icons [--tile "#202020"]` makes
 them, plus store promo tiles, from one mark. An optional `key` (a base64
 public key) fixes the unpacked build's extension ID.

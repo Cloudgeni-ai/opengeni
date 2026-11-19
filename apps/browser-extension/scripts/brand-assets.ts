@@ -31,14 +31,16 @@ for (const size of [16, 32, 48, 128]) {
     .png()
     .toFile(resolve(root, `icons/icon-${size}.png`));
 }
-// The tile alone, without the toolbar icon's margin, fills a tab's icon slot
-// while an agent controls the tab.
-const tabMark = svg(
-  96,
-  96,
-  `<rect width="96" height="96" rx="16" fill="#202020"/><g transform="translate(12 19.6234) scale(${72 / 176})" fill="#ffffff">${mark}</g>`,
+// The icon of a tab an agent controls: a pointer, the same for every brand.
+// Blue like the controlled tabs' group, with a white edge for dark tab strips.
+await Bun.write(
+  resolve(root, "icons/agent-cursor.svg"),
+  `${svg(26, 26, '<path d="M6 3.5 L6 21 L10.6 16.6 L13.7 23.2 L16.6 21.9 L13.6 15.4 L20 15.1 Z" fill="#1a73e8" stroke="#ffffff" stroke-width="2" stroke-linejoin="round" paint-order="stroke"/>')}\n`,
 );
-await sharp(Buffer.from(tabMark)).resize(32, 32).png().toFile(resolve(root, "icons/tab-mark.png"));
+await sharp(resolve(root, "icons/agent-cursor.svg"), { density: 300 })
+  .resize(32, 32)
+  .png()
+  .toFile(resolve(root, "icons/agent-cursor.png"));
 
 await mkdir(resolve(root, "fonts"), { recursive: true });
 const fontPackage = dirname(Bun.resolveSync("@fontsource-variable/dm-sans/package.json", root));

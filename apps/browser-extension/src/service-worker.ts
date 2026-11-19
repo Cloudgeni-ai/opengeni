@@ -31,7 +31,8 @@ import {
   sitePermissionsState,
   turnOffSitePermissions,
 } from "./site-permissions";
-import { TabIndicator, parseTabIndicatorState, type TabIndicatorState } from "./tab-indicator";
+import { TabGroup, parseTabGroupState } from "./tab-group";
+import { TabIcon, parseTabIconState } from "./tab-icon";
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const RECONNECT_MAX_MS = 30_000;
@@ -105,18 +106,19 @@ const MAX_STATE_RESUMPTIONS = 20;
 // A debugger command that reads and changes nothing, and that Chrome refuses
 // unless this extension is attached to the tab.
 const ATTACHMENT_PROBE_METHOD = "Target.getTargetInfo";
-// How long a tab keeps the product's mark as its icon after control ends, in
-// case it starts again (see TabIndicator).
-const TAB_INDICATOR_RELEASE_MS = 2_000;
-// The tabs showing the mark, in chrome.storage.local: unlike session storage
-// it outlives an update or reload of the extension, which ends every control,
-// so the next run gives those tabs their own icons back.
-const TAB_INDICATOR_KEY = "tabIndicator";
-// The mark as a tab icon. Pages load it from the extension because many sites'
-// Content-Security-Policy refuses data: images as icons. Its URL is dynamic
-// (manifest), so a site cannot probe for the extension; a page it is shown in
-// can see it, and so that the tab is controlled.
-const TAB_ICON_PATH = "icons/tab-mark.png";
+// How long a tab stays marked as controlled after control ends, in case it
+// starts again (see TabGroup and TabIcon).
+const CONTROLLED_TAB_RELEASE_MS = 2_000;
+// The controlled tabs' groups and icons, in chrome.storage.local: unlike
+// session storage it outlives an update or reload of the extension, which ends
+// every control, so the next run puts those tabs back as they were.
+const TAB_GROUP_KEY = "tabGroup";
+const TAB_ICON_KEY = "tabIcon";
+// The agent's cursor as a tab icon. Pages load it from the extension because
+// many sites' Content-Security-Policy refuses data: images as icons. Its URL
+// is dynamic (manifest), so a site cannot probe for the extension; a page it
+// is shown in can see it, and so that the tab is controlled.
+const AGENT_CURSOR_PATH = "icons/agent-cursor.png";
 
 let nativePort: chrome.runtime.Port | null = null;
 let connectionGeneration: string | null = null;
@@ -142,15 +144,26 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Map<number, number>();
 // Tabs an agent opened that are still open.
 const agentCreatedTabs = new Set<number>();
-// Shows the product's mark as the icon of the tabs an agent controls.
-const tabIndicator = chrome.scripting
-  ? new TabIndicator(chrome as never, {
-      icon: async () => chrome.runtime.getURL(TAB_ICON_PATH),
-      releaseDelayMs: TAB_INDICATOR_RELEASE_MS,
-      onChange: (state) => recordTabIndicator(state),
+// The tabs an agent controls sit in a tab group named after the product,
+// blue like the cursor they show as their icon. Chromium browsers without tab
+// groups go without the group.
+const tabGroup =
+  chrome.tabGroups && typeof chrome.tabs.group === "function"
+    ? new TabGroup(chrome as never, {
+        title: BRAND.product,
+        color: "blue",
+        releaseDelayMs: CONTROLLED_TAB_RELEASE_MS,
+        onChange: (state) => recordControlledTabs(TAB_GROUP_KEY, state),
+      })
+    : null;
+const tabIcon = chrome.scripting
+  ? new TabIcon(chrome as never, {
+      icon: async () => chrome.runtime.getURL(AGENT_CURSOR_PATH),
+      releaseDelayMs: CONTROLLED_TAB_RELEASE_MS,
+      onChange: (state) => recordControlledTabs(TAB_ICON_KEY, state),
     })
   : null;
-let tabIndicatorWrite: Promise<void> = Promise.resolve();
+let controlledTabsWrite: Promise<void> = Promise.resolve();
 // Starts at a random number, so a number from before this worker restarted
 // does not name one of its attachments.
 let lastAttachment = Math.floor(Math.random() * 2 ** 40);
@@ -197,14 +210,14 @@ async function resumeLiveState(): Promise<string> {
   } catch {
     // Without session storage this worker's state is all there is.
     currentStateGeneration = crypto.randomUUID();
-    void tabIndicator?.resume(recordedTabIndicator(), () => attachedDebuggerTabs.keys());
+    resumeControlledTabs();
     return currentStateGeneration;
   }
   if (!stored) {
     currentStateGeneration = crypto.randomUUID();
     // The extension reloaded or updated (or Chrome restarted): no tab an
     // earlier run marked is controlled now, unless attached since.
-    void tabIndicator?.resume(recordedTabIndicator(), () => attachedDebuggerTabs.keys());
+    resumeControlledTabs();
     await recordLiveState();
     return currentStateGeneration;
   }
@@ -228,7 +241,7 @@ async function resumeLiveState(): Promise<string> {
   }
   // Only now: until then nothing records the attachments or applies an update.
   currentStateGeneration = stored.stateGeneration;
-  void tabIndicator?.resume(recordedTabIndicator(), () => attachedDebuggerTabs.keys());
+  resumeControlledTabs();
   await recordLiveState();
   await recordResumption({ attachmentsKept: kept, attachmentsEnded: detached, tabsClosed: closed });
   maybeApplyUpdate();
@@ -275,16 +288,20 @@ function recordLiveState(): Promise<void> {
   return liveStateWrite;
 }
 
-async function recordedTabIndicator(): Promise<TabIndicatorState | null> {
-  return parseTabIndicatorState(
-    (await chrome.storage.local.get(TAB_INDICATOR_KEY))[TAB_INDICATOR_KEY],
-  );
+/** A new run carries on with the controlled tabs' groups and icons: tabs
+ * attached by the time the record is read keep them, the others get their
+ * place and icon back. */
+function resumeControlledTabs(): void {
+  const recorded = async (key: string) => (await chrome.storage.local.get(key))[key];
+  const controlled = () => attachedDebuggerTabs.keys();
+  void tabGroup?.resume(recorded(TAB_GROUP_KEY).then(parseTabGroupState), controlled);
+  void tabIcon?.resume(recorded(TAB_ICON_KEY).then(parseTabIconState), controlled);
 }
 
-/** Record the marked tabs for the next run, in order. */
-function recordTabIndicator(state: TabIndicatorState): void {
-  tabIndicatorWrite = tabIndicatorWrite
-    .then(async () => await chrome.storage.local.set({ [TAB_INDICATOR_KEY]: state }))
+/** Record the controlled tabs' groups or icons for the next run, in order. */
+function recordControlledTabs(key: string, state: object): void {
+  controlledTabsWrite = controlledTabsWrite
+    .then(async () => await chrome.storage.local.set({ [key]: state }))
     .catch(() => undefined);
 }
 
@@ -632,7 +649,8 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       await frameRemovals.get(tabId);
       await requireControllableTab(tabId);
       if (!attachedDebuggerTabs.has(tabId)) await attachDebugger(tabId);
-      void tabIndicator?.show(tabId);
+      void tabGroup?.show(tabId);
+      void tabIcon?.show(tabId);
       return { attached: true, attachment: attachedDebuggerTabs.get(tabId) };
     }
     case "debugger.detach": {
@@ -808,7 +826,8 @@ async function requireControllableTab(tabId: number): Promise<void> {
 
 async function detachDebugger(tabId: number): Promise<void> {
   if (attachedDebuggerTabs.delete(tabId)) void recordLiveState();
-  tabIndicator?.release(tabId);
+  tabGroup?.release(tabId);
+  tabIcon?.release(tabId);
   // Also an attachment an earlier worker left without recording it.
   try {
     await chrome.debugger.detach({ tabId });
@@ -1432,7 +1451,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (attachment === undefined) return;
   attachedDebuggerTabs.delete(source.tabId);
   void recordLiveState();
-  tabIndicator?.release(source.tabId);
+  tabGroup?.release(source.tabId);
+  tabIcon?.release(source.tabId);
   appendDebuggerEvent({
     tabId: String(source.tabId),
     sessionId: null,
@@ -1448,7 +1468,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (agentCreatedTabs.delete(tabId)) void recordLiveState();
-  tabIndicator?.closed(tabId);
+  void tabGroup?.closed(tabId);
+  tabIcon?.closed(tabId);
   frameRemovalTimes.delete(tabId);
   frameRemovals.delete(tabId);
   finishedFrameRemovals.delete(tabId);
@@ -1461,9 +1482,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   });
 });
 
-// A new page in a controlled tab gets the mark again.
+// A new page in a controlled tab gets the cursor again.
 chrome.webNavigation?.onCommitted?.addListener(({ tabId, frameId }) => {
-  if (frameId === 0) void tabIndicator?.navigated(tabId);
+  if (frameId === 0) void tabIcon?.navigated(tabId);
+});
+
+// A tab the person takes out of the group stays out until control ends.
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.groupId !== undefined) void tabGroup?.groupChanged(tabId);
 });
 
 function appendDebuggerEvent(event: Omit<BridgeDebuggerEvent, "sequence">): void {

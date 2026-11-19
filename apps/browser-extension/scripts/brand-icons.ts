@@ -47,16 +47,9 @@ const fitted = (size: number) =>
     .png()
     .toBuffer();
 
-// Chrome's guidance: a 96 px mark inside a 128 px icon, scaled down alike. The
-// tab mark, shown as a controlled tab's icon, has no margin.
-for (const [file, size, margin] of [
-  ["icon-16.png", 16, true],
-  ["icon-32.png", 32, true],
-  ["icon-48.png", 48, true],
-  ["icon-128.png", 128, true],
-  ["tab-mark.png", 32, false],
-] as const) {
-  const tile = margin ? Math.round((size * 96) / 128) : size;
+for (const size of [16, 32, 48, 128]) {
+  // Chrome's guidance: a 96 px mark inside a 128 px icon, scaled down alike.
+  const tile = Math.round((size * 96) / 128);
   const inset = (size - tile) / 2;
   const markSize = args.tile ? Math.round(tile * 0.72) : tile;
   const layers: OverlayOptions[] = [];
@@ -77,7 +70,7 @@ for (const [file, size, margin] of [
   })
     .composite(layers)
     .png()
-    .toFile(resolve(out, file));
+    .toFile(resolve(out, `icon-${size}.png`));
 }
 
 // Store-only tiles, kept beside the icons for the listing.

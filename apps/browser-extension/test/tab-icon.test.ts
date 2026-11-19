@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import {
-  TabIndicator,
-  parseTabIndicatorState,
+  TabIcon,
+  parseTabIconState,
   removeMark,
   showMark,
-  type TabIndicatorState,
-} from "../src/tab-indicator";
+  type TabIconState,
+} from "../src/tab-icon";
 
 const ICON = "data:image/png;base64,TUFSSw==";
 const flush = async () => {
@@ -219,7 +219,7 @@ describe("the mark in a page", () => {
 function indicator(
   options: {
     failing?: Set<number>;
-    saved?: TabIndicatorState[];
+    saved?: TabIconState[];
     /** Holds a script until the returned promise settles (a page with an
      * open dialog runs none). */
     gate?: (call: string) => Promise<void> | undefined;
@@ -227,7 +227,7 @@ function indicator(
 ) {
   const calls: string[] = [];
   const timers: (() => void)[] = [];
-  const instance = new TabIndicator(
+  const instance = new TabIcon(
     {
       scripting: {
         executeScript: async ({ target, func, args, world, injectImmediately }) => {
@@ -309,7 +309,7 @@ describe("the controlled tabs' icons", () => {
   });
 
   test("a closed tab is forgotten without touching it", async () => {
-    const saved: TabIndicatorState[] = [];
+    const saved: TabIconState[] = [];
     const { tabs, calls, elapse } = indicator({ saved });
     await tabs.show(4);
     tabs.release(4);
@@ -320,11 +320,11 @@ describe("the controlled tabs' icons", () => {
   });
 
   test("a new run gives ended tabs their icons back and marks controlled ones", async () => {
-    const saved: TabIndicatorState[] = [];
+    const saved: TabIconState[] = [];
     const first = indicator({ saved });
     await first.tabs.show(4);
     await first.tabs.show(5);
-    const recorded = parseTabIndicatorState(JSON.parse(JSON.stringify(saved.at(-1))));
+    const recorded = parseTabIconState(JSON.parse(JSON.stringify(saved.at(-1))));
     // Tab 5 is still controlled, tab 4 no longer, tab 7 is now.
     const next = indicator();
     await next.tabs.resume(Promise.resolve(recorded), () => [5, 7]);
@@ -360,7 +360,7 @@ describe("the controlled tabs' icons", () => {
   test("a tab attached while the record is read stays marked", async () => {
     const { tabs, calls } = indicator();
     const attached = new Set<number>();
-    let read!: (state: TabIndicatorState) => void;
+    let read!: (state: TabIconState) => void;
     const resumed = tabs.resume(new Promise((resolve) => (read = resolve)), () => attached);
     attached.add(4);
     read({ tabs: [4] });
@@ -370,7 +370,7 @@ describe("the controlled tabs' icons", () => {
   });
 
   test("a tab closed before its mark was shown is not recorded", async () => {
-    const saved: TabIndicatorState[] = [];
+    const saved: TabIconState[] = [];
     const { tabs, calls } = indicator({ saved });
     const shown = tabs.show(4);
     tabs.closed(4);
@@ -413,7 +413,7 @@ describe("the controlled tabs' icons", () => {
   });
 
   test("parses only well-formed recorded state", () => {
-    expect(parseTabIndicatorState(null)).toBeNull();
-    expect(parseTabIndicatorState({ tabs: [3, "x", 1.5] })).toEqual({ tabs: [3] });
+    expect(parseTabIconState(null)).toBeNull();
+    expect(parseTabIconState({ tabs: [3, "x", 1.5] })).toEqual({ tabs: [3] });
   });
 });
