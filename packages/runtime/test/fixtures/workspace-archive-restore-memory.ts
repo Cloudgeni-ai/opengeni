@@ -1,14 +1,11 @@
-// Child process for workspace-archive-restore-memory.test.ts: restores one
-// object-storage archive through the same two steps a cold restore takes (the
-// worker's object fetch + inline, then the restore boundary's verified read)
-// and prints how far the process's peak RSS rose above its level right before.
+// Child process for workspace-archive-restore-memory.test.ts: reads one inline
+// (database) archive through the restore boundary's verified read and prints
+// how far the process's peak RSS rose above its level right before.
+// Object-storage archives never reach this path: cold restore streams them
+// from a verified disk spool (workspace-archive-stream-memory.test.ts).
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { workspaceArchiveObjectKey } from "@opengeni/contracts";
-import {
-  inlineWorkspaceArchiveForRestore,
-  readVerifiedWorkspaceArchive,
-} from "../../src/sandbox/workspace-archive";
+import { readVerifiedWorkspaceArchive } from "../../src/sandbox/workspace-archive";
 
 function statusKiB(field: "VmRSS" | "VmHWM"): number {
   const match = new RegExp(`^${field}:\\s+(\\d+) kB$`, "m").exec(
@@ -19,7 +16,6 @@ function statusKiB(field: "VmRSS" | "VmHWM"): number {
 }
 
 const archiveBytes = Number(process.argv[2]);
-// Object storage clients hand back Node Buffers.
 const archive = Buffer.alloc(archiveBytes);
 for (let offset = 0; offset < archive.length; offset += 4096) {
   archive.writeUInt32LE(offset, offset);
@@ -41,31 +37,13 @@ const descriptor = {
     totalFileBytes: archive.length,
   },
 };
-const key = workspaceArchiveObjectKey({
-  accountId: "11111111-1111-4111-8111-111111111111",
-  workspaceId: "22222222-2222-4222-8222-222222222222",
-  sandboxGroupId: "33333333-3333-4333-8333-333333333333",
-  revision,
-});
-const ref = {
-  schema: "sandbox_archive_object_v1" as const,
-  key,
-  sha256,
-  bytes: archive.length,
-  backend: "s3-compatible",
-};
+// The session state holds the archive as base64, as an inline save stores it.
+const workspaceArchive = archive.toString("base64");
 
 Bun.gc(true);
 const baselineKiB = statusKiB("VmRSS");
 const startedAt = performance.now();
-const sessionState = await inlineWorkspaceArchiveForRestore(
-  { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor },
-  async () => ({ bytes: archive }),
-);
-const verified = readVerifiedWorkspaceArchive(
-  sessionState.workspaceArchive,
-  sessionState.workspaceArchiveMeta,
-);
+const verified = readVerifiedWorkspaceArchive(workspaceArchive, descriptor);
 if (!verified || verified.bytes.length !== archive.length) {
   throw new Error("restore did not return the archive bytes");
 }

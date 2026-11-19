@@ -44,6 +44,7 @@ import {
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
+import { installModalWorkspaceTarStreams } from "./modal-workspace-tar-stream";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
@@ -802,6 +803,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
       }
     }
   };
+  installModalWorkspaceTarStreams(mutable);
   modalRetentionWrappedSessions.add(session);
   installModalCommandStartRetention(session);
   return session;
