@@ -440,7 +440,7 @@ describe("the tabs an agent controls", () => {
     await command({ type: "debugger.attach", tabId: "9" });
     await flush();
     let read!: () => void;
-    chrome.indicatorReads = new Promise((resolve) => (read = resolve));
+    chrome.indicatorReads = new Promise((done) => (read = done));
     const updated = await chrome.reloadExtension().ready();
     expect(await updated({ type: "debugger.attach", tabId: "9" })).toMatchObject({ ok: true });
     read();
