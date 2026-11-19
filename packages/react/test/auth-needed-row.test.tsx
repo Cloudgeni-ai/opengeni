@@ -77,6 +77,31 @@ describe("AuthNeededRow", () => {
     await rendered.unmount();
   });
 
+  test("moving the card (pinned, then back in the timeline) keeps the consent going", async () => {
+    const signals: AbortSignal[] = [];
+    const onReconnect = (_item: AuthNeededItem, options?: AuthNeededRecoveryOptions) => {
+      signals.push(options!.signal);
+      return new Promise<undefined>((_resolve, reject) => {
+        options!.signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    };
+    const card = stepUp({ id: "card-moves" });
+    const pinned = await renderComponent(<AuthNeededRow item={card} onReconnect={onReconnect} />);
+    await actRun(() => button(pinned.container)!.click());
+    await pinned.unmount();
+    expect(signals[0]!.aborted).toBe(false);
+    // Pressing the same card where it shows now starts over, once.
+    const inTimeline = await renderComponent(
+      <AuthNeededRow item={card} onReconnect={onReconnect} />,
+    );
+    await actRun(() => button(inTimeline.container)!.click());
+    await flush();
+    expect(signals).toHaveLength(2);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals[1]!.aborted).toBe(false);
+    await inTimeline.unmount();
+  });
+
   test("pressing again while waiting starts over instead of staying stuck", async () => {
     const signals: AbortSignal[] = [];
     const rendered = await renderComponent(

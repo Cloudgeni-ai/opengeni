@@ -1,5 +1,5 @@
 import { CheckIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { authNeededPresentation } from "../auth-needed-presentation";
 import { bundledServiceLogoForDomain } from "../connection-service-presentation";
 import { cn } from "../lib/cn";
@@ -48,6 +48,18 @@ export type AuthNeededRecoveryHandler = (
  * When the app finishes recovery from the card (`{ outcome: "done" }`), or
  * the chat recorded that setup from it finished, the card says it is done.
  */
+const cardRuns = new Map<string, { current: AbortController | null }>();
+
+/** The run slot for one card, shared by every row that shows it. */
+function cardRun(cardId: string): { current: AbortController | null } {
+  let slot = cardRuns.get(cardId);
+  if (!slot) {
+    slot = { current: null };
+    cardRuns.set(cardId, slot);
+  }
+  return slot;
+}
+
 export function AuthNeededRow({
   item,
   onReconnect,
@@ -66,8 +78,10 @@ export function AuthNeededRow({
   const [failed, setFailed] = useState(false);
   const [done, setDone] = useState(false);
   // The run the card started last; starting again aborts the one before.
-  const run = useRef<AbortController | null>(null);
-  useEffect(() => () => run.current?.abort(), []);
+  // It is kept per card, not per row: the card moves between the timeline and
+  // the composer as the chat works and idles, and the person's consent in the
+  // provider's window must not be cancelled by that move.
+  const run = useMemo(() => cardRun(item.id), [item.id]);
   const recommendation = item.capability ?? null;
   const presentation = authNeededPresentation(t, item, { setupUnavailable });
   const { provider, actionLabel, title, reasonLine, unavailable } = presentation;

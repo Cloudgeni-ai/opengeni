@@ -28,6 +28,24 @@ describe("connection card notices", () => {
     ).not.toBe(notice.key);
   });
 
+  test("more access for an account is keyed by the access it asks for", () => {
+    const modify = { ...stepUp, scopes: ["https://www.googleapis.com/auth/gmail.modify"] };
+    const send = { ...stepUp, scopes: ["https://www.googleapis.com/auth/gmail.send"] };
+    expect(connectionCardNotice(modify)!.key).not.toBe(connectionCardNotice(send)!.key);
+    expect(connectionCardNotice(modify)!.key).toBe(
+      connectionCardNoticeKey({
+        providerDomain: "",
+        connectionId: stepUp.connectionId,
+        reason: "insufficient_scope",
+        scopes: [...modify.scopes, ...modify.scopes],
+      }),
+    );
+    // A reconnect is about the account, whatever access it holds.
+    expect(connectionCardNotice({ ...modify, reason: "expired" })!.key).toBe(
+      connectionCardNoticeKey({ providerDomain: "", connectionId: stepUp.connectionId }),
+    );
+  });
+
   test("an agent's capability request is keyed by the capability its continuation names", () => {
     const card = {
       providerDomain: "linear.app",

@@ -39,19 +39,30 @@ type NoticeCard = Pick<ToolAuthNeededPayload, "providerDomain"> & {
   connectionId?: string | null | undefined;
   capability?: { id: string; name?: string | undefined } | null | undefined;
   setupRequest?: { name?: string | undefined; endpointUrl?: string | undefined } | null | undefined;
+  reason?: string | null | undefined;
+  /** For more access (insufficient_scope): what the card asks the account for. */
+  scopes?: readonly string[] | null | undefined;
   /** "host": the account is the embedding product's; only its link can fix it. */
   authoritySource?: "host" | undefined;
   authorizationUrl?: string | undefined;
 };
 
-/** The notice key for one card's account or capability. */
+/**
+ * The notice key for one card's account or capability. A card asking an
+ * account for more access is keyed by the access too: allowing other access
+ * for the same account doesn't settle it.
+ */
 export function connectionCardNoticeKey(card: NoticeCard): string {
   // The card's own subject, as its continuation names it: an agent's
   // capability request, else the account, else the server it asked to add.
+  const scopes =
+    card.reason === "insufficient_scope" && card.scopes?.length
+      ? `:scopes:${[...new Set(card.scopes)].sort().join(" ")}`
+      : "";
   const subject = card.capability
     ? `capability:${card.capability.id}`
     : card.connectionId
-      ? `connection:${card.connectionId}`
+      ? `connection:${card.connectionId}${scopes}`
       : card.setupRequest?.endpointUrl
         ? `server:${card.setupRequest.endpointUrl.trim().toLowerCase().replace(/\/+$/u, "")}`
         : `provider:${card.providerDomain.trim().toLowerCase()}`;
@@ -81,7 +92,7 @@ function serviceName(card: NoticeCard): string {
  * person nothing to press (the chat doesn't pin it either).
  */
 export function connectionCardNotice(
-  card: NoticeCard & { reason: string | null },
+  card: NoticeCard & { reason: string | null | undefined },
 ): SessionNotificationPostedPayload | null {
   if (!card.capability && !card.setupRequest) {
     if (!ACTIONABLE_REASONS.has(card.reason ?? "")) return null;

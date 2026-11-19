@@ -3247,7 +3247,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     connectionId: string,
     grant: { subjectId: string; accountId: string },
   ): Promise<
-    | { capabilityId: string; capabilityName: string; toolsVerified: false; connectionId: string }
+    | {
+        capabilityId: string;
+        capabilityName: string;
+        toolsVerified: false;
+        connectionId: string;
+        /** The more access the card asked for, which the account now holds. */
+        askedScopes: string[];
+      }
     | "no_card"
     | null
   > {
@@ -3290,6 +3297,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       capabilityName: item?.name ?? connection.providerDomain,
       toolsVerified: false,
       connectionId,
+      askedScopes: card.payload.reason === "insufficient_scope" ? asked : [],
     };
   }
 
@@ -3327,14 +3335,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   function connectionCardNoticeKeys(
     payload: ContinueAfterCapabilitySetupRequest,
     target: { capabilityId: string; endpointUrl?: string | undefined },
+    askedScopes: readonly string[],
   ): ConnectionCardWithdrawalKey[] {
     const keys = new Map<string, boolean>();
-    if ("connectionId" in payload)
+    if ("connectionId" in payload) {
+      // The account works again, and holds the access this card asked for:
+      // other chats' cards for the same reconnect or the same access are done.
       keys.set(
         connectionCardNoticeKey({ providerDomain: "", connectionId: payload.connectionId }),
         true,
       );
-    else
+      if (askedScopes.length)
+        keys.set(
+          connectionCardNoticeKey({
+            providerDomain: "",
+            connectionId: payload.connectionId,
+            reason: "insufficient_scope",
+            scopes: askedScopes,
+          }),
+          true,
+        );
+    } else
       keys.set(
         connectionCardNoticeKey({ providerDomain: "", capability: { id: target.capabilityId } }),
         false,
@@ -3381,6 +3402,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
+      let askedScopes: string[] = [];
       let target: {
         capabilityId: string;
         capabilityName: string;
@@ -3410,7 +3432,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             reason: "no_card",
           } satisfies ContinueAfterCapabilitySetupResponse);
         }
-        target = ready;
+        const { askedScopes: readyScopes, ...readyTarget } = ready;
+        askedScopes = readyScopes;
+        target = readyTarget;
       } else {
         // A reviewed integration's card stands for the person's own connected
         // instances of it, which the workspace catalog does not list.
@@ -3468,7 +3492,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         { accountId: grant.accountId, subjectId: grant.subjectId },
         workspaceId,
         sessionId,
-        connectionCardNoticeKeys(payload, target),
+        connectionCardNoticeKeys(payload, target, askedScopes),
       ).catch(() => undefined);
       const result = await enqueueCapabilitySetupContinuation(db, {
         accountId: grant.accountId,

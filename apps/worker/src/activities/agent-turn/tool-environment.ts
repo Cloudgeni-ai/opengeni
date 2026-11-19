@@ -111,6 +111,7 @@ import {
   listConnectionsNeedingReconnect,
   nangoBackendsFor,
   postConnectionNeedsReauthNotice,
+  connectionNeedsReauthNoticeKey,
   connectedCommandOutputLook,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
@@ -639,6 +640,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   throwIfTurnCancelled();
   // Connection credentials and the optional Apps credential are resolved
   // independently. Inference auth is never an Apps fallback.
+  // Accounts this turn told the person stopped working (see below).
+  const reauthNoticed = new Set<string>();
   const rawResolveCredential = connectionTokenResolverForTurn({
     db,
     settings: runSettings,
@@ -651,8 +654,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     attemptId: input.attemptId,
     turn,
     // The owner hears once, on their inbox and phone, that it stopped working.
-    onConnectionNeedsReauth: (broken) =>
-      postConnectionNeedsReauthNotice({ db, bus, observability }, broken),
+    onConnectionNeedsReauth: (broken) => {
+      if (broken.use?.sessionId === input.sessionId) reauthNoticed.add(broken.connectionId);
+      return postConnectionNeedsReauthNotice({ db, bus, observability }, broken);
+    },
   });
   const personalConnectionDelegations = turn.personalConnectionDelegations;
   const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
@@ -701,10 +706,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       );
       // The person is needed, as for an approval: inbox, phone and chat list.
       const notice = connectionCardNotice(card);
+      // The card's notice stands in for this chat's "needs reconnecting" one
+      // about the same account, so the person has one item to act on.
+      const superseded =
+        notice && card.connectionId && reauthNoticed.has(card.connectionId)
+          ? connectionNeedsReauthNoticeKey(card.connectionId)
+          : null;
       await eventing.publish!(
         [
           { type: "tool.auth_needed", payload: card },
           ...(notice ? [{ type: "session.notification.posted" as const, payload: notice }] : []),
+          ...(superseded
+            ? [{ type: "session.notification.withdrawn" as const, payload: { key: superseded } }]
+            : []),
         ],
         true,
       );
