@@ -256,9 +256,9 @@ describe("organization agents end to end", () => {
     const chat = await call("POST", sessions(), { initialMessage: "search", agent: "crm-agent" });
     expect(chat.status).toBe(202);
     const sessionId = chat.body.id as string;
-    const [server] = await admin<{ server_id: string; url: string }[]>`
+    const [chatServer] = await admin<{ server_id: string; url: string }[]>`
       select server_id, url from session_mcp_servers where session_id = ${sessionId}`;
-    expect(server).toMatchObject({ server_id: "crm", url: TOOL_SERVER_URL });
+    expect(chatServer).toMatchObject({ server_id: "crm", url: TOOL_SERVER_URL });
     // The local MCP server speaks plain HTTP on loopback: point this chat's copy
     // of the server at it (a `none` server needs no login either way).
     await admin`update session_mcp_servers set url = ${mcp.url}
