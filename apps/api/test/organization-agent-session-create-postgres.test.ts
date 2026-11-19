@@ -209,6 +209,11 @@ async function provisionFixture() {
     managedWorkspaceId: managed.id,
     key: { authorization: `Bearer ${token}` },
     limitedKey: await mint("Chats only", ["sessions:create", "sessions:read"], null),
+    controlKey: await mint(
+      "Chats control",
+      ["sessions:create", "sessions:read", "sessions:control"],
+      null,
+    ),
     workspaceKey: await mint("Workspace admin", ["workspace:admin"], managed.id),
   };
 }
@@ -546,7 +551,9 @@ describe("session create with an organization agent over HTTP", () => {
       agent: { ref: "inline-coder", config: { ...config, instructions: "Write tests." } },
     });
     expect([changed.status, changed.body.orgAgent?.version]).toEqual([202, 2]);
-    // The saved version runs for anyone who may create chats (no write).
+    // Without agents:manage a saved config runs only as the published version.
+    await shared!.admin`update agents set published_revision = 1
+      where account_id = ${fixture.accountId} and agent_key = 'inline-coder'`;
     const reused = await call(
       "POST",
       sessions(),
@@ -554,6 +561,23 @@ describe("session create with an organization agent over HTTP", () => {
       fixture.limitedKey,
     );
     expect([reused.status, reused.body.orgAgent?.version]).toEqual([202, 1]);
+    // Version 2's exact config does not run it for them: it is not published.
+    const unpublished = await call(
+      "POST",
+      sessions(),
+      {
+        initialMessage: "hi",
+        agent: { ref: "inline-coder", config: { ...config, instructions: "Write tests." } },
+      },
+      fixture.limitedKey,
+    );
+    expect([unpublished.status, unpublished.body.details?.code]).toEqual([404, "agent_not_found"]);
+    // With agents:manage it does.
+    const managed = await call("POST", sessions(), {
+      initialMessage: "hi",
+      agent: { ref: "inline-coder", config: { ...config, instructions: "Write tests." } },
+    });
+    expect([managed.status, managed.body.orgAgent?.version]).toEqual([202, 2]);
     const audit = await shared!.admin<{ action: string; actor: string; detail: any }[]>`
       select action, actor_subject_id as actor, detail from organization_console_audit_events
       where account_id = ${fixture.accountId} and detail->>'key' = 'inline-coder'
@@ -648,5 +672,68 @@ describe("session create with an organization agent over HTTP", () => {
       "mcpServers.mine",
       "toolServers.notes",
     ]);
+  }, 120_000);
+
+  test("after create a chat may only ask first for more of the agent's tools", async () => {
+    if (!fixture) return;
+    await shared!
+      .admin`insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
+      values (${fixture.accountId}, 'notes', 'Notes', 'https://notes.example.com/mcp', 'none')
+      on conflict do nothing`;
+    const created = await call("POST", agents(), {
+      key: "asked",
+      name: "asked",
+      instructions: "Take notes.",
+      config: {
+        model: "scripted-model",
+        toolServers: [
+          {
+            server: "notes",
+            tools: { mode: "selected", enabled: ["read", "write"] },
+            approval: { ask: ["write"] },
+          },
+        ],
+      },
+    });
+    expect(created.status).toBe(201);
+    const published = await call("POST", `${agents()}/${created.body.agent.id}/publish`, {
+      version: 1,
+      expectedVersion: created.body.agent.rowVersion,
+    });
+    expect(published.status).toBe(200);
+    const chat = await call(
+      "POST",
+      sessions(),
+      { initialMessage: "hi", agent: "asked" },
+      fixture.controlKey,
+    );
+    expect(chat.status).toBe(202);
+    const policy = (serverId: string, requireApproval: unknown, key = fixture!.controlKey) =>
+      call(
+        "PATCH",
+        `${sessions()}/${chat.body.id}/mcp-servers/${serverId}/approval-policy`,
+        { requireApproval },
+        key,
+      );
+    // More "Ask first" is allowed.
+    expect((await policy("notes", ["write", "read"])).status).toBe(200);
+    expect((await policy("notes", true)).status).toBe(200);
+    // Back to the agent's own level is allowed too.
+    expect((await policy("notes", ["write"])).status).toBe(200);
+    // Taking the agent's "Ask first" away needs agents:manage for the organization.
+    for (const requireApproval of [false, ["read"]]) {
+      const refused = await policy("notes", requireApproval);
+      expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([
+        403,
+        "forbidden",
+        "agents_manage_required",
+      ]);
+    }
+    const [row] = await shared!.admin<{ require_approval: unknown }[]>`
+      select require_approval from session_mcp_servers
+      where session_id = ${chat.body.id} and server_id = 'notes'`;
+    expect(row!.require_approval).toEqual(["write"]);
+    // An organization key holding agents:manage may.
+    expect((await policy("notes", false, fixture.key)).status).toBe(200);
   }, 120_000);
 });

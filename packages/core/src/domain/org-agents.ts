@@ -34,6 +34,7 @@ import {
   readOrgAgentBindingForCreateKey,
   readOrgAgentForSessionCreate,
   readOrgAgentVersion,
+  readSessionOrgAgentState,
   saveInlineOrgAgentVersion,
   type Database,
   type OrgAgentRuntimeVersion,
@@ -307,6 +308,18 @@ async function prepare(
         );
       default:
         version = saved.version;
+        // Without agents:manage an existing config runs only as the published
+        // version (any version in the Console test workspace), as when the
+        // agent is named without config: a draft or rolled-back version's
+        // exact config does not run it.
+        if (
+          saved.outcome === "reused" &&
+          !authority.manageAgents &&
+          !inTestWorkspace &&
+          version.version !== saved.agent.publishedVersion
+        ) {
+          throw notFound();
+        }
         return await bind(deps, grant, workspaceId, raw, request, saved.agent, version, authority);
     }
   }
@@ -340,6 +353,53 @@ async function prepare(
     );
   }
   return await bind(deps, grant, workspaceId, raw, request, agent, loaded, authority);
+}
+
+/**
+ * A chat's "Ask first" change on one of its organization agent's own tool
+ * servers may only ask first for more, as at create: taking an agent's "Ask
+ * first" away needs organization-level `agents:manage`. Servers the chat
+ * added itself (or replaced under the agent server's id), and chats without
+ * an organization agent, are not checked. Throws 403 `agents_manage_required`.
+ */
+export async function assertOrgAgentApprovalPolicyNarrows(
+  deps: { db: Database },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    serverId: string;
+    requireApproval: boolean | readonly string[];
+    manageAgents: boolean;
+  },
+): Promise<void> {
+  if (input.manageAgents) return;
+  const state = await readSessionOrgAgentState(deps.db, input);
+  if (!state) return;
+  if (state.overrides?.[`mcpServers.${input.serverId}`]) return;
+  const version = await readOrgAgentVersion(deps.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    agentId: state.agentId,
+    version: state.version,
+  });
+  if (!version) return;
+  const serverConfig = parseOrgAgentVersionConfig(version.config).toolServers.find(
+    (server) => server.server === input.serverId,
+  );
+  if (!serverConfig) return;
+  const ask: true | string[] =
+    input.requireApproval === true
+      ? true
+      : input.requireApproval === false
+        ? []
+        : [...input.requireApproval];
+  const widening = orgToolServerOverrideWidening(serverConfig, { approval: { ask } });
+  if (widening) {
+    throw agentsManageRequired(
+      `This change ${widening}. A chat may ask first for more of the agent's tools; asking first for fewer needs agents:manage for the organization.`,
+    );
+  }
 }
 
 /**

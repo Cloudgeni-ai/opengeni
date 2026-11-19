@@ -32,6 +32,7 @@ import {
   markEndUserToolCredentialsUsed,
   readEndUserToolCredential,
   readOrgAgentVersion,
+  readSessionLoginOwners,
   refreshEndUserToolCredential,
   type Database,
   type EndUserToolCredentialRow,
@@ -76,6 +77,12 @@ export type OrgAgentToolLoginsInput = {
   orgAgent: { agentId: string; version: number } | null;
   /** The end user the chat acts for (`external_user:...`), or null. */
   endUserSubjectId: string | null;
+  /**
+   * The chat and who started this turn. The chat's own login headers run
+   * only for its creator, or for a turn no person started (an API key, a
+   * schedule, a worker); another person's turn never uses them.
+   */
+  chat?: { sessionId: string; turnStarterSubjectId: string | null | undefined };
   mcpServers: readonly McpServerSetting[];
   turnTools: readonly ToolRef[];
   /** Whether the workspace credential provider supplies this server's login. */
@@ -114,6 +121,23 @@ export function orgAgentEndUserSubject(
     return isEndUserSubject(initiatingHumanSubjectId) ? initiatingHumanSubjectId : null;
   }
   return isEndUserSubject(sessionScopeSubjectId) ? sessionScopeSubjectId : null;
+}
+
+/**
+ * Whether this turn may use the chat's own login headers: always when no
+ * person started it; otherwise only when that person created the chat or is
+ * the end user it acts for. Another person's turn never runs them.
+ */
+async function orgAgentChatHeadersAllowed(input: OrgAgentToolLoginsInput): Promise<boolean> {
+  const starter = input.chat?.turnStarterSubjectId;
+  if (!isPersonSubject(starter)) return true;
+  if (!input.chat) return false;
+  const owners = await readSessionLoginOwners(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.chat.sessionId,
+  });
+  return owners !== null && (owners.creatorSubjectId === starter || owners.scopeSubjectId === starter);
 }
 
 function sameUrl(left: string, right: string): boolean {
@@ -167,6 +191,11 @@ export async function resolveOrgAgentToolLogins(
   const record = (source: OrgAgentCredentialSource, outcome: OrgAgentCredentialOutcome) =>
     recordOrgAgentCredentialSource(input.observability, source, outcome);
 
+  // Read once, only when a server would fall back to the chat's headers.
+  let chatHeadersAllowedResult: Promise<boolean> | null = null;
+  const chatHeadersAllowed = () =>
+    (chatHeadersAllowedResult ??= orgAgentChatHeadersAllowed(input).catch(() => false));
+
   const mcpServers: McpServerSetting[] = [];
   const unavailable: OrgToolServerUnavailable[] = [];
   const usedCredentialIds: string[] = [];
@@ -214,11 +243,12 @@ export async function resolveOrgAgentToolLogins(
     if (stored.kind === "expired") record("end_user_store", "expired");
     else if (stored.kind === "refresh_failed") record("end_user_store", "refresh_failed");
     else if (stored.kind === "error") record("end_user_store", "error");
-    if (hasHeaders(server.headers)) {
+    if (hasHeaders(server.headers) && (await chatHeadersAllowed())) {
       record("chat_headers", "used");
       mcpServers.push(server);
       continue;
     }
+    if (hasHeaders(server.headers)) record("chat_headers", "refused");
     const reason: OrgToolServerUnavailableReason =
       stored.kind === "expired" || stored.kind === "refresh_failed"
         ? "credentials_expired"

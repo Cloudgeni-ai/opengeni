@@ -3179,7 +3179,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     "/v1/workspaces/:workspaceId/sessions/:sessionId/mcp-servers/:serverId/approval-policy",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "sessions:control",
+      );
+      const grant = authorization.grant;
       const sessionId = c.req.param("sessionId");
       const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
       const rawPayload = await c.req.json().catch(() => null);
@@ -3193,15 +3199,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "invalid MCP approval-policy request",
       });
       await assertSessionExists(db, workspaceId, sessionId);
-      return c.json(
-        await updateSessionMcpApprovalPolicy(
-          deps,
-          grant,
-          sessionId,
-          parsedServerId.data,
-          payload.requireApproval,
-        ),
-      );
+      try {
+        return c.json(
+          await updateSessionMcpApprovalPolicy(
+            deps,
+            grant,
+            sessionId,
+            parsedServerId.data,
+            payload.requireApproval,
+            authorization,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof OrgAgentSessionCreateError) {
+          // An organization agent's "Ask first": `details.code` names the reason.
+          return c.json(
+            { code: "forbidden", message: error.message, details: { code: error.code } },
+            error.httpStatus,
+          );
+        }
+        throw error;
+      }
     },
   );
 
