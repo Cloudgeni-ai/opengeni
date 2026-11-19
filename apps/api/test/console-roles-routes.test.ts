@@ -95,7 +95,8 @@ afterAll(async () => {
     );
   }
   for (const userId of createdUserIds) {
-    await shared?.admin`delete from auth_users where id = ${userId}`.catch(() => undefined);
+    if (!shared) break;
+    await shared.admin`delete from auth_users where id = ${userId}`.catch(() => undefined);
   }
   await client?.close().catch(() => undefined);
   await shared?.release();
