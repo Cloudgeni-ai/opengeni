@@ -329,7 +329,7 @@ async function provisionFixture(): Promise<Fixture> {
     accountId,
     managedWorkspaceId: managed.id,
     teamWorkspaceId: team.id,
-    agentId: agent.body.id,
+    agentId: agent.body.agent.id,
     people: { owner, admin, none, viewer, editor },
     key: { authorization: `Bearer ${token}` },
   };
