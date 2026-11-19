@@ -31,7 +31,7 @@ type RoleRow = {
   invitation_id: string | null;
   role: ConsoleMemberRole;
   updated_by_subject_id: string;
-  updated_at: Date;
+  updated_at: Date | string;
 };
 
 function entry(row: RoleRow): ConsoleMemberRoleEntry {
@@ -40,7 +40,7 @@ function entry(row: RoleRow): ConsoleMemberRoleEntry {
     invitationId: row.invitation_id,
     role: row.role,
     updatedBySubjectId: row.updated_by_subject_id,
-    updatedAt: row.updated_at.toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
   };
 }
 
