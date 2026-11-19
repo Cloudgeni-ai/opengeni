@@ -32,6 +32,7 @@ import {
   type ResolvedAgentConfig,
   type SessionGoalSnapshot,
 } from "@opengeni/contracts";
+import * as contracts from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import {
@@ -552,6 +553,17 @@ export function prefixChat(wire: Wire) {
       spyOn(db, "ensureSessionReasoningConfiguration").mockImplementation(
         async (_db, input) => (input as { reasoningEffort: string }).reasoningEffort as never,
       ),
+      // The workspace layout channel, where the database has one.
+      ...(typeof (db as Record<string, unknown>).ensureSessionWorkspaceFilesystem === "function"
+        ? [
+            spyOn(db as never, "ensureSessionWorkspaceFilesystem" as never).mockImplementation(
+              (async (_db: unknown, input: { layout: string | null }) => {
+                if (input.layout) channelWrites.set("filesystem", input.layout);
+                return input.layout;
+              }) as never,
+            ),
+          ]
+        : []),
       spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
       ...(typeof db.sessionHasToolRouterHistory === "function"
         ? [spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(state.toolRouterInHistory)]
@@ -844,12 +856,17 @@ export function prefixChat(wire: Wire) {
 
 /** A session context channel's stored history item, as the database writes it. */
 function channelItem(channel: string, value: string): AgentInputItem {
+  const filesystemItem = (contracts as Record<string, unknown>).workspaceFilesystemContextItem as
+    | ((text: string) => Record<string, unknown>)
+    | undefined;
   const item =
     channel === "skills"
       ? skillCatalogContextItem(value)
       : channel === "governance"
         ? workspaceGovernanceContextItem(value)
-        : agentInstructionsContextItem(value);
+        : channel === "filesystem" && filesystemItem
+          ? filesystemItem(value)
+          : agentInstructionsContextItem(value);
   return item as unknown as AgentInputItem;
 }
 
