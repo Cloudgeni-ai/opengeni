@@ -32,7 +32,7 @@ const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false
 type LiveSession = {
   closed: boolean;
   listDir?: (...args: unknown[]) => Promise<unknown>;
-  state: { workspaceRootPath: string };
+  state: { workspaceRootPath: string; manifest?: { root?: string } };
   close: () => Promise<void>;
 };
 const sessions: LiveSession[] = [];
@@ -40,11 +40,20 @@ afterEach(async () => {
   for (const session of sessions.splice(0)) await session.close().catch(() => undefined);
 });
 
-export async function liveBox() {
+/** A live box; `root` is the workspace root it reports, like a Connected Machine's home. */
+export async function liveBox(root?: string) {
   const client = createSandboxClientForBackend("local", settings) as unknown as {
     create: (manifest?: unknown) => Promise<LiveSession>;
   };
   const session = await client.create({});
+  // The local box always reports /workspace; a Connected Machine reports its
+  // own home directory. Only the reported root differs: no command runs here.
+  if (root && session.state.manifest) {
+    const manifest = session.state.manifest;
+    session.state.manifest = Object.assign(Object.create(Object.getPrototypeOf(manifest)), manifest, {
+      root,
+    });
+  }
   sessions.push(session);
   const addSkill = async (name: string) => {
     const folder = join(session.state.workspaceRootPath, ".agents/skills", name);
@@ -87,6 +96,8 @@ export type TurnOptions = {
   build?: Partial<BuildAgentOptions>;
   /** This turn's operational notices (goal, notes, restore or credit notices). */
   internalContext?: string;
+  /** The box this turn runs on, when the chat moved to another one. */
+  box?: Awaited<ReturnType<typeof liveBox>>;
 };
 
 export function chat(
@@ -146,7 +157,13 @@ export function chat(
             project(withIndex(loaded, index).map((row) => row.item)),
         },
         settings,
-        { ownedSandbox: { client: box.client, session: box.session, deferredSetup: true } },
+        {
+          ownedSandbox: {
+            client: (options.box ?? box).client,
+            session: (options.box ?? box).session,
+            deferredSetup: true,
+          },
+        },
       );
       for await (const _ of result.toStream()) void _;
       await result.completed;
