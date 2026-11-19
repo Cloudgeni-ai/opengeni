@@ -395,7 +395,7 @@ async function auditRows(action: string, actorSubjectId?: string) {
  * permission gets: `allowed`, or refused because the route is for people
  * (`people_only`) or for the owner (`owner_only`).
  */
-/** `workspace`: an app workspace route, never reached through a Console role. */
+/** `workspace`: an app workspace route for its members, never reached through Console access. */
 type Need = "any" | "viewer" | "editor" | "full" | "owner" | "workspace";
 type KeyOutcome = "allowed" | "people_only" | "owner_only";
 type RouteCase = {
@@ -763,15 +763,10 @@ describe("Console roles: authorization matrix", () => {
             ok = allowed();
           }
         } else if (spec.need === "workspace") {
-          // Owners and admins administer the organization's workspaces; a
-          // member's Console role gives them nothing here.
-          if (caller === "owner" || caller === "admin") {
-            expected = "allowed";
-            ok = allowed();
-          } else {
-            expected = "403/404 (no workspace access)";
-            ok = reply.status === 403 || reply.status === 404;
-          }
+          // Workspace members only: nobody here is one of the managed
+          // workspace, and no Console level (Full included) stands in for it.
+          expected = "403/404 (no workspace access)";
+          ok = reply.status === 403 || reply.status === 404;
         } else if (
           spec.need === "any" ||
           (spec.need === "owner"
@@ -1196,7 +1191,10 @@ describe("Console roles: the Console test workspace", () => {
     ).toBeLessThan(300);
     const workspaceId = (await findOrgAgentTestWorkspace(client.db, accountId))!;
     const keys = `/v1/workspaces/${workspaceId}/api-keys`;
-    const minted = await call("POST", keys, probe.headers, { name: "probe", permissions: [] });
+    const minted = await call("POST", keys, probe.headers, {
+      name: "probe",
+      permissions: ["workspace:read"],
+    });
     expect(minted.status).toBe(403);
     expect((await call("GET", keys, probe.headers)).status).toBe(403);
     const added = await call("POST", `/v1/workspaces/${workspaceId}/members`, probe.headers, {
