@@ -232,12 +232,12 @@ async function plainCreates(): Promise<Record<string, Snapshot>> {
         model: "scripted-model",
         instructions: "Answer briefly.",
         metadata: { team: "ops" },
-        mcpApprovalPolicies: { docs: true },
+        mcpApprovalPolicies: { "team-notes": true },
         mcpServers: [
           {
-            id: "docs",
-            name: "Docs",
-            url: "https://mcp.example.com/docs",
+            id: "team-notes",
+            name: "Team notes",
+            url: "https://mcp.example.com/notes",
             allowedTools: ["search"],
           },
         ],
