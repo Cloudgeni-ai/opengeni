@@ -46,6 +46,20 @@
 -- Nullable without a default: nothing is rewritten, the previous release
 -- never writes it (its rows resolve by name, as before), and the existing
 -- SELECT/INSERT grants on agent_revisions cover the new column.
+--
+-- organization_managed_workspaces writes need an account-only context. The
+-- marker now decides machine and rig reach (above), organization agents and
+-- stored end-user logins, so runtime code in one workspace's context must not
+-- be able to mark (or unmark) that workspace. Restrictive INSERT, UPDATE and
+-- DELETE policies add "no opengeni.workspace_id" to the existing
+-- account_isolation policy; reads are unchanged. Every writer, in this and
+-- the previous release, already runs in an account-only context: Console's
+-- mark/unmark (setConsoleWorkspaceKind), a workspace an organization API key
+-- creates (markWorkspaceManagedByApiKey) and the Console test workspace
+-- (ensureOrgAgentTestWorkspace) all write through withAccountRls. Deleting a
+-- workspace still removes its marker: foreign-key cascades don't apply row
+-- security. A later migration that writes markers must clear
+-- opengeni.workspace_id first. No SECURITY DEFINER function is added.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
@@ -57,6 +71,14 @@ ALTER TABLE rigs
 
 ALTER TABLE agent_revisions ADD COLUMN runs_on_target jsonb;
 COMMENT ON COLUMN agent_revisions.runs_on_target IS 'The organization machine (machineId) or sandbox environment (environmentId) an organization agent version''s Runs on resolved to when saved; NULL otherwise.';
+
+CREATE POLICY account_only_insert ON organization_managed_workspaces AS RESTRICTIVE
+  FOR INSERT WITH CHECK (opengeni_private.current_workspace_id() IS NULL);
+CREATE POLICY account_only_update ON organization_managed_workspaces AS RESTRICTIVE
+  FOR UPDATE USING (opengeni_private.current_workspace_id() IS NULL)
+  WITH CHECK (opengeni_private.current_workspace_id() IS NULL);
+CREATE POLICY account_only_delete ON organization_managed_workspaces AS RESTRICTIVE
+  FOR DELETE USING (opengeni_private.current_workspace_id() IS NULL);
 
 -- Whether an organization machine or rig works in a workspace: always where
 -- it lives, in a Personal workspace when the Personal switch is on, and in a

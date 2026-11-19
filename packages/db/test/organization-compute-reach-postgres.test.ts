@@ -13,18 +13,22 @@ import {
   createSession,
   createWorkspace,
   ensureManagedAccessForUser,
+  ensureOrgAgentTestWorkspace,
   getRig,
   getSandbox,
+  isManagedWorkspace,
   initializeSessionStartAtomically,
   listEnrollments,
   listOrganizationCompute,
   listRigs,
+  markWorkspaceManagedByApiKey,
   materializeRigVersionForAttempt,
   listOrgAgentCompute,
   nestedPostgresSqlState,
   OrgAgentError,
   resolveOrgAgentRunsOnInAccount,
   revokeScopedRig,
+  setConsoleWorkspaceKind,
   saveOrgAgentDraft,
   updateOrganizationMachineReach,
   updateOrganizationRigReach,
@@ -632,6 +636,111 @@ describe("all product-managed workspaces", () => {
       from: { allowManagedWorkspaces: true },
       to: { allowManagedWorkspaces: false },
     });
+  }, 180_000);
+});
+
+describe("who can mark a workspace managed", () => {
+  // The marker decides machine and rig reach, organization agents and stored
+  // end-user logins, so runtime code inside one workspace can't mark, change
+  // or unmark it (1509); the account-level writers still can.
+  async function inWorkspace<T>(
+    org: Org,
+    workspaceId: string,
+    fn: (tx: postgres.TransactionSql) => Promise<T>,
+  ): Promise<T> {
+    return (await app.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${org.accountId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${org.owner}, true)`;
+      return await fn(tx);
+    })) as T;
+  }
+  async function inAccount<T>(org: Org, fn: (tx: postgres.TransactionSql) => Promise<T>) {
+    return (await app.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${org.accountId}, true),
+        set_config('opengeni.workspace_id', '', true),
+        set_config('opengeni.subject_id', ${org.owner}, true)`;
+      return await fn(tx);
+    })) as T;
+  }
+  const refused = async (promise: Promise<unknown>) =>
+    await promise.then(
+      () => null,
+      (error: unknown) => (error as { code?: string }).code ?? String(error),
+    );
+
+  test("not from a workspace context; Console, API key creation and the test workspace can", async () => {
+    const org = await organization();
+    // A workspace's own context: insert refused, update and delete see nothing.
+    expect(
+      await refused(
+        inWorkspace(
+          org,
+          org.second,
+          (tx) => tx`insert into organization_managed_workspaces
+            (account_id, workspace_id, source) values (${org.accountId}, ${org.second}, 'console')`,
+        ),
+      ),
+    ).toBe("42501");
+    expect(await isManagedWorkspace(client.db, org.accountId, org.second)).toBe(false);
+
+    const managed = await managedWorkspace(org);
+    const changed = await inWorkspace(org, managed, async (tx) => [
+      (
+        await tx`update organization_managed_workspaces set source = 'console'
+        where workspace_id = ${managed}`
+      ).count,
+      (await tx`delete from organization_managed_workspaces where workspace_id = ${managed}`).count,
+      // It still reads its own marker.
+      (await tx`select 1 from organization_managed_workspaces where workspace_id = ${managed}`)
+        .count,
+    ]);
+    expect(changed).toEqual([0, 0, 1]);
+    expect(await isManagedWorkspace(client.db, org.accountId, managed)).toBe(true);
+
+    // An account-only context writes, as every writer does.
+    expect(
+      await inAccount(
+        org,
+        async (tx) =>
+          (await tx`delete from organization_managed_workspaces where workspace_id = ${managed}`)
+            .count,
+      ),
+    ).toBe(1);
+    await markWorkspaceManagedByApiKey(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.third,
+      apiKeyId: null,
+    });
+    expect(await isManagedWorkspace(client.db, org.accountId, org.third)).toBe(true);
+    const actor = { actorSubjectId: org.owner, actorLabel: "Owner" };
+    await setConsoleWorkspaceKind(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.second,
+      kind: "managed",
+      ...actor,
+    });
+    expect(await isManagedWorkspace(client.db, org.accountId, org.second)).toBe(true);
+    await setConsoleWorkspaceKind(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.second,
+      kind: "team",
+      ...actor,
+    });
+    expect(await isManagedWorkspace(client.db, org.accountId, org.second)).toBe(false);
+    // The Console test workspace is created in its own workspace context and
+    // marked from the account context, as the route does.
+    const testWorkspace = await ensureOrgAgentTestWorkspace(client.db, {
+      accountId: org.accountId,
+      actor: { subjectId: org.owner, label: "Owner" },
+      create: (tx) => createWorkspace(tx, { accountId: org.accountId, name: "Console test" }),
+    });
+    expect(testWorkspace.created).toBe(true);
+    expect(await isManagedWorkspace(client.db, org.accountId, testWorkspace.workspaceId)).toBe(
+      true,
+    );
   }, 180_000);
 });
 
