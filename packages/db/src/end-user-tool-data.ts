@@ -6,7 +6,7 @@
  * Called inside the membership lifecycle transactions: removing the end user
  * from a workspace deletes their logins there; offboarding them from the
  * organization deletes their logins everywhere and their profile. Each
- * deletion is recorded in the Console audit log.
+ * deletion of stored logins is recorded in the Console audit log.
  */
 import { sql } from "drizzle-orm";
 import { insertConsoleAuditEvent } from "./console";
@@ -66,7 +66,11 @@ export async function eraseEndUserToolData(
           ).length > 0,
       )
     : false;
-  if (removedLogins > 0 || profileRemoved) {
+  // Audited when stored logins went: those exist only where Console agents
+  // are on. A profile alone (sent by any product with `asUser`) writes no
+  // Console audit row, so organizations without Console agents never get a
+  // `tool_credential.*` action an older API server can't read.
+  if (removedLogins > 0) {
     await withRlsContext(tx, { accountId: input.accountId, workspaceId: null }, (scoped) =>
       insertConsoleAuditEvent(scoped, {
         accountId: input.accountId,

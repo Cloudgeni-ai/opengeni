@@ -2805,7 +2805,9 @@ async function createSessionForRequestInFileScope(
           workspaceId,
           rawPayload as Record<string, unknown>,
           {
-            // An end user acting through the organization key counts here: the
+            // The organization key's own agents:manage (held literally; never
+            // implied by workspace:admin, and never the end user's stated
+            // membership). An end user acting through that key counts here: the
             // session proxy drops browser-sent organization agent fields, so
             // they come only from the product's `createSession` hook.
             manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage"),

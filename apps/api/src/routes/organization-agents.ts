@@ -128,6 +128,7 @@ import {
   failPendingOrgAgentPublishOperation,
   findOrgAgentTestWorkspace,
   getConsoleReviewSettings,
+  recordConsoleAuditEvent,
   getEndUserToolCredential,
   getOrgAgent,
   getOrgAgentVersion,
@@ -1060,6 +1061,23 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         includeContent: reviewLevel === "full",
       }),
     );
+    // At the full level the list carries content (titles, what each chat
+    // changed): audited before it is returned, as a transcript read is.
+    if (reviewLevel === "full" && page.sessions.length > 0) {
+      await recordConsoleAuditEvent(deps.db, {
+        accountId: caller.organizationId,
+        actorSubjectId: caller.actor.subjectId,
+        actorLabel: caller.actor.label,
+        action: "agent.sessions_viewed",
+        workspaceId: null,
+        sessionId: null,
+        detail: {
+          agentId,
+          sessionIds: page.sessions.map((session) => session.id),
+          ...(query.version !== undefined ? { version: query.version } : {}),
+        },
+      });
+    }
     return c.json(ListOrgAgentSessionsResponse.parse(page));
   });
 

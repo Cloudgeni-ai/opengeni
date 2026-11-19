@@ -1,5 +1,5 @@
 // Shared state and small pieces for the Opengeni Console pages.
-import type { ChatClient, ConsoleAuditAction, ConsoleEndUser, ConsoleRange } from "@opengeni/sdk";
+import type { ChatClient, ConsoleAuditEvent, ConsoleEndUser, ConsoleRange } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { LockIcon } from "lucide-react";
@@ -282,7 +282,12 @@ export type EndUserDisplay = {
   secondary: string | null;
   /** The product's own id (else the subject): shown on hover and copied. */
   id: string;
+  /** The name or email shown is what the product sent, which Opengeni doesn't verify. */
+  unverified: boolean;
 };
+
+/** Hover note on a name or email the product sent. */
+export const END_USER_UNVERIFIED_NOTE = "Name and email sent by your product, not verified";
 
 function shortSubject(subjectId: string): string {
   const subject = subjectId.replace(/^(?:external_user|user):/u, "");
@@ -296,7 +301,12 @@ export function endUserDisplay(endUser: ConsoleEndUser | null | undefined): EndU
   const email = endUser.email?.trim() || null;
   const id = endUser.externalId ?? endUser.subjectId;
   const primary = name ?? email ?? endUser.externalId ?? shortSubject(endUser.subjectId);
-  return { primary, secondary: name && email ? email : null, id };
+  return {
+    primary,
+    secondary: name && email ? email : null,
+    id,
+    unverified: Boolean(name ?? email),
+  };
 }
 
 /** One line: the end user's name, else email, else the product's id. */
@@ -329,7 +339,10 @@ export function EndUserName({
   const display = endUserDisplay(endUser);
   if (!display) return <span className="text-fg-subtle">—</span>;
   return (
-    <span className="flex min-w-0 flex-col whitespace-normal" title={display.id}>
+    <span
+      className="flex min-w-0 flex-col whitespace-normal"
+      title={display.unverified ? `${display.id}\n${END_USER_UNVERIFIED_NOTE}` : display.id}
+    >
       <span className="break-words">{display.primary}</span>
       {display.secondary ? (
         <span className="text-xs break-words text-fg-subtle">{display.secondary}</span>
@@ -355,7 +368,8 @@ export function WorkspaceName({ name }: { name: string }) {
   );
 }
 
-export function auditActionText(action: ConsoleAuditAction): string {
+/** What an audit action did; an action a newer server added reads as itself. */
+export function auditActionText(action: ConsoleAuditEvent["action"]): string {
   switch (action) {
     case "session.transcript_viewed":
       return "Opened a transcript";
@@ -391,6 +405,10 @@ export function auditActionText(action: ConsoleAuditAction): string {
       return "Removed an end user's tool login";
     case "member.console_role_changed":
       return "Changed a member's Console role";
+    case "agent.sessions_viewed":
+      return "Opened an agent's sessions";
+    default:
+      return action;
   }
 }
 

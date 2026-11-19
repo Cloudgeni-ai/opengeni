@@ -53,9 +53,7 @@ export function organizationComputeReachSummary(reach: OrganizationComputeReach)
     personalWorkspaces: "choice",
     alwaysIncluded: [reach.homeWorkspaceId],
   });
-  return reach.allowManagedWorkspaces && reach.allowedWorkspaceIds !== null
-    ? `${summary} + Product-managed`
-    : summary;
+  return reach.allowManagedWorkspaces ? `${summary} + Product-managed` : summary;
 }
 
 /** Whether saving `next` takes it away from somewhere it works now. */
@@ -65,7 +63,7 @@ export function reachNarrows(
   nextManaged: boolean = current.allowManagedWorkspaces ?? false,
 ): boolean {
   if (current.allowPersonalWorkspaces && !next.personalWorkspaces) return true;
-  if (current.allowManagedWorkspaces && !nextManaged && next.workspaceIds !== null) return true;
+  if (current.allowManagedWorkspaces && !nextManaged) return true;
   if (next.workspaceIds === null) return false;
   if (current.allowedWorkspaceIds === null) return true;
   const kept = new Set([...next.workspaceIds, current.homeWorkspaceId]);
@@ -80,13 +78,6 @@ export const MANAGED_DESCRIPTION = {
   machine:
     "Every workspace your product manages, including new ones and the Console test workspace, where Editors run test chats. All end customers' chats there share this machine.",
   rig: "Every workspace your product manages, including new ones.",
-} as const;
-
-/** "All workspaces" for a machine also covers the Console test workspace. */
-export const ALL_WORKSPACES_DESCRIPTION = {
-  machine:
-    "Every shared workspace, including new ones and the Console test workspace, where Editors run test chats.",
-  rig: undefined,
 } as const;
 
 export function OrganizationComputeReachDialog({
@@ -184,9 +175,8 @@ export function OrganizationComputeReachDialog({
           hereId={hereId}
           alwaysIncluded={{ [reach.homeWorkspaceId]: HOME_REASON[kind] }}
           personalWorkspaces="choice"
-          allDescription={ALL_WORKSPACES_DESCRIPTION[kind]}
         />
-        {managedSupported && draft.workspaceIds !== null ? (
+        {managedSupported ? (
           <CheckboxField
             label="All product-managed workspaces"
             description={MANAGED_DESCRIPTION[kind]}

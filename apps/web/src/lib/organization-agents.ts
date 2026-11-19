@@ -4,6 +4,7 @@
 // Console has no routes of its own. The wire shapes are the contracts in
 // `@opengeni/contracts` (organization-agents.ts).
 import {
+  ORG_AGENT_FILE_JSON_SCHEMA_URL,
   OrgAgentDefinition,
   OrgAgentFile,
   canonicalOrgAgentDefinitionJson,
@@ -31,6 +32,7 @@ import {
   type OrgAgentSessionOverrides,
   type OrgAgentTestChatResponse,
   type OrgAgentTestWorkspaceResponse,
+  type OrgAgentUsageResponse,
   type OrgAgentToolCatalog,
   type OrgAgentToolCatalogEntry,
   type OrgAgentToolServerConfig,
@@ -149,6 +151,15 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
         `${agent(id)}/sessions`,
         undefined,
         options.cursor ? { cursor: options.cursor } : {},
+        opts(options.signal),
+      ),
+    /** Chats and cost of one agent, in total and per version (the last 30 days by default). */
+    usage: (id: string, options: { signal?: AbortSignal } = {}) =>
+      client.requestJson<OrgAgentUsageResponse>(
+        "GET",
+        `${agent(id)}/usage`,
+        undefined,
+        {},
         opts(options.signal),
       ),
     ensureTestWorkspace: () =>
@@ -366,17 +377,60 @@ export function parseOrgAgentYaml(text: string) {
   return orgAgentFileToDefinition(OrgAgentFile.parse(parseYaml(text)));
 }
 
-/** Starts the download of `<key>.yaml`. */
-export function downloadOrgAgentYaml(key: string, definition: OrgAgentDefinitionInput): void {
-  const blob = new Blob([orgAgentYaml(key, definition)], { type: "application/yaml" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${key}.yaml`;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+/** Instructions longer than this, or with several lines, go to `<key>.md` (as the CLI's export). */
+const INLINE_INSTRUCTIONS_MAX = 200;
+
+/**
+ * The files `opengeni agents export <key> --out <dir>` writes: `<key>.yaml`
+ * with the schema header and, for long or multi-line instructions,
+ * `<key>.md` that the YAML names.
+ */
+export function orgAgentExportFiles(
+  key: string,
+  definition: OrgAgentDefinitionInput,
+): { name: string; text: string; type: string }[] {
+  const file = orgAgentDefinitionToFile(key, OrgAgentDefinition.parse(definition)) as Record<
+    string,
+    unknown
+  >;
+  const instructions = file["instructions"];
+  let markdown: string | null = null;
+  if (
+    typeof instructions === "string" &&
+    (instructions.includes("\n") || instructions.length > INLINE_INSTRUCTIONS_MAX)
+  ) {
+    markdown = instructions.endsWith("\n") ? instructions : `${instructions}\n`;
+    file["instructions"] = `./${key}.md`;
+  }
+  const yaml = `# yaml-language-server: $schema=${ORG_AGENT_FILE_JSON_SCHEMA_URL}\n${stringifyYaml(file, { lineWidth: 0 })}`;
+  return [
+    { name: `${key}.yaml`, text: yaml, type: "application/yaml" },
+    ...(markdown === null ? [] : [{ name: `${key}.md`, text: markdown, type: "text/markdown" }]),
+  ];
+}
+
+/** The version Export as YAML writes: the published one, else the newest (as the CLI). */
+export function exportedVersion<V extends { version: number }>(agent: {
+  published: V | null;
+  draft: V | null;
+}): V | null {
+  return agent.published ?? agent.draft;
+}
+
+/** Starts the download of `<key>.yaml` (and `<key>.md` for long instructions). */
+export function downloadOrgAgentFiles(key: string, definition: OrgAgentDefinitionInput): string[] {
+  const files = orgAgentExportFiles(key, definition);
+  for (const file of files) {
+    const url = URL.createObjectURL(new Blob([file.text], { type: file.type }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = file.name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  return files.map((file) => file.name);
 }
 
 /** The version's settings as indented canonical JSON, for the versions diff. */

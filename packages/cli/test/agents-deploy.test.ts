@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -76,8 +76,8 @@ describe("agent files", () => {
     expect(errors).toContain(
       `${join("invalid-agents", "renamed.yaml")}: key: 'support' does not match the file name`,
     );
-    expect(result.warnings.join("\n")).toContain(
-      "'./missing.md' is not a file next to this agent file",
+    expect(errors).toContain(
+      `${join("invalid-agents", "duplicate.yaml")}: instructions: './missing.md' is not a file next to this agent file.`,
     );
   });
 
@@ -135,12 +135,45 @@ describe("opengeni agents deploy", () => {
     );
     expect(result.exitCode).toBe(CLI_EXIT.ok);
     expect(result.stdout).toContain("support\tcreated (dry run)\tv-\tnot published");
+    // A new agent diffs against nothing.
+    expect(result.stdout).toContain(
+      "--- support (new agent)\n+++ agents/support.yaml\n+ key: support\n",
+    );
     expect(api.requests[0]!.body).toMatchObject({
       dryRun: true,
       publish: true,
       moveRunningChats: true,
     });
     expect(api.agents.size).toBe(0);
+  });
+
+  test("--dry-run prints the change against the published version", async () => {
+    const api = fakeApi();
+    expect((await cli(["agents", "deploy", "agents", "--publish"], api)).exitCode).toBe(0);
+    // Unchanged files: no diff.
+    const same = await cli(["agents", "deploy", "agents", "--dry-run"], api);
+    expect(same.stdout).not.toContain("---");
+    const changed = mkdtempSync(join(tmpdir(), "opengeni-agents-diff-"));
+    try {
+      const support = readFileSync(join(fixtures, "agents", "support.yaml"), "utf8");
+      writeFileSync(
+        join(changed, "support.yaml"),
+        support.replace("name: Customer support", "name: Support desk"),
+      );
+      writeFileSync(
+        join(changed, "support.md"),
+        readFileSync(join(fixtures, "agents", "support.md"), "utf8"),
+      );
+      const result = await cli(["agents", "deploy", changed, "--dry-run"], api);
+      expect(result.exitCode).toBe(CLI_EXIT.ok);
+      expect(result.stdout).toContain("--- support (published v1)\n");
+      expect(result.stdout).toContain("- name: Customer support\n+ name: Support desk\n");
+      const json = await cli(["agents", "deploy", changed, "--dry-run", "--json"], api);
+      const parsed = JSON.parse(json.stdout) as { agents: { diff?: string }[] };
+      expect(parsed.agents[0]!.diff).toContain("+ name: Support desk");
+    } finally {
+      rmSync(changed, { recursive: true, force: true });
+    }
   });
 
   test("--json prints machine-readable results", async () => {
@@ -321,6 +354,21 @@ describe("end to end", () => {
       port: 0,
       hostname: "127.0.0.1",
       async fetch(request) {
+        // The dry run's diff reads the published version: none yet.
+        if (request.method === "GET") {
+          return Response.json(
+            {
+              error: {
+                status: 404,
+                code: "not_found",
+                message: "Agent not found.",
+                retryable: false,
+                requestId: "r",
+              },
+            },
+            { status: 404 },
+          );
+        }
         const body = (await request.json()) as { dryRun: boolean; name: string };
         received.push({ path: new URL(request.url).pathname, body });
         const parsed = ApplyOrgAgentRequest.parse(body);
@@ -371,8 +419,9 @@ describe("end to end", () => {
       ]);
       expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
       expect(stdout).toMatch(
-        /^support\tupdated \(dry run\)\tv-\tnot published\tsha256:[0-9a-f]{12}\ntriage\t/u,
+        /^support\tupdated \(dry run\)\tv-\tnot published\tsha256:[0-9a-f]{12}\n--- support \(new agent\)\n/u,
       );
+      expect(stdout).toContain("\ntriage\t");
       expect(received.map((entry) => entry.path)).toEqual([
         `/v1/organizations/${ORG}/agents/by-key/support/apply`,
         `/v1/organizations/${ORG}/agents/by-key/triage/apply`,

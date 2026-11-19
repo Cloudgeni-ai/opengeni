@@ -1,6 +1,7 @@
-// An agent's Sessions tab: its chats with the version each runs, and for a
-// chat that changed the agent's settings, what it changed (the agent's value
-// beside the chat's), with a link to the session's Console page.
+// An agent's Sessions tab: what its chats cost (in total and per version, the
+// last 30 days), its chats with the version each runs and what each cost, and
+// for a chat that changed the agent's settings, what it changed (the agent's
+// value beside the chat's), with a link to the session's Console page.
 import type { OrgAgent, OrgAgentSessionEntry } from "@opengeni/contracts";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, ArrowUpRightIcon } from "lucide-react";
@@ -13,9 +14,16 @@ import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatGroup, StatTile } from "@opengeni/react/ui/stat-tile";
 
 import { hasOverrides, overrideEntries, type OrgAgentsApi } from "@/lib/organization-agents";
-import { ConsoleLoadError, EndUserName, useConsole, useConsoleQuery } from "./console-shared";
+import {
+  ConsoleLoadError,
+  EndUserName,
+  formatMicros,
+  useConsole,
+  useConsoleQuery,
+} from "./console-shared";
 import { sessionStatus } from "./sessions";
 
 export const CHANGED_BY_CHAT = "Changed by this chat";
@@ -53,63 +61,106 @@ export function AgentSessions({
   }
 
   return (
-    <DetailSection title="Sessions">
-      {page.error && rows.length === 0 ? (
-        <ConsoleLoadError error={page.error} onRetry={page.reload} />
-      ) : page.loading && rows.length === 0 ? (
-        <ListRowSkeleton count={3} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          title="No sessions yet"
-          description="Chats your product starts with this agent appear here."
+    <div className="mt-6 flex flex-col gap-6">
+      <AgentUsage agent={agent} api={api} />
+      <DetailSection title="Sessions">
+        {page.error && rows.length === 0 ? (
+          <ConsoleLoadError error={page.error} onRetry={page.reload} />
+        ) : page.loading && rows.length === 0 ? (
+          <ListRowSkeleton count={3} />
+        ) : rows.length === 0 ? (
+          <EmptyState
+            title="No sessions yet"
+            description="Chats your product starts with this agent appear here."
+          />
+        ) : (
+          <div className="flex flex-col gap-4">
+            <RowList
+              variant="table"
+              label="Sessions"
+              nameLabel="Session"
+              columns={[
+                { id: "user", label: "End user", width: 176 },
+                { id: "version", label: "Version", width: 80 },
+                { id: "cost", label: "Cost", width: 96 },
+                { id: "status", label: "Status", width: 112 },
+                { id: "updated", label: "Updated", width: 112 },
+              ]}
+            >
+              {rows.map((session) => (
+                <ListRow
+                  key={session.id}
+                  title={chatTitle(session)}
+                  titleAddon={
+                    hasOverrides(session.overrides) ? (
+                      <MetaChip variant="soft">{CHANGED_BY_CHAT}</MetaChip>
+                    ) : null
+                  }
+                  cells={{
+                    user: <EndUserName endUser={session.endUser} />,
+                    version: `v${session.agentVersion}`,
+                    cost: session.costMicros === undefined ? "—" : formatMicros(session.costMicros),
+                    status: sessionStatus(session.status),
+                    updated: <RelativeTime date={session.updatedAt} />,
+                  }}
+                  onOpen={() => onSelect(session.id)}
+                />
+              ))}
+            </RowList>
+            {page.data?.nextCursor ? (
+              <div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page.loading}
+                  onClick={() => setCursor(page.data?.nextCursor ?? null)}
+                >
+                  Show more
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </DetailSection>
+    </div>
+  );
+}
+
+/** The agent's chats and cost in the last 30 days, in total and per version. */
+export function AgentUsage({ agent, api }: { agent: Pick<OrgAgent, "id">; api: OrgAgentsApi }) {
+  const usage = useConsoleQuery((signal) => api.usage(agent.id, { signal }), [api, agent.id]);
+  const data = usage.data;
+  if (usage.error && !data) return <ConsoleLoadError error={usage.error} onRetry={usage.reload} />;
+  return (
+    <div className="flex flex-col gap-4">
+      <StatGroup label="Last 30 days" columns={2}>
+        <StatTile label="Chats" loading={!data} value={data ? String(data.sessions) : undefined} />
+        <StatTile
+          label="Cost"
+          loading={!data}
+          value={data ? formatMicros(data.costMicros) : undefined}
         />
-      ) : (
-        <div className="flex flex-col gap-4">
-          <RowList
-            variant="table"
-            label="Sessions"
-            nameLabel="Session"
-            columns={[
-              { id: "user", label: "End user", width: 176 },
-              { id: "version", label: "Version", width: 80 },
-              { id: "status", label: "Status", width: 112 },
-              { id: "updated", label: "Updated", width: 112 },
-            ]}
-          >
-            {rows.map((session) => (
-              <ListRow
-                key={session.id}
-                title={chatTitle(session)}
-                titleAddon={
-                  hasOverrides(session.overrides) ? (
-                    <MetaChip variant="soft">{CHANGED_BY_CHAT}</MetaChip>
-                  ) : null
-                }
-                cells={{
-                  user: <EndUserName endUser={session.endUser} />,
-                  version: `v${session.agentVersion}`,
-                  status: sessionStatus(session.status),
-                  updated: <RelativeTime date={session.updatedAt} />,
-                }}
-                onOpen={() => onSelect(session.id)}
-              />
-            ))}
-          </RowList>
-          {page.data?.nextCursor ? (
-            <div>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={page.loading}
-                onClick={() => setCursor(page.data?.nextCursor ?? null)}
-              >
-                Show more
-              </Button>
-            </div>
-          ) : null}
-        </div>
-      )}
-    </DetailSection>
+      </StatGroup>
+      {data && data.byVersion.length > 0 ? (
+        <RowList
+          variant="table"
+          label="Cost by version"
+          nameLabel="Version"
+          columns={[
+            { id: "chats", label: "Chats", width: 96 },
+            { id: "cost", label: "Cost", width: 112 },
+          ]}
+        >
+          {data.byVersion.map((entry) => (
+            <ListRow
+              key={entry.version}
+              title={`v${entry.version}`}
+              cells={{ chats: String(entry.sessions), cost: formatMicros(entry.costMicros) }}
+            />
+          ))}
+        </RowList>
+      ) : null}
+    </div>
   );
 }
 

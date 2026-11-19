@@ -33,6 +33,7 @@ import {
   type ConsoleAccessLevel,
   type ConsoleMemberRole,
 } from "@opengeni/contracts";
+import { orgAgentsEnabledForAccount } from "@opengeni/config";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   holdsOrganizationAdministration,
@@ -51,6 +52,19 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
+
+/** Whether members' Console roles are on: only with Console agents (the per-organization flag). */
+export function consoleRolesEnabled(
+  deps: Pick<ApiRouteDeps, "settings">,
+  organizationId: string,
+): boolean {
+  return orgAgentsEnabledForAccount(deps.settings, organizationId);
+}
+
+/** 404 for the member-role routes while Console roles are off for the organization. */
+function consoleRolesNotFound(): ApiHttpError {
+  return new ApiHttpError(404, { code: "not_found", message: "Not found" });
+}
 
 /** The Console access a route needs, lowest first. */
 export type ConsoleAccess = "viewer" | "editor" | "full";
@@ -94,16 +108,19 @@ export function isConsoleKeyOrEndUser(context: AccessContext): boolean {
 /**
  * The signed-in person's Console access in this organization: `full` for
  * owners and admins, the stored role for a member signed in as themselves,
- * `none` for everyone and everything else.
+ * `none` for everyone and everything else. Members' Console roles exist only
+ * where Console agents are on for the organization (the per-organization
+ * flag); elsewhere every member is `none`.
  */
 export async function resolveConsoleAccess(
-  deps: Pick<ApiRouteDeps, "db">,
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
   context: AccessContext,
   organizationId: string,
 ): Promise<ConsoleAccessLevel> {
   if (isConsoleKeyOrEndUser(context)) return "none";
   if (holdsOrganizationAdministration(context, organizationId)) return "full";
   if (!holdsOrganizationMemberConsoleStanding(context, organizationId)) return "none";
+  if (!consoleRolesEnabled(deps, organizationId)) return "none";
   const role: ConsoleMemberRole = await getConsoleMemberRole(
     deps.db,
     organizationId,
@@ -124,7 +141,7 @@ export type ConsoleCaller = {
  * `console_role_required`. API keys and end users are always refused here.
  */
 export async function requireConsoleAccessForContext(
-  deps: Pick<ApiRouteDeps, "db">,
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
   context: AccessContext,
   organizationId: string,
   needed: ConsoleAccess,
@@ -188,6 +205,7 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/member-roles`, async (c) => {
     const organizationId = organizationIdOf(c);
+    if (!consoleRolesEnabled(deps, organizationId)) throw consoleRolesNotFound();
     await requireConsoleAccess(c, deps, organizationId, "full");
     const roles = await listConsoleMemberRoles(deps.db, organizationId);
     return c.json(ConsoleMemberRolesResponse.parse({ roles }));
@@ -195,6 +213,7 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.put(`${base}/member-roles`, async (c) => {
     const organizationId = organizationIdOf(c);
+    if (!consoleRolesEnabled(deps, organizationId)) throw consoleRolesNotFound();
     const admin = await requireConsoleAccess(c, deps, organizationId, "full");
     const request = await parseRequestJson(c, SetConsoleMemberRoleRequest);
     const memberNotFound = () =>

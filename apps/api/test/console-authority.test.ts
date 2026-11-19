@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessContext } from "@opengeni/contracts";
+import type { Settings } from "@opengeni/config";
 import { hasPermission } from "@opengeni/core";
 import { consoleWindow } from "../src/routes/console";
 import {
@@ -13,6 +14,8 @@ import {
 } from "../src/routes/organization-agents";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
+// Console agents (and with them members' Console roles) are on for this organization.
+const settings = { orgAgentsAccountIds: [organizationId] } as unknown as Settings;
 
 function context(subjectId: string, permissions: string[], role?: string): AccessContext {
   return {
@@ -45,7 +48,7 @@ describe("Opengeni Console authority", () => {
 
   test("an organization administrator may open Console", async () => {
     const admin = await requireConsoleAccessForContext(
-      { db: noDb },
+      { db: noDb, settings },
       context("user:admin", ["account:admin"]),
       organizationId,
       "full",
@@ -60,7 +63,7 @@ describe("Opengeni Console authority", () => {
     ]) {
       await expect(
         requireConsoleAccessForContext(
-          { db: noDb },
+          { db: noDb, settings },
           context(subjectId, ["account:admin"]),
           organizationId,
           "viewer",
@@ -72,7 +75,7 @@ describe("Opengeni Console authority", () => {
   test("people without Console standing and other organizations are refused", async () => {
     await expect(
       requireConsoleAccessForContext(
-        { db: noDb },
+        { db: noDb, settings },
         context("user:member", ["account:read"]),
         organizationId,
         "viewer",
@@ -80,7 +83,7 @@ describe("Opengeni Console authority", () => {
     ).rejects.toMatchObject({ status: 403 });
     await expect(
       requireConsoleAccessForContext(
-        { db: noDb },
+        { db: noDb, settings },
         context("user:admin", ["account:admin"]),
         "44444444-4444-4444-8444-444444444444",
         "viewer",
@@ -110,10 +113,10 @@ describe("Opengeni Console authority", () => {
       "external_user:33333333-3333-4333-8333-333333333333",
     ]) {
       const caller = context(subjectId, ["account:admin"]);
-      expect(await resolveConsoleAccess({ db }, caller, organizationId)).toBe("none");
+      expect(await resolveConsoleAccess({ db, settings }, caller, organizationId)).toBe("none");
       for (const needed of ["viewer", "editor", "full"] as const) {
         await expect(
-          requireConsoleAccessForContext({ db }, caller, organizationId, needed),
+          requireConsoleAccessForContext({ db, settings }, caller, organizationId, needed),
         ).rejects.toMatchObject({ status: 403 });
       }
     }

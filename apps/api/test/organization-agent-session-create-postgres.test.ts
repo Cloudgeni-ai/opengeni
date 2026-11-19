@@ -307,6 +307,17 @@ describe("session create with an organization agent over HTTP", () => {
     // The agent's id names it too.
     const byId = await call("POST", sessions(), { initialMessage: "hi", agent: agentId });
     expect([byId.status, byId.body.orgAgent?.id]).toEqual([202, agentId]);
+    // Listing the agent's chats at the full review level returns their content,
+    // so the read is audited before it is returned.
+    const listed = await call("GET", `${agents()}/${agentId}/sessions`);
+    expect(listed.status).toBe(200);
+    const listedIds = (listed.body.sessions as { id: string }[]).map((session) => session.id);
+    expect(listedIds).toContain(created.body.id);
+    const [viewed] = await shared!.admin<{ detail: { agentId: string; sessionIds: string[] } }[]>`
+      select detail from organization_console_audit_events
+      where account_id = ${fixture.accountId} and action = 'agent.sessions_viewed'
+        and detail->>'agentId' = ${agentId}`;
+    expect(viewed?.detail.sessionIds).toEqual(listedIds);
     // An unknown key is refused, never a plain chat.
     const unknown = await call("POST", sessions(), { initialMessage: "hi", agent: "missing" });
     expect([unknown.status, unknown.body.code, unknown.body.details?.code]).toEqual([

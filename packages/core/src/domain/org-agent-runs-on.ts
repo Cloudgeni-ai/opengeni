@@ -128,15 +128,15 @@ export async function assertOrgAgentChatMachine(
 }
 
 /**
- * Whether a reach-aware list shows it here. A list this caller cannot read
- * (for example a person without access to the workspace) answers true: the
- * create path's own machine and rig checks then decide, as for any chat.
+ * Whether a reach-aware list shows it here. Fails closed: a lookup that
+ * errors (including a list this caller cannot read) answers false, so the
+ * chat is refused rather than placed somewhere its reach was never checked.
  */
 async function worksHere(read: () => Promise<boolean>): Promise<boolean> {
   try {
     return await read();
   } catch {
-    return true;
+    return false;
   }
 }
 

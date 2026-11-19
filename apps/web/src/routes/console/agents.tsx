@@ -21,6 +21,7 @@ import {
   ConsoleForbidden,
   ConsoleLoadError,
   ConsolePage,
+  formatMicros,
   useConsole,
   useConsoleCan,
   useConsoleQuery,
@@ -66,6 +67,24 @@ function AgentsList() {
   const agents = useConsoleQuery((signal) => api.listAgents(signal), [api]);
   const canEdit = useConsoleCan("editor");
   const rows = (agents.data?.agents ?? []).filter((agent) => agent.archivedAt === null);
+  const ids = rows.map((agent) => agent.id).join(",");
+  // Chats and cost per agent, the last 30 days (one usage read each).
+  const usage = useConsoleQuery(
+    async (signal) => {
+      const entries = await Promise.all(
+        (ids ? ids.split(",") : []).map(async (id) => {
+          try {
+            return [id, await api.usage(id, { signal })] as const;
+          } catch (error) {
+            if (signal.aborted) throw error;
+            return [id, null] as const;
+          }
+        }),
+      );
+      return new Map(entries);
+    },
+    [api, ids],
+  );
   const create = () => void navigate({ to: "/console/agents/new", search });
   const open = (agent: OrgAgentSummary) =>
     void navigate({
@@ -116,11 +135,14 @@ function AgentsList() {
           columns={[
             { id: "managed", label: "Managed in", width: 132 },
             { id: "published", label: "Published", width: 120 },
+            { id: "chats", label: "Chats (30d)", width: 96 },
+            { id: "cost", label: "Cost (30d)", width: 104 },
             { id: "updated", label: "Updated", width: 112 },
           ]}
         >
           {rows.map((agent) => {
             const { published, draft } = agentVersionText(agent);
+            const used = usage.data?.get(agent.id) ?? null;
             return (
               <ListRow
                 key={agent.id}
@@ -150,6 +172,8 @@ function AgentsList() {
                       ) : null}
                     </span>
                   ),
+                  chats: used ? String(used.sessions) : "—",
+                  cost: used ? formatMicros(used.costMicros) : "—",
                   updated: <RelativeTime date={agent.updatedAt} />,
                 }}
                 onOpen={() => open(agent)}

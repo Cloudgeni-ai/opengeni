@@ -590,7 +590,7 @@ describe("Console agents routes", () => {
       login,
     );
     expect([unmanaged.status, unmanaged.body.details?.code]).toEqual([
-      409,
+      422,
       "workspace_not_managed",
     ]);
     const stored = await call(

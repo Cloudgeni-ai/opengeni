@@ -48,8 +48,14 @@ mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({ ...appContext, client }),
 }));
 
-const { ConsoleContext, endUserDisplay, endUserLabel, endUserMatches, formatMicros } =
-  await import("./console-shared");
+const {
+  ConsoleContext,
+  END_USER_UNVERIFIED_NOTE,
+  endUserDisplay,
+  endUserLabel,
+  endUserMatches,
+  formatMicros,
+} = await import("./console-shared");
 const { ConsoleSessionsRoute } = await import("./sessions");
 const { ConsoleSettingsRoute } = await import("./settings");
 const { ConsoleNewApiKeyRoute } = await import("./api-keys");
@@ -317,7 +323,9 @@ describe("Console sessions", () => {
     // Name, then email; the product's id on hover.
     expect(container.textContent).toContain("Ada Lovelace");
     expect(container.textContent).toContain("ada@example.com");
-    expect(container.querySelector('[title="email|66b45b"]')).not.toBeNull();
+    expect(
+      container.querySelector(`[title="email|66b45b\n${END_USER_UNVERIFIED_NOTE}"]`),
+    ).not.toBeNull();
     expect(container.textContent).toContain("user-2");
     // The full workspace name, never cut.
     expect(container.textContent).toContain("kontali-dev: Northwind Traders AS (production)");
@@ -347,7 +355,7 @@ describe("Console end users", () => {
         displayName: "Ada",
         email: "ada@example.com",
       }),
-    ).toEqual({ primary: "Ada", secondary: "ada@example.com", id: "auth0|1" });
+    ).toEqual({ primary: "Ada", secondary: "ada@example.com", id: "auth0|1", unverified: true });
     expect(
       endUserDisplay({
         subjectId: "external_user:1",
@@ -355,11 +363,11 @@ describe("Console end users", () => {
         source: "default",
         email: "ada@example.com",
       }),
-    ).toEqual({ primary: "ada@example.com", secondary: null, id: "auth0|1" });
+    ).toEqual({ primary: "ada@example.com", secondary: null, id: "auth0|1", unverified: true });
     // Older servers send no display details: today's label.
     expect(
       endUserDisplay({ subjectId: "external_user:1", externalId: "auth0|1", source: "default" }),
-    ).toEqual({ primary: "auth0|1", secondary: null, id: "auth0|1" });
+    ).toEqual({ primary: "auth0|1", secondary: null, id: "auth0|1", unverified: false });
     expect(
       endUserLabel({
         subjectId: "external_user:0123456789abcdef",

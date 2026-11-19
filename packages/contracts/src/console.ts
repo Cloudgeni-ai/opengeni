@@ -34,6 +34,15 @@ export const ConsoleManagedSource = /* @__PURE__ */ defineSchema(() =>
 );
 export type ConsoleManagedSource = z.infer<typeof ConsoleManagedSource>;
 
+/**
+ * A workspace's managed source as read back: a known {@link ConsoleManagedSource}
+ * or one a newer server added. Readers must tolerate new ones.
+ */
+export const ConsoleManagedSourceValue = /* @__PURE__ */ defineSchema(() =>
+  z.union([ConsoleManagedSource, z.string().min(1).max(64)]),
+);
+export type ConsoleManagedSourceValue = z.infer<typeof ConsoleManagedSourceValue>;
+
 export const ConsoleRange = /* @__PURE__ */ defineSchema(() => z.enum(["7d", "30d", "90d"]));
 export type ConsoleRange = z.infer<typeof ConsoleRange>;
 
@@ -122,7 +131,7 @@ export const ConsoleWorkspace = /* @__PURE__ */ defineSchema(() =>
     id: primitives.uuid,
     name: primitives.string,
     kind: ConsoleWorkspaceKind,
-    managedSource: ConsoleManagedSource.nullable(),
+    managedSource: ConsoleManagedSourceValue.nullable(),
     /** The organization API key that created it, when known. */
     createdByApiKeyId: primitives.nullableUuid,
     externalSource: primitives.nullableString,
@@ -281,14 +290,24 @@ export const ConsoleAuditAction = /* @__PURE__ */ defineSchema(() =>
     "tool_credential.written",
     "tool_credential.deleted",
     "member.console_role_changed",
+    "agent.sessions_viewed",
   ]),
 );
 export type ConsoleAuditAction = z.infer<typeof ConsoleAuditAction>;
 
+/**
+ * An audit event's action as read back: a known {@link ConsoleAuditAction} or
+ * one a newer server added. Readers must tolerate new ones.
+ */
+export const ConsoleAuditEventAction = /* @__PURE__ */ defineSchema(() =>
+  z.union([ConsoleAuditAction, z.string().min(1).max(128)]),
+);
+export type ConsoleAuditEventAction = z.infer<typeof ConsoleAuditEventAction>;
+
 export const ConsoleAuditEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
-    action: ConsoleAuditAction,
+    action: ConsoleAuditEventAction,
     actorSubjectId: primitives.string,
     actorLabel: primitives.nullableString,
     workspaceId: primitives.nullableUuid,

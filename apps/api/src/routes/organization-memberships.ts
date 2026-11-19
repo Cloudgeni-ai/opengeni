@@ -118,7 +118,7 @@ import {
   isAgentActingAsPerson,
   organizationSettingsPermission,
 } from "../http/acting-person";
-import { requireConsoleAccess } from "./console-roles";
+import { consoleRolesEnabled, requireConsoleAccess } from "./console-roles";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { hasRecentManagedSignIn } from "./managed-sign-in-methods";
 import {
@@ -1106,6 +1106,14 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ? null
         : payload.consoleRole;
     if (consoleRole) {
+      // Console roles exist only where Console agents are on for the organization.
+      if (!consoleRolesEnabled(deps, organizationId)) {
+        throw new ApiHttpError(422, {
+          code: "validation_failed",
+          message: "Console roles are not available for this organization",
+          details: { code: "console_roles_unavailable" },
+        });
+      }
       await requireConsoleAccess(context, deps, organizationId, "full");
       if (payload.role !== "member") {
         throw new ApiHttpError(422, {

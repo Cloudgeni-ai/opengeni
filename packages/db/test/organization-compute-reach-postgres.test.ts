@@ -529,18 +529,78 @@ describe("every organization machine and rig, wherever it works", () => {
 });
 
 /** A workspace the organization's product manages, made now, that the owner can use. */
-async function managedWorkspace(org: Org, name = "Customer") {
+async function managedWorkspace(
+  org: Org,
+  name = "Customer",
+  source: "api_key" | "console_test" = "api_key",
+) {
   const workspaceId = (await createWorkspace(client.db, { accountId: org.accountId, name })).id;
   await shared.admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
     values (${org.accountId}, ${workspaceId}, ${org.owner}, 'owner', ${MEMBER_PERMISSIONS}::jsonb)`;
   await shared.admin`
     insert into organization_managed_workspaces (account_id, workspace_id, source)
-    values (${org.accountId}, ${workspaceId}, 'api_key')`;
+    values (${org.accountId}, ${workspaceId}, ${source})`;
   return workspaceId;
 }
 
 describe("all product-managed workspaces", () => {
+  test("the Console test workspace needs the managed switch; all shared workspaces or a list never reach it", async () => {
+    const org = await organization();
+    const machine = await organizationMachine(org);
+    const rig = await createRig(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.home,
+      scope: "organization",
+      subjectId: org.owner,
+      allowOrganization: true,
+      name: `test-ws-rig-${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const customer = await managedWorkspace(org, "Customer");
+    const testWorkspace = await managedWorkspace(org, "Console test", "console_test");
+    const reaches = async (workspaceId: string) => ({
+      machine: (await visibleMachineIds(org, workspaceId)).includes(machine.enrollmentId),
+      attach: await attachAllowed(org, workspaceId, machine.sandboxId),
+      sandbox: (await getSandbox(client.db, access(org, workspaceId), machine.sandboxId)) !== null,
+      rig: (await visibleRigIds(org, workspaceId)).includes(rig.id),
+    });
+    const everywhere = { machine: true, attach: true, sandbox: true, rig: true };
+    const nowhere = { machine: false, attach: false, sandbox: false, rig: false };
+
+    // All shared workspaces (the default): other managed workspaces, not the test one.
+    expect(await reaches(customer)).toEqual(everywhere);
+    expect(await reaches(testWorkspace)).toEqual(nowhere);
+    const testAttempt = await chatOnRig(org, testWorkspace, rig.id, rig.activeVersion!.id);
+    const refused = await materializeRigVersionForAttempt(client.db, testAttempt).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
+
+    // Listing the test workspace by id doesn't reach it either.
+    await updateOrganizationMachineReach(
+      client.db,
+      machine.enrollmentId,
+      reachInput(org, [testWorkspace], false),
+    );
+    await updateOrganizationRigReach(client.db, rig.id, reachInput(org, [testWorkspace], false));
+    expect(await reaches(testWorkspace)).toEqual(nowhere);
+
+    // The explicit "All product-managed workspaces" switch does.
+    await updateOrganizationMachineReach(client.db, machine.enrollmentId, {
+      ...reachInput(org, null, false),
+      allowManagedWorkspaces: true,
+    });
+    await updateOrganizationRigReach(client.db, rig.id, {
+      ...reachInput(org, null, false),
+      allowManagedWorkspaces: true,
+    });
+    expect(await reaches(testWorkspace)).toEqual(everywhere);
+    expect((await materializeRigVersionForAttempt(client.db, testAttempt))?.version.id).toBe(
+      rig.activeVersion!.id,
+    );
+  }, 180_000);
+
   test("covers managed workspaces made later, not other shared ones, until switched off", async () => {
     const org = await organization();
     const machine = await organizationMachine(org);

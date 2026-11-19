@@ -723,6 +723,8 @@ export const OrgAgentSessionEntry = /* @__PURE__ */ defineSchema(() =>
     overrides: OrgAgentSessionOverrides.nullable(),
     /** The end user the chat belongs to (name, email, the product's id); absent on older servers. */
     endUser: ConsoleEndUser.nullable().optional(),
+    /** What the chat cost, in USD micros (the credit ledger's debits); absent on older servers. */
+    costMicros: z.number().int().nonnegative().optional(),
     createdAt: z.string(),
     updatedAt: z.string(),
   }),

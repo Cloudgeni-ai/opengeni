@@ -2169,13 +2169,13 @@ ones it creates later, without listing them; omitted keeps the current value.
 So a client that predates the setting (an older SDK or UI) leaves it on when
 it narrows the list: switch it off explicitly to take those workspaces away.
 Every chat in a managed workspace can use the machine, including your end
-customers' chats, not only organization agent chats. Both every shared
-workspace and the managed option include the Console test workspace, where
-Console Editors run test chats on it. Only an account-level context can mark or
+customers' chats, not only organization agent chats. Only the managed option
+reaches the Console test workspace, where Console Editors run test chats on it;
+every shared workspace or a list never does. Only an account-level context can mark or
 unmark a managed workspace (Console, or a workspace an organization API key
 creates); runtime code acting inside a workspace can't.
 [Console agents](agents.md#runs-on) that run on an organization machine need
-it (or every shared workspace), because their chats run in those workspaces.
+it, because their chats run in those workspaces.
 It needs
 `enrollments:manage`, and the caller is the organization's owner or an admin
 signed in as themselves (or a credential holding `account:admin`), the same

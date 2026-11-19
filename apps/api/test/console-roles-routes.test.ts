@@ -966,6 +966,54 @@ describe("Console roles: authorization matrix", () => {
     }
   }, 60_000);
 
+  test("with Console agents off for the organization, Console roles are off too", async () => {
+    if (!fixture) return;
+    const { people, accountId } = fixture;
+    settings!.orgAgentsAccountIds = [];
+    try {
+      const expected = { owner: "full", admin: "full", viewer: "none", editor: "none" } as const;
+      for (const [name, access] of Object.entries(expected)) {
+        const reply = await call(
+          "GET",
+          `${console_(fixture)}/access`,
+          headersOf(name as CallerName),
+        );
+        expect([name, reply.status, reply.body.access]).toEqual([name, 200, access]);
+      }
+      const viewerSessions = await call(
+        "GET",
+        `${console_(fixture)}/sessions`,
+        headersOf("viewer"),
+      );
+      expect(viewerSessions.status).toBe(403);
+      const listed = await call("GET", `${console_(fixture)}/member-roles`, people.owner.headers);
+      expect(listed.status).toBe(404);
+      const set = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+        subjectId: people.none.subjectId,
+        role: "viewer",
+      });
+      expect(set.status).toBe(404);
+      const invited = await call(
+        "POST",
+        `/v1/organizations/${accountId}/invitations`,
+        people.owner.headers,
+        {
+          email: `console-roles-${crypto.randomUUID()}@example.test`,
+          role: "member",
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          operationId: crypto.randomUUID(),
+          consoleRole: "viewer",
+        },
+      );
+      expect([invited.status, invited.body.details?.code]).toEqual([
+        422,
+        "console_roles_unavailable",
+      ]);
+    } finally {
+      settings!.orgAgentsAccountIds = [accountId];
+    }
+  }, 60_000);
+
   test("a Console role never reaches another organization", async () => {
     if (!fixture) return;
     const other = await person("outsider");

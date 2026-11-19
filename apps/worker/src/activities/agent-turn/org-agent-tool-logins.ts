@@ -18,7 +18,11 @@
  * records `session.tool_server.unavailable`. Secrets never reach logs,
  * events or the model.
  */
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  orgAgentsEnabledForAccount,
+  type Settings,
+} from "@opengeni/config";
 import {
   isConsoleTestChatSubject,
   normalizeCredentialProviderMcpUrl,
@@ -210,18 +214,22 @@ export async function resolveOrgAgentToolLogins(
   const chatHeadersAllowed = () =>
     (chatHeadersAllowedResult ??= orgAgentChatHeadersAllowed(input).catch(() => false));
   // The organization's secrets (shared keys, stored end-user logins) run only
-  // while the agent is not archived and still reaches this workspace; read
-  // once per turn, only when a server would use one, and closed on error.
+  // while Console agents are on for the organization and the agent is not
+  // archived and still reaches this workspace; read once per turn, only when
+  // a server would use one, and closed on error.
   const agentId = input.orgAgent.agentId;
+  const flagOn = orgAgentsEnabledForAccount(input.settings, input.accountId);
   let orgSecretsAllowedResult: Promise<boolean> | null = null;
   const orgSecretsAllowed = () =>
-    (orgSecretsAllowedResult ??= readOrgAgentRuntimeStanding(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      agentId,
-    })
-      .then((standing) => !standing.archived && standing.reaches)
-      .catch(() => false));
+    (orgSecretsAllowedResult ??= !flagOn
+      ? Promise.resolve(false)
+      : readOrgAgentRuntimeStanding(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          agentId,
+        })
+          .then((standing) => !standing.archived && standing.reaches)
+          .catch(() => false));
 
   const mcpServers: McpServerSetting[] = [];
   const unavailable: OrgToolServerUnavailable[] = [];

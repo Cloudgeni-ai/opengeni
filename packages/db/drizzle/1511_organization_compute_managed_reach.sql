@@ -13,7 +13,11 @@
 -- so every existing row (allow_managed_workspaces defaults to false) keeps
 -- exactly the reach it has. Managed workspaces are shared workspaces, so
 -- allowed_workspace_ids NULL already includes them; the switch matters with
--- a list (or none).
+-- a list (or none). The one exception is the Console test workspace
+-- (source 'console_test', new in 1504): only allow_managed_workspaces
+-- reaches it, never "all shared workspaces" or a list, so an organization
+-- machine opens to Console Editors' test chats only when an admin chose
+-- managed workspaces. No such workspace exists before this release.
 --
 -- The functions 1190 changed are replaced with the same signatures and only
 -- this added: list_scoped_enrollments, get_scoped_sandbox,
@@ -81,11 +85,14 @@ CREATE POLICY account_only_delete ON organization_managed_workspaces AS RESTRICT
   FOR DELETE USING (opengeni_private.current_workspace_id() IS NULL);
 
 -- Whether an organization machine or rig works in a workspace: always where
--- it lives, in a Personal workspace when the Personal switch is on, and in a
--- managed workspace when the managed switch is on, and in a shared workspace
--- when it works in all of them or that one is listed.
+-- it lives, in a Personal workspace when the Personal switch is on, in the
+-- Console test workspace only when the managed switch is on (never through
+-- "all shared workspaces" or a list), in another managed workspace when the
+-- managed switch is on, and in a shared workspace when it works in all of
+-- them or that one is listed.
 CREATE FUNCTION opengeni_private.organization_compute_reaches_v2(
   p_workspace_id uuid, p_workspace_personal boolean, p_workspace_managed boolean,
+  p_workspace_console_test boolean,
   p_home_workspace_id uuid, p_allowed_workspace_ids uuid[],
   p_allow_personal_workspaces boolean, p_allow_managed_workspaces boolean
 ) RETURNS boolean
@@ -96,19 +103,21 @@ CREATE FUNCTION opengeni_private.organization_compute_reaches_v2(
     WHEN p_workspace_id IS NULL THEN false
     WHEN p_workspace_id = p_home_workspace_id THEN true
     WHEN p_workspace_personal THEN coalesce(p_allow_personal_workspaces, false)
+    WHEN coalesce(p_workspace_console_test, false)
+      THEN coalesce(p_allow_managed_workspaces, false)
     WHEN coalesce(p_workspace_managed, false)
       AND coalesce(p_allow_managed_workspaces, false) THEN true
     ELSE p_allowed_workspace_ids IS NULL OR p_workspace_id = ANY (p_allowed_workspace_ids)
   END
 $$;
-REVOKE ALL ON FUNCTION opengeni_private.organization_compute_reaches_v2(uuid, boolean, boolean, uuid, uuid[], boolean, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.organization_compute_reaches_v2(uuid, boolean, boolean, boolean, uuid, uuid[], boolean, boolean) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION list_scoped_enrollments(p_account_id uuid, p_workspace_id uuid, p_enrollment_id uuid DEFAULT NULL::uuid, p_status text DEFAULT 'active'::text) RETURNS SETOF jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path FROM CURRENT
     AS $$
 DECLARE actor_membership_id uuid; enrollment_row record; workspace_personal boolean;
-  workspace_managed boolean;
+  workspace_managed boolean; workspace_console_test boolean;
 BEGIN
   INSERT INTO opengeni_private.scoped_compute_capabilities(
     backend_pid, transaction_id, capability_kind
@@ -119,6 +128,11 @@ BEGIN
   workspace_managed := EXISTS (
     SELECT 1 FROM organization_managed_workspaces managed
     WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+  );
+  workspace_console_test := EXISTS (
+    SELECT 1 FROM organization_managed_workspaces managed
+    WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+      AND managed.source = 'console_test'
   );
   IF p_status NOT IN ('active', 'revoked') THEN
     RAISE EXCEPTION 'invalid enrollment status' USING ERRCODE = '22023';
@@ -136,7 +150,8 @@ BEGIN
       AND (p_enrollment_id IS NULL OR enrollment.id = p_enrollment_id)
       AND ((enrollment.authority_scope = 'organization'
           AND opengeni_private.organization_compute_reaches_v2(
-            p_workspace_id, workspace_personal, workspace_managed, enrollment.workspace_id,
+            p_workspace_id, workspace_personal, workspace_managed, workspace_console_test,
+            enrollment.workspace_id,
             enrollment.allowed_workspace_ids, enrollment.allow_personal_workspaces,
             enrollment.allow_managed_workspaces))
         OR (enrollment.authority_scope = 'workspace'
@@ -228,7 +243,7 @@ CREATE OR REPLACE FUNCTION get_scoped_sandbox(p_account_id uuid, p_workspace_id 
     SET search_path FROM CURRENT
     AS $$
 DECLARE actor_membership_id uuid; result jsonb; workspace_personal boolean;
-  workspace_managed boolean;
+  workspace_managed boolean; workspace_console_test boolean;
 BEGIN
   INSERT INTO opengeni_private.scoped_compute_capabilities(
     backend_pid, transaction_id, capability_kind
@@ -239,6 +254,11 @@ BEGIN
   workspace_managed := EXISTS (
     SELECT 1 FROM organization_managed_workspaces managed
     WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+  );
+  workspace_console_test := EXISTS (
+    SELECT 1 FROM organization_managed_workspaces managed
+    WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+      AND managed.source = 'console_test'
   );
   SELECT pg_catalog.jsonb_build_object(
     'id', sandbox.id, 'accountId', sandbox.account_id,
@@ -257,7 +277,8 @@ BEGIN
       OR sandbox.kind = 'selfhosted' AND enrollment.status = 'active' AND (
         (enrollment.authority_scope = 'organization'
           AND opengeni_private.organization_compute_reaches_v2(
-            p_workspace_id, workspace_personal, workspace_managed, enrollment.workspace_id,
+            p_workspace_id, workspace_personal, workspace_managed, workspace_console_test,
+            enrollment.workspace_id,
             enrollment.allowed_workspace_ids, enrollment.allow_personal_workspaces,
             enrollment.allow_managed_workspaces))
         OR (enrollment.authority_scope = 'workspace'
@@ -285,7 +306,7 @@ CREATE OR REPLACE FUNCTION authorize_scoped_sandbox_attach(p_account_id uuid, p_
     AS $$
 DECLARE actor_membership_id uuid; sandbox_row sandboxes%ROWTYPE;
   enrollment_row enrollments%ROWTYPE; authorized boolean := false; capability_added boolean;
-  workspace_personal boolean; workspace_managed boolean;
+  workspace_personal boolean; workspace_managed boolean; workspace_console_test boolean;
 BEGIN
   INSERT INTO opengeni_private.scoped_compute_capabilities(backend_pid, transaction_id, capability_kind)
   VALUES (pg_backend_pid(), pg_current_xact_id(), 'write') ON CONFLICT DO NOTHING;
@@ -295,6 +316,11 @@ BEGIN
   workspace_managed := EXISTS (
     SELECT 1 FROM organization_managed_workspaces managed
     WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+  );
+  workspace_console_test := EXISTS (
+    SELECT 1 FROM organization_managed_workspaces managed
+    WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+      AND managed.source = 'console_test'
   );
   SELECT sandbox.* INTO sandbox_row FROM sandboxes sandbox
   WHERE sandbox.id = p_sandbox_id AND sandbox.account_id = p_account_id FOR SHARE;
@@ -307,7 +333,8 @@ BEGIN
     authorized := enrollment_row.id IS NOT NULL AND (
       (enrollment_row.authority_scope = 'organization'
         AND opengeni_private.organization_compute_reaches_v2(
-          p_workspace_id, workspace_personal, workspace_managed, enrollment_row.workspace_id,
+          p_workspace_id, workspace_personal, workspace_managed, workspace_console_test,
+            enrollment_row.workspace_id,
           enrollment_row.allowed_workspace_ids, enrollment_row.allow_personal_workspaces,
           enrollment_row.allow_managed_workspaces))
       OR (enrollment_row.authority_scope = 'workspace' AND enrollment_row.workspace_id = p_workspace_id)
@@ -331,7 +358,7 @@ DECLARE
   actor_membership_id uuid;
   rig_row record;
   workspace_personal boolean;
-  workspace_managed boolean;
+  workspace_managed boolean; workspace_console_test boolean;
 BEGIN
   INSERT INTO opengeni_private.scoped_compute_capabilities(
     backend_pid, transaction_id, capability_kind
@@ -342,6 +369,11 @@ BEGIN
   workspace_managed := EXISTS (
     SELECT 1 FROM organization_managed_workspaces managed
     WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+  );
+  workspace_console_test := EXISTS (
+    SELECT 1 FROM organization_managed_workspaces managed
+    WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+      AND managed.source = 'console_test'
   );
   IF p_scope IS NOT NULL AND p_scope NOT IN ('organization', 'workspace', 'user') THEN
     RAISE EXCEPTION 'invalid rig scope' USING ERRCODE = '22023';
@@ -355,7 +387,8 @@ BEGIN
       AND (
         (rig.authority_scope = 'organization'
           AND opengeni_private.organization_compute_reaches_v2(
-            p_workspace_id, workspace_personal, workspace_managed, rig.workspace_id,
+            p_workspace_id, workspace_personal, workspace_managed, workspace_console_test,
+            rig.workspace_id,
             rig.allowed_workspace_ids, rig.allow_personal_workspaces,
             rig.allow_managed_workspaces))
         OR (rig.authority_scope = 'workspace' AND rig.workspace_id = p_workspace_id)
@@ -442,6 +475,11 @@ BEGIN
       EXISTS (
         SELECT 1 FROM organization_managed_workspaces managed
         WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+      ),
+      EXISTS (
+        SELECT 1 FROM organization_managed_workspaces managed
+        WHERE managed.account_id = p_account_id AND managed.workspace_id = p_workspace_id
+          AND managed.source = 'console_test'
       ),
       rig_row.workspace_id, rig_row.allowed_workspace_ids, rig_row.allow_personal_workspaces,
       rig_row.allow_managed_workspaces)

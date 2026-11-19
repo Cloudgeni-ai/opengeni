@@ -51,6 +51,21 @@
 -- gate below, as 1276 does for agent_prompt_revision. The new tables are
 -- FORCE RLS with exact runtime grants, which the previous release's readiness
 -- accepts for unknown tables; the trigger function is SECURITY INVOKER.
+--
+-- The claim gate is safe in the same release: it refuses only a claim for a
+-- chat whose sessions.agent_version is set, and that column is new here, so
+-- no existing row trips it. Only this release's code writes agent_version,
+-- and only for an organization with the flag on; this release's workers set
+-- opengeni.org_agent_protocol_v1 and pass. Until then every claim passes
+-- exactly as before (the same reasoning as 1276).
+--
+-- New check values ('console_test', the agent, tool server, tool login and
+-- member.console_role_changed audit actions) are written only for
+-- organizations with the flag on. The previous release's Console routes read
+-- these with closed enums, so the flag is turned on (for an internal test
+-- organization first) only after this release is fully rolled out. A
+-- rollback after that affects only flagged organizations' Console workspace
+-- and audit lists; this release's readers tolerate values they don't know.
 SET LOCAL lock_timeout = '5s';
 
 -- Organization agents ------------------------------------------------------
@@ -350,4 +365,4 @@ ALTER TABLE organization_console_audit_events
     'agent.archived', 'agent.management_changed', 'agent.deployed',
     'tool_server.created', 'tool_server.updated', 'tool_server.deleted',
     'tool_credential.written', 'tool_credential.deleted',
-    'member.console_role_changed')) NOT VALID;
+    'member.console_role_changed', 'agent.sessions_viewed')) NOT VALID;

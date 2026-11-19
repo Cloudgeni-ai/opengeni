@@ -41,7 +41,7 @@ const USAGE = `Usage: opengeni <command> [options]
 
 Commands:
   agents deploy [dir]        Deploy agents/<key>.yaml files to an organization (default dir: agents)
-    --dry-run                Show what would change without saving
+    --dry-run                Show the change against the published version without saving
     --publish                Publish the deployed versions
     --move-running-chats     With --publish, also move running chats to the new versions
     --json                   Print the results as JSON

@@ -1484,6 +1484,21 @@ export async function listOrgAgentSessions(
     });
     const page = candidates.slice(0, input.limit);
     const last = page.at(-1);
+    // What each chat cost (the same debits Console's session list shows).
+    const spend = new Map<string, number>();
+    const byWorkspace = new Map<string, string[]>();
+    for (const row of page) {
+      byWorkspace.set(row.workspace_id, [...(byWorkspace.get(row.workspace_id) ?? []), row.id]);
+    }
+    for (const [workspaceId, ids] of byWorkspace) {
+      await scopeWorkspace(tx, workspaceId);
+      for (const row of await rawRows<{ id: string; spend: string }>(
+        tx,
+        consoleSessionSpendSql(input.accountId, workspaceId, ids),
+      )) {
+        spend.set(row.id, Math.max(0, num(row.spend)));
+      }
+    }
     await scopeWorkspace(tx, null);
     const endUsers = await readConsoleEndUsers(
       tx,
@@ -1510,6 +1525,7 @@ export async function listOrgAgentSessions(
                 email: label?.email ?? null,
               }
             : null,
+          costMicros: spend.get(row.id) ?? 0,
           createdAt: iso(row.created_at),
           updatedAt: iso(row.updated_at),
         };
@@ -2054,6 +2070,14 @@ function mapCredential(toolServerKey: string, row: CredentialRow): EndUserToolCr
   };
 }
 
+function workspaceNotManaged(): OrgAgentError {
+  return new OrgAgentError(
+    422,
+    "workspace_not_managed",
+    "End users' tool logins are stored only in workspaces the organization manages.",
+  );
+}
+
 type CredentialTarget = {
   accountId: string;
   workspaceId: string;
@@ -2076,13 +2100,7 @@ async function credentialServer(
     sql`select 1 as found from organization_managed_workspaces
       where account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid`,
   );
-  if (!managed) {
-    throw new OrgAgentError(
-      409,
-      "workspace_not_managed",
-      "End users' tool logins are stored only in workspaces the organization manages.",
-    );
-  }
+  if (!managed) throw workspaceNotManaged();
   const server = await selectToolServer(tx, input.accountId, input.toolServerKey, {
     forShare: options.forWrite === true,
   });
@@ -2117,6 +2135,10 @@ export async function putEndUserToolCredential(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
       const server = await credentialServer(tx, input, { forWrite: true });
+      // The workspace's managed marker is the foreign key's target: if it is
+      // removed after the check above, the insert's foreign key fails, which
+      // is a refusal, never a server error. (A row lock here would need an
+      // UPDATE policy the workspace context doesn't have.)
       const [row] = await rawRows<CredentialRow>(
         tx,
         sql`insert into end_user_tool_credentials (account_id, workspace_id, end_user_subject_id,
@@ -2128,7 +2150,10 @@ export async function putEndUserToolCredential(
             expires_at = excluded.expires_at, refresh_failed_at = null,
             version = end_user_tool_credentials.version + 1, updated_at = now()
           returning kind, expires_at, refresh_failed_at, updated_at, last_used_at`,
-      );
+      ).catch((error: unknown) => {
+        if (nestedPostgresSqlState(error) === "23503") throw workspaceNotManaged();
+        throw error;
+      });
       await audit(tx, {
         accountId: input.accountId,
         actor: input.actor,

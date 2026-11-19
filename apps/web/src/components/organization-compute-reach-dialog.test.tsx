@@ -26,7 +26,6 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
 }));
 
 const {
-  ALL_WORKSPACES_DESCRIPTION,
   MANAGED_DESCRIPTION,
   OrganizationComputeReachDialog,
   organizationComputeReachSummary,
@@ -104,7 +103,10 @@ describe("where an organization machine or rig works", () => {
     expect(organizationComputeReachSummary(reach([], false, true))).toBe(
       "1 workspace + Product-managed",
     );
-    expect(organizationComputeReachSummary(reach(null, false, true))).toBe("All workspaces");
+    // All workspaces never covers the Console test workspace; the switch does.
+    expect(organizationComputeReachSummary(reach(null, false, true))).toBe(
+      "All workspaces + Product-managed",
+    );
   });
 
   test("narrowing is anything that takes it away from somewhere it works now", () => {
@@ -132,7 +134,7 @@ describe("where an organization machine or rig works", () => {
       true,
     );
     expect(reachNarrows(managed, { workspaceIds: null, personalWorkspaces: false }, false)).toBe(
-      false,
+      true,
     );
   });
 
@@ -242,10 +244,9 @@ describe("where an organization machine or rig works", () => {
     expect(document.body.textContent).toContain("All product-managed workspaces");
     expect(document.body.textContent).toContain(MANAGED_DESCRIPTION.machine);
     expect(MANAGED_DESCRIPTION.machine).toContain("share this machine");
-    // Both choices that cover it say the Console test workspace is included.
+    // Only this choice covers the Console test workspace; All workspaces never does.
     expect(MANAGED_DESCRIPTION.machine).toContain("Console test workspace");
-    expect(document.body.textContent).toContain(ALL_WORKSPACES_DESCRIPTION.machine);
-    expect(ALL_WORKSPACES_DESCRIPTION.machine).toContain("Console test workspace");
+    expect(document.body.textContent?.match(/Console test workspace/g)?.length).toBe(1);
     await act(async () => root.unmount());
   });
 

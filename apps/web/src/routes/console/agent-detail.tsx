@@ -24,11 +24,14 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
-import { Switch } from "@opengeni/react/ui/switch";
 
 import type { ConsoleAgentSearch, ConsoleAgentTab } from "@/lib/console-route";
-import { downloadOrgAgentYaml } from "@/lib/organization-agents";
-import { AgentEditor, initialDefinition } from "./agent-editor";
+import {
+  definitionOfVersion,
+  downloadOrgAgentFiles,
+  exportedVersion,
+} from "@/lib/organization-agents";
+import { AgentEditor } from "./agent-editor";
 import { AgentSessions } from "./agent-sessions";
 import { AgentTestChat } from "./agent-test-chat";
 import { AgentVersions, PublishDialog, usePublishOperation } from "./agent-versions";
@@ -129,6 +132,7 @@ export function ConsoleAgentRoute() {
   }
 
   const code = agent.managedBy === "code";
+  const exported = exportedVersion(agent);
   // An agent in team workspaces runs there too: only owners and admins publish it.
   const canPublish = canEdit && (full || agent.workspaceIds.length === 0);
   const draftWaiting =
@@ -164,11 +168,18 @@ export function ConsoleAgentRoute() {
               </Button>
             ) : null}
             <MoreMenu label="More actions">
-              <DropdownMenuItem
-                onSelect={() => downloadOrgAgentYaml(agent.key, initialDefinition(agent))}
-              >
-                Export as YAML
-              </DropdownMenuItem>
+              {exported ? (
+                <DropdownMenuItem
+                  onSelect={() => {
+                    const files = downloadOrgAgentFiles(agent.key, definitionOfVersion(exported));
+                    toast.success(`Exported v${exported.version}`, {
+                      description: files.join(", "),
+                    });
+                  }}
+                >
+                  Export v{exported.version} as YAML
+                </DropdownMenuItem>
+              ) : null}
               {owner && !code ? (
                 <DropdownMenuItem onSelect={() => setManagement("code")}>
                   Manage by code
@@ -208,10 +219,9 @@ export function ConsoleAgentRoute() {
           title={MANAGED_BY_CODE}
           action={
             owner ? (
-              <label className="flex items-center gap-2 text-sm text-fg">
+              <Button size="sm" variant="outline" onClick={() => setManagement("console")}>
                 Manage in Console
-                <Switch checked={false} onCheckedChange={() => setManagement("console")} />
-              </label>
+              </Button>
             ) : undefined
           }
         >

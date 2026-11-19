@@ -132,6 +132,34 @@ describe("Runs on at create", () => {
     ).toBe("runs_on_unavailable");
   });
 
+  test("a reach lookup that fails refuses the chat (fails closed)", async () => {
+    const failing = (): OrgAgentRunsOnDeps => ({
+      ...deps(),
+      machineWorksHere: async () => {
+        throw new Error("lookup failed");
+      },
+      rigWorksHere: async () => {
+        throw new Error("lookup failed");
+      },
+    });
+    for (const runsOn of [
+      { kind: "machine" as const, machine: BUILD_BOX.id },
+      { kind: "sandbox" as const, environment: PYTHON.id },
+    ]) {
+      expect(
+        await refusal(
+          applyOrgAgentRunsOn({
+            deps: failing(),
+            grant: grant as never,
+            workspaceId: WORKSPACE,
+            payload: { message: "hi" },
+            runsOn,
+          }),
+        ),
+      ).toBe("runs_on_unavailable");
+    }
+  });
+
   test("unknown names are refused", async () => {
     expect(await refusal(place({ kind: "machine", machine: "Nope" }))).toBe("machine_not_found");
     expect(await refusal(place({ kind: "sandbox", environment: "Nope" }))).toBe(

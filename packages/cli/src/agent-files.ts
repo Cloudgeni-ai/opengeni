@@ -45,14 +45,15 @@ function issuePath(path: readonly PropertyKey[]): string {
 }
 
 /**
- * `instructions` that name an existing `.md` file next to the YAML file are
- * read from it; any other value is the instructions text itself.
+ * `instructions` that name a `.md` file are read from that file next to the
+ * YAML file; a missing one is an error. Any other value is the instructions
+ * text itself.
  */
 function resolveInstructions(
   value: unknown,
   yamlPath: string,
   displayPath: string,
-  warnings: string[],
+  errors: string[],
 ): { text: unknown; file?: string } {
   if (typeof value !== "string") return { text: value };
   const candidate = value.trim();
@@ -61,8 +62,8 @@ function resolveInstructions(
   if (existsSync(filePath) && statSync(filePath).isFile()) {
     return { text: readFileSync(filePath, "utf8"), file: filePath };
   }
-  warnings.push(
-    `${displayPath}: instructions: '${candidate}' is not a file next to this agent file; it is used as the instructions text.`,
+  errors.push(
+    `${displayPath}: instructions: '${candidate}' is not a file next to this agent file.`,
   );
   return { text: value };
 }
@@ -101,7 +102,7 @@ export function loadAgentFile(
   const record = { ...(raw as Record<string, unknown>) };
   let instructionsFile: string | undefined;
   if ("instructions" in record) {
-    const resolved = resolveInstructions(record.instructions, filePath, displayPath, warnings);
+    const resolved = resolveInstructions(record.instructions, filePath, displayPath, errors);
     record.instructions = resolved.text;
     instructionsFile = resolved.file;
   }
@@ -132,6 +133,7 @@ export function loadAgentFile(
     }
     return { errors, warnings };
   }
+  if (errors.length > 0) return { errors, warnings };
   return {
     agent: {
       path: displayPath,

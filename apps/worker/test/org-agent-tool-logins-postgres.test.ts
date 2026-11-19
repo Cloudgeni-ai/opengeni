@@ -60,6 +60,8 @@ async function fixture() {
   const grant = access.workspaceGrants[0]!;
   const accountId = grant.accountId;
   const workspaceId = grant.workspaceId!;
+  // Console agents are on for this organization (the per-organization flag).
+  settings.orgAgentsAccountIds = [...settings.orgAgentsAccountIds, accountId];
   await shared.admin`insert into organization_managed_workspaces (account_id, workspace_id, source)
     values (${accountId}, ${workspaceId}, 'console')`;
   const servers: Record<string, string> = {};
@@ -351,6 +353,16 @@ describe("organization agent tool server logins", () => {
     expect(before.byId.get("stored")).toEqual({ "X-Api-Key": "stored-key" });
     expect(before.byId.get("team")).toEqual({ "X-Team-Key": "team-secret" });
     expect(before.unavailable).toEqual([]);
+
+    // Console agents turned off for the organization: no organization secret runs.
+    const enabled = settings.orgAgentsAccountIds;
+    settings.orgAgentsAccountIds = enabled.filter((id) => id !== f.accountId);
+    const flagOff = await resolve();
+    settings.orgAgentsAccountIds = enabled;
+    expect(flagOff.byId.has("stored")).toBe(false);
+    expect(flagOff.byId.has("team")).toBe(false);
+    expect(flagOff.unavailable).toEqual(cutOff);
+    expect(flagOff.byId.get("chatonly")).toEqual({ "X-Chat": "chat-login" });
 
     // Access removed: the workspace is no longer managed and has no access row.
     await shared.admin`delete from organization_managed_workspaces

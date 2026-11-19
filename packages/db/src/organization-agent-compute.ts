@@ -80,9 +80,14 @@ export async function listOrganizationComputeInAccount(
   }));
 }
 
-/** Whether a reach includes every workspace the organization's product manages. */
+/**
+ * Whether a reach includes every workspace the organization's product
+ * manages, the Console test workspace too: only the explicit "All
+ * product-managed workspaces" switch (migration 1511). "All shared
+ * workspaces" reaches the other managed workspaces but never the test one.
+ */
 export function computeReachIncludesManagedWorkspaces(reach: OrganizationComputeReach): boolean {
-  return reach.allowedWorkspaceIds === null || reach.allowManagedWorkspaces === true;
+  return reach.allowManagedWorkspaces === true;
 }
 
 /** The organization machines and sandbox environments, for the Console "Runs on" control. */

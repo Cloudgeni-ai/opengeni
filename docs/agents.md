@@ -631,7 +631,9 @@ editors completion and checks. The full reference is
 `opengeni agents deploy <dir>` checks every file first and deploys nothing
 while any has a problem, then prints one line per agent: key, outcome
 (`created`, `updated`, `unchanged`), version, whether it is published, and
-the config hash. `--dry-run` writes nothing, `--publish` publishes the
+the config hash. A missing instructions `.md` file is an error. `--dry-run`
+writes nothing and prints each agent's diff against its published version,
+`--publish` publishes the
 deployed version, `--move-running-chats` (with `--publish`) also moves
 running chats. It reads `OPENGENI_API_KEY` (an organization key with
 `agents:manage`), `OPENGENI_ORGANIZATION_ID` (or `--organization`) and
@@ -756,9 +758,10 @@ computer (`suggestedOrgAgentRunsOnKind`); the suggestion is never applied on
 its own.
 
 The machine or environment must be an organization one whose reach includes
-the workspaces the chats run in: every shared workspace, or **All
-product-managed workspaces** (`allowManagedWorkspaces`, migration 1511), which
-also covers managed workspaces created later. Saving or deploying a version
+the workspaces the chats run in: **All product-managed workspaces**
+(`allowManagedWorkspaces`, migration 1511), which also covers managed
+workspaces created later and the Console test workspace. Every shared
+workspace alone doesn't count. Saving or deploying a version
 refuses a name that matches no organization machine or environment (422
 `machine_not_found` / `environment_not_found`); Personal (Only me) and
 workspace machines are never listed, so naming one is refused too. Reach is

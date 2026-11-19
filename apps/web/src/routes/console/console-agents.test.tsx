@@ -22,6 +22,7 @@ mock.module("@tanstack/react-router", () => ({
 
 let role = "owner";
 let flagOn = true;
+let workspaceGrants: unknown[] = [];
 const appContext = () => ({
   accessKeyVersion: 1,
   accessContext: {
@@ -35,7 +36,7 @@ const appContext = () => ({
         permissions: ["account:admin", "agents:read", "agents:manage"],
       },
     ],
-    workspaceGrants: [],
+    workspaceGrants,
   },
   clientConfig: {
     auth: { mode: "managedSession" },
@@ -326,6 +327,7 @@ const client = {
     workspaces: [{ id: workspaceId, name: "Analysts", kind: "team" }],
   })),
   getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
+  createSession: mock(async (_workspaceId: string, _request: unknown) => ({ id: chatId })),
 };
 
 let container: HTMLDivElement;
@@ -401,6 +403,7 @@ beforeEach(async () => {
   requestJson.mockClear();
   role = "owner";
   flagOn = true;
+  workspaceGrants = [];
   params = { agentId };
   agentRecord = agent();
 });
@@ -802,6 +805,28 @@ describe("Managed in Console (app)", () => {
     expect(page).toContain("Support desk");
     expect(page).toContain("Open Console");
     expect(document.querySelectorAll("button").length).toBe(0);
+  });
+
+  test("Chat starts a chat with the agent, by key, in this workspace", async () => {
+    workspaceGrants = [
+      { workspaceId, subjectId: "user:mira", role: "member", permissions: ["sessions:create"] },
+    ];
+    client.createSession.mockClear();
+    await render(createElement(ManagedInConsoleAgents, { workspaceId }));
+    const chat = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Chat",
+    );
+    expect(chat).toBeDefined();
+    await act(async () => chat!.click());
+    await settle();
+    expect(client.createSession).toHaveBeenCalledTimes(1);
+    const [calledWorkspace, request] = client.createSession.mock.calls[0]!;
+    expect(calledWorkspace).toBe(workspaceId);
+    expect((request as { agent: unknown }).agent).toBe("support-desk");
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId: chatId },
+    });
   });
 
   test("shows nothing without the flag", async () => {

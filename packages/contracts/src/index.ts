@@ -12847,7 +12847,8 @@ export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>
     homeWorkspaceId: primitives.uuid,
     allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
     allowPersonalWorkspaces: primitives.boolean,
-    allowManagedWorkspaces: primitives.boolean.default(false),
+    /** Absent (older servers) means off. */
+    allowManagedWorkspaces: primitives.boolean.optional(),
   }),
 );
 export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;

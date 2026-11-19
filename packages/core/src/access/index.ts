@@ -1203,6 +1203,8 @@ export function authorizationHoldsOrganizationPermission(
   }
   const external = externalActorContexts.get(context);
   if (external) {
+    // `external.permissions` are the organization key's own, never the end
+    // user's stated workspace membership.
     return (
       options.endUsers !== false &&
       external.identity.accountId === grant.accountId &&
@@ -2161,6 +2163,25 @@ export function hasLiteralPermission(
   return permissions.includes(permission);
 }
 
+/**
+ * Held only when listed or by a full organization key: `workspace:admin` alone
+ * (a workspace key, the Developer setup preset) never implies them.
+ */
+const FULL_ORGANIZATION_KEY_ONLY_PERMISSIONS: ReadonlySet<Permission> = new Set<Permission>([
+  "agents:manage",
+  "tool_credentials:write",
+]);
+
+/**
+ * What marks a `full` organization API key (apps/api routes/api-keys.ts), in
+ * both its raw permissions and its account-scoped workspace authority (which
+ * drops the account-only ones). The Developer setup preset can't manage keys.
+ */
+const FULL_ORGANIZATION_KEY_PERMISSIONS: readonly Permission[] = [
+  "workspace:admin",
+  "api_keys:manage",
+];
+
 export function hasPermission(
   permissions: readonly Permission[],
   permission: Permission,
@@ -2169,6 +2190,14 @@ export function hasPermission(
   if (!Array.isArray(permissions)) return false;
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
+  }
+  // Console agents' write permissions: listed, or a full organization key
+  // (every permission a `full` key is minted with). Legacy `workspace:admin`
+  // alone, including the Developer setup preset, never implies them.
+  if (FULL_ORGANIZATION_KEY_ONLY_PERMISSIONS.has(permission)) {
+    if (permissions.includes(permission)) return true;
+    if (permissionMode === "explicit" || explicitPermissionSets.has(permissions)) return false;
+    return FULL_ORGANIZATION_KEY_PERMISSIONS.every((held) => permissions.includes(held));
   }
   const granted =
     permissions.includes(permission) ||

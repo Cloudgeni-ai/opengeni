@@ -62,6 +62,7 @@ import {
 } from "@opengeni/react/app/lib/workspace-deletion";
 import type { OrganizationMembershipRole } from "@opengeni/react/app/types";
 import { useConsoleMemberRoles } from "@/lib/console-access";
+import { useOrgAgentsFlag } from "@/lib/organization-agents";
 
 const CheckoutCreditsCelebration = lazy(async () => {
   const module =
@@ -390,14 +391,20 @@ export function OrgSettingsRoute({
   const connectorPage =
     integrationsAdministrator && connectors !== undefined && connectors.kind !== "list";
   // People shows a small "Console: Viewer" label for members with a Console role.
+  // Console roles exist only where Console agents are on for the organization.
+  const peopleConsoleRoles = section === "people" && integrationsAdministrator;
+  const orgAgentsOn = useOrgAgentsFlag(client, peopleConsoleRoles ? accountId || null : null);
   const memberRoles = useConsoleMemberRoles(
     client,
     accountId || null,
-    section === "people" && integrationsAdministrator,
+    peopleConsoleRoles && orgAgentsOn === true,
   );
   const appConsoleRoles = useMemo<ConsoleRolesView | undefined>(
-    () => (memberRoles.data ? { mode: "app", roles: memberRoles.data.roles } : undefined),
-    [memberRoles.data],
+    () =>
+      memberRoles.data && orgAgentsOn === true
+        ? { mode: "app", roles: memberRoles.data.roles }
+        : undefined,
+    [memberRoles.data, orgAgentsOn],
   );
   // Models is for owners and admins, account administrators (a key or service
   // with account:admin) and signed-in members; anyone else gets a plain refusal.

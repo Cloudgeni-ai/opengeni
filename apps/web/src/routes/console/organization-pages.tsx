@@ -19,6 +19,7 @@ import {
   formatMicros,
   rangeLabel,
   useConsole,
+  useOrgAgentsEnabled,
 } from "./console-shared";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
 import {
@@ -47,18 +48,23 @@ export function ConsoleMembersRoute() {
   const { person, invitation, view } = useSearch({ strict: false }) as ConsoleMembersSearch;
   const access = useConsoleOrganizationAccess();
   // Members' Console roles (docs/opengeni-console.md, "Roles").
-  const roles = useConsoleMemberRoles(client, organizationId, true);
+  // Only where Console agents are on for the organization.
+  const rolesOn = useOrgAgentsEnabled() === true;
+  const roles = useConsoleMemberRoles(client, organizationId, rolesOn);
   const { refresh } = roles;
-  const consoleRoles = useMemo<ConsoleRolesView>(
-    () => ({
-      mode: "console",
-      roles: roles.data?.roles ?? (roles.error ? [] : null),
-      setRole: async (target, role) => {
-        await consoleRolesApi(client, organizationId).setMemberRole(target, role);
-        await refresh();
-      },
-    }),
-    [client, organizationId, refresh, roles.data, roles.error],
+  const consoleRoles = useMemo<ConsoleRolesView | undefined>(
+    () =>
+      !rolesOn
+        ? undefined
+        : {
+            mode: "console",
+            roles: roles.data?.roles ?? (roles.error ? [] : null),
+            setRole: async (target, role) => {
+              await consoleRolesApi(client, organizationId).setMemberRole(target, role);
+              await refresh();
+            },
+          },
+    [client, organizationId, refresh, roles.data, roles.error, rolesOn],
   );
   const subPage = Boolean(person || invitation || view);
   return (

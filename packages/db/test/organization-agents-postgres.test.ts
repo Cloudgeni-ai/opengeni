@@ -869,7 +869,7 @@ describe("organization tool servers and end users' logins", () => {
         credential: { kind: "headers", headers: { Authorization: "Bearer end-user-token" } },
       }),
     );
-    expect([notManaged.status, notManaged.code]).toEqual([409, "workspace_not_managed"]);
+    expect([notManaged.status, notManaged.code]).toEqual([422, "workspace_not_managed"]);
     const noServer = await refusal(
       getEndUserToolCredential(app.db, { ...target(org.managed), toolServerKey: "nope" }),
     );
