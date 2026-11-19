@@ -2,7 +2,7 @@
 // RLS): the visibility gate and reach, the session binding written on create,
 // worker chats inheriting it, the claim gate, the per-turn version pin,
 // Instructions delivered after a move and folded by compaction, end-user
-// login refresh under SKIP LOCKED, and the publish move's candidates. A chat
+// login refresh under a lease, and the publish move's candidates. A chat
 // without an organization agent keeps today's row, prompt and claim.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -581,7 +581,7 @@ describe("organization agents at runtime", () => {
     });
   }, 180_000);
 
-  test("end-user login refresh runs under SKIP LOCKED and records failures", async () => {
+  test("end-user login refresh runs under a lease and records failures", async () => {
     const org = await organization();
     const [server] = await shared.admin<{ id: string }[]>`
       insert into organization_tool_servers (account_id, server_key, name, url, auth_mode, oauth_refresh)
@@ -607,13 +607,15 @@ describe("organization agents at runtime", () => {
           return result;
         },
       });
-    // Another worker holds the row: this one does not wait or refresh.
-    const locked = await shared.admin.begin(async (tx) => {
-      await tx`select id from end_user_tool_credentials where id = ${credentialId} for update`;
-      return await refresh({ materialEncrypted: "never", expiresAt: null });
-    });
+    // Another worker holds the refresh lease: this one does not wait or refresh.
+    await shared.admin`update end_user_tool_credentials
+      set refresh_lease_until = now() + interval '1 minute' where id = ${credentialId}`;
+    const locked = await refresh({ materialEncrypted: "never", expiresAt: null });
     expect(locked).toEqual({ outcome: "locked" });
     expect(calls).toBe(0);
+    // A lapsed lease (its worker died) no longer blocks.
+    await shared.admin`update end_user_tool_credentials
+      set refresh_lease_until = now() - interval '1 second' where id = ${credentialId}`;
 
     const refreshed = await refresh({
       materialEncrypted: "new-material",
