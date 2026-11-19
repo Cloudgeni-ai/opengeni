@@ -505,7 +505,10 @@ the first diverging checkpoint), `thinking_dropped`, `account_changed`,
 `unobserved` or `unexplained`. The worker checks them in that order. Time comes
 first: more than 5 minutes after the previous call (the cache lifetime Opengeni
 requests by default) the prefix may have expired anyway, so no request change
-is blamed. Each fingerprint records the deployment revision that built the
+is blamed. `context_replaced` needs the prompt to fall below 60% of the
+previous one in tokens or in items: compaction keeps the tools, the system
+prompt and a summary, so a large fixed prefix can hold the token count up while
+the item count collapses. Each fingerprint records the deployment revision that built the
 request, so a tools or system change between two deployments is
 `release_changed` (a release that edits model-facing text costs each live
 session one cold prefix) and the same change within one deployment is

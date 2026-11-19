@@ -119,7 +119,7 @@ export type PromptCacheCallSample = {
  * prefix change after a longer pause as idle_gap, never as a false defect.
  */
 export const PROMPT_CACHE_IDLE_GAP_MS = 5 * 60_000;
-/** A prompt this much smaller than the previous one had its history replaced. */
+/** A prompt this much smaller (in tokens or items) than the previous one had its history replaced. */
 const CONTEXT_REPLACED_RATIO = 0.6;
 
 function nonNegativeInteger(value: unknown): value is number {
@@ -244,10 +244,17 @@ export function classifyPromptCacheWarmMiss(
     gapMs: Math.max(0, current.occurredAt.getTime() - previous.occurredAt.getTime()),
   };
   if (base.gapMs > PROMPT_CACHE_IDLE_GAP_MS) return { class: "idle_gap", ...base };
-  if (current.inputTokens < previous.inputTokens * CONTEXT_REPLACED_RATIO)
-    return { class: "context_replaced", ...base };
   const before = previous.observation?.request;
   const after = current.observation?.request;
+  // Compaction keeps the tools, the system prompt and a summary, so a large
+  // fixed prefix can keep the prompt above the token ratio; the request's item
+  // count still falls sharply. A system change that compaction brings with it
+  // costs nothing beyond the history it replaced.
+  if (
+    current.inputTokens < previous.inputTokens * CONTEXT_REPLACED_RATIO ||
+    (before && after && after.items < before.items * CONTEXT_REPLACED_RATIO)
+  )
+    return { class: "context_replaced", ...base };
   if (before && after) {
     // Every build that fingerprints a request also records its release, so a
     // release on only one side means the other call came from an older build:

@@ -201,6 +201,39 @@ describe("prompt-cache warm-miss classification", () => {
   });
 
   test("a replaced history is an expected miss", () => {
+    // Compaction under a large fixed prefix: tokens fall to 63%, items to 6%,
+    // and a system item the compaction added changed the system prompt.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 96_363,
+          observation: { request: fingerprint(104) },
+        }),
+        sample({
+          inputTokens: 61_048,
+          cachedTokens: 28_013,
+          occurredAt: at(3),
+          observation: { request: fingerprint(6, { system: digest("c") }) },
+        }),
+      ),
+    ).toMatchObject({ class: "context_replaced" });
+    // A history that only shrank a little is not a compaction.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 286_377,
+          observation: { request: fingerprint(373) },
+        }),
+        sample({
+          inputTokens: 272_468,
+          cachedTokens: 0,
+          occurredAt: at(10),
+          observation: { request: fingerprint(323, { system: digest("c") }) },
+        }),
+      ),
+    ).toMatchObject({ class: "system_changed" });
     expect(
       classifyPromptCacheWarmMiss(
         previous,
