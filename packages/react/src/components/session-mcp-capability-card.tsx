@@ -118,15 +118,21 @@ function ScopedCard({
   });
   const reconnecting = Boolean(reconnectConnectionId);
   const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
-  // Your own login, added in another workspace: one click turns it on here.
+  // Your own login, off here or for a connector not set up here yet: one
+  // click uses it here instead of signing in again.
   const useOwnLoginHere = offHere !== null && !connected && item !== null;
+  const ownLoginAccount = useOwnLoginHere
+    ? connectionAccountLabel(
+        offHere,
+        t("sessionMcpCapabilityCard.yourNameAccount", { name: item.name }),
+      )
+    : "";
   const ownLoginQuestion = useOwnLoginHere
-    ? `${t("sessionMcpCapabilityCard.useYourLoginHereToo", {
-        account: connectionAccountLabel(
-          offHere,
-          t("sessionMcpCapabilityCard.yourNameAccount", { name: item.name }),
-        ),
-      })} ${t("sessionMcpCapabilityCard.useYourLoginHereScope")}`
+    ? `${
+        offHere.workspaceId === workspaceId
+          ? t("sessionMcpCapabilityCard.useYourLoginHere", { account: ownLoginAccount })
+          : t("sessionMcpCapabilityCard.useYourLoginHereToo", { account: ownLoginAccount })
+      } ${t("sessionMcpCapabilityCard.useYourLoginHereScope")}`
     : null;
   const [logo, setLogo] = useState<string | null>(null);
   const openNow = flow.open;
@@ -322,7 +328,7 @@ function ScopedCard({
                 >
                   {t("sessionMcpCapabilityCard.useItHere")}
                 </button>
-                <button type="button" disabled={busy} onClick={flow.signIn}>
+                <button type="button" disabled={busy} onClick={flow.connectAnother}>
                   {t("sessionMcpCapabilityCard.connectADifferentAccount")}
                 </button>
               </>
