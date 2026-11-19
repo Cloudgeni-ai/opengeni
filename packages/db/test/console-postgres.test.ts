@@ -18,6 +18,7 @@ import {
   consoleSpendByWorkspace,
   createDb,
   createSession,
+  createWorkspace,
   decodeConsoleSessionCursor,
   getConsoleReviewSettings,
   getConsoleSession,
@@ -243,7 +244,8 @@ test("owners and admins review shared and end-user sessions, never Only me chats
 });
 
 test("end-user display details: the latest wins, omitted fields keep, and Console searches them", async () => {
-  const { accountId, managedId, teamId } = await organization();
+  const { accountId, managedId } = await organization();
+  const teamId = (await createWorkspace(client.db, { accountId, name: "Northwind" })).id;
   await markWorkspaceManagedByApiKey(client.db, {
     accountId,
     workspaceId: managedId,
