@@ -775,6 +775,12 @@ export const OrgAgentToolServerOverride = /* @__PURE__ */ defineSchema(() =>
       disableTools: ToolNames.optional(),
       approval: OrgAgentToolApproval.optional(),
       eager: ToolNames.optional(),
+      /**
+       * This chat's own login for the server (write-only, encrypted, never
+       * returned): the last login source for a `per_user` server, after the
+       * credential provider and the end user's stored login. Not an override.
+       */
+      headers: secretValue(z.record(z.string().min(1).max(256), z.string().max(16_384))).optional(),
     })
     .strict(),
 );
@@ -789,6 +795,11 @@ export type OrgAgentToolServerOverride = z.infer<typeof OrgAgentToolServerOverri
 export const OrgAgentSessionRequest = /* @__PURE__ */ defineSchema(() =>
   AgentConfigRequest.extend({
     ref: OrgAgentRef,
+    /**
+     * Run this version instead of the published one. Unpublished versions
+     * (drafts) run only in the organization's Console test workspace.
+     */
+    version: z.number().int().positive().optional(),
     config: OrgAgentDefinition.optional(),
     toolServers: z.array(OrgAgentToolServerOverride).max(ORG_AGENT_TOOL_SERVERS_MAX).optional(),
   }).strict(),
