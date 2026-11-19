@@ -1,6 +1,8 @@
 // Console > Tool servers: the organization's MCP servers that agents use,
 // referenced by key. A shared key's headers are write-only. One server's
-// page edits it and previews the tools it offers right now.
+// page edits it and previews the tools it offers right now. Adding, changing
+// and deleting servers is for owners and admins (servers hold shared keys);
+// Viewers and Editors see them read-only.
 import type {
   OrgToolServer,
   OrgToolServerAuthMode,
@@ -15,6 +17,7 @@ import { toast } from "sonner";
 import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { Button } from "@opengeni/react/ui/button";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
@@ -30,7 +33,9 @@ import { agentKeyFromName, authModeLabel, type OrgAgentsApi } from "@/lib/organi
 import {
   ConsoleLoadError,
   ConsolePage,
+  ConsoleForbidden,
   useConsole,
+  useConsoleCan,
   useConsoleQuery,
   useOrgAgentsApi,
   useOrgAgentsEnabled,
@@ -59,6 +64,7 @@ function ToolServersList() {
   const api = useOrgAgentsApi();
   const navigate = useNavigate();
   const servers = useConsoleQuery((signal) => api.listToolServers(signal), [api]);
+  const full = useConsoleCan("full");
   const rows = servers.data?.toolServers ?? [];
   const create = () => void navigate({ to: "/console/tool-servers/new", search });
   return (
@@ -68,7 +74,7 @@ function ToolServersList() {
         icon={<PlugIcon />}
         description="Your MCP servers. Agents choose which of their tools to use."
         actions={
-          rows.length > 0 ? (
+          rows.length > 0 && full ? (
             <Button onClick={create}>
               <PlusIcon aria-hidden="true" />
               Add tool server
@@ -87,10 +93,12 @@ function ToolServersList() {
           title="No tool servers yet"
           description="Add your product's MCP server so agents can act in it for each user."
           action={
-            <Button onClick={create}>
-              <PlusIcon aria-hidden="true" />
-              Add tool server
-            </Button>
+            full ? (
+              <Button onClick={create}>
+                <PlusIcon aria-hidden="true" />
+                Add tool server
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -371,6 +379,10 @@ export function toolServerChanges(form: ServerForm, existing: OrgToolServer | nu
 }
 
 export function ConsoleNewToolServerRoute() {
+  return useConsoleCan("full") ? <NewToolServerForm /> : <ConsoleForbidden ownersAndAdmins />;
+}
+
+function NewToolServerForm() {
   const { search } = useConsole();
   const api = useOrgAgentsApi();
   const navigate = useNavigate();
@@ -416,6 +428,52 @@ export function ConsoleNewToolServerRoute() {
 }
 
 export function ConsoleToolServerRoute() {
+  return useConsoleCan("full") ? <ToolServerEditor /> : <ToolServerReadOnly />;
+}
+
+/** One server for a Viewer or Editor: what it is and the tools it offers. */
+function ToolServerReadOnly() {
+  const { search } = useConsole();
+  const api = useOrgAgentsApi();
+  const navigate = useNavigate();
+  const { serverKey = "" } = useParams({ strict: false }) as { serverKey?: string };
+  const loaded = useConsoleQuery(
+    (signal) => api.getToolServer(serverKey, signal),
+    [api, serverKey],
+  );
+  const server = loaded.data;
+  const back = {
+    label: "Tool servers",
+    onClick: () => void navigate({ to: "/console/tool-servers", search }),
+  };
+  return (
+    <DetailPage back={back} className="px-0 pt-0 max-sm:px-0">
+      {loaded.error ? (
+        <ConsoleLoadError error={loaded.error} onRetry={loaded.reload} />
+      ) : !server ? (
+        <Skeleton className="h-7 w-72" />
+      ) : (
+        <div className="flex flex-col gap-8">
+          <DetailPageHeader
+            title={server.name}
+            meta={[
+              <span key="key" translate="no" className="font-mono">
+                {server.key}
+              </span>,
+              <span key="url" translate="no">
+                {server.url}
+              </span>,
+              authModeLabel(server.authMode),
+            ]}
+          />
+          <LiveToolsPreview api={api} serverKey={server.key} />
+        </div>
+      )}
+    </DetailPage>
+  );
+}
+
+function ToolServerEditor() {
   const { search } = useConsole();
   const api = useOrgAgentsApi();
   const navigate = useNavigate();

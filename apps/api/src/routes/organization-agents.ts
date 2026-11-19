@@ -16,8 +16,16 @@
  *   plus `sessions:read` for chats and usage). Legacy full keys hold them
  *   through `workspace:admin`; a key limited to selected workspaces reads and
  *   names only those workspaces;
- * - the organization's owners and admins (organization administration),
- *   who have every permission here. Other members have none, as in Console.
+ * - people, by Console role (`./console-roles.ts`, docs/opengeni-console.md
+ *   "Roles"): owners and admins (`full`) may do everything here except what
+ *   is owner-only; an Editor reads, creates agents (without team workspace
+ *   availability), saves drafts of and publishes or rolls back
+ *   Console-managed agents, and runs test chats; a Viewer reads agents,
+ *   versions, tool servers, publish operations and an agent's chats and
+ *   usage. Tool server writes, code deploys (`apply`), team workspace
+ *   availability, archiving and end users' tool logins are for owners and
+ *   admins. Members without a Console role, and agents or personal keys
+ *   acting for a person, are refused with 403 `console_role_required`.
  * - Changing who manages an agent (`POST .../management`) is for the
  *   organization's owner only; an API key is refused with
  *   `agent_management_requires_owner`.

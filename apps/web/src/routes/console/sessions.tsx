@@ -86,7 +86,7 @@ export function sessionTitle(
 }
 
 export function ConsoleSessionsRoute() {
-  const { client, organizationId, search } = useConsole();
+  const { client, organizationId, search, access } = useConsole();
   const navigate = useNavigate();
   const { workspace: workspaceFilter } = useSearch({ strict: false }) as ConsoleSessionsSearch;
   const [query, setQuery] = useState("");
@@ -196,13 +196,19 @@ export function ConsoleSessionsRoute() {
           variant="page"
           icon={<LockIcon />}
           title="Session review is off"
-          description="Turn it on to read your end users' sessions."
+          description={
+            access === "full"
+              ? "Turn it on to read your end users' sessions."
+              : "An owner or admin can turn it on."
+          }
           action={
+            access !== "full" ? undefined : (
             <Button variant="outline" asChild>
               <Link to="/console/settings" search={search}>
                 Data and privacy
               </Link>
             </Button>
+            )
           }
         />
       </ConsolePage>

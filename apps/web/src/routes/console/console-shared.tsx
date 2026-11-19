@@ -29,6 +29,7 @@ import {
 import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { consoleAccessCovers, type ConsoleAccessLevel } from "@/lib/console-access";
 import { onConsoleHost } from "@/lib/console-route";
 import { rememberConsoleSignedOut } from "@/lib/console-sign-in";
 import { orgAgentsApi, useOrgAgentsFlag, type OrgAgentsApi } from "@/lib/organization-agents";
@@ -43,9 +44,19 @@ export type ConsoleContextValue = {
   search: { org: string };
   /** A workspace in this organization the person can open in the app, for links there. */
   appWorkspaceId: string | null;
+  /**
+   * What the person may do here (docs/opengeni-console.md, "Roles"): `full`
+   * for owners and admins, else their Console role. The API checks every call.
+   */
+  access: Exclude<ConsoleAccessLevel, "none">;
 };
 
 export const ConsoleContext = createContext<ConsoleContextValue | null>(null);
+
+/** Whether the person's Console access allows what needs `needed`. */
+export function useConsoleCan(needed: Exclude<ConsoleAccessLevel, "none">): boolean {
+  return consoleAccessCovers(useConsole().access, needed);
+}
 
 export function useConsole(): ConsoleContextValue {
   const value = useContext(ConsoleContext);
@@ -107,7 +118,8 @@ export function useConsoleQuery<T>(
 
 /* --------------------------------------------------------------- errors */
 
-const CONSOLE_FORBIDDEN = /Opengeni Console is for organization owners and admins/iu;
+const CONSOLE_FORBIDDEN =
+  /Opengeni Console is for organization owners|Only organization owners and admins can do this in Console/iu;
 const REVIEW_OFF = /Session review is off/iu;
 
 export function isConsoleForbidden(error: unknown): boolean {
@@ -139,20 +151,35 @@ export function useConsoleSignOut(): (() => void) | null {
 }
 
 /**
- * Console is for owners and admins: say so, with the way back to the app, or
- * on a Console host (where nothing leads into the app) Sign out.
+ * Console is for owners, admins and members with a Console role (or this page
+ * is for owners and admins): say so, with the way back to the app, or on a
+ * Console host (where nothing leads into the app) Sign out.
  */
-export function ConsoleForbidden() {
+export function ConsoleForbidden({
+  ownersAndAdmins = false,
+  title,
+}: {
+  /** A page for owners and admins (the person has a Console role). */
+  ownersAndAdmins?: boolean;
+  /** Overrides the title for a page the person's Console role doesn't cover. */
+  title?: string;
+}) {
+  const limited = ownersAndAdmins || title !== undefined;
   const signOut = useConsoleSignOut();
   const consoleHost = onConsoleHost();
   return (
     <EmptyState
       variant="page"
       icon={<LockIcon />}
-      title="Opengeni Console is for organization owners and admins"
-      description="Ask an owner of this organization for access."
+      title={
+        title ??
+        (ownersAndAdmins
+          ? "Only organization owners and admins can open this"
+          : "Opengeni Console is for organization owners, admins and members with a Console role")
+      }
+      description={limited ? undefined : "Ask an owner or admin of this organization for access."}
       action={
-        consoleHost ? (
+        limited ? undefined : consoleHost ? (
           signOut ? (
             <Button variant="outline" onClick={signOut}>
               Sign out
@@ -289,6 +316,8 @@ export function auditActionText(action: ConsoleAuditAction): string {
       return "Stored an end user's tool login";
     case "tool_credential.deleted":
       return "Removed an end user's tool login";
+    case "member.console_role_changed":
+      return "Changed a member's Console role";
   }
 }
 
