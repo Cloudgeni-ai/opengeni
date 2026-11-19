@@ -1984,6 +1984,7 @@ export function createInteractionAttemptToolDefinitions(
     execute: async (value, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
       const reattached: ReattachedBrowserRecord = { from: null };
+      const replaced: ReplacedBrowserRecord = { from: null, reason: null };
       const opened = await reportingChatMove(
         chatMove,
         async () =>
@@ -2006,6 +2007,7 @@ export function createInteractionAttemptToolDefinitions(
                     extension.installUrl,
                     chatMove,
                     reattached,
+                    replaced,
                   ),
               ),
           ),
@@ -2023,6 +2025,13 @@ export function createInteractionAttemptToolDefinitions(
         notes.push({
           type: "text",
           text: reattachedBrowserNote(reattached.from, opened.session.id),
+        });
+      }
+      if (replaced.from !== null && replaced.reason !== null) {
+        currentTab.forgetSession(replaced.from);
+        notes.push({
+          type: "text",
+          text: replacedBrowserNote(replaced.from, replaced.reason, opened.session.id),
         });
       }
       if (!value.includeScreenshot)
@@ -4146,6 +4155,39 @@ type WorkingCopyTransport = Partial<
   Pick<OpenGeniClient, "inspectBrowserSessionWorkingCopy" | "adoptBrowserSessionWorkingCopy">
 >;
 
+/** Why a browser's working copy can never be continued, as a person reads it,
+ * by the controller's refusal. Other refusals (a copy that can be adopted, an
+ * adoption still settling, a process that may still use the copy) are not
+ * final, so an open does not replace the browser over them. */
+const UNCONTINUABLE_WORKING_COPY: Readonly<Record<string, string>> = {
+  receipt_not_adoptable: "its last launch left no record of a running browser",
+  authority_changed: "it was launched under another controller",
+  working_copy_invalid: "its working directory is missing or incomplete",
+};
+
+/** Why a browser that an open failed to continue can never be continued, or
+ * null when it might be (or the failure is about something else). Only a
+ * definite conflict is inspected, and inspecting changes nothing. */
+async function uncontinuableBrowserReason(
+  transport: WorkingCopyTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  error: unknown,
+): Promise<string | null> {
+  if (
+    !(error instanceof OpenGeniApiError) ||
+    error.status !== 409 ||
+    error.retryable ||
+    !transport.inspectBrowserSessionWorkingCopy
+  )
+    return null;
+  const inspection = await transport
+    .inspectBrowserSessionWorkingCopy(workspaceId, browserSessionId)
+    .catch(() => null);
+  if (!inspection || inspection.activeAdoption || !inspection.refusal) return null;
+  return UNCONTINUABLE_WORKING_COPY[inspection.refusal] ?? null;
+}
+
 /**
  * A stopped browser whose working directory was moved, copied or restored
  * (for example when its machine's disk was restored) does not continue from
@@ -4572,9 +4614,14 @@ async function openBrowser(
   extensionUrl: string,
   chatMove: ChatMoveRecord = { moved: false },
   reattached: ReattachedBrowserRecord = { from: null },
+  replaced: ReplacedBrowserRecord = { from: null, reason: null },
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
+  // Whether the open picked this browser itself (the default reuse) rather
+  // than being given it: only such a browser is replaced when it turns out it
+  // can never be continued.
+  let reusedByDefault = false;
   // A create that launched the browser in this call returns its tabs and the
   // opened tab's observation, which replaces the two reads below.
   let initialView: Awaited<ReturnType<InteractionTransport["createBrowserSession"]>>["initialView"];
@@ -4681,6 +4728,7 @@ async function openBrowser(
           );
     if (reusable) {
       session = reusable;
+      reusedByDefault = true;
     } else {
       created = true;
       if (attachedInventory) {
@@ -4732,6 +4780,32 @@ async function openBrowser(
       );
     await adoptBrowserWorkingCopy(transport, workspaceId, session.id, value.adoptWorkingCopy);
   }
+  // The browser this open chose for itself cannot be continued, ever: open a
+  // new one instead of failing every default open on it. It is kept, and an
+  // open that names it still says why it cannot continue.
+  const replaceUncontinuable = async (error: unknown) => {
+    const reason = reusedByDefault
+      ? await uncontinuableBrowserReason(transport, workspaceId, session.id, error)
+      : null;
+    if (reason === null) return null;
+    replaced.from = session.id;
+    replaced.reason = reason;
+    // Its own operation: this call's ID may already name the failed resume,
+    // and a retry of this call opens the same replacement.
+    return await openBrowser(
+      transport,
+      workspaceId,
+      sourceSessionId,
+      { ...value, mode: "new" },
+      {
+        ...context,
+        operationId: derivedOperationId("browser-replacement", context.operationId, session.id),
+      },
+      extensionUrl,
+      chatMove,
+      reattached,
+    );
+  };
   if (isResumablePausedBrowser(session)) {
     const stoppedId = session.id;
     let resumed: Awaited<ReturnType<InteractionTransport["resumeBrowserSession"]>>;
@@ -4740,6 +4814,8 @@ async function openBrowser(
         operationId: context.operationId,
       });
     } catch (error) {
+      const replacement = await replaceUncontinuable(error);
+      if (replacement) return replacement;
       throw (await workingCopyRecoveryError(transport, workspaceId, stoppedId)) ?? error;
     }
     if (resumed.operation?.state === "failed") {
@@ -4761,8 +4837,15 @@ async function openBrowser(
       }
     : {};
   if (session.lifecycle !== "active") return { session, targets: [], ...chosenProfile };
-  let targets =
-    initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+  let targets: z.infer<typeof BrowserTargetListResponse>["targets"];
+  try {
+    targets =
+      initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+  } catch (error) {
+    const replacement = await replaceUncontinuable(error);
+    if (replacement) return replacement;
+    throw error;
+  }
   if (
     value.initialUrl &&
     !created &&
@@ -5388,6 +5471,21 @@ type ChatMoveRecord = { moved: boolean };
 /** The session in the person's Chrome an open replaced, when the one it named
  * had ended because that Chrome reconnected. */
 type ReattachedBrowserRecord = { from: string | null };
+
+/** The browser an open chose for itself but replaced with a new one, because
+ * it can never be continued, and why. */
+type ReplacedBrowserRecord = { from: string | null; reason: string | null };
+
+/** The line an open's result adds when it opened a new browser in place of
+ * the one it would have continued: the new one starts without the old one's
+ * sign-ins and tabs. */
+function replacedBrowserNote(
+  replacedBrowserSessionId: string,
+  reason: string,
+  browserSessionId: string,
+): string {
+  return `BrowserSession ${replacedBrowserSessionId} cannot be continued (${reason}), so this opened a new browser, BrowserSession ${browserSessionId}, without its sign-ins and tabs. The old one is kept; use the new ID from now on.`;
+}
 
 /** The line an open's result adds when it continued in a new session because
  * the one it named had ended: later calls must use the new ID. */
