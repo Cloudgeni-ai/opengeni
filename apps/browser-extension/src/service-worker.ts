@@ -105,13 +105,17 @@ const MAX_STATE_RESUMPTIONS = 20;
 // A debugger command that reads and changes nothing, and that Chrome refuses
 // unless this extension is attached to the tab.
 const ATTACHMENT_PROBE_METHOD = "Target.getTargetInfo";
-// How long a tab stays in the controlled tabs' group after control ends, in
+// How long a tab keeps the product's mark as its icon after control ends, in
 // case it starts again (see TabIndicator).
 const TAB_INDICATOR_RELEASE_MS = 2_000;
-// The controlled tabs' groups, in chrome.storage.local: unlike session
-// storage it outlives an update or reload of the extension, which ends every
-// control, so the next run can put those tabs back where they were.
+// The tabs showing the mark, in chrome.storage.local: unlike session storage
+// it outlives an update or reload of the extension, which ends every control,
+// so the next run gives those tabs their own icons back.
 const TAB_INDICATOR_KEY = "tabIndicator";
+// The mark as a tab icon. Pages load it from the extension because many sites'
+// Content-Security-Policy refuses data: images as icons; its URL is dynamic
+// (manifest), so a site cannot use it to detect the extension.
+const TAB_ICON_PATH = "icons/tab-mark.png";
 
 let nativePort: chrome.runtime.Port | null = null;
 let connectionGeneration: string | null = null;
@@ -137,17 +141,14 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Map<number, number>();
 // Tabs an agent opened that are still open.
 const agentCreatedTabs = new Set<number>();
-// Puts the tabs an agent controls in a tab group named after the product.
-// Chromium browsers without tab groups go without.
-const tabIndicator =
-  chrome.tabGroups && typeof chrome.tabs.group === "function"
-    ? new TabIndicator(chrome as never, {
-        title: BRAND.product,
-        color: "grey",
-        releaseDelayMs: TAB_INDICATOR_RELEASE_MS,
-        onChange: (state) => void recordTabIndicator(state),
-      })
-    : null;
+// Shows the product's mark as the icon of the tabs an agent controls.
+const tabIndicator = chrome.scripting
+  ? new TabIndicator(chrome as never, {
+      icon: async () => chrome.runtime.getURL(TAB_ICON_PATH),
+      releaseDelayMs: TAB_INDICATOR_RELEASE_MS,
+      onChange: (state) => recordTabIndicator(state),
+    })
+  : null;
 let tabIndicatorWrite: Promise<void> = Promise.resolve();
 // Starts at a random number, so a number from before this worker restarted
 // does not name one of its attachments.
@@ -200,8 +201,8 @@ async function resumeLiveState(): Promise<string> {
   }
   if (!stored) {
     currentStateGeneration = crypto.randomUUID();
-    // The extension reloaded or updated, or Chrome restarted: tabs an earlier
-    // run grouped are no longer controlled.
+    // The extension reloaded or updated (or Chrome restarted): no tab an
+    // earlier run marked is controlled now.
     void tabIndicator?.resume(recordedTabIndicator(), []);
     await recordLiveState();
     return currentStateGeneration;
@@ -279,7 +280,7 @@ async function recordedTabIndicator(): Promise<TabIndicatorState | null> {
   );
 }
 
-/** Record the controlled tabs' groups for the next run, in order. */
+/** Record the marked tabs for the next run, in order. */
 function recordTabIndicator(state: TabIndicatorState): void {
   tabIndicatorWrite = tabIndicatorWrite
     .then(async () => await chrome.storage.local.set({ [TAB_INDICATOR_KEY]: state }))
@@ -1446,7 +1447,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (agentCreatedTabs.delete(tabId)) void recordLiveState();
-  void tabIndicator?.closed(tabId);
+  tabIndicator?.closed(tabId);
   frameRemovalTimes.delete(tabId);
   frameRemovals.delete(tabId);
   finishedFrameRemovals.delete(tabId);
@@ -1459,8 +1460,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   });
 });
 
-chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.groupId !== undefined) void tabIndicator?.groupChanged(tabId);
+// A new page in a controlled tab gets the mark again.
+chrome.webNavigation?.onCommitted?.addListener(({ tabId, frameId }) => {
+  if (frameId === 0) void tabIndicator?.navigated(tabId);
 });
 
 function appendDebuggerEvent(event: Omit<BridgeDebuggerEvent, "sequence">): void {

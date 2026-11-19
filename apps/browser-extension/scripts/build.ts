@@ -1,8 +1,17 @@
+import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { brandedManifest, brandedPopup, defaultBrand, ICON_FILES, readBrand } from "./brand";
+import {
+  brandedManifest,
+  brandedPopup,
+  defaultBrand,
+  ICON_FILES,
+  readBrand,
+  TAB_MARK_FALLBACK,
+  TAB_MARK_FILE,
+} from "./brand";
 import { packagedManifest, storeManifest } from "./manifest";
 
 // `--brand <file>` builds a product's own branded extension (see scripts/brand.ts);
@@ -60,6 +69,11 @@ await mkdir(resolve(output, "icons"), { recursive: true });
 for (const icon of ICON_FILES) {
   await cp(resolve(brand.iconsDir, icon), resolve(output, "icons", icon));
 }
+const tabMark = resolve(brand.iconsDir, TAB_MARK_FILE);
+await cp(
+  existsSync(tabMark) ? tabMark : resolve(brand.iconsDir, TAB_MARK_FALLBACK),
+  resolve(output, "icons", TAB_MARK_FILE),
+);
 await cp(resolve(root, "fonts"), resolve(output, "fonts"), { recursive: true });
 
 // Chrome deliberately requires an explicit user install for an ordinary
@@ -75,6 +89,7 @@ const installFiles = [
   "site-permissions-page.js",
   "service-worker.js",
   ...ICON_FILES.map((icon) => `icons/${icon}`),
+  `icons/${TAB_MARK_FILE}`,
   "fonts/dm-sans-latin-wght-normal.woff2",
   "fonts/OFL.txt",
 ] as const;

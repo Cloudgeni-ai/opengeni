@@ -32,6 +32,11 @@ export const ICON_FILES = [
   "icon-128.png",
 ] as const;
 
+/** The tab icon of a controlled tab. Optional in a brand's folder: without
+ * it, the brand's 32 px icon serves. */
+export const TAB_MARK_FILE = "tab-mark.png";
+export const TAB_MARK_FALLBACK = "icon-32.png";
+
 const text = (value: unknown, field: string, max: number): string => {
   if (typeof value !== "string" || !value.trim() || value.length > max) {
     throw new Error(`Brand ${field} must be a non-empty string of at most ${max} characters`);

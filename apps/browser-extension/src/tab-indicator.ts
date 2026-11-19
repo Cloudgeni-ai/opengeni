@@ -1,94 +1,46 @@
 /**
  * Shows a person which of their tabs an agent controls: while the extension's
- * debugger is attached to a tab, the tab sits in a tab group named after the
- * product, one group per window, so the tab strip says so without changing
- * the page, its title or its icon. Chrome's own debugger notification says
- * only that something is being debugged, not which tabs.
+ * debugger is attached to a tab, the tab shows the product's mark as its icon
+ * in the tab strip. Chrome's own debugger notification says only that
+ * something is being debugged, not which tabs.
  *
- * - A tab the person had in a group of their own goes back to that group when
- *   control ends, if it still exists; any other tab is ungrouped, and one the
- *   group moved goes back to where it was in the window. A group left with
- *   no controlled tab is dissolved, along with any tab the person dragged
- *   into it.
+ * - The page's own icons stay in the page, set aside (their `rel` kept in a
+ *   data attribute) while the mark is shown, and come back exactly when
+ *   control ends. Icons the page adds meanwhile are set aside too. Nothing
+ *   else on the page, nor its title, changes.
+ * - A new page in the tab (a navigation or reload) gets the mark again.
  * - Control often ends for a moment and starts again (a dialog the agent lets
- *   Chrome close, a navigation Chrome detaches on), so a tab leaves the group
- *   only once control has stayed ended for `releaseDelayMs`.
- * - A tab the person drags out of the group (or a group they ungroup) stays
- *   out until control ends; the next time an agent takes the tab it is
- *   grouped again. A group the person drags to another window stays the
- *   group.
- * - Every session shares the window's one group: the extension cannot tell
- *   which session holds which tab.
- * - Pinned tabs and tabs outside normal windows cannot be grouped; they are
- *   left as they are.
- * - The state is recorded in storage that outlives the worker and an
- *   extension update or reload (which end every control), so the next run
- *   puts tabs back where they were. Only when the recorded groups are gone
- *   (Chrome restarted, and restored them with new ids) are groups found by
- *   their title and colour.
+ *   Chrome close, a navigation Chrome detaches on), so a tab gets its own icon
+ *   back only once control has stayed ended for `releaseDelayMs`.
+ * - Pages Chrome lets no extension script (its own pages, the Web Store, a
+ *   PDF viewer) keep their icon.
+ * - The marked tabs are recorded in storage that outlives the worker and an
+ *   update or reload of the extension (which ends every control), so the
+ *   next run gives those tabs their icons back.
  */
 
-/** The part of Chrome's tabs and tabGroups APIs this uses. */
+/** The part of Chrome's scripting API this uses. */
 export type TabIndicatorChrome = {
-  tabs: {
-    get(tabId: number): Promise<IndicatorTab>;
-    query(query: { groupId: number } | { windowId: number }): Promise<IndicatorTab[]>;
-    move(tabId: number, properties: { index: number }): Promise<unknown>;
-    group(options: {
-      tabIds: number[];
-      groupId?: number;
-      createProperties?: { windowId: number };
-    }): Promise<number>;
-    ungroup(tabIds: number[]): Promise<void>;
+  scripting: {
+    executeScript(injection: {
+      target: { tabId: number };
+      world: "ISOLATED";
+      injectImmediately: boolean;
+      func: (...args: never[]) => unknown;
+      args: unknown[];
+    }): Promise<unknown>;
   };
-  tabGroups: {
-    get(groupId: number): Promise<{ title?: string; color: TabGroupColor }>;
-    query(query: { title: string; color: TabGroupColor }): Promise<{ id: number }[]>;
-    update(groupId: number, properties: { title: string; color: TabGroupColor }): Promise<unknown>;
-  };
-};
-
-export type IndicatorTab = {
-  id?: number;
-  windowId: number;
-  groupId: number;
-  pinned: boolean;
-  index: number;
-};
-
-export type TabGroupColor =
-  | "grey"
-  | "blue"
-  | "red"
-  | "yellow"
-  | "green"
-  | "pink"
-  | "purple"
-  | "cyan"
-  | "orange";
-
-/** Chrome's groupId for a tab in no group. */
-const NO_GROUP = -1;
-
-/** A tab in the group: the group, the person's own group the tab came from,
- * and where it was in its window when joining the group moved it. */
-export type IndicatedTabEntry = {
-  groupId: number;
-  restoreGroupId: number | null;
-  restoreIndex: number | null;
 };
 
 /** What the next run carries on with. */
 export type TabIndicatorState = {
-  /** Tabs in the group, by tab id. */
-  tabs: Record<string, IndicatedTabEntry>;
-  /** Controlled tabs the person took out of the group. */
-  declined: number[];
+  /** Tabs showing the mark. */
+  tabs: number[];
 };
 
 export type TabIndicatorOptions = {
-  title: string;
-  color: TabGroupColor;
+  /** The mark, as an image URL a page can load (a data: URL). */
+  icon: () => Promise<string>;
   releaseDelayMs: number;
   /** Called after every change, to record the state for the next run. */
   onChange?: (state: TabIndicatorState) => void;
@@ -96,19 +48,10 @@ export type TabIndicatorOptions = {
   clearTimeout?: (timer: unknown) => void;
 };
 
-// Chrome refuses tab edits while the person drags a tab.
-const DRAGGING = /cannot be edited right now/iu;
-const DRAG_RETRIES = 5;
-const DRAG_RETRY_MS = 300;
-
-const dragging = (error: unknown) => error instanceof Error && DRAGGING.test(error.message);
-
 export class TabIndicator {
-  private readonly indicated = new Map<number, IndicatedTabEntry>();
-  private readonly declined = new Set<number>();
+  private readonly marked = new Set<number>();
   private readonly releases = new Map<number, unknown>();
-  // Every change of the tab strip runs in order, so each one sees the last
-  // one's result.
+  // Every change runs in order, so a release never overtakes a later show.
   private queue: Promise<void> = Promise.resolve();
   private readonly schedule: (callback: () => void, ms: number) => unknown;
   private readonly cancel: (timer: unknown) => void;
@@ -122,35 +65,27 @@ export class TabIndicator {
       options.clearTimeout ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
   }
 
-  /** The extension is controlling the tab: put it in the window's group. */
+  /** The extension is controlling the tab: show the mark. */
   show(tabId: number): Promise<void> {
     this.cancelRelease(tabId);
     return this.run(async () => {
-      if (this.indicated.has(tabId) || this.declined.has(tabId)) return;
-      const tab = await this.chrome.tabs.get(tabId).catch(() => null);
-      if (!tab || tab.pinned) return;
-      const existing = await this.groupInWindow(tab.windowId);
-      const restoreGroupId =
-        tab.groupId !== NO_GROUP && tab.groupId !== existing ? tab.groupId : null;
-      let groupId: number;
-      try {
-        groupId =
-          existing !== null
-            ? await this.edit(() => this.chrome.tabs.group({ groupId: existing, tabIds: [tabId] }))
-            : await this.newGroup(tabId, tab.windowId);
-      } catch {
-        // A tab in a popup or app window, or one closed meanwhile.
-        return;
+      if (!this.marked.has(tabId)) {
+        this.marked.add(tabId);
+        this.changed();
       }
-      const moved = await this.chrome.tabs.get(tabId).catch(() => null);
-      const restoreIndex =
-        moved && moved.windowId === tab.windowId && moved.index !== tab.index ? tab.index : null;
-      this.indicated.set(tabId, { groupId, restoreGroupId, restoreIndex });
-      this.changed();
+      await this.mark(tabId);
     });
   }
 
-  /** Control of the tab ended: take it out of the group unless control
+  /** A new page committed in the tab (webNavigation.onCommitted, top frame). */
+  navigated(tabId: number): Promise<void> {
+    if (!this.marked.has(tabId)) return this.queue;
+    return this.run(async () => {
+      if (this.marked.has(tabId)) await this.mark(tabId);
+    });
+  }
+
+  /** Control of the tab ended: give it its own icon back unless control
    * starts again within the release delay. */
   release(tabId: number): void {
     this.cancelRelease(tabId);
@@ -163,77 +98,24 @@ export class TabIndicator {
     );
   }
 
-  /** Take the tab out of the group now. */
+  /** Give the tab its own icon back now. */
   releaseNow(tabId: number): Promise<void> {
     this.cancelRelease(tabId);
     return this.run(async () => {
-      const hadDecline = this.declined.delete(tabId);
-      const entry = this.indicated.get(tabId);
-      if (!entry) {
-        if (hadDecline) this.changed();
-        return;
-      }
-      this.indicated.delete(tabId);
-      try {
-        await this.putBack(tabId, entry);
-      } catch (error) {
-        if (dragging(error)) {
-          // The person is still dragging a tab: try again later.
-          this.indicated.set(tabId, entry);
-          this.release(tabId);
-          return;
-        }
-        // Closed meanwhile.
-      } finally {
-        this.changed();
-      }
-      await this.dissolveIfUnused(entry.groupId);
+      if (!this.marked.delete(tabId)) return;
+      this.changed();
+      await this.unmark(tabId);
     });
   }
 
   /** The tab was closed. */
-  closed(tabId: number): Promise<void> {
+  closed(tabId: number): void {
     this.cancelRelease(tabId);
-    return this.run(async () => {
-      const entry = this.indicated.get(tabId);
-      const hadDecline = this.declined.delete(tabId);
-      if (!entry) {
-        if (hadDecline) this.changed();
-        return;
-      }
-      this.indicated.delete(tabId);
-      this.changed();
-      await this.dissolveIfUnused(entry.groupId);
-    });
+    if (this.marked.delete(tabId)) this.changed();
   }
 
-  /** Chrome reports the tab's group changed (tabs.onUpdated). A change this
-   * class did not make is the person's: the tab stays out of the group. */
-  groupChanged(tabId: number): Promise<void> {
-    if (!this.indicated.has(tabId)) return this.queue;
-    return this.run(async () => {
-      const entry = this.indicated.get(tabId);
-      if (!entry) return;
-      const tab = await this.chrome.tabs.get(tabId).catch(() => null);
-      if (!tab || tab.groupId === entry.groupId) return;
-      // Dragging a whole group to another window gives it a new id there.
-      if (tab.groupId !== NO_GROUP && (await this.isOurs(tab.groupId))) {
-        this.indicated.set(tabId, { ...entry, groupId: tab.groupId, restoreIndex: null });
-      } else {
-        this.indicated.delete(tabId);
-        this.declined.add(tabId);
-      }
-      this.changed();
-    });
-  }
-
-  /**
-   * A new run carries on with the state the last one recorded: tabs no
-   * longer controlled leave the group and go back where they were;
-   * controlled tabs get the indicator. A recorded group that is gone means
-   * Chrome restarted and restored its groups with new ids: then groups with
-   * this title and colour that hold no controlled tab are dissolved.
-   */
+  /** A new run carries on: recorded tabs no longer controlled get their own
+   * icons back, controlled tabs show the mark. */
   resume(
     recorded: TabIndicatorState | null | Promise<TabIndicatorState | null>,
     controlled: Iterable<number>,
@@ -241,21 +123,9 @@ export class TabIndicator {
     const live = new Set(controlled);
     return this.run(async () => {
       const state = await Promise.resolve(recorded).catch(() => null);
-      let lost = false;
-      for (const [tab, entry] of Object.entries(state?.tabs ?? {})) {
-        const tabId = Number(tab);
-        if (!(await this.isOurs(entry.groupId))) {
-          lost = true;
-          continue;
-        }
-        const current = await this.chrome.tabs.get(tabId).catch(() => null);
-        if (current?.groupId === entry.groupId) this.indicated.set(tabId, entry);
-      }
-      for (const tabId of state?.declined ?? []) if (live.has(tabId)) this.declined.add(tabId);
-      if (lost) await this.dissolveLeftBehind();
-      this.changed();
+      for (const tabId of state?.tabs ?? []) this.marked.add(tabId);
     }).then(async () => {
-      const ended = [...this.indicated.keys()].filter((tabId) => !live.has(tabId));
+      const ended = [...this.marked].filter((tabId) => !live.has(tabId));
       await Promise.all([
         ...ended.map((tabId) => this.releaseNow(tabId)),
         ...[...live].map((tabId) => this.show(tabId)),
@@ -264,10 +134,7 @@ export class TabIndicator {
   }
 
   state(): TabIndicatorState {
-    return {
-      tabs: Object.fromEntries([...this.indicated].map(([tabId, entry]) => [String(tabId), entry])),
-      declined: [...this.declined],
-    };
+    return { tabs: [...this.marked] };
   }
 
   /** Resolves once every change asked for so far is done. */
@@ -275,97 +142,32 @@ export class TabIndicator {
     return this.queue;
   }
 
-  private async newGroup(tabId: number, windowId: number): Promise<number> {
-    const groupId = await this.edit(() =>
-      this.chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId } }),
-    );
+  private async mark(tabId: number): Promise<void> {
+    const icon = await this.options.icon();
+    await this.inject(tabId, showMark, [icon]);
+  }
+
+  private async unmark(tabId: number): Promise<void> {
+    await this.inject(tabId, removeMark, []);
+  }
+
+  private async inject(
+    tabId: number,
+    func: (...args: never[]) => unknown,
+    args: unknown[],
+  ): Promise<void> {
     try {
-      await this.edit(() =>
-        this.chrome.tabGroups.update(groupId, {
-          title: this.options.title,
-          color: this.options.color,
-        }),
-      );
-    } catch (error) {
-      // An untitled group would say nothing, and nothing would remove it.
-      await this.edit(() => this.chrome.tabs.ungroup([tabId])).catch(() => undefined);
-      throw error;
-    }
-    return groupId;
-  }
-
-  /** Takes a tab still in its group out of it: back to the person's group it
-   * came from, or else to where it was. */
-  private async putBack(tabId: number, entry: IndicatedTabEntry): Promise<void> {
-    const tab = await this.chrome.tabs.get(tabId).catch(() => null);
-    if (!tab || tab.groupId !== entry.groupId) return;
-    const restoreGroupId = entry.restoreGroupId;
-    if (
-      restoreGroupId !== null &&
-      (await this.chrome.tabGroups.get(restoreGroupId).then(
-        () => true,
-        () => false,
-      ))
-    ) {
-      await this.edit(() => this.chrome.tabs.group({ groupId: restoreGroupId, tabIds: [tabId] }));
-      return;
-    }
-    await this.edit(() => this.chrome.tabs.ungroup([tabId]));
-    if (entry.restoreIndex === null) return;
-    const count = (await this.chrome.tabs.query({ windowId: tab.windowId })).length;
-    const index = Math.min(entry.restoreIndex, count - 1);
-    await this.edit(() => this.chrome.tabs.move(tabId, { index }));
-    // Tabs have moved since, so that place may now be inside a group.
-    const moved = await this.chrome.tabs.get(tabId);
-    if (moved.groupId !== NO_GROUP) await this.edit(() => this.chrome.tabs.ungroup([tabId]));
-  }
-
-  /** Dissolves groups with this title and colour holding no controlled tab. */
-  private async dissolveLeftBehind(): Promise<void> {
-    const groups = await this.chrome.tabGroups
-      .query({ title: this.options.title, color: this.options.color })
-      .catch(() => []);
-    for (const group of groups) {
-      const tabs = await this.chrome.tabs.query({ groupId: group.id }).catch(() => []);
-      if (tabs.some((tab) => tab.id !== undefined && this.indicated.has(tab.id))) continue;
-      const left = tabs.map((tab) => tab.id).filter((id): id is number => id !== undefined);
-      if (left.length > 0)
-        await this.edit(() => this.chrome.tabs.ungroup(left)).catch(() => undefined);
-    }
-  }
-
-  /** Whether the group exists with this indicator's title and colour. */
-  private async isOurs(groupId: number): Promise<boolean> {
-    const group = await this.chrome.tabGroups.get(groupId).catch(() => null);
-    return group?.title === this.options.title && group.color === this.options.color;
-  }
-
-  private async groupInWindow(windowId: number): Promise<number | null> {
-    const groups = new Set([...this.indicated.values()].map((entry) => entry.groupId));
-    for (const groupId of groups) {
-      const tabs = await this.chrome.tabs.query({ groupId }).catch(() => []);
-      if (tabs.some((tab) => tab.windowId === windowId)) return groupId;
-    }
-    return null;
-  }
-
-  private async dissolveIfUnused(groupId: number): Promise<void> {
-    if ([...this.indicated.values()].some((entry) => entry.groupId === groupId)) return;
-    const left = (await this.chrome.tabs.query({ groupId }).catch(() => []))
-      .map((tab) => tab.id)
-      .filter((id): id is number => id !== undefined);
-    if (left.length > 0)
-      await this.edit(() => this.chrome.tabs.ungroup(left)).catch(() => undefined);
-  }
-
-  private async edit<T>(change: () => Promise<T>): Promise<T> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await change();
-      } catch (error) {
-        if (attempt >= DRAG_RETRIES || !dragging(error)) throw error;
-        await new Promise<void>((resolve) => this.schedule(resolve, DRAG_RETRY_MS));
-      }
+      await this.chrome.scripting.executeScript({
+        target: { tabId },
+        // The page's scripts cannot see or undo it there.
+        world: "ISOLATED",
+        // At once: a new page gets the mark before it has loaded.
+        injectImmediately: true,
+        func,
+        args,
+      });
+    } catch {
+      // A closed tab, or a page Chrome lets no extension script.
     }
   }
 
@@ -378,7 +180,7 @@ export class TabIndicator {
 
   private run(work: () => Promise<void>): Promise<void> {
     const next = this.queue.then(work).catch((error: unknown) => {
-      console.warn("could not update the controlled tabs' group", error);
+      console.warn("could not update a controlled tab's icon", error);
     });
     this.queue = next;
     return next;
@@ -392,23 +194,85 @@ export class TabIndicator {
 /** Parses a recorded TabIndicatorState, or null. */
 export function parseTabIndicatorState(value: unknown): TabIndicatorState | null {
   if (value === null || typeof value !== "object") return null;
-  const raw = value as { tabs?: unknown; declined?: unknown };
-  const tabs: TabIndicatorState["tabs"] = {};
-  if (raw.tabs !== null && typeof raw.tabs === "object") {
-    for (const [tab, entry] of Object.entries(raw.tabs as Record<string, unknown>)) {
-      if (!Number.isSafeInteger(Number(tab)) || entry === null || typeof entry !== "object")
-        continue;
-      const { groupId, restoreGroupId, restoreIndex } = entry as Record<string, unknown>;
-      if (!Number.isSafeInteger(groupId)) continue;
-      tabs[tab] = {
-        groupId: groupId as number,
-        restoreGroupId: Number.isSafeInteger(restoreGroupId) ? (restoreGroupId as number) : null,
-        restoreIndex: Number.isSafeInteger(restoreIndex) ? (restoreIndex as number) : null,
-      };
+  const tabs = (value as { tabs?: unknown }).tabs;
+  return {
+    tabs: Array.isArray(tabs)
+      ? tabs.filter((tabId): tabId is number => Number.isSafeInteger(tabId))
+      : [],
+  };
+}
+
+/** The state showMark keeps in the extension's isolated world of a page. */
+type MarkState = { link: HTMLLinkElement; observer: MutationObserver; icon: string };
+
+/**
+ * Runs in the page's top frame, in this extension's isolated world: shows
+ * `icon` as the tab's icon. The page's own icon links are set aside by
+ * renaming their `rel` (kept in `data-opengeni-rel`), the mark is added as
+ * the only icon in the head, and an observer keeps it so while the page
+ * changes its head. Running it again only updates the icon. An observer left
+ * by a version of the extension that was since reloaded stops on its own.
+ * Self-contained, since Chrome runs it from its source.
+ */
+export function showMark(icon: string): void {
+  const KEPT = "data-opengeni-rel";
+  const MARK = "data-opengeni-icon";
+  const scope = globalThis as typeof globalThis & { __opengeniMark?: MarkState };
+  const isPageIcon = (node: Node): node is HTMLLinkElement =>
+    node instanceof HTMLLinkElement &&
+    !node.hasAttribute(MARK) &&
+    /(^|\s)icon(\s|$)/iu.test(node.getAttribute("rel") ?? "");
+  const ensure = (state: MarkState) => {
+    for (const link of Array.from(document.querySelectorAll("link"))) {
+      if (!isPageIcon(link)) continue;
+      link.setAttribute(KEPT, link.getAttribute("rel") ?? "");
+      link.setAttribute("rel", "opengeni-kept-icon");
     }
+    const head = document.head;
+    if (head && state.link.parentNode !== head) head.append(state.link);
+    if (state.link.getAttribute("href") !== state.icon) state.link.setAttribute("href", state.icon);
+  };
+  let state = scope.__opengeniMark;
+  if (!state) {
+    // A mark a version of the extension that was since reloaded left.
+    for (const old of Array.from(document.querySelectorAll(`link[${MARK}]`))) old.remove();
+    const link = document.createElement("link");
+    link.setAttribute("rel", "icon");
+    link.setAttribute(MARK, "");
+    const observer = new MutationObserver(() => {
+      // The extension was reloaded or removed: its next run cleans up.
+      if (!(globalThis as { chrome?: { runtime?: { id?: string } } }).chrome?.runtime?.id) {
+        observer.disconnect();
+        return;
+      }
+      if (scope.__opengeniMark === state) ensure(state!);
+    });
+    state = { link, observer, icon };
+    scope.__opengeniMark = state;
+    observer.observe(document, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["rel", "href"],
+    });
   }
-  const declined = Array.isArray(raw.declined)
-    ? raw.declined.filter((tabId): tabId is number => Number.isSafeInteger(tabId))
-    : [];
-  return { tabs, declined };
+  state.icon = icon;
+  ensure(state);
+}
+
+/** Runs in the page's top frame, in this extension's isolated world: takes
+ * the mark away and gives the page's own icons back exactly. Also cleans up
+ * after a version of the extension that was since reloaded.
+ * Self-contained, since Chrome runs it from its source. */
+export function removeMark(): void {
+  const KEPT = "data-opengeni-rel";
+  const MARK = "data-opengeni-icon";
+  const scope = globalThis as typeof globalThis & { __opengeniMark?: MarkState };
+  scope.__opengeniMark?.observer.disconnect();
+  delete scope.__opengeniMark;
+  for (const link of Array.from(document.querySelectorAll(`link[${MARK}]`))) link.remove();
+  for (const link of Array.from(document.querySelectorAll(`link[${KEPT}]`))) {
+    link.setAttribute("rel", link.getAttribute(KEPT) ?? "icon");
+    link.removeAttribute(KEPT);
+  }
 }

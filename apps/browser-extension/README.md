@@ -20,16 +20,15 @@ to the configured deployment.
 ## Controlled tabs
 
 While an agent controls a tab (the extension's debugger is attached), the tab
-sits in a tab group named after the product, one per window, so the tab strip
-shows which tabs are in use without changing the page. `src/tab-indicator.ts`
-owns this: a tab leaves the group once control has stayed ended for a moment,
-and goes back to where it was, or to the person's own group it came from. A
-tab the person drags out stays out until that control ends. The state is kept
-in local storage, so tabs still grouped when the extension updates or reloads
-go back where they were; only after Chrome restarts are left-behind groups
-found by their title and colour. Chrome's
-debugger notification, with its Cancel button, stays the way to stop every
-agent at once.
+shows the product's mark as its icon, so the tab strip shows which tabs are in
+use. `src/tab-indicator.ts` owns this: it sets the page's own icon links aside
+and adds the mark, again after each new page, and puts them back exactly once
+control has stayed ended for a moment. The page's title and content are left
+alone. Pages load the mark from the extension (`web_accessible_resources`, at
+a URL that changes per session) because many sites' Content-Security-Policy
+refuses `data:` icons. Pages the extension cannot script (Chrome's own pages,
+the Web Store, PDFs) keep their icon. Marked tabs are kept in local storage,
+so they get their icons back after the extension updates or reloads.
 
 ## Site permissions
 
@@ -94,7 +93,8 @@ its people never see Opengeni. Write a brand file:
 ```
 
 `iconsDir` (relative to the brand file) holds `brand-mark.svg` and
-`icon-16.png`, `icon-32.png`, `icon-48.png`, `icon-128.png`;
+`icon-16.png`, `icon-32.png`, `icon-48.png`, `icon-128.png`, and optionally
+`tab-mark.png`, the icon of a tab an agent controls (else `icon-32.png`);
 `bun run brand:icons --mark logo.svg --out icons [--tile "#202020"]` makes
 them, plus store promo tiles, from one mark. An optional `key` (a base64
 public key) fixes the unpacked build's extension ID.
