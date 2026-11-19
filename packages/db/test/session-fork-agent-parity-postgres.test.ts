@@ -616,6 +616,7 @@ describe("a fork is the same agent as its source", () => {
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
+      maxNestedAgentDepthOverride: 2,
       orgAgent: { agentId, version: 2, promptVersion: 1, overrides },
       mcpServers: [
         {

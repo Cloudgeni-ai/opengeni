@@ -275,6 +275,11 @@ describe("session create with an organization agent over HTTP", () => {
     // An unknown key is refused, never a plain chat.
     const unknown = await call("POST", sessions(), { initialMessage: "hi", agent: "missing" });
     expect([unknown.status, unknown.body.code]).toEqual([404, "agent_not_found"]);
+    // An agent with no published version yet.
+    const unpublished = await call("POST", agents(), { key: "unpublished", name: "unpublished" });
+    expect(unpublished.status).toBe(201);
+    const refused = await call("POST", sessions(), { initialMessage: "hi", agent: "unpublished" });
+    expect([refused.status, refused.body.code]).toEqual([409, "agent_not_published"]);
   }, 120_000);
 
   test("agent as { ref } with this chat's own instructions and settings", async () => {
@@ -367,11 +372,11 @@ describe("session create with an organization agent over HTTP", () => {
       select source from organization_managed_workspaces
       where workspace_id = ${chat.body.workspaceId}`;
     expect(marker!.source).toBe("console_test");
-    // The draft does not run outside the test workspace.
+    // The draft is out of reach outside the test workspace.
     const outside = await call("POST", sessions(), {
       initialMessage: "hi",
       agent: { ref: agentId, version: 2 },
     });
-    expect([outside.status, outside.body.code]).toEqual([409, "agent_not_published"]);
+    expect([outside.status, outside.body.code]).toEqual([404, "agent_not_found"]);
   }, 120_000);
 });
