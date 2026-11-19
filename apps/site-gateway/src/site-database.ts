@@ -178,6 +178,8 @@ type HomeRecord = {
   legacyMarked: boolean;
   /** The frozen legacy copy was erased (the database was reset or rebuilt). */
   legacyErased?: boolean;
+  /** A reset or rebuild could not erase the legacy copy yet; later requests retry. */
+  erasePending?: boolean;
 };
 type FailureRecord = { at: string; attempts: number; retryAt: number; message: string };
 type AttemptRecord = { token: string; at: string };
@@ -419,6 +421,8 @@ export class SiteDatabase {
   private readonly relays = new Set<Promise<Response>>();
   /** When this instance may next try to mark the legacy object moved. */
   private markRetryAt = 0;
+  /** When this instance may next retry erasing the legacy copy. */
+  private eraseRetryAt = 0;
 
   constructor(
     private readonly state: DurableObjectStateLike,
@@ -458,23 +462,12 @@ export class SiteDatabase {
       if (erasing && response.ok) {
         // The database was erased here; erase its frozen legacy copy too, so a
         // reset or rebuild never leaves the old data behind.
-        try {
-          await this.eraseLegacy(site);
-        } catch (error) {
+        // When that fails, later requests retry it (`home`); the reset stands.
+        await this.eraseLegacy(site).catch((error: unknown) => {
           console.error(`site-gateway: could not erase the legacy Site database ${site}`, error);
-          return Response.json(
-            {
-              error: {
-                code: "internal",
-                message:
-                  "The database was erased, but its earlier copy could not be erased yet; run it again",
-                retryable: true,
-                outcomeUnknown: true,
-              },
-            },
-            { status: 503 },
-          );
-        }
+          const home = this.kv.get<HomeRecord>(HOME_KEY);
+          if (home) this.kv.put(HOME_KEY, { ...home, erasePending: true } satisfies HomeRecord);
+        });
       }
       return located(response, "eu");
     }
@@ -575,17 +568,19 @@ export class SiteDatabase {
     body: ArrayBuffer,
     reason: string,
   ): Promise<Response> {
-    const pendingRelease = this.kv.get<string>(RELEASE_KEY);
-    if (pendingRelease) {
-      // A failed copy could not release the legacy object; earlier gateway
-      // releases are refused until it does.
-      await this.relocationCall(site, "release", { token: pendingRelease })
-        .then(() => this.kv.delete(RELEASE_KEY))
-        .catch(() => null);
-    }
     let response: Response;
     // A copy starts only after relays in flight finish, so none lands after its read.
-    const call = this.relay(site, operation, body);
+    const call = (async () => {
+      const pendingRelease = this.kv.get<string>(RELEASE_KEY);
+      if (pendingRelease) {
+        // A failed copy could not release the legacy object; earlier gateway
+        // releases are refused until it does.
+        await this.relocationCall(site, "release", { token: pendingRelease })
+          .then(() => this.kv.delete(RELEASE_KEY))
+          .catch(() => null);
+      }
+      return this.relay(site, operation, body);
+    })();
     this.relays.add(call);
     try {
       response = await call;
@@ -616,6 +611,12 @@ export class SiteDatabase {
         if (!home.legacyMarked && Date.now() >= this.markRetryAt) {
           this.markRetryAt = Date.now() + MARK_RETRY_MS;
           await this.markLegacyMoved(site, home);
+        }
+        if (home.erasePending && Date.now() >= this.eraseRetryAt) {
+          this.eraseRetryAt = Date.now() + MARK_RETRY_MS;
+          await this.eraseLegacy(site).catch((error: unknown) =>
+            console.error(`site-gateway: could not erase the legacy Site database ${site}`, error),
+          );
         }
         return { location: "eu" };
       }
@@ -687,7 +688,12 @@ export class SiteDatabase {
     const home = this.kv.get<HomeRecord>(HOME_KEY);
     if (!home || home.legacyErased || home.from !== "legacy") return;
     await this.relocationCall(site, "erase", {});
-    this.kv.put(HOME_KEY, { ...home, legacyMarked: true, legacyErased: true } satisfies HomeRecord);
+    this.kv.put(HOME_KEY, {
+      ...home,
+      legacyMarked: true,
+      legacyErased: true,
+      erasePending: false,
+    } satisfies HomeRecord);
   }
 
   /**
