@@ -981,7 +981,9 @@ describe("Console roles: the Console test workspace", () => {
     if (!fixture || !client || !shared) return;
     const temp = await person("narrow");
     await inviteAndAccept(fixture.accountId, fixture.people.owner, temp, "member", "editor");
-    expect((await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status).toBeLessThan(300);
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status,
+    ).toBeLessThan(300);
     const row = await testMembership(temp.subjectId);
     expect(row?.role).toBe("member");
     expect([...row!.permissions].sort()).toEqual([...CONSOLE_TEST_WORKSPACE_PERMISSIONS].sort());
@@ -998,7 +1000,9 @@ describe("Console roles: the Console test workspace", () => {
     await shared.admin`update workspace_memberships set role = 'owner',
         permissions = ${["workspace:read", "workspace:admin", "sessions:create"]}
       where workspace_id = ${workspaceId} and subject_id = ${temp.subjectId}`;
-    expect((await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status).toBeLessThan(300);
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, temp.headers)).status,
+    ).toBeLessThan(300);
     expect((await testMembership(temp.subjectId))?.role).toBe("member");
   }, 120_000);
 
@@ -1079,7 +1083,9 @@ describe("Console roles: the Console test workspace", () => {
     // A demotion repeated with its operationId removes a membership left behind.
     const admin = await person("repeat-admin");
     const membership = await inviteAndAccept(accountId, people.owner, admin, "admin");
-    expect((await call("POST", `${agents(fixture)}/test-workspace`, admin.headers)).status).toBeLessThan(300);
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, admin.headers)).status,
+    ).toBeLessThan(300);
     const demotion = {
       kind: "change_role",
       role: "member",
@@ -1096,8 +1102,16 @@ describe("Console roles: the Console test workspace", () => {
 
     // Promotion keeps it: owners and admins stay full.
     const editor = await person("promoted");
-    const editorMembership = await inviteAndAccept(accountId, people.owner, editor, "member", "editor");
-    expect((await call("POST", `${agents(fixture)}/test-workspace`, editor.headers)).status).toBeLessThan(300);
+    const editorMembership = await inviteAndAccept(
+      accountId,
+      people.owner,
+      editor,
+      "member",
+      "editor",
+    );
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, editor.headers)).status,
+    ).toBeLessThan(300);
     const promoted = await call(
       "PATCH",
       `/v1/organizations/${accountId}/members/${editorMembership.membershipId}`,
@@ -1118,7 +1132,9 @@ describe("Console roles: the Console test workspace", () => {
     const { accountId, people } = fixture;
     const leaving = await person("leaving");
     const membership = await inviteAndAccept(accountId, people.owner, leaving, "member", "editor");
-    expect((await call("POST", `${agents(fixture)}/test-workspace`, leaving.headers)).status).toBeLessThan(300);
+    expect(
+      (await call("POST", `${agents(fixture)}/test-workspace`, leaving.headers)).status,
+    ).toBeLessThan(300);
     expect(await testMembership(leaving.subjectId)).not.toBeNull();
     const offboarded = await call(
       "PATCH",

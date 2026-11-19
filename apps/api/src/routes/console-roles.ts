@@ -259,7 +259,9 @@ export async function resetConsoleRoleAfterMembershipChange(
       organizationId: input.organizationId,
       error: error instanceof Error ? error.message : String(error),
     });
-    throw cleanupFailed("The change was saved, but this person's Console role wasn't reset. Try again.");
+    throw cleanupFailed(
+      "The change was saved, but this person's Console role wasn't reset. Try again.",
+    );
   }
   if (input.organizationRole === "owner" || input.organizationRole === "admin") return;
   await revokeConsoleTestWorkspaceAccess(deps, input);
