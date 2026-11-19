@@ -211,7 +211,7 @@ async function provisionFixture() {
     limitedKey: await mint("Chats only", ["sessions:create", "sessions:read"], null),
     controlKey: await mint(
       "Chats control",
-      ["sessions:create", "sessions:read", "sessions:control"],
+      ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
       null,
     ),
     workspaceKey: await mint("Workspace admin", ["workspace:admin"], managed.id),

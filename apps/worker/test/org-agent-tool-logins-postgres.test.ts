@@ -479,10 +479,9 @@ describe("organization agent tool server logins", () => {
       latencyMode: "standard",
       sandboxBackend: "none",
       scopeSubjectId: END_USER,
+      createdBy: { kind: "subject", subjectId: "user:creator" },
       orgAgent: { agentId: f.agentId, version: 1, promptVersion: 1, overrides: null },
     });
-    await shared.admin`update sessions set created_by_subject_id = 'user:creator'
-      where id = ${chat.id}`;
     const resolve = async (turnStarterSubjectId: string | null) => {
       const published: OrgToolServerUnavailable[] = [];
       const result = await resolveOrgAgentToolLogins({
