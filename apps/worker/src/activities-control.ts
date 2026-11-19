@@ -10,6 +10,7 @@ import { createBrowserRecordingActivities } from "./activities/browser-recording
 import { createGoalActivities } from "./activities/goals";
 import { createModelCallFactReconcilerActivities } from "./activities/model-call-fact-reconciler";
 import { createNangoConnectionSweepActivities } from "./activities/nango-connection-sweep";
+import { createOrgAgentPublishMoveActivities } from "./activities/org-agent-publish-move";
 import { createRetainedScreenshotMaintenanceActivities } from "./activities/retained-screenshot-reaper";
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
@@ -55,6 +56,7 @@ export function createControlActivitiesFromServices(
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
     ...createSandboxLeaseActivities(services),
+    ...createOrgAgentPublishMoveActivities(services),
   };
 }
 

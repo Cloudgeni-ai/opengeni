@@ -10,8 +10,10 @@ import {
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
   readSessionAgentPrompt,
+  readSessionOrgAgentVersion,
   markOrganizationAnthropicApiKeyCreditRefused,
 } from "@opengeni/db";
+import { orgAgentEndUserSubject, resolveOrgAgentToolLogins } from "./org-agent-tool-logins";
 import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
@@ -1425,6 +1427,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // The agent revision in this chat's system prompt, read once so every
           // compaction and the turn itself use the same instructions. The
           // turn's first attempt records it, so retries build the same prompt.
+          // The organization agent version this chat runs, frozen for every
+          // attempt of the turn (null for every other chat).
+          const orgAgentVersion = await readSessionOrgAgentVersion(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turn: {
+              turnId: attempt.turnId!,
+              expectedExecutionGeneration: attempt.executionGeneration!,
+              expectedAttemptId: input.attemptId,
+            },
+          });
           const agentPrompt = await readSessionAgentPrompt(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -1688,6 +1702,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             attachCodemodeTokenRenewal,
             attachRunCredentialRenewal,
           } = runCredentials;
+          // An organization agent's tool servers get their logins (credential
+          // provider, the end user's stored login, the chat's headers, or the
+          // shared key); one without a login is attached as unavailable.
+          const orgAgentLogins = await resolveOrgAgentToolLogins({
+            db,
+            settings,
+            observability,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            orgAgent: orgAgentVersion,
+            endUserSubjectId: orgAgentEndUserSubject(
+              session.scopeSubjectId,
+              turn.initiatingHumanSubjectId,
+            ),
+            mcpServers: runSettings.mcpServers,
+            turnTools,
+            providerManaged: (serverId) => runMcpCredentials?.has(serverId) ?? false,
+            publishUnavailable: async (payload) => {
+              await eventing.publish!(
+                [{ type: "session.tool_server.unavailable", payload }],
+                true,
+              );
+            },
+          });
+          if (orgAgentLogins) {
+            runSettings.mcpServers = orgAgentLogins.mcpServers;
+            turnTools.splice(0, turnTools.length, ...orgAgentLogins.turnTools);
+            unavailableMcpConnectors.push(...orgAgentLogins.unavailableMcpConnectors);
+          }
 
           await establishTurnSandbox({
             ...sandboxRoute,

@@ -1157,6 +1157,65 @@ unchanged.
   worker is deployed, so rolling deploys meet the gate only if an old worker
   is still serving when the first agent chat is created.
 
+### Organization agents
+
+A chat that runs an organization (Console) agent ([`agents.md`](agents.md))
+records the version in `sessions.agent_version`, the version whose
+Instructions are in its system prompt in `sessions.agent_prompt_version`, and
+what its create changed in `sessions.agent_overrides`. `agent_prompt_revision`
+stays NULL. Every other chat has NULL in all three and takes none of the steps
+below.
+
+- **Create.** Only a create whose `agent` names an organization agent (a key or
+  id string, or an object with `ref`) runs the organization path; it becomes
+  an ordinary create body (tool servers as session MCP servers with id = tool
+  server key and no credentials; model and built-ins where the request is
+  silent), so the rest of the create path is the same code.
+- **Worker chats.** A chat started by an organization agent chat inherits
+  `agent_id`, `agent_version` and `agent_overrides`, and `agent_prompt_version`
+  only when the version's `workers.shareInstructions` is on (NULL means no
+  agent layer). Tools, approvals and per-chat logins come with the parent's MCP
+  server snapshot as for every child chat.
+- **Pinning.** The worker reads `agent_version` once per turn: the first
+  attempt records it in the turn's metadata (`opengeniOrgAgentVersion`) and
+  retries reuse it, with the prompt version in `opengeniAgentPromptRevision`.
+  The layer is the same `agent_instructions` layer as a workspace agent's,
+  read from the immutable version, so an archived agent keeps its text.
+- **Logins.** For each MCP server whose id is one of the pinned version's tool
+  server keys (and whose URL is the tool server's), a `per_user` server uses
+  the workspace credential provider, then the end user's stored login
+  (`end_user_tool_credentials`; an OAuth login expiring within five minutes is
+  refreshed under `FOR UPDATE SKIP LOCKED`, a failed refresh sets
+  `refresh_failed_at`), then the chat's own headers, and never the shared key.
+  `shared_key` servers use the organization's shared headers, `none` servers
+  nothing. A server left without a login is dropped for the turn, named in the
+  turn's unavailable-connector notice, and recorded as
+  `session.tool_server.unavailable` (`missing_credentials` or
+  `credentials_expired`).
+- **Moves.** A publish with "move running chats" starts
+  `orgAgentPublishMoveWorkflow` on the control queue. It reads chats in
+  batches of 500 per workspace (the organization's managed workspaces except
+  its Console test workspace, and the agent's access rows) and moves each in
+  its own transaction under the session event lock: the agent's servers are
+  materialized again for the new version, servers the chat added or replaced
+  stay, the chat's recorded tool server changes are applied again, per-chat
+  headers stay while the URL is unchanged, the tool policy version is bumped
+  (`session.tool_policy.updated`), `agent_version` is set and the overrides are
+  compared again with the new version. `agent_prompt_version` is not changed:
+  the next turn delivers the newer Instructions as a history item (as for an
+  edited workspace agent) and compaction folds the version it showed into
+  `agent_prompt_version`, never past `agent_version`. A chat with a running
+  turn or waiting on a person is deferred; the workflow scans again with
+  backoff (30 seconds doubling to 10 minutes) for up to six hours, then counts
+  what is left as failed. A newer publish ends the move. Model, built-ins and
+  other scalar settings are not moved.
+- **Claim gate (migration 1502).** A BEFORE INSERT trigger on
+  `session_turn_attempts` refuses, with SQLSTATE 55000, an attempt for a chat
+  with a non-NULL `agent_version` unless the claim set
+  `opengeni.org_agent_protocol_v1 = '1'`, which this worker sets around its
+  own attempt registration. An older worker's refused claim parks the work as
+  described for the agent-instructions gate above.
+
 Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
 chat or scheduled-run context. Child work and replacement attempts reuse their

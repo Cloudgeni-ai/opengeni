@@ -465,6 +465,68 @@ export async function readSessionOrgAgentState(
   };
 }
 
+/** What a child chat records when its parent runs an organization agent. */
+export type InheritedSessionOrgAgent = {
+  agentId: string;
+  version: number;
+  /** Null unless the version's `workers.shareInstructions` is on: no agent layer. */
+  promptVersion: number | null;
+  overrides: Record<string, { agent: unknown; chat: unknown }> | null;
+};
+
+/** Whether a version config shares the agent's Instructions with worker chats. */
+export function orgAgentConfigSharesInstructions(config: unknown): boolean {
+  if (!config || typeof config !== "object") return false;
+  const workers = (config as Record<string, unknown>)["workers"];
+  return Boolean(
+    workers &&
+      typeof workers === "object" &&
+      (workers as Record<string, unknown>)["shareInstructions"] === true,
+  );
+}
+
+/**
+ * The organization agent a child chat inherits from its parent, read in the
+ * create transaction: the parent's agent and version, and the version's
+ * Instructions only when it shares them with workers. Null when the parent
+ * runs no organization agent (every other chat).
+ */
+export async function inheritedSessionOrgAgentInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; parentSessionId: string },
+): Promise<InheritedSessionOrgAgent | null> {
+  const [parent] = await rawRows<{
+    agent_id: string | null;
+    agent_version: number | null;
+    agent_overrides: unknown;
+  }>(
+    tx,
+    sql`select s.agent_id::text as agent_id, s.agent_version, s.agent_overrides
+      from sessions s
+      where s.workspace_id = ${input.workspaceId}::uuid
+        and s.id = ${input.parentSessionId}::uuid`,
+  );
+  if (!parent?.agent_id || parent.agent_version === null || parent.agent_version === undefined)
+    return null;
+  const version = Number(parent.agent_version);
+  const row = await withOrgAgentsVisible(tx, () =>
+    readOrgAgentVersionInTransaction(tx, {
+      accountId: input.accountId,
+      agentId: parent.agent_id!,
+      version,
+    }),
+  );
+  return {
+    agentId: parent.agent_id,
+    version,
+    promptVersion: row && orgAgentConfigSharesInstructions(row.config) ? version : null,
+    overrides:
+      parent.agent_overrides && typeof parent.agent_overrides === "object"
+        ? (parent.agent_overrides as InheritedSessionOrgAgent["overrides"])
+        : null,
+  };
+}
+
 /** Keys of these organization agents, read in an existing scoped transaction. */
 export async function readOrgAgentKeysInTransaction(
   tx: Database,

@@ -98,6 +98,14 @@ import {
 export * from "./organization-slack-bots";
 export * from "./slack-agents";
 export * from "./agents";
+export * from "./organization-agent-runtime";
+import {
+  inheritedSessionOrgAgentInTransaction,
+  readOrgAgentKeysInTransaction,
+  readOrgAgentVersion,
+  readOrgAgentVersionInTransaction,
+  withOrgAgentsVisible,
+} from "./organization-agent-runtime";
 export * from "./slack-agent-proposals";
 export * from "./slack-agent-updates";
 export * from "./voice-transcription-settlement";
@@ -32936,6 +32944,17 @@ export type SessionCreateInput = {
    */
   agent?: { id: string } | null;
   /**
+   * The organization agent version the chat runs (`agent_version`), the
+   * version whose Instructions are in its prompt, and what the create changed.
+   * Absent for every other chat; a child chat inherits its parent's.
+   */
+  orgAgent?: {
+    agentId: string;
+    version: number;
+    promptVersion: number | null;
+    overrides: Record<string, { agent: unknown; chat: unknown }> | null;
+  } | null;
+  /**
    * No person will see or answer a question until the task ends. Recorded only
    * under the reserved metadata key, which a caller-supplied value never sets.
    */
@@ -33969,6 +33988,19 @@ async function createSessionInTransaction(
   const agentBinding = input.agent
     ? await sessionAgentBinding(tx as unknown as Database, input, input.agent.id)
     : null;
+  if (agentBinding && input.orgAgent) {
+    throw new Error("A chat runs a workspace agent or an organization agent, not both");
+  }
+  // An organization agent chat: named on create, or inherited by a worker chat.
+  const orgAgentBinding = input.orgAgent
+    ? input.orgAgent
+    : input.parentSessionId && !agentBinding
+      ? await inheritedSessionOrgAgentInTransaction(tx as unknown as Database, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          parentSessionId: input.parentSessionId,
+        })
+      : null;
   try {
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
@@ -33977,6 +34009,14 @@ async function createSessionInTransaction(
         workspaceId: input.workspaceId,
         ...(agentBinding
           ? { agentId: agentBinding.agentId, agentPromptRevision: agentBinding.revision }
+          : {}),
+        ...(orgAgentBinding
+          ? {
+              agentId: orgAgentBinding.agentId,
+              agentVersion: orgAgentBinding.version,
+              agentPromptVersion: orgAgentBinding.promptVersion,
+              agentOverrides: orgAgentBinding.overrides,
+            }
           : {}),
         initialMessage: input.initialMessage,
         initialModelContext: input.initialModelContext ?? null,
@@ -45596,10 +45636,101 @@ export type SessionAgentPrompt = {
   agentId: string | null;
   revision: number;
   instructions: string | null;
+  /**
+   * Organization agent chats only: the version the chat runs this turn
+   * (`agent_version`, frozen per turn). `revision` is then the version whose
+   * Instructions are in the system prompt (`agent_prompt_version`).
+   */
+  orgVersion?: number;
 };
 
 /** Turn metadata key freezing the prompt revision for every attempt of a turn. */
 const AGENT_PROMPT_REVISION_METADATA_KEY = "opengeniAgentPromptRevision";
+/** Turn metadata key freezing the organization agent version for every attempt of a turn. */
+export const ORG_AGENT_VERSION_METADATA_KEY = "opengeniOrgAgentVersion";
+
+/**
+ * Freeze a positive integer in the turn's metadata on its first attempt;
+ * later attempts read the frozen value back. Fenced to the live attempt.
+ */
+async function freezeTurnMetadataInteger(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+  turn: { turnId: string; expectedExecutionGeneration: number; expectedAttemptId: string },
+  key: string,
+  value: number,
+): Promise<number> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.turnId,
+          executionGeneration: turn.expectedExecutionGeneration,
+          attemptId: turn.expectedAttemptId,
+        });
+        if (!fence.allowed) throw new Error("Agent prompt attempt is fenced");
+        const frozen = fence.turn.metadata[key];
+        if (frozen !== undefined) {
+          if (typeof frozen !== "number" || !Number.isSafeInteger(frozen) || frozen < 1)
+            throw new Error(`Invalid ${key} receipt`);
+          return frozen;
+        }
+        await tx
+          .update(schema.sessionTurns)
+          .set({ metadata: { ...fence.turn.metadata, [key]: value }, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, turn.turnId),
+            ),
+          );
+        return value;
+      }),
+  );
+}
+
+/**
+ * The organization agent version a chat runs, read once per turn: the first
+ * attempt records it in the turn's metadata (`opengeniOrgAgentVersion`) and
+ * retries reuse it, so a publish move between attempts never changes a turn's
+ * tools or logins. Null for every chat that runs no organization agent.
+ */
+export async function readSessionOrgAgentVersion(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turn?: { turnId: string; expectedExecutionGeneration: number; expectedAttemptId: string };
+  },
+): Promise<{ agentId: string; version: number } | null> {
+  const [row] = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    (scopedDb) =>
+      rawRows<{ agent_id: string | null; agent_version: number | null }>(
+        scopedDb,
+        sql`select s.agent_id::text as agent_id, s.agent_version
+          from sessions s
+          where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
+      ),
+  );
+  if (!row?.agent_id || row.agent_version === null || row.agent_version === undefined) return null;
+  const version = input.turn
+    ? await freezeTurnMetadataInteger(
+        db,
+        input,
+        input.turn,
+        ORG_AGENT_VERSION_METADATA_KEY,
+        Number(row.agent_version),
+      )
+    : Number(row.agent_version);
+  return { agentId: row.agent_id, version };
+}
 
 /**
  * An Only me agent serves only its owner's Only me chats. A chat shared
@@ -45651,14 +45782,35 @@ export async function readSessionAgentPrompt(
 ): Promise<SessionAgentPrompt | null> {
   const scope = { accountId: input.accountId, workspaceId: input.workspaceId };
   const session = await withRlsContext(db, scope, async (scopedDb) => {
-    const [row] = await rawRows<{ agent_id: string | null; revision: number | null }>(
+    const [row] = await rawRows<{
+      agent_id: string | null;
+      revision: number | null;
+      agent_version: number | null;
+      agent_prompt_version: number | null;
+    }>(
       scopedDb,
-      sql`select s.agent_id::text as agent_id, s.agent_prompt_revision as revision
+      sql`select s.agent_id::text as agent_id, s.agent_prompt_revision as revision,
+          s.agent_version, s.agent_prompt_version
         from sessions s
         where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
     );
     return row;
   });
+  if (
+    session &&
+    session.agent_id &&
+    session.agent_version !== null &&
+    session.agent_version !== undefined
+  ) {
+    return await readSessionOrgAgentPrompt(db, input, {
+      agentId: session.agent_id,
+      version: Number(session.agent_version),
+      promptVersion:
+        session.agent_prompt_version === null || session.agent_prompt_version === undefined
+          ? null
+          : Number(session.agent_prompt_version),
+    });
+  }
   if (!session || session.revision === null || session.revision === undefined) return null;
   let revision = Number(session.revision);
   const turn = input.turn;
@@ -45713,6 +45865,55 @@ export async function readSessionAgentPrompt(
 }
 
 /**
+ * An organization agent chat's prompt layer: the Instructions of
+ * `agent_prompt_version` (null = no agent layer, a worker chat whose agent
+ * does not share them), with both versions frozen for every attempt of the
+ * turn. Versions are immutable, so an archived agent keeps its Instructions.
+ */
+async function readSessionOrgAgentPrompt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turn?: { turnId: string; expectedExecutionGeneration: number; expectedAttemptId: string };
+  },
+  session: { agentId: string; version: number; promptVersion: number | null },
+): Promise<SessionAgentPrompt | null> {
+  if (session.promptVersion === null) return null;
+  let revision = session.promptVersion;
+  let orgVersion = session.version;
+  if (input.turn) {
+    revision = await freezeTurnMetadataInteger(
+      db,
+      input,
+      input.turn,
+      AGENT_PROMPT_REVISION_METADATA_KEY,
+      revision,
+    );
+    orgVersion = await freezeTurnMetadataInteger(
+      db,
+      input,
+      input.turn,
+      ORG_AGENT_VERSION_METADATA_KEY,
+      orgVersion,
+    );
+  }
+  const row = await readOrgAgentVersion(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    agentId: session.agentId,
+    version: revision,
+  });
+  return {
+    agentId: session.agentId,
+    revision,
+    instructions: row?.instructions ?? null,
+    orgVersion,
+  };
+}
+
+/**
  * Deliver an edit of the chat's agent made since its system prompt was built:
  * once per logical turn, as a developer history item before the turn that
  * first sees the new revision. Retries reuse the turn's snapshot. Nothing is
@@ -45736,6 +45937,35 @@ export async function ensureSessionAgentInstructions(
   },
 ): Promise<string | null> {
   const { prompt, ...scope } = input;
+  if (prompt.orgVersion !== undefined && prompt.agentId) {
+    // An organization agent chat moved to a newer version: its Instructions
+    // arrive as a history item until compaction folds them into the prompt.
+    const current = await readOrgAgentVersion(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      agentId: prompt.agentId,
+      version: prompt.orgVersion,
+    }).catch(() => null);
+    return await ensureSessionContextSnapshot(
+      db,
+      {
+        ...scope,
+        text: current
+          ? agentInstructionsContextText({
+              kind: "revision",
+              revision: current.version,
+              instructions: current.instructions,
+            })
+          : null,
+        baselineText: agentInstructionsContextText(
+          prompt.instructions === null
+            ? { kind: "deleted" }
+            : { kind: "revision", revision: prompt.revision, instructions: prompt.instructions },
+        ),
+      },
+      AGENT_INSTRUCTIONS_CHANNEL,
+    );
+  }
   const current = prompt.agentId
     ? await readBoundAgentRows<{ revision: number; instructions: string | null }>(
         db,
@@ -47236,6 +47466,37 @@ function retainedRowTurnId(
   return typeof turnId === "string" && sessionTurnIds.has(turnId) ? turnId : null;
 }
 
+/** Whether the chat runs an organization agent that has this version. */
+async function sessionHasOrgAgentVersion(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+  version: number,
+): Promise<boolean> {
+  return await withoutSessionRlsActor(() =>
+    withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        withOrgAgentsVisible(scopedDb, async () => {
+          const [row] = await rawRows<{ found: number }>(
+            scopedDb,
+            sql`select 1 as found
+              from sessions s
+              join agent_revisions r
+                on r.account_id = s.account_id
+                and r.workspace_id is null
+                and r.agent_id = s.agent_id
+                and r.revision = ${version}::integer
+              where s.workspace_id = ${input.workspaceId}::uuid
+                and s.id = ${input.sessionId}::uuid
+                and s.agent_version is not null`,
+          );
+          return Boolean(row);
+        }),
+    ),
+  );
+}
+
 /**
  * Atomically install the Codex-style replacement history for one exact turn
  * attempt. The old active rows remain as inactive audit evidence; the retained
@@ -47286,6 +47547,8 @@ export async function applyContextCompaction(
     throw new Error("Compaction replacement turn ids must align with replacement items");
   }
   let agentPromptRevision = input.agentPromptRevision;
+  // Organization agent chats: the version folded into `agent_prompt_version`.
+  let orgAgentPromptVersion: number | undefined;
   if (agentPromptRevision !== undefined) {
     if (!Number.isSafeInteger(agentPromptRevision) || agentPromptRevision < 1)
       throw new Error("Invalid agent prompt revision");
@@ -47304,6 +47567,9 @@ export async function applyContextCompaction(
         where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
     );
     if (!ownRevision) agentPromptRevision = undefined;
+    if (!ownRevision && (await sessionHasOrgAgentVersion(db, input, input.agentPromptRevision!))) {
+      orgAgentPromptVersion = input.agentPromptRevision;
+    }
   }
   return await withSessionActivityRlsContext(
     db,
@@ -47496,6 +47762,21 @@ export async function applyContextCompaction(
               and id = ${input.sessionId}::uuid
               and agent_id is not null
               and agent_prompt_revision < ${agentPromptRevision}::integer
+          `);
+        }
+        if (orgAgentPromptVersion !== undefined) {
+          // An organization agent chat whose prompt has an agent layer folds
+          // the version its history showed; never past the version it runs.
+          // A rollback publish moves to a lower version, so "forward" is
+          // toward agent_version, not toward a higher number.
+          await tx.execute(sql`
+            update sessions set agent_prompt_version = ${orgAgentPromptVersion}::integer
+            where workspace_id = ${input.workspaceId}::uuid
+              and id = ${input.sessionId}::uuid
+              and agent_id is not null
+              and agent_version = ${orgAgentPromptVersion}::integer
+              and agent_prompt_version is not null
+              and agent_prompt_version <> ${orgAgentPromptVersion}::integer
           `);
         }
         return {
@@ -99559,6 +99840,33 @@ type LockedSessionUpdateContext = {
   ) => Promise<UpdateSessionMcpApprovalPolicyResult>;
   listPendingSessionTurns: () => Promise<SessionTurn[]>;
   getLockedSession: (sessionId: string) => Promise<Session | null>;
+  /** The locked chat's organization agent binding, or null. */
+  orgAgentState: {
+    agentId: string;
+    version: number;
+    promptVersion: number | null;
+    overrides: Record<string, { agent: unknown; chat: unknown }> | null;
+  } | null;
+  /** The locked chat's MCP server rows, with their encrypted per-chat headers. */
+  listSessionMcpServerRows: () => Promise<OrgAgentMoveSessionMcpServerRow[]>;
+  /** Remove and write MCP server rows for a publish move (per-chat headers kept as given). */
+  replaceSessionMcpServersForOrgAgentMove: (input: {
+    removeIds: readonly string[];
+    upsert: readonly OrgAgentMoveSessionMcpServerRow[];
+  }) => Promise<void>;
+};
+
+/** A session MCP server row as a publish move reads and writes it. */
+export type OrgAgentMoveSessionMcpServerRow = {
+  id: string;
+  name: string | null;
+  url: string;
+  allowedTools: string[] | null;
+  timeoutMs: number | null;
+  cacheToolsList: boolean;
+  requireApproval: boolean | string[] | null;
+  connectionRef: McpServerConnectionRef | null;
+  headersEncrypted: Record<string, string>;
 };
 
 type LockedSessionUpdateResult = {
@@ -99585,6 +99893,16 @@ type LockedSessionUpdateResult = {
     metadata?: Record<string, unknown>;
     status?: SessionStatus;
     activeTurnId?: string | null;
+    /**
+     * A publish move: the version the chat runs and what it changed, written
+     * only while the chat still runs `expectedVersion`. Never the prompt
+     * version; the next turn delivers newer Instructions.
+     */
+    orgAgent?: {
+      expectedVersion: number;
+      version: number;
+      overrides: Record<string, { agent: unknown; chat: unknown }> | null;
+    };
   };
 };
 
@@ -99691,6 +100009,94 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
             return rows.map(mapSessionTurn);
           },
+          orgAgentState:
+            sessionRow.agentId && sessionRow.agentVersion != null
+              ? {
+                  agentId: sessionRow.agentId,
+                  version: Number(sessionRow.agentVersion),
+                  promptVersion:
+                    sessionRow.agentPromptVersion == null
+                      ? null
+                      : Number(sessionRow.agentPromptVersion),
+                  overrides:
+                    sessionRow.agentOverrides && typeof sessionRow.agentOverrides === "object"
+                      ? sessionRow.agentOverrides
+                      : null,
+                }
+              : null,
+          listSessionMcpServerRows: async () =>
+            (
+              await tx
+                .select()
+                .from(schema.sessionMcpServers)
+                .where(
+                  and(
+                    eq(schema.sessionMcpServers.workspaceId, workspaceId),
+                    eq(schema.sessionMcpServers.sessionId, sessionId),
+                  ),
+                )
+                .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId))
+            ).map((row) => ({
+              id: row.serverId,
+              name: row.name ?? null,
+              url: row.url,
+              allowedTools: row.allowedTools ?? null,
+              timeoutMs: row.timeoutMs ?? null,
+              cacheToolsList: row.cacheToolsList,
+              requireApproval: row.requireApproval ?? null,
+              connectionRef: row.connectionRef ?? null,
+              headersEncrypted: row.headersEncrypted ?? {},
+            })),
+          replaceSessionMcpServersForOrgAgentMove: async ({ removeIds, upsert }) => {
+            if (removeIds.length > 0) {
+              await tx
+                .delete(schema.sessionMcpServers)
+                .where(
+                  and(
+                    eq(schema.sessionMcpServers.workspaceId, workspaceId),
+                    eq(schema.sessionMcpServers.sessionId, sessionId),
+                    inArray(schema.sessionMcpServers.serverId, [...removeIds]),
+                  ),
+                );
+            }
+            const now = new Date();
+            for (const server of upsert) {
+              const values = {
+                name: server.name,
+                url: server.url,
+                allowedTools: server.allowedTools,
+                timeoutMs: server.timeoutMs,
+                cacheToolsList: server.cacheToolsList,
+                requireApproval: server.requireApproval,
+                connectionRef: server.connectionRef,
+                headersEncrypted: server.headersEncrypted,
+                updatedAt: now,
+              };
+              const [updated] = await tx
+                .update(schema.sessionMcpServers)
+                .set({
+                  ...values,
+                  credentialVersion: sql`${schema.sessionMcpServers.credentialVersion} + 1`,
+                })
+                .where(
+                  and(
+                    eq(schema.sessionMcpServers.workspaceId, workspaceId),
+                    eq(schema.sessionMcpServers.sessionId, sessionId),
+                    eq(schema.sessionMcpServers.serverId, server.id),
+                  ),
+                )
+                .returning({ id: schema.sessionMcpServers.id });
+              if (!updated) {
+                await tx.insert(schema.sessionMcpServers).values({
+                  accountId: sessionRow.accountId,
+                  workspaceId,
+                  sessionId,
+                  serverId: server.id,
+                  ...values,
+                });
+              }
+            }
+          },
           getLockedSession: async (lockedSessionId) => {
             const row = locks.sessions.find((candidate) => candidate.id === lockedSessionId);
             return row
@@ -99787,6 +100193,12 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
             ...(update.status !== undefined ? { status: update.status } : {}),
             ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
+            ...(update.orgAgent !== undefined
+              ? {
+                  agentVersion: update.orgAgent.version,
+                  agentOverrides: update.orgAgent.overrides,
+                }
+              : {}),
             ...(advancesActivity ? { updatedAt: now } : {}),
           })
           .where(
@@ -99795,6 +100207,9 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               eq(schema.sessions.id, sessionId),
               ...(update.expectedToolPolicyVersion !== undefined
                 ? [eq(schema.sessions.toolPolicyVersion, update.expectedToolPolicyVersion)]
+                : []),
+              ...(update.orgAgent !== undefined
+                ? [eq(schema.sessions.agentVersion, update.orgAgent.expectedVersion)]
                 : []),
             ),
           )
@@ -99855,6 +100270,32 @@ async function sessionControlProjections(
   );
 }
 
+/** `Session.orgAgent` for a chat that runs an organization agent version. */
+async function sessionOrgAgentProjection(
+  db: Database,
+  row: Pick<
+    typeof schema.sessions.$inferSelect,
+    "accountId" | "workspaceId" | "agentId" | "agentVersion" | "agentOverrides"
+  >,
+): Promise<Session["orgAgent"]> {
+  if (row.agentVersion == null || !row.agentId) return null;
+  const agentId = row.agentId;
+  const keys = await withRlsContext(
+    db,
+    { accountId: row.accountId, workspaceId: row.workspaceId },
+    (tx) => readOrgAgentKeysInTransaction(tx, row.accountId, [agentId]),
+  ).catch(() => new Map<string, string>());
+  const key = keys.get(agentId);
+  if (!key) return null;
+  return {
+    id: agentId,
+    key,
+    version: Number(row.agentVersion),
+    overrides:
+      row.agentOverrides && typeof row.agentOverrides === "object" ? row.agentOverrides : null,
+  };
+}
+
 async function mapSessionWithControl(
   db: Database,
   row: SessionRowWithSkills,
@@ -99889,6 +100330,9 @@ async function mapSessionWithControl(
   );
   mapped.codexCurrentSelection = null;
   mapped.dispatchWait = null;
+  if (row.agentVersion != null && row.agentId) {
+    mapped.orgAgent = await sessionOrgAgentProjection(db, row);
+  }
   if (presentation === "model_gate") return mapped;
   if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
     // Read only the existing delivery ledger. Neither a claimed wake nor a
@@ -100028,7 +100472,8 @@ function mapSessionFields(
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     description: row.description ?? null,
     avatar: storedSessionAvatar(row.avatar),
-    agentId: row.agentId ?? null,
+    // A workspace agent only: an organization agent chat reports `orgAgent`.
+    agentId: row.agentVersion == null ? (row.agentId ?? null) : null,
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),

@@ -79,6 +79,10 @@ export const ORG_AGENT_ERROR_CODES = [
   "workspace_not_managed",
   /** Only an organization owner can change who manages an agent. */
   "agent_management_requires_owner",
+  /** A create names both `agentId` (a workspace agent) and an organization agent. */
+  "agent_ref_conflict",
+  /** Saving an agent version from inline config needs `agents:manage`. */
+  "agents_manage_required",
 ] as const;
 export type OrgAgentErrorCode = (typeof ORG_AGENT_ERROR_CODES)[number];
 
