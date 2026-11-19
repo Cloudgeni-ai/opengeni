@@ -1322,8 +1322,10 @@ describe("organization agents: visibility gate, isolation and grants", () => {
     expect(moved.workspaceIds).toEqual([org.managedOther]);
     expect(await accessRows()).toEqual([org.managedOther]);
     expect(
-      await asApp({ accountId: org.accountId, orgAgents: true }, (sql) =>
-        sql`insert into agent_workspace_access (account_id, agent_id, workspace_id)
+      await asApp(
+        { accountId: org.accountId, orgAgents: true },
+        (sql) =>
+          sql`insert into agent_workspace_access (account_id, agent_id, workspace_id)
           values (${org.accountId}, ${otherAgent.id}, ${org.unmanaged}) returning agent_id`,
       ),
     ).toEqual([{ agent_id: otherAgent.id }]);
