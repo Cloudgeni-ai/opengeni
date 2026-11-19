@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/example-embedded-product",
-  "version": "0.0.96",
+  "version": "0.0.97",
   "private": true,
   "type": "module",
   "scripts": {
