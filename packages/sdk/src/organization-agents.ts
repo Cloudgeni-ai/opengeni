@@ -30,6 +30,7 @@ import type {
   UpdateOrgToolServerRequest,
 } from "@opengeni/contracts";
 import type { OpenGeniClient } from "./client";
+import type { CreateSessionRequest, OrgAgentRef, OrgAgentSessionRequest } from "./types";
 
 /**
  * Console agents (organization agents): server-side administration and code
@@ -408,6 +409,24 @@ export async function deleteEndUserToolCredential(
  */
 export function defineAgent<const Agent extends OrgAgentFileInput>(agent: Agent): Agent {
   return agent;
+}
+
+/**
+ * True when a session request's `agent` names a Console agent (a key or id
+ * string, or an object with `ref`) rather than an inline agent config. Use it
+ * to narrow `CreateSessionRequest["agent"]` before reading inline fields such
+ * as `capabilities`.
+ */
+export function isOrgAgentRef(
+  agent: CreateSessionRequest["agent"] | null,
+): agent is OrgAgentRef | OrgAgentSessionRequest {
+  return (
+    typeof agent === "string" ||
+    (agent !== null &&
+      typeof agent === "object" &&
+      !Array.isArray(agent) &&
+      Object.hasOwn(agent, "ref"))
+  );
 }
 
 /**

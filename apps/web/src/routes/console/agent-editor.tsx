@@ -554,9 +554,10 @@ function ToolServerTools({
   onChange: (server: OrgAgentToolServerConfig) => void;
   onRemove: () => void;
 }) {
-  const tools = live?.tools ?? [];
+  // Unknown while loading or when the server couldn't list its tools.
+  const tools = live && !live.error ? live.tools : null;
   const rows = toolRows(server, tools, catalog);
-  const names = tools.map((tool) => tool.name);
+  const names = rows.map((row) => row.name);
   const on = rows.filter((row) => row.on).length;
   return (
     <section

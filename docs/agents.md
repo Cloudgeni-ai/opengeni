@@ -650,8 +650,10 @@ the other fields change settings for this chat only:
   selection, `disableTools` turns tools off, `approval` replaces "Ask first",
   `eager`, and `headers`, the chat's own login (see Logins);
 - `mcpServers` and `tools` add servers as today;
-- `version`: run a version other than the published one (drafts only in the
-  organization's Console test workspace);
+- `version`: pin the version to run. In the organization's Console test
+  workspace any version can run, drafts included; everywhere else only the
+  published version is accepted, and another number answers 404
+  `agent_not_found`;
 - `config`: an inline code-agent definition; each distinct config becomes a
   version of a code-managed agent.
 

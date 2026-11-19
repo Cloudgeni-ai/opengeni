@@ -116,6 +116,7 @@ export async function deployAgents(
                   file: result.path,
                   error: result.error,
                   code: result.code ?? null,
+                  status: result.status ?? null,
                 },
           ),
         },
@@ -199,7 +200,7 @@ export async function exportAgent(
     response = await requestJson<OrgAgentResponse>(
       api,
       "GET",
-      `/v1/organizations/${encodeURIComponent(options.organizationId)}/agents/${encodeURIComponent(options.key)}`,
+      `/v1/organizations/${encodeURIComponent(options.organizationId)}/agents/by-key/${encodeURIComponent(options.key)}`,
     );
   } catch (error) {
     const message =

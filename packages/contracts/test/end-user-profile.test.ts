@@ -56,6 +56,30 @@ describe("end-user display details", () => {
   });
 
   test("normalization is lenient: bounded, trimmed, never an error", () => {
+    // Null or non-string display details are ignored, never a rejected request.
+    const actor = ExternalActorSelection.parse({
+      mode: "external",
+      identity: { externalId: "u-1", source: "product", displayName: null, email: 42 },
+    });
+    expect(splitExternalIdentityProfile(actor.identity)).toEqual({
+      identity: { externalId: "u-1", source: "product" },
+      profile: {},
+    });
+    const memberWithNulls = AddExternalWorkspaceMemberRequest.parse({
+      identity: { externalId: "u-1", displayName: { first: "Ada" }, email: null },
+      permissions: ["sessions:read"],
+    });
+    expect(splitExternalIdentityProfile(memberWithNulls.identity)).toEqual({
+      identity: { externalId: "u-1", source: "default" },
+      profile: {},
+    });
+    // Unknown keys are still rejected: only the two display details are lenient.
+    expect(
+      ExternalActorSelection.safeParse({
+        mode: "external",
+        identity: { externalId: "u-1", nickname: "Ada" },
+      }).success,
+    ).toBe(false);
     expect(normalizeEndUserProfile({})).toEqual({});
     expect(normalizeEndUserProfile({ displayName: "   ", email: "" })).toEqual({});
     expect(normalizeEndUserProfile({ displayName: 42, email: { a: 1 } })).toEqual({});
