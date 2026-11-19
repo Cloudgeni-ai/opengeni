@@ -31,6 +31,7 @@ import {
   listOrgToolServersByKey,
   markEndUserToolCredentialsUsed,
   readEndUserToolCredential,
+  readOrgAgentRuntimeStanding,
   readOrgAgentVersion,
   readSessionLoginOwners,
   refreshEndUserToolCredential,
@@ -197,6 +198,19 @@ export async function resolveOrgAgentToolLogins(
   let chatHeadersAllowedResult: Promise<boolean> | null = null;
   const chatHeadersAllowed = () =>
     (chatHeadersAllowedResult ??= orgAgentChatHeadersAllowed(input).catch(() => false));
+  // The organization's secrets (shared keys, stored end-user logins) run only
+  // while the agent is not archived and still reaches this workspace; read
+  // once per turn, only when a server would use one, and closed on error.
+  const agentId = input.orgAgent.agentId;
+  let orgSecretsAllowedResult: Promise<boolean> | null = null;
+  const orgSecretsAllowed = () =>
+    (orgSecretsAllowedResult ??= readOrgAgentRuntimeStanding(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      agentId,
+    })
+      .then((standing) => !standing.archived && standing.reaches)
+      .catch(() => false));
 
   const mcpServers: McpServerSetting[] = [];
   const unavailable: OrgToolServerUnavailable[] = [];
@@ -215,6 +229,11 @@ export async function resolveOrgAgentToolLogins(
       continue;
     }
     if (toolServer.authMode === "shared_key") {
+      if (!(await orgSecretsAllowed())) {
+        record("shared_key", "refused");
+        unavailable.push({ serverKey: server.id, name, reason: "missing_credentials" });
+        continue;
+      }
       const shared = decryptHeaders(encryptionKey, toolServer.sharedHeadersEncrypted);
       if (shared) {
         record("shared_key", "used");
@@ -231,7 +250,11 @@ export async function resolveOrgAgentToolLogins(
       mcpServers.push(server);
       continue;
     }
-    const stored = input.endUserSubjectId
+    // An archived agent, or one removed from this workspace, runs no stored login.
+    const storedRefused = Boolean(input.endUserSubjectId) && !(await orgSecretsAllowed());
+    if (storedRefused) record("end_user_store", "refused");
+    const storedAllowed = Boolean(input.endUserSubjectId) && !storedRefused;
+    const stored = storedAllowed
       ? await storedLoginHeaders(input, toolServer, encryptionKey, now).catch(() => ({
           kind: "error" as const,
         }))
@@ -255,7 +278,7 @@ export async function resolveOrgAgentToolLogins(
       stored.kind === "expired" || stored.kind === "refresh_failed"
         ? "credentials_expired"
         : "missing_credentials";
-    if (stored.kind === "missing") record("end_user_store", "missing");
+    if (stored.kind === "missing" && !storedRefused) record("end_user_store", "missing");
     unavailable.push({ serverKey: server.id, name, reason });
   }
 

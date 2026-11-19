@@ -38,7 +38,11 @@ export const ORG_AGENT_CREDENTIAL_OUTCOMES = [
   "expired",
   "refresh_failed",
   "error",
-  /** Chat headers another person's turn may not use. */
+  /**
+   * Chat headers another person's turn may not use, or an organization secret
+   * (shared key, stored login) for an archived agent or one that no longer
+   * reaches the chat's workspace.
+   */
   "refused",
 ] as const;
 export type OrgAgentCredentialOutcome = (typeof ORG_AGENT_CREDENTIAL_OUTCOMES)[number];
