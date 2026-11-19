@@ -39,7 +39,9 @@ import {
 import {
   PUBLISHED_DEP_FIELDS,
   changesetIgnoreSet,
+  isPublishedPackageName,
   publishableWorkspacePackages,
+  publishedPackageOfSpecifier,
   repoRoot,
   topologicallySortedPackages,
   workspaceDependencyNames,
@@ -81,7 +83,7 @@ function readPkg(pkgDir: string): PackageJson {
 }
 
 function opengeniRuntimeDeps(pkg: PackageJson): string[] {
-  return Object.keys(pkg.dependencies ?? {}).filter((name) => name.startsWith("@opengeni/"));
+  return Object.keys(pkg.dependencies ?? {}).filter((name) => isPublishedPackageName(name));
 }
 
 function assertPublishableMetadata(pkg: WorkspacePackage): void {
@@ -600,8 +602,7 @@ for (const pkg of publishable) {
                 : "js") satisfies RuntimeLoader,
         );
     for (const imported of moduleSpecifiers) {
-      const match = imported.match(/^(@opengeni\/[^/]+)(?:\/|$)/u);
-      const importedPackage = match?.[1];
+      const importedPackage = publishedPackageOfSpecifier(imported);
       if (
         importedPackage &&
         importedPackage !== pkg.name &&
@@ -687,7 +688,7 @@ if (existsSync(contractsDistDir)) {
     );
   }
   for (const [imported, sourcePath] of externalImports) {
-    if (imported.startsWith("@opengeni/")) {
+    if (publishedPackageOfSpecifier(imported)) {
       failures.push(
         `${sourcePath.slice(repoRoot.length + 1)} makes the canonical editable-artifact contract depend on ${imported}.`,
       );

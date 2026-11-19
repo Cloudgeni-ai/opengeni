@@ -5,6 +5,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  isPublishedPackageName,
   publishableWorkspacePackages,
   workspaceVersionMap,
   type WorkspacePackage,
@@ -248,7 +249,7 @@ export async function proveEffectiveConsumers(
         const minimums: Record<string, string> = {};
         if (lane === "minimum") {
           for (const [dep, range] of Object.entries(candidate.manifest.dependencies ?? {})) {
-            if (!dep.startsWith("@opengeni/")) continue;
+            if (!isPublishedPackageName(dep)) continue;
             const metadata = registry.metadata.get(dep);
             if (!metadata) throw new Error(`Missing effective dependency ${dep}`);
             minimums[dep] = lowestPublishedVersion(range, Object.keys(metadata.versions));
@@ -272,7 +273,7 @@ export async function proveEffectiveConsumers(
         if (manifest.version !== candidate.manifest.version)
           throw new Error(`${name} installed the wrong version`);
         for (const [dep, range] of Object.entries(manifest.dependencies ?? {})) {
-          if (!dep.startsWith("@opengeni/")) continue;
+          if (!isPublishedPackageName(dep)) continue;
           const actual = JSON.parse(
             await readFile(Bun.resolveSync(`${dep}/package.json`, installed), "utf8"),
           ) as SmokeManifest;
@@ -314,7 +315,7 @@ export async function main(): Promise<void> {
       ...Object.keys(candidate.manifest.optionalDependencies ?? {}),
     ]);
     for (const name of closure) {
-      if (!name.startsWith("@opengeni/")) continue;
+      if (!isPublishedPackageName(name)) continue;
       const dependency = packages.get(name);
       if (!dependency) throw new Error(`No intended publishable dependency ${name}`);
       await stage(dependency);

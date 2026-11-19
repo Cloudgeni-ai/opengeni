@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { gunzipSync, inflateRawSync } from "node:zlib";
+import { isPublishedPackageName } from "./publishable-workspaces";
 
 export const REPOSITORY = "Cloudgeni-ai/opengeni";
 export const REPOSITORY_URL = `https://github.com/${REPOSITORY}`;
@@ -94,7 +95,7 @@ export function sourceCohort(files: ReadonlyMap<string, Buffer>): SourcePackage[
     .map((p) => ({ ...p, name: text(p.manifest.name) }));
   requireThat(new Set(all.map((p) => p.name)).size === all.length, "Duplicate source workspace");
   const selected = all.filter(
-    (p) => p.name.startsWith("@opengeni/") && p.manifest.private !== true && !ignored.has(p.name),
+    (p) => isPublishedPackageName(p.name) && p.manifest.private !== true && !ignored.has(p.name),
   );
   requireThat(selected.length > 0 && selected.length <= 64, "Source cohort outside bound");
   const byName = new Map(selected.map((p) => [p.name, p]));
@@ -362,7 +363,7 @@ export function acknowledgedPlan(
       version = text(pkg.version);
     requireThat(
       name === cohort[index]?.name &&
-        /^@opengeni\/[a-z0-9][a-z0-9._-]*$/.test(name) &&
+        isPublishedPackageName(name) &&
         /^\d+\.\d+\.\d+-canary\.[1-9]\d*$/.test(version) &&
         Number(version.split("-canary.")[1]) ===
           Number(origin.runId) * 1000 + Number(origin.attempt) &&
