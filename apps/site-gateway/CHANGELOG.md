@@ -1,5 +1,23 @@
 # @opengeni/site-gateway
 
+## 0.3.0
+
+### Minor Changes
+
+- 443b97b: Store Site SQL databases in Cloudflare's EU jurisdiction. Databases created before this move to the EU on first use (or with `scripts/move-site-databases-to-eu.ts`), verified against the original before they switch; a database that cannot move keeps working from its original object, and original objects are never deleted automatically (a reset or rebuild erases their data). The API treats a "moving" 503 as retryable with nothing run and logs databases not yet in the EU.
+
+### Patch Changes
+
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+  - @opengeni/contracts@6.30.2
+  - @opengeni/sdk@6.30.2
+
 ## 0.2.7
 
 ### Patch Changes

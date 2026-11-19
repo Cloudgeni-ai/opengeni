@@ -1,5 +1,57 @@
 # @opengeni/worker-bundle
 
+## 6.30.2
+
+### Patch Changes
+
+- e75ea20: A stopped Modal or Docker sandbox is now forgotten a day after every chat that works in it is archived, and its saved workspace (a Modal snapshot or tar archive) is deleted. 1502 grants the runtime the inventory 1404 added.
+- 9ecc26c: Agents with workspace connectors but without workspace admin can now show Connect cards (`capability_authorization_request`), for example to connect the person's own computer. Catalog search and custom MCP setup stay admin-only. Tool descriptions, notices and tool results name a setup tool only when the agent has it.
+- 047b487: A configured agent now always gets `goal_resume` and the goals sentence that names it. Before, both appeared only once the session had a goal, so a session's first goal changed the tool list and system prompt under every earlier request and the next turn re-read the whole history uncached.
+- a67e0b8: Fetch the speaker embedding model from a commit-pinned source so image builds keep the same model bytes after upstream replaced its release asset.
+- 890c910: Moving a session to another machine no longer rewrites the system prompt. The workspace root and filesystem layout reach the model as a `<opengeni_workspace_filesystem>` history item written before the turn that first sees a new layout, and `sandbox_swap` returns the new `workspaceRoot`, so the provider's prompt cache survives a swap.
+- Updated dependencies [e75ea20]
+- Updated dependencies [c2fe398]
+- Updated dependencies [a0fb1c6]
+- Updated dependencies [5fb457f]
+- Updated dependencies [d07d727]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [ea21b19]
+- Updated dependencies [443b97b]
+- Updated dependencies [4fdd778]
+- Updated dependencies [46d677b]
+- Updated dependencies [9ca567a]
+- Updated dependencies [8e1f06d]
+  - @opengeni/db@6.30.2
+  - @opengeni/contracts@6.30.2
+  - @opengeni/runtime@6.30.2
+  - @opengeni/core@6.30.2
+  - @opengeni/sdk@6.30.2
+  - @opengeni/network@6.30.2
+  - @opengeni/codex@6.30.2
+  - @opengeni/documents@6.30.2
+  - @opengeni/events@6.30.2
+  - @opengeni/capabilities@6.30.2
+  - @opengeni/codemode@6.30.2
+  - @opengeni/config@6.30.2
+  - @opengeni/decisions@6.30.2
+  - @opengeni/github@6.30.2
+  - @opengeni/interaction@6.30.2
+  - @opengeni/observability@6.30.2
+  - @opengeni/storage@6.30.2
+  - @opengeni/tool-gateway@6.30.2
+  - @opengeni/vaults@6.30.2
+  - @opengeni/vaults-bitwarden@6.30.2
+  - @opengeni/vaults-keeper@6.30.2
+  - @opengeni/vaults-onepassword@6.30.2
+  - @opengeni/vaults-protonpass@6.30.2
+  - @opengeni/xai-subscription@6.30.2
+  - @opengeni/jev@6.30.2
+  - @opengeni/agent-proto@6.30.2
+  - @opengeni/subscriptions@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes

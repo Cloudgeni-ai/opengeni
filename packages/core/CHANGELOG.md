@@ -1,5 +1,48 @@
 # @opengeni/core
 
+## 6.30.2
+
+### Patch Changes
+
+- 047b487: A configured agent now always gets `goal_resume` and the goals sentence that names it. Before, both appeared only once the session had a goal, so a session's first goal changed the tool list and system prompt under every earlier request and the next turn re-read the whole history uncached.
+- cafa73f: Your own connector login now has one switch per workspace. Turning it on in "Where it works" for a workspace that hasn't turned that connector on also turns the connector on there, for each person's own account. This happens in the same request, as the connect card's "Use it here" does it. Where only an admin may turn the connector on, nothing changes: the request is refused with `details.code` `own_login_connector_needs_admin`, and the row says an admin has to turn it on. Turning a login off never turns its connector off.
+
+  Each reach row carries an optional `connectorOff` flag. A login that is on where its connector isn't (for example a standing grant) reads as off, with a line saying the switch turns the connector on too. My things doesn't count such a workspace as one where the login works.
+
+  The OAuth connect card now offers your one own login first, as "Use my <service> here", without asking "Who can use this connection?". Connecting a new account for everyone stays a secondary choice.
+
+- 890c910: Moving a session to another machine no longer rewrites the system prompt. The workspace root and filesystem layout reach the model as a `<opengeni_workspace_filesystem>` history item written before the turn that first sees a new layout, and `sandbox_swap` returns the new `workspaceRoot`, so the provider's prompt cache survives a swap.
+- ea21b19: A session create that the server refuses while starting its first turn (for example a personal-resource attachment that selects no personal Rig or Connected Machine) no longer leaves an idle, usable session behind when it carried an `idempotencyKey`. The refused session and its key are released, so retrying the same request gets the same refusal and a corrected request can reuse both the key and its `requestedSessionId`. Migration 1501 adds the database function this needs without granting it to the runtime yet; until a later release grants it, a refused keyed create keeps its session as before.
+- Updated dependencies [e75ea20]
+- Updated dependencies [c2fe398]
+- Updated dependencies [a0fb1c6]
+- Updated dependencies [5fb457f]
+- Updated dependencies [d07d727]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [ea21b19]
+- Updated dependencies [443b97b]
+- Updated dependencies [4fdd778]
+- Updated dependencies [46d677b]
+- Updated dependencies [9ca567a]
+- Updated dependencies [8e1f06d]
+  - @opengeni/db@6.30.2
+  - @opengeni/contracts@6.30.2
+  - @opengeni/runtime@6.30.2
+  - @opengeni/network@6.30.2
+  - @opengeni/codex@6.30.2
+  - @opengeni/documents@6.30.2
+  - @opengeni/events@6.30.2
+  - @opengeni/capabilities@6.30.2
+  - @opengeni/config@6.30.2
+  - @opengeni/observability@6.30.2
+  - @opengeni/storage@6.30.2
+  - @opengeni/tool-gateway@6.30.2
+  - @opengeni/vaults@6.30.2
+  - @opengeni/xai-subscription@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes

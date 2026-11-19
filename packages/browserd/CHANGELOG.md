@@ -1,5 +1,21 @@
 # @opengeni/browserd
 
+## 0.4.49
+
+### Patch Changes
+
+- fd0f13f: A computer-use window read that asks only for what changed since an earlier read (`since`), with structured elements (`tree_format` "elements" or "both"), no longer fails with "internal typed output mismatch … returned_element_count does not match elements". The pinned CUA driver trimmed the elements to the changed rows but kept the full read's count, so the typed output check rejected the response and the agent got an unknown outcome on a plain read. The count now follows the rows returned.
+- fd0f13f: Typing into iPhone Mirroring on macOS now arrives as the intended text. iPhone Mirroring passes each key event's key code on to the phone and ignores the text a synthetic event carries, so typed text arrived as "aaaa" and a code typed into a field left it empty. The pinned CUA driver now sends it the physical keys for each character, as it already did for Screen Sharing and the iOS Simulator.
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+  - @opengeni/contracts@6.30.2
+  - @opengeni/interaction@6.30.2
+
 ## 0.4.48
 
 ### Patch Changes
