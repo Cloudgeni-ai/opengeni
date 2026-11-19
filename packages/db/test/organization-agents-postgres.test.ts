@@ -585,8 +585,12 @@ describe("organization agents: versions and publishing", () => {
         latencyMode: "standard" as const,
         sandboxBackend: "none",
       });
-      await shared.admin`update sessions set agent_id = ${agent.id}, agent_version = 1,
-        agent_prompt_version = 1, created_by_subject_id = ${subjectId} where id = ${session.id}`;
+      // The creator is immutable for the runtime; the fixture sets it directly.
+      await shared.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`update sessions set agent_id = ${agent.id}, agent_version = 1,
+          agent_prompt_version = 1, created_by_subject_id = ${subjectId} where id = ${session.id}`;
+      });
       return session.id;
     };
     const named = await chat(identity.subjectId);
