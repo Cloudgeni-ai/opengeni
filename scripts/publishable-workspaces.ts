@@ -18,7 +18,7 @@ type DepField = (typeof ALL_DEP_FIELDS)[number];
 /** The one unscoped npm name Opengeni publishes: the `opengeni` CLI. */
 export const OPENGENI_CLI_PACKAGE_NAME = "opengeni";
 
-const scopedPackageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9._-]*$/u;
+const scopedPackageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9-]*$/u;
 
 /**
  * Whether `name` is an npm name Opengeni publishes: an `@opengeni/*` package or
@@ -46,6 +46,20 @@ export function publishedPackageOfSpecifier(specifier: string): string | null {
 /** File stem npm uses for a package's tarball: the name without its scope. */
 export function npmTarballStem(name: string): string {
   return name.startsWith("@") ? name.slice(name.indexOf("/") + 1) : name;
+}
+
+/**
+ * The order a release publishes packages in: the unscoped `opengeni` CLI first,
+ * then the given (dependency) order. It is the only name outside the
+ * `@opengeni` scope, so an npm token limited to that scope fails on it before
+ * any other package is published, and the release can simply be rerun once
+ * the token is fixed.
+ */
+export function publicationOrder<T extends { name: string }>(packages: readonly T[]): T[] {
+  return [
+    ...packages.filter((pkg) => pkg.name === OPENGENI_CLI_PACKAGE_NAME),
+    ...packages.filter((pkg) => pkg.name !== OPENGENI_CLI_PACKAGE_NAME),
+  ];
 }
 
 export type PackageJson = Record<string, unknown> & {

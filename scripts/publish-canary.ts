@@ -31,6 +31,7 @@ import { lockstepCanaryBase, retiredVersionSet } from "./release/lockstep-versio
 import {
   isPublishedPackageName,
   publishableWorkspacePackages,
+  publicationOrder,
   repoRoot,
   topologicallySortedPackages,
   type WorkspacePackage,
@@ -1036,7 +1037,9 @@ export async function main(): Promise<void> {
     runId: process.env.GITHUB_RUN_ID!,
     attempt: process.env.GITHUB_RUN_ATTEMPT!,
   });
-  const packages = topologicallySortedPackages(publishableWorkspacePackages());
+  // Publishes (and records the cohort) in this order; sourceCohort in
+  // canary-reconciliation-inputs must compute the same one.
+  const packages = publicationOrder(topologicallySortedPackages(publishableWorkspacePackages()));
   const config = JSON.parse(readFileSync(join(repoRoot, ".changeset/config.json"), "utf8")) as {
     fixed?: string[][];
   };

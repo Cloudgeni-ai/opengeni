@@ -681,9 +681,9 @@ describe("immutable origin receipts and archives", () => {
     ] as const)
       files.set(path, bytes(manifest));
     expect(sourceCohort(files).map((p) => p.name)).toEqual([
+      "opengeni",
       "@opengeni/z",
       "@opengeni/a",
-      "opengeni",
     ]);
   });
 });

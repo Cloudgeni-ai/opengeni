@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 
 import {
   publishableWorkspacePackages,
+  publicationOrder,
   topologicallySortedPackages,
 } from "./publishable-workspaces";
 import { sharedLockstepVersion } from "./release/lockstep-version";
@@ -26,7 +27,7 @@ function published(name: string, version: string): boolean {
 
 export function main(): void {
   if (!process.env.NODE_AUTH_TOKEN) throw new Error("NODE_AUTH_TOKEN is required");
-  const packages = topologicallySortedPackages(publishableWorkspacePackages());
+  const packages = publicationOrder(topologicallySortedPackages(publishableWorkspacePackages()));
   const version = sharedLockstepVersion(packages);
   process.stdout.write(`Publishing ${packages.length} packages at ${version} as latest\n`);
   run("bun", ["run", "build:packages"]);

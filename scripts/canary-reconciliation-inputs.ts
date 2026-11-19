@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { gunzipSync, inflateRawSync } from "node:zlib";
-import { isPublishedPackageName } from "./publishable-workspaces";
+import { isPublishedPackageName, publicationOrder } from "./publishable-workspaces";
 
 export const REPOSITORY = "Cloudgeni-ai/opengeni";
 export const REPOSITORY_URL = `https://github.com/${REPOSITORY}`;
@@ -122,7 +122,8 @@ export function sourceCohort(files: ReadonlyMap<string, Buffer>): SourcePackage[
     ordered.push(pkg);
   };
   for (const pkg of selected) visit(pkg);
-  return ordered;
+  // The publisher's order (publish-canary): dependency order, unscoped CLI first.
+  return publicationOrder(ordered);
 }
 
 function crc32(bytes: Buffer): number {

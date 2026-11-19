@@ -52,6 +52,12 @@ bun scripts/rewrite-workspace-deps.ts --strip-dev-dependencies
 # committed; run with `--restore` locally to undo it.
 bun scripts/rewrite-entry-points.ts
 
+# Publish the unscoped `opengeni` CLI first: `changeset publish` below runs in
+# no fixed order, and the CLI is the only package outside the @opengeni scope.
+# A token that cannot write it then fails here, before any @opengeni package is
+# published, and the release can be rerun once the token is fixed.
+bun scripts/publish-unscoped-first.ts
+
 # changeset publish reads publishConfig (access: public, provenance: true) from
 # each package and runs `npm publish` with provenance under the hood. Keep npm
 # only as the provenance-capable registry transport; Bun owns CLI execution.
