@@ -4,7 +4,8 @@ Opengeni Console is the administration surface for organizations that embed
 Opengeni in their own product. Organization owners and admins use it to read
 what their product's end users asked and what the agent answered, see the
 metered cost, create organization API keys and choose how much of their end
-users' sessions they review. It is served by the web app under `/console`
+users' sessions they review; members they give a Console role (see
+[Roles](#roles)) read or edit within it. It is served by the web app under `/console`
 with the app's account, sign-in and organization switcher, and has no chat
 sidebar.
 
@@ -122,12 +123,13 @@ The main app shows managed workspaces exactly as before.
 
 | Reader | Allowed |
 | --- | --- |
-| Organization owner or admin (a person, `holdsOrganizationAdministration`) | Console, under the review level |
-| Organization member | Nothing in Console |
+| Organization owner or admin (a person, `holdsOrganizationAdministration`) | All of Console, under the review level |
+| Organization member with a Console role, signed in as themselves | Their role's pages (see [Roles](#roles)), under the review level |
+| Organization member without a Console role | Nothing in Console (`403`) |
 | Any API key, including a full organization key | Nothing in Console (`403`) |
 | A product's end user (`external_user:`) | Nothing in Console (`403`) |
 
-Within Console, for an owner or admin:
+Within Console, for an owner, admin, Viewer or Editor:
 
 | Session | Managed workspace | Team workspace |
 | --- | --- | --- |
@@ -158,6 +160,44 @@ An organization setting, `organization_session_review_settings`:
 - `off`: no session list or detail (`403`); Overview, Workspaces, Usage and
   API keys still work.
 
+## Roles
+
+Console roles are separate from app workspace roles: a Console role never
+gives access to an app workspace, and a workspace role never gives access to
+Console.
+
+| Role | Who | Console |
+| --- | --- | --- |
+| Full | Organization owners and admins, always | Everything. Switching an agent between code and Console management is owner-only |
+| Editor | A member given it | Viewer, plus creating and editing agents, test chats, and publishing or rolling back Console-managed agents (also moving running chats) |
+| Viewer | A member given it | Overview, Workspaces, Sessions with their detail and transcripts (under the review level) and cost, and Agents, versions, tool servers and an agent's sessions and usage, read-only |
+| None | Every other member (default) | Nothing (`403`) |
+
+Full only: marking workspaces managed or team, Settings (review level, audit
+log), API keys, Members, Usage and billing, the organization name, tool server
+writes (they hold shared keys), end users' tool logins, code deploys
+(`apply`), an agent's workspaces and archiving. Editors can't create an agent
+for specific workspaces or edit a code-managed one. Refusals are `403` with
+`details.code: "console_role_required"`.
+
+An owner or admin sets a member's role on Console's Members page, or chooses
+one when inviting (`consoleRole` on `POST /v1/organizations/:id/invitations`,
+`none`, `viewer` or `editor`; refused for owner and admin invitations); a
+Console-only invitee gets no workspace access. The invitation's role becomes
+the member's when they accept. Changing a member's organization role or
+offboarding them resets their Console role to none. An Editor who runs test
+chats becomes a member of the organization's Console test workspace; that
+membership is removed when they stop being Editor. The app's People page
+shows "Console: Viewer" or "Console: Editor" next to such members.
+
+Roles are stored in `organization_console_roles` (migration 1508, one row
+per member or pending invitation, FORCE RLS on the account; the runtime may
+read, insert and update, never delete). Only a person signed in as themselves
+(not an API key, an end user, or an agent acting for a person) holds a
+Console role (`holdsOrganizationMemberConsoleStanding`). Every role change is
+audited as `member.console_role_changed`, and a Viewer's or Editor's session
+reads are audited exactly as an admin's.
+
 ## Audit log
 
 Every session detail open writes `session.transcript_viewed` (full) or
@@ -165,7 +205,8 @@ Every session detail open writes `session.transcript_viewed` (full) or
 before the response is returned; a transcript events read writes
 `session.transcript_viewed` too, unless the same reader already has one for that
 session from the last ten minutes, with the reader, workspace, session and end
-user. Review level changes and workspace kind changes are also logged. The
+user. Review level changes, workspace kind changes and Console role changes
+are also logged. The
 runtime role may only insert and read the log. Owners and admins read it in
 Console Settings.
 
@@ -218,6 +259,9 @@ Those routes answer 404 while the flag is off, which is how Console knows.
 - A code-managed agent opens read-only. An owner can switch it to Console
   management (audited); code deploys of it are refused afterwards.
 
+Viewers see these pages read-only, and Editors can't edit tool servers (see
+[Roles](#roles)).
+
 **Tool servers** lists the organization's MCP servers (name, key, URL, login:
 each user's login, a shared key, or none). Shared key headers and an OAuth
 client secret are write-only. Each server shows the tools it offers now.
@@ -242,6 +286,8 @@ mirrored by `@opengeni/sdk` methods. Contracts: `packages/contracts/src/console.
 | `GET` / `PUT settings` `{ reviewLevel }` | `getConsoleSettings` / `updateConsoleSettings` |
 | `GET audit-log?limit&cursor&sessionId` | `listConsoleAuditLog` |
 | `GET api-keys?range` | `getConsoleApiKeyUsage` |
+| `GET access` (the caller's Console role: `full`, `editor`, `viewer` or `none`) | none yet (`requestJson`) |
+| `GET member-roles`, `PUT member-roles` `{ subjectId \| invitationId, role }` (owners and admins) | none yet (`requestJson`) |
 
 Keys are created and revoked with the ordinary organization API-key routes
 (`createOrganizationApiKey`, `deleteOrganizationApiKey`).

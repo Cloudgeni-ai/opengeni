@@ -769,7 +769,8 @@ First-sign-in onboarding and invitation precedence remain a separate one-shot
 path.
 
 Opengeni Console (`/console`, `apps/api/src/routes/console.ts`) gives
-organization owners and admins, never API keys or external users, read-only
+organization owners and admins, and members with a Console role (Viewer or
+Editor, `apps/api/src/routes/console-roles.ts`), never API keys or external users, read-only
 review of sessions in workspaces the product manages
 (`organization_managed_workspaces`): shared sessions and private sessions of
 `external_user:` owners, never an Opengeni account's private chat. The review
