@@ -32,6 +32,10 @@ const ORGANIZATION_SCOPES = new Set<string>([
   "billing:read",
   "billing:manage",
   "usage_allowances:manage",
+  // Console agents: used only through organization keys.
+  "agents:read",
+  "agents:manage",
+  "tool_credentials:write",
 ]);
 
 /** Old names still accepted by the API; never offered, but labelled on old keys. */
