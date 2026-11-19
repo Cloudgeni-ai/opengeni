@@ -23,6 +23,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
+import { HTTPException } from "hono/http-exception";
 import postgres from "postgres";
 import type { ApiRouteDeps } from "../src";
 import type { AccessGrantAuthorization } from "../src/access";
@@ -166,6 +167,24 @@ async function refusal(promise: Promise<unknown>) {
 
 const PERSONAL = { status: 422, code: "personal_machine_not_allowed" };
 
+/**
+ * The machine a create got as far as attaching: these test machines are not
+ * connected, so the ordinary attach preflight (past every Runs on check) stops
+ * there and names the machine it was asked to use.
+ */
+async function attachedTo(promise: Promise<unknown>): Promise<string> {
+  const error = await promise.then(
+    () => null,
+    (caught: unknown) => caught,
+  );
+  if (!(error instanceof HTTPException) || error instanceof OrgAgentSessionCreateError) {
+    throw error ?? new Error("expected the offline machine's attach preflight to stop the create");
+  }
+  const match = /cannot target sandbox ([0-9a-f-]{36})/.exec(error.message);
+  if (!match) throw error;
+  return match[1]!;
+}
+
 describe("where an organization agent chat lands", () => {
   test("a chat's own machine must reach the workspace; then it is used", async () => {
     const org = await organization();
@@ -188,9 +207,9 @@ describe("where an organization agent chat lands", () => {
     });
 
     await reach(true);
-    const chat = await org.create({ agent: "helper", targetSandboxId: box.sandboxId });
-    expect(chat.activeSandboxId).toBe(box.sandboxId);
-    expect(chat.orgAgent?.key).toBe("helper");
+    expect(await attachedTo(org.create({ agent: "helper", targetSandboxId: box.sandboxId }))).toBe(
+      box.sandboxId,
+    );
   }, 180_000);
 
   test("a Personal machine named by the request is refused", async () => {
@@ -214,8 +233,7 @@ describe("where an organization agent chat lands", () => {
       values (${org.accountId}, ${org.home}, ${org.owner},
         ${JSON.stringify({ kind: "machine", targetSandboxId: laptop.sandboxId })}::text::jsonb)`;
     // Their ordinary chats start there.
-    const own = await org.create({});
-    expect(own.activeSandboxId).toBe(laptop.sandboxId);
+    expect(await attachedTo(org.create({}))).toBe(laptop.sandboxId);
     // An organization agent chat does not.
     const chat = await org.create({ agent: "helper" });
     expect(chat.activeSandboxId).toBeNull();
@@ -226,8 +244,12 @@ describe("where an organization agent chat lands", () => {
     const org = await organization();
     await org.agent("helper");
     const laptop = await org.machine("user", org.home, "My laptop");
-    const parent = await org.create({ targetSandboxId: laptop.sandboxId });
-    expect(parent.activeSandboxId).toBe(laptop.sandboxId);
+    // The parent chat runs on the person's laptop (its connection is not
+    // part of this test, so the route is written directly).
+    const parent = await org.create({ sandboxBackend: "none" });
+    await shared.admin`update sessions set sandbox_backend = 'selfhosted',
+        active_sandbox_id = ${laptop.sandboxId}
+      where id = ${parent.id}`;
     const fromParent: AccessGrant = {
       ...org.grant,
       metadata: { ...org.grant.metadata, sessionId: parent.id },
@@ -254,8 +276,7 @@ describe("where an organization agent chat lands", () => {
     await org.agent("by-name", { runsOn: { kind: "machine", machine: "Build box" } });
     await org.machine("organization", org.home, "Build box");
     // Saved by id: still the first machine.
-    const chat = await org.create({ agent: "on-box" });
-    expect(chat.activeSandboxId).toBe(box.sandboxId);
+    expect(await attachedTo(org.create({ agent: "on-box" }))).toBe(box.sandboxId);
     // A version saved before ids were kept resolves the name and finds two.
     expect(await refusal(org.create({ agent: "by-name" }))).toEqual({
       status: 422,
