@@ -5,7 +5,7 @@
 import { t } from "./console-text";
 import { creatorIdentityKey, creatorType, machineCreatorLabel } from "./creator-initials";
 import { formatWaitingSince } from "./format";
-import { awaitsPerson } from "./needs-you";
+import { awaitingPersonSince, awaitsPerson } from "./needs-you";
 import { failureHandledByAgent, needsFailureReview } from "./session-failure";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
@@ -166,7 +166,7 @@ function ownRailStatusCounts(
     total: 1,
     sendFailed: localDeliveryAttention.get(session.id) ?? 0,
     attention: awaitsPerson(session) ? 1 : 0,
-    attentionSince: awaitsPerson(session) ? (session.requiresActionSince ?? null) : null,
+    attentionSince: awaitsPerson(session) ? awaitingPersonSince(session) : null,
     // Failed is a review signal in the rail, not a permanent copy of the
     // lifecycle badge. Opening the session acknowledges the failure together
     // with the unread frontier; a failure its parent agent consumed is that
