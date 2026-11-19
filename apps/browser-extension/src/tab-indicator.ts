@@ -60,6 +60,9 @@ export class TabIndicator {
   // Tabs whose mark this run took away: a page kept in the back-forward cache
   // still has it and may come back.
   private readonly unmarked = new Set<number>();
+  // Released tabs whose page has not run the script yet (a dialog is open):
+  // still recorded, and cleared on their next page or by the next run.
+  private readonly releasing = new Set<number>();
   // Chrome never reuses a tab's ID.
   private readonly closedTabs = new Set<number>();
   private readonly releases = new Map<number, unknown>();
@@ -85,6 +88,7 @@ export class TabIndicator {
     return this.run(tabId, async () => {
       if (this.closedTabs.has(tabId)) return;
       this.unmarked.delete(tabId);
+      this.releasing.delete(tabId);
       if (!this.marked.has(tabId)) {
         this.marked.add(tabId);
         this.changed();
@@ -96,9 +100,11 @@ export class TabIndicator {
   /** A new page committed in the tab (webNavigation.onCommitted, top frame),
    * possibly one restored from the back-forward cache. */
   navigated(tabId: number): Promise<void> {
-    if (!this.marked.has(tabId) && !this.unmarked.has(tabId)) return Promise.resolve();
+    if (!this.marked.has(tabId) && !this.unmarked.has(tabId) && !this.releasing.has(tabId))
+      return Promise.resolve();
     return this.run(tabId, async () => {
       if (this.marked.has(tabId)) await this.mark(tabId);
+      else if (this.releasing.has(tabId)) await this.unmarkAndRecord(tabId);
       else if (this.unmarked.has(tabId)) await this.unmark(tabId);
     });
   }
@@ -120,13 +126,9 @@ export class TabIndicator {
   releaseNow(tabId: number): Promise<void> {
     this.cancelRelease(tabId);
     return this.run(tabId, async () => {
-      if (!this.marked.has(tabId)) return;
-      await this.unmark(tabId);
-      // Recorded only once done, so a run that ends meanwhile leaves the tab
-      // to the next one.
-      this.marked.delete(tabId);
-      this.unmarked.add(tabId);
-      this.changed();
+      if (!this.marked.delete(tabId)) return;
+      this.releasing.add(tabId);
+      await this.unmarkAndRecord(tabId);
     });
   }
 
@@ -135,7 +137,8 @@ export class TabIndicator {
     this.cancelRelease(tabId);
     this.closedTabs.add(tabId);
     this.unmarked.delete(tabId);
-    if (this.marked.delete(tabId)) this.changed();
+    const wasReleasing = this.releasing.delete(tabId);
+    if (this.marked.delete(tabId) || wasReleasing) this.changed();
     void this.run(tabId, async () => {
       this.queues.delete(tabId);
     });
@@ -165,7 +168,7 @@ export class TabIndicator {
   }
 
   state(): TabIndicatorState {
-    return { tabs: [...this.marked] };
+    return { tabs: [...this.marked, ...this.releasing] };
   }
 
   /** Resolves once every change asked for so far is done. */
@@ -183,34 +186,50 @@ export class TabIndicator {
     await this.inject(tabId, showMark, [icon]);
   }
 
-  private async unmark(tabId: number): Promise<void> {
-    await this.inject(tabId, removeMark, []);
+  /** Takes a releasing tab's mark away. It stays recorded until that is done,
+   * so a run that ends meanwhile leaves the tab to the next one. */
+  private async unmarkAndRecord(tabId: number): Promise<void> {
+    if ((await this.unmark(tabId)) === "timeout" || !this.releasing.delete(tabId)) return;
+    this.unmarked.add(tabId);
+    this.changed();
   }
 
+  private unmark(tabId: number): Promise<"done" | "timeout"> {
+    return this.inject(tabId, removeMark, []);
+  }
+
+  /** "done" also when Chrome refused: a closed tab, or a page no extension
+   * may script, has nothing to undo. */
   private async inject(
     tabId: number,
     func: (...args: never[]) => unknown,
     args: unknown[],
-  ): Promise<void> {
+  ): Promise<"done" | "timeout"> {
     let timer: unknown;
-    const timedOut = new Promise<void>((resolve) => {
-      timer = this.schedule(resolve, this.options.injectTimeoutMs ?? INJECT_TIMEOUT_MS);
+    const timedOut = new Promise<"timeout">((resolve) => {
+      timer = this.schedule(
+        () => resolve("timeout"),
+        this.options.injectTimeoutMs ?? INJECT_TIMEOUT_MS,
+      );
     });
     try {
-      await Promise.race([
-        this.chrome.scripting.executeScript({
-          target: { tabId },
-          // The page's scripts cannot see or undo it there.
-          world: "ISOLATED",
-          // At once: a new page gets the mark before it has loaded.
-          injectImmediately: true,
-          func,
-          args,
-        }),
+      return await Promise.race([
+        this.chrome.scripting
+          .executeScript({
+            target: { tabId },
+            // The page's scripts cannot see or undo it there.
+            world: "ISOLATED",
+            // At once: a new page gets the mark before it has loaded.
+            injectImmediately: true,
+            func,
+            args,
+          })
+          .then(() => "done" as const),
         timedOut,
       ]);
     } catch {
       // A closed tab, or a page Chrome lets no extension script.
+      return "done";
     } finally {
       this.cancel(timer);
     }
@@ -291,12 +310,14 @@ export function showMark(icon: string): void {
     if (state.link.parentNode !== head) head.append(state.link);
     if (state.link.getAttribute("href") !== state.icon) state.link.setAttribute("href", state.icon);
   };
+  const alive = () =>
+    Boolean((globalThis as { chrome?: { runtime?: { id?: string } } }).chrome?.runtime?.id);
   const touchesLinks = (records: MutationRecord[]) =>
     records.some((record) =>
       record.type === "attributes"
         ? record.target instanceof HTMLLinkElement
-        : [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)].some(
-            (node) => node.nodeName === "LINK" || node.nodeName === "HEAD",
+        : [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)].some((node) =>
+            ["LINK", "HEAD", "HTML"].includes(node.nodeName),
           ),
     );
   let state = scope.__opengeniMark;
@@ -308,7 +329,7 @@ export function showMark(icon: string): void {
     link.setAttribute(MARK, "");
     const observer = new MutationObserver((records) => {
       // The extension was reloaded or removed: its next run cleans up.
-      if (!(globalThis as { chrome?: { runtime?: { id?: string } } }).chrome?.runtime?.id) {
+      if (!alive()) {
         observer.disconnect();
         return;
       }
@@ -319,7 +340,8 @@ export function showMark(icon: string): void {
       if (current.repairs.length >= REPAIRS_PER_SECOND) {
         current.later ??= setTimeout(() => {
           current.later = undefined;
-          if (scope.__opengeniMark === current) ensure(current);
+          if (!alive()) observer.disconnect();
+          else if (scope.__opengeniMark === current) ensure(current);
         }, 1_000);
         return;
       }

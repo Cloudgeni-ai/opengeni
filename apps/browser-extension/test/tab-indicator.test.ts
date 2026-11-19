@@ -127,6 +127,34 @@ describe("the mark in a page", () => {
     expect(tab.document.head.innerHTML).toBe(before);
   });
 
+  test("a page that replaces its whole document element gets the mark back", async () => {
+    const tab = page(PAGE);
+    const extension = tab.world("abc");
+    extension.run(showMark, ICON);
+    await flush();
+    const html = tab.document.createElement("html");
+    html.innerHTML = `<head><link rel="icon" href="/next.png"></head><body></body>`;
+    tab.document.documentElement.remove();
+    tab.document.append(html);
+    await flush();
+    expect(tab.icons()).toEqual([ICON]);
+  });
+
+  test("a repair put off by the limit is dropped once the extension is reloaded", async () => {
+    const tab = page(PAGE);
+    const extension = tab.world("abc");
+    extension.run(showMark, ICON);
+    await flush();
+    const state = extension.scope.__opengeniMark as { repairs: number[] };
+    state.repairs = Array.from({ length: 10 }, () => Date.now());
+    // The page drops the mark; the repair waits for the limit.
+    tab.document.head.querySelector("link[data-opengeni-icon]")!.remove();
+    await flush();
+    (extension.scope.chrome as { runtime: { id?: string } }).runtime.id = undefined;
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(tab.document.head.querySelector("link[data-opengeni-icon]")).toBeNull();
+  });
+
   test("a page with no icon of its own goes back to having none", async () => {
     const tab = page("<html><head><title>Plain</title></head><body></body></html>");
     const extension = tab.world("abc");
@@ -227,6 +255,11 @@ function indicator(
   return {
     tabs: instance,
     calls,
+    /** Pending timers fire, without waiting for what they start. */
+    fire: async () => {
+      for (const run of timers.splice(0)) run();
+      await flush();
+    },
     /** The release delay passes. */
     elapse: async () => {
       for (const run of timers.splice(0)) run();
@@ -359,6 +392,23 @@ describe("the controlled tabs' icons", () => {
     expect(tabs.state()).toEqual({ tabs: [4] });
     open();
     await released;
+    expect(tabs.state()).toEqual({ tabs: [] });
+  });
+
+  test("a page that has not run the removal yet stays recorded, and its next page is cleared", async () => {
+    const stuck = new Promise<void>(() => {});
+    let blocked = true;
+    const { tabs, calls, fire } = indicator({
+      gate: (call) => (call === "removeMark 4" && blocked ? stuck : undefined),
+    });
+    await tabs.show(4);
+    tabs.release(4);
+    await fire(); // the release delay
+    await fire(); // the injection gives up
+    expect(tabs.state()).toEqual({ tabs: [4] });
+    blocked = false;
+    await tabs.navigated(4);
+    expect(calls).toEqual([`showMark 4 ${ICON}`, "removeMark 4"]);
     expect(tabs.state()).toEqual({ tabs: [] });
   });
 

@@ -197,14 +197,14 @@ async function resumeLiveState(): Promise<string> {
   } catch {
     // Without session storage this worker's state is all there is.
     currentStateGeneration = crypto.randomUUID();
-    void tabIndicator?.resume(recordedTabIndicator(), () => []);
+    void tabIndicator?.resume(recordedTabIndicator(), () => attachedDebuggerTabs.keys());
     return currentStateGeneration;
   }
   if (!stored) {
     currentStateGeneration = crypto.randomUUID();
     // The extension reloaded or updated (or Chrome restarted): no tab an
-    // earlier run marked is controlled now.
-    void tabIndicator?.resume(recordedTabIndicator(), () => []);
+    // earlier run marked is controlled now, unless attached since.
+    void tabIndicator?.resume(recordedTabIndicator(), () => attachedDebuggerTabs.keys());
     await recordLiveState();
     return currentStateGeneration;
   }

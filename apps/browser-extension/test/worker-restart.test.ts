@@ -40,6 +40,8 @@ class FakeChrome {
   readonly scripts: string[] = [];
   // The icon each showMark script set.
   readonly icons: unknown[] = [];
+  // Holds reads of the recorded marked tabs until it settles.
+  indicatorReads: Promise<void> = Promise.resolve();
   // Callbacks the worker scheduled after the controlled tab release delay.
   readonly releaseTimers: (() => void)[] = [];
   current: ReturnType<FakeChrome["startWorker"]> | null = null;
@@ -110,7 +112,10 @@ class FakeChrome {
       },
       storage: {
         local: {
-          get: async (key: string) => (key in profile.local ? { [key]: profile.local[key] } : {}),
+          get: async (key: string) => {
+            if (key === "tabIndicator") await profile.indicatorReads;
+            return key in profile.local ? { [key]: profile.local[key] } : {};
+          },
           set: async (value: object) => Object.assign(profile.local, value),
         },
         session: {
@@ -427,5 +432,20 @@ describe("the tabs an agent controls", () => {
     await chrome.reloadExtension().ready();
     await flush();
     expect(chrome.scripts.at(-1)).toBe("removeMark 9");
+  });
+
+  test("a tab the agent takes again while an updated extension starts keeps the mark", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    await command({ type: "debugger.attach", tabId: "9" });
+    await flush();
+    let read!: () => void;
+    chrome.indicatorReads = new Promise((resolve) => (read = resolve));
+    const updated = await chrome.reloadExtension().ready();
+    expect(await updated({ type: "debugger.attach", tabId: "9" })).toMatchObject({ ok: true });
+    read();
+    await flush();
+    expect(chrome.scripts.filter((script) => script.startsWith("removeMark"))).toEqual([]);
+    expect(chrome.scripts.at(-1)).toBe("showMark 9");
   });
 });
