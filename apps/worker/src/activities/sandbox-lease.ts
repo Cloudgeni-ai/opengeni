@@ -1457,6 +1457,7 @@ export function createSandboxLeaseActivities(
         forceDrained +=
           bounds.drained.compute_closed +
           bounds.drained.compute_daily_budget +
+          bounds.drained.compute_card_required +
           bounds.drained.compute_idle +
           bounds.drained.compute_turnless;
       } catch (error) {

@@ -12596,6 +12596,12 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
  * - `organizationsYoungerThanMs`: only for the `new` tier, which applies to a
  *   Free self-serve organization created less than this long
  *   ago. Omitted or 0 turns the `new` tier off.
+ * - `cardTrialBoxSeconds`: while the card verification gate is on, the
+ *   metered box time an unpaid organization without a verified card gets for
+ *   agent turns before it must add one, over its whole life (not per day).
+ *   One such box runs at a time; terminals, processes, desktops and viewers
+ *   still need the card to start a box. Once it is used the reaper drains
+ *   boxes no turn holds. Omitted or 0: no box without a card.
  */
 export type SandboxPlanLimit = {
   viewerOnlyBoxesPerOrganization?: number;
@@ -12606,6 +12612,7 @@ export type SandboxPlanLimit = {
   boxSecondsPerPersonPerDay?: number;
   idleDrainAllHolders?: boolean;
   organizationsYoungerThanMs?: number;
+  cardTrialBoxSeconds?: number;
 };
 
 /**
@@ -12638,18 +12645,25 @@ const SANDBOX_PLAN_LIMIT_COUNT_FIELDS = [
   "boxSecondsPerOrganizationPerDay",
   "boxSecondsPerPersonPerDay",
   "organizationsYoungerThanMs",
+  "cardTrialBoxSeconds",
 ] as const;
 
 /** 12 box-hours: the daily box-time budget of an unpaid organization and person. */
 const UNPAID_BOX_SECONDS_PER_DAY = 12 * 60 * 60;
 
-/** The running, per-person, daily and idle bounds every unpaid tier shares. */
+/** 10 box-minutes: what an unpaid organization's agent gets before a card is
+ * required, while the card verification gate is on. */
+const UNPAID_CARD_TRIAL_BOX_SECONDS = 10 * 60;
+
+/** The running, per-person, daily, idle and card-trial bounds every unpaid
+ * tier shares. */
 const UNPAID_SANDBOX_BOUNDS = {
   runningBoxesPerOrganization: 2,
   runningBoxesPerPerson: 2,
   boxSecondsPerOrganizationPerDay: UNPAID_BOX_SECONDS_PER_DAY,
   boxSecondsPerPersonPerDay: UNPAID_BOX_SECONDS_PER_DAY,
   idleDrainAllHolders: true,
+  cardTrialBoxSeconds: UNPAID_CARD_TRIAL_BOX_SECONDS,
 } as const satisfies SandboxPlanLimit;
 
 export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
@@ -12950,6 +12964,7 @@ export const UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS = [
   "boxSecondsPerOrganizationPerDay",
   "boxSecondsPerPersonPerDay",
   "idleDrainAllHolders",
+  "cardTrialBoxSeconds",
 ] as const satisfies readonly (keyof SandboxPlanLimit)[];
 
 /** `limit` for an organization that has paid: without the unpaid-only bounds. */

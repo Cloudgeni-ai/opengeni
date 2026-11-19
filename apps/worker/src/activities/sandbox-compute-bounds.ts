@@ -4,7 +4,10 @@
 // Admission refuses a new box, a join and a re-arm for an organization whose
 // plan allows no sandbox (`compute_closed`: a held or denied organization that
 // has not paid) or whose day's box time is used (`compute_daily_budget`), but
-// a box already warm stays warm for as long as something holds it. For an
+// a box already warm stays warm for as long as something holds it. The same
+// goes for an organization that still needs a verified card (card
+// verification gate) once its card trial box time is used
+// (`compute_card_required`). For an
 // organization on such a plan, each maintenance pass therefore drains every
 // warm box no turn holds, whatever else holds it (a terminal, a process, a
 // Browser/ComputerSession, a viewer). For a tier with `idleDrainAllHolders`
@@ -61,6 +64,9 @@ export type OrganizationComputeBounds = {
   /** A young unpaid organization that never started a turn and used the box
    * time it gets before one. */
   turnlessYoung?: boolean;
+  /** The card verification gate is on, the organization still needs a card
+   * and has no card trial box time left. */
+  cardBlocked?: boolean;
 };
 
 export type ComputeBoundsDrainDecision = {
@@ -107,6 +113,10 @@ export function planComputeBoundsDrains(
       drains.push({ lease, reason: "compute_daily_budget" });
       continue;
     }
+    if (organization.cardBlocked === true) {
+      drains.push({ lease, reason: "compute_card_required" });
+      continue;
+    }
     if (
       organization.turnlessYoung === true &&
       !lease.openSessionWork &&
@@ -143,7 +153,13 @@ export async function boundComputeBoundedWarmBoxes(
   const { db, settings, observability } = services;
   const result: ComputeBoundsResult = {
     inspected: 0,
-    drained: { compute_closed: 0, compute_daily_budget: 0, compute_idle: 0, compute_turnless: 0 },
+    drained: {
+      compute_closed: 0,
+      compute_daily_budget: 0,
+      compute_card_required: 0,
+      compute_idle: 0,
+      compute_turnless: 0,
+    },
   };
   const planLimits = sandboxPlanLimits(settings);
   const fleetLimits = sandboxFleetLimits(settings);
@@ -181,8 +197,14 @@ export async function boundComputeBoundedWarmBoxes(
           }) && !standing.paidHistory,
         createdAt: standing.organizationCreatedAt,
       });
-      if (!organizationHasComputeBounds(limit) && !turnlessYoung) return;
+      const unpaid =
+        sandboxPlanTierUnpaid(standing.tier, {
+          subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+        }) && !standing.paidHistory;
+      const cardBlocked = unpaid && (await organizationCardBlocked(services, accountId, planLimits));
+      if (!organizationHasComputeBounds(limit) && !turnlessYoung && !cardBlocked) return;
       organizations.set(accountId, {
+        cardBlocked,
         limit,
         boxSecondsToday:
           limit.boxSecondsPerOrganizationPerDay === undefined
@@ -271,6 +293,30 @@ export async function boundComputeBoundedWarmBoxes(
     },
   );
   return result;
+}
+
+/** Whether an unpaid organization still needs a verified card (the gate is
+ * on) and has no card trial box time left. A failed read leaves it to the
+ * next pass. */
+async function organizationCardBlocked(
+  services: Pick<ActivityServices, "db" | "settings" | "observability">,
+  accountId: string,
+  limits: ReturnType<typeof sandboxPlanLimits>,
+): Promise<boolean> {
+  let failed = false;
+  const standing = await resolveSandboxComputeStanding(services.db, {
+    accountId,
+    limits,
+    subscriptionPlansEnabled: services.settings.subscriptionPlansEnabled,
+    onFallback: (error) => {
+      failed = true;
+      services.observability.warn("sandbox reaper: card standing read failed for organization", {
+        accountId,
+        error: errorMessage(error),
+      });
+    },
+  });
+  return !failed && standing.cardRequired && !standing.cardTrial;
 }
 
 /** Whether an unpaid organization in its first day never started a turn

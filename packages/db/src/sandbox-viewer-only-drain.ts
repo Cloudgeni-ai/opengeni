@@ -328,6 +328,9 @@ export async function drainViewerOnlyLease(
 //   - compute_idle: nothing on it was used (a new request, process, browser
 //     or desktop session, reported viewer interaction, message or turn) for
 //     the idle window;
+//   - compute_card_required: the card verification gate is on, the
+//     organization still needs a card and its card trial box time (if its
+//     tier sets one) is used;
 //   - compute_turnless: an unpaid organization in its first day that never
 //     started a turn used the box time it gets before one, and nothing on
 //     the box was active for the turnless idle window. A box that still runs
@@ -344,6 +347,7 @@ export async function drainViewerOnlyLease(
 export type ComputeBoundsDrainReason =
   | "compute_closed"
   | "compute_daily_budget"
+  | "compute_card_required"
   | "compute_idle"
   | "compute_turnless";
 
