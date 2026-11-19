@@ -5990,6 +5990,10 @@ const STATIC_NEVER_APPROVAL: Extract<Tool<unknown>, { type: "function" }>["needs
 const APPLY_PATCH_EXAMPLE =
   "*** Begin Patch\n*** Add File: notes/example.txt\n+first line\n+second line\n*** End Patch";
 
+/** The `then` variant's example shows that one patch can change several files. */
+const APPLY_PATCH_WITH_THEN_EXAMPLE =
+  '*** Begin Patch\n*** Update File: src/app.py\n@@\n-greeting = "hi"\n+greeting = "hello"\n*** Add File: notes/example.txt\n+first line\n*** End Patch';
+
 const APPLY_PATCH_FILE_SECTIONS =
   'File sections: "*** Add File: <path>" followed by lines each prefixed with "+"; "*** Delete File: <path>"; "*** Update File: <path>" (optionally followed by "*** Move to: <path>") with "@@" hunks whose lines start with " " (context), "-" (remove), or "+" (add).';
 
@@ -6005,12 +6009,18 @@ const APPLY_PATCH_WITH_THEN_DESCRIPTION = [
   "Create, update, move, or delete files in the sandbox workspace.",
   'Pass `patch`: a single string in apply_patch format that starts with "*** Begin Patch" and ends with "*** End Patch".',
   APPLY_PATCH_FILE_SECTIONS,
-  `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })}`,
+  "One patch can change several files.",
+  `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_WITH_THEN_EXAMPLE })}`,
 ].join(" ");
 
 const APPLY_PATCH_PATCH_PARAMETER = {
   type: "string",
   description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_EXAMPLE)}`,
+} as const;
+
+const APPLY_PATCH_WITH_THEN_PATCH_PARAMETER = {
+  type: "string",
+  description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_WITH_THEN_EXAMPLE)}`,
 } as const;
 
 const APPLY_PATCH_PARAMETERS = {
@@ -6023,7 +6033,7 @@ const APPLY_PATCH_PARAMETERS = {
 
 const APPLY_PATCH_WITH_THEN_PARAMETERS = {
   type: "object",
-  properties: { patch: APPLY_PATCH_PATCH_PARAMETER, then: APPLY_PATCH_THEN_PARAMETER },
+  properties: { patch: APPLY_PATCH_WITH_THEN_PATCH_PARAMETER, then: APPLY_PATCH_THEN_PARAMETER },
   required: ["patch"],
   additionalProperties: true,
 } as const;

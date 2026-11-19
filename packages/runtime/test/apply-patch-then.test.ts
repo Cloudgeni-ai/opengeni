@@ -145,6 +145,29 @@ describe("apply_patch `then` arguments", () => {
     expect(Object.keys(off.parameters.properties ?? {})).toEqual(["patch"]);
     expect(off.description).toContain("Pass exactly one argument, `patch`");
   });
+
+  test("only the `then` variant shows a multi-file example", () => {
+    const { session } = fakeSession();
+    const multi = JSON.stringify(
+      '*** Begin Patch\n*** Update File: src/app.py\n@@\n-greeting = "hi"\n+greeting = "hello"\n*** Add File: notes/example.txt\n+first line\n*** End Patch',
+    );
+    const single = JSON.stringify(
+      "*** Begin Patch\n*** Add File: notes/example.txt\n+first line\n+second line\n*** End Patch",
+    );
+    const on = named(boundTools(session), "apply_patch");
+    expect(on.description).toContain('"+" (add). One patch can change several files. Example');
+    expect(on.description).toContain(multi);
+    expect(on.parameters.properties?.patch?.description).toContain(multi);
+
+    const off = named(
+      boundTools(session, testSettings({ experimentApplyPatchThen: false })),
+      "apply_patch",
+    );
+    expect(off.description).not.toContain("several files");
+    expect(off.description).toContain(single);
+    expect(off.parameters.properties?.patch?.description).toContain(single);
+    expect(JSON.stringify(off)).not.toContain("src/app.py");
+  });
 });
 
 describe("apply_patch `then` execution", () => {

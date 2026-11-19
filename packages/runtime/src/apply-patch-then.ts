@@ -37,7 +37,7 @@ type InvokeDetails = Parameters<Invoke>[2];
 
 /** Model-facing description of the `then` argument. */
 export const APPLY_PATCH_THEN_DESCRIPTION =
-  "Optional shell command to run after the patch applies, such as the check you'd run next. It runs like exec_command, and its exit code, wall time and output are returned with the patch result. It doesn't run if the patch fails.";
+  "Optional shell command, run like exec_command after the patch applies, such as the test or build you'd run right after this edit. Leave it out if you'll keep editing first. Its exit code, wall time and output are returned with the patch result. It doesn't run if the patch fails.";
 
 export const APPLY_PATCH_THEN_PARAMETER = {
   type: "string",
