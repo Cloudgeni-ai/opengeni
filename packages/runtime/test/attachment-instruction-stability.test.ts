@@ -14,6 +14,7 @@ import {
   agentPromptResourcesFor,
   buildOpenGeniAgent,
   manifestWithoutFileResourceEntries,
+  workspaceFilesystemLayout,
 } from "../src/index";
 
 const FILE_ID = "00000000-0000-4000-8000-0000000000f1";
@@ -62,8 +63,12 @@ const { prepareSandboxAgent } = (await import(
 async function sentInstructions(
   resources: ResourceRef[],
   sessionManifest?: Manifest,
+  placement: { activeSandboxBackend?: "selfhosted"; sandboxWorkspaceRoot?: string } = {},
 ): Promise<{ text: string; runtimeManifest: Manifest }> {
-  const agent = buildOpenGeniAgent(settings, resources, { agentConfig }) as unknown as {
+  const agent = buildOpenGeniAgent(settings, resources, {
+    agentConfig,
+    ...placement,
+  }) as unknown as {
     defaultManifest: Manifest;
   };
   const prepared = prepareSandboxAgent({
@@ -85,11 +90,48 @@ describe("file attachments and the cached instruction prefix", () => {
     expect(withFile.text).not.toContain(FILE_ID);
     expect(withFile.text).not.toContain("# Sandbox remote mount policy");
     expect(withFile.text).not.toContain("# Attached files");
-    // Session-level entries are still described.
-    expect(withFile.text).toContain("# Filesystem");
-    expect(withFile.text).toContain("repos/");
+    // Session-level entries are still described, in the layout history item.
+    expect(workspaceFilesystemLayout(settings, [REPOSITORY, FILE])).toBe(
+      workspaceFilesystemLayout(settings, [REPOSITORY]),
+    );
+    expect(workspaceFilesystemLayout(settings, [REPOSITORY, FILE])).toContain("repos/");
+    expect(workspaceFilesystemLayout(settings, [REPOSITORY, FILE])).not.toContain(FILE_ID);
     // The file is still delivered through the manifest the session applies.
     expect(Object.keys(withFile.runtimeManifest.entries)).toContain(`.opengeni/files/${FILE_ID}`);
+  });
+
+  test("moving the session to another machine keeps the instructions; only the layout changes", async () => {
+    const managed = await sentInstructions([REPOSITORY]);
+    const linux = await sentInstructions([REPOSITORY], undefined, {
+      activeSandboxBackend: "selfhosted",
+      sandboxWorkspaceRoot: "/home/user",
+    });
+    const mac = await sentInstructions([REPOSITORY], undefined, {
+      activeSandboxBackend: "selfhosted",
+      sandboxWorkspaceRoot: "/Users/user",
+    });
+    // Machines differ only by their root, which is no longer in the prompt.
+    expect(mac.text).toBe(linux.text);
+    expect(linux.text).not.toContain("/home/user");
+    for (const sent of [managed, linux]) {
+      expect(sent.text).not.toContain("The filesystem layout is");
+      expect(sent.text).toContain("<opengeni_workspace_filesystem>");
+    }
+    expect(linux.runtimeManifest.root).toBe("/home/user");
+
+    expect(workspaceFilesystemLayout(settings, [REPOSITORY])).toStartWith("/workspace");
+    expect(
+      workspaceFilesystemLayout(settings, [REPOSITORY], {
+        activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/home/user",
+      }),
+    ).toBe("/home/user");
+    expect(
+      workspaceFilesystemLayout(settings, [REPOSITORY], { activeSandboxBackend: "selfhosted" }),
+    ).toBeNull();
+    expect(workspaceFilesystemLayout({ ...settings, sandboxBackend: "none" }, [REPOSITORY])).toBe(
+      null,
+    );
   });
 
   test("files from earlier turns in a resumed sandbox's manifest stay out too", async () => {

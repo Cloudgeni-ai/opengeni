@@ -40,13 +40,18 @@ test("rendered alerts distinguish repeated crashes and overlapping loss evidence
     all.find((rule: any) => rule.alert === "OpenGeniNodeContainerRuntimeErrors").labels.severity,
   ).toBe("warning");
   const byName = new Map<string, any>(rules.map((rule: any) => [rule.alert, rule]));
-  const worker = (pod: string, values: string, instance = "ksm-a"): Input[] => [
+  const worker = (
+    pod: string,
+    values: string,
+    instance = "ksm-a",
+    component = "worker-turns",
+  ): Input[] => [
     {
       series: `kube_pod_container_status_restarts_total{namespace="fixture",pod="${pod}",container="worker",instance="${instance}"}`,
       values,
     },
     {
-      series: `kube_pod_labels{namespace="fixture",pod="${pod}",label_app_kubernetes_io_instance="fixture",label_app_kubernetes_io_component="worker-turns",instance="${instance}"}`,
+      series: `kube_pod_labels{namespace="fixture",pod="${pod}",label_app_kubernetes_io_instance="fixture",label_app_kubernetes_io_component="${component}",instance="${instance}"}`,
       values: "1+0x30",
     },
   ];
@@ -115,6 +120,10 @@ test("rendered alerts distinguish repeated crashes and overlapping loss evidence
     "two observed restarts on one pod remain critical",
     worker("worker-a", "0+0x3 1+0x3 2+0x23"),
     { alert: crash, value: 2, pod: "worker-a" },
+  );
+  scenario(
+    "repeated restarts of a non-turn worker are not a turn-worker crash loop",
+    worker("control-a", "0+0x3 1+0x3 2+0x23", "ksm-a", "worker-control"),
   );
   scenario("duplicate kube-state-metrics replicas do not double restart counts", [
     ...worker("worker-a", "0+0x5 1+0x25"),

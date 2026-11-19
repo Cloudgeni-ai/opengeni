@@ -60,10 +60,15 @@ const RUNTIME_TOOLS = [
   "set_session_title",
   "wait_for_input",
 ];
-// A "none" create request leaves notifications off: only the turn mechanics remain.
-const NONE_RUNTIME_TOOLS = RUNTIME_TOOLS.filter(
-  (tool) => !["call_user", "inbox_tidy", "notification_withdraw", "notify_user"].includes(tool),
-);
+// A "none" create request leaves notifications off: only the turn mechanics
+// remain. Like wait_for_input, the stored selection keeps the derived Connect
+// card tool, which each turn gates (here off: no connectors, no admin).
+const NONE_RUNTIME_TOOLS = [
+  "capability_authorization_request",
+  ...RUNTIME_TOOLS.filter(
+    (tool) => !["call_user", "inbox_tidy", "notification_withdraw", "notify_user"].includes(tool),
+  ),
+];
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -696,6 +701,7 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(names).toContain("request_human_input");
     expect(names).not.toContain("web_search");
     expect(names).not.toContain("list_models");
+    expect(names).not.toContain("capability_authorization_request");
   });
 
   test("typed 422s: goal conflict, instructions alias conflict", async () => {

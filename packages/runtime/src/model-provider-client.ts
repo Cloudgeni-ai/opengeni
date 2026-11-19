@@ -66,6 +66,7 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
+import { withCacheableSystemPrompt } from "./responses-system-prompt";
 import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
@@ -205,7 +206,7 @@ export function buildOpenAIClientFromSettings(
     {
       // Only the OpenAI platform; a compatible server keeps its own contract.
       modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
-        ? withStorelessResponses(chatModelRequestPolicy)
+        ? withCacheableSystemPrompt(withStorelessResponses(chatModelRequestPolicy))
         : chatModelRequestPolicy,
     },
   );
