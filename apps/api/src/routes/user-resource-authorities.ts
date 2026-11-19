@@ -22,6 +22,7 @@ import {
   nameOwnResources,
   OwnResourceAlwaysOnError,
   OwnResourceNotFoundError,
+  OwnLoginConnectorNeedsAdminError,
   ownResourceKey,
   requireAccessContext,
   requireAccessGrantAuthorization,
@@ -34,6 +35,7 @@ import {
   type ApiRouteDeps,
   type OwnResourceHere,
 } from "@opengeni/core";
+import { OWN_LOGIN_CONNECTOR_NEEDS_ADMIN_CODE } from "@opengeni/contracts/personal-integration-setup";
 import {
   getWorkspace,
   nestedPostgresSqlState,
@@ -42,6 +44,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { ApiHttpError } from "../http/api-error";
 import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
@@ -58,6 +61,14 @@ function lifecycleError(error: unknown): never {
   }
   if (error instanceof OwnResourceAlwaysOnError) {
     throw new HTTPException(422, { message: error.message });
+  }
+  if (error instanceof OwnLoginConnectorNeedsAdminError) {
+    throw new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.message,
+      retryable: false,
+      details: { code: OWN_LOGIN_CONNECTOR_NEEDS_ADMIN_CODE },
+    });
   }
   if (
     error instanceof SessionAuthorizationDeniedError ||

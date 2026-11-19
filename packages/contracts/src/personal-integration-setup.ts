@@ -9,6 +9,13 @@ import { integrationDefinitionIdFromCapabilityId } from "./integration-capabilit
 export const PERSONAL_INTEGRATION_SETUP_PERMISSION = "connections:personal" as const;
 
 /**
+ * `details.code` of the refusal to turn your own login on in a workspace
+ * that hasn't turned its connector on, where only an admin may turn it on.
+ * Its message says so in a person's words; nothing was changed.
+ */
+export const OWN_LOGIN_CONNECTOR_NEEDS_ADMIN_CODE = "own_login_connector_needs_admin" as const;
+
+/**
  * Adding integrations to a workspace: installing and removing plugins and API
  * integrations, adding custom MCP servers, turning on a catalog integration
  * that is not on yet, and configuring an installed integration's sources.

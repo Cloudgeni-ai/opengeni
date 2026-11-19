@@ -1,4 +1,5 @@
 import type {
+  ConnectionMetadata,
   IssueUserResourceGrantRequest,
   OwnResourceReachKind,
   Permission,
@@ -6,6 +7,8 @@ import type {
   UserResourceKind,
 } from "@opengeni/contracts";
 import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
+import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
+import type { Settings } from "@opengeni/config";
 import {
   isSubjectOwnPersonalWorkspace,
   issueSelfUserResourceGrant,
@@ -17,13 +20,22 @@ import {
   revokeSelfUserResourceGrant,
   type UserResourceAuthoritySummary,
 } from "@opengeni/db";
-import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import { HTTPException } from "hono/http-exception";
+import {
+  hasIntegrationAdminPermission,
+  hasIntegrationSetupPermission,
+  hasPermission,
+  requirePermission,
+  type AccessGrantAuthorization,
+} from "../access";
 import type { AppDependencies } from "../dependencies";
 import { releaseAdmissionBlocksAfterAccessChange } from "./admission-release";
+import { buildCapabilityCatalog, enableCapability } from "../domain/capabilities";
 import { listOwnConnectionMetadata } from "../domain/personal-connection-delegations";
 import {
   loginConnectorEndpoint,
   loginConnectorTurnedOn,
+  sameConnectorEndpoint,
 } from "../domain/personal-workspace-connectors";
 import { requireSessionAuthorization } from "../session-authorization";
 import {
@@ -33,6 +45,16 @@ import {
 
 type UserResourceGrantDependencies = Pick<AppDependencies, "db" | "sessionAuthorization"> & {
   workflowClient?: Pick<AppDependencies["workflowClient"], "requestSessionWorkflowWakeDispatch">;
+};
+
+/** Turning your own thing on may also turn a login's connector on here. */
+type OwnResourceSwitchDependencies = Pick<
+  UserResourceGrantDependencies,
+  "db" | "workflowClient"
+> & {
+  settings: Settings;
+  /** Where a connector's advertised icon is stored as its logo when it is turned on. */
+  objectStorage?: Pick<NonNullable<AppDependencies["objectStorage"]>, "putObject"> | null;
 };
 
 /** A new grant may be what a chat's saved message is waiting for. */
@@ -197,8 +219,9 @@ export type OwnResourceHere = {
   canChange: boolean;
   /**
    * A connector's login whose connector this shared workspace hasn't turned
-   * on: nothing here can use it until the connector is turned on, whether or
-   * not the login is on. Absent for anything else.
+   * on: nothing here can use it yet, whether or not the login is on. Turning
+   * the login on here turns the connector on too (see
+   * {@link setOwnResourceHere}). Absent for anything else.
    */
   connectorOff?: true;
 };
@@ -345,8 +368,8 @@ async function loginsWithConnectorOffHere(
   workspaceId: string,
   personal: boolean,
   connectionIds: ReadonlySet<string>,
-): Promise<Set<string>> {
-  const off = new Set<string>();
+): Promise<Map<string, ConnectionMetadata>> {
+  const off = new Map<string, ConnectionMetadata>();
   if (personal || connectionIds.size === 0) return off;
   let logins: Awaited<ReturnType<typeof listOwnConnectionMetadata>>;
   try {
@@ -367,9 +390,99 @@ async function loginsWithConnectorOffHere(
   if (logins.length === 0) return off;
   const servers = await listEnabledMcpCapabilityServers(deps.db, workspaceId);
   for (const login of logins) {
-    if (!loginConnectorTurnedOn(servers, login)) off.add(login.id);
+    if (!loginConnectorTurnedOn(servers, login)) off.set(login.id, login);
   }
   return off;
+}
+
+/**
+ * Turning your own login on in a workspace that hasn't turned its connector
+ * on needs the connector turned on there, which only an admin may do here.
+ * Nothing was changed: the login stays as it was.
+ */
+export class OwnLoginConnectorNeedsAdminError extends Error {
+  readonly name = "OwnLoginConnectorNeedsAdminError";
+  constructor(readonly connectorName: string | null) {
+    super(
+      connectorName
+        ? `Only an admin can turn ${connectorName} on in this workspace. Ask one to turn it on, then use your login here.`
+        : "Only an admin can add this connector to this workspace. Ask one to add it, then use your login here.",
+    );
+  }
+}
+
+/**
+ * Turn on, for each person's own account, the connector your login signs in
+ * to: the connect card's "Use it here", as the person may do it (an
+ * integration admin, a member who may add integrations, or the personal
+ * setup permission for a reviewed connector). The connector is this
+ * workspace's one catalog entry for the login's endpoint. A refusal changes
+ * nothing and says an admin has to turn it on.
+ */
+async function turnOnLoginConnectorHere(
+  deps: OwnResourceSwitchDependencies,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+  login: ConnectionMetadata,
+): Promise<void> {
+  const endpoint = loginConnectorEndpoint(login);
+  const { grant } = authorization;
+  const catalog = endpoint
+    ? await buildCapabilityCatalog({
+        db: deps.db,
+        workspaceId,
+        settings: deps.settings,
+        subjectId: grant.subjectId,
+        accountId: grant.accountId,
+      })
+    : { items: [] };
+  const connectors = catalog.items.filter((item) => {
+    const url = item.mcpUrl ?? item.endpointUrl;
+    return (
+      item.kind === "mcp" &&
+      item.authKind === "oauth2" &&
+      !!url &&
+      !!endpoint &&
+      sameConnectorEndpoint(url, endpoint)
+    );
+  });
+  if (connectors.length !== 1) throw new OwnLoginConnectorNeedsAdminError(null);
+  const connector = connectors[0]!;
+  // The same rights as turning it on from its card (the enable route).
+  const setup = hasIntegrationSetupPermission(grant);
+  if (
+    !setup &&
+    !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
+  )
+    throw new OwnLoginConnectorNeedsAdminError(connector.name);
+  try {
+    await enableCapability({
+      db: deps.db,
+      grant,
+      ...(setup ? {} : { personalSetup: true }),
+      ...(setup && !hasIntegrationAdminPermission(grant) ? { memberSetup: true } : {}),
+      accountId: grant.accountId,
+      workspaceId,
+      settings: deps.settings,
+      capabilityId: connector.id,
+      payload: {
+        connectionRef: {
+          providerDomain: login.providerDomain,
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+        config: {},
+        metadata: {},
+        headers: {},
+      },
+      mcpServerLogoStorage: deps.objectStorage ?? null,
+    });
+  } catch (error) {
+    // Not theirs to turn on (only admins may, or an admin turned it off).
+    if (error instanceof HTTPException && (error.status === 403 || error.status === 409))
+      throw new OwnLoginConnectorNeedsAdminError(connector.name);
+    throw error;
+  }
 }
 
 /**
@@ -611,9 +724,15 @@ export class OwnResourceAlwaysOnError extends Error {
  * this workspace. On is one standing grant (a machine gets one per chat
  * context, as connecting it does); off takes back every standing grant here.
  * Grants for one chat are left alone. Returns the new state.
+ *
+ * A login is one switch: where this workspace hasn't turned on the connector
+ * it signs in to, turning it on turns that connector on here too, for each
+ * person's own account, before the login (see
+ * {@link turnOnLoginConnectorHere}). Where only an admin may do that, nothing
+ * changes. Turning a login off never turns its connector off: others may use it.
  */
 export async function setOwnResourceHere(
-  deps: Pick<UserResourceGrantDependencies, "db" | "workflowClient">,
+  deps: OwnResourceSwitchDependencies,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
   input: OwnResourceInput & { on: boolean },
@@ -653,6 +772,18 @@ export async function setOwnResourceHere(
       context,
       workspaceSharedAcknowledged: context === "workspace_shared",
     });
+
+  if (input.on && kind === "connection") {
+    const off = await loginsWithConnectorOffHere(
+      deps,
+      authorization,
+      workspaceId,
+      personal,
+      new Set([input.resourceId]),
+    );
+    const login = off.get(input.resourceId);
+    if (login) await turnOnLoginConnectorHere(deps, authorization, workspaceId, login);
+  }
 
   if (input.on && !onHere(authority, workspaceId, kind, personal, now)) {
     const contexts = machine

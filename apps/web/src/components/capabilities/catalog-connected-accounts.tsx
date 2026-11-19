@@ -83,12 +83,17 @@ export type CatalogConnectedAccountsProps = {
   workspaceId?: string | undefined;
   workspaces?: readonly AccountOriginWorkspace[] | undefined;
   /** Your own logins: choose where each works for your own messages, asked from this workspace. */
-  ownReach?: { client: OwnReachClient; workspaceId: string } | undefined;
-  /**
-   * Turn this connector on here with your own login, while it isn't on here
-   * (the connect card's "Use it here"). Offered on this workspace's row.
-   */
-  onUseOwnLoginHere?: (() => void) | undefined;
+  ownReach?: OwnLoginReach | undefined;
+};
+
+/**
+ * Your own logins, asked from this workspace. Turning one on where its
+ * connector isn't on turns the connector on there too: the page reads it again.
+ */
+type OwnLoginReach = {
+  client: OwnReachClient;
+  workspaceId: string;
+  onConnectorTurnedOn?: ((workspaceId: string) => void) | undefined;
 };
 
 /** Under your own login: the workspaces where it works for your own messages. */
@@ -98,7 +103,7 @@ function OwnLoginWhereItWorks({
   label,
   connector,
 }: {
-  ownReach: { client: OwnReachClient; workspaceId: string };
+  ownReach: OwnLoginReach;
   account: ConnectionMetadata;
   label: string;
   connector: OwnLoginConnector;
@@ -192,7 +197,6 @@ export function CatalogConnectedAccounts({
   workspaceId,
   workspaces,
   ownReach,
-  onUseOwnLoginHere,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
@@ -397,7 +401,7 @@ export function CatalogConnectedAccounts({
                       ownReach={ownReach}
                       account={account}
                       label={label}
-                      connector={{ name: item.name, onUseHere: onUseOwnLoginHere }}
+                      connector={{ name: item.name }}
                     />
                   ) : null}
                 </li>

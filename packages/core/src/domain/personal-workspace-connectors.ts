@@ -108,6 +108,11 @@ export function loginConnectorEndpoint(connection: ConnectionMetadata): string |
   return typeof mcpUrl === "string" && mcpUrl.trim() ? mcpUrl : null;
 }
 
+/** Whether two connector endpoints are the same, written either way. */
+export function sameConnectorEndpoint(left: string, right: string): boolean {
+  return canonicalUrl(left) === canonicalUrl(right);
+}
+
 /**
  * Whether a workspace has turned on the connector a login signs in to: one of
  * its enabled connectors is that endpoint, or binds that provider's accounts

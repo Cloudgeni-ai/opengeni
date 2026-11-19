@@ -188,7 +188,7 @@ test("a failed removal says so and keeps the login", async () => {
   await view.unmount();
 });
 
-test("a login whose connector isn't on in this workspace says so and links to where it's used here", async () => {
+test("a login whose connector isn't on reads as off there, and its switch turns both on", async () => {
   const NOTES = "66666666-6666-4666-8666-666666666666";
   const endpoint = "https://notes.example.com/mcp";
   const fake = client([
@@ -234,6 +234,12 @@ test("a login whose connector isn't on in this workspace says so and links to wh
       metadata: { mcpUrl: endpoint },
     } as unknown as ConnectionMetadata,
   ]);
+  fake.setOwnResourceReach.mockImplementation((async (
+    workspaceId: string,
+    request: { on: boolean },
+  ) => ({
+    workspace: row("Design", request.on, { workspaceId, current: true }),
+  })) as never);
   const view = await render(<MyThings client={fake} workspaceId="design" />);
   const loginRow = [...view.container.querySelectorAll("button")].find((candidate) =>
     candidate.textContent?.startsWith("Notes"),
@@ -241,15 +247,20 @@ test("a login whose connector isn't on in this workspace says so and links to wh
   // On in Design and Research, but Notes isn't turned on there: it works only in Personal.
   expect(loginRow!.textContent).toContain("Works only in your Personal workspace");
   await act(async () => loginRow!.click());
+  const design = () =>
+    document.querySelector('[aria-label="Use Notes (sam@example.com) in Design"]')!;
+  expect(design().getAttribute("aria-checked")).toBe("false");
   expect(document.body.textContent).toContain(
-    "This workspace. Notes isn't turned on here yet, so nothing here uses it",
+    "This workspace. Not used here yet. Turning it on turns Notes on here too",
   );
-  // Only this workspace's row links to the connector's page here, which offers "Use it here".
-  const links = [...document.querySelectorAll("a")].filter(
-    (link) => link.textContent === "Use it here",
-  );
-  expect(links.map((link) => link.getAttribute("href"))).toEqual([
-    "/workspaces/design/plugins?open=item%3Amcp%3Anotes",
-  ]);
+  // One switch turns the login and Notes on here.
+  await act(async () => (design() as HTMLButtonElement).click());
+  expect(fake.setOwnResourceReach).toHaveBeenCalledWith("design", {
+    resourceKind: "connection",
+    resourceId: NOTES,
+    on: true,
+  });
+  expect(design().getAttribute("aria-checked")).toBe("true");
+  expect(loginRow!.textContent).toContain("Works in your Personal workspace and Design");
   await view.unmount();
 });

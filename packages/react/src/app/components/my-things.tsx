@@ -15,8 +15,8 @@ import { matchingConnectionAccounts } from "./capabilities/session-connection-ac
 import {
   OWN_WHERE_IT_WORKS_DESCRIPTION,
   OwnWhereItWorks,
+  ownReachWorksHere,
   useOwnResourceReach,
-  type OwnLoginConnector,
   type OwnReachClient,
 } from "./own-where-it-works";
 
@@ -70,10 +70,10 @@ function workspaceLabel(row: OwnResourceReachWorkspace): string {
 
 /**
  * Where it works, in a few words: "Works in your Personal workspace and
- * Design". A login doesn't work where its connector isn't turned on.
+ * Design". A login doesn't work where its connector isn't turned on yet.
  */
 export function whereItWorksSummary(workspaces: readonly OwnResourceReachWorkspace[]): string {
-  const on = workspaces.filter((row) => row.on && !row.connectorOff);
+  const on = workspaces.filter(ownReachWorksHere);
   if (on.length === 0) return "Turned off everywhere";
   if (workspaces.length > 2 && on.length === workspaces.length)
     return "Works in all your workspaces";
@@ -86,9 +86,8 @@ export function whereItWorksSummary(workspaces: readonly OwnResourceReachWorkspa
 /**
  * Which app each of your logins signs in to ("Gmail"), from this workspace's
  * connectors. A login for a connector this workspace doesn't list keeps its
- * service's address. Also each login itself, which says where to remove it,
- * and the page of a connector this workspace hasn't turned on that the login
- * signs in to, where it can be turned on with that login.
+ * service's address, also one this workspace hasn't turned on yet. Also each
+ * login itself, which says where to remove it.
  */
 async function loginDetails(client: MyThingsClient, workspaceId: string) {
   const [catalog, accounts] = await Promise.all([
@@ -96,10 +95,9 @@ async function loginDetails(client: MyThingsClient, workspaceId: string) {
     client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
   ]);
   const names = new Map<string, string>();
-  const connectorPages = new Map<string, string>();
   for (const item of catalog.items) {
     if (item.kind === "mcp" && !item.enabled && item.authKind === "oauth2") {
-      // The connector page's own match, for a connector that isn't on here.
+      // Named the way the connector's page matches its logins, before it is on here.
       const ref =
         item.connectionRef ??
         (item.providerDomain ? { providerDomain: item.providerDomain, kind: "oauth2" } : null);
@@ -108,12 +106,7 @@ async function loginDetails(client: MyThingsClient, workspaceId: string) {
         accounts,
         item.mcpUrl ?? item.endpointUrl,
       )) {
-        if (account.subjectId === null || connectorPages.has(account.id)) continue;
-        if (!names.has(account.id)) names.set(account.id, item.name);
-        connectorPages.set(
-          account.id,
-          `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=${encodeURIComponent(`item:${item.id}`)}`,
-        );
+        if (account.subjectId !== null && !names.has(account.id)) names.set(account.id, item.name);
       }
     }
     if (!item.connectionRef || item.connectionRef.authoritySource === "host") continue;
@@ -127,7 +120,7 @@ async function loginDetails(client: MyThingsClient, workspaceId: string) {
       .filter((account) => account.subjectId !== null)
       .map((account) => [account.id, account]),
   );
-  return { names, logins, connectorPages };
+  return { names, logins };
 }
 
 /**
@@ -152,7 +145,6 @@ function useMyThings(client: MyThingsClient, workspaceId: string) {
   const [state, setState] = useState<ListState>({ status: "loading" });
   const [appNames, setAppNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [logins, setLogins] = useState<ReadonlyMap<string, ConnectionMetadata>>(new Map());
-  const [connectorPages, setConnectorPages] = useState<ReadonlyMap<string, string>>(new Map());
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -178,7 +170,6 @@ function useMyThings(client: MyThingsClient, workspaceId: string) {
         if (!current) return;
         setAppNames(details.names);
         setLogins(details.logins);
-        setConnectorPages(details.connectorPages);
       })
       .catch(() => undefined);
     return () => {
@@ -190,7 +181,6 @@ function useMyThings(client: MyThingsClient, workspaceId: string) {
     state,
     appNames,
     logins,
-    connectorPages,
     retry: useCallback(() => setAttempt((count) => count + 1), []),
   };
 }
@@ -222,7 +212,6 @@ function MyThingRow({
   resource,
   appNames,
   login,
-  connectorPage,
   onRemoved,
 }: {
   client: MyThingsClient;
@@ -231,8 +220,6 @@ function MyThingRow({
   appNames: ReadonlyMap<string, string>;
   /** The login this row is, when it can be removed. */
   login: ConnectionMetadata | null;
-  /** A login's connector page here, while this workspace hasn't turned it on. */
-  connectorPage?: string | undefined;
   onRemoved: () => void;
 }) {
   const reach = useOwnResourceReach({
@@ -243,10 +230,7 @@ function MyThingRow({
     initialWorkspaces: resource.workspaces,
   });
   const { title, account } = titleAndAccount(resource, appNames);
-  const connector: OwnLoginConnector | undefined =
-    resource.resourceKind === "connection"
-      ? { name: title, useHereHref: connectorPage }
-      : undefined;
+  const connector = resource.resourceKind === "connection" ? { name: title } : undefined;
   const where = reach.state.status === "ready" ? whereItWorksSummary(reach.state.workspaces) : null;
   const summary = [account, where].filter((part): part is string => Boolean(part)).join(" · ");
   const [confirming, setConfirming] = useState(false);
@@ -342,7 +326,7 @@ const GROUPS = [
 ] as const;
 
 export function MyThings({ client, workspaceId }: { client: MyThingsClient; workspaceId: string }) {
-  const { state, appNames, logins, connectorPages, retry } = useMyThings(client, workspaceId);
+  const { state, appNames, logins, retry } = useMyThings(client, workspaceId);
 
   if (state.status === "loading") {
     return (
@@ -401,7 +385,6 @@ export function MyThings({ client, workspaceId }: { client: MyThingsClient; work
                     ? (logins.get(resource.resourceId) ?? null)
                     : null
                 }
-                connectorPage={connectorPages.get(resource.resourceId)}
                 onRemoved={retry}
               />
             ))}

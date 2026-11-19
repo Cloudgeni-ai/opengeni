@@ -12,12 +12,14 @@ import {
   grantDeferredRuntimeAccess,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import type { AccessGrantAuthorization } from "../src/access";
 import {
   getOwnResourceHere,
   listOwnResourcesHere,
   nameOwnResources,
+  OwnLoginConnectorNeedsAdminError,
   OwnResourceAlwaysOnError,
   OwnResourceNotFoundError,
   ownResourceKey,
@@ -146,8 +148,8 @@ function connector(): Connector {
   };
 }
 
-/** Turn the connector on in a workspace for each member's own account. */
-async function turnOnConnector(f: Fixture, workspaceId: string, item: Connector) {
+/** The connector in a workspace's catalog, not turned on there. */
+async function addConnector(f: Fixture, workspaceId: string, item: Connector) {
   await shared.admin`insert into capability_catalog_items (
       id, account_id, workspace_id, kind, source, name, endpoint_url,
       auth_model, auth_kind, provider_domain, mcp_url, metadata
@@ -156,19 +158,26 @@ async function turnOnConnector(f: Fixture, workspaceId: string, item: Connector)
       'oauth2', 'oauth2', ${item.providerDomain}, ${item.endpoint},
       ${shared.admin.json({ mcpServerId: item.id.slice("mcp:".length) })}
     )`;
-  await shared.admin`insert into capability_installations (
-      account_id, workspace_id, capability_id, kind, status, config, metadata
-    ) values (
-      ${f.accountId}, ${workspaceId}, ${item.id}, 'mcp', 'active',
-      ${shared.admin.json({
-        connectionRef: {
-          providerDomain: item.providerDomain,
-          kind: "oauth2",
-          subjectScope: "subject",
-        },
-      })},
-      ${shared.admin.json({ mcpConnectivity: { status: "auth_deferred" } })}
-    )`;
+}
+
+/** How the connector is turned on in a workspace, if it is. */
+async function installation(f: Fixture, workspaceId: string, item: Connector) {
+  const [row] = await shared.admin<{ status: string; config: Record<string, unknown> }[]>`
+    select status, config from capability_installations
+    where account_id = ${f.accountId} and workspace_id = ${workspaceId}
+      and capability_id = ${item.id}`;
+  return row ?? null;
+}
+
+/** Live standing grants for your own login in a workspace. */
+async function standingGrantCount(f: Fixture, workspaceId: string, resourceId: string) {
+  const [row] = await shared.admin<{ count: number }[]>`
+    select count(*)::int as count from organization_user_resource_grants g
+    join organization_user_resource_authorities a on a.id = g.authority_id
+    where a.account_id = ${f.accountId} and a.resource_kind = 'connection'
+      and a.resource_id = ${resourceId}::uuid and g.workspace_id = ${workspaceId}
+      and g.mode = 'always' and g.revoked_at is null`;
+  return row!.count;
 }
 
 async function connectPlan(f: Fixture) {
@@ -211,7 +220,8 @@ async function sqlMachineOn(f: Fixture, enrollmentId: string, workspaceId: strin
   return row!.on;
 }
 
-const deps = () => ({ db: client.db });
+const settings = testSettings({ sandboxBackend: "none" });
+const deps = () => ({ db: client.db, settings });
 
 async function reach(
   f: Fixture,
@@ -324,33 +334,27 @@ describe("where your own things work (real PostgreSQL)", () => {
     ).rejects.toBeInstanceOf(OwnResourceNotFoundError);
   }, 180_000);
 
-  test("a connector's login says where its connector isn't turned on, even where the login is on", async () => {
+  test("turning your login on where its connector isn't on turns the connector on too, in one step", async () => {
     const f = await fixture();
     const notes = connector();
+    await addConnector(f, f.other, notes);
     const resourceId = await addConnectorLogin(f, f.origin, notes);
     const resource = { resourceKind: "connection" as const, resourceId };
     const plain = await addLogin(f, f.origin);
-
-    // On through a standing grant, but the connector isn't turned on there.
-    expect(
-      await setOwnResourceHere(deps(), f.authorization(f.other), f.other, {
-        ...resource,
-        on: true,
-      }),
-    ).toMatchObject({ on: true, connectorOff: true });
-    expect(await reach(f, f.other, resource)).toEqual({
-      personal: false,
-      on: true,
-      alwaysOn: false,
-      canChange: true,
-      connectorOff: true,
-    });
     const listed = async (workspaceId: string) =>
       Object.fromEntries(
         (await listOwnResourcesHere(deps(), f.authorization(workspaceId), workspaceId)).map(
           (entry) => [entry.resourceId, entry.connectorOff ?? false],
         ),
       );
+    // Nothing here can use it yet: the connector isn't on.
+    expect(await reach(f, f.other, resource)).toEqual({
+      personal: false,
+      on: false,
+      alwaysOn: false,
+      canChange: true,
+      connectorOff: true,
+    });
     // A login that isn't a connector's sign-in has no connector to turn on.
     expect(await listed(f.other)).toMatchObject({ [resourceId]: true, [plain]: false });
     // Your Personal workspace carries the connectors behind your own logins.
@@ -360,18 +364,83 @@ describe("where your own things work (real PostgreSQL)", () => {
       alwaysOn: true,
       canChange: false,
     });
-    expect(await listed(f.personal)).toMatchObject({ [resourceId]: false, [plain]: false });
 
-    await turnOnConnector(f, f.other, notes);
-    expect(await reach(f, f.other, resource)).toEqual({
-      personal: false,
-      on: true,
-      alwaysOn: false,
-      canChange: true,
+    // One switch: a member who may add integrations turns the login on, and
+    // the connector with it, for each person's own account.
+    const member = [...MEMBER_PERMISSIONS, "connections:write"];
+    expect(
+      await setOwnResourceHere(deps(), f.authorization(f.other, member), f.other, {
+        ...resource,
+        on: true,
+      }),
+    ).toEqual({ personal: false, on: true, alwaysOn: false, canChange: true });
+    expect(await installation(f, f.other, notes)).toMatchObject({
+      status: "active",
+      config: {
+        connectionRef: {
+          providerDomain: notes.providerDomain,
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      },
     });
+    expect(await standingGrantCount(f, f.other, resourceId)).toBe(1);
     expect(await listed(f.other)).toMatchObject({ [resourceId]: false });
-    // Still off where it was added, until it is turned on there too.
+
+    // Turning the login off leaves the connector on: others may use it.
+    expect(
+      await setOwnResourceHere(deps(), f.authorization(f.other), f.other, {
+        ...resource,
+        on: false,
+      }),
+    ).toMatchObject({ on: false });
+    expect(await installation(f, f.other, notes)).toMatchObject({ status: "active" });
+    expect(await standingGrantCount(f, f.other, resourceId)).toBe(0);
+  }, 180_000);
+
+  test("where only an admin may turn its connector on, turning your login on changes nothing", async () => {
+    const f = await fixture();
+    const notes = connector();
+    await addConnector(f, f.other, notes);
+    const resourceId = await addConnectorLogin(f, f.origin, notes);
+    const resource = { resourceKind: "connection" as const, resourceId };
+    // The personal setup permission turns on only reviewed connectors, not
+    // one this workspace added itself.
+    const refused = setOwnResourceHere(deps(), f.authorization(f.other), f.other, {
+      ...resource,
+      on: true,
+    });
+    await expect(refused).rejects.toBeInstanceOf(OwnLoginConnectorNeedsAdminError);
+    await expect(refused).rejects.toMatchObject({
+      connectorName: "Notes",
+      message:
+        "Only an admin can turn Notes on in this workspace. Ask one to turn it on, then use your login here.",
+    });
+    expect(await installation(f, f.other, notes)).toBeNull();
+    expect(await standingGrantCount(f, f.other, resourceId)).toBe(0);
+    expect(await reach(f, f.other, resource)).toMatchObject({ on: false, connectorOff: true });
+  }, 180_000);
+
+  test("a login already on where its connector isn't is turned on with one switch, keeping its grant", async () => {
+    const f = await fixture();
+    const notes = connector();
+    // Added in a workspace that hasn't turned its connector on: on there,
+    // but nothing there uses it.
+    await addConnector(f, f.origin, notes);
+    const resourceId = await addConnectorLogin(f, f.origin, notes);
+    const resource = { resourceKind: "connection" as const, resourceId };
     expect(await reach(f, f.origin, resource)).toMatchObject({ on: true, connectorOff: true });
+    const grants = await standingGrantCount(f, f.origin, resourceId);
+
+    const admin = [...MEMBER_PERMISSIONS, "capabilities:manage"];
+    expect(
+      await setOwnResourceHere(deps(), f.authorization(f.origin, admin), f.origin, {
+        ...resource,
+        on: true,
+      }),
+    ).toEqual({ personal: false, on: true, alwaysOn: false, canChange: true });
+    expect(await installation(f, f.origin, notes)).toMatchObject({ status: "active" });
+    expect(await standingGrantCount(f, f.origin, resourceId)).toBe(grants);
   }, 180_000);
 
   test("My things lists each of your own things with where it works and its name", async () => {

@@ -6659,8 +6659,9 @@ export type OwnResourceReachWorkspace = {
   canChange: boolean;
   /**
    * A connector's login whose connector this shared workspace hasn't turned
-   * on: nothing here can use it until the connector is turned on, even when
-   * it is on. Absent otherwise.
+   * on: nothing here uses it yet, even when it is on. Turning it on here
+   * turns the connector on too, for each person's own account, where you
+   * may. Absent otherwise.
    */
   connectorOff?: boolean;
 };
