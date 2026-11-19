@@ -25,8 +25,8 @@ const FIXTURE = new URL("./fixtures/session-create-golden.json", import.meta.url
 const RECORD = process.env.OPENGENI_GOLDEN_RECORD === "1";
 /** Session columns added by organization agents (migration 1502): NULL on every other chat. */
 const ADDED_SESSION_COLUMNS = ["agent_overrides", "agent_prompt_version", "agent_version"];
-/** Values that differ between any two runs (transaction ids). */
-const VOLATILE_KEYS = new Set(["activity_xid", "activity_revision_pending_xid"]);
+/** Values that differ between any two runs (transaction ids, hashes of ids). */
+const VOLATILE_KEYS = new Set(["activity_xid", "activity_revision_pending_xid", "controlEtag"]);
 const DELEGATION_SECRET = "session-create-golden-secret";
 const SUBJECT = "user:golden";
 
