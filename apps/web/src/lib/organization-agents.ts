@@ -535,6 +535,22 @@ export function overrideValueText(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The value the chat runs with. A tool server change names only the fields it
+ * changes, so it is shown on top of the agent's server settings and the diff
+ * shows just those fields.
+ */
+function effectiveChatValue(setting: string, agent: unknown, chat: unknown): unknown {
+  if (!setting.startsWith("toolServers.") || !isPlainObject(agent) || !isPlainObject(chat)) {
+    return chat;
+  }
+  return { ...agent, ...chat };
+}
+
 /** What a chat changed from its agent version, one entry per setting, in a stable order. */
 export function overrideEntries(
   overrides: OrgAgentSessionOverrides | null | undefined,
@@ -550,7 +566,7 @@ export function overrideEntries(
       setting,
       label: overrideLabel(setting),
       agent: overrideValueText(change?.agent),
-      chat: overrideValueText(change?.chat),
+      chat: overrideValueText(effectiveChatValue(setting, change?.agent, change?.chat)),
     }))
     .sort(
       (left, right) =>

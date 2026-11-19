@@ -226,6 +226,22 @@ describe("overrides", () => {
     expect(hasOverrides({})).toBe(false);
     expect(hasOverrides({ model: { agent: "a", chat: "b" } })).toBe(true);
   });
+
+  test("a tool server change is shown on top of the agent's server settings", () => {
+    const [entry] = overrideEntries({
+      "toolServers.github": {
+        agent: { server: "github", tools: { mode: "all", enabled: [] }, newTools: "off" },
+        chat: { enabled: false },
+      },
+    });
+    const chat = JSON.parse(entry!.chat);
+    expect(chat).toEqual({
+      server: "github",
+      tools: { mode: "all", enabled: [] },
+      newTools: "off",
+      enabled: false,
+    });
+  });
 });
 
 describe("labels", () => {
