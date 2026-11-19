@@ -150,7 +150,7 @@ export type ClaimedNativePushDelivery = {
   payload: {
     rule: NativePushRule;
     eventType?: string;
-    /** Absent from a notice about something other than a chat (1502), which carries `link`. */
+    /** Absent from a notice about something other than a chat (1503), which carries `link`. */
     sessionId?: string;
     workspaceId: string;
     subjectId: string;
@@ -180,7 +180,7 @@ export type ClaimedNativePushDelivery = {
      */
     serverQuestionKind?: "confirm" | "form";
     /**
-     * Where a tap goes for a notice about something other than a chat (1502),
+     * Where a tap goes for a notice about something other than a chat (1503),
      * such as a subscription account that needs signing in again: a path in
      * the web app.
      */

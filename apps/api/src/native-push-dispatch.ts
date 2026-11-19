@@ -40,7 +40,7 @@ export type NativePushPayload = ClaimedNativePushDelivery["payload"] & {
 };
 
 /**
- * Give a chat-less notice's push (1502) the absolute web address of its link,
+ * Give a chat-less notice's push (1503) the absolute web address of its link,
  * from the deployment's web address, so a tap opens it. Without a web address
  * the push still shows; a tap then opens the app.
  */
@@ -401,7 +401,7 @@ export function createApnsSender(input: {
             aps: {
               alert,
               sound: "default",
-              // A chat-less notice (1502) groups with the other notices.
+              // A chat-less notice (1503) groups with the other notices.
               "thread-id": delivery.payload.sessionId ?? "notices",
               "interruption-level": nativePushInterruptionLevel(delivery.payload),
               ...(category ? { category } : {}),
@@ -429,7 +429,7 @@ export function createApnsSender(input: {
           "apns-topic": delivery.appId,
           "apns-push-type": "alert",
           "apns-priority": "10",
-          // Each chat-less notice (1502) shows on its own; one session's pushes collapse.
+          // Each chat-less notice (1503) shows on its own; one session's pushes collapse.
           ...(delivery.payload.sessionId
             ? {
                 "apns-collapse-id": `${delivery.payload.sessionId}:${delivery.payload.rule}`.slice(

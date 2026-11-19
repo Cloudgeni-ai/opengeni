@@ -88,7 +88,7 @@ export type SubscriptionCoreConnectionRow = {
   connected_by_subject_id: string | null;
   expires_at: Date | string | null;
   last_refresh_at: Date | string | null;
-  /** When it was last signed in (1502); null when unknown, and on personal rows. */
+  /** When it was last signed in (1503); null when unknown, and on personal rows. */
   signed_in_at?: Date | string | null;
   managed_by_workspace_id: string | null;
   provider_state: Record<string, unknown> | null;

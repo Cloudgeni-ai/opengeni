@@ -1,4 +1,4 @@
-// A notice about something other than a chat (migration 1502), such as a
+// A notice about something other than a chat (migration 1503), such as a
 // subscription account that needs signing in again: no session, and a link
 // to its page in the web app.
 import { describe, expect, test } from "bun:test";

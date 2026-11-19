@@ -34,7 +34,7 @@ export type InboxItemRow = {
 };
 
 /**
- * A notification about something other than a chat (1502), such as a
+ * A notification about something other than a chat (1503), such as a
  * subscription account that needs signing in again: no session, and always a
  * link (a path in the web app, or an https URL).
  */
@@ -164,7 +164,7 @@ function inboxRowOf(row: InboxItemRecord): Omit<InboxItemRow, "sessionId" | "lin
 
 /**
  * The person's open items in one account, newest first: items from chats and
- * notices about something other than a chat (1502).
+ * notices about something other than a chat (1503).
  */
 export async function listInboxEntries(
   db: Database,
@@ -200,7 +200,7 @@ export async function listInboxItems(
 export type InboxItemRef = {
   id: string;
   workspaceId: string;
-  /** Null for a notice about something other than a chat (1502). */
+  /** Null for a notice about something other than a chat (1503). */
   sessionId: string | null;
   kind: InboxItemRow["kind"];
   sourceKey: string;

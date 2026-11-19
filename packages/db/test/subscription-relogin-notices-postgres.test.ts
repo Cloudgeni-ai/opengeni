@@ -1,5 +1,5 @@
 /**
- * Migration 1502: a subscription account that needs signing in again tells
+ * Migration 1503: a subscription account that needs signing in again tells
  * the person who connected it, once per sign-in, in their inbox and on their
  * phone, with a link straight to that account's sign-in step. When that
  * person can no longer reconnect it, the organization's owners and admins

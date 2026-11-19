@@ -73,7 +73,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * unpaid sandbox fleet counts behind the fleet limits (1486), and the
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
  * (1487), and the managed warm box count fleet pressure reads (1492), and
- * the subscription needs-sign-in notice sync (1502).
+ * the subscription needs-sign-in notice sync (1503).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -165,7 +165,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * pressure reads the warm count of every lease, self-hosted ones included.
  * 1501 withholds the discard of a refused keyed session create; until it is
  * granted, such a shell stays (as before).
- * 1502 withholds the subscription needs-sign-in notice sync; until it is
+ * 1503 withholds the subscription needs-sign-in notice sync; until it is
  * granted, only a status write by the tables' owner (the definer that records
  * a model request refused after refresh, and the migration's backfill) opens
  * or resolves a notice, and the person dismisses one left after a reconnect.
@@ -560,7 +560,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 1213: clears a new session's archive marker; triggers fire
   // without the inserting role holding EXECUTE.
   "session_insert_not_archived()",
-  // Migration 1502: the sign-in stamp and needs-sign-in notice triggers on
+  // Migration 1503: the sign-in stamp and needs-sign-in notice triggers on
   // subscription connections. Triggers fire without the writing role
   // holding EXECUTE.
   "stamp_subscription_connection_sign_in()",
