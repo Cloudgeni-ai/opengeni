@@ -1,5 +1,24 @@
 # @opengeni/core
 
+## 6.30.2
+
+### Patch Changes
+
+- @opengeni/capabilities@6.30.2
+- @opengeni/codex@6.30.2
+- @opengeni/config@6.30.2
+- @opengeni/contracts@6.30.2
+- @opengeni/db@6.30.2
+- @opengeni/documents@6.30.2
+- @opengeni/events@6.30.2
+- @opengeni/network@6.30.2
+- @opengeni/observability@6.30.2
+- @opengeni/runtime@6.30.2
+- @opengeni/storage@6.30.2
+- @opengeni/tool-gateway@6.30.2
+- @opengeni/vaults@6.30.2
+- @opengeni/xai-subscription@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes

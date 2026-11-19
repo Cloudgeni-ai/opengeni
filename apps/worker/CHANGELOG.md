@@ -1,5 +1,38 @@
 # @opengeni/worker-bundle
 
+## 6.30.2
+
+### Patch Changes
+
+- a67e0b8: Fetch the speaker embedding model from a commit-pinned source so image builds keep the same model bytes after upstream replaced its release asset.
+  - @opengeni/agent-proto@6.30.2
+  - @opengeni/capabilities@6.30.2
+  - @opengeni/codemode@6.30.2
+  - @opengeni/codex@6.30.2
+  - @opengeni/config@6.30.2
+  - @opengeni/contracts@6.30.2
+  - @opengeni/core@6.30.2
+  - @opengeni/db@6.30.2
+  - @opengeni/decisions@6.30.2
+  - @opengeni/documents@6.30.2
+  - @opengeni/events@6.30.2
+  - @opengeni/github@6.30.2
+  - @opengeni/interaction@6.30.2
+  - @opengeni/jev@6.30.2
+  - @opengeni/network@6.30.2
+  - @opengeni/observability@6.30.2
+  - @opengeni/runtime@6.30.2
+  - @opengeni/sdk@6.30.2
+  - @opengeni/storage@6.30.2
+  - @opengeni/subscriptions@6.30.2
+  - @opengeni/tool-gateway@6.30.2
+  - @opengeni/vaults@6.30.2
+  - @opengeni/vaults-bitwarden@6.30.2
+  - @opengeni/vaults-keeper@6.30.2
+  - @opengeni/vaults-onepassword@6.30.2
+  - @opengeni/vaults-protonpass@6.30.2
+  - @opengeni/xai-subscription@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes
