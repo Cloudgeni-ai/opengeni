@@ -910,16 +910,20 @@ test("the chip offers Undo only to people who may publish the Site", async () =>
 test("a version published elsewhere shows within a few seconds while the Site is open", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   permissions = ["sessions:create", "artifacts:publish"];
-  const intervals: Array<{ run: () => void; ms: number }> = [];
-  const setIntervalBefore = window.setInterval;
-  window.setInterval = ((run: () => void, ms: number) => {
-    intervals.push({ run, ms });
-    return intervals.length;
-  }) as unknown as typeof window.setInterval;
+  const timers: Array<{ run: () => void; ms: number }> = [];
+  const setTimeoutBefore = window.setTimeout;
+  window.setTimeout = ((run: () => void, ms?: number) => {
+    // Hold the version checks' timer; let everything else run.
+    if (ms === 5_000) {
+      timers.push({ run, ms });
+      return -timers.length;
+    }
+    return setTimeoutBefore(run, ms);
+  }) as unknown as typeof window.setTimeout;
   try {
     const { container } = await render();
     expect(shownVersion(container)).toBe("version-4");
-    const poll = intervals.find((interval) => interval.ms === 5_000)!;
+    const poll = timers.at(-1)!;
     expect(poll).toBeDefined();
     siteDetails = async () => siteAt(6);
     await act(async () => poll.run());
@@ -929,7 +933,7 @@ test("a version published elsewhere shows within a few seconds while the Site is
     const messageContext = conversationProps.at(-1)!.messageContext as () => string | undefined;
     expect(messageContext()).toContain("at version 6 (version id version-6)");
   } finally {
-    window.setInterval = setIntervalBefore;
+    window.setTimeout = setTimeoutBefore;
   }
 });
 
