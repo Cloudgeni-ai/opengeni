@@ -1729,7 +1729,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (orgAgentLogins) {
             runSettings.mcpServers = orgAgentLogins.mcpServers;
             turnTools.splice(0, turnTools.length, ...orgAgentLogins.turnTools);
-            unavailableMcpConnectors.push(...orgAgentLogins.unavailableMcpConnectors);
+            unavailableMcpConnectors.connectors.push(...orgAgentLogins.unavailableMcpConnectors);
           }
 
           await establishTurnSandbox({
