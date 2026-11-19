@@ -203,7 +203,12 @@ own test chats (the ones their principal started), through `GET`
 `/v1/organizations/:id/agents/:agentId/test-chats/:sessionId` (and `/events`)
 and `POST .../messages`, while their Console access is Editor or more; anyone
 else (another Editor, an owner) gets `404`, and the app's session routes refuse
-everyone without workspace access. Losing Editor access takes test chats away
+everyone without workspace access. A test chat's agent holds no more than
+that principal and is created with `agentAccess: "session"` and Memory off, so
+one tester's agent never reaches another tester's chats or Memory, and a test
+chat's pasted logins run only for turns its own tester's principal started.
+The `console-test:` prefix is the server's: an API key can't name it as a
+service initiator (`422`). Losing Editor access takes test chats away
 at once, with nothing to clean up. Owners and admins review test chats like any
 other managed workspace's, through Console's audited session routes. An
 Editor's agent can run on an organization machine whose reach the owners and
