@@ -103,7 +103,12 @@ async function freshWorkspace(): Promise<Workspace> {
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-const PERMISSIONS: Permission[] = ["workspace:read", "sessions:create", "sessions:read"];
+const PERMISSIONS: Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "mcp_servers:attach",
+];
 
 async function call(workspace: Workspace, method: string, path: string, body?: unknown) {
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
