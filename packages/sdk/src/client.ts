@@ -224,6 +224,7 @@ import type {
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactCurrentResponse,
+  WorkspaceArtifactLiveTicketResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -10148,6 +10149,25 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactCurrentResponse>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/current`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * A ticket for an open Site view's live connection (new versions and data
+   * change hints). 404 when the deployment has no live hints; keep checking
+   * with `getWorkspaceArtifactCurrent` then.
+   */
+  async createWorkspaceArtifactLiveTicket(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactLiveTicketResponse> {
+    return await this.requestJson<WorkspaceArtifactLiveTicketResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/live`,
       undefined,
       undefined,
       options,

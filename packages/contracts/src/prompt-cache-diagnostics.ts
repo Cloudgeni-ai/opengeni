@@ -17,6 +17,7 @@
 export const PROMPT_CACHE_DIGEST_HEX_LENGTH = 16;
 const DIGEST = /^[0-9a-f]{16}$/;
 const REASON = /^[a-z][a-z0-9_]{0,63}$/;
+const RELEASE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const MAX_CHECKPOINTS = 48;
 const MAX_DROP_REASONS = 8;
 
@@ -42,6 +43,8 @@ export type PromptCacheObservation = {
   /** Signed thinking blocks the provider dropped before inference, by reason. */
   thinkingBlocksDropped?: Record<string, number>;
   request?: PromptCacheRequestFingerprint;
+  /** The deployment revision of the worker that built the request. */
+  release?: string;
 };
 
 export const PROMPT_CACHE_WARM_MISS_CLASSES = [
@@ -49,6 +52,12 @@ export const PROMPT_CACHE_WARM_MISS_CLASSES = [
   "context_replaced",
   "tools_changed",
   "system_changed",
+  /**
+   * The tools or system prompt changed between two deployments: a release
+   * that edits model-facing text costs each live session one cold prefix.
+   * The same change within one deployment is tools_changed or system_changed.
+   */
+  "release_changed",
   /** An item the previous request already sent changed. */
   "history_rewritten",
   /**
@@ -60,7 +69,15 @@ export const PROMPT_CACHE_WARM_MISS_CLASSES = [
   "account_changed",
   /** Long enough since the previous call that the cache may have expired. */
   "idle_gap",
-  /** Nothing observed explains the miss (provider eviction or routing). */
+  /**
+   * A request fingerprint is missing on either call, so a changed prefix
+   * cannot be ruled out. A share of these means the diagnostics are blind.
+   */
+  "unobserved",
+  /**
+   * Both requests were fingerprinted, the prefix was identical and nothing
+   * else explains the miss (provider eviction or routing).
+   */
   "unexplained",
 ] as const;
 export type PromptCacheWarmMissClass = (typeof PROMPT_CACHE_WARM_MISS_CLASSES)[number];
@@ -142,9 +159,14 @@ export function parsePromptCacheObservation(value: unknown): PromptCacheObservat
       ? null
       : parseDropCounts(record.thinkingBlocksDropped);
   if (!request && !dropped) return null;
+  const release =
+    request && typeof record.release === "string" && RELEASE.test(record.release)
+      ? record.release
+      : null;
   return {
     ...(dropped ? { thinkingBlocksDropped: dropped } : {}),
     ...(request ? { request } : {}),
+    ...(release ? { release } : {}),
   };
 }
 
@@ -214,8 +236,16 @@ export function classifyPromptCacheWarmMiss(
   const before = previous.observation?.request;
   const after = current.observation?.request;
   if (before && after) {
-    if (before.tools !== after.tools) return { class: "tools_changed", ...base };
-    if (before.system !== after.system) return { class: "system_changed", ...base };
+    const previousRelease = previous.observation?.release;
+    const currentRelease = current.observation?.release;
+    const released =
+      previousRelease !== undefined &&
+      currentRelease !== undefined &&
+      previousRelease !== currentRelease;
+    if (before.tools !== after.tools)
+      return { class: released ? "release_changed" : "tools_changed", ...base };
+    if (before.system !== after.system)
+      return { class: released ? "release_changed" : "system_changed", ...base };
     const diverged = firstDivergentHistoryCheckpoint(before, after);
     if (diverged !== null)
       return { class: "history_rewritten", ...base, divergedWithinItems: diverged };
@@ -229,5 +259,6 @@ export function classifyPromptCacheWarmMiss(
   )
     return { class: "account_changed", ...base };
   if (base.gapMs > PROMPT_CACHE_IDLE_GAP_MS) return { class: "idle_gap", ...base };
+  if (!before || !after) return { class: "unobserved", ...base };
   return { class: "unexplained", ...base };
 }

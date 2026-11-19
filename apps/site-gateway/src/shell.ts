@@ -195,7 +195,10 @@ export async function handleShell(site: SiteContext): Promise<Response> {
   const headers = applySecurityHeaders(new Headers(), { noindex: site.noindex, hsts: site.hsts });
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.set("Cache-Control", "no-store");
-  headers.set("Content-Security-Policy", shellCsp(nonce, { turnstile: !!site.config.turnstile }));
+  headers.set(
+    "Content-Security-Policy",
+    shellCsp(nonce, { turnstile: !!site.config.turnstile, siteOrigin: site.siteOrigin }),
+  );
   for (const cookie of cookies) headers.append("Set-Cookie", cookie);
   const html = shellHtml({
     nonce,

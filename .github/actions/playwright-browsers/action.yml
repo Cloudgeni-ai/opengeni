@@ -31,7 +31,7 @@ inputs:
       alongside that job's own declared step budgets. On Linux the first
       attempt also covers the system packages phase, as `--with-deps` did.
     required: false
-    default: "900"
+    default: "960"
   attempts:
     description: >-
       Bounded attempts before the step fails. Defaults to one: a retry reuses the
@@ -51,7 +51,7 @@ inputs:
       that do not resolve in favour of fallback mirrors; whatever it leaves
       goes to the first browser download.
     required: false
-    default: "300"
+    default: "470"
 
 runs:
   using: composite

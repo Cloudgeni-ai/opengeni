@@ -15,6 +15,7 @@ import { matchingConnectionAccounts } from "./capabilities/session-connection-ac
 import {
   OWN_WHERE_IT_WORKS_DESCRIPTION,
   OwnWhereItWorks,
+  ownReachWorksHere,
   useOwnResourceReach,
   type OwnReachClient,
 } from "./own-where-it-works";
@@ -67,9 +68,12 @@ function workspaceLabel(row: OwnResourceReachWorkspace): string {
   return row.personal ? "your Personal workspace" : row.name;
 }
 
-/** Where it works, in a few words: "Works in your Personal workspace and Design". */
+/**
+ * Where it works, in a few words: "Works in your Personal workspace and
+ * Design". A login doesn't work where its connector isn't turned on yet.
+ */
 export function whereItWorksSummary(workspaces: readonly OwnResourceReachWorkspace[]): string {
-  const on = workspaces.filter((row) => row.on);
+  const on = workspaces.filter(ownReachWorksHere);
   if (on.length === 0) return "Turned off everywhere";
   if (workspaces.length > 2 && on.length === workspaces.length)
     return "Works in all your workspaces";
@@ -82,7 +86,8 @@ export function whereItWorksSummary(workspaces: readonly OwnResourceReachWorkspa
 /**
  * Which app each of your logins signs in to ("Gmail"), from this workspace's
  * connectors. A login for a connector this workspace doesn't list keeps its
- * service's address. Also each login itself, which says where to remove it.
+ * service's address, also one this workspace hasn't turned on yet. Also each
+ * login itself, which says where to remove it.
  */
 async function loginDetails(client: MyThingsClient, workspaceId: string) {
   const [catalog, accounts] = await Promise.all([
@@ -91,6 +96,19 @@ async function loginDetails(client: MyThingsClient, workspaceId: string) {
   ]);
   const names = new Map<string, string>();
   for (const item of catalog.items) {
+    if (item.kind === "mcp" && !item.enabled && item.authKind === "oauth2") {
+      // Named the way the connector's page matches its logins, before it is on here.
+      const ref =
+        item.connectionRef ??
+        (item.providerDomain ? { providerDomain: item.providerDomain, kind: "oauth2" } : null);
+      for (const account of matchingConnectionAccounts(
+        ref,
+        accounts,
+        item.mcpUrl ?? item.endpointUrl,
+      )) {
+        if (account.subjectId !== null && !names.has(account.id)) names.set(account.id, item.name);
+      }
+    }
     if (!item.connectionRef || item.connectionRef.authoritySource === "host") continue;
     for (const account of matchingConnectionAccounts(item.connectionRef, accounts)) {
       if (!names.has(account.id)) names.set(account.id, item.name);
@@ -212,6 +230,7 @@ function MyThingRow({
     initialWorkspaces: resource.workspaces,
   });
   const { title, account } = titleAndAccount(resource, appNames);
+  const connector = resource.resourceKind === "connection" ? { name: title } : undefined;
   const where = reach.state.status === "ready" ? whereItWorksSummary(reach.state.workspaces) : null;
   const summary = [account, where].filter((part): part is string => Boolean(part)).join(" · ");
   const [confirming, setConfirming] = useState(false);
@@ -273,7 +292,11 @@ function MyThingRow({
       }
     >
       <p className="m-0 text-xs leading-4.5 text-fg-muted">{OWN_WHERE_IT_WORKS_DESCRIPTION}</p>
-      <OwnWhereItWorks name={account ? `${title} (${account})` : title} reach={reach} />
+      <OwnWhereItWorks
+        name={account ? `${title} (${account})` : title}
+        reach={reach}
+        connector={connector}
+      />
       {removeError ? (
         <div role="alert">
           <Notice tone="failed">{removeError}</Notice>

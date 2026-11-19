@@ -635,7 +635,7 @@ substituted in. Exact-message application context does not enter this prefix.
   is created, without restarting the controller when the callback changes. A
   failing or oversized callback omits only that entry's context and does not
   discard or block the provider message.
-- **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling Opengeni. Opengeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
+- **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling Opengeni. Opengeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. A create answered with a `4xx` keeps neither the session nor its key, so a corrected request may reuse both (for a keyed create, from the release that grants migration 1501's discard). The UUID is identity/correlation only and grants no access.
 
 Use workspace `agentInstructions` for stable tenant-wide behavior and session
 `instructions` for a durable session persona. Use `modelContext` for concise

@@ -191,6 +191,20 @@ describe("session title generation", () => {
     expect(result.title).toBe("NO_TITLE Sentinel Handling");
   });
 
+  for (const [answer, title] of [
+    ["Filer på skrivebordet_TITLE", "Filer på skrivebordet"],
+    ["Filer på skrivebordet NO_TITLE", "Filer på skrivebordet"],
+    ["Filer på skrivebordet_NO_TITLE.", "Filer på skrivebordet"],
+  ] as const) {
+    test(`a title ending in a piece of the no-title answer drops the piece (${JSON.stringify(answer)})`, async () => {
+      const { result } = await generateThroughResolvedChatModel(() =>
+        chatCompletion(answer, "stop"),
+      );
+
+      expect(result.title).toBe(title);
+    });
+  }
+
   test("a capped response with only reasoning yields no title", async () => {
     const { result } = await generateThroughResolvedChatModel(() => chatCompletion(null, "length"));
 

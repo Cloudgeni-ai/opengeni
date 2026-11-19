@@ -5896,6 +5896,8 @@ export type CodexAccount = {
   active: boolean;
   expiresAt?: string | null;
   lastRefreshAt?: string | null;
+  /** When the account was last signed in (connected or reconnected); null when unknown. */
+  signedInAt?: string | null;
   lastError?: string | null;
   // P2 CACHED usage (built from the persisted columns; renders bars off
   // listCodexAccounts with no second call). null until the first live refresh.
@@ -6099,6 +6101,8 @@ export type SuperGrokAccount = {
   active: boolean;
   expiresAt?: string | null;
   lastRefreshAt?: string | null;
+  /** When the account was last signed in (connected or reconnected); null when unknown. */
+  signedInAt?: string | null;
   lastError?: string | null;
   allocatorEnabled: boolean;
   allocatorVersion: number;
@@ -6657,6 +6661,13 @@ export type OwnResourceReachWorkspace = {
   alwaysOn: boolean;
   /** You may turn it on or off here. */
   canChange: boolean;
+  /**
+   * A connector's login whose connector this shared workspace hasn't turned
+   * on: nothing here uses it yet, even when it is on. Turning it on here
+   * turns the connector on too, for each person's own account, where you
+   * may. Absent otherwise.
+   */
+  connectorOff?: boolean;
 };
 export type OwnResourceReachResponse = {
   resourceKind: OwnResourceReachKind;
@@ -7597,6 +7608,21 @@ export type InboxItemFact = { label: string; value: string };
 /** A place outside the session an agent's notification points to. */
 export type InboxItemLink = { url: string; label: string };
 
+/**
+ * A notice about something other than a chat, such as a subscription account
+ * that needs signing in again: shaped like a notification item, with no
+ * session and always a link (an address in the web app). Mark it seen or
+ * dismiss it like an item.
+ */
+export type InboxNotice = Omit<InboxItem, "sessionId" | "kind" | "link"> & {
+  sessionId: null;
+  kind: "notification";
+  link: InboxItemLink;
+};
+
+/** An item from a chat, or a notice about something else. */
+export type InboxEntry = InboxItem | InboxNotice;
+
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
 
@@ -7613,6 +7639,11 @@ export type InboxItemServerQuestion = {
 
 export type ListInboxResponse = {
   items: InboxItem[];
+  /**
+   * Open notices about something other than a chat, newest first. Not
+   * counted in `needsYouCount` or `unreadCount`.
+   */
+  notices?: InboxNotice[];
   /** Organization billing notices for the recipient; not workspace inbox items. */
   billingNotifications?: BillingCreditNotification[];
   /** Open, unsnoozed items that need the person (questions, approvals, paused goals). */

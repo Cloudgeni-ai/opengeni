@@ -332,6 +332,46 @@ describe("CdpConnection", () => {
     expect(removed).toBe(0);
   });
 
+  test("a closing browser fails commands and waits nobody still holds without an unhandled rejection", async () => {
+    let closeSocket: () => void = () => {
+      throw new Error("socket not ready");
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      // Never answers, as a browser shutting down does.
+      websocket: {
+        open(socket) {
+          closeSocket = () => socket.close();
+        },
+        message() {},
+      },
+    });
+    servers.push(server);
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", record);
+    try {
+      const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+      // Work its caller stopped waiting for: nobody observes how it ends.
+      connection.send("Target.detachFromTarget", { sessionId: "gone" });
+      connection.waitForEvent("Page.loadEventFired", { sessionId: "gone" });
+      const awaited = connection.send("Page.navigate", { url: "about:blank" });
+      closeSocket();
+      await expect(awaited).rejects.toMatchObject({
+        name: "CdpTransportError",
+        message: "CDP connection closed",
+      });
+      await Bun.sleep(50);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+  });
+
   test("cleans up a timed out command and ignores its late reply without closing the connection", async () => {
     let replyToExpired: (() => void) | undefined;
     const server = Bun.serve({

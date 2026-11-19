@@ -181,7 +181,32 @@ export type CodexRequestContext = {
    * (JSON). Body `metadata` is stripped by normalize — never put request_kind there.
    */
   turnMetadata?: Record<string, unknown>;
+  /**
+   * The turn's sticky-routing token. Give each turn its own (see
+   * {@link createCodexTurnState}); requests outside the turn, such as session
+   * titles, leave it out.
+   */
+  turnState?: CodexTurnState;
 };
+
+/**
+ * The backend's sticky-routing token for one turn. The turn's first response
+ * returns it in `x-codex-turn-state` (a response header over HTTP, the
+ * `codex.response.metadata` event over the WebSocket), and every later request
+ * of the turn sends it back. That keeps a request that leaves the turn's
+ * WebSocket, such as remote compaction or an HTTP fallback, on the backend that
+ * holds the turn's prompt cache. It belongs to the account that issued it and
+ * never crosses turns.
+ */
+export type CodexTurnState = {
+  current: { token: string; accountId: string | null } | null;
+};
+
+export const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
+
+export function createCodexTurnState(): CodexTurnState {
+  return { current: null };
+}
 
 export const codexRequestStorage = new AsyncLocalStorage<CodexRequestContext>();
 

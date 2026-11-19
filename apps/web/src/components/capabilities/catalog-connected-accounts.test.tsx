@@ -2,7 +2,12 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  OwnResourceReachWorkspace,
+} from "@opengeni/sdk";
 // The Radix dialog is a portal; this inline stand-in keeps its contract.
 mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
@@ -864,6 +869,110 @@ describe("catalog connected accounts", () => {
           .querySelector('[aria-label="Use mine@example.test in Team"]')
           ?.getAttribute("aria-checked"),
       ).toBe("true");
+      await view.unmount();
+    });
+
+    test("your own login where the connector isn't on reads as off, and one switch turns both on", async () => {
+      const mine = account({ metadata: { email: "mine@example.test", mcpUrl: item.mcpUrl } });
+      const row = (
+        overrides: Pick<OwnResourceReachWorkspace, "workspaceId" | "name"> &
+          Partial<OwnResourceReachWorkspace>,
+      ): OwnResourceReachWorkspace => ({
+        personal: false,
+        current: false,
+        on: true,
+        alwaysOn: false,
+        canChange: true,
+        ...overrides,
+      });
+      const getOwnResourceReach = mock(
+        async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+          resourceKind: "connection" as const,
+          resourceId: resource.resourceId,
+          workspaces: [
+            row({ workspaceId: "personal", name: "Personal", personal: true, alwaysOn: true }),
+            // On through a standing grant, but Slack isn't on in either.
+            row({ workspaceId: "design", name: "Design", connectorOff: true }),
+            row({ workspaceId: "team", name: "Team", current: true, connectorOff: true }),
+          ],
+        }),
+      );
+      const setOwnResourceReach = mock(
+        async (
+          workspaceId: string,
+          request: { resourceKind: string; resourceId: string; on: boolean },
+        ) => {
+          if (workspaceId === "design")
+            throw new OpenGeniApiError(
+              403,
+              JSON.stringify({
+                error: {
+                  code: "forbidden",
+                  message:
+                    "Only an admin can turn Slack on in this workspace. Ask one to turn it on, then use your login here.",
+                  details: { code: "own_login_connector_needs_admin" },
+                },
+              }),
+              { mutation: true },
+            );
+          return {
+            workspace: row({ workspaceId, name: "Team", on: request.on }),
+          };
+        },
+      );
+      const turnedOn = mock((_workspaceId: string) => undefined);
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={{ ...item, enabled: false }}
+          connections={[mine]}
+          management={management()}
+          ownReach={{
+            client: { getOwnResourceReach, setOwnResourceReach },
+            workspaceId: "team",
+            onConnectorTurnedOn: turnedOn,
+          }}
+        />,
+      );
+      await act(async () => {});
+      const switches = () =>
+        Object.fromEntries(
+          [...view.container.querySelectorAll('[role="switch"]')].map((entry) => [
+            entry.getAttribute("aria-label"),
+            entry.getAttribute("aria-checked"),
+          ]),
+        );
+      // "On" would read as usable: nothing there uses it until Slack is on.
+      expect(switches()).toEqual({
+        "Use mine@example.test in Personal": "true",
+        "Use mine@example.test in Design": "false",
+        "Use mine@example.test in Team": "false",
+      });
+      expect(view.container.textContent).toContain(
+        "This workspace. Not used here yet. Turning it on turns Slack on here too",
+      );
+      expect(view.container.textContent).not.toContain("Use it here");
+
+      // One switch: the server turns Slack on here with the login.
+      const toggle = (label: string) =>
+        act(async () =>
+          (view.container.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement).click(),
+        );
+      await toggle("Use mine@example.test in Team");
+      expect(setOwnResourceReach).toHaveBeenCalledWith("team", {
+        resourceKind: "connection",
+        resourceId: mine.id,
+        on: true,
+      });
+      expect(switches()["Use mine@example.test in Team"]).toBe("true");
+      expect(turnedOn.mock.calls).toEqual([["team"]]);
+
+      // Where only an admin may turn Slack on, it says so and nothing moves.
+      await toggle("Use mine@example.test in Design");
+      expect(switches()["Use mine@example.test in Design"]).toBe("false");
+      expect(view.container.textContent).toContain(
+        "Only an admin can turn Slack on in this workspace. Ask one to turn it on, then use your login here.",
+      );
+      expect(turnedOn).toHaveBeenCalledTimes(1);
       await view.unmount();
     });
 

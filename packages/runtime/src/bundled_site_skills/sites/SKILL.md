@@ -210,9 +210,8 @@ that is its setting, not a broken link, so tell the person their visitors
 sign in first instead of reporting sharing as broken.
 
 A published Site is a public web page. Never put secrets, tokens or private
-data in its HTML. An invited or public Site that keeps entries in Site Data,
-or an app that uses Site SQL, workspace tools or an embedded agent, also needs
-`references/publish-to-web.md`.
+data in its HTML. Before publishing or sharing a Site that keeps data or uses
+tools, read `references/publish-to-web.md` and review who sees what.
 
 ## Apps
 

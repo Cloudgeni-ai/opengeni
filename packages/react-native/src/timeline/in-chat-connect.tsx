@@ -1,3 +1,4 @@
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import type { ChatClient } from "@opengeni/sdk";
 import {
@@ -455,11 +456,16 @@ function PrimaryAction({
   onPress,
   busy,
   disabled,
+  lead,
+  secondary,
 }: {
   label: string;
   onPress: () => void;
   busy?: boolean | undefined;
   disabled?: boolean | undefined;
+  /** Under the action; "You choose what to authorize" unless given. `null` shows none. */
+  lead?: ReactNode | null | undefined;
+  secondary?: ReactNode | undefined;
 }) {
   const t = useOpenGeniText();
   return (
@@ -474,10 +480,15 @@ function PrimaryAction({
           onPress={onPress}
         />
       }
+      secondary={secondary}
       lead={
-        <Line tone="small" icon="shield-check">
-          {t("sessionCapabilityFrame.youChooseWhatToAuthorize")}
-        </Line>
+        lead === undefined ? (
+          <Line tone="small" icon="shield-check">
+            {t("sessionCapabilityFrame.youChooseWhatToAuthorize")}
+          </Line>
+        ) : (
+          lead
+        )
       }
     />
   );
@@ -1148,8 +1159,32 @@ export function NativeMcpCapabilityCard({
     reconnectConnectionId,
   });
   const reconnecting = Boolean(reconnectConnectionId);
-  const { item, personalOnly, busy, waiting, reconciling, connected, ownership } = flow;
+  const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
   const title = item?.name ?? name;
+  // Your own login, off here or for a connector not set up here yet: one tap
+  // uses it here instead of signing in again, as on the web card. It comes
+  // first even where others could use a shared connection: you already chose
+  // to connect your own account. Connecting one for everyone stays a choice.
+  const useOwnLoginHere = offHere !== null && !connected && item !== null;
+  const ownLoginAccount = useOwnLoginHere
+    ? connectionAccountLabel(
+        offHere,
+        t("sessionMcpCapabilityCard.yourNameAccount", { name: item.name }),
+      )
+    : "";
+  const ownLoginQuestion = useOwnLoginHere
+    ? `${
+        offHere.workspaceId === workspaceId
+          ? t("sessionMcpCapabilityCard.useYourLoginHere", { account: ownLoginAccount })
+          : t("sessionMcpCapabilityCard.useYourLoginHereToo", { account: ownLoginAccount })
+      } ${t("sessionMcpCapabilityCard.useYourLoginHereScope")}`
+    : null;
+  // Who can use a new connection: asked only where someone else could.
+  const canShare = item !== null && !item.connectionRef && !personalOnly && !reconnecting;
+  const forEveryoneInstead = (andOpen: boolean) => {
+    flow.setOwnership("workspace");
+    if (andOpen) void flow.open();
+  };
   return (
     <CapabilityFrame
       name={title}
@@ -1158,9 +1193,26 @@ export function NativeMcpCapabilityCard({
       description={rationale || item?.description || undefined}
       clampDescription={Boolean(rationale)}
       complete={flow.complete}
-      note={t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")}
+      note={ownLoginQuestion ?? t("sessionMcpCapabilityCard.reviewAccessBeforeSigningIn")}
     >
-      {flow.complete ? null : !flow.expanded ? (
+      {flow.complete ? null : !flow.expanded && useOwnLoginHere ? (
+        <PrimaryAction
+          label={t("sessionMcpCapabilityCard.useMyNameHere", { name: item.name })}
+          busy={busy}
+          onPress={() => void flow.useHere()}
+          // No sign-in: there is nothing to authorize, so no line about it.
+          lead={null}
+          secondary={
+            canShare ? (
+              <DecisionButton
+                label={t("sessionMcpCapabilityCard.connectAnAccountForEveryone")}
+                disabled={busy}
+                onPress={() => forEveryoneInstead(true)}
+              />
+            ) : undefined
+          }
+        />
+      ) : !flow.expanded ? (
         <PrimaryAction
           label={
             connected
@@ -1209,9 +1261,34 @@ export function NativeMcpCapabilityCard({
                   : t("sessionMcpCapabilityCard.preparingYourConnection")}
               </Line>
             )
+          ) : ownLoginQuestion ? (
+            // Your own login first, without asking who can use it; a new
+            // connection for everyone stays a choice where others could use it.
+            <>
+              <Line tone="small">{ownLoginQuestion}</Line>
+              <Button
+                icon="check"
+                variant="primary"
+                size="form"
+                label={t("sessionMcpCapabilityCard.useMyNameHere", { name: item.name })}
+                disabled={flow.view.busy}
+                onPress={() => void flow.useHere()}
+              />
+              <Button
+                icon="external-link"
+                label={t("sessionMcpCapabilityCard.connectADifferentAccount")}
+                onPress={flow.signIn}
+              />
+              {canShare ? (
+                <Button
+                  label={t("sessionMcpCapabilityCard.connectAnAccountForEveryone")}
+                  onPress={() => forEveryoneInstead(false)}
+                />
+              ) : null}
+            </>
           ) : !connected ? (
             <>
-              {!item.connectionRef && !personalOnly && !reconnecting ? (
+              {canShare ? (
                 <View
                   accessibilityRole="radiogroup"
                   accessibilityLabel={t("sessionMcpCapabilityCard.whoCanUseThisConnection")}

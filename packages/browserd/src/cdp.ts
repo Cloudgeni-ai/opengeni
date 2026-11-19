@@ -244,7 +244,7 @@ export class CdpConnection {
       throw new Error("CDP command exceeds its bounded transport envelope");
     }
     const timeoutMs = boundedTimeout(options.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
-    return new Promise<T>((resolve, reject) => {
+    const command = new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.settlePending(id);
         reject(new CdpCommandTimeoutError(method, options.sessionId));
@@ -273,6 +273,7 @@ export class CdpConnection {
         reject(new CdpTransportError(`CDP ${method} could not be sent`));
       }
     });
+    return observedFailure(command);
   }
 
   on(method: string, listener: EventListener, sessionId?: string): () => void {
@@ -298,7 +299,7 @@ export class CdpConnection {
     const timeoutMs = boundedTimeout(options.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
     if (this.failure) throw this.failure;
     if (options.signal?.aborted) throw new CdpTransportError(`CDP ${method} wait was aborted`);
-    return new Promise((resolve, reject) => {
+    const wait = new Promise<CdpEvent>((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
         reject(new CdpTransportError(`CDP ${method} event timed out`));
@@ -338,6 +339,7 @@ export class CdpConnection {
         reject(this.failure ?? new CdpTransportError("CDP connection closed"));
       });
     });
+    return observedFailure(wait);
   }
 
   onDisconnect(listener: () => void): () => void {
@@ -505,6 +507,17 @@ export class CdpConnection {
     }
     this.disconnectListeners.clear();
   }
+}
+
+/**
+ * A command or wait whose caller stopped waiting (it raced something else,
+ * or was left to finish on its own) still fails when the browser goes away.
+ * Unobserved, that failure would end the whole controller process and every
+ * browser it runs; callers that await the promise still receive it.
+ */
+function observedFailure<T>(promise: Promise<T>): Promise<T> {
+  promise.catch(() => undefined);
+  return promise;
 }
 
 function validateEndpoint(endpoint: string, allowRemote: boolean): void {

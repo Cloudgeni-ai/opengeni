@@ -13,7 +13,7 @@ use std::time::Duration;
 use compute_core::{HostPolicy, SandboxId};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, LastWords, MemoryProfile,
-    MemorySource, MemoryStats, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
+    MemorySource, MemoryStats, Readable, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -105,6 +105,11 @@ struct World {
     /// Restores still to refuse as a VMM does when it cannot load an image
     /// (with a memory-lost error), whatever the image holds.
     refuse_restores: Mutex<usize>,
+    /// While set, this host is of another kind than the one that made any
+    /// image: the engine says so of every runtime it is asked about, and
+    /// refuses every restore, as a VMM does an image whose processor state
+    /// does not fit.
+    another_kind: AtomicBool,
     resumes: AtomicUsize,
     adopted: AtomicUsize,
     /// While set, every resume is refused before the guest runs.
@@ -845,6 +850,16 @@ impl Engine for Fake {
         "fake"
     }
 
+    fn reads(&self, made_under: &str) -> Readable {
+        if self.world.another_kind.load(Ordering::SeqCst) {
+            Readable::Elsewhere(format!("{made_under} is another kind of host"))
+        } else if made_under == self.runtime() {
+            Readable::Yes
+        } else {
+            Readable::Unknown
+        }
+    }
+
     fn process_identity(&self, vm: &FakeVm) -> Result<String, EngineError> {
         Self::alive(vm, "process_identity")?;
         Ok(format!("fake-{}", vm.serial))
@@ -858,7 +873,8 @@ impl Engine for Fake {
         let refuse = {
             let mut left = self.world.refuse_restores.lock().unwrap();
             left.checked_sub(1).map(|fewer| *left = fewer)
-        };
+        }
+        .or_else(|| self.world.another_kind.load(Ordering::SeqCst).then_some(()));
         if refuse.is_some() {
             // As Firecracker does: the VMM starts, then refuses the load.
             return Err(EngineError::new(

@@ -1110,7 +1110,20 @@ export type SiteDbErrorCode =
   /** SQLite or Durable Object failures that are not the caller's (busy, I/O, corruption); 500. */
   | "internal";
 
-export type SiteDbErrorBody = { error: { code: SiteDbErrorCode; message: string } };
+/** On Site database responses from the gateway: where the request was served, `eu` or `legacy`. */
+export const SITE_DB_LOCATION_HEADER = "x-og-site-db-location";
+/** On responses served from a legacy (pre-EU) database: why it has not moved yet. */
+export const SITE_DB_RELOCATION_ERROR_HEADER = "x-og-site-db-relocation-error";
+
+export type SiteDbErrorBody = {
+  error: {
+    code: SiteDbErrorCode;
+    message: string;
+    /** On a 503: false when the request certainly did not run (safe to retry). */
+    outcomeUnknown?: boolean;
+    retryable?: boolean;
+  };
+};
 
 /** Encode a SQLite blob for JSON. */
 export function siteSqlBlobValue(bytes: Uint8Array): { $base64: string } {

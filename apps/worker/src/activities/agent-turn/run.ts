@@ -49,6 +49,7 @@ import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
   codexRequestStorage,
+  createCodexTurnState,
   withCodexRequestOverrides,
   withResponsesConversation,
   createResponsesTurn,
@@ -912,6 +913,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       session.scopeSubjectId,
                       input.sessionId,
                     ),
+                    // One attempt is one turn for the backend's sticky routing:
+                    // a retried or resumed attempt starts with fresh routing.
+                    turnState: createCodexTurnState(),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),

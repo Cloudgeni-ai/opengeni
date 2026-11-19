@@ -38,6 +38,7 @@ import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { OwnWhereItWorksSection } from "@opengeni/react/app/components/own-where-it-works";
+import { subscriptionSignInAge } from "./subscription-sign-in-age";
 
 export type SubscriptionAccountPlaces = {
   scopeName: string;
@@ -62,6 +63,8 @@ type AccountSummary = SubscriptionPoolAccount & {
   status: string;
   allocatorEnabled: boolean;
   lastError?: string | null;
+  /** When it was last signed in (connected or reconnected); null or absent when unknown. */
+  signedInAt?: string | null | undefined;
 };
 type AccountPool<Account extends AccountSummary> = {
   accounts: Account[];
@@ -208,6 +211,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   const organizationManaged =
     sharedBy === null &&
     (pool.inherited || (!pool.organizationId && account.scope === "organization"));
+  const signInAge = subscriptionSignInAge(provider, account.signedInAt);
   const status =
     account.status !== "active"
       ? "needs_reconnect"
@@ -244,6 +248,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
           plan(account),
           account.email && account.email !== name ? account.email : null,
           scopeLabel,
+          signInAge?.text ?? null,
         ]}
         actions={
           canEdit ? (
@@ -298,6 +303,29 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
               }
             >
               {account.lastError ?? "This account can't be used until someone signs in again."}
+            </Notice>
+          </DetailSection>
+        ) : null}
+        {account.status === "active" && signInAge?.nearingExpiry ? (
+          <DetailSection>
+            <Notice
+              tone="waiting"
+              title={`Sign in to ${providerName} again soon`}
+              action={
+                canEdit ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="default"
+                    onClick={() => places.openConnect(account.id)}
+                    className="rounded-[10px] pointer-coarse:h-11"
+                  >
+                    Sign in again
+                  </Button>
+                ) : undefined
+              }
+            >
+              {`${providerName} stops accepting a sign-in about 4 weeks after it was made, and this one is ${signInAge.days} days old. Sign in again now so work doesn't stop.`}
             </Notice>
           </DetailSection>
         ) : null}

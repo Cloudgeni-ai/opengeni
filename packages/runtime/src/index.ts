@@ -544,6 +544,7 @@ import {
   gitRepo,
   inContainerMountStrategy,
   s3Mount,
+  renderManifestDescription,
   shell,
   type SandboxClient,
   type SandboxSessionLike,
@@ -1629,18 +1630,26 @@ function withoutInlineReasoning(text: string): string | null {
  * A response stopped by the output limit can end inside a word. Keep only
  * whole words before the shared automatic-title normalizer bounds the title.
  * SESSION_TITLE_NOT_YET (alone, possibly quoted or punctuated) is no title.
+ * A real title the model ends with a piece of it ("Files on the desktop_TITLE",
+ * "Files on the desktop NO_TITLE") keeps the title without the piece.
  */
 function normalizeGeneratedSessionTitle(
   text: string,
   stoppedAtOutputLimit: boolean,
 ): string | null {
-  const answer = withoutInlineReasoning(text);
-  if (answer === null) return null;
+  const raw = withoutInlineReasoning(text);
+  if (raw === null) return null;
+  if (raw.replace(/[^\p{L}\p{N}_]+/gu, "").toUpperCase() === SESSION_TITLE_NOT_YET) return null;
+  const answer = raw.replace(TRAILING_NOT_YET_FRAGMENT, "");
   if (answer.replace(/[^\p{L}\p{N}_]+/gu, "").toUpperCase() === SESSION_TITLE_NOT_YET) return null;
+  if (!/[\p{L}\p{N}]/u.test(answer)) return null;
   const complete =
     stoppedAtOutputLimit && !/\s$/u.test(answer) ? answer.replace(/\S+$/u, "") : answer;
   return normalizeAutomaticSessionTitle(complete);
 }
+
+/** A trailing "_TITLE", "NO_TITLE" or "_NO_TITLE" after a title, with any closing punctuation. */
+const TRAILING_NOT_YET_FRAGMENT = /[\s_]*(?:NO)?_TITLE[\s\p{P}]*$/u;
 
 /**
  * Run the compaction summarizer as one plain, tool-less, non-streaming model
@@ -4374,6 +4383,9 @@ export function buildOpenGeniAgent(
     ),
     instructionManifest: (manifest: Manifest) =>
       manifestWithoutFileResourceEntries(manifest, resources),
+    // The layout names the active machine's root, so it reaches the model as a
+    // history item (`workspaceFilesystemLayout`), never in the system prompt.
+    filesystemInstructions: false,
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.sandboxEnvironment ? { sandboxEnvironment: options.sandboxEnvironment } : {}),
       ...(options.authorizeAttemptExecution
@@ -14101,6 +14113,38 @@ export function manifestWithoutFileResourceEntries(
   );
   if (entries.length === Object.keys(manifest.entries).length) return manifest;
   return new Manifest({ ...manifest, entries: Object.fromEntries(entries) });
+}
+
+/**
+ * The filesystem layout of a turn's active workspace as the model reads it:
+ * the instruction manifest (without file resources) rendered the way the SDK
+ * renders its filesystem section. It names the active machine's root, so it is
+ * delivered as a session history item (`ensureSessionWorkspaceFilesystem`)
+ * instead of in the system prompt, where moving the session to another machine
+ * would rewrite every cached request prefix. Null without a sandbox.
+ */
+export function workspaceFilesystemLayout(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    activeSandboxBackend?: Settings["sandboxBackend"];
+    sandboxWorkspaceRoot?: string;
+  } = {},
+): string | null {
+  if (settings.sandboxBackend === "none") return null;
+  if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) return null;
+  const manifest = buildManifest(
+    settings,
+    resources,
+    {},
+    [],
+    options.activeSandboxBackend === "selfhosted"
+      ? { root: options.sandboxWorkspaceRoot!, includeResourceEntries: false }
+      : {},
+  );
+  return renderManifestDescription(manifestWithoutFileResourceEntries(manifest, resources), {
+    depth: 3,
+  }).text;
 }
 
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {

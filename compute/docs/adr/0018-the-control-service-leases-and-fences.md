@@ -418,8 +418,11 @@ can be built and tested.
   that, nothing the service gave another host thaws here.
 - **Requests.** A create is placed (two random hosts that fit, preferring
   one with a ready clone of the shape, then the larger share of its room
-  free (the smaller of the shares of its memory and processor time it can
-  still promise, so hosts of different sizes fill evenly), then the most
+  free (the smallest of the shares of its memory and processor time it can
+  still promise and of its processors the VMs of its awake sandboxes do not
+  have, so hosts of different sizes fill evenly and a VM that keeps its
+  processors busy, guaranteed little of their time, is not stacked onto a
+  host whose processors are shared while another has them spare), then the most
   free memory, spread over zones) and recorded with owner epoch 1 while
   the host creates it.
   An adopt prefers a host whose memory profile and CPU template match the

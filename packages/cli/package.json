@@ -1,0 +1,46 @@
+{
+  "name": "opengeni",
+  "version": "6.31.0",
+  "description": "Command-line interface for Opengeni.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/cli"
+  },
+  "bin": {
+    "opengeni": "./dist/bin/opengeni.cjs"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "typecheck": "tsrs --noEmit",
+    "test": "bun test",
+    "build": "bun build.ts",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

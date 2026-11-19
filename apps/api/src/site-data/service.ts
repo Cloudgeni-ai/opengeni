@@ -5,7 +5,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { AccessGrant, SiteDataDescribeResponse } from "@opengeni/contracts";
 import {
   createPostgresSiteDataStore,
-  getSiteDataScheduledTaskId,
+  getSiteDataScheduledRun,
   getSiteDataSite,
   parseSiteDataPath,
   readSiteDataPath,
@@ -21,6 +21,7 @@ import {
   type SiteDataWriteSummary,
   writeSiteDataPath,
 } from "@opengeni/db";
+import { siteLiveChangeListener, type SiteLiveSettings } from "../site-live/service";
 
 /**
  * Site Data service: resolves who is calling (manager or viewer, and their
@@ -41,13 +42,19 @@ export type SiteDataAccess = {
 };
 
 const stores = new WeakMap<object, SiteDataStore>();
+const liveStores = new WeakMap<object, SiteDataStore>();
 
-/** One store per database handle. */
-export function siteDataStore(db: Database): SiteDataStore {
-  let store = stores.get(db);
+/**
+ * One store per database handle. With settings, the store also sends live
+ * change hints for watched Sites after its writes commit (site-live).
+ */
+export function siteDataStore(db: Database, settings?: SiteLiveSettings): SiteDataStore {
+  const onChange = settings ? siteLiveChangeListener(settings) : undefined;
+  const cache = onChange ? liveStores : stores;
+  let store = cache.get(db);
   if (!store) {
-    store = createPostgresSiteDataStore(db);
-    stores.set(db, store);
+    store = createPostgresSiteDataStore(db, onChange ? { onChange } : {});
+    cache.set(db, store);
   }
   return store;
 }
@@ -837,7 +844,7 @@ function publishedViewerAccess(
     site: viewer.site,
     caller,
     subjectId,
-    store: siteDataStore(deps.db),
+    store: siteDataStore(deps.db, deps.settings),
     limits,
     writeOptions: {
       limits,
@@ -862,9 +869,10 @@ export async function resolveSiteDataAccess(
   const grant = authority;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   const agentIds = agentSessionIds(grant);
-  const scheduledTaskId = agentIds
-    ? await getSiteDataScheduledTaskId(deps.db, scope, agentIds.sessionId)
+  const scheduledRun = agentIds
+    ? await getSiteDataScheduledRun(deps.db, scope, agentIds.sessionId)
     : null;
+  const scheduledTaskId = scheduledRun?.taskId ?? null;
   const framed = surface.frameSiteId !== undefined && surface.frameSiteId !== null;
   if (surface.frameSiteId != null && surface.frameSiteId !== siteId)
     throw new SiteDataError("forbidden", "A Site can only use its own data");
@@ -887,13 +895,14 @@ export async function resolveSiteDataAccess(
     principal: siteDataPrincipal(grant, viewer.subjectId, scheduledTaskId),
     actor: siteDataActor(grant, viewer.subjectId),
     framed,
+    ...(scheduledRun ? { chainDepth: scheduledRun.chainDepth } : {}),
   };
   const limits = siteDataLimits(deps.settings);
   return {
     site,
     caller,
     subjectId: viewer.subjectId,
-    store: siteDataStore(deps.db),
+    store: siteDataStore(deps.db, deps.settings),
     limits,
     writeOptions: {
       limits,

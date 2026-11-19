@@ -463,6 +463,9 @@ import {
   WORKSPACE_GOVERNANCE_NONE,
   readWorkspaceGovernanceContext,
   workspaceGovernanceContextItem,
+  WORKSPACE_FILESYSTEM_CONTEXT_PREFIX,
+  readWorkspaceFilesystemContext,
+  workspaceFilesystemContextItem,
   AGENT_INSTRUCTIONS_CONTEXT_PREFIX,
   agentInstructionsContextItem,
   agentInstructionsContextText,
@@ -34661,14 +34664,18 @@ export type DiscardUninitializedSessionShellResult =
  * transaction. When that second step fails for a create without an
  * idempotency key, the caller receives an error and has no way to resume
  * that session, so the bare row must not stay visible as a queued session
- * that nothing will ever run. A keyed shell is kept: a retry with the same
- * key repairs it with the parameters it was first accepted with. The row lock
- * serializes with the initializer, so a shell that gained any event or turn
- * (including an outcome-unknown initializer commit) is left untouched.
+ * that nothing will ever run. A keyed shell is kept, because a retry with the
+ * same key repairs it with the parameters it was first accepted with, unless
+ * `discardKeyed` says the server refused its start: then there is nothing to
+ * repair, and 1501's definer deletes it together with the key's guard row, so
+ * a retry with that key evaluates the request again. Until that definer is
+ * granted a refused keyed shell is kept too. The row lock serializes with the
+ * initializer, so a shell that gained any event or turn (including an
+ * outcome-unknown initializer commit) is left untouched.
  */
 export async function discardUninitializedSessionShell(
   db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
+  input: { accountId: string; workspaceId: string; sessionId: string; discardKeyed?: boolean },
 ): Promise<DiscardUninitializedSessionShellResult> {
   try {
     return await withSessionActivityRlsContext(
@@ -34678,11 +34685,27 @@ export async function discardUninitializedSessionShell(
         await scopedDb.transaction(async (txRaw) => {
           const tx = txRaw as unknown as Database;
           await lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+          // Read the key without a row lock: a keyed shell is locked only
+          // after its key's admission lock, as keyed creates take them.
+          const [keyed] = await tx
+            .select({ createIdempotencyKey: schema.sessions.createIdempotencyKey })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (!keyed) return "not_found" as const;
+          if (keyed.createIdempotencyKey !== null) {
+            if (input.discardKeyed !== true) return "keyed" as const;
+            return await discardRefusedKeyedSessionShell(tx, input);
+          }
           const [shell] = await tx
             .select({
               id: schema.sessions.id,
               lastSequence: schema.sessions.lastSequence,
-              createIdempotencyKey: schema.sessions.createIdempotencyKey,
             })
             .from(schema.sessions)
             .where(
@@ -34694,7 +34717,6 @@ export async function discardUninitializedSessionShell(
             .for("update")
             .limit(1);
           if (!shell) return "not_found" as const;
-          if (shell.createIdempotencyKey !== null) return "keyed" as const;
           if (shell.lastSequence !== 0) return "initialized" as const;
           const [[event], [turn], [child]] = await Promise.all([
             tx
@@ -34754,6 +34776,39 @@ export async function discardUninitializedSessionShell(
         : undefined;
     if (code === "23503" || causeCode === "23503") return "referenced";
     throw error;
+  }
+}
+
+const DISCARD_REFUSED_SESSION_CREATE_ROUTINE =
+  "opengeni_private.discard_refused_session_create_v1(uuid, uuid)";
+
+/**
+ * Delete a refused keyed shell and release its key through 1501's definer (the
+ * runtime cannot write the key's guard row). While the definer is withheld the
+ * shell is kept, as before.
+ */
+async function discardRefusedKeyedSessionShell(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string },
+): Promise<DiscardUninitializedSessionShellResult> {
+  const [privilege] = await rawRows<{ granted: boolean | null }>(
+    tx,
+    sql`select has_function_privilege(
+      to_regprocedure(${DISCARD_REFUSED_SESSION_CREATE_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  if (privilege?.granted !== true) return "keyed";
+  const [row] = await rawRows<{ result: string }>(
+    tx,
+    sql`select opengeni_private.discard_refused_session_create_v1(
+      ${input.workspaceId}::uuid, ${input.sessionId}::uuid) as result`,
+  );
+  switch (row?.result) {
+    case "discarded":
+    case "initialized":
+    case "not_found":
+      return row.result;
+    default:
+      throw new Error(`unexpected refused session create discard result: ${row?.result}`);
   }
 }
 
@@ -35025,7 +35080,7 @@ export async function deleteSessionTreeIfQuiescent(
                 .where(
                   and(
                     inArray(schema.sandboxRetainedProcesses.leaseId, leaseIds),
-                    eq(schema.sandboxRetainedProcesses.state, "active"),
+                    retainedProcessEvidenceKeptSql(sql`sandbox_retained_processes`),
                   ),
                 )
                 .for("update", { noWait: true }),
@@ -35048,6 +35103,13 @@ export async function deleteSessionTreeIfQuiescent(
             ) {
               return { status: "live_sandboxes" as const };
             }
+            await deleteSettledRetainedProcessesOfLeasesTx(
+              tx,
+              sql`(${sql.join(
+                leaseIds.map((id) => sql`${id}::uuid`),
+                sql`, `,
+              )})`,
+            );
             await tx.delete(schema.sandboxLeases).where(inArray(schema.sandboxLeases.id, leaseIds));
           }
 
@@ -45429,6 +45491,14 @@ const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
   item: workspaceGovernanceContextItem,
 };
 
+const WORKSPACE_FILESYSTEM_CHANNEL: SessionContextChannel = {
+  label: "Workspace filesystem",
+  metadataKey: "opengeniWorkspaceFilesystemHistoryId",
+  contentPrefix: WORKSPACE_FILESYSTEM_CONTEXT_PREFIX,
+  read: readWorkspaceFilesystemContext,
+  item: workspaceFilesystemContextItem,
+};
+
 const AGENT_INSTRUCTIONS_CHANNEL: SessionContextChannel = {
   label: "Agent instructions",
   metadataKey: "opengeniAgentInstructionsHistoryId",
@@ -45531,6 +45601,33 @@ export async function ensureSessionWorkspaceGovernance(
     WORKSPACE_GOVERNANCE_CHANNEL,
   );
   return visible === null || visible === WORKSPACE_GOVERNANCE_NONE ? null : visible;
+}
+
+/**
+ * Persist the active workspace's filesystem layout once per logical turn, as
+ * a history item before the turn that first sees a new layout (for example
+ * after the session moved to another machine). Retries reuse the turn
+ * snapshot. Null means the turn has no sandbox: nothing is written and the
+ * model keeps the layout it last read. Returns the model-visible layout.
+ */
+export async function ensureSessionWorkspaceFilesystem(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    layout: string | null;
+  },
+): Promise<string | null> {
+  const { layout, ...scope } = input;
+  return await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: layout },
+    WORKSPACE_FILESYSTEM_CHANNEL,
+  );
 }
 
 /**
@@ -60043,24 +60140,43 @@ function sandboxGroupOnlyOfArchivedChatsSql(input: {
     ))`;
 }
 
-/** Migration 1404's inventory, withheld from the runtime for one release. */
-export const COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE =
-  "opengeni_private.cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)";
-
 export type ColdSandboxOfArchivedChats = {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
 };
 
-/** False while the deployment's database withholds the inventory (1404). */
-export async function coldSandboxesOfArchivedChatsAvailable(db: Database): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select has_function_privilege(
-      to_regprocedure(${COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE})::oid, 'EXECUTE') as granted`,
+/**
+ * True while a retained process row over alias `process` must stay: it still
+ * runs, or it is a supervised command whose output has not been captured yet
+ * (the database refuses to delete that evidence).
+ */
+function retainedProcessEvidenceKeptSql(process: SQL): SQL {
+  return sql`(${process}.state = 'active' or (${process}.provider_command ? 'supervision'
+    and ${process}.state <> 'lost'
+    and (${process}.supervision_receipt is null or not ${process}.supervision_output_captured)))`;
+}
+
+/**
+ * Delete the settled command records of sandboxes about to be forgotten, so
+ * their lease rows can go. A finished or lost process names the workspace
+ * write that started it, which deleting the lease removes; its background
+ * command and closed terminal name the process in turn. The caller has
+ * already checked that none of them still runs.
+ */
+async function deleteSettledRetainedProcessesOfLeasesTx(
+  tx: Database,
+  leaseIds: SQL,
+): Promise<void> {
+  const processIds = sql`(select process.id from sandbox_retained_processes process
+    where process.lease_id in ${leaseIds})`;
+  await tx.execute(
+    sql`delete from session_background_commands where retained_process_id in ${processIds}`,
   );
-  return row?.granted === true;
+  await tx.execute(
+    sql`delete from sandbox_pty_sessions where retained_process_id in ${processIds}`,
+  );
+  await tx.execute(sql`delete from sandbox_retained_processes where lease_id in ${leaseIds}`);
 }
 
 /**
@@ -60145,13 +60261,19 @@ export async function forgetColdSandboxOfArchivedChats(
                 or exists (select 1 from sandbox_workspace_mutation_admissions admission
                   where admission.lease_id in ${leaseIds} and admission.settled_at is null)
                 or exists (select 1 from sandbox_retained_processes process
-                  where process.lease_id in ${leaseIds} and process.state = 'active')
+                  where process.lease_id in ${leaseIds} and ${retainedProcessEvidenceKeptSql(sql`process`)})
+                or exists (select 1 from sandbox_retained_processes process
+                  join session_background_commands command
+                    on command.retained_process_id = process.id
+                  where process.lease_id in ${leaseIds}
+                    and command.state in ('running', 'stopping'))
                 or exists (select 1 from sandbox_pty_sessions pty
                   where pty.workspace_id = ${input.workspaceId}
                     and pty.sandbox_group_id = ${input.sandboxGroupId}
                     and pty.status = 'open')) as busy`,
           );
           if (state?.unused !== true || state.busy) return false;
+          await deleteSettledRetainedProcessesOfLeasesTx(tx, leaseIds);
           await tx.execute(sql`delete from sandbox_leases where id in ${leaseIds}`);
           return true;
         }),
@@ -75668,28 +75790,6 @@ export async function getSessionGoal(
       )
       .limit(1);
     return row ? mapSessionGoal(row) : null;
-  });
-}
-
-/** The given sessions that have a goal, in any state (one indexed lookup). */
-export async function sessionsWithGoal(
-  db: Database,
-  workspaceId: string,
-  sessionIds: readonly string[],
-): Promise<Set<string>> {
-  const ids = [...new Set(sessionIds)];
-  if (ids.length === 0) return new Set();
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({ sessionId: schema.sessionGoals.sessionId })
-      .from(schema.sessionGoals)
-      .where(
-        and(
-          eq(schema.sessionGoals.workspaceId, workspaceId),
-          inArray(schema.sessionGoals.sessionId, ids),
-        ),
-      );
-    return new Set(rows.map((row) => row.sessionId));
   });
 }
 

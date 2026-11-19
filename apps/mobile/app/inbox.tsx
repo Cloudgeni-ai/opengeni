@@ -1,5 +1,5 @@
 import { NativeInboxList, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
-import type { InboxItem } from "@opengeni/sdk";
+import type { InboxEntry } from "@opengeni/sdk";
 import * as Haptics from "expo-haptics";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
@@ -50,7 +50,9 @@ function Inbox() {
     if (inbox.data) void syncInboxBadge(inbox.data);
   }, [inbox.data]);
 
-  const open = (item: InboxItem) => {
+  const open = (item: InboxEntry) => {
+    // A notice about something other than a chat opens its link instead.
+    if (item.sessionId === null) return;
     if (item.workspaceId !== workspaceId) setWorkspaceId(item.workspaceId);
     // Opens on the moment the item was raised.
     router.push(

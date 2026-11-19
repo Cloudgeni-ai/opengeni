@@ -197,8 +197,9 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// the image is kept for a retry. An image made on another kind of
     /// host (another processor model or host kernel) is kept too, but only
     /// for [`REFUSALS_FROM_ELSEWHERE`] wakes in a row: its saved processor
-    /// state may not fit this host, which does not change while it runs,
-    /// and nothing sends the sandbox to a host like the one that made it.
+    /// state may not fit this host, which does not change while it runs.
+    /// An adopt never takes such an image up (it wakes from its files), so
+    /// this is an image made here before the host's kernel changed.
     async fn rejected(
         &mut self,
         images: &Images,

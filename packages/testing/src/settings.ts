@@ -109,6 +109,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxWarmBillingMode: "usage_only",
     documentEmbeddingBillingMode: "usage_only",
     sitesCloudflareStorageEnabled: false,
+    sitesLiveEnabled: false,
     sitesGatewayInternalOrigin: undefined,
     sitesSqlFreeStorageBytes: 5 * 1024 * 1024 * 1024,
     sitesSqlFreeRowsReadPerMonth: undefined,

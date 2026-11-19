@@ -65,11 +65,23 @@ export {
   probeRemoteWorkspaceSize,
   WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
   REBUILDABLE_WORKSPACE_DIRECTORY_NAMES,
+  workspaceArchiveObjectRestoresFromSpool,
   workspaceSizeFromArchiveDescriptor,
   type RebuildableWorkspacePaths,
   type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
+export {
+  WorkspaceTarStreamValidator,
+  workspaceTarStreamSession,
+  type WorkspaceTarStreamSession,
+} from "./workspace-tar-stream";
+import {
+  hydrateWorkspaceTarStreamFromSpool,
+  readWorkspaceArchiveSpool,
+  workspaceTarProtectedPaths,
+  workspaceTarStreamSession,
+} from "./workspace-tar-stream";
 
 import {
   BROWSER_CONTROL_PORT,
@@ -2304,23 +2316,28 @@ export async function establishSandboxSessionFromEnvelope(
     );
     const objectRef = parseWorkspaceArchiveObjectRef(archiveState?.workspaceArchiveRef);
     const objectDescriptor = parseWorkspaceArchiveDescriptor(workspaceArchiveMetadata);
+    const hostProjection =
+      objectDescriptor?.version === 1 &&
+      objectDescriptor.workspace.projection === "sdk_local_archive_v1";
     if (
-      process.platform === "linux" &&
       objectRef &&
       objectDescriptor?.version === 1 &&
-      objectDescriptor.workspace.projection === "sdk_local_archive_v1" &&
+      (!hostProjection || process.platform === "linux") &&
       opts.loadHostWorkspaceArchive
     ) {
-      // Local/Docker restore a host-backed archive natively. Any other backend
-      // hydrates a portable tar converted from it, so a deployment that changes
-      // sandbox backend can still continue chats archived before the change.
+      // Every object-storage tar is read through a verified disk spool, never
+      // one in-memory buffer. Local/Docker restore a host-backed archive
+      // natively. Any other backend hydrates a portable tar converted from it,
+      // so a deployment that changes sandbox backend can still continue chats
+      // archived before the change. A portable tar streams from the spool into
+      // a session that can extract a stream.
       if (
         objectRef.sha256 !== objectDescriptor.archiveSha256 ||
         objectRef.bytes !== objectDescriptor.archiveBytes
       ) {
         throw new WorkspaceArchiveIntegrityError(
-          "archive_metadata_invalid",
-          "Host archive object reference does not match its descriptor",
+          hostProjection ? "archive_metadata_invalid" : "archive_hash_mismatch",
+          "Workspace archive object reference does not match its descriptor",
         );
       }
       workspaceArchive = { kind: "host_spool", descriptor: objectDescriptor, ref: objectRef };
@@ -2554,9 +2571,19 @@ export async function establishSandboxSessionFromEnvelope(
       if (workspaceArchive) {
         const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
           .hydrateWorkspace;
+        const spooledHostProjection =
+          workspaceArchive.kind === "host_spool" &&
+          workspaceArchive.descriptor.workspace.projection === "sdk_local_archive_v1";
+        // A portable tar read from object storage streams into a session that
+        // can extract a stream; any other session hydrates it from memory.
+        const tarStream =
+          workspaceArchive.kind === "host_spool" && !spooledHostProjection
+            ? workspaceTarStreamSession(restored)
+            : null;
         if (
           !createdFromFilesystemSnapshot &&
-          (workspaceArchive.kind !== "host_spool" || !hostBackedBackend) &&
+          !(spooledHostProjection && hostBackedBackend) &&
+          !tarStream &&
           typeof hydrate !== "function"
         ) {
           await terminateCreatedSandbox(createdClient, restored, restoredState);
@@ -2577,7 +2604,7 @@ export async function establishSandboxSessionFromEnvelope(
             );
           }
           // Directory/tar hydration operates on the attributed destination.
-          if (workspaceArchive.kind === "host_spool" && hostBackedBackend) {
+          if (spooledHostProjection && hostBackedBackend) {
             // This is the exact newly-created, unpublished destination. The lease
             // restore fence must exclude admitted writers until verification ends;
             // descriptor-relative filesystem access alone is not writer isolation.
@@ -2591,7 +2618,7 @@ export async function establishSandboxSessionFromEnvelope(
             await restoreHostWorkspaceArchive(root, hostSpool!, {
               archiveLimits: Reflect.get(restored as object, "archiveLimits"),
             });
-          } else if (workspaceArchive.kind === "host_spool") {
+          } else if (workspaceArchive.kind === "host_spool" && spooledHostProjection) {
             const portable = await convertHostWorkspaceArchiveToTar(hostSpool!, {
               excludedPaths: workspaceArchiveExcludedPaths(restored),
               mtimeSeconds: Date.parse(workspaceArchive.descriptor.capturedAt) / 1000,
@@ -2612,6 +2639,23 @@ export async function establishSandboxSessionFromEnvelope(
             }
             await hydrate!.call(restored, portable.bytes);
             portableContents = portable.contents;
+          } else if (workspaceArchive.kind === "host_spool") {
+            // A portable tar from object storage: the spool was verified
+            // against the descriptor before create, and the stream re-hashes
+            // what it forwards, so a changed spool still fails closed.
+            if (tarStream) {
+              await hydrateWorkspaceTarStreamFromSpool(
+                tarStream,
+                hostSpool!,
+                workspaceArchive.descriptor,
+                {
+                  rejectRelPaths: workspaceTarProtectedPaths(restored),
+                  archiveLimits: Reflect.get(restored as object, "archiveLimits"),
+                },
+              );
+            } else {
+              await hydrate!.call(restored, await readWorkspaceArchiveSpool(hostSpool!));
+            }
           } else if (!createdFromFilesystemSnapshot) {
             await hydrate!.call(restored, workspaceArchive.bytes);
           }

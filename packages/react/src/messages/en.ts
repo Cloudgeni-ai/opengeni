@@ -4987,6 +4987,7 @@ export const englishMessages = {
   "sessionListModel.today": "Today",
   "sessionListModel.yesterday": "Yesterday",
   "sessionMcpCapabilityCard.connectADifferentAccount": "Connect a different account",
+  "sessionMcpCapabilityCard.connectAnAccountForEveryone": "Connect an account for everyone instead",
   "sessionMcpCapabilityCard.connected": "Connected",
   "sessionMcpCapabilityCard.connectionDetailsAreUnavailable": "Connection details are unavailable.",
   "sessionMcpCapabilityCard.connectionSetupCouldNotFinish":
@@ -5061,7 +5062,9 @@ export const englishMessages = {
     "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
-  "sessionMcpCapabilityCard.useItHere": "Use it here",
+  "sessionMcpCapabilityCard.useMyNameHere": "Use my {name} here",
+  "sessionMcpCapabilityCard.useYourLoginHere":
+    "You already connected {account}. Use it for your messages here?",
   "sessionMcpCapabilityCard.useYourLoginHereScope":
     "Only you can use it. In shared chats here, people see what the agent does with it.",
   "sessionMcpCapabilityCard.useYourLoginHereToo":

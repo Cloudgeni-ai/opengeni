@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { isPublishedPackageName } from "./publishable-workspaces";
 
 // Typecheck the TypeScript code samples in the integration docs, the bundled
 // opengeni-client Skill and the package READMEs against the SDK and React
@@ -281,7 +282,7 @@ export function parseDiagnostics(output: string): RawDiagnostic[] {
 
 export function isReportedDiagnostic(code: number, message: string): boolean {
   if (!REPORTED_CODES.has(code)) return false;
-  if (code === 2307) return /'@opengeni\//.test(message);
+  if (code === 2307) return /'(?:@opengeni\/|opengeni['/])/.test(message);
   return true;
 }
 
@@ -312,7 +313,7 @@ export function packagePaths(root: string): Record<string, string[]> {
       types?: string;
       exports?: Record<string, ExportTarget>;
     };
-    if (!manifest.name?.startsWith("@opengeni/")) continue;
+    if (!isPublishedPackageName(manifest.name)) continue;
     const exportsMap = manifest.exports ?? (manifest.types ? { ".": manifest.types } : {});
     for (const [subpath, target] of Object.entries(exportsMap)) {
       const file =

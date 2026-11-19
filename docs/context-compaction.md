@@ -453,6 +453,17 @@ the start of every later request:
   appends a new item that replaces the old one; withdrawn governance appends an
   explicit "no workspace governance" item. Compaction re-adds only the latest
   governance item after the Skill catalog.
+- The active workspace's filesystem layout names its root, which differs
+  between a managed sandbox (`/workspace`) and each Connected Machine (its
+  host-native working directory). The SDK's `# Filesystem` section is turned
+  off (`filesystemInstructions: false`); the system prompt keeps a static
+  section that points at the latest `<opengeni_workspace_filesystem>` developer
+  item, written like governance before the turn that first sees a new layout
+  and frozen for that turn's attempts. A `sandbox_swap` within a turn returns
+  the new `workspaceRoot` in its tool result; the next turn appends the new
+  layout. Compaction re-adds only the latest layout item after governance.
+  Before this, every machine swap rewrote the end of the system prompt and
+  every later request of the session re-read its whole history uncached.
 - An agent's Instructions are the exception that is allowed in the system
   prompt, because every chat of one agent shares them: chats bound to an agent
   revision (`sessions.agent_prompt_revision`) carry that revision as their own
@@ -489,18 +500,33 @@ counts 1, 2, 4, … and the full count). `model_call_facts.prompt_cache_diagnost
 stores that fingerprint, Claude's dropped signed-thinking counts by reason,
 and, when a call reads much less cache than the previous call of the same model
 in the session, a warm-miss class: `context_replaced`, `tools_changed`,
-`system_changed`, `history_rewritten` (with the first diverging checkpoint),
-`thinking_dropped`, `account_changed`, `idle_gap` or `unexplained`. The worker
-checks them in that order. `thinking_dropped` needs Claude to drop more signed
-thinking than it dropped for the previous call: a long conversation can drop
-the same old blocks on every request, which leaves the prompt unchanged, so a
-steady drop count falls through to the account, idle-gap or unexplained class.
+`system_changed`, `release_changed`, `history_rewritten` (with the first
+diverging checkpoint), `thinking_dropped`, `account_changed`, `idle_gap`,
+`unobserved` or `unexplained`. The worker checks them in that order. Each
+fingerprint records the deployment revision that built the request, so a tools
+or system change between two deployments is `release_changed` (a release that
+edits model-facing text costs each live session one cold prefix) and the same
+change within one deployment is `tools_changed` or `system_changed`.
+`thinking_dropped` needs Claude to drop more signed thinking than it dropped
+for the previous call: a long conversation can drop the same old blocks on
+every request, which leaves the prompt unchanged, so a steady drop count falls
+through to the account, idle-gap or unexplained class. `unobserved` means
+either call has no request fingerprint, so a prefix change cannot be ruled out;
+`unexplained` means both were fingerprinted with an identical prefix (provider
+eviction or routing). Every transport is fingerprinted: JSON text bodies and
+the replayable stream the OpenAI-family clients send.
 The worker
 also exports `opengeni_model_prompt_cache_warm_misses_total{class}`,
 `opengeni_model_prompt_cache_missed_tokens_total` and
 `opengeni_model_thinking_blocks_dropped_total{reason}`. `context_replaced`,
-`idle_gap` and `account_changed` are expected; a steady rate of any other class
-points to a prompt-cache bug.
+`release_changed`, `idle_gap` and `account_changed` are expected; a steady rate
+of any other class points to a prompt-cache bug. The chart alerts on them:
+`OpenGeniPromptCachePrefixChanged` (tools or system changed within one
+deployment, five or more in a day for a model), `OpenGeniPromptCacheHistoryRewriteLossHigh`
+(history rewrites and newly dropped thinking above 2% of cached tokens over
+6h) and `OpenGeniPromptCacheDiagnosticsBlind` (most of a provider's misses
+`unobserved`). A cache hit ratio cannot see a defect that rewrites each
+session's prefix once, because the median call stays warm.
 
 `packages/runtime/test/prompt-cache-prefix-stability.test.ts` asserts the
 byte-prefix contract across consecutive requests: new turn, steer and

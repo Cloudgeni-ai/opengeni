@@ -202,7 +202,8 @@ fn a_wake_beyond_the_processor_budget_is_refused_at_once_with_what_it_needs() {
         rig.cpu(),
         CpuCapacity {
             budget: 1000,
-            reserved: 800
+            reserved: 800,
+            vcpus: 0,
         }
     );
     let actions = rig.touch(3);
@@ -502,7 +503,8 @@ fn a_smaller_budget_admits_no_wake_until_it_fits_and_a_larger_one_lets_held_wake
         rig.cpu(),
         CpuCapacity {
             budget: 500,
-            reserved: 600
+            reserved: 600,
+            vcpus: 0,
         }
     );
     assert_eq!(rig.level(1), Level::Running, "an awake sandbox stays awake");
@@ -529,4 +531,28 @@ fn a_smaller_budget_admits_no_wake_until_it_fits_and_a_larger_one_lets_held_wake
     let mut unbudgeted = Rig::with(&HostPolicy::default());
     unbudgeted.send(Input::CpuBudget { millis: 500 });
     assert_eq!(unbudgeted.host.cpu_capacity(), None);
+}
+
+/// The processors awake VMs have are counted, for placement to steer by,
+/// and never refused on: two VMs with more processors between them than
+/// the budget has both wake, and one asleep counts none.
+#[test]
+fn the_processors_of_awake_vms_are_counted_but_never_refused_on() {
+    let mut rig = Rig::new(1000);
+    let with = |vcpus| Size { vcpus, ..size(100) };
+    rig.add(1, saved(), with(12));
+    rig.add(2, saved(), with(12));
+    rig.add(3, saved(), with(4));
+    assert_eq!(rig.cpu().vcpus, 0);
+    rig.hold_awake(1);
+    rig.hold_awake(2);
+    assert_eq!(rig.level(3), Level::Saved);
+    assert_eq!(
+        rig.cpu(),
+        CpuCapacity {
+            budget: 1000,
+            reserved: 200,
+            vcpus: 24,
+        }
+    );
 }

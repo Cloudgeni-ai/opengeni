@@ -7,7 +7,11 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
-import { ClassifiedDatabaseRefusal, nestedPostgresSqlState } from "./persistence-errors";
+import {
+  ClassifiedDatabaseRefusal,
+  nestedPostgresMessage,
+  nestedPostgresSqlState,
+} from "./persistence-errors";
 
 export type UserResourceAuthorityGrant = {
   grantId: string;
@@ -43,19 +47,28 @@ export class PersonalResourceAttachmentAcceptanceError extends ClassifiedDatabas
   constructor(
     readonly kind: "invalid" | "forbidden" | "conflict" | "stale",
     options?: ErrorOptions,
+    /** Which invalid request: one that selects nothing personal says so. */
+    readonly invalidReason: "nothing_to_attach" | null = null,
   ) {
     super(
-      kind === "invalid"
-        ? "The personal-resource attachment request is invalid"
-        : kind === "forbidden"
-          ? "The personal-resource attachment is not authorized"
-          : kind === "stale"
-            ? "This chat's access changed just before the message was sent. Check the attached resources and send it again."
-            : "The personal-resource attachment conflicts with accepted work",
+      kind === "invalid" && invalidReason === "nothing_to_attach"
+        ? "This chat uses no personal Rig or Connected Machine, so there is nothing to attach. Leave out personalResourceAttachment; Connections are chosen with connectionAccounts."
+        : kind === "invalid"
+          ? "The personal-resource attachment request is invalid"
+          : kind === "forbidden"
+            ? "The personal-resource attachment is not authorized"
+            : kind === "stale"
+              ? "This chat's access changed just before the message was sent. Check the attached resources and send it again."
+              : "The personal-resource attachment conflicts with accepted work",
       options,
     );
   }
 }
+
+// What accept_turn_personal_resource_attachment raises (22023) when the
+// session's closure is empty.
+const NOTHING_TO_ATTACH_MESSAGE =
+  "no personal Variable Set, Rig, or Connected Machine is selected by this session";
 
 /**
  * Issue and freeze the locked session's personal Variable Set/Rig/Connected
@@ -123,7 +136,11 @@ export async function acceptTurnPersonalResourceAttachmentInTransaction(
   } catch (error) {
     const sqlState = nestedPostgresSqlState(error);
     if (sqlState === "22023") {
-      throw new PersonalResourceAttachmentAcceptanceError("invalid", { cause: error });
+      throw new PersonalResourceAttachmentAcceptanceError(
+        "invalid",
+        { cause: error },
+        nestedPostgresMessage(error) === NOTHING_TO_ATTACH_MESSAGE ? "nothing_to_attach" : null,
+      );
     }
     if (sqlState === "42501") {
       throw new PersonalResourceAttachmentAcceptanceError("forbidden", { cause: error });

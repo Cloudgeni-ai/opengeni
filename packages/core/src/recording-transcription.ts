@@ -980,16 +980,27 @@ export function canonicalLanguageTag(code: string): string {
  * language, even when the model labels a few phrases with a neighbour (Danish
  * in Norwegian speech): the languages it heard that are the one asked for are
  * kept as it named them, or else the one asked for.
+ *
+ * `heard` may repeat a language once per piece (or phrase) it was heard in.
+ * Without a language asked for, a model that labels each phrase on its own
+ * can name dozens of languages over a long meeting, so the result keeps the
+ * most often heard, at most MAX_TRANSCRIPT_LANGUAGES (what a transcript
+ * stores), in order of how often they were heard.
  */
+export const MAX_TRANSCRIPT_LANGUAGES = 16;
+
 export function transcriptLanguages(
   requested: string | null | undefined,
   heard: Iterable<string>,
 ): string[] {
-  const all = [...new Set(heard)];
-  if (!requested?.trim()) return all;
+  const counts = new Map<string, number>();
+  for (const tag of heard) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  // Sort is stable, so equally heard languages keep the order first heard.
+  const all = [...counts.keys()].sort((a, b) => counts.get(b)! - counts.get(a)!);
+  if (!requested?.trim()) return all.slice(0, MAX_TRANSCRIPT_LANGUAGES);
   const asked = canonicalLanguageTag(requested);
   const matching = all.filter((tag) => languageFamily(tag) === languageFamily(asked));
-  return matching.length > 0 ? matching : [asked];
+  return matching.length > 0 ? matching.slice(0, MAX_TRANSCRIPT_LANGUAGES) : [asked];
 }
 
 /** A language without its region or script; Norwegian's written forms are one. */

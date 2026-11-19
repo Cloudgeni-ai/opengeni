@@ -85,6 +85,7 @@ export function projectSubscriptionCoreClaudeAccount(
     allocatorUpdatedAt: date(row.updated_at),
     expiresAt: date(row.expires_at),
     lastRefreshAt: date(row.last_refresh_at),
+    signedInAt: date(row.signed_in_at),
     lastError: row.last_error,
     quotaUsedPercent: null,
     quotaResetAt: null,

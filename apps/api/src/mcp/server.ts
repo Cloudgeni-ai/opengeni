@@ -1656,6 +1656,7 @@ export function buildOpenGeniMcpServer(
       deps,
       grant,
       sessionId,
+      cardTool: selectedTools === null || selectedTools.has("capability_authorization_request"),
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
@@ -5269,7 +5270,8 @@ function registerFleetTools(
           new Set(),
           false,
           new Set(),
-          new Set(),
+          // A workspace admin tool, like sandboxes_list that its result names.
+          new Set(["sandboxes_list"]),
         );
         if (setup.status === "unavailable") {
           return json({ kind: "selfhosted", status: "unavailable", message: setup.detail });
@@ -7790,6 +7792,26 @@ function capabilityReconnectCandidates(
   });
 }
 
+/**
+ * The accounts a reconnect card can be for, by connectionId, so the agent can
+ * choose one without another catalog search (which it may not have).
+ */
+function reconnectChoices(
+  item: Pick<CapabilityCatalogItem, "name">,
+  candidates: readonly ConnectionNeedingReconnect[],
+): string {
+  const here = candidates.filter((candidate) => candidate.addedHere);
+  if (here.length === 0)
+    return `No account of ${item.name} that stopped working can be reconnected from this workspace.`;
+  const listed = here
+    .map(
+      (candidate) =>
+        `${capabilityReconnectAccountLabel(item, candidate)} (connectionId ${candidate.connectionId})`,
+    )
+    .join("; ");
+  return `Pass the connectionId of the one to reconnect: ${listed}.`;
+}
+
 function capabilityReconnectAccountLabel(
   item: Pick<CapabilityCatalogItem, "name">,
   candidate: ConnectionNeedingReconnect,
@@ -7849,6 +7871,14 @@ function registerCapabilityDiscoveryTools(
 ): void {
   const signedTools = grant.metadata?.["firstPartyMcpTools"];
   const secretsSelected = Array.isArray(signedTools) && signedTools.includes("secret_search");
+  // The card tool comes with workspace connectors as well as with workspace
+  // administration, so an agent may have it without the admin-only catalog
+  // search: its description then names only where else capability IDs come from.
+  const catalogSelected =
+    !Array.isArray(signedTools) || signedTools.includes("capability_catalog_search");
+  const connectCardLead = catalogSelected
+    ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. "
+    : "Show a Connect card in this chat for something the person must connect for the task, by the capability ID a tool result or notice names, or one named below. ";
   const catalog = () =>
     buildCapabilityCatalog({
       db: deps.db,
@@ -8161,10 +8191,12 @@ function registerCapabilityDiscoveryTools(
     {
       description:
         (deps.settings.githubPersonalOauthEnabled
-          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+          ? connectCardLead +
+            "Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
             browserExtension(deps.settings).name +
             " Chrome extension link; never paste an enroll token into the chat yourself."
-          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+          : connectCardLead +
+            "Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
             browserExtension(deps.settings).name +
             " Chrome extension link; never paste an enroll token into the chat yourself.") +
         (secretsSelected
@@ -8283,13 +8315,13 @@ function registerCapabilityDiscoveryTools(
         reconnect = candidates.find((candidate) => candidate.connectionId === connectionId);
         if (!reconnect)
           throw new ToolArgumentError(
-            `That connectionId is not an account of ${item.name} that stopped working. Search the catalog again for its setup.reconnect.`,
+            `That connectionId is not an account of ${item.name} that stopped working. ${reconnectChoices(item, candidates)}`,
           );
       } else if (setup.status !== "ready") {
         const here = candidates.filter((candidate) => candidate.addedHere);
         if (here.length > 1)
           throw new ToolArgumentError(
-            `Several ${item.name} accounts stopped working. Pass the connectionId of the one to reconnect, from setup.reconnect in capability_catalog_search.`,
+            `Several ${item.name} accounts stopped working. ${reconnectChoices(item, here)}`,
           );
         reconnect = here[0];
       }
@@ -8711,7 +8743,10 @@ async function capabilitySetupProjection(
       return {
         status: "ready",
         action: null,
-        detail: "Machines are connected to this workspace; sandboxes_list shows which are online.",
+        // sandboxes_list is a workspace admin tool; the card lists them too.
+        detail: selectedFirstPartyTools.has("sandboxes_list")
+          ? "Machines are connected to this workspace; sandboxes_list shows which are online."
+          : "Machines are connected to this workspace.",
       };
     }
     return {
