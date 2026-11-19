@@ -62,7 +62,7 @@ async function creditTurnImageGeneration(input: {
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, value) => value.catalog),
     spyOn(db, "ensureSessionWorkspaceFilesystem").mockImplementation(
-      async (_db, input) => input.layout,
+      async (_db, value) => value.layout,
     ),
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
       async (_db, value) => value.governance,
