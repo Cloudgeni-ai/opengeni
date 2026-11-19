@@ -321,6 +321,7 @@ fn capacity(info: &Described, reported: &Reported) -> Capacity {
         reclaimable_memory_mib: reported.memory_reclaimable_mib,
         cpu_millis: reported.cpu_millis,
         free_cpu_millis: reported.cpu_free_millis,
+        vcpus_awake: reported.vcpus_awake,
         // What the host frees by disk relief is room as much as what is
         // free (ADR 30).
         free_disk_mib: reported
@@ -790,6 +791,7 @@ mod tests {
             memory_mib: 1024,
             memory_max_mib: 1024,
             cpu_millis: 1000,
+            vcpus: 0,
             disk_mib: 1024,
             reach: Offers::NONE,
             prefer: Prefer::Any,
@@ -819,6 +821,7 @@ mod tests {
                 memory_free_mib: 16 * 1024,
                 cpu_millis: 8000,
                 cpu_free_millis: 8000,
+                vcpus_awake: 0,
                 disk_free_mib: 100 * 1024,
                 ..Reported::default()
             },

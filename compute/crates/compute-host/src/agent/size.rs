@@ -56,6 +56,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             request,
             limit,
             cpu: u64::from(config.cpu_request()),
+            vcpus: u64::from(config.vcpus),
             save: limit * self.save_copies + SAVE_EXTRA,
             disk,
             fetch: limit
