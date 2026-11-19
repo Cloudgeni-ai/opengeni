@@ -22,6 +22,7 @@ import {
   CodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
+  createCodexTurnState,
   type CodexRequestContext,
 } from "@opengeni/codex";
 import {
@@ -7216,6 +7217,7 @@ describe("transient provider error classifier", () => {
       nextRequestId: () => "main-request",
       betaFeatures: ["main-only"],
       turnMetadata: { request_kind: "agent_turn" },
+      turnState: createCodexTurnState(),
     };
     const titleCodexContext = sessionTitleCodexRequestContext(codexContext, () => "title-request");
 
@@ -7237,6 +7239,8 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
     expect(titleCodexContext.onRequestOpaqueArtifacts).toBeUndefined();
     expect(titleCodexContext.betaFeatures).toBeUndefined();
+    // A title is not part of the turn's sticky routing.
+    expect(titleCodexContext.turnState).toBeUndefined();
 
     const getXaiToken = mock(async () => ({ accessToken: "xai-token", userId: "user" }));
     const refreshXaiToken = mock(async () => ({ accessToken: "xai-token-2", userId: "user" }));
