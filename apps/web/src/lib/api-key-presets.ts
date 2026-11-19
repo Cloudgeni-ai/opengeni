@@ -32,6 +32,8 @@ const ORGANIZATION_SCOPES = new Set<string>([
   "billing:read",
   "billing:manage",
   "usage_allowances:manage",
+  "agents:read",
+  "agents:manage",
 ]);
 
 /** Old names still accepted by the API; never offered, but labelled on old keys. */
@@ -96,6 +98,7 @@ export const WORKSPACE_KEY_PERMISSION_GROUPS: ReadonlyArray<{
       "capabilities:manage",
       "github:use",
       "github:manage",
+      "tool_credentials:write",
     ],
   },
   {
@@ -160,6 +163,9 @@ const PERMISSION_LABELS: Record<string, string> = {
   "workspace:create": "Create workspaces",
   "billing:read": "See billing",
   "billing:manage": "Manage billing",
+  "agents:read": "See organization agents",
+  "agents:manage": "Manage organization agents",
+  "tool_credentials:write": "Store people's tool logins",
 };
 
 /** "Read sessions" for `sessions:read`; the raw scope when it's unknown. */

@@ -212,7 +212,7 @@ export function AgentVersions({
                 ? "success"
                 : "waiting"
           }
-          live
+          live="polite"
         >
           {operationText(operation)}
         </Notice>

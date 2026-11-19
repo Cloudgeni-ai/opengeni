@@ -62,6 +62,9 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "account:admin": "Admin & account",
   "billing:read": "Admin & account",
   "billing:manage": "Admin & account",
+  "agents:read": "Agents",
+  "agents:manage": "Agents",
+  "tool_credentials:write": "Agents",
 };
 
 const permissionGroupOrder = [
@@ -76,6 +79,7 @@ const permissionGroupOrder = [
   "Goals",
   "Sandbox Environments",
   "Artifacts",
+  "Agents",
   "Admin & account",
 ];
 

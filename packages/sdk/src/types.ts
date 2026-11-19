@@ -4457,6 +4457,9 @@ export const KNOWN_PERMISSIONS = [
   "rigs:manage",
   "artifacts:read",
   "artifacts:publish",
+  "agents:read",
+  "agents:manage",
+  "tool_credentials:write",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
