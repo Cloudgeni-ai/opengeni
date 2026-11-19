@@ -4,6 +4,7 @@ import {
   PROMPT_CACHE_DIGEST_HEX_LENGTH,
   type PromptCacheRequestFingerprint,
 } from "@opengeni/contracts";
+import { replayableJsonBodySource } from "./replayable-json-body";
 
 /**
  * Wire fingerprints of provider requests, for prompt-cache diagnostics.
@@ -31,16 +32,29 @@ export function withPromptCacheFingerprintObserver<T>(
 /**
  * Called by the model transport with the final body. Fingerprinting parses
  * the body, so it runs after dispatch and never delays the request.
+ *
+ * A body is either JSON text (Claude, Chat Completions) or the replayable
+ * stream the OpenAI-family clients send (Responses over HTTP or WebSocket,
+ * Codex, Azure, xAI). The stream is read through the object it encodes, never
+ * consumed; that object is not changed while its request is in flight.
  */
 export function observePromptCacheRequestBody(body: unknown): void {
   const observer = observers.getStore();
-  if (!observer || typeof body !== "string") return;
+  if (!observer) return;
+  const parse: (() => unknown) | null =
+    typeof body === "string"
+      ? () => JSON.parse(body)
+      : (() => {
+          const replayable = replayableJsonBodySource(body);
+          return replayable ? () => replayable.source : null;
+        })();
+  if (!parse) return;
   try {
     observer(
       new Promise((resolve) => {
         setImmediate(() => {
           try {
-            resolve(promptCacheRequestFingerprint(JSON.parse(body)));
+            resolve(promptCacheRequestFingerprint(parse()));
           } catch {
             resolve(null);
           }

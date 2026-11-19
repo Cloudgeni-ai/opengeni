@@ -131,6 +131,17 @@ export type WorkspaceArtifactDetailResponse = {
 export type WorkspaceArtifactCurrentResponse = {
   artifact: WorkspaceArtifact;
 };
+/**
+ * A short-lived ticket for an open Site view's live connection: hints when a
+ * new version is live or the Site's data changed (never the data itself).
+ */
+export type WorkspaceArtifactLiveTicketResponse = {
+  /** wss:// address of the live connection, ticket included; open it within a minute. */
+  url: string;
+  expiresAt: string;
+  /** The Site's data change number when the ticket was issued. */
+  seq: number;
+};
 export type WorkspaceArtifactContentResponse = {
   artifactId: string;
   versionId: string;

@@ -105,6 +105,11 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   });
   const pageLive = usePageLiveActivity();
   const pollIntervalMs = Math.max(750, options.pollIntervalMs ?? 2_000);
+  // A page whose background observation was refused for good. Polling it
+  // again would get the same refusal (and, in the person's own Chrome, make
+  // the extension try the tab again each time), so the poll skips it until
+  // the tab shows another page or document.
+  const refusedObservationPageRef = useRef<string | null>(null);
   const [state, setState] = useState<{
     source: typeof source;
     browserSessionId: string | null;
@@ -231,7 +236,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
               }
             : current,
         );
-        if (!selected || !observeSelectedTarget || !semanticObservationEnabledRef.current) return;
+        if (
+          !selected ||
+          !observeSelectedTarget ||
+          !semanticObservationEnabledRef.current ||
+          refusedObservationPageRef.current === observedPageKey(selected)
+        )
+          return;
         try {
           const observation = await client.observeBrowserTarget(
             workspaceId,
@@ -270,10 +281,11 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         } catch (cause) {
           if (controller.signal.aborted || !isCurrentSource() || requestRef.current.id !== id)
             return;
+          if (isFinalObservationRefusal(cause))
+            refusedObservationPageRef.current = observedPageKey(selected);
           // Target inventory and the media plane remain authoritative for the
           // human-facing browser. A failed semantic snapshot must not blank or
           // disable an otherwise live visual browser.
-          void cause;
         }
       } catch (cause) {
         if (controller.signal.aborted || !isCurrentSource() || requestRef.current.id !== id) return;
@@ -302,7 +314,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const refreshSemantic = useCallback(async (): Promise<void> => {
     if (!enabled || !browserSessionId || !isCurrentSource()) return;
     const target = selectedTargetRef.current;
-    if (!target) return;
+    if (!target || refusedObservationPageRef.current === observedPageKey(target)) return;
     const id = requestRef.current.id + 1;
     requestRef.current.controller?.abort();
     const controller = new AbortController();
@@ -326,7 +338,9 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
           ? { ...current, observation }
           : current,
       );
-    } catch {
+    } catch (cause) {
+      if (isFinalObservationRefusal(cause) && requestRef.current.id === id)
+        refusedObservationPageRef.current = observedPageKey(target);
       // A failed semantic fallback cannot disable an otherwise live browser.
     } finally {
       if (requestRef.current.id === id) requestRef.current = { id, controller: null };
@@ -897,6 +911,8 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     ) {
       throw new Error(t("hooks.useBrowserSession.theBrowserPageChangedOpen"));
     }
+    // The page answers again, so background polling may resume.
+    refusedObservationPageRef.current = null;
     return observation;
   }, [browserSessionId, client, enabled, isCurrentSource, workspaceId, t]);
 
@@ -1021,4 +1037,24 @@ function sameObservationTarget(
 
 function isMissingBrowserTarget(error: unknown): boolean {
   return error instanceof OpenGeniApiError && error.code === "target_not_found";
+}
+
+/** The page a background observation was refused for: the same tab showing
+ * the same document at the same address. */
+function observedPageKey(target: BrowserTarget): string {
+  return JSON.stringify([
+    target.browserSessionId,
+    target.id,
+    target.controllerGeneration,
+    target.targetGeneration,
+    target.documentGeneration,
+    target.url,
+  ]);
+}
+
+/** A refusal that asking again for the same page cannot change, such as a tab
+ * Chrome will not let the extension control. A failure that may pass (a
+ * busy or unreachable controller) is not one. */
+function isFinalObservationRefusal(error: unknown): boolean {
+  return isNonRetryableInteractionError(error) && error.status >= 400 && error.status < 500;
 }

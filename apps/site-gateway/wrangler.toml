@@ -43,6 +43,19 @@ class_name = "SiteDatabase"
 tag = "v1"
 new_sqlite_classes = ["SiteDatabase"]
 
+# Optional live change hints: one `SiteLive` Durable Object per Site
+# (`SITE_LIVE.idFromName(siteId)`) holds open pages' WebSockets (Hibernation
+# API) and passes on the API's signed change and version notices. Remove the
+# binding to turn `/_og/live` off (404); pages then keep their fallback
+# checks. See src/site-live.ts.
+[[durable_objects.bindings]]
+name = "SITE_LIVE"
+class_name = "SiteLive"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SiteLive"]
+
 [env.staging]
 name = "opengeni-site-gateway-staging"
 # account_id = "<staging account id>"
@@ -71,6 +84,10 @@ LOGIN_ONLY = "true"
 # name = "SITE_DB"
 # class_name = "SiteDatabase"
 
+# [[env.staging.durable_objects.bindings]]
+# name = "SITE_LIVE"
+# class_name = "SiteLive"
+
 [env.production]
 name = "opengeni-site-gateway-production"
 # account_id = "<production account id>"
@@ -96,3 +113,7 @@ LOGIN_ONLY = "false"
 # [[env.production.durable_objects.bindings]]
 # name = "SITE_DB"
 # class_name = "SiteDatabase"
+
+# [[env.production.durable_objects.bindings]]
+# name = "SITE_LIVE"
+# class_name = "SiteLive"

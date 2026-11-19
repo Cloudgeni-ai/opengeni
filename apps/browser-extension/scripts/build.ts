@@ -5,6 +5,8 @@ import { parseArgs } from "node:util";
 import { brandedManifest, brandedPopup, defaultBrand, ICON_FILES, readBrand } from "./brand";
 import { packagedManifest, storeManifest } from "./manifest";
 
+const AGENT_CURSOR = "agent-cursor.png";
+
 // `--brand <file>` builds a product's own branded extension (see scripts/brand.ts);
 // without it, Opengeni Browser. `--out <dir>` picks the output folder.
 const { values: args } = parseArgs({
@@ -60,6 +62,8 @@ await mkdir(resolve(output, "icons"), { recursive: true });
 for (const icon of ICON_FILES) {
   await cp(resolve(brand.iconsDir, icon), resolve(output, "icons", icon));
 }
+// The controlled tab's icon is the same for every brand.
+await cp(resolve(root, "icons", AGENT_CURSOR), resolve(output, "icons", AGENT_CURSOR));
 await cp(resolve(root, "fonts"), resolve(output, "fonts"), { recursive: true });
 
 // Chrome deliberately requires an explicit user install for an ordinary
@@ -75,6 +79,7 @@ const installFiles = [
   "site-permissions-page.js",
   "service-worker.js",
   ...ICON_FILES.map((icon) => `icons/${icon}`),
+  `icons/${AGENT_CURSOR}`,
   "fonts/dm-sans-latin-wght-normal.woff2",
   "fonts/OFL.txt",
 ] as const;

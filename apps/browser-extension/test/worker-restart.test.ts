@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import { GROUP_TITLE_MARK } from "../src/tab-group";
 
 const build = await Bun.build({
   entrypoints: [resolve(import.meta.dir, "../src/service-worker.ts")],
@@ -36,6 +37,20 @@ class FakeChrome {
   readonly session: Record<string, unknown> = {};
   readonly local: Record<string, unknown> = {};
   readonly calls: string[] = [];
+  // Scripts the extension ran in pages: the function's name and the tab.
+  readonly scripts: string[] = [];
+  // The icon each showMark script set.
+  readonly icons: unknown[] = [];
+  // Holds reads of the recorded marked tabs until it settles.
+  indicatorReads: Promise<void> = Promise.resolve();
+  // Callbacks the worker scheduled after the controlled tab release delay.
+  readonly releaseTimers: (() => void)[] = [];
+  // Chrome's tab groups, which outlive the extension: each tab's group, and
+  // each group's title and colour. A group disappears with its last tab.
+  readonly tabGroup = new Map<number, number>();
+  readonly groups = new Map<number, { title: string; color: string }>();
+  /** Each closed tab, and whether it was still in a group then. */
+  readonly closedGrouped: [number, boolean][] = [];
   current: ReturnType<FakeChrome["startWorker"]> | null = null;
 
   /** Chrome stops the extension's worker (keeping everything above) and,
@@ -56,10 +71,13 @@ class FakeChrome {
   startWorker() {
     const ports: any[] = [];
     const debuggerEvents = { onEvent: event(), onDetach: event() };
+    const navigation = { onCommitted: event() };
     const profile = this;
     const chrome: any = {
       runtime: {
         id: "abcdefghijklmnopabcdefghijklmnop",
+        getURL: (path: string) =>
+          `chrome-extension://${path.endsWith("agent-cursor.png") ? "dynamic-id" : "x"}/${path}`,
         getManifest: () => ({ version: "0.2.2" }),
         onMessage: event(),
         getPlatformInfo: async () => ({ os: "mac", arch: "arm64" }),
@@ -83,9 +101,28 @@ class FakeChrome {
         },
       },
       alarms: { onAlarm: event(), create: async () => {} },
+      webNavigation: navigation,
+      scripting: {
+        executeScript: async ({
+          target,
+          func,
+          args,
+        }: {
+          target: { tabId: number };
+          func: Function;
+          args?: unknown[];
+        }) => {
+          profile.scripts.push(`${func.name} ${target.tabId}`);
+          if (func.name === "showMark") profile.icons.push(args?.[0]);
+          return [];
+        },
+      },
       storage: {
         local: {
-          get: async (key: string) => (key in profile.local ? { [key]: profile.local[key] } : {}),
+          get: async (key: string) => {
+            if (key === "tabIcon" || key === "tabGroup") await profile.indicatorReads;
+            return key in profile.local ? { [key]: profile.local[key] } : {};
+          },
           set: async (value: object) => Object.assign(profile.local, value),
         },
         session: {
@@ -136,22 +173,57 @@ class FakeChrome {
             "onReplaced",
           ].map((name) => [name, event()]),
         ),
-        query: async () => [...profile.tabs].map((id) => tabOf(id)),
+        move: async () => ({}),
+        query: async (query: { groupId?: number } = {}) =>
+          [...profile.tabs]
+            .filter((id) => query.groupId === undefined || profile.groupOf(id) === query.groupId)
+            .map((id) => profile.tabOf(id)),
         get: async (id: number) => {
           if (!profile.tabs.has(id)) throw new Error(`No tab with id: ${id}.`);
-          return tabOf(id);
+          return profile.tabOf(id);
         },
         create: async () => {
           const id = Math.max(...profile.tabs) + 1;
           profile.tabs.add(id);
-          return tabOf(id);
+          return profile.tabOf(id);
         },
+        group: async ({ tabIds, groupId }: { tabIds: number[]; groupId?: number }) => {
+          const id = groupId ?? Math.max(100, ...profile.groups.keys()) + 1;
+          if (!profile.groups.has(id)) profile.groups.set(id, { title: "", color: "grey" });
+          for (const tabId of tabIds) profile.tabGroup.set(tabId, id);
+          return id;
+        },
+        ungroup: async (tabIds: number[]) => {
+          for (const tabId of tabIds) profile.tabGroup.delete(tabId);
+          profile.pruneGroups();
+        },
+        remove: async (tabId: number) => {
+          profile.closedGrouped.push([tabId, profile.tabGroup.has(tabId)]);
+          profile.tabs.delete(tabId);
+          profile.tabGroup.delete(tabId);
+          profile.pruneGroups();
+        },
+      },
+      tabGroups: {
+        get: async (id: number) => {
+          if (!profile.groups.has(id)) throw new Error(`No group with id: ${id}.`);
+          return { id, ...profile.groups.get(id) };
+        },
+        query: async ({ title, color }: { title: string; color: string }) =>
+          [...profile.groups]
+            .filter(([, group]) => group.title === title && group.color === color)
+            .map(([id, group]) => ({ id, ...group })),
+        update: async (id: number, properties: { title: string; color: string }) =>
+          Object.assign(profile.groups.get(id)!, properties),
       },
     };
     new Function("chrome", "navigator", "setTimeout", "clearTimeout", worker)(
       chrome,
       { userAgent: "Chrome/153.0.0.0" },
-      () => 0,
+      (callback: () => void, ms: number) => {
+        if (ms === 2_000) profile.releaseTimers.push(callback);
+        return 0;
+      },
       () => {},
     );
     const started = {
@@ -194,9 +266,30 @@ class FakeChrome {
         };
       },
       detached: (tabId: number, reason: string) => debuggerEvents.onDetach.emit({ tabId }, reason),
+      navigated: (tabId: number, frameId = 0, transitionQualifiers: string[] = []) =>
+        navigation.onCommitted.emit({ tabId, frameId, transitionQualifiers }),
+      loaded: (tabId: number) => chrome.tabs.onUpdated.emit(tabId, { status: "complete" }),
     };
     this.current = started;
     return started;
+  }
+
+  groupOf(id: number): number {
+    return this.tabGroup.get(id) ?? -1;
+  }
+
+  pruneGroups() {
+    for (const id of this.groups.keys())
+      if (![...this.tabGroup.values()].includes(id)) this.groups.delete(id);
+  }
+
+  /** The title of the tab's group, or null. */
+  groupTitle(id: number): string | null {
+    return this.groups.get(this.groupOf(id))?.title ?? null;
+  }
+
+  tabOf(id: number) {
+    return { ...tabOf(id), groupId: this.groupOf(id) };
   }
 }
 
@@ -336,5 +429,119 @@ describe("a restarted extension worker", () => {
     const second = chrome.restartWorker();
     await second.ready();
     expect((chrome.session.liveState as any).createdTabs).toEqual([10]);
+  });
+});
+
+describe("the tabs an agent controls", () => {
+  const releaseDelay = async (chrome: FakeChrome) => {
+    for (const run of chrome.releaseTimers.splice(0)) run();
+    await flush();
+    await flush();
+  };
+
+  test("sit in the product's tab group and show the agent's cursor while controlled", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    expect(await command({ type: "debugger.attach", tabId: "8" })).toMatchObject({ ok: true });
+    await flush();
+    expect(chrome.groupTitle(8)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
+    expect(chrome.groups.get(chrome.groupOf(8))?.color).toBe("grey");
+    expect(chrome.groupTitle(7)).toBeNull();
+    expect(chrome.scripts).toEqual(["showMark 8"]);
+    // Served by the extension: sites' Content-Security-Policy often refuses
+    // data: icons.
+    expect(chrome.icons).toEqual(["chrome-extension://dynamic-id/icons/agent-cursor.png"]);
+
+    expect(await command({ type: "debugger.detach", tabId: "8" })).toMatchObject({ ok: true });
+    await flush();
+    expect(chrome.scripts).toEqual(["showMark 8"]);
+    expect(chrome.groupTitle(8)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
+    await releaseDelay(chrome);
+    expect(chrome.scripts).toEqual(["showMark 8", "removeMark 8"]);
+    expect(chrome.groupTitle(8)).toBeNull();
+    expect(chrome.groups.size).toBe(0);
+  });
+
+  test("a new page in a controlled tab gets the mark again", async () => {
+    const chrome = new FakeChrome();
+    const started = chrome.startWorker();
+    const command = await started.ready();
+    await command({ type: "debugger.attach", tabId: "7" });
+    await flush();
+    started.navigated(7);
+    started.navigated(7, 3);
+    started.navigated(9);
+    await flush();
+    expect(chrome.scripts).toEqual(["showMark 7", "showMark 7"]);
+  });
+
+  test("a page shown without a new commit gets the mark too", async () => {
+    const chrome = new FakeChrome();
+    const started = chrome.startWorker();
+    const command = await started.ready();
+    await command({ type: "debugger.attach", tabId: "7" });
+    await flush();
+    started.loaded(7);
+    started.loaded(9);
+    await flush();
+    expect(chrome.scripts).toEqual(["showMark 7", "showMark 7"]);
+  });
+
+  test("a tab the agent closes leaves the group first, so Chrome saves no group", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    await command({ type: "debugger.attach", tabId: "8" });
+    await flush();
+    expect(chrome.groupTitle(8)).not.toBeNull();
+    expect(await command({ type: "tabs.close", tabId: "8" })).toMatchObject({ ok: true });
+    expect(chrome.closedGrouped).toEqual([[8, false]]);
+    expect(chrome.groups.size).toBe(0);
+  });
+
+  test("Chrome ending the agent's control gives the tab its icon and place back", async () => {
+    const chrome = new FakeChrome();
+    const started = chrome.startWorker();
+    const command = await started.ready();
+    await command({ type: "debugger.attach", tabId: "7" });
+    await flush();
+    expect(chrome.groupTitle(7)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
+    chrome.attached.delete(7);
+    started.detached(7, "canceled_by_user");
+    await releaseDelay(chrome);
+    expect(chrome.scripts).toEqual(["showMark 7", "removeMark 7"]);
+    expect(chrome.groupTitle(7)).toBeNull();
+  });
+
+  test("a reloaded or updated extension gives controlled tabs their icons and places back", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    await command({ type: "debugger.attach", tabId: "9" });
+    await flush();
+    // A restarted worker keeps the mark and the group.
+    await chrome.restartWorker().ready();
+    await flush();
+    expect(chrome.scripts.filter((script) => script.startsWith("removeMark"))).toEqual([]);
+    expect(chrome.groupTitle(9)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
+    await chrome.reloadExtension().ready();
+    await flush();
+    await flush();
+    expect(chrome.scripts.at(-1)).toBe("removeMark 9");
+    expect(chrome.groupTitle(9)).toBeNull();
+  });
+
+  test("a tab the agent takes again while an updated extension starts stays marked", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    await command({ type: "debugger.attach", tabId: "9" });
+    await flush();
+    let read!: () => void;
+    chrome.indicatorReads = new Promise((done) => (read = done));
+    const updated = await chrome.reloadExtension().ready();
+    expect(await updated({ type: "debugger.attach", tabId: "9" })).toMatchObject({ ok: true });
+    read();
+    await flush();
+    expect(chrome.scripts.filter((script) => script.startsWith("removeMark"))).toEqual([]);
+    expect(chrome.scripts.at(-1)).toBe("showMark 9");
+    expect(chrome.groupTitle(9)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
   });
 });

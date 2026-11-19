@@ -6,7 +6,11 @@ import { Hono } from "hono";
 
 import { registeredApiRoutes } from "../../../scripts/public-api/action-catalog";
 import surface from "../../../scripts/public-api/surface.gen.json";
-import { computerRouteError, registerComputerSessionRoutes } from "../src/routes/computer-sessions";
+import {
+  computerRouteError,
+  connectedDesktopRouteSession,
+  registerComputerSessionRoutes,
+} from "../src/routes/computer-sessions";
 
 const routeUrl = new URL("../src/routes/computer-sessions.ts", import.meta.url);
 const computerSessionRoot = "/v1/workspaces/:workspaceId/computer-sessions";
@@ -164,6 +168,34 @@ describe("ComputerSession route discipline", () => {
     expect(source).not.toContain("terminalizeStaleConnectedInteractionPlacement");
     expect(source).toContain('interactionFailureCode: "source_placement_elsewhere"');
     expect(source).toContain("retryable: false");
+  });
+
+  test("another agent chat on the Desktop's machine uses it after the chat that opened it moved away", async () => {
+    const mac = "machine-mac";
+    const opener = { id: "opener", activeSandboxId: "elsewhere" };
+    const child = { id: "child", activeSandboxId: mac };
+    // The chat that opened it keeps it while it works there.
+    expect(connectedDesktopRouteSession(mac, { ...opener, activeSandboxId: mac }, child)?.id).toBe(
+      "opener",
+    );
+    // It moved away: a chat working on that machine now reaches it.
+    expect(connectedDesktopRouteSession(mac, opener, child)?.id).toBe("child");
+    // Neither works there: the Desktop stays where it is, refused.
+    expect(
+      connectedDesktopRouteSession(mac, opener, { ...child, activeSandboxId: "other" }),
+    ).toBeNull();
+    expect(connectedDesktopRouteSession(mac, opener, null)).toBeNull();
+    const source = await readFile(routeUrl, "utf8");
+    const active = source.slice(
+      source.indexOf("async function withActiveComputerControllerReads"),
+      source.indexOf("async function ensureInteractionHolder"),
+    );
+    // The routed chat is authorized for the request and carries it.
+    expect(active).toContain("connectedDesktopRouteSession(machineId, sourceSession, caller)");
+    expect(active).toContain(
+      "authorizeSourceSession(deps, grant, routed.id, authorizationOperation)",
+    );
+    expect(active).toContain("sourceSession = routed;");
   });
 
   test("reports a request for another machine before the routed machine's desktop state", async () => {

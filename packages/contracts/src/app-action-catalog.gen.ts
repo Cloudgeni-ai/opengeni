@@ -1560,6 +1560,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createWorkspaceArtifactLiveTicket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/live",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "createWorkspaceClaudeCustomModel",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/custom-models",

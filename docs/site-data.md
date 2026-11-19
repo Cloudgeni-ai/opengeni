@@ -41,6 +41,8 @@ and DML granted to the runtime role, so it could move to its own database:
 | `site_data_rate_windows` | fixed one-minute windows: writes per principal and per Site, Site-frame reads per principal |
 | `site_data_validation_windows` | fixed one-minute window of schema-validation time per Site |
 | `site_data_workspace_validation_windows` | fixed one-minute window of schema-validation time per workspace, a ceiling across its Sites |
+| `site_data_changes` | the change outbox (migration `1504`): one row per committed write transaction while someone listens (see "Change events") |
+| `site_data_insert_keys` | idempotency keys of inserts, per collection and principal, pointing at the record they created |
 
 Principals are abstract strings: `user:<subjectId>` for people and
 `service:<subjectId>` for personless keys. Agents are recorded as
@@ -67,6 +69,60 @@ to 100 operations) are atomic and unique constraints are race-free. Reads and
 counts use the maintained counters; nothing counts a collection. Records carry a
 `version`; `expectedVersion` turns a stale patch, put or delete into
 `conflict` (`0` means "must not exist").
+
+Inserts accept an optional `idempotencyKey` (1 to 256 characters). Inside the
+write transaction, a key the same principal already used in the collection
+returns the record it created (`replayed: true`) instead of inserting again;
+a batch that only replays records no change. Keys are kept at least a day
+(older ones are pruned as writes go by) and vanish with their record.
+
+Filters on `$createdAt`, `$updatedAt` and data fields accept the server's
+clock as a value: `$now`, optionally offset (`$now-5m`, `$now+1h`, units `ms`,
+`s`, `m`, `h`, `d`). On data fields it compares as an ISO-8601 UTC string with
+milliseconds (`2026-11-19T12:00:00.000Z`), so store lease times in that form.
+That makes the expiry check use the server's clock; the `leaseUntil` a page
+writes with `patch` still comes from its own clock, so keep leases well above
+any likely clock skew. The record `version` (with `expectedVersion`) is the
+fencing token for whoever holds a claim.
+
+## Change events
+
+Every committed write moves the Site's `site_data_usage.change_seq` up by one,
+under the same row lock that already serializes the Site's writes, so the
+numbers are gap-free and in commit order. When someone listens
+(`site_data_usage.live_until` is in the future), the same transaction also
+writes one `site_data_changes` row: kind (`write`, `import`, `reset`,
+`collection`, `files`), the collections touched (`$files` for files), counts
+per operation, up to 20 record ids, the writer's kind (`user`, `guest`,
+`agent`, `schedule`, `service`, `other`) and the automation chain depth. Imports, resets
+and collection deletes are one coarse row each. With nobody listening the cost
+is the one column update; rows past the newest 200 per Site are pruned every
+20 changes.
+
+After commit the API sends a signed notice to the gateway's `SiteLive`
+Durable Object for the Site (best effort, gathered per Site for 50 ms, at
+most 3 seconds, never failing the write). Open pages hold a WebSocket to it (`/_og/live` on the Site host,
+admitted by `POST /v1/site-runtime/live/admit` with the viewer's normal
+access; the console uses a 60-second ticket from `POST
+/v1/workspaces/:workspaceId/published-artifacts/:artifactId/live`). Each
+connection hears only `{collections, seq}` for collections it may read, and
+new versions; never record data, so `per_viewer` and guest rules hold: pages
+read again through their ordinary authorized calls. Admission refreshes
+`live_until` (15 minutes, extended at half-life), and a connection lasts no
+longer than it, so connections reconnect before it lapses. A reconnect that
+missed changes, or a connection admitted just before a change, hears
+"anything may have changed". The published Site's page opens its connection
+when its code first calls `onChange`, lets it go after 30 seconds hidden, and
+stops after five refused connections. Hints still show when
+others write (activity timing, never content); readable collections are fixed
+per connection until it reconnects. Without `OPENGENI_SITES_LIVE_ENABLED` and the `SITE_LIVE` gateway binding the live routes answer 404
+and pages keep their timed checks.
+
+Not covered: Site SQL writes (the Durable Object commit is not atomic with
+Postgres, so no event is published), and workspace webhooks or the "This
+workspace" automation source. `site_data_changes` with its listener flag is
+the seam for those: a consumer would keep `live_until` fresh and read rows by
+`change_seq`.
 
 ## Access rules
 
@@ -749,7 +805,9 @@ answered; a metering failure is logged and does not fail the call.
 - Forward Site Data through `createOpenGeniSessionProxy` for embedded hosts
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
-  principals; live updates.
+  principals.
+- Site Data change events to workspace webhooks and the "This workspace"
+  automation source (read `site_data_changes`); Site SQL change events.
 
 
 - Site SQL: per-call CPU time is bounded only by the Durable Object's own

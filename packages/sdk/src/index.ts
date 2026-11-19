@@ -763,6 +763,7 @@ export type {
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactLiveTicketResponse,
   WorkspaceArtifactEvent,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,

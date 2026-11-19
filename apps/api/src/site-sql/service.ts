@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { SITE_DB_OPERATION_METRIC, SITE_TIMING_BUCKETS } from "../site-live/metrics";
 import {
   compileSiteSql,
   isSiteSqlPrincipalParam,
@@ -105,7 +106,25 @@ import { errorMessage } from "@opengeni/contracts/values";
  * statement in the Durable Object.
  */
 
-export type SiteSqlDeps = Pick<ApiRouteDeps, "db" | "settings">;
+export type SiteSqlDeps = Pick<ApiRouteDeps, "db" | "settings"> &
+  Partial<Pick<ApiRouteDeps, "observability">>;
+
+/** The gateway config with the round-trip histogram (docs/application-observability.md, "Sites"). */
+function measuredGateway(deps: SiteSqlDeps): SiteSqlGatewayConfig | null {
+  const gateway = siteSqlGatewayConfig(deps.settings);
+  const observability = deps.observability;
+  if (!gateway || !observability) return gateway;
+  return {
+    ...gateway,
+    observe: (operation, outcome, seconds) =>
+      observability.observeHistogram({
+        ...SITE_DB_OPERATION_METRIC,
+        labels: { operation, outcome },
+        value: seconds,
+        buckets: SITE_TIMING_BUCKETS,
+      }),
+  };
+}
 
 /** Who is calling: whatever Site Data accepts (an access grant, or a published Site viewer). */
 export type SiteSqlAuthority = Parameters<typeof resolveSiteDataAccess>[1];
@@ -333,7 +352,7 @@ async function resolve(
       workspaceId: access.caller.workspaceId,
       siteId,
     },
-    gateway: siteSqlGatewayConfig(deps.settings),
+    gateway: measuredGateway(deps),
     offered: siteSqlOffered(deps.settings),
     guest: (access.caller as { guest?: boolean }).guest === true,
   };

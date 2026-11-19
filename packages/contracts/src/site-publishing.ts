@@ -727,6 +727,121 @@ export const SITE_GATEWAY_LOGIN_PATH = "/_og/auth/login";
 export const SITE_GATEWAY_CALLBACK_PATH = "/_og/auth/callback";
 export const SITE_GATEWAY_LOGOUT_PATH = "/_og/auth/logout";
 export const SITE_GATEWAY_REPORT_PATH = "/_og/report";
+/**
+ * Live change hints: a WebSocket on a Site host (the viewer's own session)
+ * or on the console's frame host (with a console ticket). It carries only
+ * `SiteLiveHint` messages, never record data.
+ */
+export const SITE_GATEWAY_LIVE_PATH = "/_og/live";
+/** Batched speed beacons from the Site page (`SiteTimingBeacon`). */
+export const SITE_GATEWAY_TIMING_PATH = "/_og/timing";
+/** The API's signed route that sends a Site's live hints (`SiteLiveNotice`). */
+export const SITE_LIVE_INTERNAL_PREFIX = "/_og/internal/site-live";
+
+export function siteLiveInternalPath(siteId: string): string {
+  return `${SITE_LIVE_INTERNAL_PREFIX}/${encodeURIComponent(siteId)}`;
+}
+
+/** How long one live connection is admitted for; clients reconnect before it ends. */
+export const SITE_LIVE_TTL_SECONDS = 900;
+
+/**
+ * What a live connection hears. `data`: these collections changed (the
+ * pseudo-collection `$files` for files), at change number `seq`; null
+ * collections mean "refetch everything" (after a gap). `version`: a new
+ * version of the Site was published or rolled back. `hello` opens the
+ * connection with the current change number.
+ */
+export type SiteLiveHint =
+  | { type: "hello"; seq: number; collections: string[] | null; ttlSeconds: number }
+  | { type: "data"; seq: number; collections: string[] | null }
+  | { type: "version"; versionId: string | null };
+
+/** The API's notice to a Site's live connections (signed internal request). */
+export const SiteLiveNotice = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("data"),
+      seq: z.number().int().min(0),
+      collections: z.array(z.string().min(1).max(64)).max(200),
+    }),
+    z.object({ type: z.literal("version"), versionId: z.string().max(64).nullable() }),
+  ]),
+);
+export type SiteLiveNotice = z.infer<typeof SiteLiveNotice>;
+
+/**
+ * The API's answer when the gateway admits a live connection: what the
+ * connection may hear about (collections the viewer can read; null for every
+ * collection) and the current change number.
+ */
+export const SiteLiveAdmission = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    siteId: primitives.uuid,
+    seq: z.number().int().min(0),
+    collections: z.array(z.string()).nullable(),
+    ttlSeconds: z.number().int().min(1),
+  }),
+);
+export type SiteLiveAdmission = z.infer<typeof SiteLiveAdmission>;
+
+/** A console ticket for the live connection of a Site shown in the console. */
+export const SiteLiveTicketResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: primitives.string.describe("wss:// address of the live connection, ticket included."),
+    expiresAt: primitives.string,
+    seq: z.number().int().min(0),
+  }),
+);
+export type SiteLiveTicketResponse = z.infer<typeof SiteLiveTicketResponse>;
+
+/** Speed measurements a Site page sends (bounded names, no personal data). */
+export const SITE_TIMING_KINDS = ["app_load", "first_data", "bridge"] as const;
+export type SiteTimingKind = (typeof SITE_TIMING_KINDS)[number];
+export const SITE_TIMING_OUTCOMES = ["ok", "error"] as const;
+
+/** One page's batch of speed beacons (`POST /_og/timing`). */
+export const SiteTimingBeacon = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    timings: z
+      .array(
+        z.object({
+          kind: z.enum(SITE_TIMING_KINDS),
+          /** A Site operation id or tool bridge method; anything else counts as `other`. */
+          op: z.string().max(64).optional(),
+          ms: z.number().min(0).max(600_000),
+          outcome: z.enum(SITE_TIMING_OUTCOMES).optional(),
+        }),
+      )
+      .max(50),
+  }),
+);
+export type SiteTimingBeacon = z.infer<typeof SiteTimingBeacon>;
+
+/**
+ * The gateway's batched timing report to the API (`POST
+ * /v1/site-runtime/platform/timings`): per series, a bounded sample of
+ * durations in seconds. Series names are bounded; hosts and viewers never
+ * appear.
+ */
+export const SitePlatformTimingReport = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    v: z.literal(1),
+    series: z
+      .array(
+        z.object({
+          kind: z.enum([...SITE_TIMING_KINDS, "gateway"] as const),
+          op: z.string().max(64),
+          outcome: z.enum(SITE_TIMING_OUTCOMES),
+          samples: z.array(z.number().min(0).max(600)).max(100),
+          /** How many measurements the samples were drawn from (at least their number). */
+          seen: z.number().int().min(0).max(1_000_000_000).optional(),
+        }),
+      )
+      .max(300),
+  }),
+);
+export type SitePlatformTimingReport = z.infer<typeof SitePlatformTimingReport>;
 
 /** The API prefix the gateway forwards `/_og/api/*` to. */
 export const SITE_RUNTIME_API_PREFIX = "/v1/site-runtime";

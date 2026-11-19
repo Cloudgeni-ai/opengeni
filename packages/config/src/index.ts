@@ -2319,6 +2319,10 @@ const SettingsSchema = z.object({
   // configured; the API signs its calls to the gateway with that secret.
   // Usage is recorded in the usage ledger only. Free-profile defaults are strict.
   sitesCloudflareStorageEnabled: EnvBoolean.default(false),
+  // Live data and version hints for open Site pages (docs/site-data.md,
+  // "Change events"). Turn on once the gateway has its SITE_LIVE binding; it
+  // also needs the gateway's internal origin and secret.
+  sitesLiveEnabled: EnvBoolean.default(false),
   sitesGatewayInternalOrigin: z
     .string()
     .url()
@@ -6907,6 +6911,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingAuth: optional("OPENGENI_DOCUMENT_EMBEDDING_AUTH"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
     sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
+    sitesLiveEnabled: optional("OPENGENI_SITES_LIVE_ENABLED"),
     sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
     sitesSqlFreeStorageBytes: optional("OPENGENI_SITES_SQL_FREE_STORAGE_BYTES"),
     sitesSqlFreeRowsReadPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_READ_PER_MONTH"),
