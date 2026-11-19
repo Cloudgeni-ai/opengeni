@@ -144,14 +144,14 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Map<number, number>();
 // Tabs an agent opened that are still open.
 const agentCreatedTabs = new Set<number>();
-// The tabs an agent controls sit in a tab group named after the product,
-// blue like the cursor they show as their icon. Chromium browsers without tab
-// groups go without the group.
+// The tabs an agent controls sit in a tab group named after the product, in
+// Chrome's group colour closest to the brand teal of the cursor they show as
+// their icon. Chromium browsers without tab groups go without the group.
 const tabGroup =
   chrome.tabGroups && typeof chrome.tabs.group === "function"
     ? new TabGroup(chrome as never, {
         title: BRAND.product,
-        color: "blue",
+        color: "cyan",
         releaseDelayMs: CONTROLLED_TAB_RELEASE_MS,
         onChange: (state) => recordControlledTabs(TAB_GROUP_KEY, state),
       })

@@ -20,7 +20,7 @@ to the configured deployment.
 ## Controlled tabs
 
 While an agent controls a tab (the extension's debugger is attached), the tab
-sits in a blue tab group named after the product, one per window, and shows
+sits in a cyan tab group named after the product, one per window, and shows
 the agent's cursor as its icon, so the tab strip shows which tabs are in use.
 Both end once control has stayed ended for a moment.
 

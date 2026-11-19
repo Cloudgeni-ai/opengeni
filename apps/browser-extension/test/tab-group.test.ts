@@ -198,7 +198,7 @@ function indicator(strip: TabStrip, saved: TabGroupState[] = []) {
   const timers: (() => void)[] = [];
   const instance = new TabGroup(strip.api, {
     title: "Opengeni",
-    color: "blue",
+    color: "cyan",
     releaseDelayMs: 2_000,
     onChange: (state) => saved.push(state),
     setTimeout: (callback, ms) => {
@@ -229,7 +229,7 @@ describe("the controlled tabs' group", () => {
     const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3 }]);
     const { indicator: tabs, elapse } = indicator(strip);
     await tabs.show(2);
-    expect(strip.groupOf(2)).toMatchObject({ title: "Opengeni", color: "blue", windowId: 1 });
+    expect(strip.groupOf(2)).toMatchObject({ title: "Opengeni", color: "cyan", windowId: 1 });
     expect(strip.groupOf(1)).toBeNull();
     expect(strip.groupOf(3)).toBeNull();
 
@@ -524,7 +524,7 @@ describe("the controlled tabs' group", () => {
     await first.show(2);
     // The person's own group with the same title and colour.
     const theirs = strip.userGroup(1, "Opengeni");
-    strip.groups.get(theirs)!.color = "blue";
+    strip.groups.get(theirs)!.color = "cyan";
     strip.move(1, theirs);
 
     const state = parseTabGroupState(JSON.parse(JSON.stringify(saved.at(-1))))!;
@@ -599,7 +599,7 @@ describe("the controlled tabs' group", () => {
   test("with nothing recorded, no group is touched", async () => {
     const strip = new TabStrip([{ id: 1 }]);
     const theirs = strip.userGroup(1, "Opengeni");
-    strip.groups.get(theirs)!.color = "blue";
+    strip.groups.get(theirs)!.color = "cyan";
     strip.move(1, theirs);
     await indicator(strip).indicator.resume(null, () => []);
     expect(strip.groupOf(1)?.id).toBe(theirs);

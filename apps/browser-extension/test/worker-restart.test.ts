@@ -435,7 +435,7 @@ describe("the tabs an agent controls", () => {
     expect(await command({ type: "debugger.attach", tabId: "8" })).toMatchObject({ ok: true });
     await flush();
     expect(chrome.groupTitle(8)).toBe("Opengeni");
-    expect(chrome.groups.get(chrome.groupOf(8))?.color).toBe("blue");
+    expect(chrome.groups.get(chrome.groupOf(8))?.color).toBe("cyan");
     expect(chrome.groupTitle(7)).toBeNull();
     expect(chrome.scripts).toEqual(["showMark 8"]);
     // Served by the extension: sites' Content-Security-Policy often refuses
