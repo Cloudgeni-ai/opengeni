@@ -26,13 +26,14 @@ import {
   ModelPolicyRefusedError,
   ModelUnavailableError,
 } from "@opengeni/contracts";
-import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
+import { ContinueAfterCapabilitySetupRequest, connectionCardNoticeKey } from "@opengeni/contracts";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
 import {
   enqueueCapabilitySetupContinuation,
   getConnectionMetadata,
   getProviderConnectionHomeWorkspace,
   latestConnectionAuthNotice,
+  listInboxItems,
 } from "@opengeni/db";
 import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
@@ -3288,6 +3289,62 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
   }
 
+  /** Withdraw a finished card's open notices in this chat and the person's others. */
+  async function withdrawConnectionCardNotices(
+    person: { accountId: string; subjectId: string },
+    workspaceId: string,
+    sessionId: string,
+    keys: readonly string[],
+  ): Promise<void> {
+    const wanted = new Set(keys);
+    const sessions = new Map<string, { workspaceId: string; keys: Set<string> }>([
+      [sessionId, { workspaceId, keys: new Set(keys) }],
+    ]);
+    for (const item of await listInboxItems(db, person)) {
+      if (item.kind !== "notification" || !wanted.has(item.sourceKey)) continue;
+      const entry = sessions.get(item.sessionId) ?? {
+        workspaceId: item.workspaceId,
+        keys: new Set<string>(),
+      };
+      entry.keys.add(item.sourceKey);
+      sessions.set(item.sessionId, entry);
+    }
+    for (const [id, entry] of sessions) {
+      await appendAndPublishEvents(
+        db,
+        bus,
+        entry.workspaceId,
+        id,
+        [...entry.keys].map((key) => ({
+          type: "session.notification.withdrawn" as const,
+          payload: { key },
+        })),
+      ).catch(() => undefined);
+    }
+  }
+
+  /** The notices a finished card may have opened, by every name its continuation knows. */
+  function connectionCardNoticeKeys(
+    payload: ContinueAfterCapabilitySetupRequest,
+    target: { capabilityId: string; endpointUrl?: string | undefined },
+  ): string[] {
+    const keys = new Set<string>();
+    if ("connectionId" in payload)
+      keys.add(connectionCardNoticeKey({ providerDomain: "", connectionId: payload.connectionId }));
+    else
+      keys.add(
+        connectionCardNoticeKey({ providerDomain: "", capability: { id: target.capabilityId } }),
+      );
+    if (target.endpointUrl)
+      keys.add(
+        connectionCardNoticeKey({
+          providerDomain: "",
+          setupRequest: { endpointUrl: target.endpointUrl },
+        }),
+      );
+    return [...keys];
+  }
+
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
     async (c) => {
@@ -3400,6 +3457,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             : {}),
         };
       }
+      // The card is done: it no longer needs the person, here or in another
+      // chat that asked for the same account, whatever the agent does next.
+      await withdrawConnectionCardNotices(
+        { accountId: grant.accountId, subjectId: grant.subjectId },
+        workspaceId,
+        sessionId,
+        connectionCardNoticeKeys(payload, target),
+      ).catch(() => undefined);
       const result = await enqueueCapabilitySetupContinuation(db, {
         accountId: grant.accountId,
         workspaceId,

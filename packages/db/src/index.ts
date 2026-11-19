@@ -809,6 +809,8 @@ import {
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   SessionNotificationPostedPayload,
+  ToolAuthNeededPayload,
+  connectionCardNotice,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -98573,6 +98575,23 @@ export async function appendSessionEventsForTurnAttempt(
  * from before their latest message, which may be stale, is not reused. A chat
  * with no message from a person (a scheduled run) reuses only this turn's.
  */
+/**
+ * A connection card's events with the notice that tells the person they are
+ * needed (`connectionCardNotice`), after the card so the card stays first.
+ */
+export function withConnectionCardNotice<T extends { type: string; payload?: unknown }>(
+  events: readonly T[],
+): Array<T | { type: "session.notification.posted"; payload: SessionNotificationPostedPayload }> {
+  return events.flatMap((event) => {
+    if (event.type !== "tool.auth_needed") return [event];
+    const parsed = ToolAuthNeededPayload.safeParse(event.payload);
+    const notice = parsed.success ? connectionCardNotice(parsed.data) : null;
+    return notice
+      ? [event, { type: "session.notification.posted" as const, payload: notice }]
+      : [event];
+  });
+}
+
 export async function appendTurnCapabilityCardOnce(
   db: Database,
   workspaceId: string,
@@ -98607,7 +98626,8 @@ export async function appendTurnCapabilityCardOnce(
     turnId,
     executionGeneration,
     attemptId,
-    [input],
+    // The card needs the person: its notice reaches the inbox and the phone.
+    withConnectionCardNotice([input]),
     {
       rowProjection: "event",
       mutate: async (tx) => {

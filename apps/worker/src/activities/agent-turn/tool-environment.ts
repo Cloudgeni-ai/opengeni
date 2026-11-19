@@ -129,6 +129,7 @@ import { turnToolRouterExpected } from "./tool-router-expectation";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { decisionModelProcessingResidency, videoGenerationRoute } from "./side-feature-gates";
 import {
+  connectionCardNotice,
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
@@ -708,14 +709,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       return;
     }
     await authNeededCards.post(payload, async () => {
+      const card = rollingSafeToolAuthNeededPayload(
+        accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
+      );
+      // The person is needed, as for an approval: inbox, phone and chat list.
+      const notice = connectionCardNotice(card);
       await eventing.publish!(
         [
-          {
-            type: "tool.auth_needed",
-            payload: rollingSafeToolAuthNeededPayload(
-              accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
-            ),
-          },
+          { type: "tool.auth_needed", payload: card },
+          ...(notice ? [{ type: "session.notification.posted" as const, payload: notice }] : []),
         ],
         true,
       );

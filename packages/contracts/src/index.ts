@@ -15,6 +15,7 @@ export * from "./citation-urls";
 export * from "./claude-cite-tags";
 export * from "./machine-access";
 export * from "./no-reply";
+export * from "./connection-card-notice";
 import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
 import {
