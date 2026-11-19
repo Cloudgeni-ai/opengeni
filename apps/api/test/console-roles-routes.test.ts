@@ -1237,12 +1237,12 @@ describe("Console roles: reads, writes and lifecycle", () => {
     rowVersion = published.body.agent.rowVersion;
 
     // An admin makes it available in a team workspace.
-    const shared = await call("PATCH", `${agents(fixture)}/${agentId}`, people.admin.headers, {
+    const offered = await call("PATCH", `${agents(fixture)}/${agentId}`, people.admin.headers, {
       workspaceIds: [teamWorkspaceId],
       expectedVersion: rowVersion,
     });
-    expect(shared.status).toBe(200);
-    rowVersion = shared.body.agent.rowVersion;
+    expect(offered.status).toBe(200);
+    rowVersion = offered.body.agent.rowVersion;
     const refused = (reply: { status: number; body: Record<string, any> }) => [
       reply.status,
       reply.body.details?.code,
