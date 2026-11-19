@@ -466,6 +466,65 @@ describe("organization agent tool server logins", () => {
     }
   }, 180_000);
 
+  test("a chat's own login headers run only for its creator, its end user, or no person", async () => {
+    const f = await fixture();
+    const chat = await createSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      scopeSubjectId: END_USER,
+      createdBy: { kind: "subject", subjectId: "user:creator" },
+      orgAgent: { agentId: f.agentId, version: 1, promptVersion: 1, overrides: null },
+    });
+    const resolve = async (turnStarterSubjectId: string | null) => {
+      const published: OrgToolServerUnavailable[] = [];
+      const result = await resolveOrgAgentToolLogins({
+        db: client.db,
+        settings,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        orgAgent: { agentId: f.agentId, version: 1 },
+        // No stored login applies: only the chat's headers are in question.
+        endUserSubjectId: null,
+        chat: { sessionId: chat.id, turnStarterSubjectId },
+        mcpServers: [
+          {
+            id: "chatonly",
+            name: "CHATONLY",
+            url: url("chatonly"),
+            cacheToolsList: false,
+            headers: { "X-Chat": "creator-login" },
+          },
+        ],
+        turnTools: [{ kind: "mcp", id: "chatonly" }],
+        providerManaged: () => false,
+        publishUnavailable: async (payload) => {
+          published.push(payload);
+        },
+      });
+      return { headers: result!.mcpServers[0]?.headers ?? null, published };
+    };
+    for (const starter of [null, "api_key:backend", "user:creator", END_USER]) {
+      expect(await resolve(starter)).toEqual({
+        headers: { "X-Chat": "creator-login" },
+        published: [],
+      });
+    }
+    // Another person's turn: the server needs their own login.
+    for (const starter of ["external_user:bob", "user:someone-else"]) {
+      expect(await resolve(starter)).toEqual({
+        headers: null,
+        published: [{ serverKey: "chatonly", name: "CHATONLY", reason: "missing_credentials" }],
+      });
+    }
+  }, 180_000);
+
   test("OAuth refresh holds a lease, not a row lock, during the token request", async () => {
     const f = await fixture();
     const credentialId = await f.storeLogin(
