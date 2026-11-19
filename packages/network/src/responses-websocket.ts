@@ -465,6 +465,12 @@ function fingerprint(value: unknown): string {
  * model context. In particular phase and hosted-call status remain significant.
  * A replayed tool_search_call loses its provider id and its "completed" status
  * (the Codex normalizer strips both), exactly like a function call.
+ * A replayed hosted web_search_call loses only its provider `ws_` id: it keeps
+ * its status (required on replay) and the action the backend streamed. Without
+ * this, every response that searched the web ended the chain and the next
+ * request resent the full input, which the backend renders differently from
+ * the chain it holds, so that request missed the prompt cache from the first
+ * differing item onwards.
  */
 function modelVisibleItem(item: unknown): string {
   if (!item || typeof item !== "object" || Array.isArray(item)) return fingerprint(item);
@@ -473,7 +479,8 @@ function modelVisibleItem(item: unknown): string {
     type !== "message" &&
     type !== "function_call" &&
     type !== "reasoning" &&
-    type !== "tool_search_call"
+    type !== "tool_search_call" &&
+    type !== "web_search_call"
   )
     return fingerprint(item);
   const visible: Record<string, unknown> = {};

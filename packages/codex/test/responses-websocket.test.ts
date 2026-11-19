@@ -1028,6 +1028,65 @@ describe("continuing the previous response on a connection", () => {
     await continued.text();
   });
 
+  // As the backend streams a hosted web search; the history keeps the action
+  // and status, and the Codex normalizer strips only the `ws_` id on replay.
+  const webSearch = {
+    id: "ws_1",
+    type: "web_search_call",
+    status: "completed",
+    action: { type: "search", query: "radon rules", queries: ["radon rules", "radon limits"] },
+  };
+
+  test("a hosted web search replayed without its id continues the response", async () => {
+    const { transport, sockets } = harness();
+    const normalized = (input: unknown[]) =>
+      normalizeCodexRequestBody(structuredClone({ ...base, input }), (slug) => slug);
+    const first = transport(URL, request(normalized([user])));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: reasoning });
+    socket.emit({ type: "response.output_item.done", output_index: 1, item: webSearch });
+    socket.emit({ type: "response.output_item.done", output_index: 2, item: call });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+
+    const { pending, sent } = await sendNext(
+      transport,
+      socket,
+      normalized([user, sentBack[0], webSearch, call, result]),
+    );
+    expect(sent.previous_response_id).toBe("resp_1");
+    expect(sent.input).toEqual([result]);
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    const continued = await pending;
+    expect(continued.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+      "websocket; connection=reused; input=incremental",
+    );
+    await continued.text();
+  });
+
+  test("a replayed web search with a different action or status sends the full input", async () => {
+    for (const changed of [
+      { ...webSearch, action: { type: "open_page", url: "https://example.com" } },
+      { ...webSearch, status: "failed" },
+    ]) {
+      const { transport, sockets } = harness();
+      const first = transport(URL, request({ ...base, input: [user] }));
+      const socket = await nextSend(() => sockets[0]);
+      socket.emit({ type: "response.output_item.done", output_index: 0, item: webSearch });
+      socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+      await (await first).text();
+      const replayed = { ...changed } as { id?: string };
+      delete replayed.id;
+      const { pending, sent } = await sendNext(transport, socket, {
+        ...base,
+        input: [user, replayed, { type: "message", role: "user", content: "next" }],
+      });
+      expect(sent).not.toHaveProperty("previous_response_id");
+      socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+      await (await pending).text();
+    }
+  });
+
   test("a replayed tool search with different arguments sends the full input", async () => {
     const { transport, sockets } = harness();
     const search = {
