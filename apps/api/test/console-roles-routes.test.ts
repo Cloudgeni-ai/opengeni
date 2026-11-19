@@ -1590,21 +1590,21 @@ describe("Console roles: Console test chats", () => {
           select count(*)::int as count from session_events where session_id = ${sessionId}`
       )[0]!.count;
     const before = { events: await eventsOf(theirs), state: await stateFingerprint(fixture.accountId) };
-    const app = (method: string, suffix: string, body?: unknown) =>
+    const viaApp = (method: string, suffix: string, body?: unknown) =>
       call(method, `/v1/workspaces/${agent.workspaceId}/sessions${suffix}`, { authorization: agent.bearer }, body);
     // Its own chat works; the other tester's chat is not there, through HTTP...
-    expect((await app("GET", `/${mine}`)).status).toBe(200);
-    expect((await app("GET", `/${theirs}`)).status).toBe(404);
-    expect((await app("GET", `/${theirs}/events`)).status).toBe(404);
+    expect((await viaApp("GET", `/${mine}`)).status).toBe(200);
+    expect((await viaApp("GET", `/${theirs}`)).status).toBe(404);
+    expect((await viaApp("GET", `/${theirs}/events`)).status).toBe(404);
     expect(
       (
-        await app("POST", `/${theirs}/events`, {
+        await viaApp("POST", `/${theirs}/events`, {
           type: "user.message",
           payload: { text: "from another tester's agent" },
         })
       ).status,
     ).toBe(404);
-    const listed = await app("GET", "");
+    const listed = await viaApp("GET", "");
     expect(listed.status).toBe(200);
     expect((listed.body as unknown as { id: string }[]).map((row) => row.id)).not.toContain(theirs);
     // ...and through its session tools.
