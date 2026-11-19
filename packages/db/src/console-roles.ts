@@ -11,10 +11,11 @@
  * change is written to the Console audit log in the same transaction.
  */
 import type { ConsoleMemberRole, ConsoleMemberRoleEntry } from "@opengeni/contracts";
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { insertConsoleAuditEvent } from "./console";
-import { rawRows, withAccountRls, type Database } from "./database";
+import { rawRows, withAccountRls, withWorkspaceRls, type Database } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
+import * as schema from "./schema";
 
 export type ConsoleRoleTarget = { subjectId: string } | { invitationId: string };
 
@@ -295,5 +296,29 @@ export async function applyInvitationConsoleRole(
       detail: { invitationId: input.invitationId, reason: "invitation_accepted" },
     });
     return role;
+  });
+}
+
+/**
+ * Who started a chat, as recorded at create (`sessions.created_by_*`), or
+ * null when it does not exist. Console test chats are owned by the service
+ * principal that started them (a service principal cannot own a chat as a
+ * member), so this is how the test chat routes find a tester's own chats.
+ */
+export async function getSessionCreator(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ kind: string; subjectId: string | null } | null> {
+  return withWorkspaceRls(db, workspaceId, async (tx) => {
+    const [row] = await tx
+      .select({
+        kind: schema.sessions.createdByKind,
+        subjectId: schema.sessions.createdBySubjectId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row ? { kind: row.kind, subjectId: row.subjectId ?? null } : null;
   });
 }

@@ -395,6 +395,17 @@ async function provisionFixture(): Promise<Fixture> {
     }
     testChats[name] = started.body.sessionId as string;
   }
+  // The matrix's end user exists (only an organization key provisions one), so
+  // everyone allowed to write a stored login reaches the body check.
+  const provisioned = await call(
+    "PUT",
+    `/v1/workspaces/${managed.id}/end-users/matrix-user/tool-credentials/missing-server`,
+    { authorization: `Bearer ${token}` },
+    {},
+  );
+  if (provisioned.status !== 422) {
+    throw new Error(`end user provisioning failed: ${provisioned.status}`);
+  }
   return {
     accountId,
     managedWorkspaceId: managed.id,
@@ -567,7 +578,7 @@ const MATRIX: Record<string, RouteCase> = {
   [`PATCH ${A}/tool-servers/:key`]: {
     need: "full",
     key: "allowed",
-    ok: 404,
+    ok: 422,
     path: (f) => `${agents(f)}/tool-servers/missing-server`,
     body: {},
   },
@@ -659,7 +670,7 @@ const MATRIX: Record<string, RouteCase> = {
     need: "viewer",
     key: "allowed",
     ok: 200,
-    path: (f) => `${agents(f)}/${f.agentId}/movable-chats`,
+    path: (f) => `${agents(f)}/${f.agentId}/movable-chats?version=1`,
   },
   [`POST ${A}/:agentId/management`]: {
     need: "owner",
@@ -1284,7 +1295,7 @@ describe("Console roles: Console test chats", () => {
     };
   }
 
-  test("nobody becomes a member of the test workspace; each chat is its tester's principal's", async () => {
+  test("nobody becomes a member of the test workspace; each chat is started by its tester's principal", async () => {
     if (!fixture || !shared) return;
     const workspaceId = await testWorkspaceId();
     const [{ count }] = await shared.admin<{ count: number }[]>`
@@ -1292,12 +1303,14 @@ describe("Console roles: Console test chats", () => {
     expect(count).toBe(0);
     for (const name of ["owner", "admin", "editor"] as const) {
       const sessionId = fixture.testChats[name]!;
-      const [row] = await shared.admin<{ owner_subject_id: string; visibility: string }[]>`
-        select owner_subject_id, visibility from sessions where id = ${sessionId}`;
-      expect([name, row?.owner_subject_id]).toEqual([
-        name,
-        consoleTestChatSubjectId(fixture.people[name].subjectId),
-      ]);
+      const [row] = await shared.admin<
+        { created_by_kind: string; created_by_subject_id: string; owner_subject_id: string | null }[]
+      >`
+        select created_by_kind, created_by_subject_id, owner_subject_id
+        from sessions where id = ${sessionId}`;
+      expect([name, row?.created_by_kind, row?.created_by_subject_id, row?.owner_subject_id]).toEqual(
+        [name, "service", consoleTestChatSubjectId(fixture.people[name].subjectId), null],
+      );
     }
     // The principal holds its own chats and nothing that administers anything.
     for (const mode of ["legacy", "explicit", undefined] as const) {

@@ -199,7 +199,7 @@ organization's Console test workspace as the tester's own test chat principal
 and `sessions:create`, `sessions:read` and `sessions:control` there, never
 `workspace:admin`, so never `agents:manage`), and nobody is a member of that
 workspace, owners and admins included. A tester reads and continues only their
-own test chats, through `GET`
+own test chats (the ones their principal started), through `GET`
 `/v1/organizations/:id/agents/:agentId/test-chats/:sessionId` (and `/events`)
 and `POST .../messages`, while their Console access is Editor or more; anyone
 else (another Editor, an owner) gets `404`, and the app's session routes refuse

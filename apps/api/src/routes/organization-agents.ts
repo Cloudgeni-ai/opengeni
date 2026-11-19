@@ -126,7 +126,7 @@ import {
   getOrgAgentVersion,
   getOrgToolServer,
   getSession,
-  getSessionAuthorityProjection,
+  getSessionCreator,
   listOrgAgentChatWorkspaces,
   listOrgAgentCompute,
   listOrgAgentPublishOperations,
@@ -449,7 +449,7 @@ const CONSOLE_TEST_CHAT_SUBJECT_PREFIX = "console-test:";
 
 /**
  * The service principal one tester's Console test chats run as and are
- * owned by: one per person (or organization key), never a person and never a
+ * started by (`sessions.created_by_*`): one per person (or organization key), never a person and never a
  * member of any workspace. Its chats are read and continued only through the
  * test-chats routes, by that tester while they may test agents.
  */
@@ -1055,7 +1055,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
 
   /**
    * One of the caller's own test chats of this agent, or 404: a test chat is
-   * its tester's alone (owned by their test chat principal), whatever the
+   * its tester's alone (started by their test chat principal), whatever the
    * caller's Console access. Console review of the test workspace stays the
    * audited Console session routes.
    */
@@ -1067,8 +1067,10 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = await findOrgAgentTestWorkspace(deps.db, caller.organizationId);
     if (!workspaceId || !inScope(caller, workspaceId)) throw notFound();
     const grant = consoleTestChatGrant(caller, workspaceId);
-    const authority = await getSessionAuthorityProjection(deps.db, workspaceId, sessionId);
-    if (authority?.ownerSubjectId !== grant.subjectId) throw notFound();
+    // Started by this tester's own test chat principal (a service principal
+    // records who started a chat, it cannot own one as a member).
+    const creator = await getSessionCreator(deps.db, workspaceId, sessionId);
+    if (creator?.kind !== "service" || creator.subjectId !== grant.subjectId) throw notFound();
     const session = await getSession(deps.db, workspaceId, sessionId);
     if (!session || session.orgAgent?.id !== agentId) throw notFound();
     return { caller, grant, workspaceId, session };
