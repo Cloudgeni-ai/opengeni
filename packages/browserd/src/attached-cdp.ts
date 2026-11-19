@@ -61,11 +61,12 @@ const DOWNLOAD_START_SLACK_MS = 5_000;
 const DOWNLOAD_FIND_ATTEMPTS = 10;
 const DOWNLOAD_FIND_RETRY_MS = 200;
 const MAX_TRACKED_DOWNLOADS = 1_000;
-// The site permissions Chrome lets an extension set, by their CDP names, as
-// the extension's `permissions.set` names them. The others it cannot set.
+// The site permissions Chrome lets an extension set, by the descriptor names
+// `Browser.setPermission` carries, as the extension's `permissions.set` names
+// them. The others it cannot set.
 const ATTACHED_SITE_PERMISSIONS = new Map([
-  ["videoCapture", "camera"],
-  ["audioCapture", "microphone"],
+  ["camera", "camera"],
+  ["microphone", "microphone"],
   ["geolocation", "geolocation"],
   ["notifications", "notifications"],
 ]);
