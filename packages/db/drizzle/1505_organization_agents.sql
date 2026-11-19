@@ -41,12 +41,12 @@
 -- - organization_managed_workspaces.source gains 'console_test' (the
 --   organization's Console test workspace) and the Console audit log gains
 --   agent and tool server actions. Both checks are re-added NOT VALID and
---   validated in 1508.
+--   validated in 1509.
 --
 -- Rolling: the previous release never reads or writes the new columns or
 -- tables, never sets opengeni.org_agents_v1, so it cannot see organization
 -- rows, and only writes check values the widened checks still accept. Every
--- new check is NOT VALID (all existing rows satisfy it; 1508 validates).
+-- new check is NOT VALID (all existing rows satisfy it; 1509 validates).
 -- A chat with an agent_version is refused to a previous worker by the claim
 -- gate below, as 1276 does for agent_prompt_revision. The new tables are
 -- FORCE RLS with exact runtime grants, which the previous release's readiness

@@ -224,7 +224,7 @@ admins set, so a test chat can use that machine.
 The app's People page shows "Console: Viewer" or "Console: Editor" next to
 members with a Console role.
 
-Roles are stored in `organization_console_roles` (migration 1510, one row
+Roles are stored in `organization_console_roles` (migration 1511, one row
 per member or pending invitation, FORCE RLS on the account; the runtime may
 read, insert and update, never delete, and only from the account context: a
 workspace context of the organization reads roles but can't write them).
@@ -266,7 +266,7 @@ The product's backend may also send a display name and an email with the user:
 `asUser(id, { displayName, email })`, `identity.displayName`/`identity.email` on
 `addExternalWorkspaceMember`, or `displayName`/`email` from the session proxy's
 `resolve`. The API stores them in `organization_end_user_profiles` (migration
-1509), keyed like the labels. The latest value sent wins and a field left out
+1510), keyed like the labels. The latest value sent wins and a field left out
 keeps its stored value. They are never rejected: names are trimmed and cut to
 256 characters; an email is stored as given (trimmed), unless it has spaces or
 is longer than 320 characters, which drops it. They are not part of the

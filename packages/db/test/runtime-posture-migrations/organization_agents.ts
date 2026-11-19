@@ -4,6 +4,6 @@ import type { RuntimePostureMigration } from "../runtime-posture-migrations";
  * workspace access (full DML), and publish operations (read, insert and
  * update), all FORCE RLS. */
 export default {
-  migration: "1504_organization_agents",
+  migration: "1505_organization_agents",
   forceRls: { fullDml: 3, readInsertUpdate: 1 },
 } satisfies RuntimePostureMigration;

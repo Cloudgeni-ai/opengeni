@@ -28,7 +28,7 @@ import { createApp } from "../src/app";
 
 const FIXTURE = new URL("./fixtures/session-create-golden.json", import.meta.url);
 const RECORD = process.env.OPENGENI_GOLDEN_RECORD === "1";
-/** Session columns added by organization agents (migration 1504): NULL on every other chat. */
+/** Session columns added by organization agents (migration 1505): NULL on every other chat. */
 const ADDED_SESSION_COLUMNS = ["agent_overrides", "agent_prompt_version", "agent_version"];
 /** Values that differ between any two runs (transaction ids, hashes of ids). */
 const VOLATILE_KEYS = new Set(["activity_xid", "activity_revision_pending_xid", "controlEtag"]);

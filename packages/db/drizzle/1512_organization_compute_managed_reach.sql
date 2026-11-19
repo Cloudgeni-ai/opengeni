@@ -14,7 +14,7 @@
 -- exactly the reach it has. Managed workspaces are shared workspaces, so
 -- allowed_workspace_ids NULL already includes them; the switch matters with
 -- a list (or none). The one exception is the Console test workspace
--- (source 'console_test', new in 1504): only allow_managed_workspaces
+-- (source 'console_test', new in 1505): only allow_managed_workspaces
 -- reaches it, never "all shared workspaces" or a list, so an organization
 -- machine opens to Console Editors' test chats only when an admin chose
 -- managed workspaces. No such workspace exists before this release.

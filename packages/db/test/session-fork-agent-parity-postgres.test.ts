@@ -71,7 +71,7 @@ const COPIED = [
   "agent_id",
   "agent_prompt_revision",
   // The organization agent version the chat runs, the version whose
-  // Instructions are in its prompt and what the chat changed (migration 1504,
+  // Instructions are in its prompt and what the chat changed (migration 1505,
   // docs/run-lifecycle.md): a fork runs the same organization agent.
   "agent_version",
   "agent_prompt_version",
