@@ -180,7 +180,11 @@ export function recordedToolServerOverride(
   value: unknown,
 ): Omit<OrgAgentToolServerOverride, "server" | "headers"> | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const parsed = OrgAgentToolServerOverride.safeParse({ server: "x", ...value, headers: undefined });
+  const parsed = OrgAgentToolServerOverride.safeParse({
+    server: "x",
+    ...value,
+    headers: undefined,
+  });
   if (!parsed.success) return undefined;
   const { server: _server, headers: _headers, ...rest } = parsed.data;
   return rest;
@@ -201,9 +205,7 @@ export function toolServerOverrideChanges(
 }
 
 export function withoutUndefined<T extends Record<string, unknown>>(value: T): T {
-  return Object.fromEntries(
-    Object.entries(value).filter(([, entry]) => entry !== undefined),
-  ) as T;
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T;
 }
 
 /** The chat-facing view of a session MCP server input (no headers). */
@@ -295,7 +297,9 @@ export function planOrgAgentSessionMove<Row extends OrgAgentMoveServerRow>(input
       cacheToolsList: previous?.cacheToolsList ?? false,
       connectionRef: previous?.connectionRef ?? null,
       headersEncrypted:
-        previous && previous.url === materialized.url ? { ...(previous.headersEncrypted ?? {}) } : {},
+        previous && previous.url === materialized.url
+          ? { ...(previous.headersEncrypted ?? {}) }
+          : {},
       // The eager marker lives on the chat's tool ref, not the server row.
       eager: materialized.eager,
     } as Row & { eager?: string[] });
@@ -316,7 +320,8 @@ export function planOrgAgentSessionMove<Row extends OrgAgentMoveServerRow>(input
       continue;
     }
     const agentValue = (input.toConfig as Record<string, unknown>)[key] ?? null;
-    if (!sameSetting(agentValue, change.chat)) nextOverrides[key] = { agent: agentValue, chat: change.chat };
+    if (!sameSetting(agentValue, change.chat))
+      nextOverrides[key] = { agent: agentValue, chat: change.chat };
   }
   const nextAgentIds = new Set(agentServers.map((server) => server.id));
   const removedServerIds = input.currentServers

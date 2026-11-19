@@ -12,6 +12,7 @@ import {
   GoalResumeBlockedError,
   turnAppActionGrant,
   MissingPermissionRefusal,
+  OrgAgentSessionCreateError,
 } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
@@ -7268,6 +7269,10 @@ async function defaultAgentChatVisibility(
 }
 
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof OrgAgentSessionCreateError) {
+    // An organization agent the create named: `code` is one of ORG_AGENT_ERROR_CODES.
+    return c.json({ code: error.code, message: error.message }, error.httpStatus);
+  }
   if (error instanceof SessionUsageLimitHttpError) {
     // a create-time usage limit the caller may not set (agents and
     // children) or that this server does not accept yet (producer flag off).

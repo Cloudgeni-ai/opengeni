@@ -186,7 +186,8 @@ async function prepare(
     ref,
   });
   const inTestWorkspace = reach.managedSource === "console_test";
-  if (agent && (agent.archived || !(reach.managedSource !== null || reach.access))) throw notFound();
+  if (agent && (agent.archived || !(reach.managedSource !== null || reach.access)))
+    throw notFound();
 
   let version: OrgAgentRuntimeVersion;
   if (request.config) {
@@ -355,7 +356,10 @@ export async function planOrgAgentSessionCreate(input: {
   request: OrgAgentSessionRequest;
   config: OrgAgentVersionConfig;
   toolCatalog: unknown;
-  toolServers: ReadonlyMap<string, { key: string; name: string; url: string } & Partial<OrgToolServerRuntime>>;
+  toolServers: ReadonlyMap<
+    string,
+    { key: string; name: string; url: string } & Partial<OrgToolServerRuntime>
+  >;
   liveTools?: (
     server: OrgToolServerRuntime,
     chatHeaders: Record<string, string> | undefined,
@@ -367,7 +371,9 @@ export async function planOrgAgentSessionCreate(input: {
 }> {
   const { raw, request, config } = input;
   const requestObject =
-    raw["agent"] && typeof raw["agent"] === "object" ? (raw["agent"] as Record<string, unknown>) : {};
+    raw["agent"] && typeof raw["agent"] === "object"
+      ? (raw["agent"] as Record<string, unknown>)
+      : {};
   const overrides: OrgAgentSessionOverrides = {};
   const serverOverrides = new Map<string, OrgAgentToolServerOverride>(
     (request.toolServers ?? []).map((override) => [override.server, override]),
@@ -555,7 +561,11 @@ async function liveListHeaders(
 export function endUserLoginHeaders(material: string): Record<string, string> | null {
   try {
     const parsed = JSON.parse(material) as Record<string, unknown>;
-    if (parsed["kind"] === "headers" && parsed["headers"] && typeof parsed["headers"] === "object") {
+    if (
+      parsed["kind"] === "headers" &&
+      parsed["headers"] &&
+      typeof parsed["headers"] === "object"
+    ) {
       return Object.fromEntries(
         Object.entries(parsed["headers"] as Record<string, unknown>).filter(
           (entry): entry is [string, string] => typeof entry[1] === "string",

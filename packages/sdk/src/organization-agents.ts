@@ -6,6 +6,7 @@ import type {
   EndUserToolCredential,
   ListOrgAgentSessionsResponse,
   ListOrgAgentsResponse,
+  ListOrgAgentPublishOperationsResponse,
   ListOrgAgentVersionsResponse,
   ListOrgToolServersResponse,
   OrgAgent,
@@ -67,8 +68,8 @@ const agentsPath = (organizationId: string) =>
   `/v1/organizations/${segment(organizationId)}/agents`;
 const agentPath = (organizationId: string, agentId: string) =>
   `${agentsPath(organizationId)}/${segment(agentId)}`;
-const toolServersPath = (organizationId: string) =>
-  `/v1/organizations/${segment(organizationId)}/tool-servers`;
+const toolServersPath = (organizationId: string) => `${agentsPath(organizationId)}/tool-servers`;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const credentialPath = (workspaceId: string, externalUserId: string, toolServerKey: string) =>
   `/v1/workspaces/${segment(workspaceId)}/end-users/${segment(externalUserId)}/tool-credentials/${segment(toolServerKey)}`;
 
@@ -103,7 +104,10 @@ export async function getOrganizationAgent(
   organizationId: string,
   agentIdOrKey: string,
 ): Promise<OrgAgentResponse> {
-  return await client.requestJson("GET", agentPath(organizationId, agentIdOrKey));
+  const path = UUID_PATTERN.test(agentIdOrKey)
+    ? agentPath(organizationId, agentIdOrKey)
+    : `${agentsPath(organizationId)}/by-key/${segment(agentIdOrKey)}`;
+  return await client.requestJson("GET", path);
 }
 
 /** A Console-managed agent with an unpublished first version. */
@@ -173,16 +177,35 @@ export async function publishOrganizationAgent(
   return await client.requestJson("POST", `${agentPath(organizationId, agentId)}/publish`, request);
 }
 
+/** Publish and rollback operations for one agent, newest first. */
+export async function listOrganizationAgentPublishOperations(
+  client: Client,
+  organizationId: string,
+  agentId: string,
+): Promise<ListOrgAgentPublishOperationsResponse> {
+  return await client.requestJson(
+    "GET",
+    `${agentPath(organizationId, agentId)}/publish-operations`,
+  );
+}
+
+/** One publish operation, read from the agent's operation list. */
 export async function getOrganizationAgentPublishOperation(
   client: Client,
   organizationId: string,
   agentId: string,
   operationId: string,
 ): Promise<{ operation: OrgAgentPublishOperation }> {
-  return await client.requestJson(
-    "GET",
-    `${agentPath(organizationId, agentId)}/publish-operations/${segment(operationId)}`,
+  const { operations } = await listOrganizationAgentPublishOperations(
+    client,
+    organizationId,
+    agentId,
   );
+  const operation = operations.find((candidate) => candidate.id === operationId);
+  if (!operation) {
+    throw new Error(`Publish operation ${operationId} was not found for agent ${agentId}.`);
+  }
+  return { operation };
 }
 
 /** Moves an agent between Console and code management (organization owners only). */
@@ -415,6 +438,8 @@ export function organizationAgents(client: Client, organizationId: string) {
       getOrganizationAgentVersion(client, organizationId, agentId, version),
     publish: (agentId: string, request: PublishOrgAgentRequest) =>
       publishOrganizationAgent(client, organizationId, agentId, request),
+    publishOperations: (agentId: string) =>
+      listOrganizationAgentPublishOperations(client, organizationId, agentId),
     publishOperation: (agentId: string, operationId: string) =>
       getOrganizationAgentPublishOperation(client, organizationId, agentId, operationId),
     setManagement: (agentId: string, request: SetOrgAgentManagementRequest) =>

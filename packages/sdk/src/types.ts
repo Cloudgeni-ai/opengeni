@@ -3047,6 +3047,8 @@ export const SESSION_EVENT_TYPES = [
   "session.skills.updated",
   "session.resources.removed",
   "session.resources.added",
+  // An organization agent's tool server has no usable login for this turn.
+  "session.tool_server.unavailable",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
