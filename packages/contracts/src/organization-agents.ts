@@ -84,8 +84,7 @@ export type OrgAgentErrorCode = (typeof ORG_AGENT_ERROR_CODES)[number];
 
 export const OrgAgentKey = /* @__PURE__ */ defineSchema(() =>
   z.string().regex(ORG_AGENT_KEY_PATTERN, {
-    message:
-      "Use 1 to 64 lowercase letters, digits, '-' or '_', starting with a letter or digit.",
+    message: "Use 1 to 64 lowercase letters, digits, '-' or '_', starting with a letter or digit.",
   }),
 );
 export type OrgAgentKey = z.infer<typeof OrgAgentKey>;
@@ -95,14 +94,12 @@ export const OrgToolServerKey = OrgAgentKey;
 export type OrgToolServerKey = z.infer<typeof OrgToolServerKey>;
 
 const ToolName = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(200));
-const ToolNames = /* @__PURE__ */ defineSchema(() => z.array(ToolName).max(ORG_AGENT_TOOL_NAMES_MAX));
+const ToolNames = /* @__PURE__ */ defineSchema(() =>
+  z.array(ToolName).max(ORG_AGENT_TOOL_NAMES_MAX),
+);
 
 export const OrgAgentName = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .trim()
-    .min(1, { message: "Give the agent a name." })
-    .max(ORG_AGENT_NAME_MAX_LENGTH),
+  z.string().trim().min(1, { message: "Give the agent a name." }).max(ORG_AGENT_NAME_MAX_LENGTH),
 );
 export const OrgAgentDescription = /* @__PURE__ */ defineSchema(() =>
   z.string().trim().max(ORG_AGENT_DESCRIPTION_MAX_LENGTH),
@@ -277,7 +274,10 @@ export function orgAgentFileToDefinition(file: OrgAgentFile): {
 }
 
 /** The agent file for a definition: the inverse of {@link orgAgentFileToDefinition}. */
-export function orgAgentDefinitionToFile(key: string, definition: OrgAgentDefinition): OrgAgentFile {
+export function orgAgentDefinitionToFile(
+  key: string,
+  definition: OrgAgentDefinition,
+): OrgAgentFile {
   const { toolServers, workers, ...settings } = definition.config;
   return {
     key,
@@ -830,7 +830,9 @@ export function sessionAgentFieldNamesOrgAgent(agent: unknown): boolean {
 }
 
 /** `allow` (default): the request may change the agent's settings. `reject`: 422 if it does. */
-export const OrgAgentOverridesMode = /* @__PURE__ */ defineSchema(() => z.enum(["allow", "reject"]));
+export const OrgAgentOverridesMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["allow", "reject"]),
+);
 export type OrgAgentOverridesMode = z.infer<typeof OrgAgentOverridesMode>;
 
 /** Client config feature flag (`/v1/client-config`). */
@@ -843,7 +845,11 @@ export const OrgToolServerUnavailableReason = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrgToolServerUnavailableReason = z.infer<typeof OrgToolServerUnavailableReason>;
 
-export const ORG_AGENT_PERMISSIONS = ["agents:read", "agents:manage", "tool_credentials:write"] as const;
+export const ORG_AGENT_PERMISSIONS = [
+  "agents:read",
+  "agents:manage",
+  "tool_credentials:write",
+] as const;
 
 /* ----------------------------------------------------- agent file JSON Schema */
 

@@ -28,8 +28,12 @@ export type DeployResult =
   | { key: string; path: string; ok: true; response: ApplyOrgAgentResponse; localHash: string }
   | { key: string; path: string; ok: false; error: string; code?: string; status?: number };
 
-function apiErrorMessage(error: unknown, key: string): { message: string; code?: string; status?: number } {
-  if (!(error instanceof CliApiError)) return { message: (error as Error).message ?? String(error) };
+function apiErrorMessage(
+  error: unknown,
+  key: string,
+): { message: string; code?: string; status?: number } {
+  if (!(error instanceof CliApiError))
+    return { message: (error as Error).message ?? String(error) };
   const base = { ...(error.code ? { code: error.code } : {}), status: error.status };
   if (error.code === "agent_managed_in_console") {
     return {
@@ -37,14 +41,18 @@ function apiErrorMessage(error: unknown, key: string): { message: string; code?:
       message: `'${key}' is managed in Console, so code deploys are refused. Move it back to code in Console (Agent settings) or remove this file.`,
     };
   }
-  if (error.status === 401) return { ...base, message: "the API key was not accepted (401). Check OPENGENI_API_KEY." };
+  if (error.status === 401)
+    return { ...base, message: "the API key was not accepted (401). Check OPENGENI_API_KEY." };
   if (error.status === 403) {
     return {
       ...base,
       message: `the API key may not manage agents in this organization (403${error.code ? ` ${error.code}` : ""}). It needs the agents:manage permission.`,
     };
   }
-  return { ...base, message: `${error.message}${error.code ? ` (${error.code})` : ""}${error.status ? ` [HTTP ${error.status}]` : ""}` };
+  return {
+    ...base,
+    message: `${error.message}${error.code ? ` (${error.code})` : ""}${error.status ? ` [HTTP ${error.status}]` : ""}`,
+  };
 }
 
 function shortHash(hash: string): string {
@@ -103,7 +111,12 @@ export async function deployAgents(
                   configHash: result.response.configHash,
                   operation: result.response.operation,
                 }
-              : { key: result.key, file: result.path, error: result.error, code: result.code ?? null },
+              : {
+                  key: result.key,
+                  file: result.path,
+                  error: result.error,
+                  code: result.code ?? null,
+                },
           ),
         },
         null,
@@ -111,7 +124,8 @@ export async function deployAgents(
       )}\n`,
     );
   }
-  if (failed > 0) out.stderr(`${failed} of ${results.length} agent${results.length === 1 ? "" : "s"} failed.\n`);
+  if (failed > 0)
+    out.stderr(`${failed} of ${results.length} agent${results.length === 1 ? "" : "s"} failed.\n`);
   return { exitCode: failed > 0 ? 1 : 0, results };
 }
 
@@ -216,7 +230,8 @@ export async function exportAgent(
   if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
   const yamlPath = join(directory, `${agent.key}.yaml`);
   writeFileSync(yamlPath, rendered.yaml, "utf8");
-  if (rendered.markdown !== undefined) writeFileSync(join(directory, `${agent.key}.md`), rendered.markdown, "utf8");
+  if (rendered.markdown !== undefined)
+    writeFileSync(join(directory, `${agent.key}.md`), rendered.markdown, "utf8");
   out.stdout(
     `${agent.key}\texported v${version.version}${agent.published ? "" : " (draft)"}\t${yamlPath}${rendered.markdown !== undefined ? ` (+ ${agent.key}.md)` : ""}\n`,
   );

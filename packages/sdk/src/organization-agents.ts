@@ -63,7 +63,8 @@ export type {
 type Client = Pick<OpenGeniClient, "requestJson">;
 
 const segment = encodeURIComponent;
-const agentsPath = (organizationId: string) => `/v1/organizations/${segment(organizationId)}/agents`;
+const agentsPath = (organizationId: string) =>
+  `/v1/organizations/${segment(organizationId)}/agents`;
 const agentPath = (organizationId: string, agentId: string) =>
   `${agentsPath(organizationId)}/${segment(agentId)}`;
 const toolServersPath = (organizationId: string) =>
@@ -71,7 +72,9 @@ const toolServersPath = (organizationId: string) =>
 const credentialPath = (workspaceId: string, externalUserId: string, toolServerKey: string) =>
   `/v1/workspaces/${segment(workspaceId)}/end-users/${segment(externalUserId)}/tool-credentials/${segment(toolServerKey)}`;
 
-function query(values: Record<string, string | number | boolean | undefined>): Record<string, string> {
+function query(
+  values: Record<string, string | number | boolean | undefined>,
+): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(values)) {
     if (value !== undefined) result[key] = String(value);
@@ -189,7 +192,11 @@ export async function setOrganizationAgentManagement(
   agentId: string,
   request: SetOrgAgentManagementRequest,
 ): Promise<OrgAgentResponse> {
-  return await client.requestJson("POST", `${agentPath(organizationId, agentId)}/management`, request);
+  return await client.requestJson(
+    "POST",
+    `${agentPath(organizationId, agentId)}/management`,
+    request,
+  );
 }
 
 /**
@@ -204,7 +211,11 @@ export async function applyOrganizationAgent(
   key: string,
   request: ApplyOrgAgentRequest,
 ): Promise<ApplyOrgAgentResponse> {
-  return await client.requestJson("PUT", `${agentsPath(organizationId)}/by-key/${segment(key)}/apply`, request);
+  return await client.requestJson(
+    "PUT",
+    `${agentsPath(organizationId)}/by-key/${segment(key)}/apply`,
+    request,
+  );
 }
 
 export async function listOrganizationAgentSessions(
@@ -266,7 +277,11 @@ export async function updateOrganizationToolServer(
   key: string,
   request: UpdateOrgToolServerRequest,
 ): Promise<{ toolServer: OrgToolServer }> {
-  return await client.requestJson("PATCH", `${toolServersPath(organizationId)}/${segment(key)}`, request);
+  return await client.requestJson(
+    "PATCH",
+    `${toolServersPath(organizationId)}/${segment(key)}`,
+    request,
+  );
 }
 
 export async function deleteOrganizationToolServer(
@@ -289,7 +304,10 @@ export async function listOrganizationToolServerTools(
   organizationId: string,
   key: string,
 ): Promise<OrgToolServerToolsResponse> {
-  return await client.requestJson("GET", `${toolServersPath(organizationId)}/${segment(key)}/tools`);
+  return await client.requestJson(
+    "GET",
+    `${toolServersPath(organizationId)}/${segment(key)}/tools`,
+  );
 }
 
 /* ------------------------------------------------------ end-user logins */
@@ -306,7 +324,11 @@ export async function putEndUserToolCredential(
   toolServerKey: string,
   request: PutEndUserToolCredentialRequest,
 ): Promise<{ credential: EndUserToolCredential }> {
-  return await client.requestJson("PUT", credentialPath(workspaceId, externalUserId, toolServerKey), request);
+  return await client.requestJson(
+    "PUT",
+    credentialPath(workspaceId, externalUserId, toolServerKey),
+    request,
+  );
 }
 
 /** The stored login's metadata (never the secret). */
@@ -316,7 +338,10 @@ export async function getEndUserToolCredential(
   externalUserId: string,
   toolServerKey: string,
 ): Promise<{ credential: EndUserToolCredential }> {
-  return await client.requestJson("GET", credentialPath(workspaceId, externalUserId, toolServerKey));
+  return await client.requestJson(
+    "GET",
+    credentialPath(workspaceId, externalUserId, toolServerKey),
+  );
 }
 
 export async function deleteEndUserToolCredential(
@@ -378,7 +403,8 @@ export function organizationAgents(client: Client, organizationId: string) {
     list: (options?: { includeArchived?: boolean }) =>
       listOrganizationAgents(client, organizationId, options),
     get: (agentIdOrKey: string) => getOrganizationAgent(client, organizationId, agentIdOrKey),
-    create: (request: CreateOrgAgentRequest) => createOrganizationAgent(client, organizationId, request),
+    create: (request: CreateOrgAgentRequest) =>
+      createOrganizationAgent(client, organizationId, request),
     update: (agentId: string, request: UpdateOrgAgentRequest) =>
       updateOrganizationAgent(client, organizationId, agentId, request),
     archive: (agentId: string) => archiveOrganizationAgent(client, organizationId, agentId),

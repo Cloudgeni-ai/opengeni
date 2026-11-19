@@ -2,7 +2,12 @@ import packageManifest from "../package.json" with { type: "json" };
 import { deployAgents, exportAgent } from "./agents";
 import { DEFAULT_OPENGENI_BASE_URL, type FetchLike } from "./api";
 
-export { type LoadedAgentFile, loadAgentDirectory, loadAgentFile, orgAgentConfigHash } from "./agent-files";
+export {
+  type LoadedAgentFile,
+  loadAgentDirectory,
+  loadAgentFile,
+  orgAgentConfigHash,
+} from "./agent-files";
 export { type DeployResult, renderAgentFile } from "./agents";
 export { CliApiError, DEFAULT_OPENGENI_BASE_URL, type FetchLike } from "./api";
 
@@ -155,16 +160,22 @@ export async function runCli(argv: readonly string[], io: CliIo = processIo): Pr
   if (subcommand === "export" && args.positionals.length !== 1) {
     args.errors.push("expected the agent key: opengeni agents export <key>.");
   }
-  if (subcommand === "deploy" && args.flags.has("out")) args.errors.push("--out is only for agents export.");
+  if (subcommand === "deploy" && args.flags.has("out"))
+    args.errors.push("--out is only for agents export.");
   if (args.flags.has("move-running-chats") && !args.flags.has("publish")) {
     io.stderr("warning: --move-running-chats has no effect without --publish.\n");
   }
   const apiKey = nonEmpty(env.OPENGENI_API_KEY);
-  const organizationId = nonEmpty(args.flags.get("organization")) ?? nonEmpty(env.OPENGENI_ORGANIZATION_ID);
+  const organizationId =
+    nonEmpty(args.flags.get("organization")) ?? nonEmpty(env.OPENGENI_ORGANIZATION_ID);
   const baseUrl =
-    nonEmpty(args.flags.get("base-url")) ?? nonEmpty(env.OPENGENI_BASE_URL) ?? DEFAULT_OPENGENI_BASE_URL;
-  if (!apiKey) args.errors.push("set OPENGENI_API_KEY to an organization API key with agents:manage.");
-  if (!organizationId) args.errors.push("set OPENGENI_ORGANIZATION_ID or pass --organization <id>.");
+    nonEmpty(args.flags.get("base-url")) ??
+    nonEmpty(env.OPENGENI_BASE_URL) ??
+    DEFAULT_OPENGENI_BASE_URL;
+  if (!apiKey)
+    args.errors.push("set OPENGENI_API_KEY to an organization API key with agents:manage.");
+  if (!organizationId)
+    args.errors.push("set OPENGENI_ORGANIZATION_ID or pass --organization <id>.");
   if (args.errors.length > 0) {
     for (const error of args.errors) io.stderr(`error: ${error}\n`);
     io.stderr("Run opengeni --help for usage.\n");

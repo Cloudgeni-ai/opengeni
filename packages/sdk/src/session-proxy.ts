@@ -2074,7 +2074,10 @@ function withoutBrowserOrgAgent(created: Record<string, unknown>): void {
   const agent = created.agent;
   if (
     typeof agent === "string" ||
-    (agent !== null && typeof agent === "object" && !Array.isArray(agent) && Object.hasOwn(agent, "ref"))
+    (agent !== null &&
+      typeof agent === "object" &&
+      !Array.isArray(agent) &&
+      Object.hasOwn(agent, "ref"))
   ) {
     delete created.agent;
   }

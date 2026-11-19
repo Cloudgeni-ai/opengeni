@@ -20,7 +20,8 @@ function recordingClient(respond: (method: string, path: string) => unknown = ()
     fetch: async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
-      const text = request.method === "GET" || request.method === "DELETE" ? "" : await request.text();
+      const text =
+        request.method === "GET" || request.method === "DELETE" ? "" : await request.text();
       requests.push({
         method: request.method,
         path: url.pathname,
@@ -39,7 +40,9 @@ const support = defineAgent({
   name: "Customer support",
   instructions: "Help customers.",
   model: "gpt-5.5",
-  toolServers: [{ server: "helpdesk", tools: { mode: "selected", enabled: ["search"] }, newTools: "on" }],
+  toolServers: [
+    { server: "helpdesk", tools: { mode: "selected", enabled: ["search"] }, newTools: "on" },
+  ],
   workers: { shareInstructions: true },
 });
 
@@ -53,7 +56,13 @@ describe("organization agents", () => {
         instructions: "Help customers.",
         config: {
           model: "gpt-5.5",
-          toolServers: [{ server: "helpdesk", tools: { mode: "selected", enabled: ["search"] }, newTools: "on" }],
+          toolServers: [
+            {
+              server: "helpdesk",
+              tools: { mode: "selected", enabled: ["search"] },
+              newTools: "on",
+            },
+          ],
           workers: { shareInstructions: true },
         },
       },
@@ -119,29 +128,34 @@ describe("organization agents", () => {
     await agents.toolCredentials.delete(WORKSPACE_ID, "user 1", "helpdesk");
     const base = `/v1/organizations/${ORG}`;
     const login = `/v1/workspaces/${WORKSPACE_ID}/end-users/user%201/tool-credentials/helpdesk`;
-    expect(requests.map((request) => `${request.method} ${request.path}${request.search}`)).toEqual([
-      `GET ${base}/agents?includeArchived=true`,
-      `GET ${base}/agents/support`,
-      `POST ${base}/agents`,
-      `PATCH ${base}/agents/${agentId}`,
-      `PUT ${base}/agents/${agentId}/draft`,
-      `GET ${base}/agents/${agentId}/versions`,
-      `GET ${base}/agents/${agentId}/versions/2`,
-      `POST ${base}/agents/${agentId}/publish`,
-      `GET ${base}/agents/${agentId}/publish-operations/op-1`,
-      `POST ${base}/agents/${agentId}/management`,
-      `POST ${base}/agents/${agentId}/archive`,
-      `GET ${base}/agents/${agentId}/sessions?version=2&limit=50`,
-      `GET ${base}/agents/${agentId}/usage?range=30d`,
-      `GET ${base}/tool-servers`,
-      `GET ${base}/tool-servers/helpdesk`,
-      `GET ${base}/tool-servers/helpdesk/tools`,
-      `DELETE ${base}/tool-servers/helpdesk`,
-      `PUT ${login}`,
-      `GET ${login}`,
-      `DELETE ${login}`,
-    ]);
-    expect(requests[17]!.body).toEqual({ kind: "headers", headers: { authorization: "Bearer end-user-token" } });
+    expect(requests.map((request) => `${request.method} ${request.path}${request.search}`)).toEqual(
+      [
+        `GET ${base}/agents?includeArchived=true`,
+        `GET ${base}/agents/support`,
+        `POST ${base}/agents`,
+        `PATCH ${base}/agents/${agentId}`,
+        `PUT ${base}/agents/${agentId}/draft`,
+        `GET ${base}/agents/${agentId}/versions`,
+        `GET ${base}/agents/${agentId}/versions/2`,
+        `POST ${base}/agents/${agentId}/publish`,
+        `GET ${base}/agents/${agentId}/publish-operations/op-1`,
+        `POST ${base}/agents/${agentId}/management`,
+        `POST ${base}/agents/${agentId}/archive`,
+        `GET ${base}/agents/${agentId}/sessions?version=2&limit=50`,
+        `GET ${base}/agents/${agentId}/usage?range=30d`,
+        `GET ${base}/tool-servers`,
+        `GET ${base}/tool-servers/helpdesk`,
+        `GET ${base}/tool-servers/helpdesk/tools`,
+        `DELETE ${base}/tool-servers/helpdesk`,
+        `PUT ${login}`,
+        `GET ${login}`,
+        `DELETE ${login}`,
+      ],
+    );
+    expect(requests[17]!.body).toEqual({
+      kind: "headers",
+      headers: { authorization: "Bearer end-user-token" },
+    });
   });
 
   test("the subpath export matches the root export", () => {
@@ -157,11 +171,20 @@ describe("organization agents", () => {
       agent: {
         ref: "support",
         instructions: "The user is on the Pro plan.",
-        toolServers: [{ server: "crm", disableTools: ["delete_contact"], headers: { authorization: "Bearer x" } }],
+        toolServers: [
+          {
+            server: "crm",
+            disableTools: ["delete_contact"],
+            headers: { authorization: "Bearer x" },
+          },
+        ],
       },
       agentOverrides: "reject",
     };
-    const today: CreateSessionRequest = { initialMessage: "Hi", agent: { identity: null, renderer: "markdown" } };
+    const today: CreateSessionRequest = {
+      initialMessage: "Hi",
+      agent: { identity: null, renderer: "markdown" },
+    };
     const orgAgent: NonNullable<Session["orgAgent"]> = {
       id: "5d3c2b1a-0f9e-4d8c-8b7a-6f5e4d3c2b1a",
       key: "support",

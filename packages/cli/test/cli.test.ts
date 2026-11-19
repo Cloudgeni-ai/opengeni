@@ -46,7 +46,14 @@ describe("runCli", () => {
   });
 
   test("prints usage for help and for no arguments", async () => {
-    for (const argv of [[], ["--help"], ["-h"], ["help"], ["agents", "--help"], ["agents", "deploy", "--help"]]) {
+    for (const argv of [
+      [],
+      ["--help"],
+      ["-h"],
+      ["help"],
+      ["agents", "--help"],
+      ["agents", "deploy", "--help"],
+    ]) {
       const result = await capture(argv);
       expect(result.exitCode).toBe(CLI_EXIT.ok);
       expect(result.stdout).toContain("Usage: opengeni <command>");
@@ -66,8 +73,12 @@ describe("runCli", () => {
 
   test("unknown options and extra arguments are usage errors", async () => {
     const env = { OPENGENI_API_KEY: "key", OPENGENI_ORGANIZATION_ID: "org" };
-    expect((await capture(["agents", "deploy", "--nope"], env)).stderr).toContain("unknown option --nope");
-    expect((await capture(["agents", "deploy", "a", "b"], env)).stderr).toContain("expected one directory");
+    expect((await capture(["agents", "deploy", "--nope"], env)).stderr).toContain(
+      "unknown option --nope",
+    );
+    expect((await capture(["agents", "deploy", "a", "b"], env)).stderr).toContain(
+      "expected one directory",
+    );
     expect((await capture(["agents", "deploy", "--organization"], env)).stderr).toContain(
       "--organization needs a value",
     );

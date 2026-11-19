@@ -18,7 +18,10 @@ import { WORKSPACE_ID } from "./helpers";
  */
 type FixtureCase = { name: string; input: Record<string, unknown>; parsed: unknown };
 function fixture(name: string): FixtureCase[] {
-  const path = new URL(`../../contracts/test/fixtures/session-compat/${name}.json`, import.meta.url);
+  const path = new URL(
+    `../../contracts/test/fixtures/session-compat/${name}.json`,
+    import.meta.url,
+  );
   return (JSON.parse(readFileSync(path, "utf8")) as { cases: FixtureCase[] }).cases;
 }
 
@@ -39,7 +42,10 @@ describe("SDK wire compatibility (recorded on main)", () => {
       await client
         .createSession(WORKSPACE_ID, fixtureCase.input as unknown as CreateSessionRequest)
         .catch(() => undefined);
-      expect({ name: fixtureCase.name, sent }).toEqual({ name: fixtureCase.name, sent: [fixtureCase.input] });
+      expect({ name: fixtureCase.name, sent }).toEqual({
+        name: fixtureCase.name,
+        sent: [fixtureCase.input],
+      });
     }
   });
 

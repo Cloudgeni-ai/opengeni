@@ -79,13 +79,18 @@ export function loadAgentFile(
   try {
     text = readFileSync(filePath, "utf8");
   } catch (error) {
-    return { errors: [`${displayPath}: cannot read the file (${(error as Error).message}).`], warnings };
+    return {
+      errors: [`${displayPath}: cannot read the file (${(error as Error).message}).`],
+      warnings,
+    };
   }
   const document = parseDocument(text, { prettyErrors: true });
   if (document.errors.length > 0) {
     for (const error of document.errors) {
       const line = error.linePos?.[0];
-      errors.push(`${displayPath}${line ? `:${line.line}:${line.col}` : ""}: ${error.message.split("\n")[0]!.replace(/ at line \d+, column \d+:?$/u, "")}`);
+      errors.push(
+        `${displayPath}${line ? `:${line.line}:${line.col}` : ""}: ${error.message.split("\n")[0]!.replace(/ at line \d+, column \d+:?$/u, "")}`,
+      );
     }
     return { errors, warnings };
   }

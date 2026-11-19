@@ -65,13 +65,21 @@ export async function requestJson<T>(
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   } catch (error) {
-    throw new CliApiError(0, "network_error", `cannot reach ${options.baseUrl} (${(error as Error).message}).`);
+    throw new CliApiError(
+      0,
+      "network_error",
+      `cannot reach ${options.baseUrl} (${(error as Error).message}).`,
+    );
   }
   const text = await response.text();
   if (!response.ok) throw decodeError(response.status, text);
   try {
     return (text ? JSON.parse(text) : {}) as T;
   } catch {
-    throw new CliApiError(response.status, "invalid_response", "the API returned a response that is not JSON.");
+    throw new CliApiError(
+      response.status,
+      "invalid_response",
+      "the API returned a response that is not JSON.",
+    );
   }
 }

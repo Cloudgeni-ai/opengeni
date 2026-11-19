@@ -10,11 +10,11 @@ Console agents are turned on per organization. Ask Opengeni to enable them for y
 
 ## Three ways to work
 
-| Setup | Where it is edited | How it ships |
-| --- | --- | --- |
-| Console agent | Console: draft, test chat, publish, roll back | Publish in Console |
-| Code agent | `agents/<key>.yaml` in your repository | `npx opengeni agents deploy`, the GitHub Action, or the API |
-| No agent | Nothing changes | Chats work exactly as before |
+| Setup         | Where it is edited                            | How it ships                                                |
+| ------------- | --------------------------------------------- | ----------------------------------------------------------- |
+| Console agent | Console: draft, test chat, publish, roll back | Publish in Console                                          |
+| Code agent    | `agents/<key>.yaml` in your repository        | `npx opengeni agents deploy`, the GitHub Action, or the API |
+| No agent      | Nothing changes                               | Chats work exactly as before                                |
 
 A code agent is read-only in Console ("Managed by code"). An organization owner can move it to Console; code deploys are then refused. **Export as YAML** in Console gives you a Console agent's file to move it into Git.
 
@@ -23,7 +23,7 @@ A code agent is read-only in Console ("Managed by code"). An organization owner 
 {/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
 
 ```ts
-agent: "support"
+agent: "support";
 ```
 
 A chat can change settings for itself. Extra `instructions` are added after the agent's, never replacing them:
@@ -69,20 +69,20 @@ workers:
 
 The first line gives editors that use the YAML language server completion and checks from the [JSON Schema](https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json).
 
-| Field | Meaning |
-| --- | --- |
-| `key` | Lowercase letters, digits, `-` and `_`; must match the file name. Chats name the agent by it. |
-| `name` | Shown in Console. Required. |
-| `description` | One line about what it is for. |
-| `instructions` | The Instructions, or a path to a `.md` file next to the YAML file. |
-| `model`, `reasoningEffort` | The model and effort; omitted uses the workspace default. |
-| `capabilities`, `identity`, `renderer`, `titleInstructions` | As in [Configure the agent](/integrate/configure-the-agent). |
-| `toolServers[].server` | The key of a tool server in your organization. |
-| `toolServers[].tools` | `mode: selected` with `enabled` tool names, or `mode: all`. |
-| `toolServers[].approval.ask` | Tools that ask a person first, or `true` for all. |
-| `toolServers[].eager` | Tools loaded before the first model request. |
-| `toolServers[].newTools` | Tools the server adds later: `off` (default), `on`, or `on_with_approval`. |
-| `workers.shareInstructions` | Workers a chat starts get the agent's Instructions too. They always get its tools, approvals and logins. |
+| Field                                                       | Meaning                                                                                                  |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `key`                                                       | Lowercase letters, digits, `-` and `_`; must match the file name. Chats name the agent by it.            |
+| `name`                                                      | Shown in Console. Required.                                                                              |
+| `description`                                               | One line about what it is for.                                                                           |
+| `instructions`                                              | The Instructions, or a path to a `.md` file next to the YAML file.                                       |
+| `model`, `reasoningEffort`                                  | The model and effort; omitted uses the workspace default.                                                |
+| `capabilities`, `identity`, `renderer`, `titleInstructions` | As in [Configure the agent](/integrate/configure-the-agent).                                             |
+| `toolServers[].server`                                      | The key of a tool server in your organization.                                                           |
+| `toolServers[].tools`                                       | `mode: selected` with `enabled` tool names, or `mode: all`.                                              |
+| `toolServers[].approval.ask`                                | Tools that ask a person first, or `true` for all.                                                        |
+| `toolServers[].eager`                                       | Tools loaded before the first model request.                                                             |
+| `toolServers[].newTools`                                    | Tools the server adds later: `off` (default), `on`, or `on_with_approval`.                               |
+| `workers.shareInstructions`                                 | Workers a chat starts get the agent's Instructions too. They always get its tools, approvals and logins. |
 
 ## Deploy
 
@@ -119,10 +119,16 @@ const support = defineAgent({
   toolServers: [{ server: "helpdesk", tools: { mode: "all" } }],
 });
 
-const client = new OpenGeniClient({ baseUrl: "https://app.opengeni.ai", apiKey: process.env.OPENGENI_API_KEY! });
-const result = await organizationAgents(client, process.env.OPENGENI_ORGANIZATION_ID!).deploy(support, {
-  publish: true,
+const client = new OpenGeniClient({
+  baseUrl: "https://app.opengeni.ai",
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
+const result = await organizationAgents(client, process.env.OPENGENI_ORGANIZATION_ID!).deploy(
+  support,
+  {
+    publish: true,
+  },
+);
 console.log(result.outcome, result.version);
 ```
 
@@ -131,12 +137,17 @@ console.log(result.outcome, result.version);
 For a tool server that uses each person's own login, Opengeni asks, in order: your [credential provider](/integrate/host-managed-integrations), then the login you stored for that end user, then the headers the chat itself sent. It never falls back to a shared key. Store a login from your backend:
 
 ```ts
-await organizationAgents(client, organizationId).toolCredentials.put(workspaceId, externalUserId, "crm", {
-  kind: "oauth",
-  accessToken,
-  refreshToken,
-  expiresAt,
-});
+await organizationAgents(client, organizationId).toolCredentials.put(
+  workspaceId,
+  externalUserId,
+  "crm",
+  {
+    kind: "oauth",
+    accessToken,
+    refreshToken,
+    expiresAt,
+  },
+);
 ```
 
 Logins are encrypted, refreshed before they expire, and never readable back.

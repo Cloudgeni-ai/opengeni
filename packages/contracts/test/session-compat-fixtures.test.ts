@@ -64,7 +64,10 @@ describe("session wire compatibility (recorded on main)", () => {
   test("existing agent objects never name an organization agent", () => {
     for (const fixtureCase of fixture("create-session-requests").cases) {
       const input = fixtureCase.input as { agent?: unknown };
-      expect({ name: fixtureCase.name, orgAgent: sessionAgentFieldNamesOrgAgent(input.agent) }).toEqual({
+      expect({
+        name: fixtureCase.name,
+        orgAgent: sessionAgentFieldNamesOrgAgent(input.agent),
+      }).toEqual({
         name: fixtureCase.name,
         orgAgent: false,
       });

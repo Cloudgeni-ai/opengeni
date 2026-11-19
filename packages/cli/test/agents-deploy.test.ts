@@ -21,7 +21,10 @@ type Recorded = { method: string; url: string; headers: Record<string, string>; 
 /** An in-memory `PUT .../agents/by-key/:key/apply` and `GET .../agents/:key`. */
 function fakeApi(options: { managedInConsole?: string[] } = {}) {
   const requests: Recorded[] = [];
-  const agents = new Map<string, { versions: { hash: string; definition: unknown }[]; published: number | null }>();
+  const agents = new Map<
+    string,
+    { versions: { hash: string; definition: unknown }[]; published: number | null }
+  >();
   const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
     const url = new URL(input);
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -31,17 +34,30 @@ function fakeApi(options: { managedInConsole?: string[] } = {}) {
       headers: Object.fromEntries(new Headers(init?.headers).entries()),
       body,
     });
-    const apply = url.pathname.match(/^\/v1\/organizations\/([^/]+)\/agents\/by-key\/([^/]+)\/apply$/u);
+    const apply = url.pathname.match(
+      /^\/v1\/organizations\/([^/]+)\/agents\/by-key\/([^/]+)\/apply$/u,
+    );
     if (apply && init?.method === "PUT") {
       const key = decodeURIComponent(apply[2]!);
       if (options.managedInConsole?.includes(key)) {
         return Response.json(
-          { error: { code: "agent_managed_in_console", message: "This agent is managed in Console." } },
+          {
+            error: {
+              code: "agent_managed_in_console",
+              message: "This agent is managed in Console.",
+            },
+          },
           { status: 409 },
         );
       }
       const request = ApplyOrgAgentRequest.parse(body);
-      const { publish, moveRunningChats: _move, dryRun, expectedVersion: _expected, ...definition } = request;
+      const {
+        publish,
+        moveRunningChats: _move,
+        dryRun,
+        expectedVersion: _expected,
+        ...definition
+      } = request;
       const hash = `sha256:${createHash("sha256").update(canonicalOrgAgentDefinitionJson(definition)).digest("hex")}`;
       const existing = agents.get(key);
       const same = existing?.versions.findIndex((version) => version.hash === hash) ?? -1;
@@ -70,7 +86,11 @@ function fakeApi(options: { managedInConsole?: string[] } = {}) {
     if (get) {
       const key = decodeURIComponent(get[2]!);
       const record = agents.get(key);
-      if (!record) return Response.json({ error: { code: "agent_not_found", message: "Not found." } }, { status: 404 });
+      if (!record)
+        return Response.json(
+          { error: { code: "agent_not_found", message: "Not found." } },
+          { status: 404 },
+        );
       const latest = record.versions.length;
       const versionOf = (number: number) => {
         const definition = OrgAgentDefinition.parse(record.versions[number - 1]!.definition);
@@ -140,9 +160,14 @@ describe("agent files", () => {
     expect(warnings).toEqual([]);
     expect(agent?.path).toBe(join("agents", "support.yaml"));
     expect(agent?.key).toBe("support");
-    expect(agent?.definition.instructions).toBe(readFileSync(join(fixtures, "agents", "support.md"), "utf8").trim());
+    expect(agent?.definition.instructions).toBe(
+      readFileSync(join(fixtures, "agents", "support.md"), "utf8").trim(),
+    );
     expect(agent?.definition.config.model).toBe("gpt-5.5");
-    expect(agent?.definition.config.toolServers.map((server) => server.server)).toEqual(["helpdesk", "billing"]);
+    expect(agent?.definition.config.toolServers.map((server) => server.server)).toEqual([
+      "helpdesk",
+      "billing",
+    ]);
     expect(agent?.definition.config.workers).toEqual({ shareInstructions: true });
     expect(agent?.configHash).toBe(
       `sha256:${createHash("sha256").update(canonicalOrgAgentDefinitionJson(agent!.definition)).digest("hex")}`,
@@ -165,11 +190,15 @@ describe("agent files", () => {
     expect(errors).toContain(
       `${join("invalid-agents", "renamed.yaml")}: key: 'support' does not match the file name`,
     );
-    expect(result.warnings.join("\n")).toContain("'./missing.md' is not a file next to this agent file");
+    expect(result.warnings.join("\n")).toContain(
+      "'./missing.md' is not a file next to this agent file",
+    );
   });
 
   test("a missing directory or one without agent files is an error", () => {
-    expect(loadAgentDirectory("nope", { cwd: fixtures }).errors).toEqual(["nope: not a directory."]);
+    expect(loadAgentDirectory("nope", { cwd: fixtures }).errors).toEqual([
+      "nope: not a directory.",
+    ]);
     const empty = mkdtempSync(join(tmpdir(), "opengeni-agents-empty-"));
     try {
       expect(loadAgentDirectory(empty).errors[0]).toContain("no agent files");
@@ -198,7 +227,12 @@ describe("opengeni agents deploy", () => {
     expect(first!.headers.authorization).toBe("Bearer og_test_key");
     expect(first!.headers["content-type"]).toBe("application/json");
     expect(first!.headers["user-agent"]).toStartWith("opengeni-cli/");
-    expect(first!.body).toMatchObject({ publish: true, moveRunningChats: false, dryRun: false, name: "Customer support" });
+    expect(first!.body).toMatchObject({
+      publish: true,
+      moveRunningChats: false,
+      dryRun: false,
+      name: "Customer support",
+    });
     expect(ApplyOrgAgentRequest.safeParse(first!.body).success).toBe(true);
 
     // Deploying the same files again is a no-op.
@@ -209,10 +243,17 @@ describe("opengeni agents deploy", () => {
 
   test("--dry-run and --move-running-chats are sent, and nothing is saved on a dry run", async () => {
     const api = fakeApi();
-    const result = await cli(["agents", "deploy", "agents", "--dry-run", "--publish", "--move-running-chats"], api);
+    const result = await cli(
+      ["agents", "deploy", "agents", "--dry-run", "--publish", "--move-running-chats"],
+      api,
+    );
     expect(result.exitCode).toBe(CLI_EXIT.ok);
     expect(result.stdout).toContain("support\tcreated (dry run)\tv-\tnot published");
-    expect(api.requests[0]!.body).toMatchObject({ dryRun: true, publish: true, moveRunningChats: true });
+    expect(api.requests[0]!.body).toMatchObject({
+      dryRun: true,
+      publish: true,
+      moveRunningChats: true,
+    });
     expect(api.agents.size).toBe(0);
   });
 
@@ -220,7 +261,10 @@ describe("opengeni agents deploy", () => {
     const api = fakeApi();
     const result = await cli(["agents", "deploy", "agents", "--json"], api);
     expect(result.exitCode).toBe(CLI_EXIT.ok);
-    const parsed = JSON.parse(result.stdout) as { dryRun: boolean; agents: { key: string; outcome: string; configHash: string }[] };
+    const parsed = JSON.parse(result.stdout) as {
+      dryRun: boolean;
+      agents: { key: string; outcome: string; configHash: string }[];
+    };
     expect(parsed.dryRun).toBe(false);
     expect(parsed.agents.map((agent) => [agent.key, agent.outcome])).toEqual([
       ["support", "created"],
@@ -278,9 +322,13 @@ describe("opengeni agents export", () => {
     expect(exported.exitCode).toBe(0);
     expect(exported.stdout).toContain("support\texported v1");
     const yaml = readFileSync(join(outDirectory, "support.yaml"), "utf8");
-    expect(yaml).toStartWith("# yaml-language-server: $schema=https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json\n");
+    expect(yaml).toStartWith(
+      "# yaml-language-server: $schema=https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json\n",
+    );
     expect(yaml).toContain("instructions: ./support.md");
-    expect(readFileSync(join(outDirectory, "support.md"), "utf8")).toContain("Search the help center");
+    expect(readFileSync(join(outDirectory, "support.md"), "utf8")).toContain(
+      "Search the help center",
+    );
 
     const reloaded = loadAgentFile(join(outDirectory, "support.yaml"));
     expect(reloaded.errors).toEqual([]);
@@ -295,7 +343,9 @@ describe("opengeni agents export", () => {
     await cli(["agents", "deploy", "agents"], api);
     const printed = await cli(["agents", "export", "triage"], api);
     expect(printed.exitCode).toBe(0);
-    expect(printed.stdout).toContain("key: triage\nname: Triage\ninstructions: Sort incoming requests by urgency.\n");
+    expect(printed.stdout).toContain(
+      "key: triage\nname: Triage\ninstructions: Sort incoming requests by urgency.\n",
+    );
     const missing = await cli(["agents", "export", "nobody"], api);
     expect(missing.exitCode).toBe(1);
     expect(missing.stderr).toContain("agent 'nobody' was not found");
@@ -312,7 +362,13 @@ describe("end to end", () => {
         const body = (await request.json()) as { dryRun: boolean; name: string };
         received.push({ path: new URL(request.url).pathname, body });
         const parsed = ApplyOrgAgentRequest.parse(body);
-        const { publish: _p, moveRunningChats: _m, dryRun, expectedVersion: _e, ...definition } = parsed;
+        const {
+          publish: _p,
+          moveRunningChats: _m,
+          dryRun,
+          expectedVersion: _e,
+          ...definition
+        } = parsed;
         return Response.json({
           outcome: "updated",
           dryRun,
@@ -326,7 +382,14 @@ describe("end to end", () => {
     });
     try {
       const child = Bun.spawn(
-        [process.execPath, join(import.meta.dir, "..", "src", "bin.ts"), "agents", "deploy", "agents", "--dry-run"],
+        [
+          process.execPath,
+          join(import.meta.dir, "..", "src", "bin.ts"),
+          "agents",
+          "deploy",
+          "agents",
+          "--dry-run",
+        ],
         {
           cwd: fixtures,
           stdout: "pipe",
@@ -345,7 +408,9 @@ describe("end to end", () => {
         child.exited,
       ]);
       expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-      expect(stdout).toMatch(/^support\tupdated \(dry run\)\tv-\tnot published\tsha256:[0-9a-f]{12}\ntriage\t/u);
+      expect(stdout).toMatch(
+        /^support\tupdated \(dry run\)\tv-\tnot published\tsha256:[0-9a-f]{12}\ntriage\t/u,
+      );
       expect(received.map((entry) => entry.path)).toEqual([
         `/v1/organizations/${ORG}/agents/by-key/support/apply`,
         `/v1/organizations/${ORG}/agents/by-key/triage/apply`,

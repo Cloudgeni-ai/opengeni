@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { createSessionProxyHandler, OpenGeniClient, type SessionProxyHandlerOptions } from "../src/index";
+import {
+  createSessionProxyHandler,
+  OpenGeniClient,
+  type SessionProxyHandlerOptions,
+} from "../src/index";
 import { WORKSPACE_ID } from "./helpers";
 
 const API = "https://api.example.test";
@@ -35,7 +39,10 @@ function setup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
     );
   const createdBodies = () =>
     forwarded
-      .filter((entry) => entry.method === "POST" && entry.path === `/v1/workspaces/${WORKSPACE_ID}/sessions`)
+      .filter(
+        (entry) =>
+          entry.method === "POST" && entry.path === `/v1/workspaces/${WORKSPACE_ID}/sessions`,
+      )
       .map((entry) => entry.body);
   return { create, createdBodies };
 }
@@ -69,7 +76,13 @@ describe("session proxy and organization agents", () => {
     for (const extra of [
       { agent: "support" },
       { agent: "5d3c2b1a-0f9e-4d8c-8b7a-6f5e4d3c2b1a" },
-      { agent: { ref: "support", model: "gpt-5.5", toolServers: [{ server: "crm", headers: { authorization: "x" } }] } },
+      {
+        agent: {
+          ref: "support",
+          model: "gpt-5.5",
+          toolServers: [{ server: "crm", headers: { authorization: "x" } }],
+        },
+      },
       { agentOverrides: "allow" },
       { agent: "support", agentOverrides: "reject" },
     ]) {

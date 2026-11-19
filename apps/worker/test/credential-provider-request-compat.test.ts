@@ -67,7 +67,11 @@ describe("credentials.request body (recorded on main)", () => {
       {
         lane: "organization",
         mcpServers: [
-          { id: "cloudgeni-capability", url: "https://cloudgeni.example/mcp", extra: "dropped" } as never,
+          {
+            id: "cloudgeni-capability",
+            url: "https://cloudgeni.example/mcp",
+            extra: "dropped",
+          } as never,
         ],
       },
     );
