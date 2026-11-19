@@ -282,6 +282,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       // A session that never saw an index keeps none when told to omit it.
       return input.omitWhenEmpty ? "" : input.catalog;
     }),
+    spyOn(db, "ensureSessionWorkspaceFilesystem").mockImplementation(
+      async (_db, input) => input.layout,
+    ),
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(async (_db, input) => {
       governanceWrites.push(input.governance);
       return input.governance;

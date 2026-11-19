@@ -641,6 +641,8 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       swapped: true,
       activeSandboxId: machine.sandboxId,
     });
+    // A swap within a turn tells the model the new root (its layout item follows next turn).
+    expect(swapped.workspaceRoot).toEqual(expect.any(String));
     const executed = await runOnSandbox(services, ctx, machine.sandboxId, {
       kind: "exec",
       cmd: "hostname",
@@ -1021,7 +1023,11 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       ctx,
       "session",
     );
-    expect(switched).toMatchObject({ swapped: true, activeSandboxId: null });
+    expect(switched).toMatchObject({
+      swapped: true,
+      activeSandboxId: null,
+      workspaceRoot: "/workspace",
+    });
     expect(readinessChecks).toBe(1);
     expect(releases).toBe(1);
     expect(await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId)).toMatchObject({

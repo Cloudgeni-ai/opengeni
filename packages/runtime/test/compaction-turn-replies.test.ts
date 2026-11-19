@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { skillCatalogContextItem, workspaceGovernanceContextItem } from "@opengeni/contracts";
+import {
+  readWorkspaceFilesystemContext,
+  skillCatalogContextItem,
+  workspaceFilesystemContextItem,
+  workspaceGovernanceContextItem,
+} from "@opengeni/contracts";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   RETAINED_REPLY_MAX_TOKENS,
@@ -352,6 +357,27 @@ describe("compaction pairs a retained request only with its own turn's reply", (
       // The two platform context items belong to no turn; every retained
       // message keeps the turn of the row it came from.
       expect(turnIds).toEqual([null, null, T1, null, T2, null]);
+    });
+
+    test(`${mode}: only the newest workspace filesystem layout is carried, after governance`, () => {
+      const governance = workspaceGovernanceContextItem("current governance");
+      const { items, itemTurnIds } = rows([
+        [T0, workspaceFilesystemContextItem("/workspace")],
+        [T0, user("first")],
+        [T1, governance],
+        [T1, workspaceFilesystemContextItem("/home/person")],
+        [T1, user("ask")],
+        [T1, assistant("answer", "final_answer")],
+        [T2, call("c1")],
+      ]);
+      const { history } = rebuild(mode, items, { itemTurnIds, activeTurnId: T2 });
+      expect(history.slice(0, 2)).toEqual([
+        governance,
+        workspaceFilesystemContextItem("/home/person"),
+      ]);
+      expect(history.filter((item) => readWorkspaceFilesystemContext(item) !== null)).toHaveLength(
+        1,
+      );
     });
   }
 
