@@ -163,7 +163,10 @@ async function snapshot(
 ): Promise<Snapshot> {
   const sessions = `/v1/workspaces/${workspace.workspaceId}/sessions`;
   const created = await call(workspace, "POST", sessions, body);
-  expect(created.status).toBe(202);
+  expect({ status: created.status, error: created.status === 202 ? null : created.json }).toEqual({
+    status: 202,
+    error: null,
+  });
   const sessionId = created.json.id as string;
   names.set(sessionId, "<session>");
   const read = await call(workspace, "GET", `${sessions}/${sessionId}`);
