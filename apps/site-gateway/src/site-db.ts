@@ -14,6 +14,15 @@ import { readBodyCapped } from "./api";
 import { sha256Hex, timingSafeEqual } from "./crypto";
 import type { GatewayConfig, GatewayEnv } from "./env";
 import { applySecurityHeaders, jsonError } from "./headers";
+import {
+  primarySiteDbNamespace,
+  siteDbStub,
+  SITE_DB_LOCATION_HEADER,
+  SITE_DB_RELOCATION_ERROR_HEADER,
+  SITE_DB_ROLE_HEADER,
+  SITE_DB_SITE_HEADER,
+  type DurableObjectNamespaceLike,
+} from "./site-db-location";
 import { signGatewayFields } from "./signing";
 
 /**
@@ -30,6 +39,11 @@ import { signGatewayFields } from "./signing";
  * resolved named queries, and the Durable Object re-checks every statement.
  * Site pages never reach this route: their calls go through `/_og/api` to the
  * API, which calls back here. Without the `SITE_DB` binding the route is 404.
+ *
+ * Requests go to the Site's object in the EU jurisdiction, which first moves
+ * a database created before that from its legacy object
+ * (`site-db-location.ts`). The response says where it was served
+ * (`x-og-site-db-location`) and, when the database could not move yet, why.
  */
 export { SITE_DB_INTERNAL_PREFIX };
 
@@ -38,11 +52,7 @@ export const MAX_SITE_DB_BODY_BYTES = 8 * 1024 * 1024;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
-/** The Durable Object namespace binding (`[[durable_objects.bindings]]`). */
-export type DurableObjectNamespaceLike = {
-  idFromName(name: string): unknown;
-  get(id: unknown): { fetch(input: string, init?: RequestInit): Promise<Response> };
-};
+export type { DurableObjectNamespaceLike };
 
 export function isSiteDbInternalPath(pathname: string): boolean {
   return pathname === SITE_DB_INTERNAL_PREFIX || pathname.startsWith(`${SITE_DB_INTERNAL_PREFIX}/`);
@@ -144,12 +154,17 @@ export async function handleSiteDbInternal(
     );
   const secrets = [config.secret, ...(config.previousSecret ? [config.previousSecret] : [])];
   if (!(await verifySiteDbSignature(secrets, request, url, body))) return unauthorized();
-  const stub = namespace.get(namespace.idFromName(target.siteId));
   let response: Response;
   try {
+    // The EU object; it relocates a legacy database before serving.
+    const stub = siteDbStub(primarySiteDbNamespace(namespace), target.siteId);
     response = await stub.fetch(`https://site-db.internal/${target.operation}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        [SITE_DB_ROLE_HEADER]: "primary",
+        [SITE_DB_SITE_HEADER]: target.siteId,
+      },
       body,
     });
   } catch (error) {
@@ -168,5 +183,9 @@ export async function handleSiteDbInternal(
   const headers = applySecurityHeaders(new Headers(), security);
   headers.set("Content-Type", "application/json; charset=utf-8");
   headers.set("Cache-Control", "no-store");
+  for (const name of [SITE_DB_LOCATION_HEADER, SITE_DB_RELOCATION_ERROR_HEADER]) {
+    const value = response.headers.get(name);
+    if (value) headers.set(name, value);
+  }
   return new Response(response.body, { status: response.status, headers });
 }

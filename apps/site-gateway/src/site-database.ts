@@ -1,6 +1,6 @@
 /**
  * `SiteDatabase`: one SQLite-backed Durable Object per Site
- * (`SITE_DB.idFromName(siteId)`), the optional per-Site Cloudflare storage
+ * (`SITE_DB.jurisdiction("eu").idFromName(siteId)`), the optional per-Site Cloudflare storage
  * (docs/design/published-sites-2026-10-14.md, PR B).
  *
  * It is reachable only through the gateway's signed internal route
@@ -15,6 +15,22 @@
  * Its own bookkeeping (request ids seen, migrations applied) lives in the
  * Durable Object's key-value storage, which workerd keeps in `_cf_KV` and
  * refuses to user SQL, so no statement or trigger can read or change it.
+ *
+ * Location (`site-db-location.ts`): the gateway calls a Site's object in the
+ * EU jurisdiction (role `primary`). The first time, that object looks for the
+ * Site's legacy object (plain `idFromName`, created before databases moved to
+ * the EU) and, when it holds a database, copies it (`site-db-relocation.ts`):
+ * the legacy object is fenced (it refuses every other caller), its rows are
+ * staged here, the copy is built in one transaction and accepted only when
+ * its schema, row counts, row digests, AUTOINCREMENT counters and migration
+ * records equal the source's. Then this object becomes the database's home
+ * and the legacy object is marked moved: it keeps its data, frozen, and sends
+ * any request from an earlier gateway release here. Requests that arrive
+ * while the copy runs wait for it (one object, one copy at a time), so no
+ * write is lost. When the copy fails, nothing changes for the Site: the
+ * legacy object is released and serves (relayed by this object), the reason
+ * is reported on the response, and the copy is retried later with backoff.
+ * Nothing here deletes a legacy object; cleanup is a separate, explicit step.
  */
 import {
   compileSiteSql,
@@ -43,6 +59,29 @@ import {
   type SiteSqlValue,
 } from "@opengeni/contracts";
 import { errorMessage, isRecord, sha256Hex } from "@opengeni/contracts/values";
+import {
+  primarySiteDbNamespace,
+  siteDbStub,
+  SITE_DB_LOCATION_HEADER,
+  SITE_DB_RELOCATION_ERROR_HEADER,
+  SITE_DB_ROLE_HEADER,
+  SITE_DB_SITE_HEADER,
+  type DurableObjectNamespaceLike,
+} from "./site-db-location";
+import {
+  buildCopy,
+  compareStates,
+  copiedTables,
+  isEmptyDatabase,
+  readPage,
+  relocationState,
+  RelocationError,
+  stagePage,
+  type PageCursor,
+  type RelocationPage,
+  type RelocationState,
+  userTables,
+} from "./site-db-relocation";
 
 // The slice of the Durable Object SQLite API used here (workers-types is not loaded).
 export type SqlStorageValue = ArrayBuffer | string | number | null;
@@ -95,6 +134,37 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 type MigrationRecord = { checksum: string; appliedAt: string; position: number };
 
+// Location records (key-value storage, kept through a wipe).
+const LOCATION_PREFIX = "loc:";
+/** EU object: this object is the database's home. */
+const HOME_KEY = "loc:home";
+/** EU object: the last failed copy and when to try again. */
+const FAILURE_KEY = "loc:failure";
+/** EU object: a copy in progress (left behind when the object stopped mid-copy). */
+const ATTEMPT_KEY = "loc:attempt";
+/** Legacy object: a copy holds it; every other caller is refused until `until`. */
+const FENCE_KEY = "loc:fence";
+/** Legacy object: the database moved to the EU object; this copy is frozen. */
+const MOVED_KEY = "loc:moved";
+
+/** How long a fence holds without the copy touching it. */
+const FENCE_MS = 10 * 60_000;
+const RETRY_MIN_MS = 60_000;
+const RETRY_MAX_MS = 60 * 60_000;
+
+type HomeRecord = {
+  since: string;
+  from: "legacy" | "none";
+  token: string | null;
+  legacyMarked: boolean;
+};
+type FailureRecord = { at: string; attempts: number; retryAt: number; message: string };
+type AttemptRecord = { token: string; at: string };
+type FenceRecord = { token: string; until: number; site: string };
+type MovedRecord = { site: string; at: string };
+
+type Home = { location: "eu" } | { location: "legacy"; reason: string };
+
 function requestKey(bucket: number, requestId: string): string {
   return `${REQUEST_PREFIX}${String(bucket).padStart(12, "0")}:${requestId.toLowerCase()}`;
 }
@@ -129,6 +199,23 @@ const STATUS: Record<SiteDbErrorCode, number> = {
 
 function errorResponse(code: SiteDbErrorCode, message: string): Response {
   return Response.json({ error: { code, message } }, { status: STATUS[code] });
+}
+
+/** A retryable refusal: nothing ran. */
+function unavailable(message: string): Response {
+  return Response.json({ error: { code: "internal", message } }, { status: 503 });
+}
+
+/** A response (possibly from another object) that says where it was served. */
+function located(response: Response, location: "eu" | "legacy"): Response {
+  const headers = new Headers(response.headers);
+  headers.set(SITE_DB_LOCATION_HEADER, location);
+  return new Response(response.body, { status: response.status, headers });
+}
+
+/** Bounded printable ASCII for a response header. */
+function headerText(text: string): string {
+  return text.replace(/[^\x20-\x7e]/gu, "?").slice(0, 300);
 }
 
 function positiveInt(value: unknown, ceiling: number, name: string): number {
@@ -256,22 +343,64 @@ function drain(cursor: SqlStorageCursor): SqlStorageCursor {
 export class SiteDatabase {
   private readonly sql: SqlStorage;
   private readonly kv: SyncKvStorage;
+  /** The copy from the legacy object in progress, which other requests wait for. */
+  private relocation: Promise<Home | null> | null = null;
+  /** Whether this instance already tried to mark the legacy object moved. */
+  private legacyMarkTried = false;
 
   constructor(
     private readonly state: DurableObjectStateLike,
-    _env: unknown,
+    private readonly env: { SITE_DB?: unknown } | undefined,
   ) {
     this.sql = state.storage.sql;
     this.kv = state.storage.kv;
   }
 
   async fetch(request: Request): Promise<Response> {
-    const operation = new URL(request.url).pathname.replace(/^\/+/u, "") as SiteDbOperation;
-    if (request.method !== "POST" || !SITE_DB_OPERATIONS.includes(operation))
+    const path = new URL(request.url).pathname.replace(/^\/+/u, "");
+    if (request.method !== "POST") return errorResponse("not_found", "Unknown operation");
+    const role = request.headers.get(SITE_DB_ROLE_HEADER);
+    if (path.startsWith("relocation/")) {
+      // Only a Site's EU object calls these, on its legacy object.
+      if (role !== "relay") return errorResponse("not_found", "Unknown operation");
+      return this.relocationOperation(path.slice("relocation/".length), request);
+    }
+    const operation = path as SiteDbOperation;
+    if (!SITE_DB_OPERATIONS.includes(operation))
       return errorResponse("not_found", "Unknown operation");
+    if (role === "primary") {
+      const site = request.headers.get(SITE_DB_SITE_HEADER) ?? "";
+      if (!UUID.test(site)) return errorResponse("validation", "The Site id is missing");
+      const body = await request.arrayBuffer();
+      let home: Home;
+      try {
+        home = await this.home(site);
+      } catch (error) {
+        console.error("site-gateway: Site database location check failed", error);
+        return unavailable("The Site database is temporarily unavailable");
+      }
+      if (home.location === "legacy") return this.relayToLegacy(site, operation, body, home.reason);
+      return located(await this.serve(operation, body), "eu");
+    }
+    // A legacy object: relayed by the Site's EU object, or called by an
+    // earlier gateway release that does not know about locations.
+    const moved = this.kv.get<MovedRecord>(MOVED_KEY);
+    if (moved) {
+      if (role === "relay")
+        return errorResponse("conflict", "This database moved to the EU; this copy is frozen");
+      return this.forwardToHome(moved.site, operation, await request.arrayBuffer());
+    }
+    const fence = this.kv.get<FenceRecord>(FENCE_KEY);
+    if (fence && fence.until > Date.now())
+      return unavailable("The Site database is moving to its EU location; try again shortly");
+    return located(await this.serve(operation, await request.arrayBuffer()), "legacy");
+  }
+
+  /** Run one operation on this object's own storage. */
+  private async serve(operation: SiteDbOperation, bytes: ArrayBuffer): Promise<Response> {
     let body: unknown;
     try {
-      body = await request.json();
+      body = JSON.parse(new TextDecoder().decode(bytes));
     } catch {
       return errorResponse("validation", "The request body must be JSON");
     }
@@ -305,6 +434,330 @@ export class SiteDatabase {
     }
   }
 
+  // --- location (EU object) -------------------------------------------------
+
+  private binding(): DurableObjectNamespaceLike {
+    const binding = this.env?.SITE_DB as DurableObjectNamespaceLike | undefined;
+    if (!binding) throw new Error("The SITE_DB binding is missing");
+    return binding;
+  }
+
+  /** Call the Site's legacy object as its EU object. */
+  private relay(site: string, path: string, body: BodyInit): Promise<Response> {
+    return siteDbStub(this.binding(), site).fetch(`https://site-db.internal/${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [SITE_DB_ROLE_HEADER]: "relay",
+        [SITE_DB_SITE_HEADER]: site,
+      },
+      body,
+    });
+  }
+
+  /** A relocation step on the legacy object; throws on any refusal. */
+  private async relocationCall<T>(site: string, step: string, payload: unknown): Promise<T> {
+    const response = await this.relay(site, `relocation/${step}`, JSON.stringify(payload));
+    const value = (await response.json().catch(() => null)) as
+      | (T & { error?: { message?: string } })
+      | null;
+    if (!response.ok || value === null)
+      throw new RelocationError(
+        `The legacy database refused ${step} (HTTP ${response.status}): ${value?.error?.message ?? "no details"}`,
+      );
+    return value;
+  }
+
+  /** Serve from the legacy object while the database could not move yet. */
+  private async relayToLegacy(
+    site: string,
+    operation: SiteDbOperation,
+    body: ArrayBuffer,
+    reason: string,
+  ): Promise<Response> {
+    let response: Response;
+    try {
+      response = await this.relay(site, operation, body);
+    } catch (error) {
+      console.error("site-gateway: legacy Site database unreachable", error);
+      return unavailable("The Site database is temporarily unavailable");
+    }
+    const relayed = located(response, "legacy");
+    relayed.headers.set(SITE_DB_RELOCATION_ERROR_HEADER, headerText(reason));
+    return relayed;
+  }
+
+  /**
+   * Where this Site's database lives, copying a legacy database here first.
+   * Concurrent requests wait for the one copy.
+   */
+  private async home(site: string): Promise<Home> {
+    for (;;) {
+      if (this.relocation) {
+        await this.relocation;
+        continue;
+      }
+      const home = this.kv.get<HomeRecord>(HOME_KEY);
+      if (home) {
+        if (!home.legacyMarked && !this.legacyMarkTried) {
+          this.legacyMarkTried = true;
+          await this.markLegacyMoved(site, home);
+        }
+        return { location: "eu" };
+      }
+      const failure = this.kv.get<FailureRecord>(FAILURE_KEY);
+      if (failure && Date.now() < failure.retryAt)
+        return { location: "legacy", reason: failure.message };
+      const relocation = this.relocate(site).finally(() => {
+        this.relocation = null;
+      });
+      this.relocation = relocation;
+      const outcome = await relocation;
+      if (outcome) return outcome;
+    }
+  }
+
+  /**
+   * Copy the legacy database here. Returns where to serve from when the copy
+   * failed (the legacy object), or null to read the new location again.
+   * Throws only when neither object can serve now.
+   */
+  private async relocate(site: string): Promise<Home | null> {
+    const stale = this.kv.get<AttemptRecord>(ATTEMPT_KEY);
+    if (stale) {
+      // An earlier copy stopped midway (object restarted or ran out of time):
+      // release the legacy object and count it as a failed attempt.
+      await this.relocationCall(site, "release", { token: stale.token }).catch(() => null);
+      await this.wipeKeepingLocation();
+      this.kv.delete(ATTEMPT_KEY);
+      return this.recordFailure("An earlier copy to the EU did not finish");
+    }
+    const token = crypto.randomUUID();
+    // Unreachable legacy object: refuse this request rather than guess (no
+    // fallback could serve it either, and a new Site must not start there).
+    const begun = await this.relocationCall<{ empty: boolean; moved: boolean }>(site, "begin", {
+      token,
+    });
+    if (begun.moved)
+      throw new RelocationError(
+        "The legacy database is marked moved, but this EU database has no record of the copy",
+      );
+    if (begun.empty) {
+      this.kv.put(HOME_KEY, {
+        since: new Date().toISOString(),
+        from: "none",
+        token: null,
+        legacyMarked: true,
+      } satisfies HomeRecord);
+      this.kv.delete(FAILURE_KEY);
+      return null;
+    }
+    this.kv.put(ATTEMPT_KEY, { token, at: new Date().toISOString() } satisfies AttemptRecord);
+    try {
+      await this.wipeKeepingLocation();
+      let cursor: PageCursor | null = null;
+      for (;;) {
+        const page: { page: RelocationPage | null } = await this.relocationCall(site, "page", {
+          token,
+          cursor,
+        });
+        if (!page.page) break;
+        stagePage(this.sql, page.page);
+        cursor = page.page.next;
+      }
+      const source = await this.relocationCall<RelocationState>(site, "state", { token });
+      this.sql.exec("PRAGMA defer_foreign_keys = ON");
+      try {
+        this.state.storage.transactionSync(() => buildCopy(this.sql, this.kv, source));
+      } finally {
+        this.sql.exec("PRAGMA defer_foreign_keys = OFF");
+      }
+      const difference = compareStates(source, await relocationState(this.sql, this.kv));
+      if (difference) throw new RelocationError(`The copy did not match: ${difference}`);
+    } catch (error) {
+      console.error(`site-gateway: Site database ${site} did not move to the EU`, error);
+      await this.wipeKeepingLocation();
+      await this.relocationCall(site, "release", { token }).catch(() => null);
+      this.kv.delete(ATTEMPT_KEY);
+      return this.recordFailure(
+        error instanceof RelocationError
+          ? error.message
+          : `The copy failed: ${errorMessage(error)}`,
+      );
+    }
+    const home: HomeRecord = {
+      since: new Date().toISOString(),
+      from: "legacy",
+      token,
+      legacyMarked: false,
+    };
+    this.kv.put(HOME_KEY, home);
+    this.kv.delete(FAILURE_KEY);
+    this.kv.delete(ATTEMPT_KEY);
+    this.legacyMarkTried = true;
+    await this.markLegacyMoved(site, home);
+    return null;
+  }
+
+  /** Mark the legacy object moved, so it sends earlier releases' requests here. */
+  private async markLegacyMoved(site: string, home: HomeRecord): Promise<void> {
+    try {
+      await this.relocationCall(site, "commit", { token: home.token });
+      this.kv.put(HOME_KEY, { ...home, legacyMarked: true } satisfies HomeRecord);
+    } catch (error) {
+      // The copy is the database now; the legacy object stays fenced until it
+      // expires, and the next start of this object tries again.
+      console.error(`site-gateway: could not mark the legacy Site database ${site} moved`, error);
+    }
+  }
+
+  private recordFailure(message: string): Home {
+    const previous = this.kv.get<FailureRecord>(FAILURE_KEY);
+    const attempts = (previous?.attempts ?? 0) + 1;
+    const delay = Math.min(RETRY_MAX_MS, RETRY_MIN_MS * 2 ** (attempts - 1));
+    this.kv.put(FAILURE_KEY, {
+      at: new Date().toISOString(),
+      attempts,
+      retryAt: Date.now() + delay,
+      message,
+    } satisfies FailureRecord);
+    return { location: "legacy", reason: message };
+  }
+
+  /** Delete everything here except the location records (a copy that did not finish). */
+  private async wipeKeepingLocation(): Promise<void> {
+    const kept = Array.from(
+      this.kv.list({ prefix: LOCATION_PREFIX }),
+      ([key, value]) => [key, value] as const,
+    );
+    await this.state.storage.deleteAll();
+    for (const [key, value] of kept) this.kv.put(key, value);
+  }
+
+  // --- location (legacy object) ---------------------------------------------
+
+  /** Send a request from an earlier gateway release to the database's EU home. */
+  private async forwardToHome(
+    site: string,
+    operation: SiteDbOperation,
+    body: ArrayBuffer,
+  ): Promise<Response> {
+    try {
+      const response = await siteDbStub(primarySiteDbNamespace(this.binding()), site).fetch(
+        `https://site-db.internal/${operation}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            [SITE_DB_ROLE_HEADER]: "primary",
+            [SITE_DB_SITE_HEADER]: site,
+          },
+          body,
+        },
+      );
+      return new Response(response.body, { status: response.status, headers: response.headers });
+    } catch (error) {
+      console.error("site-gateway: EU Site database unreachable", error);
+      return unavailable("The Site database is temporarily unavailable");
+    }
+  }
+
+  /** The legacy object's side of a copy (see the class comment). */
+  private async relocationOperation(step: string, request: Request): Promise<Response> {
+    let body: Record<string, unknown>;
+    try {
+      const parsed = (await request.json()) as unknown;
+      if (!isRecord(parsed)) throw new Error("not an object");
+      body = parsed;
+    } catch {
+      return errorResponse("validation", "The request body must be JSON");
+    }
+    const token = typeof body.token === "string" ? body.token : null;
+    const site = request.headers.get(SITE_DB_SITE_HEADER) ?? "";
+    try {
+      switch (step) {
+        case "begin": {
+          if (!token || !UUID.test(site)) throw new SiteDbError("validation", "Give a token");
+          if (this.kv.get<MovedRecord>(MOVED_KEY))
+            return Response.json({ empty: false, moved: true });
+          // Nothing to copy: write nothing, so a new Site never stores data here.
+          if (isEmptyDatabase(this.sql, this.kv))
+            return Response.json({ empty: true, moved: false });
+          // One EU object per Site copies at a time; a newer token replaces a dead one.
+          this.kv.put(FENCE_KEY, {
+            token,
+            until: Date.now() + FENCE_MS,
+            site,
+          } satisfies FenceRecord);
+          return Response.json({ empty: false, moved: false });
+        }
+        case "page": {
+          this.holdFence(token);
+          const cursor = (isRecord(body.cursor) ? body.cursor : null) as PageCursor | null;
+          // An unsupported table refuses the copy (RelocationError) before any row is read.
+          const tables = copiedTables(this.sql);
+          return Response.json({ page: guarded(() => readPage(this.sql, tables, cursor)) });
+        }
+        case "state": {
+          this.holdFence(token);
+          return Response.json(await relocationState(this.sql, this.kv));
+        }
+        case "commit": {
+          // Accepted after the fence expired too: the copy is already the database.
+          const fence = this.kv.get<FenceRecord>(FENCE_KEY);
+          const moved = this.kv.get<MovedRecord>(MOVED_KEY);
+          if (moved) return Response.json({ moved: true });
+          if (!fence || fence.token !== token)
+            throw new SiteDbError("conflict", "This copy does not hold the database");
+          this.kv.put(MOVED_KEY, {
+            site: fence.site,
+            at: new Date().toISOString(),
+          } satisfies MovedRecord);
+          this.kv.delete(FENCE_KEY);
+          return Response.json({ moved: true });
+        }
+        case "status": {
+          // Read-only: what this legacy object holds and whether it moved.
+          const fence = this.kv.get<FenceRecord>(FENCE_KEY);
+          return Response.json(
+            guarded(() => ({
+              moved: this.kv.get<MovedRecord>(MOVED_KEY) ?? null,
+              fenced: fence !== undefined && fence.until > Date.now(),
+              empty: isEmptyDatabase(this.sql, this.kv),
+              tables: userTables(this.sql).map((name) => ({
+                name,
+                rows: Number(
+                  this.sql
+                    .exec(`SELECT count(*) AS n FROM ${quoteSiteSqlIdentifier(name)}`)
+                    .toArray()[0]?.n ?? 0,
+                ),
+              })),
+            })),
+          );
+        }
+        case "release": {
+          const fence = this.kv.get<FenceRecord>(FENCE_KEY);
+          if (fence && fence.token === token) this.kv.delete(FENCE_KEY);
+          return Response.json({ released: true });
+        }
+        default:
+          return errorResponse("not_found", "Unknown operation");
+      }
+    } catch (error) {
+      if (error instanceof RelocationError) return errorResponse("validation", error.message);
+      const failure = toSiteDbError(error);
+      return errorResponse(failure.code, failure.message);
+    }
+  }
+
+  /** Refuse a step whose fence is gone or expired (the source may have changed), else extend it. */
+  private holdFence(token: string | null): void {
+    const fence = this.kv.get<FenceRecord>(FENCE_KEY);
+    if (!fence || fence.token !== token || fence.until <= Date.now())
+      throw new SiteDbError("conflict", "The copy lost its hold on the database; start again");
+    this.kv.put(FENCE_KEY, { ...fence, until: Date.now() + FENCE_MS } satisfies FenceRecord);
+  }
+
   // --- bookkeeping (key-value storage, out of reach of user SQL) ----------
 
   /** Refuse a request id seen in the last few minutes (the API signs each request once). */
@@ -330,17 +783,18 @@ export class SiteDatabase {
   /**
    * Delete the database and every record of it, keeping the request ids of
    * the buckets still checked (this request's included) so a wipe never
-   * reopens the replay window.
+   * reopens the replay window, and the location records.
    */
   private async wipe(): Promise<void> {
     const bucket = Math.floor(Date.now() / REQUEST_BUCKET_MS);
-    const recent = Array.from(
-      this.kv.list({
+    const recent = [
+      ...this.kv.list({
         start: requestKey(bucket - REQUEST_BUCKETS_CHECKED + 1, ""),
         end: `${REQUEST_PREFIX}~`,
       }),
-      ([key, value]) => [key, value] as const,
-    );
+      // Where the database lives is not part of it.
+      ...this.kv.list({ prefix: LOCATION_PREFIX }),
+    ].map(([key, value]) => [key, value] as const);
     await this.state.storage.deleteAll();
     for (const [key, value] of recent) this.kv.put(key, value);
   }
