@@ -72,8 +72,6 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-type Org = Awaited<ReturnType<typeof organization>>;
-
 /** An organization with two managed workspaces and one it does not manage. */
 async function organization() {
   const accountId = crypto.randomUUID();
@@ -123,17 +121,17 @@ async function auditActions(accountId: string): Promise<string[]> {
 }
 
 /** One runtime-role transaction in a tenancy scope, optionally with organization agents visible. */
-async function asApp<T>(
-  scope: { accountId: string; workspaceId?: string; orgAgents?: boolean },
-  run: (sql: postgres.TransactionSql) => Promise<T>,
-) {
+async function asApp(
+  scope: { accountId: string; workspaceId?: string | undefined; orgAgents?: boolean },
+  run: (sql: postgres.TransactionSql) => PromiseLike<unknown>,
+): Promise<Array<Record<string, any>>> {
   return (await appSql.begin(async (sql) => {
     await sql`select set_config('opengeni.account_id', ${scope.accountId}, true),
       set_config('opengeni.workspace_id', ${scope.workspaceId ?? ""}, true),
       set_config('opengeni.subject_id', '', true),
       set_config('opengeni.org_agents_v1', ${scope.orgAgents ? "1" : ""}, true)`;
     return await run(sql);
-  })) as T;
+  })) as Array<Record<string, any>>;
 }
 
 const definition = (instructions: string, extra: Record<string, unknown> = {}) => ({
@@ -166,7 +164,12 @@ describe("organization agents: versions and publishing", () => {
 
     // The key is unique in the organization.
     const taken = await refusal(
-      createOrgAgent(app.db, { accountId: org.accountId, actor, key: "support", definition: definition("x") }),
+      createOrgAgent(app.db, {
+        accountId: org.accountId,
+        actor,
+        key: "support",
+        definition: definition("x"),
+      }),
     );
     expect([taken.status, taken.code]).toEqual([409, "agent_key_taken"]);
     // Unknown tool servers are named.
@@ -290,7 +293,10 @@ describe("organization agents: versions and publishing", () => {
 
   test("apply by key: dry run, create, unchanged, update and publish, and 409s", async () => {
     const org = await organization();
-    const apply = (instructions: string, extra: Partial<Parameters<typeof applyOrgAgent>[1]> = {}) =>
+    const apply = (
+      instructions: string,
+      extra: Partial<Parameters<typeof applyOrgAgent>[1]> = {},
+    ) =>
       applyOrgAgent(app.db, {
         accountId: org.accountId,
         key: "triage",
@@ -314,7 +320,12 @@ describe("organization agents: versions and publishing", () => {
     expect(created.configHash).toBe(dry.configHash);
 
     const unchanged = await apply("One.", { publish: true });
-    expect(unchanged).toMatchObject({ outcome: "unchanged", version: 1, published: true, operation: null });
+    expect(unchanged).toMatchObject({
+      outcome: "unchanged",
+      version: 1,
+      published: true,
+      operation: null,
+    });
     expect(unchanged.agent!.rowVersion).toBe(created.agent!.rowVersion);
 
     const dryUpdate = await apply("Two.", { dryRun: true });
@@ -413,7 +424,11 @@ describe("organization agents: versions and publishing", () => {
     });
     const reachable = (workspaceId: string) =>
       withOrgAgentsScope(app.db, { accountId: org.accountId, workspaceId }, (tx) =>
-        orgAgentReachableInWorkspace(tx, { accountId: org.accountId, agentId: agent.id, workspaceId }),
+        orgAgentReachableInWorkspace(tx, {
+          accountId: org.accountId,
+          agentId: agent.id,
+          workspaceId,
+        }),
       );
     expect(await reachable(org.managed)).toBe(true);
     expect(await reachable(org.unmanaged)).toBe(false);
@@ -441,7 +456,12 @@ describe("organization agents: versions and publishing", () => {
     expect(await reachable(org.unmanaged)).toBe(true);
 
     // Unpublished agents are not listed for workspaces.
-    expect(await listOrgAgentsForWorkspace(app.db, { accountId: org.accountId, workspaceId: org.unmanaged })).toEqual([]);
+    expect(
+      await listOrgAgentsForWorkspace(app.db, {
+        accountId: org.accountId,
+        workspaceId: org.unmanaged,
+      }),
+    ).toEqual([]);
     const published = await publishOrgAgent(app.db, {
       accountId: org.accountId,
       agentId: agent.id,
@@ -451,7 +471,9 @@ describe("organization agents: versions and publishing", () => {
       expectedVersion: withAccess.rowVersion,
     });
     for (const workspaceId of [org.managed, org.unmanaged]) {
-      expect(await listOrgAgentsForWorkspace(app.db, { accountId: org.accountId, workspaceId })).toEqual([
+      expect(
+        await listOrgAgentsForWorkspace(app.db, { accountId: org.accountId, workspaceId }),
+      ).toEqual([
         {
           id: agent.id,
           key: "helper",
@@ -469,7 +491,12 @@ describe("organization agents: versions and publishing", () => {
       expectedVersion: published.agent.rowVersion,
       workspaceIds: [],
     });
-    expect(await listOrgAgentsForWorkspace(app.db, { accountId: org.accountId, workspaceId: org.unmanaged })).toEqual([]);
+    expect(
+      await listOrgAgentsForWorkspace(app.db, {
+        accountId: org.accountId,
+        workspaceId: org.unmanaged,
+      }),
+    ).toEqual([]);
     expect(await reachable(org.unmanaged)).toBe(false);
   }, 120_000);
 
@@ -523,16 +550,26 @@ describe("organization agents: versions and publishing", () => {
   test("the Console test workspace is created once and marked console_test", async () => {
     const org = await organization();
     expect(await findOrgAgentTestWorkspace(app.db, org.accountId)).toBeNull();
-    const create = async (tx: Parameters<Parameters<typeof ensureOrgAgentTestWorkspace>[1]["create"]>[0]) => {
+    const create = async (
+      tx: Parameters<Parameters<typeof ensureOrgAgentTestWorkspace>[1]["create"]>[0],
+    ) => {
       const id = crypto.randomUUID();
       await tx.execute(drizzleSql`select set_config('opengeni.workspace_id', ${id}, true)`);
       await tx.execute(drizzleSql`insert into workspaces (id, account_id, name)
         values (${id}::uuid, ${org.accountId}::uuid, 'Console test')`);
       return { id };
     };
-    const first = await ensureOrgAgentTestWorkspace(app.db, { accountId: org.accountId, actor, create });
+    const first = await ensureOrgAgentTestWorkspace(app.db, {
+      accountId: org.accountId,
+      actor,
+      create,
+    });
     expect(first.created).toBe(true);
-    const again = await ensureOrgAgentTestWorkspace(app.db, { accountId: org.accountId, actor, create });
+    const again = await ensureOrgAgentTestWorkspace(app.db, {
+      accountId: org.accountId,
+      actor,
+      create,
+    });
     expect(again).toEqual({ workspaceId: first.workspaceId, created: false });
     expect(await findOrgAgentTestWorkspace(app.db, org.accountId)).toBe(first.workspaceId);
     const [marker] = await shared.admin<{ source: string }[]>`
@@ -565,7 +602,11 @@ describe("organization tool servers and end users' logins", () => {
       key: "crm",
       hasSharedKey: true,
       sharedHeaderNames: ["Authorization"],
-      oauthRefresh: { tokenUrl: "https://crm.example.com/token", clientId: "client", hasClientSecret: true },
+      oauthRefresh: {
+        tokenUrl: "https://crm.example.com/token",
+        clientId: "client",
+        hasClientSecret: true,
+      },
     });
     const listed = await listOrgToolServers(app.db, org.accountId);
     for (const value of [server, listed]) {
@@ -640,7 +681,11 @@ describe("organization tool servers and end users' logins", () => {
       }),
     );
     expect([stale.status, stale.code]).toEqual([409, "agent_version_conflict"]);
-    const after = await getOrgToolServerWithSecrets(app.db, { accountId: org.accountId, key: "crm", encryptionKey });
+    const after = await getOrgToolServerWithSecrets(app.db, {
+      accountId: org.accountId,
+      key: "crm",
+      encryptionKey,
+    });
     expect(after!.sharedHeaders).toBeNull();
     expect(after!.oauthRefresh?.clientSecret).toBe("client-secret-value");
 
@@ -658,7 +703,12 @@ describe("organization tool servers and end users' logins", () => {
       accountId: org.accountId,
       actor,
       encryptionKey,
-      request: { key: "crm", name: "CRM", url: "https://crm.example.com/mcp", authMode: "per_user" },
+      request: {
+        key: "crm",
+        name: "CRM",
+        url: "https://crm.example.com/mcp",
+        authMode: "per_user",
+      },
     });
     const target = (workspaceId: string) => ({
       accountId: org.accountId,
@@ -691,7 +741,11 @@ describe("organization tool servers and end users' logins", () => {
         expiresAt: "2030-01-01T00:00:00.000Z",
       },
     });
-    expect(written).toMatchObject({ toolServerKey: "crm", kind: "oauth", expiresAt: "2030-01-01T00:00:00.000Z" });
+    expect(written).toMatchObject({
+      toolServerKey: "crm",
+      kind: "oauth",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+    });
     expect(JSON.stringify(written)).not.toContain("end-user");
     const read = await getEndUserToolCredential(app.db, target(org.managed));
     expect(read).toMatchObject({ kind: "oauth" });
@@ -711,17 +765,21 @@ describe("organization tool servers and end users' logins", () => {
     });
 
     // The runtime role cannot read the login from another workspace's context.
-    const crossWorkspace = await asApp({ accountId: org.accountId, workspaceId: org.managedOther }, (sql) =>
-      sql`select count(*)::int as count from end_user_tool_credentials`,
+    const crossWorkspace = await asApp(
+      { accountId: org.accountId, workspaceId: org.managedOther },
+      (sql) => sql`select count(*)::int as count from end_user_tool_credentials`,
     );
     expect(crossWorkspace[0]!.count).toBe(0);
-    const ownWorkspace = await asApp({ accountId: org.accountId, workspaceId: org.managed }, (sql) =>
-      sql`select count(*)::int as count from end_user_tool_credentials`,
+    const ownWorkspace = await asApp(
+      { accountId: org.accountId, workspaceId: org.managed },
+      (sql) => sql`select count(*)::int as count from end_user_tool_credentials`,
     );
     expect(ownWorkspace[0]!.count).toBe(1);
 
     expect(await deleteEndUserToolCredential(app.db, { ...target(org.managed), actor })).toBe(true);
-    expect(await deleteEndUserToolCredential(app.db, { ...target(org.managed), actor })).toBe(false);
+    expect(await deleteEndUserToolCredential(app.db, { ...target(org.managed), actor })).toBe(
+      false,
+    );
     expect(await getEndUserToolCredential(app.db, target(org.managed))).toBeNull();
 
     // Deleting the server deletes its logins.
@@ -731,7 +789,9 @@ describe("organization tool servers and end users' logins", () => {
       encryptionKey,
       credential: { kind: "headers", headers: { Authorization: "Bearer again" } },
     });
-    expect(await deleteOrgToolServer(app.db, { accountId: org.accountId, key: "crm", actor })).toBe(true);
+    expect(await deleteOrgToolServer(app.db, { accountId: org.accountId, key: "crm", actor })).toBe(
+      true,
+    );
     const [left] = await shared.admin<{ count: number }[]>`
       select count(*)::int as count from end_user_tool_credentials where account_id = ${org.accountId}`;
     expect(left!.count).toBe(0);
@@ -755,21 +815,27 @@ describe("organization agents: visibility gate, isolation and grants", () => {
       definition: definition("Hidden."),
     });
     for (const workspaceId of [undefined, org.managed]) {
-      const hidden = await asApp({ accountId: org.accountId, workspaceId }, (sql) =>
-        sql`select (select count(*)::int from agents where scope = 'organization') as agents,
+      const hidden = await asApp(
+        { accountId: org.accountId, workspaceId },
+        (sql) =>
+          sql`select (select count(*)::int from agents where scope = 'organization') as agents,
           (select count(*)::int from agent_revisions where workspace_id is null) as revisions`,
       );
       expect(hidden[0]).toEqual({ agents: 0, revisions: 0 });
-      const visible = await asApp({ accountId: org.accountId, workspaceId, orgAgents: true }, (sql) =>
-        sql`select (select count(*)::int from agents where scope = 'organization') as agents,
+      const visible = await asApp(
+        { accountId: org.accountId, workspaceId, orgAgents: true },
+        (sql) =>
+          sql`select (select count(*)::int from agents where scope = 'organization') as agents,
           (select count(*)::int from agent_revisions where workspace_id is null) as revisions`,
       );
       expect(visible[0]).toEqual({ agents: 1, revisions: 1 });
     }
     // Writes are refused without the setting too.
     const write = await pgRejection(
-      asApp({ accountId: org.accountId }, (sql) =>
-        sql`insert into agents (account_id, workspace_id, scope, agent_key, visibility, name, name_key,
+      asApp(
+        { accountId: org.accountId },
+        (sql) =>
+          sql`insert into agents (account_id, workspace_id, scope, agent_key, visibility, name, name_key,
             origin, current_revision)
           values (${org.accountId}, null, 'organization', 'sneaky', 'workspace', 'Sneaky', 'sneaky',
             'app', 1)`,
@@ -790,8 +856,10 @@ describe("organization agents: visibility gate, isolation and grants", () => {
     );
     expect(missing.map((entry) => entry.id)).not.toContain(agent.id);
     // The organization's directory read (Teams routing reads agents this way) does not see it either.
-    const directory = await asApp({ accountId: org.accountId }, (sql) =>
-      sql`select id::text as id from agents where account_id = ${org.accountId} and visibility = 'workspace'`,
+    const directory = await asApp(
+      { accountId: org.accountId },
+      (sql) =>
+        sql`select id::text as id from agents where account_id = ${org.accountId} and visibility = 'workspace'`,
     );
     expect(directory.map((row) => row.id)).not.toContain(agent.id);
   }, 120_000);
@@ -819,7 +887,12 @@ describe("organization agents: visibility gate, isolation and grants", () => {
         accountId: org.accountId,
         actor,
         encryptionKey,
-        request: { key: "crm", name: "CRM", url: "https://crm.example.com/mcp", authMode: "per_user" },
+        request: {
+          key: "crm",
+          name: "CRM",
+          url: "https://crm.example.com/mcp",
+          authMode: "per_user",
+        },
       });
       await putEndUserToolCredential(app.db, {
         accountId: org.accountId,
@@ -840,18 +913,21 @@ describe("organization agents: visibility gate, isolation and grants", () => {
       "agent_publish_operations",
     ];
     for (const workspaceId of [undefined, a.managed]) {
-      const counts = await asApp({ accountId: a.accountId, workspaceId, orgAgents: true }, async (sql) => {
-        const result: Record<string, number> = {};
-        for (const table of tables) {
-          const [row] = await sql.unsafe<{ count: number }[]>(
-            `select count(*)::int as count from ${table} where account_id = $1`,
-            [b.accountId],
-          );
-          result[table] = row!.count;
-        }
-        return result;
-      });
-      expect(counts).toEqual(Object.fromEntries(tables.map((table) => [table, 0])));
+      const counts = await asApp(
+        { accountId: a.accountId, workspaceId, orgAgents: true },
+        async (sql) => {
+          const result: Record<string, number> = {};
+          for (const table of tables) {
+            const [row] = await sql.unsafe<{ count: number }[]>(
+              `select count(*)::int as count from ${table} where account_id = $1`,
+              [b.accountId],
+            );
+            result[table] = row!.count;
+          }
+          return result;
+        },
+      );
+      expect(counts as unknown).toEqual(Object.fromEntries(tables.map((table) => [table, 0])));
     }
     const [bServer] = await shared.admin<{ id: string }[]>`
       select id from organization_tool_servers where account_id = ${b.accountId}`;
@@ -878,16 +954,23 @@ describe("organization agents: visibility gate, isolation and grants", () => {
     ];
     for (const write of foreignWrites) {
       expect(
-        await pgRejection(asApp({ accountId: a.accountId, workspaceId: a.managed, orgAgents: true }, write)),
+        await pgRejection(
+          asApp({ accountId: a.accountId, workspaceId: a.managed, orgAgents: true }, write),
+        ),
       ).toBe("42501");
     }
     // Organization B's agent is not reachable from A's workspace, and A sees only its own.
     expect(
-      (await listOrgAgentsForWorkspace(app.db, { accountId: a.accountId, workspaceId: a.unmanaged })).map(
-        (agent) => agent.key,
-      ),
+      (
+        await listOrgAgentsForWorkspace(app.db, {
+          accountId: a.accountId,
+          workspaceId: a.unmanaged,
+        })
+      ).map((agent) => agent.key),
     ).toEqual(["shared-key"]);
-    expect(await listOrgAgentsForWorkspace(app.db, { accountId: a.accountId, workspaceId: b.unmanaged })).toEqual([]);
+    expect(
+      await listOrgAgentsForWorkspace(app.db, { accountId: a.accountId, workspaceId: b.unmanaged }),
+    ).toEqual([]);
     expect(await getOrgAgent(app.db, a.accountId, { id: bAgent!.id })).toBeNull();
   }, 120_000);
 
@@ -903,7 +986,7 @@ describe("organization agents: visibility gate, isolation and grants", () => {
     expect(grants).toEqual({
       agent_publish_operations: ["INSERT", "SELECT", "UPDATE"],
       agent_revisions: ["INSERT", "SELECT"],
-      agent_workspace_access: ["DELETE", "INSERT", "SELECT"],
+      agent_workspace_access: ["DELETE", "INSERT", "SELECT", "UPDATE"],
       end_user_tool_credentials: ["DELETE", "INSERT", "SELECT", "UPDATE"],
       organization_tool_servers: ["DELETE", "INSERT", "SELECT", "UPDATE"],
     });
@@ -983,7 +1066,7 @@ describe("organization agent chats: claim gate", () => {
       attemptId: crypto.randomUUID(),
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" as const },
-      agentInstructionsProtocol: 1,
+      agentInstructionsProtocol: 1 as const,
     });
 
     const pinned = await chat(true);

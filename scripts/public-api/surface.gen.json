@@ -15229,6 +15229,7 @@
         "$.mcpServers[].name": "string!",
         "$.models": "array!",
         "$.models[]": "ref(ClientModel)",
+        "$.orgAgents": "boolean?",
         "$.productAccessMode": "ref(ProductAccessMode)!",
         "$.sandboxFiles": "boolean?",
         "$.serverVersion": "string?",
@@ -16690,7 +16691,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
+        "$": "enum=[\"\\\"agent.archived\\\"\",\"\\\"agent.created\\\"\",\"\\\"agent.deployed\\\"\",\"\\\"agent.management_changed\\\"\",\"\\\"agent.published\\\"\",\"\\\"agent.updated\\\"\",\"\\\"agent.version_saved\\\"\",\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"tool_credential.deleted\\\"\",\"\\\"tool_credential.written\\\"\",\"\\\"tool_server.created\\\"\",\"\\\"tool_server.deleted\\\"\",\"\\\"tool_server.updated\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
       }
     },
     "ConsoleAuditEvent": {
@@ -16748,7 +16749,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\"]"
+        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\",\"\\\"console_test\\\"\"]"
       }
     },
     "ConsoleModelSpend": {
@@ -16885,6 +16886,7 @@
         "$.countsTruncated": "boolean!",
         "$.endUsers": "integer!",
         "$.managedSessions": "integer!",
+        "$.orgAgents": "boolean?",
         "$.organizationId": "string!",
         "$.range": "ref(ConsoleRange)!",
         "$.reviewLevel": "ref(ConsoleReviewLevel)!",
@@ -25929,7 +25931,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:personal\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:use\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
+        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"agents:manage\\\"\",\"\\\"agents:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:personal\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:use\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"tool_credentials:write\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
       }
     },
     "PersonalApiKey": {

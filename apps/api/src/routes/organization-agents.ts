@@ -267,7 +267,10 @@ function inScope(caller: Caller, workspaceId: string): boolean {
   return !caller.apiKey || organizationWorkspaceInScope(caller.apiKey.workspaceScope, workspaceId);
 }
 
-function requireWorkspacesInScope(caller: Caller, workspaceIds: readonly string[] | undefined): void {
+function requireWorkspacesInScope(
+  caller: Caller,
+  workspaceIds: readonly string[] | undefined,
+): void {
   for (const workspaceId of workspaceIds ?? []) {
     if (!inScope(caller, workspaceId)) {
       throw new HTTPException(403, { message: "workspace is outside organization key scope" });
@@ -547,7 +550,9 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const request = ApplyOrgAgentRequest.parse(await parseRequestJson(c, ApplyOrgAgentRequest));
     const { publish, moveRunningChats, dryRun, expectedVersion, ...rest } = request;
     const definition = OrgAgentDefinition.parse(rest);
-    const toolCatalog = dryRun ? null : await toolCatalogFor(deps, caller.organizationId, definition);
+    const toolCatalog = dryRun
+      ? null
+      : await toolCatalogFor(deps, caller.organizationId, definition);
     const result = await mapped(() =>
       applyOrgAgent(deps.db, {
         accountId: caller.organizationId,
@@ -562,7 +567,10 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       }),
     );
     await startMove(deps, caller.organizationId, result.operation);
-    return c.json(ApplyOrgAgentResponse.parse(result), result.outcome === "created" && !dryRun ? 201 : 200);
+    return c.json(
+      ApplyOrgAgentResponse.parse(result),
+      result.outcome === "created" && !dryRun ? 201 : 200,
+    );
   });
 
   app.get(`${base}/:agentId`, async (c) => {
@@ -677,9 +685,14 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   }
 
   async function requireAgent(caller: Caller, agentId: string): Promise<void> {
-    const agent = await getOrgAgent(deps.db, caller.organizationId, { id: agentId }, {
-      includeArchived: true,
-    });
+    const agent = await getOrgAgent(
+      deps.db,
+      caller.organizationId,
+      { id: agentId },
+      {
+        includeArchived: true,
+      },
+    );
     if (!agent) throw agentNotFound();
   }
 
@@ -789,7 +802,12 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const request = CreateOrgAgentTestChatRequest.parse(
       await parseRequestJson(c, CreateOrgAgentTestChatRequest),
     );
-    const version = await getOrgAgentVersion(deps.db, caller.organizationId, agentId, request.version);
+    const version = await getOrgAgentVersion(
+      deps.db,
+      caller.organizationId,
+      agentId,
+      request.version,
+    );
     if (!version) {
       const agent = await getOrgAgent(deps.db, caller.organizationId, { id: agentId });
       if (!agent) throw agentNotFound();
@@ -859,14 +877,19 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = uuidParam(c, "workspaceId");
     const context = await requireAccessContext(c, deps);
     let accountId: string;
+    const workspaceNotFound = () => new HTTPException(404, { message: "workspace not found" });
     try {
       accountId = (await rlsContextForWorkspace(deps.db, workspaceId)).accountId;
     } catch (error) {
-      if (error instanceof WorkspaceNotFoundError) {
-        throw new HTTPException(404, { message: "workspace not found" });
-      }
+      if (error instanceof WorkspaceNotFoundError) throw workspaceNotFound();
       throw error;
     }
+    // Callers outside the organization learn nothing about its workspaces.
+    const apiKey = accountScopedApiKeyWorkspaceAuthority(context);
+    const related = apiKey
+      ? apiKey.accountId === accountId
+      : context.accountGrants.some((grant) => grant.accountId === accountId);
+    if (!related) throw workspaceNotFound();
     const caller = authorizeOrgAgentsCaller(deps, context, accountId, [permission]);
     if (!inScope(caller, workspaceId)) {
       throw new HTTPException(403, { message: "workspace is outside organization key scope" });

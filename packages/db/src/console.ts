@@ -320,7 +320,10 @@ async function insertAudit(tx: Database, input: AuditInput): Promise<string> {
 }
 
 /** Writes one audit row in the caller's transaction (account context of the organization). */
-export async function insertConsoleAuditEvent(tx: Database, input: ConsoleAuditInput): Promise<string> {
+export async function insertConsoleAuditEvent(
+  tx: Database,
+  input: ConsoleAuditInput,
+): Promise<string> {
   return await insertAudit(tx, input);
 }
 
