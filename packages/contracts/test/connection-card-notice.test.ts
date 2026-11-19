@@ -40,6 +40,17 @@ describe("connection card notices", () => {
     );
   });
 
+  test("an embedding product's account is announced only with its sign-in link", () => {
+    expect(connectionCardNotice({ ...stepUp, authoritySource: "host" })).toBeNull();
+    expect(
+      connectionCardNotice({
+        ...stepUp,
+        authoritySource: "host",
+        authorizationUrl: "https://host.example/connect",
+      })?.title,
+    ).toBe("Gmail needs your permission");
+  });
+
   test("a card that only explains something unavailable asks nothing of the person", () => {
     expect(connectionCardNotice({ ...stepUp, reason: "unsupported_auth" })).toBeNull();
   });

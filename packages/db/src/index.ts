@@ -98602,20 +98602,6 @@ export async function appendSessionEventsForTurnAttempt(
 }
 
 /**
- * Append a capability card for the calling turn unless that turn already shows
- * a current card for the same capability (and, for a card that names the
- * machine it asks for, the same machine, and for a card with a purpose such as
- * the Chrome setup card, the same purpose). The lookup runs inside the attempt
- * write fence, which locks the session row, so parallel callers in one turn
- * cannot both append. Cards for other capabilities are never consulted.
- * Only the same kind of card counts: a first connection, or a reconnect of the
- * same connection. With `sinceLatestMessage`, a current card of any turn since
- * the person's latest message counts instead of only this turn's: repeated
- * requests do not stack cards while the person has not written, and a card
- * from before their latest message, which may be stale, is not reused. A chat
- * with no message from a person (a scheduled run) reuses only this turn's.
- */
-/**
  * A connection card's events with the notice that tells the person they are
  * needed (`connectionCardNotice`), after the card so the card stays first.
  */
@@ -98632,6 +98618,20 @@ export function withConnectionCardNotice<T extends { type: string; payload?: unk
   });
 }
 
+/**
+ * Append a capability card for the calling turn unless that turn already shows
+ * a current card for the same capability (and, for a card that names the
+ * machine it asks for, the same machine, and for a card with a purpose such as
+ * the Chrome setup card, the same purpose). The lookup runs inside the attempt
+ * write fence, which locks the session row, so parallel callers in one turn
+ * cannot both append. Cards for other capabilities are never consulted.
+ * Only the same kind of card counts: a first connection, or a reconnect of the
+ * same connection. With `sinceLatestMessage`, a current card of any turn since
+ * the person's latest message counts instead of only this turn's: repeated
+ * requests do not stack cards while the person has not written, and a card
+ * from before their latest message, which may be stale, is not reused. A chat
+ * with no message from a person (a scheduled run) reuses only this turn's.
+ */
 export async function appendTurnCapabilityCardOnce(
   db: Database,
   workspaceId: string,

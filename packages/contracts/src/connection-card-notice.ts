@@ -39,6 +39,9 @@ type NoticeCard = Pick<ToolAuthNeededPayload, "providerDomain"> & {
   connectionId?: string | null | undefined;
   capability?: { id: string; name?: string | undefined } | null | undefined;
   setupRequest?: { name?: string | undefined; endpointUrl?: string | undefined } | null | undefined;
+  /** "host": the account is the embedding product's; only its link can fix it. */
+  authoritySource?: "host" | undefined;
+  authorizationUrl?: string | undefined;
 };
 
 /** The notice key for one card's account or capability. */
@@ -72,8 +75,10 @@ function serviceName(card: NoticeCard): string {
 /**
  * The notice announcing a card the agent waits on, or null for one it doesn't:
  * a card that only explains something unavailable, one found while preparing
- * the turn (no tool call needed it; it would announce itself every turn) and
- * Opengeni's own permissions, which are settings rather than a connection.
+ * the turn (no tool call needed it; it would announce itself every turn),
+ * Opengeni's own permissions, which are settings rather than a connection, and
+ * an embedding product's account without its sign-in link, which leaves the
+ * person nothing to press (the chat doesn't pin it either).
  */
 export function connectionCardNotice(
   card: NoticeCard & { reason: string | null },
@@ -83,6 +88,7 @@ export function connectionCardNotice(
     if (!card.toolName?.trim()) return null;
     if (card.providerDomain.trim().toLowerCase() === "opengeni") return null;
   }
+  if (card.authoritySource === "host" && !card.authorizationUrl) return null;
   const name = serviceName(card);
   const title =
     card.reason === "insufficient_scope"

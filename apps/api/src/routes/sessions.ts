@@ -27,6 +27,10 @@ import {
   ModelUnavailableError,
 } from "@opengeni/contracts";
 import { ContinueAfterCapabilitySetupRequest, connectionCardNoticeKey } from "@opengeni/contracts";
+import {
+  connectionCardWithdrawals,
+  type ConnectionCardWithdrawalKey,
+} from "../connection-card-withdrawals";
 import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
 import {
   enqueueCapabilitySetupContinuation,
@@ -3289,26 +3293,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
   }
 
-  /** Withdraw a finished card's open notices in this chat and the person's others. */
+  /**
+   * Withdraw a finished card's open notices in this chat and the person's
+   * others. A key naming one account reaches the person's chats anywhere; a
+   * capability or server is set up per workspace, so its key stays in this one.
+   */
   async function withdrawConnectionCardNotices(
     person: { accountId: string; subjectId: string },
     workspaceId: string,
     sessionId: string,
-    keys: readonly string[],
+    keys: readonly ConnectionCardWithdrawalKey[],
   ): Promise<void> {
-    const wanted = new Set(keys);
-    const sessions = new Map<string, { workspaceId: string; keys: Set<string> }>([
-      [sessionId, { workspaceId, keys: new Set(keys) }],
-    ]);
-    for (const item of await listInboxItems(db, person)) {
-      if (item.kind !== "notification" || !wanted.has(item.sourceKey)) continue;
-      const entry = sessions.get(item.sessionId) ?? {
-        workspaceId: item.workspaceId,
-        keys: new Set<string>(),
-      };
-      entry.keys.add(item.sourceKey);
-      sessions.set(item.sessionId, entry);
-    }
+    const sessions = connectionCardWithdrawals(
+      { workspaceId, sessionId },
+      keys,
+      await listInboxItems(db, person),
+    );
     for (const [id, entry] of sessions) {
       await appendAndPublishEvents(
         db,
@@ -3327,22 +3327,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   function connectionCardNoticeKeys(
     payload: ContinueAfterCapabilitySetupRequest,
     target: { capabilityId: string; endpointUrl?: string | undefined },
-  ): string[] {
-    const keys = new Set<string>();
+  ): ConnectionCardWithdrawalKey[] {
+    const keys = new Map<string, boolean>();
     if ("connectionId" in payload)
-      keys.add(connectionCardNoticeKey({ providerDomain: "", connectionId: payload.connectionId }));
+      keys.set(
+        connectionCardNoticeKey({ providerDomain: "", connectionId: payload.connectionId }),
+        true,
+      );
     else
-      keys.add(
+      keys.set(
         connectionCardNoticeKey({ providerDomain: "", capability: { id: target.capabilityId } }),
+        false,
       );
     if (target.endpointUrl)
-      keys.add(
+      keys.set(
         connectionCardNoticeKey({
           providerDomain: "",
           setupRequest: { endpointUrl: target.endpointUrl },
         }),
+        false,
       );
-    return [...keys];
+    return [...keys].map(([key, accountWide]) => ({ key, accountWide }));
   }
 
   app.post(

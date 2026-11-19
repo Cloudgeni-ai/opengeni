@@ -425,6 +425,8 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
       const allowed = async (item: InboxItemRow): Promise<boolean> => {
         if (fullAccess) return true;
         if (item.kind !== "notification") return false;
+        // A connection card waits on the person as an approval does.
+        if (isConnectionCardNoticeKey(item.sourceKey)) return false;
         if (policy === "any_agent") return true;
         return (
           item.workspaceId === grant.workspaceId &&
