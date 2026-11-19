@@ -375,6 +375,9 @@ import { useUiEventTarget } from "../lib/ui-events";
 import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
 import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
+import { pendingConnectionCard } from "../../timeline/pending-connection-card";
+import { authNeededPresentation } from "../../auth-needed-presentation";
+import { AuthNeededRow } from "../../components/auth-needed-row";
 
 const InlineChatArtifact = lazy(() =>
   import("../components/artifacts/retained-file-preview").then((module) => ({
@@ -3721,6 +3724,27 @@ function SessionChatPane(props: {
     hasNewer: props.hasNewer,
     queue: props.queue.snapshot,
   });
+  // The connection card the agent ended waiting on stays in view above the
+  // composer, where approvals are, until it is done or the person writes.
+  const pinnedConnectionCard = useMemo(
+    () =>
+      props.session.status === "idle" && !props.hasNewer
+        ? pendingConnectionCard(
+            timelineWithStartup,
+            (item) =>
+              !authNeededPresentation(t, item).unavailable &&
+              (item.authoritySource !== "host" || Boolean(item.authorizationUrl)),
+          )
+        : null,
+    [props.hasNewer, props.session.status, timelineWithStartup],
+  );
+  const timelineItems = useMemo(
+    () =>
+      pinnedConnectionCard
+        ? timelineWithStartup.filter((item) => item !== pinnedConnectionCard)
+        : timelineWithStartup,
+    [pinnedConnectionCard, timelineWithStartup],
+  );
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     sessionDisplayStatus(props.session),
     readOnlyArchive === null &&
@@ -4472,6 +4496,17 @@ function SessionChatPane(props: {
                               {failureRecovery}
                               {/* The pause's other approvals stay up while a decision
                         resumes the turn: deciding them never waits for it. */}
+                              {pinnedConnectionCard ? (
+                                <div className="pb-1" data-pinned-connection-card="">
+                                  {renderAuthNeeded(pinnedConnectionCard) ?? (
+                                    <AuthNeededRow
+                                      item={pinnedConnectionCard}
+                                      onReconnect={props.onReconnect}
+                                      resolveProviderLogo={props.resolveProviderLogo}
+                                    />
+                                  )}
+                                </div>
+                              ) : null}
                               {props.approvals.length > 0 &&
                                 approvalsDecidable(props.session.status) && (
                                   <ApprovalSurface
@@ -4527,7 +4562,7 @@ function SessionChatPane(props: {
                           turnSummary={{ rolling: true }}
                           key={props.session.id}
                           className="h-full"
-                          items={timelineWithStartup}
+                          items={timelineItems}
                           searchTarget={activeSearchTarget}
                           focusSequence={momentSequence}
                           events={props.events}
