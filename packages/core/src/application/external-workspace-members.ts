@@ -5,6 +5,8 @@ import {
   ExternalIdentityReference,
   CancelExternalWorkspaceMemberGrantRequest,
   UpdateExternalWorkspaceMemberRequest,
+  splitExternalIdentityProfile,
+  type EndUserProfile,
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
 import {
@@ -19,6 +21,7 @@ import {
   cancelExternalWorkspaceMemberGrant,
   updateExternalWorkspaceMemberOperation,
   lookupExternalIdentity,
+  rememberEndUserLabel,
 } from "@opengeni/db";
 import { rethrowExternalWorkspaceOperation } from "../access/external-membership-refusal";
 import { releaseAdmissionBlocksAfterAccessChange } from "./admission-release";
@@ -41,7 +44,16 @@ export async function addExternalWorkspaceMemberForRequest(
   workspaceId: string,
   input: unknown,
 ): Promise<ExternalIdentity> {
-  const identity = await addExternalWorkspaceMember(c, deps, workspaceId, input);
+  const { identity, profile } = await addExternalWorkspaceMember(c, deps, workspaceId, input);
+  // Console's label and the display details the host sent; display only and
+  // best effort, after the grant committed.
+  await rememberEndUserLabel(deps.db, {
+    accountId: identity.accountId,
+    subjectId: identity.subjectId,
+    source: identity.source,
+    externalId: identity.externalId,
+    ...profile,
+  });
   // After commit: a returning member's saved messages may wait for this.
   await releaseAdmissionBlocksAfterAccessChange(
     { db: deps.db },
@@ -55,8 +67,22 @@ async function addExternalWorkspaceMember(
   deps: AccessDeps,
   workspaceId: string,
   input: unknown,
+): Promise<{ identity: ExternalIdentity; profile: EndUserProfile }> {
+  const parsed = AddExternalWorkspaceMemberRequest.parse(input);
+  // Display details never reach the identity, the keyed operation or its replay.
+  const { identity: reference, profile } = splitExternalIdentityProfile(parsed.identity);
+  const payload = { ...parsed, identity: reference };
+  return { identity: await addExternalWorkspaceMemberIdentity(c, deps, workspaceId, payload), profile };
+}
+
+async function addExternalWorkspaceMemberIdentity(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  payload: Omit<AddExternalWorkspaceMemberRequest, "identity"> & {
+    identity: ExternalIdentityReference;
+  },
 ): Promise<ExternalIdentity> {
-  const payload = AddExternalWorkspaceMemberRequest.parse(input);
   const context = await requireAccessContext(c, deps);
   requireApiKeyDelegationContext(context, payload.permissions);
   const authority = accountScopedApiKeyWorkspaceAuthority(context);

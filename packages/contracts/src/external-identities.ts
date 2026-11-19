@@ -46,10 +46,83 @@ export const ExternalIdentityReference = /* @__PURE__ */ defineSchema(() =>
 );
 export type ExternalIdentityReference = z.infer<typeof ExternalIdentityReference>;
 
+/** Longest display name and email Opengeni stores for an end user. */
+export const END_USER_DISPLAY_NAME_MAX = 256;
+export const END_USER_EMAIL_MAX = 320;
+
+/**
+ * The end user an embedding product acts as, with optional display details
+ * Console shows beside the product's own id. Display only, never authority:
+ * the identity is `externalId` and `source` alone. Details are stored when
+ * sent (the latest wins) and an omitted one keeps its stored value. They are
+ * never rejected: {@link normalizeEndUserProfile} trims and bounds them.
+ */
+export const ExternalIdentityReferenceWithProfile = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      externalId,
+      source: source.default("default"),
+      /** Name shown in Console, for example "Ada Lovelace". */
+      displayName: z.string().optional(),
+      /** Email shown in Console. Not verified; stored as given. */
+      email: z.string().optional(),
+    })
+    .strict(),
+);
+export type ExternalIdentityReferenceWithProfile = z.infer<
+  typeof ExternalIdentityReferenceWithProfile
+>;
+export type ExternalIdentityReferenceWithProfileInput = z.input<
+  typeof ExternalIdentityReferenceWithProfile
+>;
+
+/** Display details for an end user; each field present only when usable. */
+export type EndUserProfile = { displayName?: string; email?: string };
+
+function cleanDisplayText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  // Control characters and lone surrogates cannot be shown or stored safely.
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+/**
+ * Lenient normalization of end-user display details: never throws. Blank or
+ * non-text values are dropped; a long name is cut to
+ * {@link END_USER_DISPLAY_NAME_MAX} characters; an email is stored as given
+ * (trimmed) unless it contains spaces or is longer than {@link END_USER_EMAIL_MAX},
+ * which drops it.
+ */
+export function normalizeEndUserProfile(input: {
+  displayName?: unknown;
+  email?: unknown;
+}): EndUserProfile {
+  const profile: EndUserProfile = {};
+  const name = cleanDisplayText(input.displayName);
+  if (name) profile.displayName = Array.from(name).slice(0, END_USER_DISPLAY_NAME_MAX).join("");
+  const email = cleanDisplayText(input.email);
+  if (email && Array.from(email).length <= END_USER_EMAIL_MAX && !/\s/u.test(email))
+    profile.email = email;
+  return profile;
+}
+
+/** Splits a reference with display details into the identity and its profile. */
+export function splitExternalIdentityProfile(identity: ExternalIdentityReferenceWithProfile): {
+  identity: ExternalIdentityReference;
+  profile: EndUserProfile;
+} {
+  const { displayName, email, ...reference } = identity;
+  return { identity: reference, profile: normalizeEndUserProfile({ displayName, email }) };
+}
+
 export const AddExternalWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      identity: ExternalIdentityReference,
+      identity: ExternalIdentityReferenceWithProfile,
       permissions: z.array(Permission).min(1).max(Permission.options.length),
       /** Opt-in durable operation identity; unkeyed legacy requests are not cancellable. */
       operationId: primitives.optionalUuid,
@@ -171,14 +244,14 @@ export const ExternalActorSelection = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         mode: z.literal("external"),
-        identity: ExternalIdentityReference,
+        identity: ExternalIdentityReferenceWithProfile,
         membership: ExternalActorStatedMembership.optional(),
       })
       .strict(),
     z
       .object({
         mode: z.literal("linked_native"),
-        identity: ExternalIdentityReference,
+        identity: ExternalIdentityReferenceWithProfile,
         linkId: primitives.uuid,
         expectedLinkRevision: primitives.positiveInteger.safe(),
       })

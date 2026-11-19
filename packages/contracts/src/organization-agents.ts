@@ -7,6 +7,7 @@ import {
   AgentRenderer,
   AgentTitleInstructions,
 } from "./agent-config";
+import { ConsoleEndUser } from "./console";
 import { ReasoningEffort } from "./reasoning-effort";
 import { secretValue } from "./secret-value";
 
@@ -573,6 +574,8 @@ export const OrgAgentSessionEntry = /* @__PURE__ */ defineSchema(() =>
     status: z.string(),
     agentVersion: z.number().int().positive(),
     overrides: OrgAgentSessionOverrides.nullable(),
+    /** The end user the chat belongs to (name, email, the product's id); absent on older servers. */
+    endUser: ConsoleEndUser.nullable().optional(),
     createdAt: z.string(),
     updatedAt: z.string(),
   }),
