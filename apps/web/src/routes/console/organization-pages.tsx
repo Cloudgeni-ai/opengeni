@@ -63,6 +63,7 @@ export function ConsoleMembersRoute() {
               await consoleRolesApi(client, organizationId).setMemberRole(target, role);
               await refresh();
             },
+            refresh,
           },
     [client, organizationId, refresh, roles.data, roles.error, rolesOn],
   );

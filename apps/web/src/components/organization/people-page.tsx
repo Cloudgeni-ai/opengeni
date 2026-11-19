@@ -126,6 +126,8 @@ export type ConsoleRolesView = {
   roles: readonly ConsoleRoleEntry[] | null;
   /** Saves one role (Console only). */
   setRole?: ((target: { subjectId: string }, role: ConsoleRoleValue) => Promise<void>) | undefined;
+  /** Reloads `roles`, for example after an invitation carried one. */
+  refresh?: (() => Promise<unknown>) | undefined;
 };
 
 const ConsoleRolesContext = createContext<ConsoleRolesView | null>(null);
@@ -1484,6 +1486,7 @@ function InvitePage({
               ? { description: invitationDeliveryOutcome(result.sent[0]!) }
               : undefined,
           );
+          if (pickConsoleRole) await consoleRoles?.refresh?.();
         }
         if (result.failed.length > 0) {
           setEmails(result.failed.map((each) => each.email));

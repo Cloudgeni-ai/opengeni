@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, createElement, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import type { ReactNode } from "react";
+import type { Root } from "react-dom/client";
+
+// The DOM exists before React loads, so React handles input events.
+GlobalRegistrator.register();
+const { act, createElement } = await import("react");
+const { createRoot } = await import("react-dom/client");
 
 const organizationId = "33333333-3333-4333-8333-333333333333";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -73,6 +78,36 @@ mock.module("@opengeni/react/ui/confirm-dialog", () => ({
           createElement("p", null, description),
           children,
           createElement("button", { type: "button" }, confirmLabel),
+        )
+      : null,
+}));
+const FormDialogModule = await import("@opengeni/react/ui/form-dialog");
+mock.module("@opengeni/react/ui/form-dialog", () => ({
+  ...FormDialogModule,
+  FormDialog: ({
+    open,
+    title,
+    submitLabel,
+    onSubmit,
+    children,
+  }: {
+    open: boolean;
+    title: ReactNode;
+    submitLabel: string;
+    onSubmit?: () => Promise<boolean | void>;
+    children?: ReactNode;
+  }) =>
+    open
+      ? createElement(
+          "div",
+          { role: "dialog" },
+          createElement("h2", null, title),
+          children,
+          createElement(
+            "button",
+            { type: "button", onClick: () => void onSubmit?.() },
+            submitLabel,
+          ),
         )
       : null,
 }));
@@ -374,7 +409,6 @@ function text() {
 }
 
 beforeAll(() => {
-  GlobalRegistrator.register();
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -807,7 +841,7 @@ describe("Managed in Console (app)", () => {
     expect(document.querySelectorAll("button").length).toBe(0);
   });
 
-  test("Chat starts a chat with the agent, by key, in this workspace", async () => {
+  test("Chat asks for the first message, then starts a chat with the agent by key", async () => {
     workspaceGrants = [
       { workspaceId, subjectId: "user:mira", role: "member", permissions: ["sessions:create"] },
     ];
@@ -819,10 +853,29 @@ describe("Managed in Console (app)", () => {
     expect(chat).toBeDefined();
     await act(async () => chat!.click());
     await settle();
+    expect(client.createSession).toHaveBeenCalledTimes(0);
+    const message = document.querySelector("textarea")!;
+    expect(message).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+        message,
+        "Why was I charged twice?",
+      );
+      message.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const start = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Start chat",
+    );
+    expect(start).toBeDefined();
+    await act(async () => start!.click());
+    await settle();
     expect(client.createSession).toHaveBeenCalledTimes(1);
     const [calledWorkspace, request] = client.createSession.mock.calls[0]!;
     expect(calledWorkspace).toBe(workspaceId);
     expect((request as { agent: unknown }).agent).toBe("support-desk");
+    expect((request as { initialMessage: unknown }).initialMessage).toBe(
+      "Why was I charged twice?",
+    );
     expect(navigate).toHaveBeenCalledWith({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId, sessionId: chatId },
