@@ -92,7 +92,7 @@ const NAV: { group: string | null; items: NavEntry[] }[] = [
       { to: "/console/sessions", label: "Sessions", icon: <MessagesSquareIcon /> },
       { to: "/console/agents", label: "Agents", icon: <BotIcon />, orgAgents: true },
       { to: "/console/tool-servers", label: "Tool servers", icon: <PlugIcon />, orgAgents: true },
-      { to: "/console/workspaces", label: "Workspaces", icon: <Building2Icon />, fullOnly: true },
+      { to: "/console/workspaces", label: "Workspaces", icon: <Building2Icon /> },
       { to: "/console/api-keys", label: "API keys", icon: <KeyRoundIcon />, fullOnly: true },
     ],
   },
@@ -113,7 +113,7 @@ const NAV: { group: string | null; items: NavEntry[] }[] = [
 
 /**
  * Console's nav: Agents and Tool servers only for organizations with Console
- * agents; Workspaces, API keys and the Organization pages only for owners and
+ * agents; API keys and the Organization pages only for owners and
  * admins.
  */
 export function consoleNavSections(agentsOn: boolean, access: ConsoleAccessLevel = "full") {

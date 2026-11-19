@@ -344,12 +344,12 @@ describe("Console nav", () => {
     expect(labels(false)).toContain("Sessions");
   });
 
-  test("Viewers and Editors see Overview, Sessions, Agents and Tool servers only", () => {
+  test("Viewers and Editors see Overview, Sessions, Agents, Tool servers and Workspaces only", () => {
     for (const access of ["viewer", "editor"] as const) {
       const labels = consoleNavSections(true, access).flatMap((section) =>
         section.items.map((item) => item.label),
       );
-      expect(labels).toEqual(["Overview", "Sessions", "Agents", "Tool servers"]);
+      expect(labels).toEqual(["Overview", "Sessions", "Agents", "Tool servers", "Workspaces"]);
     }
     const full = consoleNavSections(true, "full").flatMap((section) =>
       section.items.map((item) => item.label),
@@ -369,7 +369,7 @@ describe("Console nav", () => {
     expect(consoleDestinationFullOnly("/console/members")).toBe(true);
     expect(consoleDestinationFullOnly("/console/api-keys")).toBe(true);
     expect(consoleDestinationFullOnly("/console/settings")).toBe(true);
-    expect(consoleDestinationFullOnly("/console/workspaces")).toBe(true);
+    expect(consoleDestinationFullOnly("/console/workspaces")).toBe(false);
     expect(consoleDestinationFullOnly("/console/usage")).toBe(true);
     expect(consoleDestinationFullOnly("/console/agents")).toBe(false);
     expect(consoleDestinationFullOnly("/console/tool-servers")).toBe(false);

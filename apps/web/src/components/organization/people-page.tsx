@@ -549,15 +549,21 @@ function RoleCell({
   /** The app's small label for a member with a Console role. */
   consoleRole?: ConsoleRoleValue | "full" | undefined;
 }) {
+  if (!soleOwner && (consoleRole === "viewer" || consoleRole === "editor")) {
+    return (
+      <span className="flex min-w-0 flex-col">
+        <span className="text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
+        <span className="min-w-0 truncate text-xs text-fg-subtle">
+          Console: {CONSOLE_ROLE_LABELS[consoleRole]}
+        </span>
+      </span>
+    );
+  }
   return (
     <span className="flex min-w-0 items-center gap-x-1.5">
       <span className="shrink-0 text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
       {soleOwner ? (
         <span className="min-w-0 truncate text-xs text-fg-subtle">Only owner</span>
-      ) : consoleRole === "viewer" || consoleRole === "editor" ? (
-        <span className="min-w-0 truncate text-xs text-fg-subtle">
-          Console: {CONSOLE_ROLE_LABELS[consoleRole]}
-        </span>
       ) : null}
     </span>
   );
