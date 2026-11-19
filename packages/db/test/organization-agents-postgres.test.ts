@@ -984,13 +984,18 @@ describe("organization tool servers and end users' logins", () => {
       select detail from organization_console_audit_events
       where account_id = ${org.accountId} and action = 'tool_server.updated'
       order by created_at, id`;
-    const moves = audits.map(({ detail }) => ({
-      urlOriginChanged: detail.urlOriginChanged,
-      tokenUrlOriginChanged: detail.tokenUrlOriginChanged,
-      sharedKeyDropped: detail.sharedKeyDropped,
-      clientSecretDropped: detail.clientSecretDropped,
-      endUserLoginsRemoved: detail.endUserLoginsRemoved,
-    }));
+    const fields = [
+      "urlOriginChanged",
+      "tokenUrlOriginChanged",
+      "sharedKeyDropped",
+      "clientSecretDropped",
+      "endUserLoginsRemoved",
+    ];
+    const moves = audits.map(({ detail }): Record<string, unknown> =>
+      Object.fromEntries(
+        fields.filter((field) => detail[field] !== undefined).map((field) => [field, detail[field]]),
+      ),
+    );
     expect(moves).toEqual([
       {},
       { tokenUrlOriginChanged: true, clientSecretDropped: true, endUserLoginsRemoved: 1 },
