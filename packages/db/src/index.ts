@@ -81150,6 +81150,10 @@ export type ClaimSessionWorkForAttemptInput = {
    * instructions layer and channel. Without it, a claim of a chat bound to an
    * agent revision is refused (SQLSTATE 55000, migration 1276). */
   agentInstructionsProtocol?: 1;
+  /** Internal worker-build declaration: this build pins organization agent
+   * versions (Instructions layer, tool server logins). Without it, a claim of
+   * a chat with `agent_version` is refused (SQLSTATE 55000, migration 1502). */
+  orgAgentProtocol?: 1;
   sessionId: string;
   workflowId: string;
   workflowRunId: string;
@@ -82454,6 +82458,7 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
   version: 1 | 2 | 3 | 4 | undefined,
   agentInstructionsVersion: 1 | undefined,
   register: () => Promise<T>,
+  orgAgentVersion?: 1,
 ): Promise<T> {
   const [prior] = await rawRows<{
     consent_protocol: string;
@@ -82461,6 +82466,7 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
     fresh_protocol: string;
     explicit_protocol: string;
     agent_instructions_protocol: string;
+    org_agent_protocol: string;
   }>(
     tx,
     sql`select
@@ -82468,7 +82474,8 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v2', true), '') as automatic_protocol,
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v3', true), '') as fresh_protocol,
       coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v4', true), '') as explicit_protocol,
-      coalesce(current_setting('opengeni.agent_instructions_protocol_v1', true), '') as agent_instructions_protocol`,
+      coalesce(current_setting('opengeni.agent_instructions_protocol_v1', true), '') as agent_instructions_protocol,
+      coalesce(current_setting('opengeni.org_agent_protocol_v1', true), '') as org_agent_protocol`,
   );
   // Each protocol version reconstructs every earlier warning kind as well.
   await tx.execute(
@@ -82477,7 +82484,8 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
       set_config('opengeni.filesystem_discontinuity_protocol_v2', ${version === 2 || version === 3 || version === 4 ? "2" : ""}, true),
       set_config('opengeni.filesystem_discontinuity_protocol_v3', ${version === 3 || version === 4 ? "3" : ""}, true),
       set_config('opengeni.filesystem_discontinuity_protocol_v4', ${version === 4 ? "4" : ""}, true),
-      set_config('opengeni.agent_instructions_protocol_v1', ${agentInstructionsVersion === 1 ? "1" : ""}, true)`,
+      set_config('opengeni.agent_instructions_protocol_v1', ${agentInstructionsVersion === 1 ? "1" : ""}, true),
+      set_config('opengeni.org_agent_protocol_v1', ${orgAgentVersion === 1 ? "1" : ""}, true)`,
   );
   let completed = false;
   try {
@@ -82491,7 +82499,8 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
         set_config('opengeni.filesystem_discontinuity_protocol_v2', ${prior?.automatic_protocol ?? ""}, true),
         set_config('opengeni.filesystem_discontinuity_protocol_v3', ${prior?.fresh_protocol ?? ""}, true),
         set_config('opengeni.filesystem_discontinuity_protocol_v4', ${prior?.explicit_protocol ?? ""}, true),
-        set_config('opengeni.agent_instructions_protocol_v1', ${prior?.agent_instructions_protocol ?? ""}, true)`,
+        set_config('opengeni.agent_instructions_protocol_v1', ${prior?.agent_instructions_protocol ?? ""}, true),
+        set_config('opengeni.org_agent_protocol_v1', ${prior?.org_agent_protocol ?? ""}, true)`,
     );
     if (completed) await restore;
     else await restore.catch(() => undefined); // Claim savepoint rolls back a rejected INSERT.
@@ -83504,6 +83513,7 @@ export async function claimSessionWorkForAttempt(
                 mcpApprovalPolicies,
                 connectorActionPolicies: connectorPolicyRows,
               }),
+            input.orgAgentProtocol,
           );
           // Freeze governance only after this exact attempt is durably claimed,
           // while the claim transaction still owns the session/turn/attempt

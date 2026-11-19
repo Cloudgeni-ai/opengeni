@@ -5581,6 +5581,14 @@ export const sessions = pgTable(
     // NULL is a legacy chat (instructions already in `instructions`): never
     // add the agent layer to it.
     agentPromptRevision: integer("agent_prompt_revision"),
+    // Migration 1502: the organization agent version this chat runs (with
+    // agentId), the version whose Instructions are in its system prompt (NULL:
+    // no agent layer, a worker without shared Instructions) and what the chat
+    // changed from the version ({setting: {agent, chat}}). NULL for every
+    // other chat.
+    agentVersion: integer("agent_version"),
+    agentPromptVersion: integer("agent_prompt_version"),
+    agentOverrides: jsonb("agent_overrides").$type<Record<string, { agent: unknown; chat: unknown }>>(),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
