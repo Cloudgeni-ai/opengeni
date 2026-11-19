@@ -21,10 +21,6 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
-ALTER TABLE site_data_usage
-  ADD COLUMN change_seq bigint NOT NULL DEFAULT 0,
-  ADD COLUMN live_until timestamptz;
-
 CREATE TABLE site_data_changes (
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
@@ -106,3 +102,9 @@ BEGIN
   END IF;
 END
 $$;
+
+-- Last, so the busy usage row's table lock is not held while the new
+-- tables' foreign keys wait for theirs.
+ALTER TABLE site_data_usage
+  ADD COLUMN change_seq bigint NOT NULL DEFAULT 0,
+  ADD COLUMN live_until timestamptz;

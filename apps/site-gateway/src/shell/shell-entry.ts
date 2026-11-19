@@ -148,6 +148,8 @@ const timings: Timing[] = [];
 const MAX_PENDING_TIMINGS = 50;
 const TIMING_FLUSH_MS = 30_000;
 let firstDataSeen = false;
+/** The live connection, started when the Site first follows data changes. */
+let live: { start(): void } | null = null;
 let timingTimer: ReturnType<typeof setTimeout> | null = null;
 
 function measure(timing: Timing): void {
@@ -284,29 +286,50 @@ const tools: SiteBridgeToolHandlers = {
   fetch: timedSiteHttp,
   siteData: true,
   dataChanges: true,
+  // Only Sites that follow data changes open the live connection.
+  watchDataChanges: () => live?.start(),
 };
 
 /**
- * One live connection for data hints. Reconnects with backoff (also when the
- * gateway has no live updates: the Site then just never hears a hint), and
- * before its admission ends. After a reconnect that missed changes, the Site
- * hears "anything may have changed".
+ * One live connection for data hints, opened once the Site follows data
+ * changes (`site.data.onChange`; pages that never do cost nothing) and
+ * closed while the page is hidden. Reconnects with backoff (also when the gateway has no live
+ * updates: the Site then just never hears a hint), and before its admission
+ * ends. After a reconnect that missed changes, the Site hears "anything may
+ * have changed".
  */
-function startLive(notify: (change: OpenGeniSiteDataChange) => void): void {
-  if (typeof WebSocket !== "function") return;
+function createLive(notify: (change: OpenGeniSiteDataChange) => void): { start(): void } {
+  let wanted = false;
+  let socket: WebSocket | null = null;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  let hiding: ReturnType<typeof setTimeout> | null = null;
   let lastSeq: number | null = null;
   let failures = 0;
+  const visible = () => document.visibilityState !== "hidden";
+  const later = (ms: number) => {
+    if (retry) clearTimeout(retry);
+    retry = setTimeout(
+      () => {
+        retry = null;
+        open();
+      },
+      ms * (0.75 + Math.random() * 0.5),
+    );
+  };
   const open = () => {
+    if (!wanted || socket || !visible() || typeof WebSocket !== "function") return;
     const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${SITE_GATEWAY_LIVE_PATH}`;
-    let socket: WebSocket;
+    let current: WebSocket;
     try {
-      socket = new WebSocket(url);
+      current = new WebSocket(url);
     } catch {
       return;
     }
+    socket = current;
     let admitted = false;
+    let planned = false;
     let refresh: ReturnType<typeof setTimeout> | null = null;
-    socket.addEventListener("message", (event) => {
+    current.addEventListener("message", (event) => {
       let hint: SiteLiveHint;
       try {
         hint = JSON.parse(String(event.data)) as SiteLiveHint;
@@ -317,25 +340,61 @@ function startLive(notify: (change: OpenGeniSiteDataChange) => void): void {
         admitted = true;
         failures = 0;
         if (lastSeq !== null && hint.seq > lastSeq) notify({ collections: null, seq: hint.seq });
-        lastSeq = hint.seq;
+        lastSeq = Math.max(lastSeq ?? 0, hint.seq);
         // Reconnect shortly before the admission ends.
         if (refresh) clearTimeout(refresh);
-        refresh = setTimeout(() => socket.close(1000), Math.max(30, hint.ttlSeconds - 30) * 1000);
+        refresh = setTimeout(
+          () => {
+            planned = true;
+            current.close(1000);
+          },
+          Math.max(30, hint.ttlSeconds - 30) * 1000,
+        );
       } else if (hint.type === "data") {
-        if (lastSeq !== null && hint.seq <= lastSeq) return;
-        lastSeq = hint.seq;
+        // Notices can arrive out of order: always pass them on.
+        lastSeq = Math.max(lastSeq ?? 0, hint.seq);
         notify({ collections: hint.collections, seq: hint.seq });
       }
     });
-    socket.addEventListener("close", () => {
+    current.addEventListener("close", () => {
       if (refresh) clearTimeout(refresh);
+      if (socket === current) socket = null;
+      if (!wanted || !visible()) return;
       if (!admitted) failures += 1;
-      // A refused or missing live route backs off up to 10 minutes.
-      const wait = admitted ? 1_000 : Math.min(600_000, 5_000 * 2 ** Math.min(failures, 7));
-      setTimeout(open, wait * (0.75 + Math.random() * 0.5));
+      // A planned refresh comes back at once; a dropped connection (a
+      // gateway deploy drops them all) spreads its return over 30 seconds; a
+      // refused or missing live route backs off up to 10 minutes.
+      later(
+        planned
+          ? 1_000
+          : admitted
+            ? 1_000 + Math.random() * 29_000
+            : Math.min(600_000, 5_000 * 2 ** Math.min(failures, 7)),
+      );
     });
   };
-  open();
+  document.addEventListener("visibilitychange", () => {
+    if (visible()) {
+      if (hiding) clearTimeout(hiding);
+      hiding = null;
+      if (!retry) open();
+      return;
+    }
+    // A briefly hidden tab keeps its connection; a page left in the background lets it go.
+    hiding ??= setTimeout(() => {
+      hiding = null;
+      const current = socket;
+      socket = null;
+      current?.close(1000);
+    }, 30_000);
+  });
+  return {
+    start: () => {
+      if (wanted) return;
+      wanted = true;
+      open();
+    },
+  };
 }
 
 const viewerHandlers: SiteBridgeViewerHandlers = {
@@ -439,5 +498,5 @@ if (frame) {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flushTimings();
   });
-  startLive((change) => host.notifyDataChanged(change));
+  live = createLive((change) => host.notifyDataChanged(change));
 }

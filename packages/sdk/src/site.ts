@@ -101,6 +101,12 @@ export const OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD = "auth.signIn" as const;
 export const OPENGENI_SITE_BRIDGE_LOCATION_METHOD = "location" as const;
 /** Bridge request method that moves the Site to another of its own addresses (advertised by `location: 1`). */
 export const OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD = "location.navigate" as const;
+/**
+ * Bridge request method a Site sends when it first follows data changes
+ * (advertised by `dataChanges: 1`), so the host keeps a live connection only
+ * for Sites that listen.
+ */
+export const OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD = "data.watch" as const;
 /** Host-to-Site notification on a connected port, such as a location change. */
 export const OPENGENI_SITE_BRIDGE_EVENT = "opengeni.site.event" as const;
 
@@ -289,6 +295,7 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: typeof OPENGENI_SITE_BRIDGE_VIEWER_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_LOCATION_METHOD }
+  | { method: typeof OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD }
   | {
       method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
       payload: { to: string; replace?: boolean };
@@ -330,7 +337,8 @@ export type OpenGeniSiteBridgeResponseMessage = {
         | ToolGatewaySiteReadinessResponse
         | OpenGeniSiteViewer
         | OpenGeniSiteSignInResult
-        | OpenGeniSiteLocationValue;
+        | OpenGeniSiteLocationValue
+        | { watching: boolean };
     }
   | {
       ok: false;
@@ -822,7 +830,8 @@ export function isOpenGeniSiteBridgeRequestMessage(
     value.method === "declarations" ||
     value.method === OPENGENI_SITE_BRIDGE_VIEWER_METHOD ||
     value.method === OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD ||
-    value.method === OPENGENI_SITE_BRIDGE_LOCATION_METHOD
+    value.method === OPENGENI_SITE_BRIDGE_LOCATION_METHOD ||
+    value.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD
   )
     return true;
   if (value.method === OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD)
@@ -924,6 +933,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
   private locationSupported = false;
   private toolReadiness = false;
   private dataChanges = false;
+  private dataWatchSent = false;
   private readonly locationListeners = new Set<(location: OpenGeniSiteLocationValue) => void>();
   private readonly readinessListeners = new Set<() => void>();
   private readonly dataChangeListeners = new Set<(change: OpenGeniSiteDataChange) => void>();
@@ -1054,12 +1064,25 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
 
   subscribeDataChanges(listener: (change: OpenGeniSiteDataChange) => void): () => void {
     this.dataChangeListeners.add(listener);
-    // Connect so the host's events reach this client (see subscribeLocation).
+    // Connect so the host's events reach this client (see subscribeLocation),
+    // and ask a host with data hints to start them. Best effort.
     const attempt = (retries: number): void => {
-      this.connect().catch(() => {
-        if (retries > 0 && !this.closed && this.dataChangeListeners.size > 0)
-          setTimeout(() => attempt(retries - 1), 1_000);
-      });
+      this.connect()
+        .then(() => {
+          if (this.dataChanges && !this.dataWatchSent) {
+            this.dataWatchSent = true;
+            this.request(
+              { method: OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD },
+              { timeoutMs: 30_000 },
+            ).catch(() => {
+              this.dataWatchSent = false;
+            });
+          }
+        })
+        .catch(() => {
+          if (retries > 0 && !this.closed && this.dataChangeListeners.size > 0)
+            setTimeout(() => attempt(retries - 1), 1_000);
+        });
     };
     attempt(2);
     return () => {
@@ -1159,6 +1182,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
       | { method: typeof OPENGENI_SITE_BRIDGE_VIEWER_METHOD }
       | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
       | { method: typeof OPENGENI_SITE_BRIDGE_LOCATION_METHOD }
+      | { method: typeof OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD }
       | {
           method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
           payload: { to: string; replace?: boolean };

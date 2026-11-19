@@ -834,15 +834,14 @@ export const SitePlatformTimingReport = /* @__PURE__ */ defineSchema(() =>
           op: z.string().max(64),
           outcome: z.enum(SITE_TIMING_OUTCOMES),
           samples: z.array(z.number().min(0).max(600)).max(100),
+          /** How many measurements the samples were drawn from (at least their number). */
+          seen: z.number().int().min(0).max(1_000_000_000).optional(),
         }),
       )
       .max(300),
   }),
 );
 export type SitePlatformTimingReport = z.infer<typeof SitePlatformTimingReport>;
-
-/** Histogram bucket upper bounds (seconds) for Site speed measurements. */
-export const SITE_TIMING_BUCKETS = [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30] as const;
 
 /** The API prefix the gateway forwards `/_og/api/*` to. */
 export const SITE_RUNTIME_API_PREFIX = "/v1/site-runtime";

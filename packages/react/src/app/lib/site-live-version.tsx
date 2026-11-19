@@ -288,19 +288,30 @@ function followSiteLive(
     failures += 1;
     later(Math.min(600_000, 5_000 * 2 ** Math.min(failures, 7)));
   };
+  const visible = () => document.visibilityState !== "hidden";
+  let opening = false;
+  let unsupported = false;
+  let socketFailures = 0;
   const open = async () => {
-    if (signal.aborted) return;
+    if (signal.aborted || opening || socket || !visible()) return;
+    opening = true;
     let ticket: WorkspaceArtifactLiveTicketResponse;
     try {
       ticket = await createTicket.call(client, workspaceId, siteId, { signal });
     } catch (error) {
       // No live hints here (or the Site is gone): timed checks carry on.
       const status = errorStatus(error);
-      if (signal.aborted || status === 404 || status === 403 || status === 405) return;
+      if (signal.aborted) return;
+      if (status === 404 || status === 403 || status === 405) {
+        unsupported = true;
+        return;
+      }
       retryLater();
       return;
+    } finally {
+      opening = false;
     }
-    if (signal.aborted) return;
+    if (signal.aborted || !visible()) return;
     let current: WebSocket;
     try {
       current = new WebSocket(ticket.url);
@@ -310,6 +321,7 @@ function followSiteLive(
     }
     socket = current;
     let admitted = false;
+    let planned = false;
     let refresh: number | null = null;
     current.addEventListener("message", (event) => {
       let hint: { type?: unknown; seq?: unknown; collections?: unknown; ttlSeconds?: unknown };
@@ -322,19 +334,26 @@ function followSiteLive(
       if (hint.type === "hello") {
         admitted = true;
         failures = 0;
+        socketFailures = 0;
         handlers.up(true);
         if (lastSeq !== null && seq !== null && seq > lastSeq) {
           handlers.data({ collections: null, seq });
           // A version may also have gone live while disconnected.
           handlers.version();
         }
-        if (seq !== null) lastSeq = seq;
+        if (seq !== null) lastSeq = Math.max(lastSeq ?? 0, seq);
         const ttl = typeof hint.ttlSeconds === "number" ? hint.ttlSeconds : 900;
         if (refresh !== null) window.clearTimeout(refresh);
-        refresh = window.setTimeout(() => current.close(1000), Math.max(30, ttl - 30) * 1000);
+        refresh = window.setTimeout(
+          () => {
+            planned = true;
+            current.close(1000);
+          },
+          Math.max(30, ttl - 30) * 1000,
+        );
       } else if (hint.type === "data") {
-        if (seq !== null && lastSeq !== null && seq <= lastSeq) return;
-        if (seq !== null) lastSeq = seq;
+        // Notices can arrive out of order: always pass them on.
+        if (seq !== null) lastSeq = Math.max(lastSeq ?? 0, seq);
         const collections = Array.isArray(hint.collections)
           ? hint.collections.filter((name): name is string => typeof name === "string")
           : null;
@@ -348,12 +367,40 @@ function followSiteLive(
       if (socket === current) socket = null;
       if (signal.aborted) return;
       handlers.up(false);
-      if (admitted) later(1_000);
-      else retryLater();
+      if (!visible()) return;
+      // A planned refresh comes back at once; a dropped connection (a gateway
+      // deploy drops them all) spreads its return over 30 seconds.
+      if (planned) later(1_000);
+      else if (admitted) later(1_000 + Math.random() * 29_000);
+      else if (++socketFailures >= 5) {
+        // The live route refuses every connection here (for example a
+        // gateway without live hints): stop asking for tickets.
+        unsupported = true;
+      } else retryLater();
     });
   };
+  // A page left in the background lets the connection go; coming back
+  // reconnects (and its hello says whether anything was missed).
+  let hiding: number | null = null;
+  const onVisibility = () => {
+    if (visible()) {
+      if (hiding !== null) window.clearTimeout(hiding);
+      hiding = null;
+      if (!socket && timer === null && !opening && !unsupported) void open();
+      return;
+    }
+    hiding ??= window.setTimeout(() => {
+      hiding = null;
+      const current = socket;
+      socket = null;
+      current?.close(1000);
+    }, 30_000);
+  };
+  document.addEventListener("visibilitychange", onVisibility);
   void open();
   return () => {
+    document.removeEventListener("visibilitychange", onVisibility);
+    if (hiding !== null) window.clearTimeout(hiding);
     if (timer !== null) window.clearTimeout(timer);
     timer = null;
     const current = socket;

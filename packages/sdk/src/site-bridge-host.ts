@@ -27,6 +27,7 @@ import {
   OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD,
   OPENGENI_SITE_BRIDGE_VERSION,
   OPENGENI_SITE_BRIDGE_VIEWER_METHOD,
+  OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD,
   isOpenGeniSiteBridgeCancelMessage,
   isOpenGeniSiteBridgeConnectMessage,
   isOpenGeniSiteBridgeRequestMessage,
@@ -108,6 +109,11 @@ export type SiteBridgeToolHandlers = {
   dataChanges?: boolean;
   /** Call `listener` with each data hint; returns an unsubscribe. Implies `dataChanges`. */
   subscribeDataChanges?: (listener: (change: OpenGeniSiteDataChange) => void) => () => void;
+  /**
+   * The Site started following data changes (`site.data.onChange`): a host
+   * can wait for this before opening its live connection.
+   */
+  watchDataChanges?: () => void;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -154,7 +160,8 @@ export type SiteBridgeRequestValue =
   | ToolGatewaySiteReadinessResponse
   | SiteViewer
   | OpenGeniSiteSignInResult
-  | OpenGeniSiteLocationValue;
+  | OpenGeniSiteLocationValue
+  | { watching: boolean };
 
 /** Capabilities the host advertises when a Site connects; Sites never ask for more. */
 export function siteBridgeReadyMessage(
@@ -544,6 +551,10 @@ export async function handleSiteBridgeRequest(
     return await location.navigate(to, { replace: message.payload.replace === true });
   }
   if (!bridge) throw new Error("Site tool bridge is unavailable");
+  if (message.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD) {
+    bridge.watchDataChanges?.();
+    return { watching: Boolean(bridge.dataChanges || bridge.subscribeDataChanges) };
+  }
   if (message.method === "resolve") {
     if (!bridge.resolve) throw new Error("Targeted Site tools are unavailable");
     return await bridge.resolve({ target: message.payload.target }, { signal });

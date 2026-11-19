@@ -80,8 +80,10 @@ Filters on `$createdAt`, `$updatedAt` and data fields accept the server's
 clock as a value: `$now`, optionally offset (`$now-5m`, `$now+1h`, units `ms`,
 `s`, `m`, `h`, `d`). On data fields it compares as an ISO-8601 UTC string with
 milliseconds (`2026-11-19T12:00:00.000Z`), so store lease times in that form.
-That makes lease expiry independent of viewers' clocks; the record `version`
-(with `expectedVersion`) is the fencing token for whoever holds a claim.
+That makes the expiry check use the server's clock; the `leaseUntil` a page
+writes with `patch` still comes from its own clock, so keep leases well above
+any likely clock skew. The record `version` (with `expectedVersion`) is the
+fencing token for whoever holds a claim.
 
 ## Change events
 
@@ -98,17 +100,21 @@ is the one column update; rows past the newest 200 per Site are pruned every
 20 changes.
 
 After commit the API sends a signed notice to the gateway's `SiteLive`
-Durable Object for the Site (best effort, at most 3 seconds, never failing
-the write). Open pages hold a WebSocket to it (`/_og/live` on the Site host,
+Durable Object for the Site (best effort, gathered per Site for 50 ms, at
+most 3 seconds, never failing the write). Open pages hold a WebSocket to it (`/_og/live` on the Site host,
 admitted by `POST /v1/site-runtime/live/admit` with the viewer's normal
 access; the console uses a 60-second ticket from `POST
 /v1/workspaces/:workspaceId/published-artifacts/:artifactId/live`). Each
 connection hears only `{collections, seq}` for collections it may read, and
 new versions; never record data, so `per_viewer` and guest rules hold: pages
 read again through their ordinary authorized calls. Admission refreshes
-`live_until` (15 minutes, extended at half-life) and connections reconnect
-before it lapses. A reconnect that missed changes hears "anything may have
-changed". Without the `SITE_LIVE` gateway binding the live routes answer 404
+`live_until` (15 minutes, extended at half-life), and a connection lasts no
+longer than it, so connections reconnect before it lapses. A reconnect that
+missed changes, or a connection admitted just before a change, hears
+"anything may have changed". The published Site's page opens its connection
+with its first data call and lets it go while hidden. Hints still show when
+others write (activity timing, never content); readable collections are fixed
+per connection until it reconnects. Without the `SITE_LIVE` gateway binding the live routes answer 404
 and pages keep their timed checks.
 
 Not covered: Site SQL writes (the Durable Object commit is not atomic with

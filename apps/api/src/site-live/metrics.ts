@@ -22,6 +22,11 @@ export const SITE_CLIENT_TIMING_METRIC = {
   help: "Speed measured in published Site pages and by the Site gateway, reported in sampled batches: app_load (shell start to app ready), first_data (first Site Data or SQL answer), bridge (one bridge call, by operation), gateway (gateway handling, by route).",
 } as const;
 
+export const SITE_CLIENT_TIMING_EVENTS_METRIC = {
+  name: "opengeni_site_client_timing_events_total",
+  help: "Measurements behind opengeni_site_client_timing_seconds, before sampling (the histogram keeps at most 100 per series per gateway report): use this for rates.",
+} as const;
+
 export const SITE_DB_OPERATION_METRIC = {
   name: "opengeni_site_db_operation_duration_seconds",
   help: "Round trip from the API to a Site's SQL Durable Object through the gateway, by operation and outcome.",
@@ -98,10 +103,22 @@ type Histogram = (input: {
   buckets?: number[];
 }) => void;
 
-/** Record a gateway timing report. Returns how many samples were recorded. */
+type Counter = (input: {
+  name: string;
+  help?: string;
+  labels?: Record<string, string>;
+  amount?: number;
+}) => void;
+
+/**
+ * Record a gateway timing report: its samples in the histogram (for
+ * percentiles) and how many measurements they stand for in a counter (for
+ * rates). Returns how many samples were recorded.
+ */
 export function recordSiteTimingReport(
   observe: Histogram,
   report: SitePlatformTimingReport,
+  count?: Counter,
 ): number {
   let recorded = 0;
   for (const series of report.series) {
@@ -113,10 +130,16 @@ export function recordSiteTimingReport(
         : series.kind === "bridge"
           ? siteOpLabel(series.op)
           : "page";
+    const labels = { kind: series.kind, op, outcome: series.outcome };
+    count?.({
+      ...SITE_CLIENT_TIMING_EVENTS_METRIC,
+      labels,
+      amount: Math.max(series.samples.length, series.seen ?? 0),
+    });
     for (const value of series.samples) {
       observe({
         ...SITE_CLIENT_TIMING_METRIC,
-        labels: { kind: series.kind, op, outcome: series.outcome },
+        labels,
         value,
         buckets: SITE_TIMING_BUCKETS,
       });

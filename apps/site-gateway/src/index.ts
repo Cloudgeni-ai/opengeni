@@ -291,7 +291,7 @@ function measureGateway(
   try {
     const config = gatewayConfig(env);
     const route = gatewayRoute(new URL(request.url).pathname);
-    // The beacon and live routes measure the page, not the gateway.
+    // The beacon measures the page, not the gateway.
     if (route === "timing") return;
     recordTiming(
       config,

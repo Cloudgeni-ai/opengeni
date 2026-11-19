@@ -284,7 +284,8 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
       collections: watched.collections,
       seq: watched.seq,
       expiresAt,
-      ttlSeconds: watched.ttlSeconds,
+      // The ticket may be used up to its own lifetime later: never outlive the watch.
+      ttlSeconds: Math.max(30, watched.ttlSeconds - SITE_LIVE_TICKET_SECONDS),
     });
     const response: SiteLiveTicketResponse = {
       url: `${url}?ticket=${encodeURIComponent(ticket)}`,

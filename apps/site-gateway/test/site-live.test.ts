@@ -145,6 +145,24 @@ describe("the SiteLive object", () => {
     expect(sockets[0]!.closed).toBe(4001);
   });
 
+  test("a connection admitted before a change it missed hears that something changed", async () => {
+    await connect(null);
+    await notify({ type: "data", seq: 5, collections: ["todos"] });
+    // Admitted at change 2, connected after change 5 was passed on.
+    await connect(["todos"]);
+    expect(sockets[1]!.sent).toEqual([
+      { type: "hello", seq: 2, collections: ["todos"], ttlSeconds: 900 },
+      { type: "data", seq: 5, collections: null },
+    ]);
+  });
+
+  test("expired connections give their place up when a new one arrives", async () => {
+    await connect(null, 0);
+    await connect(null);
+    expect(sockets[0]!.closed).toBe(4001);
+    expect(sockets[1]!.closed).toBeNull();
+  });
+
   test("refuses an invalid notice", async () => {
     const response = await live.fetch(
       new Request("https://site-live.internal/notify", { method: "POST", body: "{}" }),

@@ -133,6 +133,7 @@ import {
   siteRuntimeOpLabel,
   statusClass,
 } from "../site-live/metrics";
+import { siteLiveConfigured } from "../site-live/service";
 import type { PublishedSiteDataViewer } from "../site-data/service";
 import {
   sameSha256Hex,
@@ -888,7 +889,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw invalid("Platform reports are signed for the Sites domain");
     const input = parseJson(request.body, SitePlatformTimingReport);
     const recorded = deps.observability
-      ? recordSiteTimingReport((metric) => deps.observability!.observeHistogram(metric), input)
+      ? recordSiteTimingReport(
+          (metric) => deps.observability!.observeHistogram(metric),
+          input,
+          (metric) => deps.observability!.incrementCounter(metric),
+        )
       : 0;
     return request.context.json({ recorded });
   };
@@ -901,6 +906,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
    * collections) still hears about new versions.
    */
   const liveAdmit = async (request: RuntimeRequest): Promise<Response> => {
+    // Off here: the page keeps its own checks and never hears a hint.
+    if (!siteLiveConfigured(deps.settings))
+      throw sitePublishingError(404, "not_found", "site_live_disabled", "Live updates are off");
     const { host, viewer } = await viewing(request);
     let seq = 0;
     let collections: string[] = [];

@@ -238,10 +238,13 @@ test("the live connection checks on new versions, passes data hints on, and slow
     expect(state.checks).toBe(0);
     await actRun(() => jest.advanceTimersByTime(SITE_VERSION_LIVE_POLL_MS));
     expect(state.checks).toBe(1);
-    // A data hint reaches the frame; an old one is dropped.
+    // Data hints reach the frame, also out of order.
+    await actRun(() => socket.send({ type: "data", seq: 5, collections: ["notes"] }));
     await actRun(() => socket.send({ type: "data", seq: 4, collections: ["todos"] }));
-    await actRun(() => socket.send({ type: "data", seq: 4, collections: ["todos"] }));
-    expect(changes).toEqual([{ collections: ["todos"], seq: 4 }]);
+    expect(changes).toEqual([
+      { collections: ["notes"], seq: 5 },
+      { collections: ["todos"], seq: 4 },
+    ]);
     // A new version: checked at once.
     state.revision = 5;
     await actRun(() => socket.send({ type: "version", versionId: "version-5" }));
@@ -249,7 +252,7 @@ test("the live connection checks on new versions, passes data hints on, and slow
     expect(hook.result.current.detail?.artifact.currentVersion?.id).toBe("version-5");
     // A dropped connection comes back; changes missed meanwhile say "anything".
     await actRun(() => socket.close());
-    await actRun(() => jest.advanceTimersByTime(2_000));
+    await actRun(() => jest.advanceTimersByTime(40_000));
     expect(tickets).toBe(2);
     await actRun(() =>
       FakeSocket.sockets[1]!.send({
@@ -260,7 +263,17 @@ test("the live connection checks on new versions, passes data hints on, and slow
       }),
     );
     expect(changes.at(-1)).toEqual({ collections: null, seq: 7 });
+    // A page left in the background lets the connection go, and reconnects when shown.
+    await actRun(() => setVisibility("hidden"));
+    await actRun(() => jest.advanceTimersByTime(30_000));
+    expect(FakeSocket.sockets[1]!.closed).toBe(true);
+    await actRun(() => jest.advanceTimersByTime(SITE_VERSION_LIVE_POLL_MS));
+    expect(tickets).toBe(2);
+    await actRun(() => setVisibility("visible"));
+    await actRun(() => jest.advanceTimersByTime(0));
+    expect(tickets).toBe(3);
   } finally {
+    setVisibility("visible");
     stop();
     await hook.unmount();
     globalThis.WebSocket = original;

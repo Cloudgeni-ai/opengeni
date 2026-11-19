@@ -95,8 +95,11 @@ export function recordTiming(
   if (windowStartedAt === null) {
     windowStartedAt = now;
     ctx.waitUntil(delay(config.platformReportIntervalMs).then(() => flushTimings(config)));
-  } else if (now - windowStartedAt >= config.platformReportIntervalMs)
+  } else if (now - windowStartedAt >= config.platformReportIntervalMs) {
+    // One flush per window, however many requests arrive while it runs.
+    windowStartedAt = now;
     ctx.waitUntil(flushTimings(config));
+  }
 }
 
 /** Send what is waiting. Never throws; a failed report is dropped. */
@@ -110,11 +113,12 @@ export function flushTimings(
     }
     const report: SitePlatformTimingReport = {
       v: 1,
-      series: [...series.values()].map(({ kind, op, outcome, samples }) => ({
+      series: [...series.values()].map(({ kind, op, outcome, samples, seen }) => ({
         kind,
         op,
         outcome,
         samples,
+        seen,
       })),
     };
     series.clear();
@@ -131,6 +135,7 @@ export function flushTimings(
             headers: new Headers({ "content-type": "application/json" }),
           },
         ),
+        { signal: AbortSignal.timeout(10_000) },
       );
       await response.body?.cancel();
     } catch {

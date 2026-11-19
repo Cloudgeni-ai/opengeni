@@ -25,7 +25,11 @@ import { signGatewayInternalRequest, siteSqlGatewayConfig } from "../site-sql/ga
 
 export type SiteLiveSettings = Pick<
   Settings,
-  "sitesGatewayInternalOrigin" | "sitesGatewaySecret" | "sitesSqlTimeoutMs" | "sitesDomain"
+  | "sitesGatewayInternalOrigin"
+  | "sitesGatewaySecret"
+  | "sitesSqlTimeoutMs"
+  | "sitesDomain"
+  | "sitesLiveEnabled"
 > &
   Partial<Pick<Settings, "sitesCloudflareStorageEnabled">>;
 
@@ -34,9 +38,11 @@ const NOTICE_TIMEOUT_MS = 3_000;
 
 export type SiteLiveFetch = (input: string, init: RequestInit) => Promise<Response>;
 
-/** Whether this deployment can send live hints (the gateway's internal route is configured). */
+/** Whether this deployment sends live hints: turned on, with the gateway's internal route configured. */
 export function siteLiveConfigured(settings: SiteLiveSettings): boolean {
-  return Boolean(settings.sitesGatewayInternalOrigin && settings.sitesGatewaySecret);
+  return Boolean(
+    settings.sitesLiveEnabled && settings.sitesGatewayInternalOrigin && settings.sitesGatewaySecret,
+  );
 }
 
 /** Send one notice to a Site's live connections. Never throws; resolves when sent or given up. */
@@ -87,14 +93,34 @@ export function siteLiveChangeListener(
   fetchImpl: SiteLiveFetch = fetch,
 ): SiteDataChangeListener | undefined {
   if (!siteLiveConfigured(settings)) return undefined;
-  return (change: SiteDataChange) =>
-    notifySiteLive(
-      settings,
-      change.siteId,
-      { type: "data", seq: change.seq, collections: change.collections.slice(0, 200) },
-      fetchImpl,
-    );
+  // Changes to one Site within a short window go out as one notice, so a
+  // burst of writes costs one request to the gateway.
+  const pending = new Map<string, { seq: number; collections: Set<string> }>();
+  return (change: SiteDataChange) => {
+    const waiting = pending.get(change.siteId);
+    if (waiting) {
+      waiting.seq = Math.max(waiting.seq, change.seq);
+      for (const name of change.collections) waiting.collections.add(name);
+      return;
+    }
+    pending.set(change.siteId, { seq: change.seq, collections: new Set(change.collections) });
+    const timer = setTimeout(() => {
+      const ready = pending.get(change.siteId);
+      pending.delete(change.siteId);
+      if (!ready) return;
+      notifySiteLive(
+        settings,
+        change.siteId,
+        { type: "data", seq: ready.seq, collections: [...ready.collections].slice(0, 200) },
+        fetchImpl,
+      );
+    }, SITE_LIVE_COALESCE_MS);
+    (timer as { unref?: () => void }).unref?.();
+  };
 }
+
+/** How long changes to one Site gather before their notice goes out. */
+export const SITE_LIVE_COALESCE_MS = 50;
 
 // ---------------------------------------------------------------------------
 // Console tickets

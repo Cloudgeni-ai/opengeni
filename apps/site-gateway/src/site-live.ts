@@ -283,7 +283,11 @@ export type SiteLiveState = {
   acceptWebSocket(socket: LiveSocket, tags?: string[]): void;
   getWebSockets(tag?: string): LiveSocket[];
   setWebSocketAutoResponse?(pair: unknown): void;
+  /** SQLite-backed objects' synchronous key-value storage (survives hibernation). */
+  storage?: { kv?: { get(key: string): unknown; put(key: string, value: unknown): void } };
 };
+
+const LAST_SEQ_KEY = "lastSeq";
 
 /** What a connection was admitted for, kept with the socket across hibernation. */
 type Attachment = { c: string[] | null; x: number };
@@ -308,6 +312,14 @@ export function visibleCollections(
   return visible.length > 0 ? visible : null;
 }
 
+function closeQuietly(socket: LiveSocket, code: number, reason: string): void {
+  try {
+    socket.close(code, reason);
+  } catch {
+    // already closed
+  }
+}
+
 function send(socket: LiveSocket, hint: SiteLiveHint): void {
   try {
     socket.send(JSON.stringify(hint));
@@ -317,6 +329,9 @@ function send(socket: LiveSocket, hint: SiteLiveHint): void {
 }
 
 export class SiteLive {
+  /** The highest change number passed on, so a connection admitted just before a change still hears it. */
+  private lastSeq: number | null = null;
+
   constructor(
     private readonly state: SiteLiveState,
     _env: unknown,
@@ -354,7 +369,15 @@ export class SiteLive {
     } catch {
       return new Response("Bad request", { status: 400 });
     }
-    if (this.state.getWebSockets().length >= SITE_LIVE_MAX_CONNECTIONS)
+    // Expired connections give their place up before the cap is checked.
+    const now = Date.now();
+    let open = 0;
+    for (const socket of this.state.getWebSockets()) {
+      const held = attachment(socket);
+      if (!held || held.x <= now) closeQuietly(socket, 4001, "reauth");
+      else open += 1;
+    }
+    if (open >= SITE_LIVE_MAX_CONNECTIONS)
       return Response.json(
         {
           error: { code: "site_live_busy", message: "Too many live connections", retryable: true },
@@ -376,22 +399,46 @@ export class SiteLive {
       collections: admitted.collections,
       ttlSeconds: admitted.ttlSeconds,
     });
+    // A change committed between the admission and now was passed on before
+    // this connection existed: tell it something may have changed.
+    const last = this.readLastSeq();
+    if (last !== null && last > admitted.seq)
+      send(server, { type: "data", seq: last, collections: null });
     return new Response(null, { status: 101, webSocket: client } as ResponseInit);
+  }
+
+  private readLastSeq(): number | null {
+    if (this.lastSeq !== null) return this.lastSeq;
+    try {
+      const stored = this.state.storage?.kv?.get(LAST_SEQ_KEY);
+      if (typeof stored === "number") this.lastSeq = stored;
+    } catch {
+      // Without storage, memory is enough while the object is awake.
+    }
+    return this.lastSeq;
+  }
+
+  private rememberSeq(seq: number): void {
+    const last = this.readLastSeq();
+    if (last !== null && last >= seq) return;
+    this.lastSeq = seq;
+    try {
+      this.state.storage?.kv?.put(LAST_SEQ_KEY, seq);
+    } catch {
+      // Best effort.
+    }
   }
 
   /** Pass a notice on to every connection that may hear it. Returns how many did. */
   private broadcast(notice: SiteLiveNotice): number {
     const now = Date.now();
+    if (notice.type === "data") this.rememberSeq(notice.seq);
     let delivered = 0;
     for (const socket of this.state.getWebSockets()) {
       const admitted = attachment(socket);
       if (!admitted || admitted.x <= now) {
         // The admission ran out: the page reconnects and is checked again.
-        try {
-          socket.close(4001, "reauth");
-        } catch {
-          // already closed
-        }
+        closeQuietly(socket, 4001, "reauth");
         continue;
       }
       if (notice.type === "version") {

@@ -205,7 +205,7 @@ describe("Site data hints through the bridge host", () => {
     };
     expect(siteBridgeReadyMessage(live)).toMatchObject({ dataChanges: 1 });
     expect(
-      siteBridgeReadyMessage({ ...tools, fetch: live.fetch, siteData: true }),
+      siteBridgeReadyMessage({ ...tools, fetch: live.fetch!, siteData: true }),
     ).not.toHaveProperty("dataChanges");
     const { host, site } = connect({ tools: () => live });
     try {

@@ -82,8 +82,8 @@ viewer returns the original record for a day.
 To claim work (a ticket, a job) across viewers and schedules, write a lease
 with the server's clock: list with `{ field: "leaseUntil", op: "lt", value:
 "$now" }`, then `patch` with `{ expectedVersion }` and a new `leaseUntil`
-(an ISO time; `"$now+5m"` style values work in filters, with `s`, `m`, `h`
-or `d`). The record's `version` is the fencing token: a holder whose lease
+(an ISO time from the page's own clock, so keep leases minutes long;
+`"$now+5m"` style values work in filters, with `s`, `m`, `h` or `d`). The record's `version` is the fencing token: a holder whose lease
 lapsed fails its next `expectedVersion` write with `conflict` and must stop.
 
 Also available: `get` (by id or key; resolves null when missing), `put` (create

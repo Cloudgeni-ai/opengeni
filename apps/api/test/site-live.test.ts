@@ -88,6 +88,7 @@ describe("live notices", () => {
     sitesGatewaySecret: SECRET,
     sitesSqlTimeoutMs: 5_000,
     sitesDomain: "opengeni.site",
+    sitesLiveEnabled: true,
   };
 
   test("are signed requests to the Site's internal live route", async () => {
@@ -107,6 +108,22 @@ describe("live notices", () => {
     expect([...sent[0]!.headers.keys()].some((name) => name.includes("signature"))).toBe(true);
   });
 
+  test("are off unless turned on", async () => {
+    let called = false;
+    expect(
+      await sendSiteLiveNotice(
+        { ...settings, sitesLiveEnabled: false },
+        SITE,
+        { type: "version", versionId: null },
+        async () => {
+          called = true;
+          return new Response("{}");
+        },
+      ),
+    ).toBe(false);
+    expect(called).toBe(false);
+  });
+
   test("never throw: a failing gateway or a missing configuration is just false", async () => {
     expect(
       await sendSiteLiveNotice(settings, SITE, { type: "version", versionId: null }, async () => {
@@ -119,5 +136,31 @@ describe("live notices", () => {
         versionId: null,
       }),
     ).toBe(false);
+  });
+});
+
+describe("the change listener", () => {
+  test("gathers a burst of changes to one Site into one notice", async () => {
+    const { siteLiveChangeListener, SITE_LIVE_COALESCE_MS } =
+      await import("../src/site-live/service");
+    const sent: unknown[] = [];
+    const listener = siteLiveChangeListener(
+      {
+        sitesGatewayInternalOrigin: "https://gateway.test",
+        sitesGatewaySecret: SECRET,
+        sitesSqlTimeoutMs: 5_000,
+        sitesDomain: "opengeni.site",
+        sitesLiveEnabled: true,
+      },
+      async (_url, init) => {
+        sent.push(JSON.parse(String(init.body)));
+        return new Response("{}");
+      },
+    )!;
+    const scope = { accountId: "a", workspaceId: "w", siteId: SITE, kind: "write" as const };
+    listener({ ...scope, seq: 3, collections: ["todos"] });
+    listener({ ...scope, seq: 4, collections: ["notes", "todos"] });
+    await new Promise((resolve) => setTimeout(resolve, SITE_LIVE_COALESCE_MS * 3));
+    expect(sent).toEqual([{ type: "data", seq: 4, collections: ["todos", "notes"] }]);
   });
 });

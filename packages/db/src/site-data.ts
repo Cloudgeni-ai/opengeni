@@ -392,16 +392,12 @@ export interface SiteDataStore {
   ): Promise<void>;
   deleteFile(caller: SiteDataCaller, fileId: string): Promise<SiteDataStoredFile>;
   /**
-   * Mark the Site as watched for `ttlSeconds` (so writes record change
-   * events and notify the change listener) and return its current change
-   * number and the collections the caller may read (plus `$files` when it
-   * may read files). Renewing early is cheap: the lease is only extended
-   * once less than half of it is left.
-   */
-  /**
-   * Mark the Site as watched for up to `ttlSeconds` and return its change
-   * number, the collections this caller may hear about, and how long this
-   * watch lasts (until `live_until`, which may be sooner than asked).
+   * Mark the Site as watched for up to `ttlSeconds` (so writes record change
+   * events and notify the change listener) and return its change number, the
+   * collections the caller may read (plus `$files` when it may read files),
+   * and how long this watch lasts (until `live_until`, which may be sooner
+   * than asked). Renewing early is cheap: the lease is only extended once
+   * less than half of it is left.
    */
   watch(
     caller: SiteDataCaller,
@@ -912,10 +908,12 @@ export function siteDataActorKind(
   return prefix === "user" || prefix === "agent" || prefix === "service" ? prefix : "other";
 }
 
+const SITE_DATA_NOW_MAX_OFFSET_MS = 100 * 366 * 86_400_000;
+
 /**
  * Server-evaluated time in a filter value: `$now`, or `$now` plus or minus a
- * whole number of ms, s, m, h or d (`$now-5m`). Returns the offset in
- * milliseconds, or null when the value is not a `$now` expression.
+ * whole number of ms, s, m, h or d (`$now-5m`), at most a century. Returns the
+ * offset in milliseconds, or null when the value is not a `$now` expression.
  */
 export function siteDataNowOffsetMs(value: unknown): number | null {
   if (typeof value !== "string") return null;
@@ -924,6 +922,8 @@ export function siteDataNowOffsetMs(value: unknown): number | null {
   if (!match[1]) return 0;
   const unit = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[3]!]!;
   const amount = Number(match[2]) * unit;
+  // Beyond a century is not a lease; refusing it keeps timestamps in range.
+  if (amount > SITE_DATA_NOW_MAX_OFFSET_MS) return null;
   return match[1] === "-" ? -amount : amount;
 }
 
@@ -1838,11 +1838,12 @@ export function createPostgresSiteDataStore(
         // What this transaction changes, for the change outbox.
         const changedCollections = new Set<string>();
         const opCounts: Record<string, number> = {};
-        const changedIds: string[] = [];
+        // Distinct ids; one past the cap is kept so the row says it is truncated.
+        const changedIdSet = new Set<string>();
         const changed = (collection: SiteDataCollection, op: string, id: string) => {
           changedCollections.add(collection.name);
           opCounts[op] = (opCounts[op] ?? 0) + 1;
-          if (changedIds.length <= SITE_DATA_CHANGE_RECORD_IDS) changedIds.push(id);
+          if (changedIdSet.size <= SITE_DATA_CHANGE_RECORD_IDS) changedIdSet.add(id);
         };
         const collections = new Map<string, SiteDataCollection>();
         const collectionFor = async (name: string) => {
@@ -2210,7 +2211,7 @@ export function createPostgresSiteDataStore(
                     kind: imported ? "import" : "write",
                     collections: [...changedCollections],
                     opCounts,
-                    recordIds: imported ? [] : changedIds,
+                    recordIds: imported ? [] : [...changedIdSet],
                   },
           },
         );
