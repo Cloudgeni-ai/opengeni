@@ -293,7 +293,14 @@ function measureGateway(
     const route = gatewayRoute(new URL(request.url).pathname);
     // The beacon and live routes measure the page, not the gateway.
     if (route === "timing") return;
-    recordTiming(config, ctx, "gateway", route, status >= 500 ? "error" : "ok", Date.now() - started);
+    recordTiming(
+      config,
+      ctx,
+      "gateway",
+      route,
+      status >= 500 ? "error" : "ok",
+      Date.now() - started,
+    );
   } catch {
     // An unconfigured gateway has nothing to report to.
   }

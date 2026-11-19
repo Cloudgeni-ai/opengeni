@@ -209,6 +209,16 @@ deployment asks every visitor to sign in to Opengeni, even on public Sites:
 that is its setting, not a broken link, so tell the person their visitors
 sign in first instead of reporting sharing as broken.
 
+Before publishing or sharing a Site with data or tools, review who can read
+and write each collection and SQL query, and where the data flows. Data
+fetched with a viewer's personal connection (such as their Gmail) stays with
+that viewer: never write it into shared collections or queries unless the
+user explicitly wants that. Site SQL rules are only as safe as their
+`:viewer` filters, so check each query. Then tell the user in plain words who
+sees what. An app that uses personal-account tools shows clear connect states
+from `site.tools.$readiness`, so it works for teammates who have not connected
+yet.
+
 A published Site is a public web page. Never put secrets, tokens or private
 data in its HTML. An invited or public Site that keeps entries in Site Data,
 or an app that uses Site SQL, workspace tools or an embedded agent, also needs

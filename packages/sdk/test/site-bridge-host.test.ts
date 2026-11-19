@@ -189,6 +189,54 @@ describe("Site bridge host", () => {
   });
 });
 
+describe("Site data hints through the bridge host", () => {
+  test("a host following data hints advertises them and each collection hears its own", async () => {
+    let push: ((change: { collections: string[] | null; seq: number | null }) => void) | undefined;
+    const live: SiteBridgeToolHandlers = {
+      ...tools,
+      fetch: async () => new Response("{}"),
+      siteData: true,
+      subscribeDataChanges: (listener) => {
+        push = listener;
+        return () => {
+          push = undefined;
+        };
+      },
+    };
+    expect(siteBridgeReadyMessage(live)).toMatchObject({ dataChanges: 1 });
+    expect(
+      siteBridgeReadyMessage({ ...tools, fetch: live.fetch, siteData: true }),
+    ).not.toHaveProperty("dataChanges");
+    const { host, site } = connect({ tools: () => live });
+    try {
+      const all: unknown[] = [];
+      const todos: unknown[] = [];
+      const heardAll = new Promise<void>((resolve) => {
+        site.data.onChange((change) => {
+          all.push(change);
+          if (all.length === 2) resolve();
+        });
+      });
+      site.data.collection("todos").onChange((change) => todos.push(change));
+      // Wait for the client to connect and the host to follow.
+      const following = () => push !== undefined;
+      for (let i = 0; i < 50 && !following(); i++) await new Promise((r) => setTimeout(r, 10));
+      push!({ collections: ["notes"], seq: 2 });
+      host.notifyDataChanged({ collections: null, seq: 3 });
+      await heardAll;
+      expect(all).toEqual([
+        { collections: ["notes"], seq: 2 },
+        { collections: null, seq: 3 },
+      ]);
+      expect(todos).toEqual([{ collections: null, seq: 3 }]);
+    } finally {
+      site.close();
+      host.close();
+    }
+    expect(push).toBeUndefined();
+  });
+});
+
 describe("Site tool readiness through the bridge host", () => {
   const target = { identity: { serverId: "crm", toolName: "update" } };
   const answer = {

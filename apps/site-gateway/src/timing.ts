@@ -36,7 +36,13 @@ const MAX_BEACON_BYTES = 16 * 1024;
 export type TimingKind = "app_load" | "first_data" | "bridge" | "gateway";
 export type TimingOutcome = "ok" | "error";
 
-type Series = { kind: TimingKind; op: string; outcome: TimingOutcome; samples: number[]; seen: number };
+type Series = {
+  kind: TimingKind;
+  op: string;
+  outcome: TimingOutcome;
+  samples: number[];
+  seen: number;
+};
 
 const OPERATION_IDS = new Set(SITE_OPERATIONS.map((operation) => operation.id));
 const TOOL_METHODS = new Set<string>(SITE_TOOL_METHODS);
@@ -160,14 +166,7 @@ export async function handleTimingBeacon(site: SiteContext): Promise<Response> {
     return jsonError(422, { code: "validation", message: "Invalid beacon" }, security);
   }
   for (const timing of beacon.timings)
-    recordTiming(
-      site.config,
-      site.ctx,
-      timing.kind,
-      timing.op,
-      timing.outcome ?? "ok",
-      timing.ms,
-    );
+    recordTiming(site.config, site.ctx, timing.kind, timing.op, timing.outcome ?? "ok", timing.ms);
   return new Response(null, {
     status: 204,
     headers: applySecurityHeaders(new Headers({ "Cache-Control": "no-store" }), security),

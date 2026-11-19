@@ -277,7 +277,7 @@ export async function watchSiteData(
   grant: SiteDataAuthority,
   siteId: string,
   surface: SiteDataSurface = {},
-): Promise<{ seq: number; collections: string[] }> {
+): Promise<{ seq: number; collections: string[]; ttlSeconds: number }> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
   return access.store.watch(access.caller, SITE_LIVE_TTL_SECONDS);
 }

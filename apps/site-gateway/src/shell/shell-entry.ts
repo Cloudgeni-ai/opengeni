@@ -7,16 +7,25 @@
  * this page's own address: navigation adds history entries to this page (the
  * Site frame never reloads), and Back/Forward are passed on to the Site.
  * Requests outside the allowlist never leave the page.
+ *
+ * It also keeps one live connection (`/_og/live`) and passes its data hints
+ * to the Site as `data_changed` events, and sends small batched speed
+ * beacons (`/_og/timing`): app load, first data and each bridge call.
  */
 import {
   SITE_GATEWAY_API_PREFIX,
+  SITE_GATEWAY_LIVE_PATH,
   SITE_GATEWAY_LOGIN_PATH,
+  SITE_GATEWAY_TIMING_PATH,
   matchSiteOperation,
+  type SiteLiveHint,
+  type SiteTimingBeacon,
   type SiteToolMethod,
   type SiteViewer,
 } from "@opengeni/contracts";
 import {
   SiteBridgeHost,
+  type OpenGeniSiteDataChange,
   openGeniSiteLocationHref,
   openGeniSitePath,
   type OpenGeniSiteLocationValue,
@@ -132,6 +141,59 @@ async function gatewayFetch(
   return response;
 }
 
+type Timing = SiteTimingBeacon["timings"][number];
+
+/** Measurements waiting for the next beacon; bounded, oldest dropped. */
+const timings: Timing[] = [];
+const MAX_PENDING_TIMINGS = 50;
+const TIMING_FLUSH_MS = 30_000;
+let firstDataSeen = false;
+let timingTimer: ReturnType<typeof setTimeout> | null = null;
+
+function measure(timing: Timing): void {
+  if (!Number.isFinite(timing.ms) || timing.ms < 0) return;
+  if (timings.length >= MAX_PENDING_TIMINGS) timings.shift();
+  timings.push({ ...timing, ms: Math.min(Math.round(timing.ms), 600_000) });
+  timingTimer ??= setTimeout(flushTimings, TIMING_FLUSH_MS);
+}
+
+/** Time one bridge call; the first data or SQL call also counts as first data. */
+async function timed<T>(op: string, data: boolean, run: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  let outcome: "ok" | "error" = "error";
+  try {
+    const result = await run();
+    if (!(result instanceof Response) || result.ok) outcome = "ok";
+    return result;
+  } finally {
+    const ended = performance.now();
+    measure({ kind: "bridge", op, ms: ended - started, outcome });
+    if (data && !firstDataSeen) {
+      firstDataSeen = true;
+      measure({ kind: "first_data", ms: ended, outcome });
+    }
+  }
+}
+
+/** Send what was measured; best effort, never retried. */
+function flushTimings(): void {
+  if (timingTimer) clearTimeout(timingTimer);
+  timingTimer = null;
+  if (timings.length === 0) return;
+  const body = JSON.stringify({ timings: timings.splice(0) } satisfies SiteTimingBeacon);
+  try {
+    if (navigator.sendBeacon?.(SITE_GATEWAY_TIMING_PATH, body)) return;
+  } catch {
+    // Fall through to fetch.
+  }
+  void fetch(SITE_GATEWAY_TIMING_PATH, {
+    method: "POST",
+    body,
+    credentials: "same-origin",
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 async function tool<T>(method: SiteToolMethod, payload: unknown, signal: AbortSignal): Promise<T> {
   const response = await gatewayFetch(
     `/tools/${method}`,
@@ -197,16 +259,84 @@ async function currentViewer(signal: AbortSignal): Promise<SiteViewer> {
   return viewer;
 }
 
+function timedTool<T>(method: SiteToolMethod, payload: unknown, signal: AbortSignal): Promise<T> {
+  return timed(method, false, () => tool<T>(method, payload, signal));
+}
+
+function timedSiteHttp(request: SiteHttpRequest, signal: AbortSignal): Promise<Response> {
+  const match = matchSiteOperation(
+    request.method,
+    new URL(request.path, "https://site.invalid").pathname,
+  );
+  const op = match?.operation.id ?? "other";
+  return timed(op, op.startsWith("data.") || op.startsWith("sql."), () =>
+    siteHttp(request, signal),
+  );
+}
+
 const tools: SiteBridgeToolHandlers = {
-  catalog: ({ signal }) => tool("catalog", {}, signal),
-  declarations: ({ signal }) => tool("declarations", {}, signal),
-  call: (request, { signal }) => tool("call", request, signal),
-  resolve: (request, { signal }) => tool("resolve", request, signal),
-  invoke: (request, { signal }) => tool("invoke", request, signal),
-  readiness: (request, { signal }) => tool("readiness", request, signal),
-  fetch: siteHttp,
+  catalog: ({ signal }) => timedTool("catalog", {}, signal),
+  declarations: ({ signal }) => timedTool("declarations", {}, signal),
+  call: (request, { signal }) => timedTool("call", request, signal),
+  resolve: (request, { signal }) => timedTool("resolve", request, signal),
+  invoke: (request, { signal }) => timedTool("invoke", request, signal),
+  readiness: (request, { signal }) => timedTool("readiness", request, signal),
+  fetch: timedSiteHttp,
   siteData: true,
+  dataChanges: true,
 };
+
+/**
+ * One live connection for data hints. Reconnects with backoff (also when the
+ * gateway has no live updates: the Site then just never hears a hint), and
+ * before its admission ends. After a reconnect that missed changes, the Site
+ * hears "anything may have changed".
+ */
+function startLive(notify: (change: OpenGeniSiteDataChange) => void): void {
+  if (typeof WebSocket !== "function") return;
+  let lastSeq: number | null = null;
+  let failures = 0;
+  const open = () => {
+    const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${SITE_GATEWAY_LIVE_PATH}`;
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(url);
+    } catch {
+      return;
+    }
+    let admitted = false;
+    let refresh: ReturnType<typeof setTimeout> | null = null;
+    socket.addEventListener("message", (event) => {
+      let hint: SiteLiveHint;
+      try {
+        hint = JSON.parse(String(event.data)) as SiteLiveHint;
+      } catch {
+        return;
+      }
+      if (hint.type === "hello") {
+        admitted = true;
+        failures = 0;
+        if (lastSeq !== null && hint.seq > lastSeq) notify({ collections: null, seq: hint.seq });
+        lastSeq = hint.seq;
+        // Reconnect shortly before the admission ends.
+        if (refresh) clearTimeout(refresh);
+        refresh = setTimeout(() => socket.close(1000), Math.max(30, hint.ttlSeconds - 30) * 1000);
+      } else if (hint.type === "data") {
+        if (lastSeq !== null && hint.seq <= lastSeq) return;
+        lastSeq = hint.seq;
+        notify({ collections: hint.collections, seq: hint.seq });
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (refresh) clearTimeout(refresh);
+      if (!admitted) failures += 1;
+      // A refused or missing live route backs off up to 10 minutes.
+      const wait = admitted ? 1_000 : Math.min(600_000, 5_000 * 2 ** Math.min(failures, 7));
+      setTimeout(open, wait * (0.75 + Math.random() * 0.5));
+    });
+  };
+  open();
+}
 
 const viewerHandlers: SiteBridgeViewerHandlers = {
   viewer: ({ signal }) => currentViewer(signal),
@@ -298,8 +428,16 @@ if (frame) {
   frame.addEventListener("load", () => {
     const frameWindow = frame.contentWindow;
     if (frameWindow) host.load(frameWindow);
+    measure({ kind: "app_load", ms: performance.now(), outcome: "ok" });
   });
   // Back/Forward and edits to the #hash in the address bar.
   window.addEventListener("popstate", () => host.notifyLocation(pageLocation()));
-  window.addEventListener("pagehide", () => host.close());
+  window.addEventListener("pagehide", () => {
+    flushTimings();
+    host.close();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushTimings();
+  });
+  startLive((change) => host.notifyDataChanged(change));
 }

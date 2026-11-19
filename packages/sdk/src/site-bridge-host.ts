@@ -36,6 +36,7 @@ import {
   sanitizeOpenGeniSiteToolCallRequest,
   sanitizeOpenGeniSiteToolInvokeRequest,
   type OpenGeniSiteBridgeEventMessage,
+  type OpenGeniSiteDataChange,
   type OpenGeniSiteBridgeReadyMessage,
   type OpenGeniSiteBridgeRequestMessage,
   type OpenGeniSiteBridgeResponseMessage,
@@ -58,6 +59,7 @@ import type {
 } from "./types";
 
 export type { SiteHttpRequest } from "./site-http";
+export type { OpenGeniSiteDataChange } from "./site";
 export {
   isOpenGeniReservedSitePath,
   openGeniSiteLocationHref,
@@ -98,6 +100,14 @@ export type SiteBridgeToolHandlers = {
    * routes (data, files and `sql/queries/<name>`) for the pinned Site.
    */
   siteData?: boolean;
+  /**
+   * Advertise live data hints (`dataChanges: 1`): the host calls
+   * `SiteBridgeHost.notifyDataChanged` when the Site's data changes, or
+   * supplies `subscribeDataChanges` and the bridge host follows it.
+   */
+  dataChanges?: boolean;
+  /** Call `listener` with each data hint; returns an unsubscribe. Implies `dataChanges`. */
+  subscribeDataChanges?: (listener: (change: OpenGeniSiteDataChange) => void) => () => void;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -158,6 +168,9 @@ export function siteBridgeReadyMessage(
     ...(bridge?.resolve && bridge?.invoke ? { targetTools: 1 as const } : {}),
     ...(bridge?.readiness ? { toolReadiness: 1 as const } : {}),
     ...(bridge?.fetch && bridge.siteData ? { siteData: 1 as const } : {}),
+    ...(bridge?.fetch && bridge.siteData && (bridge.dataChanges || bridge.subscribeDataChanges)
+      ? { dataChanges: 1 as const }
+      : {}),
     ...(viewer ? { viewer: 1 as const } : {}),
     ...(location ? { location: 1 as const } : {}),
   };
@@ -213,6 +226,8 @@ export class SiteBridgeHost {
   private readonly lease: SiteBridgeDocumentLease;
   private stopReadiness: (() => void) | null = null;
   private readinessSource: SiteBridgeToolHandlers["subscribeReadiness"] | null = null;
+  private stopDataChanges: (() => void) | null = null;
+  private dataChangesSource: SiteBridgeToolHandlers["subscribeDataChanges"] | null = null;
 
   constructor(
     private readonly source: SiteBridgeHostSource,
@@ -234,6 +249,9 @@ export class SiteBridgeHost {
     this.stopReadiness?.();
     this.stopReadiness = null;
     this.readinessSource = null;
+    this.stopDataChanges?.();
+    this.stopDataChanges = null;
+    this.dataChangesSource = null;
     this.lease.close();
   }
 
@@ -243,6 +261,20 @@ export class SiteBridgeHost {
       type: OPENGENI_SITE_BRIDGE_EVENT,
       version: OPENGENI_SITE_BRIDGE_VERSION,
       event: "tool_readiness",
+    });
+  }
+
+  /**
+   * Tell every connected client of the current document that Site data
+   * changed. Hints name collections only (or null for "anything"), never records.
+   */
+  notifyDataChanged(change: OpenGeniSiteDataChange): void {
+    this.post({
+      type: OPENGENI_SITE_BRIDGE_EVENT,
+      version: OPENGENI_SITE_BRIDGE_VERSION,
+      event: "data_changed",
+      collections: change.collections ? [...change.collections] : null,
+      seq: change.seq,
     });
   }
 
@@ -263,6 +295,15 @@ export class SiteBridgeHost {
     this.stopReadiness?.();
     this.readinessSource = subscribe;
     this.stopReadiness = subscribe ? subscribe(() => this.notifyToolReadiness()) : null;
+  }
+
+  /** Follow the current handlers' data hints (handlers may be swapped). */
+  private followDataChanges(tools: SiteBridgeToolHandlers | undefined): void {
+    const subscribe = tools?.subscribeDataChanges ?? null;
+    if (subscribe === this.dataChangesSource) return;
+    this.stopDataChanges?.();
+    this.dataChangesSource = subscribe;
+    this.stopDataChanges = subscribe ? subscribe((change) => this.notifyDataChanged(change)) : null;
   }
 
   /** Tell every connected client of the current document that the Site's address changed. */
@@ -357,6 +398,7 @@ export class SiteBridgeHost {
     port.start();
     const tools = this.source.tools();
     this.followReadiness(tools);
+    this.followDataChanges(tools);
     port.postMessage(
       siteBridgeReadyMessage(tools, this.source.viewer?.(), this.source.location?.()),
     );

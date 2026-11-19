@@ -25,6 +25,8 @@ export type SiteSqlGatewayConfig = {
   origin: string;
   secret: string;
   timeoutMs: number;
+  /** Record each call's round trip (seconds); measuring never fails a call. */
+  observe?: (operation: SiteDbOperation, outcome: "ok" | "error", seconds: number) => void;
 };
 
 export type SiteSqlGatewaySettings = Pick<
@@ -86,7 +88,12 @@ export function signSiteDbRequest(
   body: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): { url: string; headers: Record<string, string> } {
-  return signGatewayInternalRequest(config, siteDbInternalPath(siteId, operation), body, nowSeconds);
+  return signGatewayInternalRequest(
+    config,
+    siteDbInternalPath(siteId, operation),
+    body,
+    nowSeconds,
+  );
 }
 
 /**
@@ -132,6 +139,28 @@ export async function callSiteDb<T>(
   operation: SiteDbOperation,
   payload: Record<string, unknown>,
   fetchImpl: SiteDbFetch = fetch,
+): Promise<T> {
+  const started = performance.now();
+  let outcome: "ok" | "error" = "error";
+  try {
+    const result = await callSiteDbOnce<T>(config, siteId, operation, payload, fetchImpl);
+    outcome = "ok";
+    return result;
+  } finally {
+    try {
+      config.observe?.(operation, outcome, (performance.now() - started) / 1000);
+    } catch {
+      // Measuring never fails a call.
+    }
+  }
+}
+
+async function callSiteDbOnce<T>(
+  config: SiteSqlGatewayConfig,
+  siteId: string,
+  operation: SiteDbOperation,
+  payload: Record<string, unknown>,
+  fetchImpl: SiteDbFetch,
 ): Promise<T> {
   const body = JSON.stringify({ requestId: crypto.randomUUID(), ...payload });
   const signed = signSiteDbRequest(config, siteId, operation, body);

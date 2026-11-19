@@ -221,9 +221,8 @@ type SiteDataFetch = (path: string, init: RequestInit) => Promise<Response>;
 export function createOpenGeniSiteData(
   fetchSite: SiteDataFetch,
   ready: () => Promise<boolean>,
-  subscribeChanges: (
-    listener: (change: OpenGeniSiteDataChange) => void,
-  ) => () => void = () => () => undefined,
+  subscribeChanges: (listener: (change: OpenGeniSiteDataChange) => void) => () => void = () => () =>
+    undefined,
 ): { data: OpenGeniSiteData; files: OpenGeniSiteFiles } {
   const send = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
     if (!(await ready()))
@@ -337,8 +336,7 @@ export function createOpenGeniSiteData(
         count: async (where, options = {}) => await count(name, where, options.scope),
         onChange: (listener) =>
           subscribeChanges((change) => {
-            if (change.collections === null || change.collections.includes(name))
-              listener(change);
+            if (change.collections === null || change.collections.includes(name)) listener(change);
           }),
       };
       return collection;

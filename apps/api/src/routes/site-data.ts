@@ -256,12 +256,20 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(`${base}/live`, async (context) => {
     const grant = await grantFor(context, "artifacts:read");
     if (framed(context))
-      throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot open the console's live connection"));
+      throw siteDataHttpError(
+        new SiteDataError("forbidden", "A Site cannot open the console's live connection"),
+      );
     const id = siteId(context);
     const url = siteLiveConsoleUrl(deps.settings);
     if (!url || !siteLiveConfigured(deps.settings) || !deps.settings.sitesGatewaySecret)
-      throw siteDataHttpError(new SiteDataError("not_found", "Live updates are not available here"));
-    let watched: { seq: number; collections: string[] } = { seq: 0, collections: [] };
+      throw siteDataHttpError(
+        new SiteDataError("not_found", "Live updates are not available here"),
+      );
+    let watched: { seq: number; collections: string[]; ttlSeconds: number } = {
+      seq: 0,
+      collections: [],
+      ttlSeconds: SITE_LIVE_TTL_SECONDS,
+    };
     try {
       // What the Site's own frame may read: the hints feed that frame.
       watched = await watchSiteData(deps, grant, id, { frameSiteId: id });
@@ -276,7 +284,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
       collections: watched.collections,
       seq: watched.seq,
       expiresAt,
-      ttlSeconds: SITE_LIVE_TTL_SECONDS,
+      ttlSeconds: watched.ttlSeconds,
     });
     const response: SiteLiveTicketResponse = {
       url: `${url}?ticket=${encodeURIComponent(ticket)}`,

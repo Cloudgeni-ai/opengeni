@@ -25,7 +25,12 @@ import {
 } from "./tools";
 import { OpenGeniClient } from "./client";
 import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
-import { createOpenGeniSiteData, type OpenGeniSiteData, type OpenGeniSiteFiles } from "./site-data";
+import {
+  createOpenGeniSiteData,
+  type OpenGeniSiteData,
+  type OpenGeniSiteDataChange,
+  type OpenGeniSiteFiles,
+} from "./site-data";
 import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
 import { createOpenGeniSiteAi, type OpenGeniSiteAi } from "./site-ai";
 export type {
@@ -46,6 +51,7 @@ export {
   OpenGeniSiteDataError,
   SITE_DATA_PATH_PREFIX,
   type OpenGeniSiteData,
+  type OpenGeniSiteDataChange,
   type OpenGeniSiteDataCollection,
   type OpenGeniSiteDataErrorCode,
   type OpenGeniSiteDataFilter,
@@ -249,14 +255,6 @@ export type OpenGeniSiteBridgeReadyMessage = {
   /** The host posts `data_changed` events when the Site's data changes (live hints). */
   dataChanges?: 1;
 };
-
-/**
- * A hint that the Site's data changed: the collections that changed (the
- * pseudo-collection `$files` for files), or null for "anything may have
- * changed" (after a reconnect). `seq` is the Site's change number when
- * known. Hints carry no records: read the data again with your usual calls.
- */
-export type OpenGeniSiteDataChange = { collections: string[] | null; seq: number | null };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
 export type OpenGeniSiteToolCallRequest = Omit<
@@ -855,7 +853,9 @@ export function isOpenGeniSiteDataChange(value: unknown): value is OpenGeniSiteD
     collections === null ||
     (Array.isArray(collections) &&
       collections.length <= 200 &&
-      collections.every((name) => typeof name === "string" && name.length > 0 && name.length <= 64));
+      collections.every(
+        (name) => typeof name === "string" && name.length > 0 && name.length <= 64,
+      ));
   const validSeq = seq === null || (typeof seq === "number" && Number.isInteger(seq) && seq >= 0);
   return validCollections && validSeq;
 }

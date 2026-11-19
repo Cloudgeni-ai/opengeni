@@ -35,7 +35,11 @@ import type { GatewayConfig, GatewayEnv } from "./env";
 import { applySecurityHeaders, jsonError } from "./headers";
 import { signedApiRequest } from "./signing";
 import { isSameOriginRequest, requiresSignIn, siteCaller, type SiteContext } from "./site-context";
-import { precheckSiteDbSignature, verifySiteDbSignature, type DurableObjectNamespaceLike } from "./site-db";
+import {
+  precheckSiteDbSignature,
+  verifySiteDbSignature,
+  type DurableObjectNamespaceLike,
+} from "./site-db";
 
 export { SITE_GATEWAY_LIVE_PATH, SITE_LIVE_INTERNAL_PREFIX };
 
@@ -48,7 +52,9 @@ export const SITE_LIVE_MAX_CONNECTIONS = 2_000;
 const ADMITTED_HEADER = "x-og-live-admitted";
 
 export function isSiteLiveInternalPath(pathname: string): boolean {
-  return pathname === SITE_LIVE_INTERNAL_PREFIX || pathname.startsWith(`${SITE_LIVE_INTERNAL_PREFIX}/`);
+  return (
+    pathname === SITE_LIVE_INTERNAL_PREFIX || pathname.startsWith(`${SITE_LIVE_INTERNAL_PREFIX}/`)
+  );
 }
 
 function liveNamespace(env: GatewayEnv): DurableObjectNamespaceLike | null {
@@ -114,14 +120,21 @@ export async function handleSiteLive(site: SiteContext): Promise<Response> {
       return new Response(body, {
         status: response.status >= 500 ? 502 : response.status,
         headers: applySecurityHeaders(
-          new Headers({ "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }),
+          new Headers({
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+          }),
           security,
         ),
       });
     }
     const parsed = SiteLiveAdmission.safeParse(await response.json());
     if (!parsed.success || parsed.data.siteId !== site.record.siteId)
-      return jsonError(502, { code: "site_upstream_unavailable", message: "Try again shortly", retryable: true }, security);
+      return jsonError(
+        502,
+        { code: "site_upstream_unavailable", message: "Try again shortly", retryable: true },
+        security,
+      );
     admitted = parsed.data;
   } catch {
     return jsonError(
@@ -157,10 +170,16 @@ export async function verifySiteLiveTicket(
     if (typeof e !== "number" || e < nowSeconds) return null;
     if (typeof q !== "number" || !Number.isInteger(q) || q < 0) return null;
     const collections =
-      c === null ? null : Array.isArray(c) && c.every((name) => typeof name === "string") ? (c as string[]) : undefined;
+      c === null
+        ? null
+        : Array.isArray(c) && c.every((name) => typeof name === "string")
+          ? (c as string[])
+          : undefined;
     if (collections === undefined) return null;
     const ttlSeconds =
-      typeof t === "number" && Number.isInteger(t) && t > 0 && t <= 3600 ? t : SITE_LIVE_TTL_SECONDS;
+      typeof t === "number" && Number.isInteger(t) && t > 0 && t <= 3600
+        ? t
+        : SITE_LIVE_TTL_SECONDS;
     return { siteId: s, seq: q, collections, ttlSeconds };
   } catch {
     return null;
@@ -211,7 +230,11 @@ export async function handleSiteLiveInternal(
   if (precheckSiteDbSignature(request) === null) return unauthorized();
   const body = await readBodyCapped(request, MAX_NOTICE_BYTES);
   if (body === "too_large")
-    return jsonError(413, { code: "too_large", message: "The request body is too large" }, security);
+    return jsonError(
+      413,
+      { code: "too_large", message: "The request body is too large" },
+      security,
+    );
   const secrets = [config.secret, ...(config.previousSecret ? [config.previousSecret] : [])];
   if (!(await verifySiteDbSignature(secrets, request, url, body))) return unauthorized();
   let notice: SiteLiveNotice;
@@ -299,9 +322,11 @@ export class SiteLive {
     _env: unknown,
   ) {
     // Answer keep-alive pings without waking the object.
-    const Pair = (globalThis as { WebSocketRequestResponsePair?: new (a: string, b: string) => unknown })
-      .WebSocketRequestResponsePair;
-    if (Pair && state.setWebSocketAutoResponse) state.setWebSocketAutoResponse(new Pair("ping", "pong"));
+    const Pair = (
+      globalThis as { WebSocketRequestResponsePair?: new (a: string, b: string) => unknown }
+    ).WebSocketRequestResponsePair;
+    if (Pair && state.setWebSocketAutoResponse)
+      state.setWebSocketAutoResponse(new Pair("ping", "pong"));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -312,7 +337,10 @@ export class SiteLive {
       try {
         notice = SiteLiveNotice.parse(await request.json());
       } catch {
-        return Response.json({ error: { code: "validation", message: "Invalid notice" } }, { status: 422 });
+        return Response.json(
+          { error: { code: "validation", message: "Invalid notice" } },
+          { status: 422 },
+        );
       }
       return Response.json({ delivered: this.broadcast(notice) });
     }
@@ -328,10 +356,13 @@ export class SiteLive {
     }
     if (this.state.getWebSockets().length >= SITE_LIVE_MAX_CONNECTIONS)
       return Response.json(
-        { error: { code: "site_live_busy", message: "Too many live connections", retryable: true } },
+        {
+          error: { code: "site_live_busy", message: "Too many live connections", retryable: true },
+        },
         { status: 503 },
       );
-    const Pair = (globalThis as { WebSocketPair?: new () => Record<0 | 1, LiveSocket> }).WebSocketPair;
+    const Pair = (globalThis as { WebSocketPair?: new () => Record<0 | 1, LiveSocket> })
+      .WebSocketPair;
     if (!Pair) return new Response("WebSockets are not available", { status: 500 });
     const pair = new Pair();
     const client = pair[0];

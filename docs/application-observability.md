@@ -325,6 +325,26 @@ five-second caller-configurable maximum. It cannot guarantee delivery on process
 kill or exporter outage. `opengeni_telemetry_exports_total{outcome}` records
 exported, retried, failed and dropped **batches**. No IDs become metric labels.
 
+## Sites
+
+Site speed is measured at each hop, with labels from closed sets only (Site
+operation ids such as `data.read` or `sql.run`, `tools.<method>`, the API's
+own Site routes, gateway route names, or `other`); hosts, Sites, workspaces
+and viewers never become labels.
+
+- `opengeni_site_runtime_request_duration_seconds{op,status_class}`: the API's
+  time for each gateway-signed `/v1/site-runtime` request. (The generic HTTP
+  histogram keeps one route label for all of them.) Responses carry
+  `Server-Timing: auth;dur=…, app;dur=…`, and the gateway appends
+  `upstream;dur=…`.
+- `opengeni_site_db_operation_duration_seconds{operation,outcome}`: the API's
+  round trip to a Site's SQL Durable Object (the object adds `Server-Timing:
+  db`).
+- `opengeni_site_client_timing_seconds{kind,op,outcome}`: sampled
+  measurements the gateway reports in batches (no request per beacon):
+  `gateway` (its own handling, by route), and from the viewer's page
+  `app_load`, `first_data` and `bridge` (one bridge call, by operation).
+
 ## Web client errors
 
 The public, anonymous `POST /v1/client-errors` route counts browser failures in

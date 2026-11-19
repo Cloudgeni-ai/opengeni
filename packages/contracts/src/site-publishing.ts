@@ -842,9 +842,7 @@ export const SitePlatformTimingReport = /* @__PURE__ */ defineSchema(() =>
 export type SitePlatformTimingReport = z.infer<typeof SitePlatformTimingReport>;
 
 /** Histogram bucket upper bounds (seconds) for Site speed measurements. */
-export const SITE_TIMING_BUCKETS = [
-  0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30,
-] as const;
+export const SITE_TIMING_BUCKETS = [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30] as const;
 
 /** The API prefix the gateway forwards `/_og/api/*` to. */
 export const SITE_RUNTIME_API_PREFIX = "/v1/site-runtime";

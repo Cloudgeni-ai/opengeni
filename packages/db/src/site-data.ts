@@ -398,7 +398,15 @@ export interface SiteDataStore {
    * may read files). Renewing early is cheap: the lease is only extended
    * once less than half of it is left.
    */
-  watch(caller: SiteDataCaller, ttlSeconds: number): Promise<{ seq: number; collections: string[] }>;
+  /**
+   * Mark the Site as watched for up to `ttlSeconds` and return its change
+   * number, the collections this caller may hear about, and how long this
+   * watch lasts (until `live_until`, which may be sooner than asked).
+   */
+  watch(
+    caller: SiteDataCaller,
+    ttlSeconds: number,
+  ): Promise<{ seq: number; collections: string[]; ttlSeconds: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2085,7 +2093,12 @@ export function createPostgresSiteDataStore(
               checkVersion(row, op.expectedVersion, index);
               if (!isPlainJsonObject(op.data))
                 throw validationError("Patch data must be a JSON object", { index });
-              const record = await replaceRecord(collection, row, { ...row.data, ...op.data }, index);
+              const record = await replaceRecord(
+                collection,
+                row,
+                { ...row.data, ...op.data },
+                index,
+              );
               changed(collection, "patch", record.id);
               results.push({ op: "patch", record });
               break;
@@ -2357,19 +2370,23 @@ export function createPostgresSiteDataStore(
         );
         // Extend the lease only when less than half of it is left, so many
         // viewers renewing together rarely write the row a write locks.
-        const [extended] = await rawRows<{ change_seq: string | number }>(
+        // `remaining`: how long this watch lasts, so a connection never
+        // outlives the flag that makes writes publish changes.
+        type Watched = { change_seq: string | number; remaining: string | number | null };
+        const [extended] = await rawRows<Watched>(
           tx,
           sql`update site_data_usage set live_until = now() + ${ttl}::integer * interval '1 second'
             where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}
               and (live_until is null
                 or live_until < now() + ${Math.ceil(ttl / 2)}::integer * interval '1 second')
-            returning change_seq`,
+            returning change_seq, floor(extract(epoch from (live_until - now()))) as remaining`,
         );
         const [current] = extended
           ? [extended]
-          : await rawRows<{ change_seq: string | number }>(
+          : await rawRows<Watched>(
               tx,
-              sql`select change_seq from site_data_usage
+              sql`select change_seq, floor(extract(epoch from (live_until - now()))) as remaining
+                from site_data_usage
                 where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}`,
             );
         const collections = (await loadCollections(tx, caller))
@@ -2380,7 +2397,8 @@ export function createPostgresSiteDataStore(
           .map((collection) => collection.name);
         // Every caller that can read Site Data can list (at least shared) files.
         collections.push(SITE_DATA_FILES_CHANGE);
-        return { seq: num(current?.change_seq), collections };
+        const remaining = Math.max(1, Math.min(ttl, num(current?.remaining)));
+        return { seq: num(current?.change_seq), collections, ttlSeconds: remaining };
       });
     },
   };

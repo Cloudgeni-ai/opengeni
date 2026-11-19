@@ -904,21 +904,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const { host, viewer } = await viewing(request);
     let seq = 0;
     let collections: string[] = [];
+    let ttlSeconds = SITE_LIVE_TTL_SECONDS;
     try {
       const watched = await watchSiteData(deps, publishedViewer(host, viewer), host.site.id, {
         frameSiteId: host.site.id,
       });
       seq = watched.seq;
       collections = watched.collections;
+      ttlSeconds = watched.ttlSeconds;
     } catch (error) {
+      // Without Site Data access the page still hears about new versions.
       if (!(error instanceof SiteDataError)) throw error;
     }
-    const admission: SiteLiveAdmission = {
-      siteId: host.site.id,
-      seq,
-      collections,
-      ttlSeconds: SITE_LIVE_TTL_SECONDS,
-    };
+    const admission: SiteLiveAdmission = { siteId: host.site.id, seq, collections, ttlSeconds };
     return request.context.json(admission);
   };
 

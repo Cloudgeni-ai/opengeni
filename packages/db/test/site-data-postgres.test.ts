@@ -253,3 +253,134 @@ test("a record cannot point at another Site than its collection's", async () => 
     select indexdef from pg_indexes where indexname = 'site_data_record_values_workspace_record_idx'`;
   expect(String(index!.indexdef)).toContain("(workspace_id, record_id)");
 });
+
+test("change numbers count every write; the outbox and listener run only while watched", async () => {
+  const heard: { seq: number; kind: string; collections: string[] }[] = [];
+  const store = createPostgresSiteDataStore(client.db, {
+    onChange: (change) =>
+      heard.push({ seq: change.seq, kind: change.kind, collections: change.collections }),
+  });
+  const a = await site();
+  await store.defineCollection(a.caller, { name: "notes", accessMode: "shared" }, limits);
+  const seqOf = async () => {
+    const [row] = await shared.admin`
+      select change_seq::int as seq from site_data_usage where site_id = ${a.caller.siteId}`;
+    return row!.seq as number;
+  };
+  const outbox = async () =>
+    await shared.admin`
+      select change_seq::int as seq, kind, collections, op_counts, record_ids, actor_kind
+      from site_data_changes where site_id = ${a.caller.siteId} order by change_seq`;
+  // Nobody watching: the number moves, nothing else is written or heard.
+  const before = await seqOf();
+  await store.write(a.caller, [{ op: "insert", collection: "notes", data: { text: "a" } }], {
+    limits,
+  });
+  expect(await seqOf()).toBe(before + 1);
+  expect(await outbox()).toHaveLength(0);
+  expect(heard).toHaveLength(0);
+
+  const watched = await store.watch(a.caller, 900);
+  expect(watched.seq).toBe(before + 1);
+  expect(watched.collections).toEqual(["notes", "$files"]);
+  expect(watched.ttlSeconds).toBeGreaterThan(890);
+  // A second watch soon after does not extend (nor shorten) the lease.
+  expect((await store.watch(a.caller, 900)).ttlSeconds).toBeGreaterThan(890);
+
+  const written = await store.write(
+    a.caller,
+    [
+      { op: "insert", collection: "notes", data: { text: "b" } },
+      { op: "insert", collection: "notes", data: { text: "c" } },
+    ],
+    { limits },
+  );
+  const rows = await outbox();
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    seq: before + 2,
+    kind: "write",
+    collections: ["notes"],
+    op_counts: { insert: 2 },
+    actor_kind: "user",
+  });
+  expect([...(rows[0]!.record_ids as string[])].sort()).toEqual(
+    written.results.map((result) => (result.op === "insert" ? result.record.id : "")).sort(),
+  );
+  expect(heard).toEqual([{ seq: before + 2, kind: "write", collections: ["notes"] }]);
+
+  // A failed write takes no number and tells no one.
+  await expect(
+    store.write(
+      a.caller,
+      [{ op: "patch", collection: "notes", id: crypto.randomUUID(), data: { text: "x" } }],
+      { limits },
+    ),
+  ).rejects.toBeInstanceOf(SiteDataError);
+  expect(await seqOf()).toBe(before + 2);
+  expect(heard).toHaveLength(1);
+});
+
+test("an insert with an idempotency key returns the original record when retried", async () => {
+  const store = createPostgresSiteDataStore(client.db);
+  const a = await site();
+  await store.defineCollection(a.caller, { name: "orders", accessMode: "shared" }, limits);
+  const insert = (text: string, caller = a.caller) =>
+    store.write(
+      caller,
+      [{ op: "insert", collection: "orders", data: { text }, idempotencyKey: "order-1" }],
+      { limits },
+    );
+  const first = await insert("first");
+  const again = await insert("second");
+  const original = first.results[0]!;
+  const replay = again.results[0]!;
+  if (original.op !== "insert" || replay.op !== "insert") throw new Error("unexpected result");
+  expect(replay.replayed).toBe(true);
+  expect(replay.record.id).toBe(original.record.id);
+  expect(replay.record.data).toEqual({ text: "first" });
+  expect((await store.query(a.caller, { collection: "orders" })).records).toHaveLength(1);
+  // Another principal's key is its own.
+  const other = await insert("other", {
+    ...a.caller,
+    principal: "user:someone-else",
+    actor: "user:someone-else",
+  });
+  const otherResult = other.results[0]!;
+  expect(otherResult.op === "insert" && otherResult.replayed).toBeFalsy();
+  // Deleting the record frees the key.
+  await store.write(a.caller, [{ op: "delete", collection: "orders", id: original.record.id }], {
+    limits,
+  });
+  const fresh = (await insert("fresh")).results[0]!;
+  expect(fresh.op === "insert" && fresh.replayed).toBeFalsy();
+});
+
+test("$now filters compare with the database's clock", async () => {
+  const store = createPostgresSiteDataStore(client.db);
+  const a = await site();
+  await store.defineCollection(a.caller, { name: "jobs", accessMode: "shared" }, limits);
+  const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
+  await store.write(
+    a.caller,
+    [
+      { op: "insert", collection: "jobs", key: "lapsed", data: { leaseUntil: iso(-3_600_000) } },
+      { op: "insert", collection: "jobs", key: "held", data: { leaseUntil: iso(3_600_000) } },
+    ],
+    { limits },
+  );
+  const keys = async (where: { field: string; op: "lt" | "gt" | "gte"; value: string }[]) =>
+    (await store.query(a.caller, { collection: "jobs", where })).records
+      .map((record) => record.key)
+      .sort();
+  expect(await keys([{ field: "leaseUntil", op: "lt", value: "$now" }])).toEqual(["lapsed"]);
+  expect(await keys([{ field: "leaseUntil", op: "gt", value: "$now+30m" }])).toEqual(["held"]);
+  expect(await keys([{ field: "leaseUntil", op: "lt", value: "$now+2h" }])).toEqual([
+    "held",
+    "lapsed",
+  ]);
+  expect(await keys([{ field: "$createdAt", op: "gte", value: "$now-1h" }])).toEqual([
+    "held",
+    "lapsed",
+  ]);
+});

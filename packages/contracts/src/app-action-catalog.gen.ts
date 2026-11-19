@@ -7484,6 +7484,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/live",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/live",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",

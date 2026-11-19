@@ -32,6 +32,9 @@ console's own Content-Security-Policy.
 | `/_og/api/*` | Same-origin Site calls: re-checked against `matchSiteOperation` and `SITE_TOOL_METHODS`, rate-limited, size-capped, signed and forwarded to `${API_ORIGIN}/v1/site-runtime<suffix>`; SSE streams through |
 | `/_og/report` | Script-free abuse report form, posting a `SiteAbuseReportRequest` to signed `POST /v1/site-runtime/site/reports` (same-origin plus a form token); reports go to the Site's owners and the abuse team, and the pages show `ABUSE_EMAIL` |
 | `/_og/human` | Turnstile verification (only when both Turnstile values are set) |
+| `/_og/live` | WebSocket for the Site page's live data hints: same-origin, sign-in and flood brake like `/_og/api`, admitted by signed `POST /v1/site-runtime/live/admit`, then held by the Site's `SiteLive` Durable Object (Hibernation API). On `og.<domain>`, `/_og/live?ticket=` serves the console's view from the app origin. 404 without the `SITE_LIVE` binding |
+| `/_og/timing` | Same-origin, rate-limited `POST` of the shell's batched speed beacons (`SiteTimingBeacon`); answered 204 and sampled in the isolate (see "Speed measurement") |
+| `/_og/internal/site-live/<siteId>` | Signed `POST` from the API with a `SiteLiveNotice` (data change or new version), passed to the Site's `SiteLive` object |
 | `/_og/internal/site-db/<siteId>/<operation>` | Site SQL (optional per-Site storage): signed `POST` from the API only (see below), forwarded to the Site's `SiteDatabase` Durable Object; 404 without the `SITE_DB` binding |
 | anything else (GET) | The shell page: nonce'd bridge-host script, a full-viewport sandboxed iframe (`allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals`, never `allow-same-origin`) on `/_og/v/<versionId>`, and a Report link |
 
@@ -167,6 +170,23 @@ waiting. A failed report keeps its id and is retried with the next one, and
 the API records each host once per report id, so a retry never counts twice.
 Counting never refuses or delays a request; an evicted isolate loses at most
 its unsent counts.
+
+## Speed measurement
+
+The gateway times its own handling per route, and the shell times app load,
+first data and each bridge call (operation and outcome only). Samples wait in
+the isolate, at most 100 per series and 300 series, and are reported in signed
+batches to `POST /v1/site-runtime/platform/timings` with the request counts'
+interval; the API records them as `opengeni_site_client_timing_seconds`. API
+responses carry `Server-Timing` (`auth`, `app`), and the gateway adds
+`upstream`. A lost isolate loses its samples; measuring never delays a
+request.
+
+## Live hints binding
+
+`SITE_LIVE` (class `SiteLive`, migration tag `v2`) is optional. Deployments
+add the binding next to `SITE_DB` in their Wrangler environment; the API sends
+notices through `SITES_GATEWAY_INTERNAL_ORIGIN` with the gateway secret.
 
 ## Caching and takedown latency
 

@@ -4,8 +4,12 @@
 
 Every published Site can keep persistent JSON records and files in the workspace.
 Data belongs to the Site, not a version: it survives new versions and
-rollbacks. An archived Site keeps its data but its page cannot reach it. There
-is no live push; read on load or when the viewer refreshes.
+rollbacks. An archived Site keeps its data but its page cannot reach it. Read
+on load, and use `site.data.onChange` (or `collection.onChange`) to read again
+when another viewer, agent or schedule changes data: it hints which
+collections changed (null means "anything"), never the records. Hints are
+best effort, so keep a refresh button or a slow timer where missing one would
+matter.
 
 Define collections with agent tools, never from Site HTML. Use
 `opengeni__site_data_define_collection` after the first publish (it needs the
@@ -70,6 +74,17 @@ await site.data.batch([...]); // up to 100 operations, all or nothing
 const file = await site.files.upload(input.files[0], { scope: "private" });
 const { url } = await site.files.url(file.id); // short-lived; fetch a new one when needed
 ```
+
+Pass `{ idempotencyKey }` to `insert` when a retry must not add a second
+record (a flaky network, a resubmitted form): the same key from the same
+viewer returns the original record for a day.
+
+To claim work (a ticket, a job) across viewers and schedules, write a lease
+with the server's clock: list with `{ field: "leaseUntil", op: "lt", value:
+"$now" }`, then `patch` with `{ expectedVersion }` and a new `leaseUntil`
+(an ISO time; `"$now+5m"` style values work in filters, with `s`, `m`, `h`
+or `d`). The record's `version` is the fencing token: a holder whose lease
+lapsed fails its next `expectedVersion` write with `conflict` and must stop.
 
 Also available: `get` (by id or key; resolves null when missing), `put` (create
 or replace by key), `delete`, `increment` (atomic numeric add), `count`, and
