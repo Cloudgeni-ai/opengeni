@@ -22,6 +22,7 @@ import {
   createOrgAgent,
   createOrgToolServer,
   createSession,
+  deleteWorkspace,
   deleteEndUserToolCredential,
   deleteOrgToolServer,
   decodeEndUserToolCredentialMaterial,
@@ -1253,6 +1254,85 @@ describe("organization agents: visibility gate, isolation and grants", () => {
       await listOrgAgentsForWorkspace(app.db, { accountId: a.accountId, workspaceId: b.unmanaged }),
     ).toEqual([]);
     expect(await getOrgAgent(app.db, a.accountId, { id: bAgent!.id })).toBeNull();
+  }, 120_000);
+
+  test("only the organization writes where an agent is available; a workspace reads its rows", async () => {
+    const org = await organization();
+    const agent = await createOrgAgent(app.db, {
+      accountId: org.accountId,
+      actor,
+      key: "access-guard",
+      definition: definition("Hi."),
+      workspaceIds: [org.unmanaged],
+    });
+    expect(agent.workspaceIds).toEqual([org.unmanaged]);
+    const accessRows = async () =>
+      (
+        await shared.admin<{ workspace_id: string }[]>`
+          select workspace_id::text as workspace_id from agent_workspace_access
+          where agent_id = ${agent.id} order by workspace_id`
+      ).map((row) => row.workspace_id);
+
+    // A workspace's own context reads its row but cannot add, change or remove one.
+    const inWorkspace = { accountId: org.accountId, workspaceId: org.unmanaged, orgAgents: true };
+    expect(
+      await asApp(
+        inWorkspace,
+        (sql) => sql`select workspace_id::text as workspace_id from agent_workspace_access
+          where agent_id = ${agent.id}`,
+      ),
+    ).toEqual([{ workspace_id: org.unmanaged }]);
+    const otherAgent = await createOrgAgent(app.db, {
+      accountId: org.accountId,
+      actor,
+      key: "access-guard-other",
+      definition: definition("Hi."),
+    });
+    expect(
+      await pgRejection(
+        asApp(
+          inWorkspace,
+          (sql) => sql`insert into agent_workspace_access (account_id, agent_id, workspace_id)
+            values (${org.accountId}, ${otherAgent.id}, ${org.unmanaged})`,
+        ),
+      ),
+    ).toBe("42501");
+    const updated = await asApp(
+      inWorkspace,
+      (sql) => sql`update agent_workspace_access set enabled_by_subject_id = 'user:evil'
+        where agent_id = ${agent.id} returning agent_id`,
+    );
+    expect(updated).toEqual([]);
+    const deleted = await asApp(
+      inWorkspace,
+      (sql) => sql`delete from agent_workspace_access where agent_id = ${agent.id}
+        returning agent_id`,
+    );
+    expect(deleted).toEqual([]);
+    expect(await accessRows()).toEqual([org.unmanaged]);
+
+    // The account context (Console and API) still adds and removes them.
+    const moved = await updateOrgAgent(app.db, {
+      accountId: org.accountId,
+      agentId: agent.id,
+      actor,
+      expectedVersion: agent.rowVersion,
+      workspaceIds: [org.managedOther],
+    });
+    expect(moved.workspaceIds).toEqual([org.managedOther]);
+    expect(await accessRows()).toEqual([org.managedOther]);
+    expect(
+      await asApp({ accountId: org.accountId, orgAgents: true }, (sql) =>
+        sql`insert into agent_workspace_access (account_id, agent_id, workspace_id)
+          values (${org.accountId}, ${otherAgent.id}, ${org.unmanaged}) returning agent_id`,
+      ),
+    ).toEqual([{ agent_id: otherAgent.id }]);
+
+    // Deleting a workspace still removes its rows.
+    await deleteWorkspace(app.db, org.unmanaged);
+    expect(
+      await shared.admin`select 1 from agent_workspace_access where workspace_id = ${org.unmanaged}`,
+    ).toHaveLength(0);
   }, 120_000);
 
   test("runtime grants are exact", async () => {
