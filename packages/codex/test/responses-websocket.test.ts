@@ -478,6 +478,33 @@ test("persistent socket resources do not inherit the opening request context", a
   socket.close();
 });
 
+test("the turn's routing token comes back as a header but never splits or reaches the connection", async () => {
+  const { transport, sockets, httpCalls } = harness();
+  transport.warm(URL, request().headers);
+  const first = transport(URL, request());
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({ type: "codex.response.metadata", headers: { "x-codex-turn-state": "turn-a" } });
+  socket.emit({ type: "response.completed", response: { id: "r1", output: [] } });
+  const response = await first;
+  expect(response.headers.get("x-codex-turn-state")).toBe("turn-a");
+  await response.text();
+  const later = request();
+  const second = transport(
+    URL,
+    request(undefined, { headers: { ...later.headers, "x-codex-turn-state": "turn-a" } }),
+  );
+  for (let i = 0; i < 50 && socket.sent.length < 2; i++) await Bun.sleep(1);
+  socket.emit({ type: "response.completed", response: { id: "r2", output: [] } });
+  const reused = await second;
+  expect(reused.headers.get(CODEX_TRANSPORT_HEADER)).toStartWith("websocket; connection=reused");
+  await reused.text();
+  expect(sockets).toHaveLength(1);
+  expect(socket.headers["x-codex-turn-state"]).toBeUndefined();
+  expect(socket.sent.every((message) => !("x-codex-turn-state" in message))).toBe(true);
+  expect(httpCalls).toEqual([]);
+  socket.close();
+});
+
 test("streams a response over one reused connection as SSE with usage headers", async () => {
   const { transport, sockets, httpCalls } = harness();
   const pending = transport(URL, request());

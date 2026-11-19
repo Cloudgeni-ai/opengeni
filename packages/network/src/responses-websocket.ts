@@ -208,6 +208,11 @@ export type ResponsesWebSocketEndpoint = {
   /** HTTP-only body fields left out of `response.create` (WebSocket mode always streams). */
   httpOnlyFields?: readonly string[];
   /**
+   * Provider request headers that, like {@link PER_REQUEST_HEADERS}, stay off
+   * the handshake and out of the connection's identity (lower case).
+   */
+  perRequestHeaders?: readonly string[];
+  /**
    * Give each conversation (see {@link withResponsesConversation}) its own
    * connection, and leave requests outside a conversation on HTTP. Needed
    * even when a side request carries the same session-affinity header. Only an
@@ -804,7 +809,8 @@ export function responsesTransport(
   const identity = (url: string, headers: HeadersInit | undefined) => {
     const handshake: Record<string, string> = {};
     for (const [name, value] of new Headers(headers).entries()) {
-      if (!isPerRequestHeader(name)) handshake[name] = value;
+      if (!isPerRequestHeader(name) && !endpoint.perRequestHeaders?.includes(name))
+        handshake[name] = value;
     }
     if (endpoint.beta) handshake["openai-beta"] = endpoint.beta;
     const wsUrl = url.replace(/^https:/, "wss:");

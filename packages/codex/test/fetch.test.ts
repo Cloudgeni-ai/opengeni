@@ -16,6 +16,7 @@ import {
   classifyCodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
+  createCodexTurnState,
   warmCodexResponsesConnection,
   isCodexTransportError,
   opaqueProviderArtifactFingerprint,
@@ -719,6 +720,69 @@ describe("codexSubscriptionFetch", () => {
       input: Array<{ type: string }>;
     };
     expect(body.input.some((item) => item.type === "compaction_trigger")).toBe(true);
+  });
+
+  test("replays the turn's routing token on its later requests, for the issuing account only", async () => {
+    const sent: Array<string | null> = [];
+    const issued = ["turn-a", null, "turn-b-500", "turn-b", null, null];
+    const statuses = [200, 200, 500, 200, 200, 200];
+    let call = 0;
+    const base: FetchLike = async (_input, init) => {
+      sent.push(new Headers(init?.headers).get("x-codex-turn-state"));
+      const index = call++;
+      const token = issued[index];
+      return new Response(
+        'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}\n\n',
+        {
+          status: statuses[index] ?? 200,
+          headers: {
+            "content-type": "text/event-stream",
+            ...(token ? { "x-codex-turn-state": token } : {}),
+          },
+        },
+      );
+    };
+    let account = "acct_1";
+    const turnState = createCodexTurnState();
+    const turn = ctx({
+      turnState,
+      getToken: async () => ({ accessToken: "AC", chatgptAccountId: account, isFedramp: false }),
+    });
+    const fetchImpl = codexSubscriptionFetch(base);
+    const send = () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "m", input: [], stream: true }),
+      }).then((response) => response.text().catch(() => ""));
+    await codexRequestStorage.run(turn, async () => {
+      await send(); // first request of the turn: no token yet; the backend issues one
+      await send(); // replays it
+      account = "acct_2";
+      await send().catch(() => ""); // another account: fresh routing; a failed reply is not kept
+      await send(); // the new account's first successful reply issues its token
+      await send(); // replays the new account's token
+    });
+    // Outside the turn (for example a session title) no token is sent.
+    await codexRequestStorage.run(ctx(), send);
+    expect(sent).toEqual([null, "turn-a", null, null, "turn-b", null]);
+    expect(turnState.current).toEqual({ token: "turn-b", accountId: "acct_2" });
+  });
+
+  test("keeps the turn's routing token on remote compaction requests", async () => {
+    const { base, captures } = baseRecorder();
+    const turnState = createCodexTurnState();
+    turnState.current = { token: "turn-a", accountId: "acct_1" };
+    await codexRequestStorage.run(ctx({ turnState }), () =>
+      withCodexRequestOverrides(
+        { betaFeatures: ["remote_compaction_v2"], turnMetadata: { request_kind: "compaction" } },
+        () =>
+          codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "m", input: [{ type: "compaction_trigger" }] }),
+          }),
+      ),
+    );
+    expect(new Headers(captures[0]?.init?.headers).get("x-codex-turn-state")).toBe("turn-a");
   });
 
   test("does not double-rewrite when url already targets /codex/responses", async () => {
