@@ -33,7 +33,10 @@ export async function loadTestChat(
 ): Promise<{ events: SessionEvent[]; status: SessionStatus | null }> {
   const [session, page] = await Promise.all([
     api.getTestChat(agentId, chat.sessionId, signal),
-    api.listTestChatEvents(agentId, chat.sessionId, { limit: 1_000, ...(signal ? { signal } : {}) }),
+    api.listTestChatEvents(agentId, chat.sessionId, {
+      limit: 1_000,
+      ...(signal ? { signal } : {}),
+    }),
   ]);
   return { events: page.events, status: session.status };
 }

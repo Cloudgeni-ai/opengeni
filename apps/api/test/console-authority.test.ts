@@ -106,7 +106,9 @@ describe("Opengeni Console authority", () => {
 
   test("a test chat runs as the tester's own service principal, which never manages anything", () => {
     expect(consoleTestChatSubjectId("user:editor")).toBe("console-test:user:editor");
-    expect(consoleTestChatSubjectId("user:editor")).not.toBe(consoleTestChatSubjectId("user:other"));
+    expect(consoleTestChatSubjectId("user:editor")).not.toBe(
+      consoleTestChatSubjectId("user:other"),
+    );
     for (const mode of ["explicit", "legacy"] as const) {
       for (const permission of [
         "agents:manage",

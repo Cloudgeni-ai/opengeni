@@ -379,12 +379,19 @@ async function provisionFixture(): Promise<Fixture> {
   ];
   const testChats: Fixture["testChats"] = {};
   for (const [name, headers] of testers) {
-    const started = await call("POST", `/v1/organizations/${accountId}/agents/${agentId}/test-chats`, headers, {
-      version: 1,
-      message: `hi from ${name}`,
-    });
+    const started = await call(
+      "POST",
+      `/v1/organizations/${accountId}/agents/${agentId}/test-chats`,
+      headers,
+      {
+        version: 1,
+        message: `hi from ${name}`,
+      },
+    );
     if (started.status !== 201) {
-      throw new Error(`test chat failed for ${name}: ${started.status} ${JSON.stringify(started.body)}`);
+      throw new Error(
+        `test chat failed for ${name}: ${started.status} ${JSON.stringify(started.body)}`,
+      );
     }
     testChats[name] = started.body.sessionId as string;
   }
@@ -455,8 +462,12 @@ const credentials = (f: Fixture) =>
 
 const MATRIX: Record<string, RouteCase> = {
   // Console (src/routes/console.ts, console-roles.ts): people only.
-  [`GET ${C}/access`]: { need: "any", key: "people_only", ok: 200,
-    path: (f) => `${console_(f)}/access` },
+  [`GET ${C}/access`]: {
+    need: "any",
+    key: "people_only",
+    ok: 200,
+    path: (f) => `${console_(f)}/access`,
+  },
   [`GET ${C}/summary`]: {
     need: "viewer",
     key: "people_only",
@@ -578,12 +589,14 @@ const MATRIX: Record<string, RouteCase> = {
     ok: [200, 201],
     path: (f) => `${agents(f)}/test-workspace`,
   },
-  [`GET ${A}`]: { need: "viewer", key: "allowed", ok: 200,
-    path: (f) => agents(f) },
-  [`GET ${A}/compute`]: { need: "viewer", key: "allowed", ok: 200,
-    path: (f) => `${agents(f)}/compute` },
-  [`POST ${A}`]: { need: "editor", key: "allowed", ok: 422,
-    path: (f) => agents(f), body: {} },
+  [`GET ${A}`]: { need: "viewer", key: "allowed", ok: 200, path: (f) => agents(f) },
+  [`GET ${A}/compute`]: {
+    need: "viewer",
+    key: "allowed",
+    ok: 200,
+    path: (f) => `${agents(f)}/compute`,
+  },
+  [`POST ${A}`]: { need: "editor", key: "allowed", ok: 422, path: (f) => agents(f), body: {} },
   [`GET ${A}/by-key/:key`]: {
     need: "viewer",
     key: "allowed",
@@ -703,12 +716,9 @@ const MATRIX: Record<string, RouteCase> = {
     body: {},
   },
   // End users' stored tool logins: owners and admins among people.
-  [`PUT ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 422,
-    path: credentials, body: {} },
-  [`GET ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 404,
-    path: credentials },
-  [`DELETE ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 404,
-    path: credentials },
+  [`PUT ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 422, path: credentials, body: {} },
+  [`GET ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 404, path: credentials },
+  [`DELETE ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 404, path: credentials },
   // The agents a workspace can use: workspace access, never a Console role.
   [`GET ${WORKSPACE_AGENTS}`]: {
     need: "workspace",
@@ -1211,9 +1221,19 @@ describe("Console roles: reads, writes and lifecycle", () => {
       operationId: crypto.randomUUID(),
       consoleRole: "editor",
     };
-    const first = await call("POST", `/v1/organizations/${accountId}/invitations`, people.owner.headers, body);
+    const first = await call(
+      "POST",
+      `/v1/organizations/${accountId}/invitations`,
+      people.owner.headers,
+      body,
+    );
     expect(first.status).toBe(201);
-    const replay = await call("POST", `/v1/organizations/${accountId}/invitations`, people.owner.headers, body);
+    const replay = await call(
+      "POST",
+      `/v1/organizations/${accountId}/invitations`,
+      people.owner.headers,
+      body,
+    );
     expect([replay.status, replay.body.id]).toEqual([201, first.body.id]);
     const listed = await call("GET", `${console_(fixture)}/member-roles`, people.owner.headers);
     expect(
@@ -1247,16 +1267,16 @@ describe("Console roles: Console test chats", () => {
   /** Every way into someone's test chat: the test chat routes and the app's session routes. */
   async function probeTestChat(who: Record<string, string>, sessionId: string) {
     const workspaceId = await testWorkspaceId();
-    const app = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
-    const console = testChatUrl(fixture!.agentId, sessionId);
+    const appPath = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    const consolePath = testChatUrl(fixture!.agentId, sessionId);
     return {
-      consoleRead: (await call("GET", console, who)).status,
-      consoleEvents: (await call("GET", `${console}/events`, who)).status,
-      consoleSend: (await call("POST", `${console}/messages`, who, { message: "mine now" })).status,
-      appRead: (await call("GET", app, who)).status,
-      appEvents: (await call("GET", `${app}/events`, who)).status,
+      consoleRead: (await call("GET", consolePath, who)).status,
+      consoleEvents: (await call("GET", `${consolePath}/events`, who)).status,
+      consoleSend: (await call("POST", `${consolePath}/messages`, who, { message: "mine now" })).status,
+      appRead: (await call("GET", appPath, who)).status,
+      appEvents: (await call("GET", `${appPath}/events`, who)).status,
       appSend: (
-        await call("POST", `${app}/events`, who, {
+        await call("POST", `${appPath}/events`, who, {
           type: "user.message",
           payload: { text: "mine now" },
         })
@@ -1359,22 +1379,41 @@ describe("Console roles: Console test chats", () => {
     const bystanderMembership = await inviteAndAccept(accountId, people.owner, bystander, "member");
     const workspaceId = await testWorkspaceId();
     const before = await stateFingerprint(accountId);
-    const minted = await call("POST", `/v1/workspaces/${workspaceId}/api-keys`, people.editor.headers, {
-      name: "probe",
-      permissions: ["workspace:read"],
-    });
+    const minted = await call(
+      "POST",
+      `/v1/workspaces/${workspaceId}/api-keys`,
+      people.editor.headers,
+      {
+        name: "probe",
+        permissions: ["workspace:read"],
+      },
+    );
     expect(minted.status).toBe(403);
-    const added = await call("POST", `/v1/workspaces/${workspaceId}/members`, people.editor.headers, {
-      organizationMembershipId: bystanderMembership.membershipId,
-      role: "owner",
-      permissions: ["workspace:admin"],
-    });
+    const added = await call(
+      "POST",
+      `/v1/workspaces/${workspaceId}/members`,
+      people.editor.headers,
+      {
+        organizationMembershipId: bystanderMembership.membershipId,
+        role: "owner",
+        permissions: ["workspace:admin"],
+      },
+    );
     expect(added.status).toBe(403);
-    const plain = await call("POST", `/v1/workspaces/${workspaceId}/sessions`, people.editor.headers, {
-      initialMessage: "hi",
-    });
+    const plain = await call(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions`,
+      people.editor.headers,
+      {
+        initialMessage: "hi",
+      },
+    );
     expect(plain.status).toBe(403);
-    const listed = await call("GET", `/v1/workspaces/${workspaceId}/sessions`, people.editor.headers);
+    const listed = await call(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions`,
+      people.editor.headers,
+    );
     expect(listed.status).toBe(403);
     expect(await stateFingerprint(accountId)).toBe(before);
   }, 120_000);
@@ -1391,7 +1430,11 @@ describe("Console roles: Console test chats", () => {
       const started = await startTestChat(who.headers);
       expect(started.status).toBe(201);
       chats.set(who, started.body.sessionId as string);
-      const own = await call("GET", testChatUrl(fixture.agentId, started.body.sessionId), who.headers);
+      const own = await call(
+        "GET",
+        testChatUrl(fixture.agentId, started.body.sessionId),
+        who.headers,
+      );
       expect(own.status).toBe(200);
     }
 

@@ -184,7 +184,11 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
         },
         opts(options.signal),
       ),
-    sendTestChatMessage: (id: string, sessionId: string, request: SendOrgAgentTestChatMessageRequest) =>
+    sendTestChatMessage: (
+      id: string,
+      sessionId: string,
+      request: SendOrgAgentTestChatMessageRequest,
+    ) =>
       client.requestJson<unknown>(
         "POST",
         `${agent(id)}/test-chats/${encode(sessionId)}/messages`,
