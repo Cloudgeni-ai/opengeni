@@ -104,28 +104,28 @@ describe("file attachments and the cached instruction prefix", () => {
     const managed = await sentInstructions([REPOSITORY]);
     const linux = await sentInstructions([REPOSITORY], undefined, {
       activeSandboxBackend: "selfhosted",
-      sandboxWorkspaceRoot: "/home/person",
+      sandboxWorkspaceRoot: "/home/user",
     });
     const mac = await sentInstructions([REPOSITORY], undefined, {
       activeSandboxBackend: "selfhosted",
-      sandboxWorkspaceRoot: "/Users/person",
+      sandboxWorkspaceRoot: "/Users/user",
     });
     // Machines differ only by their root, which is no longer in the prompt.
     expect(mac.text).toBe(linux.text);
-    expect(linux.text).not.toContain("/home/person");
+    expect(linux.text).not.toContain("/home/user");
     for (const sent of [managed, linux]) {
       expect(sent.text).not.toContain("The filesystem layout is");
       expect(sent.text).toContain("<opengeni_workspace_filesystem>");
     }
-    expect(linux.runtimeManifest.root).toBe("/home/person");
+    expect(linux.runtimeManifest.root).toBe("/home/user");
 
     expect(workspaceFilesystemLayout(settings, [REPOSITORY])).toStartWith("/workspace");
     expect(
       workspaceFilesystemLayout(settings, [REPOSITORY], {
         activeSandboxBackend: "selfhosted",
-        sandboxWorkspaceRoot: "/home/person",
+        sandboxWorkspaceRoot: "/home/user",
       }),
-    ).toBe("/home/person");
+    ).toBe("/home/user");
     expect(
       workspaceFilesystemLayout(settings, [REPOSITORY], { activeSandboxBackend: "selfhosted" }),
     ).toBeNull();

@@ -365,7 +365,7 @@ describe("compaction pairs a retained request only with its own turn's reply", (
         [T0, workspaceFilesystemContextItem("/workspace")],
         [T0, user("first")],
         [T1, governance],
-        [T1, workspaceFilesystemContextItem("/home/person")],
+        [T1, workspaceFilesystemContextItem("/home/user")],
         [T1, user("ask")],
         [T1, assistant("answer", "final_answer")],
         [T2, call("c1")],
@@ -373,7 +373,7 @@ describe("compaction pairs a retained request only with its own turn's reply", (
       const { history } = rebuild(mode, items, { itemTurnIds, activeTurnId: T2 });
       expect(history.slice(0, 2)).toEqual([
         governance,
-        workspaceFilesystemContextItem("/home/person"),
+        workspaceFilesystemContextItem("/home/user"),
       ]);
       expect(history.filter((item) => readWorkspaceFilesystemContext(item) !== null)).toHaveLength(
         1,

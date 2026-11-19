@@ -117,24 +117,24 @@ test("a machine move adds a layout item before the next turn and never rewrites 
   expect(original[1]!.item.role).toBe("user");
   // A swap within the turn starts a new attempt that keeps the turn's snapshot;
   // the swap's own tool result tells the model the new root.
-  expect(await f.layout(first, "/home/person")).toBe("/workspace");
+  expect(await f.layout(first, "/home/user")).toBe("/workspace");
   expect(await f.history()).toEqual(original);
   await f.settle(first);
 
   const second = await f.claim();
-  expect(await f.layout(second, "/home/person")).toBe("/home/person");
+  expect(await f.layout(second, "/home/user")).toBe("/home/user");
   const moved = await f.history();
   expect(moved.slice(0, original.length)).toEqual(original);
-  expect(await f.layouts()).toEqual(["/workspace", "/home/person"]);
+  expect(await f.layouts()).toEqual(["/workspace", "/home/user"]);
   await f.settle(second);
 
   // The same machine on a later turn writes nothing.
   const third = await f.claim();
-  expect(await f.layout(third, "/home/person")).toBe("/home/person");
-  expect(await f.layouts()).toEqual(["/workspace", "/home/person"]);
+  expect(await f.layout(third, "/home/user")).toBe("/home/user");
+  expect(await f.layouts()).toEqual(["/workspace", "/home/user"]);
   // A turn without a sandbox keeps what the model last read.
   await f.settle(third);
   const fourth = await f.claim();
-  expect(await f.layout(fourth, null)).toBe("/home/person");
-  expect(await f.layouts()).toEqual(["/workspace", "/home/person"]);
+  expect(await f.layout(fourth, null)).toBe("/home/user");
+  expect(await f.layouts()).toEqual(["/workspace", "/home/user"]);
 }, 180_000);
