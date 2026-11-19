@@ -7458,7 +7458,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "CreateOrgAgentTestChatRequest"
     ],
-    "response": []
+    "response": [],
+    "secretFields": [
+      "request.toolLogins"
+    ]
   },
   {
     "id": "POST /v1/organizations/:organizationId/agents/test-workspace",

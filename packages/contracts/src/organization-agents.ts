@@ -833,7 +833,7 @@ export const CreateOrgAgentTestChatRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       version: z.number().int().positive(),
       message: z.string().trim().min(1).max(100_000),
-      toolLogins: z.record(OrgToolServerKey, secretValue(z.string().min(1).max(16_384))).optional(),
+      toolLogins: secretValue(z.record(OrgToolServerKey, z.string().min(1).max(16_384))).optional(),
     })
     .strict(),
 );
