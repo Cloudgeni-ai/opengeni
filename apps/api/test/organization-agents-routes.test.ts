@@ -44,7 +44,13 @@ type Fixture = {
   managedWorkspaceId: string;
   teamWorkspaceId: string;
   keys: Record<
-    "full" | "read" | "agentsRead" | "agentsManage" | "credentials" | "sessionsOnly",
+    | "full"
+    | "read"
+    | "agentsRead"
+    | "agentsManage"
+    | "agentsManageLimited"
+    | "credentials"
+    | "sessionsOnly",
     Record<string, string>
   >;
 };
@@ -185,7 +191,12 @@ async function provisionFixture(): Promise<Fixture> {
   await shared.admin`insert into organization_managed_workspaces (account_id, workspace_id, source)
     values (${accountId}, ${managed.id}, 'console')`;
 
-  const key = async (name: string, permissions: Permission[], explicit: Permission[] | null) => {
+  const key = async (
+    name: string,
+    permissions: Permission[],
+    explicit: Permission[] | null,
+    onlyWorkspaces: string[] | null = null,
+  ) => {
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     const created = await createApiKey(client!.db, {
       accountId,
@@ -199,6 +210,13 @@ async function provisionFixture(): Promise<Fixture> {
     if (explicit) {
       await shared!.admin`update api_keys set permission_mode = 'explicit',
         permissions = ${JSON.stringify(explicit)}::jsonb where id = ${created.id}`;
+    }
+    if (onlyWorkspaces) {
+      await shared!.admin`update api_keys set workspace_scope = 'selected' where id = ${created.id}`;
+      for (const workspaceId of onlyWorkspaces) {
+        await shared!.admin`insert into organization_api_key_workspaces (api_key_id, workspace_id, account_id)
+          values (${created.id}, ${workspaceId}, ${accountId})`;
+      }
     }
     return { authorization: `Bearer ${token}` };
   };
@@ -216,6 +234,12 @@ async function provisionFixture(): Promise<Fixture> {
         "Agents manage",
         [],
         ["account:read", "agents:read", "agents:manage"],
+      ),
+      agentsManageLimited: await key(
+        "Agents manage, one workspace",
+        [],
+        ["account:read", "agents:read", "agents:manage"],
+        [managed.id],
       ),
       credentials: await key("Logins", [], ["account:read", "tool_credentials:write"]),
       sessionsOnly: await key("Sessions", [], ["account:read", "agents:read", "sessions:read"]),
@@ -608,6 +632,83 @@ describe("Console agents routes", () => {
 
     expect((await call("DELETE", `${org()}/tool-servers/crm`, keys.full)).status).toBe(204);
     expect((await call("GET", `${org()}/tool-servers/crm`, keys.full)).status).toBe(404);
+  }, 120_000);
+
+  test("a key limited to some workspaces cannot write tool servers or move running chats", async () => {
+    if (!fixture) return;
+    const { keys } = fixture;
+    const limited = keys.agentsManageLimited;
+    const refused = (reply: Reply) => [reply.status, reply.body.details?.code];
+    const workspaceLimited = [403, "organization_key_workspace_limited"];
+    const server = { key: "limited-crm", name: "CRM", url: "https://crm.example.com/mcp" };
+
+    expect(
+      refused(await call("POST", `${org()}/tool-servers`, limited, { ...server, authMode: "none" })),
+    ).toEqual(workspaceLimited);
+    const created = await call("POST", `${org()}/tool-servers`, keys.agentsManage, {
+      ...server,
+      authMode: "none",
+    });
+    expect(created.status).toBe(201);
+    expect(
+      refused(
+        await call("PATCH", `${org()}/tool-servers/limited-crm`, limited, {
+          expectedVersion: created.body.toolServer.rowVersion,
+          url: "https://elsewhere.example/mcp",
+        }),
+      ),
+    ).toEqual(workspaceLimited);
+    expect(refused(await call("DELETE", `${org()}/tool-servers/limited-crm`, limited))).toEqual(
+      workspaceLimited,
+    );
+    // Reading stays allowed.
+    expect((await call("GET", `${org()}/tool-servers/limited-crm`, limited)).status).toBe(200);
+
+    // Agents: publishing is allowed; moving running chats is not.
+    const agent = await call("POST", org(), limited, { key: "limited", name: "Limited" });
+    expect(agent.status).toBe(201);
+    const agentId = agent.body.agent.id as string;
+    const move = await call("POST", `${org()}/${agentId}/publish`, limited, {
+      version: 1,
+      moveRunningChats: true,
+      expectedVersion: agent.body.agent.rowVersion,
+    });
+    expect(refused(move)).toEqual(workspaceLimited);
+    const publish = await call("POST", `${org()}/${agentId}/publish`, limited, {
+      version: 1,
+      moveRunningChats: false,
+      expectedVersion: agent.body.agent.rowVersion,
+    });
+    expect(publish.status).toBe(200);
+    const definition = { name: "Limited deploy", instructions: "Hi." };
+    const applyMove = await call("PUT", `${org()}/by-key/limited-deploy/apply`, limited, {
+      ...definition,
+      publish: true,
+      moveRunningChats: true,
+    });
+    expect(refused(applyMove)).toEqual(workspaceLimited);
+    const dryRun = await call("PUT", `${org()}/by-key/limited-deploy/apply`, limited, {
+      ...definition,
+      publish: true,
+      moveRunningChats: true,
+      dryRun: true,
+    });
+    expect(dryRun.status).toBe(200);
+    const applied = await call("PUT", `${org()}/by-key/limited-deploy/apply`, limited, {
+      ...definition,
+      publish: true,
+    });
+    expect(applied.status).toBe(201);
+    // A key for all workspaces moves chats.
+    const fullMove = await call("POST", `${org()}/${agentId}/publish`, keys.agentsManage, {
+      version: 1,
+      moveRunningChats: true,
+      expectedVersion: publish.body.agent.rowVersion,
+    });
+    expect(fullMove.status).toBe(200);
+    expect((await call("DELETE", `${org()}/tool-servers/limited-crm`, keys.full)).status).toBe(
+      204,
+    );
   }, 120_000);
 
   test("workspaces list their published organization agents; the test workspace is created once", async () => {

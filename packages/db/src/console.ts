@@ -521,6 +521,11 @@ export function resetRememberedEndUserLabels(): void {
   rememberedProfiles.clear();
 }
 
+/** After the stored profile was erased: the next value the product sends is stored again. */
+export function forgetRememberedEndUserProfile(accountId: string, subjectId: string): void {
+  rememberedProfiles.delete(`${accountId}:${subjectId}`);
+}
+
 export type ConsoleEndUserRow = {
   subjectId: string;
   externalId: string | null;

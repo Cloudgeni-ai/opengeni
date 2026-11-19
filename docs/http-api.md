@@ -59,7 +59,8 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   `PUT /by-key/:key/apply`), tool servers (`/tool-servers[/:key[/tools]]`),
   chats and usage per agent (`GET /:agentId/sessions|usage`, also
   `sessions:read`), the Console test workspace (`POST /test-workspace`) and
-  test chats (`POST /:agentId/test-chats`). See
+  test chats (`POST /:agentId/test-chats`). Tool server writes and
+  publishing with `moveRunningChats` need a key for all workspaces. See
   [`agents.md` § Console agents](agents.md#console-agents)
 - `PUT|GET|DELETE /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`
   (an end user's stored login for an organization tool server; `PUT`/`DELETE`

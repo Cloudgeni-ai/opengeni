@@ -1630,6 +1630,16 @@ function toolServerNotFound(key: string): OrgAgentError {
   return new OrgAgentError(404, "tool_server_not_found", `No tool server '${key}'.`);
 }
 
+/** Where a URL's secrets go: its origin, or the raw value when it does not parse. */
+function urlOrigin(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value;
+  }
+}
+
 export async function listOrgToolServers(
   db: Database,
   accountId: string,
@@ -1648,13 +1658,13 @@ async function selectToolServer(
   tx: Database,
   accountId: string,
   key: string,
-  options: { forUpdate?: boolean } = {},
+  options: { forUpdate?: boolean; forShare?: boolean } = {},
 ): Promise<ToolServerRow | null> {
   const [row] = await rawRows<ToolServerRow>(
     tx,
     sql`select ${TOOL_SERVER_COLUMNS} from organization_tool_servers
       where account_id = ${accountId}::uuid and server_key = ${key}
-      ${options.forUpdate ? sql`for update` : sql``}`,
+      ${options.forUpdate ? sql`for update` : options.forShare ? sql`for share` : sql``}`,
   );
   return row ?? null;
 }
@@ -1767,31 +1777,58 @@ export async function updateOrgToolServer(
     if (typeof sharedHeaders === "string" && authMode !== "shared_key") {
       throw toolServerInvalid("Only a shared_key tool server keeps a shared key.");
     }
+    // Secrets are bound to where they are sent. Pointing the server at another
+    // origin drops its shared key (unless this request sets a new one) and
+    // deletes every end user's stored login for it; pointing OAuth refresh at
+    // another origin drops the client secret (unless re-supplied) and deletes
+    // the stored OAuth logins, whose refresh tokens would go there.
+    const nextUrl = request.url ?? current.url;
+    const serverMoved = urlOrigin(nextUrl) !== urlOrigin(current.url);
+    const currentOAuth = storedOAuthRefresh(current.oauth_refresh);
     // Leaving shared_key drops the shared key.
     const nextSharedHeaders =
       authMode !== "shared_key"
         ? null
-        : sharedHeaders === undefined
-          ? current.shared_headers_encrypted
-          : sharedHeaders;
+        : sharedHeaders !== undefined
+          ? sharedHeaders
+          : serverMoved
+            ? null
+            : current.shared_headers_encrypted;
+    const sharedKeyDropped =
+      serverMoved &&
+      sharedHeaders === undefined &&
+      authMode === "shared_key" &&
+      current.shared_headers_encrypted !== null;
     const nextHeaderNames =
       nextSharedHeaders === null
         ? []
         : request.sharedHeaders
           ? Object.keys(request.sharedHeaders).sort()
           : (current.shared_header_names ?? []);
-    let nextOAuth: StoredOAuthRefresh | null = storedOAuthRefresh(current.oauth_refresh);
+    let nextOAuth: StoredOAuthRefresh | null = currentOAuth;
+    let clientSecretDropped = false;
     if (oauth === null) nextOAuth = null;
     else if (oauth !== undefined) {
-      // An omitted client secret keeps the stored one when the client stays the same.
-      const kept =
+      // An omitted client secret keeps the stored one while the client and
+      // the token endpoint's origin stay the same.
+      const keep =
         oauth.clientSecret === undefined &&
-        nextOAuth?.clientSecretEncrypted !== undefined &&
-        nextOAuth.clientId === oauth.clientId
-          ? { clientSecretEncrypted: nextOAuth.clientSecretEncrypted }
-          : {};
-      nextOAuth = { ...encryptOAuthRefresh(input.encryptionKey, oauth), ...kept };
+        currentOAuth?.clientSecretEncrypted !== undefined &&
+        currentOAuth.clientId === oauth.clientId &&
+        urlOrigin(currentOAuth.tokenUrl) === urlOrigin(oauth.tokenUrl);
+      clientSecretDropped =
+        oauth.clientSecret === undefined &&
+        currentOAuth?.clientSecretEncrypted !== undefined &&
+        !keep;
+      nextOAuth = {
+        ...encryptOAuthRefresh(input.encryptionKey, oauth),
+        ...(keep ? { clientSecretEncrypted: currentOAuth!.clientSecretEncrypted } : {}),
+      };
     }
+    // Setting a token endpoint where there was none also counts: stored
+    // refresh tokens would start going there.
+    const tokenUrlMoved =
+      nextOAuth !== null && urlOrigin(nextOAuth.tokenUrl) !== urlOrigin(currentOAuth?.tokenUrl);
     const changed = Object.keys(request).filter(
       (field) =>
         field !== "expectedVersion" && request[field as keyof typeof request] !== undefined,
@@ -1800,7 +1837,7 @@ export async function updateOrgToolServer(
       tx,
       sql`update organization_tool_servers set
           name = ${request.name?.trim() ?? current.name},
-          url = ${request.url ?? current.url},
+          url = ${nextUrl},
           auth_mode = ${authMode},
           shared_headers_encrypted = ${nextSharedHeaders},
           shared_header_names = ${pgArray(nextHeaderNames)}::text[],
@@ -1809,6 +1846,23 @@ export async function updateOrgToolServer(
         where account_id = ${input.accountId}::uuid and id = ${current.id}::uuid
         returning ${TOOL_SERVER_COLUMNS}`,
     );
+    // The account context sees every workspace's logins (1502 policy). Turns
+    // read the server before its logins, and this runs in the same
+    // transaction as the URL change, so no turn pairs a login with the new
+    // origin.
+    const removedLogins =
+      serverMoved || tokenUrlMoved
+        ? (
+            await rawRows<{ id: string }>(
+              tx,
+              sql`delete from end_user_tool_credentials
+                where account_id = ${input.accountId}::uuid
+                  and tool_server_id = ${current.id}::uuid
+                  ${serverMoved ? sql`` : sql`and kind = 'oauth'`}
+                returning id::text as id`,
+            )
+          ).length
+        : 0;
     await audit(tx, {
       accountId: input.accountId,
       actor: input.actor,
@@ -1820,6 +1874,11 @@ export async function updateOrgToolServer(
         ...(request.url !== undefined ? { url: request.url } : {}),
         ...(request.authMode !== undefined ? { authMode: request.authMode } : {}),
         sharedHeaderNames: nextHeaderNames,
+        ...(serverMoved ? { urlOriginChanged: true } : {}),
+        ...(tokenUrlMoved ? { tokenUrlOriginChanged: true } : {}),
+        ...(sharedKeyDropped ? { sharedKeyDropped: true } : {}),
+        ...(clientSecretDropped ? { clientSecretDropped: true } : {}),
+        ...(serverMoved || tokenUrlMoved ? { endUserLoginsRemoved: removedLogins } : {}),
       },
     });
     return mapToolServer(row!);
@@ -1965,8 +2024,16 @@ type CredentialTarget = {
   toolServerKey: string;
 };
 
-/** The workspace must be managed by the organization, and the server must exist. */
-async function credentialServer(tx: Database, input: CredentialTarget): Promise<ToolServerRow> {
+/**
+ * The workspace must be managed by the organization, and the server must
+ * exist. A write holds the server row (FOR SHARE) so a concurrent change of
+ * its URL either sees this login and deletes it, or happens first.
+ */
+async function credentialServer(
+  tx: Database,
+  input: CredentialTarget,
+  options: { forWrite?: boolean } = {},
+): Promise<ToolServerRow> {
   const [managed] = await rawRows<{ found: number }>(
     tx,
     sql`select 1 as found from organization_managed_workspaces
@@ -1979,7 +2046,9 @@ async function credentialServer(tx: Database, input: CredentialTarget): Promise<
       "End users' tool logins are stored only in workspaces the organization manages.",
     );
   }
-  const server = await selectToolServer(tx, input.accountId, input.toolServerKey);
+  const server = await selectToolServer(tx, input.accountId, input.toolServerKey, {
+    forShare: options.forWrite === true,
+  });
   if (!server) throw toolServerNotFound(input.toolServerKey);
   return server;
 }
@@ -2010,7 +2079,7 @@ export async function putEndUserToolCredential(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      const server = await credentialServer(tx, input);
+      const server = await credentialServer(tx, input, { forWrite: true });
       const [row] = await rawRows<CredentialRow>(
         tx,
         sql`insert into end_user_tool_credentials (account_id, workspace_id, end_user_subject_id,

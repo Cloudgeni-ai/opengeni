@@ -15,7 +15,9 @@
  *   permission (`agents:read`, `agents:manage`, `tool_credentials:write`,
  *   plus `sessions:read` for chats and usage). Legacy full keys hold them
  *   through `workspace:admin`; a key limited to selected workspaces reads and
- *   names only those workspaces;
+ *   names only those workspaces, and cannot write tool servers or publish
+ *   with `moveRunningChats` (403 `organization_key_workspace_limited`): both
+ *   reach every workspace;
  * - people, by Console role (`./console-roles.ts`, docs/opengeni-console.md
  *   "Roles"): owners and admins (`full`) may do everything here except what
  *   is owner-only; an Editor reads, creates agents (without team workspace
@@ -305,6 +307,21 @@ function requireOwner(caller: Caller): void {
   }
 }
 
+/**
+ * Tool server writes and moving running chats reach every workspace of the
+ * organization, so an organization key limited to selected workspaces is
+ * refused (people are covered by their Console role).
+ */
+function requireAllWorkspacesKey(caller: Caller, change: string): void {
+  if (caller.apiKey && caller.apiKey.workspaceScope.kind !== "all") {
+    throw httpError(
+      403,
+      "organization_key_workspace_limited",
+      `${change} reaches every workspace of the organization. Use an organization key for all workspaces.`,
+    );
+  }
+}
+
 function inScope(caller: Caller, workspaceId: string): boolean {
   return !caller.apiKey || organizationWorkspaceInScope(caller.apiKey.workspaceScope, workspaceId);
 }
@@ -451,6 +468,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.post(`${base}/tool-servers`, async (c) => {
     const caller = await orgCaller(c, deps, ["agents:manage"], "full");
+    requireAllWorkspacesKey(caller, "A tool server");
     const request = await parseRequestJson(c, CreateOrgToolServerRequest);
     const toolServer = await mapped(() =>
       createOrgToolServer(deps.db, {
@@ -478,6 +496,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.patch(`${base}/tool-servers/:key`, async (c) => {
     const caller = await orgCaller(c, deps, ["agents:manage"], "full");
+    requireAllWorkspacesKey(caller, "A tool server");
     const key = toolServerKey(c);
     const request = await parseRequestJson(c, UpdateOrgToolServerRequest);
     const toolServer = await mapped(() =>
@@ -494,6 +513,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.delete(`${base}/tool-servers/:key`, async (c) => {
     const caller = await orgCaller(c, deps, ["agents:manage"], "full");
+    requireAllWorkspacesKey(caller, "A tool server");
     const key = toolServerKey(c);
     const expected = c.req.query("expectedVersion");
     const expectedVersion = expected === undefined ? undefined : PositiveInt.safeParse(expected);
@@ -614,6 +634,9 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const key = agentKey(c);
     const request = ApplyOrgAgentRequest.parse(await parseRequestJson(c, ApplyOrgAgentRequest));
     const { publish, moveRunningChats, dryRun, expectedVersion, ...rest } = request;
+    if (publish && moveRunningChats && !dryRun) {
+      requireAllWorkspacesKey(caller, "Moving running chats");
+    }
     const definition = OrgAgentDefinition.parse(rest);
     const toolCatalog = dryRun
       ? null
@@ -716,6 +739,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const agentId = uuidParam(c, "agentId");
     await requireEditableByCaller(deps, caller, agentId);
     const request = PublishOrgAgentRequest.parse(await parseRequestJson(c, PublishOrgAgentRequest));
+    if (request.moveRunningChats) requireAllWorkspacesKey(caller, "Moving running chats");
     const result = await mapped(() =>
       publishOrgAgent(deps.db, {
         accountId: caller.organizationId,

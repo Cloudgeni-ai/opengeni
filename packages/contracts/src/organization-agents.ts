@@ -80,6 +80,12 @@ export const ORG_AGENT_ERROR_CODES = [
   "workspace_not_managed",
   /** Only an organization owner can change who manages an agent. */
   "agent_management_requires_owner",
+  /**
+   * The change reaches every workspace of the organization (tool servers, or
+   * moving running chats to a published version): it needs an organization
+   * key for all workspaces, not one limited to selected workspaces.
+   */
+  "organization_key_workspace_limited",
   /** A create names both `agentId` (a workspace agent) and an organization agent. */
   "agent_ref_conflict",
   /** Saving an agent version from inline config needs `agents:manage`. */
