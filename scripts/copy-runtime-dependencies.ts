@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, realpath, symlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isPublishedPackageName } from "./publishable-workspaces";
 
 type PackageManifest = {
   name: string;
@@ -83,7 +84,7 @@ export async function copyRuntimeDependencies(
         filter: (source) => {
           const parts = relative(physical, source).split(sep);
           if (parts.some((part) => part.startsWith(".bun-tag-"))) return false;
-          if (manifest.name.startsWith("@opengeni/") && parts.length > 0 && parts[0]) {
+          if (isPublishedPackageName(manifest.name) && parts.length > 0 && parts[0]) {
             // Workspace links point at checkouts rather than packed packages.
             // Preserve the published runtime files, not tests or build inputs.
             const allowed = new Set([

@@ -12,7 +12,11 @@ import {
   workspaceForPath,
   type WorkspaceGraph,
 } from "./workspace";
-import { changesetIgnoreSet } from "../publishable-workspaces";
+import {
+  changesetIgnoreSet,
+  isPublishedPackageName,
+  publishedPackageOfSpecifier,
+} from "../publishable-workspaces";
 
 export type ImpactReason = { path: string; reason: string };
 export type BrowserAcceptanceLane =
@@ -700,8 +704,8 @@ function importedWorkspaceDependencies(graph: WorkspaceGraph, path: string): Set
   const workspaceNames = new Set(graph.packages.map((pkg) => pkg.name));
   const dependencies = new Set<string>();
   for (const specifier of imports) {
-    if (specifier.startsWith("@opengeni/")) {
-      const name = specifier.split("/").slice(0, 2).join("/");
+    const name = publishedPackageOfSpecifier(specifier);
+    if (name) {
       if (!workspaceNames.has(name)) {
         throw new Error(`${path} imports unknown workspace dependency ${name}`);
       }
@@ -807,7 +811,7 @@ function fullPlan(
     browserAcceptanceLanes: ["accounts", "interaction", "knowledge", "onboarding", "workbench"],
     artifactRuntimeRequired: true,
     buildPackages: graph.packages
-      .filter((pkg) => pkg.name.startsWith("@opengeni/") && pkg.packageJson.private !== true)
+      .filter((pkg) => isPublishedPackageName(pkg.name) && pkg.packageJson.private !== true)
       .filter((pkg) => !ignoredBuildPackages.has(pkg.name))
       .map((pkg) => pkg.name)
       .sort(),
@@ -1041,7 +1045,7 @@ export function createImpactPlan(
     .filter(
       (pkg) =>
         affected.has(pkg.name) &&
-        pkg.name.startsWith("@opengeni/") &&
+        isPublishedPackageName(pkg.name) &&
         pkg.packageJson.private !== true,
     )
     .map((pkg) => pkg.name)
