@@ -8,6 +8,11 @@
 // serialized Session JSON (create response and read) and the built system
 // prompt. Columns added later must be NULL on these chats and are the only
 // difference allowed.
+//
+// When a later change intentionally alters the system prompt, the Session JSON
+// or the session columns, re-record the fixture on that change with
+// OPENGENI_GOLDEN_RECORD=1. The organization-agent columns must stay NULL on
+// these chats either way.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { Settings } from "@opengeni/config";
@@ -307,17 +312,31 @@ describe("a create without an organization agent is unchanged", () => {
     expect(Object.keys(actual).sort()).toEqual(Object.keys(expected).sort());
     for (const [name, recorded] of Object.entries(expected)) {
       const current = actual[name]!;
-      // Only the organization-agent columns are new, and they are NULL here.
+      // Only the organization-agent columns may be new, and they are NULL here.
       const added = Object.keys(current.sessionRow)
         .filter((column) => !(column in recorded.sessionRow))
         .sort();
-      expect({ name, added }).toEqual({ name, added: ADDED_SESSION_COLUMNS });
-      for (const column of added)
+      expect({
+        name,
+        added: added.filter((column) => !ADDED_SESSION_COLUMNS.includes(column)),
+      }).toEqual({ name, added: [] });
+      for (const column of ADDED_SESSION_COLUMNS)
         expect({ column, value: current.sessionRow[column] }).toEqual({ column, value: null });
       const sessionRow = Object.fromEntries(
-        Object.entries(current.sessionRow).filter(([column]) => column in recorded.sessionRow),
+        Object.entries(current.sessionRow).filter(
+          ([column]) => column in recorded.sessionRow && !ADDED_SESSION_COLUMNS.includes(column),
+        ),
       );
-      expect({ name, ...current, sessionRow }).toEqual({ name, ...recorded });
+      const recordedRow = Object.fromEntries(
+        Object.entries(recorded.sessionRow).filter(
+          ([column]) => !ADDED_SESSION_COLUMNS.includes(column),
+        ),
+      );
+      expect({ name, ...current, sessionRow }).toEqual({
+        name,
+        ...recorded,
+        sessionRow: recordedRow,
+      });
       // Byte for byte.
       expect(current.systemPrompt).toBe(recorded.systemPrompt);
     }
