@@ -976,8 +976,6 @@ describe("Console roles: the Console test workspace", () => {
 
   const refusedForRole = (reply: Reply) =>
     reply.status === 403 && reply.body.details?.code === "console_role_required";
-  const reachedTheChat = (reply: Reply) =>
-    reply.status !== 401 && reply.status !== 403 && reply.status !== 404;
 
   test("membership there only starts and reads chats: never workspace:admin or agents:manage", async () => {
     if (!fixture || !client || !shared) return;
@@ -1014,16 +1012,16 @@ describe("Console roles: the Console test workspace", () => {
 
     for (const who of [exAdmin, exEditor]) {
       const before = await testChat(who);
-      expect({ status: before.status, ok: reachedTheChat(before) }).toEqual({
-        status: before.status,
-        ok: true,
-      });
+      expect([before.status, JSON.stringify(before.body).slice(0, 200)]).toEqual([
+        201,
+        expect.any(String),
+      ]);
       expect(await testMembership(who.subjectId)).not.toBeNull();
       const direct = await directDraftChat(who);
-      expect({ status: direct.status, ok: reachedTheChat(direct) }).toEqual({
-        status: direct.status,
-        ok: true,
-      });
+      expect([direct.status, JSON.stringify(direct.body).slice(0, 200)]).toEqual([
+        202,
+        expect.any(String),
+      ]);
     }
 
     const demoted = await call(
