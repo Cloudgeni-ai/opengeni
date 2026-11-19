@@ -1,5 +1,46 @@
 # @opengeni/db
 
+## 6.31.0
+
+### Minor Changes
+
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+### Patch Changes
+
+- e75ea20: A stopped Modal or Docker sandbox is now forgotten a day after every chat that works in it is archived, and its saved workspace (a Modal snapshot or tar archive) is deleted. 1502 grants the runtime the inventory 1404 added.
+- 5fb457f: Claude accounts that are serving turns no longer show "Usage unavailable" on the Models page. A live usage reading was stamped with the time its request left, so whenever a turn on the same account stored its response headers while Claude was answering (about two seconds), the stored quota counted as newer and the reading was dropped and reported as unavailable. Readings are now stamped when Claude's answer arrives, as Codex readings already are; whether a refusal stored meanwhile still stands is still judged from the request time. A reading that a genuinely newer stored observation supersedes now counts as a successful check. Every live check that still ends unavailable logs why (Claude's HTTP status, the kind of transport error, or why the reading was not stored), without tokens or response text. When a check does fail, the account row and the account page keep showing the last saved reading with its age, and say "Usage unavailable" only for an account Claude has never reported.
+- d07d727: A `personalResourceAttachment` on a chat that uses no personal Rig or Connected Machine is still refused with 422, but the refusal now says there is nothing to attach and that Connections are chosen with `connectionAccounts`, instead of the generic "The personal-resource attachment request is invalid".
+- 047b487: A configured agent now always gets `goal_resume` and the goals sentence that names it. Before, both appeared only once the session had a goal, so a session's first goal changed the tool list and system prompt under every earlier request and the next turn re-read the whole history uncached.
+- 890c910: Moving a session to another machine no longer rewrites the system prompt. The workspace root and filesystem layout reach the model as a `<opengeni_workspace_filesystem>` history item written before the turn that first sees a new layout, and `sandbox_swap` returns the new `workspaceRoot`, so the provider's prompt cache survives a swap.
+- ea21b19: A session create that the server refuses while starting its first turn (for example a personal-resource attachment that selects no personal Rig or Connected Machine) no longer leaves an idle, usable session behind when it carried an `idempotencyKey`. The refused session and its key are released, so retrying the same request gets the same refusal and a corrected request can reuse both the key and its `requestedSessionId`. Migration 1501 adds the database function this needs without granting it to the runtime yet; until a later release grants it, a refused keyed create keeps its session as before.
+- 46d677b: When a Claude, ChatGPT or SuperGrok subscription account stops accepting its sign-in, the person who connected it now gets one inbox notice and phone notification, for example "Sign in to Claude again", with the account's email. If that person can no longer manage the account, the organization's owners and admins get it instead. The notice's "Sign in again" opens that account's own sign-in step. For Claude, the step names the email to sign in as, and the person signs in with Claude and pastes the code. The notice goes away once the account works again, and a later lapse gets a new notice.
+
+  Each account's page shows how long ago it was signed in. A Claude account signed in 25 or more days ago shows a warning with "Sign in again" before Claude stops accepting the sign-in, which tends to happen around 28 to 30 days.
+
+  `GET /v1/inbox` returns these notices in a new optional `notices` list (`InboxNotice`: shaped like a notification item, with `sessionId: null` and always a `link`). `items`, `needsYouCount` and `unreadCount` are unchanged. Subscription account listings carry an optional `signedInAt`. A phone notification about something other than a chat carries the address to open in `url`.
+
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+- Updated dependencies [8e1f06d]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/config@6.31.0
+  - @opengeni/network@6.31.0
+  - @opengeni/codex@6.31.0
+  - @opengeni/codemode@6.31.0
+  - @opengeni/observability@6.31.0
+  - @opengeni/xai-subscription@6.31.0
+  - @opengeni/subscriptions@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

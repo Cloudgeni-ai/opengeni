@@ -1,5 +1,46 @@
 # @opengeni/runtime
 
+## 6.31.0
+
+### Patch Changes
+
+- a0fb1c6: On Codex subscription, OpenAI platform and Azure OpenAI Responses requests, the agent's system prompt is now sent as the leading `developer` input item instead of top-level `instructions`. GPT-6.2 and later models place `instructions` after the input and never cache them, so the whole system prompt was billed as uncached input on every request; as a leading developer item it is part of the cached prefix again. Earlier models cache both shapes.
+- 9ecc26c: Agents with workspace connectors but without workspace admin can now show Connect cards (`capability_authorization_request`), for example to connect the person's own computer. Catalog search and custom MCP setup stay admin-only. Tool descriptions, notices and tool results name a setup tool only when the agent has it.
+- 890c910: Moving a session to another machine no longer rewrites the system prompt. The workspace root and filesystem layout reach the model as a `<opengeni_workspace_filesystem>` history item written before the turn that first sees a new layout, and `sandbox_swap` returns the new `workspaceRoot`, so the provider's prompt cache survives a swap.
+- 1f5ea5b: Prompt-cache diagnostics now fingerprint every provider transport, including the streamed request bodies of OpenAI, Azure OpenAI, Codex and xAI calls, which were never fingerprinted before. Two new warm-miss classes separate causes that `system_changed` and `unexplained` used to hide: `release_changed` (the tools or system prompt changed between two deployments) and `unobserved` (a call has no request fingerprint). The chart adds three alerts on the per-call classification: `OpenGeniPromptCachePrefixChanged`, `OpenGeniPromptCacheHistoryRewriteLossHigh` and `OpenGeniPromptCacheDiagnosticsBlind`.
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+- 4fdd778: Saving and restoring a Modal sandbox's workspace as a tar in object storage no longer holds the archive in worker or API memory. The tar streams between `tar -c` / `tar -x` in the box and a private disk spool through Modal's exec streams, checked and hashed chunk by chunk, so peak memory no longer grows with the archive (a 419 MB archive: restore +3.4 GB and save over 15 GB before, about +9 MB and +55 MB now). Every object-storage tar is restored from a spool verified against its descriptor before any box is created; any other provider reads that spool into one buffer instead of fetching, base64-encoding and decoding it.
+- 0531626: Send the system prompt as the leading input item on every Responses route, not only OpenAI's: a `system` message on AI Gateway, SuperGrok and OpenAI-compatible servers, a `developer` message where OpenAI runs the backend.
+- 9ca567a: An automatic chat title no longer ends in a leftover piece of the no-title answer, such as "Files on the desktop_TITLE"; the title keeps its words without it.
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+- Updated dependencies [8e1f06d]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/sdk@6.31.0
+  - @opengeni/config@6.31.0
+  - @opengeni/network@6.31.0
+  - @opengeni/codex@6.31.0
+  - @opengeni/capabilities@6.31.0
+  - @opengeni/codemode@6.31.0
+  - @opengeni/decisions@6.31.0
+  - @opengeni/interaction@6.31.0
+  - @opengeni/observability@6.31.0
+  - @opengeni/tool-gateway@6.31.0
+  - @opengeni/vaults@6.31.0
+  - @opengeni/xai-subscription@6.31.0
+  - @opengeni/jev@6.31.0
+  - @opengeni/agent-proto@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

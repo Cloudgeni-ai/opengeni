@@ -1,5 +1,67 @@
 # @opengeni/api-router
 
+## 6.31.0
+
+### Minor Changes
+
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+### Patch Changes
+
+- 6235287: A Desktop on a Connected Machine can be used by another agent chat working on that machine (a child given its parent's Desktop, say) after the chat that opened it has moved to another machine. Before, every request was refused with "this task now runs on another machine", even after the calling chat moved to the Desktop's machine, because only the opening chat's route counted. The request now goes through the calling chat's own route when it works on that machine. Requests from a chat on another machine are refused as before.
+- cafa73f: Your own connector login now has one switch per workspace. Turning it on in "Where it works" for a workspace that hasn't turned that connector on also turns the connector on there, for each person's own account. This happens in the same request, as the connect card's "Use it here" does it. Where only an admin may turn the connector on, nothing changes: the request is refused with `details.code` `own_login_connector_needs_admin`, and the row says an admin has to turn it on. Turning a login off never turns its connector off.
+
+  Each reach row carries an optional `connectorOff` flag. A login that is on where its connector isn't (for example a standing grant) reads as off, with a line saying the switch turns the connector on too. My things doesn't count such a workspace as one where the login works.
+
+  The OAuth connect card now offers your one own login first, as "Use my <service> here", without asking "Who can use this connection?". Connecting a new account for everyone stays a secondary choice.
+
+- 443b97b: Store Site SQL databases in Cloudflare's EU jurisdiction. Databases created before this move to the EU on first use (or with `scripts/move-site-databases-to-eu.ts`), verified against the original before they switch; a database that cannot move keeps working from its original object, and original objects are never deleted automatically (a reset or rebuild erases their data). The API treats a "moving" 503 as retryable with nothing run and logs databases not yet in the EU.
+- Updated dependencies [e75ea20]
+- Updated dependencies [c2fe398]
+- Updated dependencies [a0fb1c6]
+- Updated dependencies [5fb457f]
+- Updated dependencies [d07d727]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [ea21b19]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [4fdd778]
+- Updated dependencies [46d677b]
+- Updated dependencies [0531626]
+- Updated dependencies [9ca567a]
+- Updated dependencies [8e1f06d]
+  - @opengeni/db@6.31.0
+  - @opengeni/contracts@6.31.0
+  - @opengeni/runtime@6.31.0
+  - @opengeni/core@6.31.0
+  - @opengeni/config@6.31.0
+  - @opengeni/network@6.31.0
+  - @opengeni/codex@6.31.0
+  - @opengeni/documents@6.31.0
+  - @opengeni/events@6.31.0
+  - @opengeni/artifact-tool@6.31.0
+  - @opengeni/capabilities@6.31.0
+  - @opengeni/codemode@6.31.0
+  - @opengeni/decisions@6.31.0
+  - @opengeni/github@6.31.0
+  - @opengeni/interaction@6.31.0
+  - @opengeni/observability@6.31.0
+  - @opengeni/storage@6.31.0
+  - @opengeni/tool-gateway@6.31.0
+  - @opengeni/vaults@6.31.0
+  - @opengeni/vaults-bitwarden@6.31.0
+  - @opengeni/vaults-keeper@6.31.0
+  - @opengeni/vaults-onepassword@6.31.0
+  - @opengeni/vaults-protonpass@6.31.0
+  - @opengeni/xai-subscription@6.31.0
+  - @opengeni/agent-proto@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes
