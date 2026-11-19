@@ -381,7 +381,7 @@ export function EmptyCreditsNotice({
   if (!empty) return null;
   if (cardCheck && cardAccountId === cardCheck) {
     return (
-      <Notice tone="waiting" title="Add a card to get Free credit">
+      <Notice tone="waiting" title="Add a card for Free credit">
         You won't be charged.
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
           <AddCardButton client={client} accountId={cardCheck} />

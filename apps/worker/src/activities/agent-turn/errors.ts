@@ -2341,13 +2341,28 @@ export function findSandboxOrganizationBoxLimitError(
   error: unknown,
 ): SandboxOrganizationBoxLimitError | null {
   const graph = structuredRecoveryCauseGraph(error);
-  const nodes = graph ? [...graph.keys()] : [error];
+  const nodes = graph ? [...graph.keys()] : causeChain(error);
   return (
     nodes.find(
       (node): node is SandboxOrganizationBoxLimitError =>
         node instanceof SandboxOrganizationBoxLimitError,
     ) ?? null
   );
+}
+
+/** Up to 16 `cause` links, for when the full graph walk gives up. */
+function causeChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  for (let current = error; current && typeof current === "object";) {
+    if (chain.includes(current) || chain.length >= 16) break;
+    chain.push(current);
+    try {
+      current = (current as { cause?: unknown }).cause;
+    } catch {
+      break;
+    }
+  }
+  return chain;
 }
 
 /**

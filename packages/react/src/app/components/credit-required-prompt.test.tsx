@@ -209,7 +209,7 @@ describe("credit required prompt", () => {
     };
     await render();
     expect(getBillingCardVerification).toHaveBeenCalledWith({ accountId: "account-a" });
-    expect(container.textContent).toContain("Add a card to get Free credit");
+    expect(container.textContent).toContain("Add a card for Free credit");
     expect(container.textContent).not.toContain("Add credits");
     expect([...container.querySelectorAll("button")].map((b) => b.textContent)).toContain(
       "Add a card",
