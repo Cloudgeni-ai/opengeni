@@ -711,6 +711,9 @@ every workspace and the display name and email the product sent.
 Tool server writes and publishing with `moveRunningChats` reach every
 workspace of the organization, so an organization key limited to selected
 workspaces gets 403 `organization_key_workspace_limited` for them.
+Such a key sees only its own workspaces in an agent's `workspaceIds`, and a
+`PATCH` with `workspaceIds` changes only those: the agent's access in other
+workspaces stays as it is. Other callers replace the whole list.
 
 ### Runs on
 

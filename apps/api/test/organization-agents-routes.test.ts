@@ -717,6 +717,78 @@ describe("Console agents routes", () => {
     expect((await call("DELETE", `${org()}/tool-servers/limited-crm`, keys.full)).status).toBe(204);
   }, 120_000);
 
+  test("a key limited to some workspaces sees and changes only those in an agent's workspaces", async () => {
+    if (!fixture) return;
+    const { keys, managedWorkspaceId: inside, teamWorkspaceId: outside } = fixture;
+    const limited = keys.agentsManageLimited;
+    const sorted = (ids: string[]) => [...ids].sort();
+    const created = await call("POST", org(), keys.full, {
+      key: "scoped-access",
+      name: "Scoped access",
+      workspaceIds: [outside],
+    });
+    expect(created.status).toBe(201);
+    const agentId = created.body.agent.id as string;
+    const published = await call("POST", `${org()}/${agentId}/publish`, limited, {
+      version: 1,
+      expectedVersion: created.body.agent.rowVersion,
+    });
+    expect(published.status).toBe(200);
+    expect(published.body.agent.workspaceIds).toEqual([]);
+
+    // Reads by the limited key hide the workspace outside its scope.
+    const read = await call("GET", `${org()}/${agentId}`, limited);
+    expect(read.body.agent.workspaceIds).toEqual([]);
+    const byKey = await call("GET", `${org()}/by-key/scoped-access`, limited);
+    expect(byKey.body.agent.workspaceIds).toEqual([]);
+    const listed = await call("GET", org(), limited);
+    expect(
+      listed.body.agents.find((agent: Record<string, unknown>) => agent.id === agentId)
+        .workspaceIds,
+    ).toEqual([]);
+    const draft = await call("PUT", `${org()}/${agentId}/draft`, limited, {
+      name: "Scoped access",
+      instructions: "Two.",
+      expectedVersion: read.body.agent.rowVersion,
+    });
+    expect(draft.status).toBe(201);
+    expect(draft.body.agent.workspaceIds).toEqual([]);
+
+    // Adding its own workspace keeps the other one.
+    const added = await call("PATCH", `${org()}/${agentId}`, limited, {
+      workspaceIds: [inside],
+      expectedVersion: draft.body.agent.rowVersion,
+    });
+    expect(added.status).toBe(200);
+    expect(added.body.agent.workspaceIds).toEqual([inside]);
+    let full = await call("GET", `${org()}/${agentId}`, keys.full);
+    expect(sorted(full.body.agent.workspaceIds)).toEqual(sorted([inside, outside]));
+
+    // Clearing the list removes only its own workspace.
+    const cleared = await call("PATCH", `${org()}/${agentId}`, limited, {
+      workspaceIds: [],
+      expectedVersion: added.body.agent.rowVersion,
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.agent.workspaceIds).toEqual([]);
+    full = await call("GET", `${org()}/${agentId}`, keys.full);
+    expect(full.body.agent.workspaceIds).toEqual([outside]);
+    // Naming the other workspace is still refused.
+    const outsideRefused = await call("PATCH", `${org()}/${agentId}`, limited, {
+      workspaceIds: [outside],
+      expectedVersion: full.body.agent.rowVersion,
+    });
+    expect(outsideRefused.status).toBe(403);
+
+    // A key for all workspaces replaces the whole list.
+    const replaced = await call("PATCH", `${org()}/${agentId}`, keys.agentsManage, {
+      workspaceIds: [inside],
+      expectedVersion: full.body.agent.rowVersion,
+    });
+    expect(replaced.status).toBe(200);
+    expect(replaced.body.agent.workspaceIds).toEqual([inside]);
+  }, 120_000);
+
   test("a publish that moves running chats fails clearly when the move cannot start", async () => {
     if (!fixture || !routeDeps) return;
     const deps = routeDeps;

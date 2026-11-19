@@ -668,6 +668,12 @@ export async function updateOrgAgent(
     actor: OrgAgentActor;
     expectedVersion: number;
     workspaceIds?: readonly string[];
+    /**
+     * Workspaces the caller cannot see (an organization key limited to some
+     * workspaces): their access rows are kept as they are, and `workspaceIds`
+     * replaces only the rest. Omitted, `workspaceIds` replaces the whole list.
+     */
+    keepWorkspace?: (workspaceId: string) => boolean;
   },
 ): Promise<OrgAgent> {
   return await withOrgAgentsScope(db, { accountId: input.accountId }, async (tx) => {
@@ -682,7 +688,9 @@ export async function updateOrgAgent(
             where account_id = ${input.accountId}::uuid and agent_id = ${input.agentId}::uuid`,
         )
       ).map((row) => row.workspace_id);
-      const removed = current.filter((id) => !next.includes(id));
+      const removed = current.filter(
+        (id) => !next.includes(id) && !(input.keepWorkspace?.(id) ?? false),
+      );
       const added = next.filter((id) => !current.includes(id));
       if (removed.length > 0) {
         await tx.execute(sql`delete from agent_workspace_access

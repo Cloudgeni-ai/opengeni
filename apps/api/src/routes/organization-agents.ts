@@ -327,6 +327,26 @@ function inScope(caller: Caller, workspaceId: string): boolean {
   return !caller.apiKey || organizationWorkspaceInScope(caller.apiKey.workspaceScope, workspaceId);
 }
 
+/** Whether the caller is an organization key limited to selected workspaces. */
+function workspaceLimited(caller: Caller): boolean {
+  return !!caller.apiKey && caller.apiKey.workspaceScope.kind !== "all";
+}
+
+/**
+ * An agent as the caller may see it: a workspace-limited organization key
+ * sees only the workspaces in its scope in `workspaceIds`.
+ */
+function agentForCaller<T extends { workspaceIds: string[] } | null | undefined>(
+  caller: Caller,
+  agent: T,
+): T {
+  if (!agent || !workspaceLimited(caller)) return agent;
+  return {
+    ...agent,
+    workspaceIds: agent.workspaceIds.filter((workspaceId) => inScope(caller, workspaceId)),
+  };
+}
+
 function requireWorkspacesInScope(
   caller: Caller,
   workspaceIds: readonly string[] | undefined,
@@ -601,7 +621,9 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const agents = await listOrgAgents(deps.db, caller.organizationId, {
       includeArchived: c.req.query("includeArchived") === "true",
     });
-    return c.json(ListOrgAgentsResponse.parse({ agents }));
+    return c.json(ListOrgAgentsResponse.parse({
+        agents: agents.map((agent) => agentForCaller(caller, agent)),
+      }));
   });
 
   // Runs on: the organization machines and sandbox environments an agent can
@@ -648,7 +670,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         toolCatalog,
       }),
     );
-    return c.json(OrgAgentResponse.parse({ agent }), 201);
+    return c.json(OrgAgentResponse.parse({ agent: agentForCaller(caller, agent) }), 201);
   });
 
   function agentKey(c: Context): string {
@@ -666,7 +688,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       { includeArchived: c.req.query("includeArchived") === "true" },
     );
     if (!agent) throw agentNotFound();
-    return c.json(OrgAgentResponse.parse({ agent }));
+    return c.json(OrgAgentResponse.parse({ agent: agentForCaller(caller, agent) }));
   });
 
   app.put(`${base}/by-key/:key/apply`, async (c) => {
@@ -696,7 +718,11 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     );
     const operation = await startMove(deps, caller.organizationId, result.operation);
     return c.json(
-      ApplyOrgAgentResponse.parse({ ...result, operation }),
+      ApplyOrgAgentResponse.parse({
+        ...result,
+        agent: agentForCaller(caller, result.agent),
+        operation,
+      }),
       result.outcome === "created" && !dryRun ? 201 : 200,
     );
   });
@@ -710,7 +736,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       { includeArchived: c.req.query("includeArchived") === "true" },
     );
     if (!agent) throw agentNotFound();
-    return c.json(OrgAgentResponse.parse({ agent }));
+    return c.json(OrgAgentResponse.parse({ agent: agentForCaller(caller, agent) }));
   });
 
   app.patch(`${base}/:agentId`, async (c) => {
@@ -725,9 +751,14 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         actor: caller.actor,
         expectedVersion: request.expectedVersion,
         ...(request.workspaceIds !== undefined ? { workspaceIds: request.workspaceIds } : {}),
+        // A key limited to some workspaces changes only those; access in the
+        // other workspaces stays as it is.
+        ...(workspaceLimited(caller)
+          ? { keepWorkspace: (workspaceId: string) => !inScope(caller, workspaceId) }
+          : {}),
       }),
     );
-    return c.json(OrgAgentResponse.parse({ agent }));
+    return c.json(OrgAgentResponse.parse({ agent: agentForCaller(caller, agent) }));
   });
 
   app.put(`${base}/:agentId/draft`, async (c) => {
@@ -750,7 +781,10 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         toolCatalog,
       }),
     );
-    return c.json(SaveOrgAgentDraftResponse.parse(result), result.created ? 201 : 200);
+    return c.json(SaveOrgAgentDraftResponse.parse({
+        ...result,
+        agent: agentForCaller(caller, result.agent),
+      }), result.created ? 201 : 200);
   });
 
   app.get(`${base}/:agentId/versions`, async (c) => {
@@ -791,7 +825,11 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       }),
     );
     const operation = await startMove(deps, caller.organizationId, result.operation);
-    return c.json(PublishOrgAgentResponse.parse({ ...result, operation }));
+    return c.json(PublishOrgAgentResponse.parse({
+        ...result,
+        agent: agentForCaller(caller, result.agent),
+        operation,
+      }));
   });
 
   app.get(`${base}/:agentId/publish-operations`, async (c) => {
@@ -859,7 +897,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         expectedVersion: request.expectedVersion,
       }),
     );
-    return c.json(OrgAgentResponse.parse({ agent }));
+    return c.json(OrgAgentResponse.parse({ agent: agentForCaller(caller, agent) }));
   });
 
   app.post(`${base}/:agentId/archive`, async (c) => {
@@ -874,7 +912,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         expectedVersion: request.expectedVersion,
       }),
     );
-    return c.json(OrgAgentResponse.parse({ agent }));
+    return c.json(OrgAgentResponse.parse({ agent: agentForCaller(caller, agent) }));
   });
 
   app.get(`${base}/:agentId/sessions`, async (c) => {
