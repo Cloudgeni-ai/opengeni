@@ -1,5 +1,7 @@
 # @opengeni/contracts
 
+## 6.30.1
+
 ## 6.30.0
 
 ### Minor Changes
