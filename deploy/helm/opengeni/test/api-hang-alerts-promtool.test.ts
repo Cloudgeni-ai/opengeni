@@ -155,7 +155,12 @@ function restarts(pod: string, container: string, values: string) {
     values,
   };
 }
-function releasePod(name: string, component: string, ownerKind = "ReplicaSet", instance = "fixture") {
+function releasePod(
+  name: string,
+  component: string,
+  ownerKind = "ReplicaSet",
+  instance = "fixture",
+) {
   return [
     {
       series: `kube_pod_labels{namespace="fixture",pod="${name}",label_app_kubernetes_io_instance="${instance}",label_app_kubernetes_io_component="${component}"}`,
