@@ -1171,6 +1171,12 @@ below.
   an ordinary create body (tool servers as session MCP servers with id = tool
   server key and no credentials; model and built-ins where the request is
   silent), so the rest of the create path is the same code.
+- **Who may change what.** Saving an inline `config`, widening the agent's
+  tool servers (tools it left off, less "Ask first") and replacing one of them
+  through `mcpServers` need organization-level `agents:manage`
+  (`authorizationHoldsOrganizationPermission`: an organization key in scope,
+  or the owner or an admin); other callers may only narrow. Servers added
+  under a new id pass the ordinary `mcp_servers:attach` check.
 - **Worker chats.** A chat started by an organization agent chat inherits
   `agent_id`, `agent_version` and `agent_overrides`, and `agent_prompt_version`
   only when the version's `workers.shareInstructions` is on (NULL means no
@@ -1187,10 +1193,15 @@ below.
   read from the immutable version, so an archived agent keeps its text.
 - **Logins.** For each MCP server whose id is one of the pinned version's tool
   server keys (and whose URL is the tool server's), a `per_user` server uses
-  the workspace credential provider, then the end user's stored login
-  (`end_user_tool_credentials`; an OAuth login expiring within five minutes is
-  refreshed under `FOR UPDATE SKIP LOCKED`, a failed refresh sets
-  `refresh_failed_at`), then the chat's own headers, and never the shared key.
+  the workspace credential provider, then the stored login
+  (`end_user_tool_credentials`) of the end user who started the turn (a turn
+  another person started uses no stored login; only a turn no person started,
+  such as an API key's or a schedule's, uses the chat's end user), then the
+  chat's own headers, and never the shared key. An OAuth login expiring within
+  five minutes is refreshed under a lease (`refresh_lease_until`, taken in a
+  short transaction); the token request runs with no transaction open and the
+  result is written only if the row is still the leased version. A failed
+  refresh sets `refresh_failed_at`.
   `shared_key` servers use the organization's shared headers, `none` servers
   nothing. A server left without a login is dropped for the turn, named in the
   turn's unavailable-connector notice, and recorded as
@@ -1202,7 +1213,9 @@ below.
   its Console test workspace, and the agent's access rows) and moves each in
   its own transaction under the session event lock: the agent's servers are
   materialized again for the new version, servers the chat added or replaced
-  stay, the chat's recorded tool server changes are applied again, per-chat
+  stay, the chat's recorded tool server changes are applied again (a change
+  that only narrowed the old version is narrowed to the new one: its tools stay
+  within the new version's and the new version's "Ask first" tools stay asked), per-chat
   headers stay while the URL is unchanged, the tool policy version is bumped
   (`session.tool_policy.updated`), `agent_version` is set and the overrides are
   compared again with the new version. `agent_prompt_version` is not changed:

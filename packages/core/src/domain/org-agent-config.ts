@@ -208,6 +208,73 @@ export function withoutUndefined<T extends Record<string, unknown>>(value: T): T
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T;
 }
 
+/**
+ * What a chat's override gives beyond the agent's own server config: tools the
+ * agent left off, or "Ask first" taken away. Null when the override only
+ * narrows (turns the server or tools off, or asks first for more tools).
+ */
+export function orgToolServerOverrideWidening(
+  config: OrgAgentToolServerConfig,
+  override: Omit<OrgAgentToolServerOverride, "server" | "headers">,
+): string | null {
+  if (override.enabled === false) return null;
+  if (override.tools && config.tools.mode === "selected") {
+    if (override.tools.mode === "all") {
+      return `turns on every tool of '${config.server}'`;
+    }
+    const agentTools = new Set(config.tools.enabled);
+    const added = unique(override.tools.enabled).filter((name) => !agentTools.has(name));
+    if (added.length > 0) {
+      return `turns on ${added.map((name) => `'${name}'`).join(", ")} on '${config.server}'`;
+    }
+  }
+  if (override.approval && config.approval.ask !== override.approval.ask) {
+    const chatAsk = override.approval.ask;
+    if (chatAsk !== true) {
+      if (config.approval.ask === true) {
+        return `stops asking first for every tool of '${config.server}'`;
+      }
+      const asked = new Set(chatAsk);
+      const removed = config.approval.ask.filter((name) => !asked.has(name));
+      if (removed.length > 0) {
+        return `stops asking first for ${removed.map((name) => `'${name}'`).join(", ")} on '${config.server}'`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * A narrowing override applied to another version of the server config: the
+ * chat's tool selection stays within the version's tools and the version's
+ * "Ask first" tools stay asked. A move never gives a chat more than its new
+ * version does through an override that only narrowed the old one.
+ */
+export function narrowOrgToolServerOverride(
+  config: OrgAgentToolServerConfig,
+  override: Omit<OrgAgentToolServerOverride, "server" | "headers">,
+): Omit<OrgAgentToolServerOverride, "server" | "headers"> {
+  const narrowed = { ...override };
+  if (override.tools && config.tools.mode === "selected") {
+    const agentTools = new Set(config.tools.enabled);
+    narrowed.tools =
+      override.tools.mode === "all"
+        ? config.tools
+        : {
+            mode: "selected",
+            enabled: unique(override.tools.enabled).filter((name) => agentTools.has(name)),
+          };
+  }
+  if (override.approval) {
+    const chatAsk = override.approval.ask;
+    const agentAsk = config.approval.ask;
+    narrowed.approval = {
+      ask: chatAsk === true || agentAsk === true ? true : unique([...agentAsk, ...chatAsk]),
+    };
+  }
+  return narrowed;
+}
+
 /** The chat-facing view of a session MCP server input (no headers). */
 export function sessionMcpServerSetting(server: SessionMcpServerInput): Record<string, unknown> {
   const { headers: _headers, ...rest } = server;
@@ -273,7 +340,16 @@ export function planOrgAgentSessionMove<Row extends OrgAgentMoveServerRow>(input
     const server = input.toolServers.get(config.server);
     if (!server) continue;
     const recordedKey = `toolServers.${config.server}`;
-    const recorded = recordedToolServerOverride(overrides[recordedKey]?.chat);
+    const recordedChange = recordedToolServerOverride(overrides[recordedKey]?.chat);
+    // A change that only narrowed the old version narrows the new one too.
+    const fromServer = input.fromConfig?.toolServers.find(
+      (candidate) => candidate.server === config.server,
+    );
+    const recorded =
+      recordedChange &&
+      (!fromServer || orgToolServerOverrideWidening(fromServer, recordedChange) === null)
+        ? narrowOrgToolServerOverride(config, recordedChange)
+        : recordedChange;
     if (recorded && toolServerOverrideChanges(config, recorded)) {
       nextOverrides[recordedKey] = { agent: config, chat: recorded };
     }

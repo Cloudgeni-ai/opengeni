@@ -82,7 +82,11 @@ export const ORG_AGENT_ERROR_CODES = [
   "agent_management_requires_owner",
   /** A create names both `agentId` (a workspace agent) and an organization agent. */
   "agent_ref_conflict",
-  /** Saving an agent version from inline config needs `agents:manage`. */
+  /**
+   * Saving an agent version from inline config, or giving a chat more than its
+   * agent (tools the agent left off, less "Ask first", replacing one of its tool
+   * servers), needs `agents:manage` for the organization.
+   */
   "agents_manage_required",
   /** A workspace named in the request is not one of this organization's shared workspaces. */
   "workspace_not_found",

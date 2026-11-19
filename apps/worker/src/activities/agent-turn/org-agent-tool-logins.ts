@@ -6,8 +6,9 @@
  * no credentials). Before tools are prepared, each one gets its login:
  *
  * - `per_user`: the workspace credential provider (it sets headers at the
- *   request boundary), then the end user's stored login (OAuth refreshed when
- *   it expires within five minutes, under a row lock), then the chat's own
+ *   request boundary), then the stored login of the end user who started the
+ *   turn (OAuth refreshed when it expires within five minutes, under a refresh
+ *   lease; no row lock is held during the token request), then the chat's own
  *   headers. Never the organization's shared key.
  * - `shared_key`: the organization's shared headers.
  * - `none`: nothing.
@@ -87,15 +88,32 @@ export type OrgAgentToolLoginsInput = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-/** The end user a chat acts for: its end-user scope, else the person who started the turn. */
+function isEndUserSubject(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.startsWith("external_user:");
+}
+
+/** A person: an end user or an Opengeni member (not a key, service or worker). */
+function isPersonSubject(value: string | null | undefined): value is string {
+  return (
+    typeof value === "string" && (value.startsWith("external_user:") || value.startsWith("user:"))
+  );
+}
+
+/**
+ * Whose stored logins this turn uses: the person who started the turn when
+ * that is an end user. A turn another person started (another end user, or an
+ * Opengeni member) uses no stored login, so one person's login never runs for
+ * another person's message. Only a turn no person started (an API key, a
+ * schedule, a worker) falls back to the chat's end user.
+ */
 export function orgAgentEndUserSubject(
   sessionScopeSubjectId: string | null | undefined,
   initiatingHumanSubjectId: string | null | undefined,
 ): string | null {
-  for (const candidate of [sessionScopeSubjectId, initiatingHumanSubjectId]) {
-    if (typeof candidate === "string" && candidate.startsWith("external_user:")) return candidate;
+  if (isPersonSubject(initiatingHumanSubjectId)) {
+    return isEndUserSubject(initiatingHumanSubjectId) ? initiatingHumanSubjectId : null;
   }
-  return null;
+  return isEndUserSubject(sessionScopeSubjectId) ? sessionScopeSubjectId : null;
 }
 
 function sameUrl(left: string, right: string): boolean {
@@ -292,15 +310,23 @@ async function storedLoginHeaders(
         refresh: async (current) => await refreshOAuthLogin(input, toolServer, key, current, now),
       });
     let outcome = await attempt();
-    if (outcome.outcome === "locked") {
-      // Another turn is refreshing this login: wait, then use what it wrote.
-      await (input.sleep ?? defaultSleep)(REFRESH_LOCK_RETRY_MS);
+    // Another turn holds the refresh. A login that still works is used now;
+    // an expired one waits (up to one token request) for what it writes.
+    for (
+      let waited = 0;
+      outcome.outcome === "locked" && waited <= REFRESH_TIMEOUT_MS;
+      waited += REFRESH_LOCK_RETRY_MS
+    ) {
       const reread = await readEndUserToolCredential(input.db, scope);
       if (!reread) return { kind: "missing" };
       credential = reread;
-      if (credential.expiresAt && credential.expiresAt <= refreshBefore) {
-        outcome = await attempt();
+      if (!credential.expiresAt || credential.expiresAt > refreshBefore) {
+        outcome = { outcome: "current", credential };
+        break;
       }
+      if (credential.expiresAt.getTime() > now()) break;
+      await (input.sleep ?? defaultSleep)(REFRESH_LOCK_RETRY_MS);
+      outcome = await attempt();
     }
     if (outcome.outcome === "missing") return { kind: "missing" };
     if (outcome.outcome === "refreshed" || outcome.outcome === "current") {

@@ -60,6 +60,8 @@ async function plan(
     config?: OrgAgentVersionConfigInput;
     toolServers?: (typeof CRM)[];
     live?: Record<string, string[] | null>;
+    /** Organization-level agents:manage: the chat may give more than the agent. */
+    mayWiden?: boolean;
   } = {},
 ) {
   const raw: Record<string, unknown> = { initialMessage: "hi", agent, ...extra };
@@ -78,6 +80,7 @@ async function plan(
       const live = options.live ?? LIVE;
       return live[server.key] ?? null;
     },
+    mayWiden: options.mayWiden === true,
   });
   return { ...result, listed };
 }
@@ -184,9 +187,11 @@ describe("organization agent session create plan", () => {
   });
 
   test("a request MCP server with an agent server's id replaces it", async () => {
-    const result = await plan("support", {
-      mcpServers: [{ id: "docs", url: "https://other.example.com/mcp" }],
-    });
+    const result = await plan(
+      "support",
+      { mcpServers: [{ id: "docs", url: "https://other.example.com/mcp" }] },
+      { mayWiden: true },
+    );
     expect(result.payload["mcpServers"]).toEqual([
       expect.objectContaining({ id: "crm" }),
       { id: "docs", url: "https://other.example.com/mcp" },
@@ -199,17 +204,21 @@ describe("organization agent session create plan", () => {
   });
 
   test("replacing the tool selection and approval is recorded and applied", async () => {
-    const result = await plan({
-      ref: "support",
-      toolServers: [
-        {
-          server: "crm",
-          tools: { mode: "selected", enabled: ["delete"] },
-          approval: { ask: true },
-        },
-        { server: "docs", disableTools: ["drop"], eager: ["read"] },
-      ],
-    });
+    const result = await plan(
+      {
+        ref: "support",
+        toolServers: [
+          {
+            server: "crm",
+            tools: { mode: "selected", enabled: ["delete"] },
+            approval: { ask: true },
+          },
+          { server: "docs", disableTools: ["drop"], eager: ["read"] },
+        ],
+      },
+      {},
+      { mayWiden: true },
+    );
     const [crm, docs] = result.payload["mcpServers"] as Record<string, unknown>[];
     expect(crm).toMatchObject({ allowedTools: ["delete", "export"], requireApproval: true });
     // "all" with a disabled tool needs the server's tool list.
@@ -219,6 +228,84 @@ describe("organization agent session create plan", () => {
       "toolServers.crm",
       "toolServers.docs",
     ]);
+  });
+
+  test("without organization agents:manage a chat may only narrow the agent's tool servers", async () => {
+    // Narrowing: fewer of the agent's tools, more "Ask first", servers or tools off.
+    const narrowed = await plan({
+      ref: "support",
+      toolServers: [
+        {
+          server: "crm",
+          tools: { mode: "selected", enabled: ["lookup"] },
+          approval: { ask: ["update", "lookup"] },
+        },
+        { server: "docs", tools: { mode: "selected", enabled: ["read"] }, approval: { ask: true } },
+      ],
+    });
+    const [crm, docs] = narrowed.payload["mcpServers"] as Record<string, unknown>[];
+    expect(crm).toMatchObject({
+      allowedTools: ["lookup", "export"],
+      requireApproval: ["update", "lookup", "export"],
+    });
+    expect(docs).toMatchObject({ allowedTools: ["read"], requireApproval: true });
+    expect(Object.keys(narrowed.overrides ?? {}).sort()).toEqual([
+      "toolServers.crm",
+      "toolServers.docs",
+    ]);
+
+    const refused = async (agent: unknown, extra: Record<string, unknown> = {}) => {
+      const error = await plan(agent, extra).then(
+        () => null,
+        (caught: unknown) => caught as { httpStatus?: number; code?: string; message?: string },
+      );
+      return { status: error?.httpStatus, code: error?.code, message: error?.message ?? "" };
+    };
+    // A tool the agent left off.
+    const added = await refused({
+      ref: "support",
+      toolServers: [{ server: "crm", tools: { mode: "selected", enabled: ["lookup", "delete"] } }],
+    });
+    expect(added).toMatchObject({ status: 403, code: "agents_manage_required" });
+    expect(added.message).toContain("'delete'");
+    // Every tool of a server the agent limits.
+    expect(
+      await refused({ ref: "support", toolServers: [{ server: "crm", tools: { mode: "all" } }] }),
+    ).toMatchObject({ status: 403, code: "agents_manage_required" });
+    // "Ask first" taken away, partly or fully.
+    expect(
+      await refused({ ref: "support", toolServers: [{ server: "crm", approval: { ask: [] } }] }),
+    ).toMatchObject({ status: 403, code: "agents_manage_required" });
+    expect(
+      await refused(
+        { ref: "support", toolServers: [{ server: "crm", approval: { ask: ["lookup"] } }] },
+        {},
+      ),
+    ).toMatchObject({ status: 403, code: "agents_manage_required" });
+    // One of the agent's servers replaced through mcpServers.
+    expect(
+      await refused("support", {
+        mcpServers: [{ id: "crm", url: "https://crm.example.com/mcp" }],
+      }),
+    ).toMatchObject({ status: 403, code: "agents_manage_required" });
+    // A server under a new id is the chat's own (checked like any mcpServers).
+    const own = await plan("support", {
+      mcpServers: [{ id: "mine", url: "https://mine.example.com/mcp" }],
+    });
+    expect([...own.agentServerIds].sort()).toEqual(["crm", "docs"]);
+    // With organization agents:manage the same widening is applied and recorded.
+    const widened = await plan(
+      { ref: "support", toolServers: [{ server: "crm", tools: { mode: "all" }, approval: { ask: [] } }] },
+      {},
+      { mayWiden: true },
+    );
+    expect((widened.payload["mcpServers"] as Record<string, unknown>[])[0]).not.toHaveProperty(
+      "allowedTools",
+    );
+    expect(widened.overrides?.["toolServers.crm"]?.chat).toEqual({
+      tools: { mode: "all", enabled: [] },
+      approval: { ask: [] },
+    });
   });
 
   test("newTools off, an unlisted server and a deleted tool server", async () => {
@@ -414,6 +501,67 @@ describe("publish move plan", () => {
       "toolServers.crm",
     ]);
     expect(result.overrides?.["toolServers.crm"]?.agent).toEqual(toConfig.toolServers[0]);
+  });
+
+  test("a change that only narrowed the old version narrows the new one", () => {
+    // v1: crm selected [lookup, update], ask [update]. The chat narrowed it to
+    // [update] and asked first for lookup too.
+    const narrowing = {
+      "toolServers.crm": {
+        agent: OrgAgentVersionConfig.parse(VERSION).toolServers[0],
+        chat: {
+          tools: { mode: "selected", enabled: ["update"] },
+          approval: { ask: ["update", "lookup"] },
+        },
+      },
+    };
+    // v2 drops update and asks first for export.
+    const next = OrgAgentVersionConfig.parse({
+      toolServers: [
+        {
+          server: "crm",
+          tools: { enabled: ["lookup", "export"] },
+          approval: { ask: ["export"] },
+        },
+      ],
+    });
+    const moved = planOrgAgentSessionMove({
+      currentServers: servers,
+      currentTools: tools,
+      fromConfig: OrgAgentVersionConfig.parse(VERSION),
+      toConfig: next,
+      toToolCatalog: {},
+      toolServers: new Map([CRM].map((server) => [server.key, server])),
+      overrides: narrowing,
+    });
+    const crm = moved.servers.find((server) => server.id === "crm")!;
+    // update is no longer the agent's: the chat's selection stays within v2.
+    expect(crm.allowedTools).toEqual([]);
+    // v2's "Ask first" stays, with the chat's own additions.
+    expect(crm.requireApproval).toEqual(["export", "update", "lookup"]);
+    expect(moved.overrides?.["toolServers.crm"]?.chat).toEqual({
+      tools: { mode: "selected", enabled: [] },
+      approval: { ask: ["export", "update", "lookup"] },
+    });
+
+    // A widening an organization manager made is applied as recorded.
+    const widened = planOrgAgentSessionMove({
+      currentServers: servers,
+      currentTools: tools,
+      fromConfig: OrgAgentVersionConfig.parse(VERSION),
+      toConfig: next,
+      toToolCatalog: {},
+      toolServers: new Map([CRM].map((server) => [server.key, server])),
+      overrides: {
+        "toolServers.crm": {
+          agent: OrgAgentVersionConfig.parse(VERSION).toolServers[0],
+          chat: { tools: { mode: "all", enabled: [] }, approval: { ask: [] } },
+        },
+      },
+    });
+    const wide = widened.servers.find((server) => server.id === "crm")!;
+    expect(wide.allowedTools).toBeNull();
+    expect(wide.requireApproval).toBeNull();
   });
 
   test("a server whose URL changed drops the chat's login", () => {

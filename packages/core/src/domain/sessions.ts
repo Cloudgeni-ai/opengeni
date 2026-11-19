@@ -22,7 +22,10 @@ import {
   isClaudeSubscriptionModelId,
   isClaudeSubscriptionProviderId,
 } from "@opengeni/contracts/claude-subscription-model-ids";
-import { requireExplicitPermissionDelegation } from "../access";
+import {
+  authorizationHoldsOrganizationPermission,
+  requireExplicitPermissionDelegation,
+} from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import { unattendedRequestGoal } from "./unattended-request-goal";
@@ -2796,6 +2799,9 @@ async function createSessionForRequestInFileScope(
           grant,
           workspaceId,
           rawPayload as Record<string, unknown>,
+          {
+            manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage"),
+          },
         )
       : null;
   if (orgAgent) rawPayload = orgAgent.payload;

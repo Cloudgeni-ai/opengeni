@@ -41,7 +41,6 @@ import {
 import { pinnedFetch } from "@opengeni/network";
 import { recordOrgAgentResolve, type Observability } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission } from "../access";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import { legacyMcpClientError, withMcpStreamableHttpClient } from "./mcp-streamable-http-client";
 import {
@@ -49,6 +48,7 @@ import {
   materializeOrgToolServer,
   mergeOrgAgentCapabilities,
   orgAgentCatalogToolNames,
+  orgToolServerOverrideWidening,
   orgToolServerSessionInput,
   parseOrgAgentVersionConfig,
   sameSetting,
@@ -64,7 +64,22 @@ import {
 } from "./org-agent-runs-on";
 
 type OrgAgentCreateGrant = Pick<AccessGrant, "accountId" | "subjectId" | "permissions"> &
-  Partial<Pick<AccessGrant, "metadata">>;
+  Partial<Pick<AccessGrant, "metadata" | "subjectLabel">>;
+
+/**
+ * What the caller may do beyond running the agent, decided by the caller of
+ * `prepareOrgAgentSessionCreate` from organization-level authority only
+ * (`authorizationHoldsOrganizationPermission(..., "agents:manage")`), never
+ * from workspace permissions.
+ */
+export type OrgAgentCreateAuthority = {
+  /** Save agents or versions from inline config, and widen the agent's tools or approvals. */
+  manageAgents: boolean;
+};
+
+function agentsManageRequired(message: string): OrgAgentSessionCreateError {
+  return new OrgAgentSessionCreateError(403, "agents_manage_required", message);
+}
 
 /** A refused create: `details.code` is one of `ORG_AGENT_ERROR_CODES`. */
 export class OrgAgentSessionCreateError extends HTTPException {
@@ -138,9 +153,10 @@ export async function prepareOrgAgentSessionCreate(
   grant: OrgAgentCreateGrant,
   workspaceId: string,
   rawPayload: Record<string, unknown>,
+  authority: OrgAgentCreateAuthority = { manageAgents: false },
 ): Promise<PreparedOrgAgentSessionCreate> {
   try {
-    const prepared = await prepare(deps, grant, workspaceId, rawPayload);
+    const prepared = await prepare(deps, grant, workspaceId, rawPayload, authority);
     recordOrgAgentResolve(deps.observability, "resolved");
     return prepared;
   } catch (error) {
@@ -157,6 +173,7 @@ async function prepare(
   grant: OrgAgentCreateGrant,
   workspaceId: string,
   raw: Record<string, unknown>,
+  authority: OrgAgentCreateAuthority,
 ): Promise<PreparedOrgAgentSessionCreate> {
   if (raw["agentId"] !== undefined && raw["agentId"] !== null) {
     throw new OrgAgentSessionCreateError(
@@ -240,17 +257,16 @@ async function prepare(
       toolCatalog: {},
       configHash: orgAgentConfigHash(definition),
       subjectId: grant.subjectId ?? null,
-      mayWrite: hasPermission(grant.permissions, "agents:manage"),
+      actorLabel: grant.subjectLabel ?? null,
+      mayWrite: authority.manageAgents,
     });
     switch (saved.outcome) {
       case "not_found":
       case "archived":
         throw notFound();
       case "forbidden":
-        throw new OrgAgentSessionCreateError(
-          403,
-          "agents_manage_required",
-          "Saving an agent from config needs the agents:manage permission.",
+        throw agentsManageRequired(
+          "Saving an agent from config needs agents:manage for the organization: an organization key, or an owner or admin.",
         );
       case "managed_in_console":
         throw new OrgAgentSessionCreateError(
@@ -260,7 +276,16 @@ async function prepare(
         );
       default:
         version = saved.version;
-        return await bind(deps, grant, workspaceId, raw, request, saved.agent, version);
+        return await bind(
+          deps,
+          grant,
+          workspaceId,
+          raw,
+          request,
+          saved.agent,
+          version,
+          authority,
+        );
     }
   }
   if (!agent) throw notFound();
@@ -292,7 +317,7 @@ async function prepare(
       `This agent has no version ${versionNumber}.`,
     );
   }
-  return await bind(deps, grant, workspaceId, raw, request, agent, loaded);
+  return await bind(deps, grant, workspaceId, raw, request, agent, loaded, authority);
 }
 
 async function bind(
@@ -303,6 +328,7 @@ async function bind(
   request: OrgAgentSessionRequest,
   agent: { id: string; key: string },
   version: OrgAgentRuntimeVersion,
+  authority: OrgAgentCreateAuthority,
 ): Promise<PreparedOrgAgentSessionCreate> {
   const config = parseOrgAgentVersionConfig(version.config);
   const toolServers = await listOrgToolServersByKey(deps.db, {
@@ -316,6 +342,7 @@ async function bind(
     config,
     toolCatalog: version.toolCatalog,
     toolServers,
+    mayWiden: authority.manageAgents,
     liveTools: async (server, chatHeaders) =>
       await liveToolNames(deps, grant, workspaceId, server, chatHeaders),
   });
@@ -373,6 +400,13 @@ export async function planOrgAgentSessionCreate(input: {
     server: OrgToolServerRuntime,
     chatHeaders: Record<string, string> | undefined,
   ) => Promise<string[] | null>;
+  /**
+   * Whether the chat may give more than the agent: turn on tools the agent
+   * left off, take "Ask first" away, or replace an agent's tool server with
+   * its own. Without it a chat may only narrow (organization-level
+   * `agents:manage` only).
+   */
+  mayWiden?: boolean;
 }): Promise<{
   payload: Record<string, unknown>;
   overrides: OrgAgentSessionOverrides | null;
@@ -397,6 +431,14 @@ export async function planOrgAgentSessionCreate(input: {
     if (!server) continue;
     const override = serverOverrides.get(serverConfig.server);
     const { server: _key, headers, ...change } = override ?? { server: serverConfig.server };
+    if (override && !input.mayWiden) {
+      const widening = orgToolServerOverrideWidening(serverConfig, change);
+      if (widening) {
+        throw agentsManageRequired(
+          `This chat ${widening}. A chat may turn the agent's tools off or ask first for more of them; giving more needs agents:manage for the organization.`,
+        );
+      }
+    }
     if (override && toolServerOverrideChanges(serverConfig, change)) {
       overrides[`toolServers.${serverConfig.server}`] = {
         agent: serverConfig,
@@ -429,6 +471,15 @@ export async function planOrgAgentSessionCreate(input: {
     ? (raw["mcpServers"] as SessionMcpServerInput[])
     : [];
   const replaced = new Set(requestServers.map((server) => server?.id).filter(Boolean));
+  if (!input.mayWiden) {
+    const agentKeys = new Set(config.toolServers.map((server) => server.server));
+    const replacing = [...replaced].filter((id) => agentKeys.has(id as string));
+    if (replacing.length > 0) {
+      throw agentsManageRequired(
+        `mcpServers replaces the agent's tool server ${replacing.map((id) => `'${id}'`).join(", ")}. Change it with agent.toolServers, or add your own server under another id; replacing it needs agents:manage for the organization.`,
+      );
+    }
+  }
   for (const server of requestServers) {
     if (!server || typeof server !== "object" || typeof server.id !== "string") continue;
     const agentServer = materialized.find((candidate) => candidate.id === server.id);

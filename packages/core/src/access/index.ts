@@ -1170,6 +1170,43 @@ export function authorizationHoldsOrganizationAdministration(
 }
 
 /**
+ * Organization-level `permission` behind a workspace request, checked like the
+ * organization routes (`authorizeOrgAgentsCaller`): an organization key holding
+ * it (directly, or for one of its end users) whose scope includes the
+ * workspace, or the organization's owner or an admin. A workspace membership,
+ * a workspace key or a role on one workspace never counts.
+ */
+export function authorizationHoldsOrganizationPermission(
+  authorization: AccessGrantAuthorization | undefined,
+  permission: Permission,
+): boolean {
+  if (!authorization) return false;
+  const { grant } = authorization;
+  if (!resolvedAccessGrantAuthorizations.has(authorization) || !authorization.contextIntegrity) {
+    return false;
+  }
+  const context = authorizationContexts.get(authorization);
+  if (!context) return false;
+  const key = accountScopedApiKeyWorkspaceAuthority(context);
+  if (key) {
+    return (
+      key.accountId === grant.accountId &&
+      organizationWorkspaceInScope(key.workspaceScope, grant.workspaceId) &&
+      hasPermission(key.permissions, permission, key.permissionMode)
+    );
+  }
+  const external = externalActorContexts.get(context);
+  if (external) {
+    return (
+      external.identity.accountId === grant.accountId &&
+      organizationWorkspaceInScope(external.workspaceScope, grant.workspaceId) &&
+      hasPermission(external.permissions, permission, external.permissionMode)
+    );
+  }
+  return authorizationHoldsOrganizationAdministration(authorization);
+}
+
+/**
  * Mint the organization-administration capability passed to database
  * lifecycles (organization document backfills, authority reclassification and
  * their audits). Same opaque stamp as {@link requireAccountAdminAuthorizationStamp}

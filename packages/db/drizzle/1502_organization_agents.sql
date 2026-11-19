@@ -147,6 +147,9 @@ CREATE TABLE end_user_tool_credentials (
   material_encrypted text NOT NULL,
   expires_at timestamptz,
   refresh_failed_at timestamptz,
+  -- A worker refreshing this OAuth login holds the refresh until then (no row
+  -- lock or connection is held during the token request).
+  refresh_lease_until timestamptz,
   version integer NOT NULL DEFAULT 1,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),

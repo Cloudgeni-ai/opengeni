@@ -12,6 +12,7 @@
  * in `organization-agents.ts`.
  */
 import { sql } from "drizzle-orm";
+import { insertConsoleAuditEvent } from "./console";
 import { rawRows, withRlsContext, withoutSessionRlsActor, type Database } from "./database";
 
 /** The transaction setting that makes organization agents visible (migration 1502). */
@@ -341,7 +342,12 @@ export async function saveInlineOrgAgentVersion(
     toolCatalog: unknown;
     configHash: string;
     subjectId: string | null;
-    /** Whether the caller may write (create the agent or add a version). */
+    /** Shown in Console's audit log beside the subject. */
+    actorLabel?: string | null;
+    /**
+     * Whether the caller may write (create the agent or add a version): only
+     * with organization-level `agents:manage` (the caller checks it).
+     */
     mayWrite: boolean;
   },
 ): Promise<InlineOrgAgentVersionResult> {
@@ -365,6 +371,13 @@ export async function saveInlineOrgAgentVersion(
       if (!agent) throw new Error("Organization agent create raced with a delete");
       if (inserted.length > 0) {
         const version = await insertInlineVersion(tx, input, agent.id, 1);
+        await auditInlineSave(tx, input, "agent.created", {
+          agentId: agent.id,
+          key: agent.key,
+          name: input.definition.name,
+          version: 1,
+          configHash: input.configHash,
+        });
         return { outcome: "created_agent" as const, agent, version };
       }
     }
@@ -387,11 +400,40 @@ export async function saveInlineOrgAgentVersion(
           updated_at = now()
         where account_id = ${input.accountId}::uuid and id = ${agent.id}::uuid`,
     );
+    await auditInlineSave(tx, input, "agent.version_saved", {
+      agentId: agent.id,
+      key: agent.key,
+      version: next,
+      configHash: input.configHash,
+    });
     return {
       outcome: "created_version" as const,
       agent: { ...agent, currentVersion: next },
       version,
     };
+  });
+}
+
+/** Console's audit row for an agent or version saved from a session create. */
+async function auditInlineSave(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    actorLabel?: string | null;
+  },
+  action: "agent.created" | "agent.version_saved",
+  detail: Record<string, unknown>,
+): Promise<void> {
+  await insertConsoleAuditEvent(tx, {
+    accountId: input.accountId,
+    actorSubjectId: input.subjectId ?? "system",
+    actorLabel: input.actorLabel ?? null,
+    action,
+    workspaceId: input.workspaceId,
+    sessionId: null,
+    detail: { ...detail, source: "inline" },
   });
 }
 
@@ -604,12 +646,24 @@ export async function readEndUserToolCredential(
   return row ? mapCredential(row) : null;
 }
 
+/** How long a refresh lease keeps other workers from refreshing the same login. */
+export const END_USER_LOGIN_REFRESH_LEASE_MS = 60_000;
+
 /**
- * Refresh one stored OAuth login under its row lock. Returns `locked` when
- * another worker holds the row (SKIP LOCKED): re-read it shortly. `refresh`
- * runs while the row is locked; it returns the new encrypted material and
- * expiry, or null when the provider refused (recorded in `refresh_failed_at`).
- * A row another worker already refreshed is returned as `current`.
+ * Refresh one stored OAuth login without holding a row lock or a database
+ * connection during the token request:
+ *
+ * 1. A short transaction takes a refresh lease on the row
+ *    (`refresh_lease_until`), only while the login still needs a refresh and
+ *    no other worker holds an unexpired lease. Otherwise it returns `locked`
+ *    (another worker is refreshing: re-read shortly), `current` (already
+ *    refreshed) or `missing`.
+ * 2. `refresh` runs outside any transaction. It returns the new encrypted
+ *    material and expiry, or null when the provider refused.
+ * 3. A second short transaction writes the result only if the row is still
+ *    the version that was leased (compare-and-set), and clears the lease. A
+ *    row that changed meanwhile (for example the end user signed in again)
+ *    wins and is returned as `current`; a refusal sets `refresh_failed_at`.
  */
 export async function refreshEndUserToolCredential(
   db: Database,
@@ -622,70 +676,99 @@ export async function refreshEndUserToolCredential(
     refresh: (
       current: EndUserToolCredentialRow,
     ) => Promise<{ materialEncrypted: string; expiresAt: Date | null } | null>;
+    /** Test seam: the lease length. */
+    leaseMs?: number;
   },
 ): Promise<
   | { outcome: "locked" | "missing" }
   | { outcome: "refreshed" | "current" | "failed"; credential: EndUserToolCredentialRow }
 > {
-  return await withoutSessionRlsActor(() =>
-    withRlsContext(
-      db,
-      { accountId: input.accountId, workspaceId: input.workspaceId },
-      async (tx) => {
-        const [row] = await rawRows<CredentialRow>(
-          tx,
-          sql`select ${CREDENTIAL_COLUMNS}
+  const scoped = <T>(fn: (tx: Database) => Promise<T>) =>
+    withoutSessionRlsActor(() =>
+      withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, fn),
+    );
+  const readRow = async (tx: Database) =>
+    (
+      await rawRows<CredentialRow>(
+        tx,
+        sql`select ${CREDENTIAL_COLUMNS}
           from end_user_tool_credentials c
           where c.account_id = ${input.accountId}::uuid
             and c.workspace_id = ${input.workspaceId}::uuid
-            and c.id = ${input.credentialId}::uuid
-          for update skip locked`,
-        );
-        if (!row) {
-          const [exists] = await rawRows<{ found: number }>(
-            tx,
-            sql`select 1 as found from end_user_tool_credentials c
-            where c.workspace_id = ${input.workspaceId}::uuid
-              and c.id = ${input.credentialId}::uuid`,
-          );
-          return { outcome: exists ? ("locked" as const) : ("missing" as const) };
-        }
-        const current = mapCredential(row);
-        if (!current.expiresAt || current.expiresAt > input.refreshBefore)
-          return { outcome: "current" as const, credential: current };
-        let refreshed: { materialEncrypted: string; expiresAt: Date | null } | null = null;
-        try {
-          refreshed = await input.refresh(current);
-        } catch {
-          refreshed = null;
-        }
-        if (!refreshed) {
-          const [failed] = await rawRows<CredentialRow>(
-            tx,
-            sql`update end_user_tool_credentials c
-            set refresh_failed_at = now(), updated_at = now()
-            where c.workspace_id = ${input.workspaceId}::uuid
-              and c.id = ${input.credentialId}::uuid
-            returning ${CREDENTIAL_COLUMNS}`,
-          );
-          return { outcome: "failed" as const, credential: mapCredential(failed ?? row) };
-        }
-        const [updated] = await rawRows<CredentialRow>(
+            and c.id = ${input.credentialId}::uuid`,
+      )
+    )[0];
+  const leaseMs = Math.max(1_000, Math.trunc(input.leaseMs ?? END_USER_LOGIN_REFRESH_LEASE_MS));
+
+  // 1. Lease (one short transaction).
+  const leased = await scoped(async (tx) => {
+    const [row] = await rawRows<CredentialRow>(
+      tx,
+      sql`update end_user_tool_credentials c
+        set refresh_lease_until = now() + make_interval(secs => ${leaseMs / 1000}::double precision)
+        where c.account_id = ${input.accountId}::uuid
+          and c.workspace_id = ${input.workspaceId}::uuid
+          and c.id = ${input.credentialId}::uuid
+          and c.expires_at is not null
+          and c.expires_at <= ${input.refreshBefore.toISOString()}::timestamptz
+          and (c.refresh_lease_until is null or c.refresh_lease_until <= now())
+        returning ${CREDENTIAL_COLUMNS}`,
+    );
+    if (row) return { outcome: "leased" as const, credential: mapCredential(row) };
+    const current = await readRow(tx);
+    if (!current) return { outcome: "missing" as const };
+    const credential = mapCredential(current);
+    if (!credential.expiresAt || credential.expiresAt > input.refreshBefore)
+      return { outcome: "current" as const, credential };
+    return { outcome: "locked" as const };
+  });
+  if (leased.outcome !== "leased") return leased;
+
+  // 2. The token request, with no transaction open.
+  let refreshed: { materialEncrypted: string; expiresAt: Date | null } | null = null;
+  try {
+    refreshed = await input.refresh(leased.credential);
+  } catch {
+    refreshed = null;
+  }
+
+  // 3. Compare-and-set against the leased version (one short transaction).
+  return await scoped(async (tx) => {
+    const leasedVersion = leased.credential.version;
+    const [written] = refreshed
+      ? await rawRows<CredentialRow>(
           tx,
           sql`update end_user_tool_credentials c
-          set material_encrypted = ${refreshed.materialEncrypted},
-            expires_at = ${refreshed.expiresAt ? refreshed.expiresAt.toISOString() : null}::timestamptz,
-            refresh_failed_at = null, version = c.version + 1, updated_at = now(),
-            last_used_at = now()
-          where c.workspace_id = ${input.workspaceId}::uuid
-            and c.id = ${input.credentialId}::uuid
-          returning ${CREDENTIAL_COLUMNS}`,
+            set material_encrypted = ${refreshed.materialEncrypted},
+              expires_at = ${refreshed.expiresAt ? refreshed.expiresAt.toISOString() : null}::timestamptz,
+              refresh_failed_at = null, refresh_lease_until = null,
+              version = c.version + 1, updated_at = now(), last_used_at = now()
+            where c.account_id = ${input.accountId}::uuid
+              and c.workspace_id = ${input.workspaceId}::uuid
+              and c.id = ${input.credentialId}::uuid
+              and c.version = ${leasedVersion}::integer
+            returning ${CREDENTIAL_COLUMNS}`,
+        )
+      : await rawRows<CredentialRow>(
+          tx,
+          sql`update end_user_tool_credentials c
+            set refresh_failed_at = now(), refresh_lease_until = null, updated_at = now()
+            where c.account_id = ${input.accountId}::uuid
+              and c.workspace_id = ${input.workspaceId}::uuid
+              and c.id = ${input.credentialId}::uuid
+              and c.version = ${leasedVersion}::integer
+            returning ${CREDENTIAL_COLUMNS}`,
         );
-        if (!updated) throw new Error("End-user tool login refresh lost its row");
-        return { outcome: "refreshed" as const, credential: mapCredential(updated) };
-      },
-    ),
-  );
+    if (written) {
+      return refreshed
+        ? { outcome: "refreshed" as const, credential: mapCredential(written) }
+        : { outcome: "failed" as const, credential: mapCredential(written) };
+    }
+    // The row changed while the token request ran: what is stored now wins.
+    const current = await readRow(tx);
+    if (!current) return { outcome: "missing" as const };
+    return { outcome: "current" as const, credential: mapCredential(current) };
+  });
 }
 
 /** Record that these stored logins were used for a turn. */

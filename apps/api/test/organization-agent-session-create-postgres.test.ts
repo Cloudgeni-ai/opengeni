@@ -3,6 +3,8 @@
 // `{ ref }`, `agentOverrides`, and the Console test chat route, which goes
 // through the same session create. The route's early body check must read an
 // organization agent's `agent` field as such, not as today's agent object.
+// Saving an inline config and widening the agent's tool servers need
+// organization-level agents:manage; workspace keys and roles never count.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import type { AccessContext } from "@opengeni/contracts";
@@ -38,6 +40,10 @@ let fixture: {
   accountId: string;
   managedWorkspaceId: string;
   key: Record<string, string>;
+  /** An organization key that may create chats but holds no agents:manage. */
+  limitedKey: Record<string, string>;
+  /** A workspace key with workspace:admin on the managed workspace. */
+  workspaceKey: Record<string, string>;
 } | null = null;
 const authSessionByCookie = new Map<
   string,
@@ -180,22 +186,46 @@ async function provisionFixture() {
     permissions: organizationApiKeyPermissions,
     credentialKind: "organization",
   });
+  const mint = async (
+    name: string,
+    permissions: Parameters<typeof createApiKey>[1]["permissions"],
+    workspaceId: string | null,
+  ) => {
+    const minted = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client!.db, {
+      accountId,
+      workspaceId,
+      name,
+      prefix: minted.slice(0, 14),
+      keyHash: await sha256Hex(minted),
+      permissions,
+      credentialKind: workspaceId ? "workspace" : "organization",
+    });
+    return { authorization: `Bearer ${minted}` };
+  };
   return {
     userId,
     accountId,
     managedWorkspaceId: managed.id,
     key: { authorization: `Bearer ${token}` },
+    limitedKey: await mint("Chats only", ["sessions:create", "sessions:read"], null),
+    workspaceKey: await mint("Workspace admin", ["workspace:admin"], managed.id),
   };
 }
 
 type Reply = { status: number; body: Record<string, any> };
 
-async function call(method: string, path: string, body?: unknown): Promise<Reply> {
+async function call(
+  method: string,
+  path: string,
+  body?: unknown,
+  key?: Record<string, string>,
+): Promise<Reply> {
   if (!app || !fixture) throw new Error("app unavailable");
   const response = await app.request(`http://x${path}`, {
     method,
     headers: {
-      ...fixture.key,
+      ...(key ?? fixture.key),
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -378,5 +408,150 @@ describe("session create with an organization agent over HTTP", () => {
       agent: { ref: agentId, version: 2 },
     });
     expect([outside.status, outside.body.code]).toEqual([404, "agent_not_found"]);
+  }, 120_000);
+
+  test("inline config saves an agent only with organization-level agents:manage", async () => {
+    if (!fixture) return;
+    const config = {
+      name: "Inline coder",
+      instructions: "Write code.",
+      config: { model: "scripted-model" },
+    };
+    // A workspace key with workspace:admin, and an organization key without
+    // agents:manage, may not save agents from config.
+    for (const key of [fixture.workspaceKey, fixture.limitedKey]) {
+      const refused = await call(
+        "POST",
+        sessions(),
+        { initialMessage: "hi", agent: { ref: "inline-coder", config } },
+        key,
+      );
+      expect([refused.status, refused.body.details?.code ?? refused.body.code]).toEqual([
+        403,
+        "agents_manage_required",
+      ]);
+    }
+    const [none] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from agents
+      where account_id = ${fixture.accountId} and agent_key = 'inline-coder'`;
+    expect(none!.count).toBe(0);
+    // An organization key holding agents:manage saves it, with Console audit rows.
+    const created = await call("POST", sessions(), {
+      initialMessage: "hi",
+      agent: { ref: "inline-coder", config },
+    });
+    expect([created.status, created.body.orgAgent?.key]).toEqual([202, "inline-coder"]);
+    const changed = await call("POST", sessions(), {
+      initialMessage: "hi",
+      agent: { ref: "inline-coder", config: { ...config, instructions: "Write tests." } },
+    });
+    expect([changed.status, changed.body.orgAgent?.version]).toEqual([202, 2]);
+    // The saved version runs for anyone who may create chats (no write).
+    const reused = await call(
+      "POST",
+      sessions(),
+      { initialMessage: "hi", agent: { ref: "inline-coder", config } },
+      fixture.limitedKey,
+    );
+    expect([reused.status, reused.body.orgAgent?.version]).toEqual([202, 1]);
+    const audit = await shared!.admin<{ action: string; actor: string; detail: any }[]>`
+      select action, actor_subject_id as actor, detail from organization_console_audit_events
+      where account_id = ${fixture.accountId} and detail->>'key' = 'inline-coder'
+      order by created_at`;
+    expect(audit.map((row) => [row.action, row.detail.version, row.detail.source])).toEqual([
+      ["agent.created", 1, "inline"],
+      ["agent.version_saved", 2, "inline"],
+    ]);
+    expect(audit.every((row) => row.actor.startsWith("api_key:"))).toBe(true);
+  }, 120_000);
+
+  test("without agents:manage a chat may only narrow the agent's tool servers", async () => {
+    if (!fixture) return;
+    await shared!.admin`insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
+      values (${fixture.accountId}, 'notes', 'Notes', 'https://notes.example.com/mcp', 'none')
+      on conflict do nothing`;
+    const created = await call("POST", agents(), {
+      key: "noted",
+      name: "noted",
+      instructions: "Take notes.",
+      config: {
+        model: "scripted-model",
+        toolServers: [
+          {
+            server: "notes",
+            tools: { mode: "selected", enabled: ["read", "write"] },
+            approval: { ask: ["write"] },
+          },
+        ],
+      },
+    });
+    expect(created.status).toBe(201);
+    const published = await call("POST", `${agents()}/${created.body.agent.id}/publish`, {
+      version: 1,
+      expectedVersion: created.body.agent.rowVersion,
+    });
+    expect(published.status).toBe(200);
+    const asLimited = (body: Record<string, unknown>) =>
+      call("POST", sessions(), { initialMessage: "hi", ...body }, fixture!.limitedKey);
+    // Narrowing: fewer tools, more "Ask first".
+    const narrowed = await asLimited({
+      agent: {
+        ref: "noted",
+        toolServers: [
+          {
+            server: "notes",
+            tools: { mode: "selected", enabled: ["read"] },
+            approval: { ask: ["write", "read"] },
+          },
+        ],
+      },
+    });
+    expect(narrowed.status).toBe(202);
+    const [server] = await shared!.admin<
+      { allowed_tools: string[] | null; require_approval: unknown }[]
+    >`select allowed_tools, require_approval from session_mcp_servers
+      where session_id = ${narrowed.body.id} and server_id = 'notes'`;
+    expect(server!.allowed_tools).toEqual(["read"]);
+    // Widening: a tool the agent left off, every tool, or "Ask first" removed.
+    for (const change of [
+      { tools: { mode: "selected", enabled: ["read", "delete"] } },
+      { tools: { mode: "all" } },
+      { approval: { ask: [] } },
+    ]) {
+      const refused = await asLimited({
+        agent: { ref: "noted", toolServers: [{ server: "notes", ...change }] },
+      });
+      expect([refused.status, refused.body.details?.code ?? refused.body.code]).toEqual([
+        403,
+        "agents_manage_required",
+      ]);
+    }
+    // Replacing the agent's server through mcpServers widens too.
+    const replaced = await asLimited({
+      agent: "noted",
+      mcpServers: [{ id: "notes", url: "https://notes.example.com/mcp" }],
+    });
+    expect([replaced.status, replaced.body.details?.code ?? replaced.body.code]).toEqual([
+      403,
+      "agents_manage_required",
+    ]);
+    // A server of the chat's own under a new id needs mcp_servers:attach, as for any chat.
+    const added = await asLimited({
+      agent: "noted",
+      mcpServers: [{ id: "mine", url: "https://mine.example.com/mcp" }],
+    });
+    expect(added.status).toBe(403);
+    expect(JSON.stringify(added.body)).toContain("mcp_servers:attach");
+    // An organization key holding agents:manage may widen; it is recorded.
+    const widened = await call("POST", sessions(), {
+      initialMessage: "hi",
+      agent: { ref: "noted", toolServers: [{ server: "notes", tools: { mode: "all" } }] },
+      mcpServers: [{ id: "mine", url: "https://mine.example.com/mcp" }],
+    });
+    expect(widened.status).toBe(202);
+    expect(Object.keys(widened.body.orgAgent.overrides).sort()).toEqual([
+      "mcpServers.mine",
+      "toolServers.notes",
+    ]);
   }, 120_000);
 });

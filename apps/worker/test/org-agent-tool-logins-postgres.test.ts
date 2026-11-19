@@ -14,6 +14,7 @@ import {
   createDb,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
+  refreshEndUserToolCredential,
 } from "@opengeni/db";
 import {
   orgAgentEndUserSubject,
@@ -104,12 +105,16 @@ async function fixture() {
     serverKey: string,
     material: Record<string, unknown>,
     expiresAt: Date | null,
+    endUser: string = END_USER,
   ) {
-    await shared.admin`insert into end_user_tool_credentials (account_id, workspace_id,
+    const [row] = await shared.admin<{ id: string }[]>`
+      insert into end_user_tool_credentials (account_id, workspace_id,
         end_user_subject_id, tool_server_id, kind, material_encrypted, expires_at)
-      values (${accountId}, ${workspaceId}, ${END_USER}, ${servers[serverKey]!},
+      values (${accountId}, ${workspaceId}, ${endUser}, ${servers[serverKey]!},
         ${String(material["kind"])}, ${encryptEnvironmentValue(key, JSON.stringify(material))},
-        ${expiresAt})`;
+        ${expiresAt})
+      returning id::text`;
+    return row!.id;
   }
   return { accountId, workspaceId, agentId, servers, storeLogin };
 }
@@ -302,8 +307,171 @@ describe("organization agent tool server logins", () => {
         },
       }),
     ).toBeNull();
-    expect(orgAgentEndUserSubject("external_user:a", "user:b")).toBe("external_user:a");
     expect(orgAgentEndUserSubject(null, "external_user:b")).toBe("external_user:b");
     expect(orgAgentEndUserSubject("user:a", null)).toBeNull();
+  }, 180_000);
+  test("stored logins are the person's who started the turn, never another person's", () => {
+    // The person who sent the message: their own login.
+    expect(orgAgentEndUserSubject("external_user:a", "external_user:a")).toBe("external_user:a");
+    expect(orgAgentEndUserSubject("external_user:a", "external_user:b")).toBe("external_user:b");
+    // Another person (an Opengeni member) in an end user's chat: no stored login.
+    expect(orgAgentEndUserSubject("external_user:a", "user:b")).toBeNull();
+    // No person started the turn (an API key, a schedule, a worker): the chat's end user.
+    expect(orgAgentEndUserSubject("external_user:a", null)).toBe("external_user:a");
+    expect(orgAgentEndUserSubject("external_user:a", "api_key:k")).toBe("external_user:a");
+    expect(orgAgentEndUserSubject("external_user:a", "worker:model-access")).toBe(
+      "external_user:a",
+    );
+  });
+
+  test("end user B's message in A's chat never runs A's stored login", async () => {
+    const f = await fixture();
+    const BOB = "external_user:bob";
+    await f.storeLogin("stored", { kind: "headers", headers: { "X-Api-Key": "alice-key" } }, null);
+    const resolve = async (endUserSubjectId: string | null) => {
+      const published: OrgToolServerUnavailable[] = [];
+      const result = await resolveOrgAgentToolLogins({
+        db: client.db,
+        settings,
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        orgAgent: { agentId: f.agentId, version: 1 },
+        endUserSubjectId,
+        mcpServers: [{ id: "stored", name: "STORED", url: url("stored"), cacheToolsList: false }],
+        turnTools: [{ kind: "mcp", id: "stored" }],
+        providerManaged: () => false,
+        publishUnavailable: async (payload) => {
+          published.push(payload);
+        },
+      });
+      return { result: result!, published };
+    };
+    // Bob started the turn in Alice's chat: Bob has no login, so the server is unavailable.
+    const bob = await resolve(orgAgentEndUserSubject(END_USER, BOB));
+    expect(bob.result.mcpServers).toEqual([]);
+    expect(bob.published).toEqual([
+      { serverKey: "stored", name: "STORED", reason: "missing_credentials" },
+    ]);
+    // Bob's own login is used once he has one; Alice's never.
+    await f.storeLogin("stored", { kind: "headers", headers: { "X-Api-Key": "bob-key" } }, null, BOB);
+    const bobAgain = await resolve(orgAgentEndUserSubject(END_USER, BOB));
+    expect(bobAgain.result.mcpServers[0]?.headers).toEqual({ "X-Api-Key": "bob-key" });
+    const alice = await resolve(orgAgentEndUserSubject(END_USER, END_USER));
+    expect(alice.result.mcpServers[0]?.headers).toEqual({ "X-Api-Key": "alice-key" });
+  }, 180_000);
+
+  test("OAuth refresh holds a lease, not a row lock, during the token request", async () => {
+    const f = await fixture();
+    const credentialId = await f.storeLogin(
+      "crm",
+      { kind: "oauth", accessToken: "old-access", refreshToken: "refresh-1" },
+      new Date(Date.now() - 1_000),
+    );
+    const scope = { accountId: f.accountId, workspaceId: f.workspaceId, credentialId };
+    const refreshBefore = new Date(Date.now() + 5 * 60_000);
+    const fresh = {
+      materialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({ kind: "oauth", accessToken: "new-access", refreshToken: "refresh-2" }),
+      ),
+      expiresAt: new Date(Date.now() + 3_600_000),
+    };
+    const during: { lease?: Date | null; lockedNowait?: boolean; concurrent?: string } = {};
+    const outcome = await refreshEndUserToolCredential(client.db, {
+      ...scope,
+      refreshBefore,
+      refresh: async () => {
+        // No transaction holds the row: another connection locks it at once.
+        const locked = await shared.admin.begin(async (tx) => {
+          const rows = await tx<{ refresh_lease_until: Date | null }[]>`
+            select refresh_lease_until from end_user_tool_credentials
+            where id = ${credentialId} for update nowait`;
+          return rows[0]!;
+        });
+        // A second worker sees the lease and does not refresh.
+        const second = await refreshEndUserToolCredential(client.db, {
+          ...scope,
+          refreshBefore,
+          refresh: async () => {
+            throw new Error("must not refresh twice");
+          },
+        });
+        during.lease = locked.refresh_lease_until;
+        during.lockedNowait = true;
+        during.concurrent = second.outcome;
+        return fresh;
+      },
+    });
+    expect(during.lockedNowait).toBe(true);
+    expect(during.lease!.getTime()).toBeGreaterThan(Date.now());
+    expect(during.concurrent).toBe("locked");
+    expect(outcome.outcome).toBe("refreshed");
+    const [row] = await shared.admin<
+      { refresh_lease_until: Date | null; version: number; material_encrypted: string }[]
+    >`select refresh_lease_until, version, material_encrypted from end_user_tool_credentials
+      where id = ${credentialId}`;
+    expect(row!.refresh_lease_until).toBeNull();
+    expect(row!.version).toBe(2);
+    expect(row!.material_encrypted).toBe(fresh.materialEncrypted);
+    // Fresh now: nothing to refresh.
+    const current = await refreshEndUserToolCredential(client.db, {
+      ...scope,
+      refreshBefore,
+      refresh: async () => {
+        throw new Error("must not refresh a current login");
+      },
+    });
+    expect(current.outcome).toBe("current");
+  }, 180_000);
+
+  test("a login changed during the token request wins over the refresh (compare-and-set)", async () => {
+    const f = await fixture();
+    const credentialId = await f.storeLogin(
+      "crm",
+      { kind: "oauth", accessToken: "old-access", refreshToken: "refresh-1" },
+      new Date(Date.now() - 1_000),
+    );
+    const scope = { accountId: f.accountId, workspaceId: f.workspaceId, credentialId };
+    const relogin = encryptEnvironmentValue(
+      key,
+      JSON.stringify({ kind: "oauth", accessToken: "signed-in-again", refreshToken: "r" }),
+    );
+    const outcome = await refreshEndUserToolCredential(client.db, {
+      ...scope,
+      refreshBefore: new Date(Date.now() + 5 * 60_000),
+      refresh: async () => {
+        // The end user signs in again while the token request runs.
+        await shared.admin`update end_user_tool_credentials
+          set material_encrypted = ${relogin}, expires_at = now() + interval '1 hour',
+            version = version + 1
+          where id = ${credentialId}`;
+        return {
+          materialEncrypted: encryptEnvironmentValue(key, JSON.stringify({ kind: "oauth" })),
+          expiresAt: new Date(Date.now() + 3_600_000),
+        };
+      },
+    });
+    expect(outcome.outcome).toBe("current");
+    if (outcome.outcome !== "current") throw new Error("unreachable");
+    expect(outcome.credential.materialEncrypted).toBe(relogin);
+    const [row] = await shared.admin<{ material_encrypted: string; version: number }[]>`
+      select material_encrypted, version from end_user_tool_credentials where id = ${credentialId}`;
+    expect(row).toEqual({ material_encrypted: relogin, version: 2 });
+
+    // A refused refresh marks the login and clears its lease.
+    await shared.admin`update end_user_tool_credentials set expires_at = now() - interval '1 second'
+      where id = ${credentialId}`;
+    const refused = await refreshEndUserToolCredential(client.db, {
+      ...scope,
+      refreshBefore: new Date(Date.now() + 5 * 60_000),
+      refresh: async () => null,
+    });
+    expect(refused.outcome).toBe("failed");
+    const [failed] = await shared.admin<
+      { refresh_failed_at: Date | null; refresh_lease_until: Date | null }[]
+    >`select refresh_failed_at, refresh_lease_until from end_user_tool_credentials
+      where id = ${credentialId}`;
+    expect(failed!.refresh_failed_at).toBeInstanceOf(Date);
+    expect(failed!.refresh_lease_until).toBeNull();
   }, 180_000);
 });

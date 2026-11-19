@@ -655,6 +655,17 @@ the other fields change settings for this chat only:
 - `config`: an inline code-agent definition; each distinct config becomes a
   version of a code-managed agent.
 
+Changes to the agent's own tool servers may only narrow what the agent gives:
+turn servers or tools off, choose fewer of its tools, or ask first for more of
+them. Turning on tools the agent left off, taking "Ask first" away, replacing
+one of its servers through `mcpServers`, and saving a `config` need
+`agents:manage` for the organization: an organization key holding it (whose
+workspace scope includes the chat's workspace), or the organization's owner or
+an admin. A workspace role never counts. Otherwise the create fails with 403
+`agents_manage_required`. Servers a chat adds under a new id need
+`mcp_servers:attach`, as for any chat. Inline saves are recorded in Console's
+audit log (`agent.created`, `agent.version_saved`).
+
 What a chat changed is stored per session (`sessions.agent_overrides`,
 `{setting: {agent, chat}}`), returned as `Session.orgAgent.overrides`, and
 shown in Console as "Changed by this chat" with a diff. `agentOverrides:

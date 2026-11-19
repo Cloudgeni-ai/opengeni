@@ -112,13 +112,20 @@ async function organization() {
   });
   const prepare = (
     raw: Record<string, unknown>,
-    options: { workspaceId?: string; permissions?: Permission[]; enabled?: boolean } = {},
+    options: {
+      workspaceId?: string;
+      permissions?: Permission[];
+      enabled?: boolean;
+      /** Organization-level agents:manage (an organization key, or an owner or admin). */
+      manage?: boolean;
+    } = {},
   ) =>
     prepareOrgAgentSessionCreate(
       options.enabled === false ? { ...deps, settings: testSettings() } : deps,
       grantFor(options.permissions),
       options.workspaceId ?? workspaceId,
       raw,
+      { manageAgents: options.manage === true },
     );
   return { accountId, workspaceId, subjectId, workspace, agent, prepare };
 }
@@ -268,8 +275,18 @@ describe("session create with an organization agent", () => {
       status: 403,
       code: "agents_manage_required",
     });
-    const manage: Permission[] = ["sessions:create", "agents:manage"];
-    const first = await org.prepare({ agent: { ref: "coder", config } }, { permissions: manage });
+    // Workspace permissions never count, not even agents:manage or workspace:admin
+    // on the workspace grant: only organization-level authority writes.
+    expect(
+      await refusal(
+        org.prepare(
+          { agent: { ref: "coder", config } },
+          { permissions: ["sessions:create", "agents:manage", "workspace:admin"] },
+        ),
+      ),
+    ).toEqual({ status: 403, code: "agents_manage_required" });
+    const manage = { manage: true };
+    const first = await org.prepare({ agent: { ref: "coder", config } }, manage);
     expect(first.binding).toMatchObject({ key: "coder", version: 1, promptVersion: 1 });
     // The same config reuses the version, also for callers who may not write.
     const again = await org.prepare({ agent: { ref: "coder", config } });
@@ -282,14 +299,46 @@ describe("session create with an organization agent", () => {
     expect(stored).toEqual({ managed_by: "code", published_revision: null });
     const changed = await org.prepare(
       { agent: { ref: "coder", config: { ...config, instructions: "Write tests." } } },
-      { permissions: manage },
+      manage,
     );
     expect(changed.binding.version).toBe(2);
+    // Each save is in Console's audit log; a reused version adds nothing.
+    const audit = await shared.admin<
+      { action: string; workspace_id: string; actor_subject_id: string; detail: Record<string, unknown> }[]
+    >`
+      select action, workspace_id::text as workspace_id, actor_subject_id, detail
+      from organization_console_audit_events
+      where account_id = ${org.accountId} and action in ('agent.created', 'agent.version_saved')
+      order by created_at, action`;
+    expect(audit).toEqual([
+      {
+        action: "agent.created",
+        workspace_id: org.workspaceId,
+        actor_subject_id: org.subjectId,
+        detail: expect.objectContaining({
+          agentId: first.binding.agentId,
+          key: "coder",
+          version: 1,
+          source: "inline",
+        }),
+      },
+      {
+        action: "agent.version_saved",
+        workspace_id: org.workspaceId,
+        actor_subject_id: org.subjectId,
+        detail: expect.objectContaining({
+          agentId: first.binding.agentId,
+          key: "coder",
+          version: 2,
+          source: "inline",
+        }),
+      },
+    ]);
     // A published Console agent is edited in Console only.
     await org.agent("console-agent", [{ instructions: "Hi." }]);
     expect(
       await refusal(
-        org.prepare({ agent: { ref: "console-agent", config } }, { permissions: manage }),
+        org.prepare({ agent: { ref: "console-agent", config } }, manage),
       ),
     ).toEqual({ status: 409, code: "agent_managed_in_console" });
     expect(
@@ -301,7 +350,7 @@ describe("session create with an organization agent", () => {
               config: { ...config, config: { toolServers: [{ server: "missing" }] } },
             },
           },
-          { permissions: manage },
+          manage,
         ),
       ),
     ).toEqual({ status: 422, code: "tool_server_not_found" });
