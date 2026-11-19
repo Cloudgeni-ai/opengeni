@@ -157,6 +157,10 @@ export const ConsoleEndUser = /* @__PURE__ */ defineSchema(() =>
     /** The product's own id for the user (`asUser(id)`), when Opengeni knows it. */
     externalId: primitives.nullableString,
     source: primitives.nullableString,
+    /** Name the product sent (`asUser(id, { displayName })`). Absent on older servers. */
+    displayName: primitives.nullableString.optional(),
+    /** Email the product sent (`asUser(id, { email })`), as given. Absent on older servers. */
+    email: primitives.nullableString.optional(),
   }),
 );
 export type ConsoleEndUser = z.infer<typeof ConsoleEndUser>;
@@ -195,7 +199,10 @@ export const ListConsoleSessionsQuery = /* @__PURE__ */ defineSchema(() =>
     limit: z.coerce.number().int().min(1).max(100).default(50),
     cursor: z.string().min(1).max(512).optional(),
     workspaceId: primitives.optionalUuid,
-    /** Matches the title and opening message; only with the `full` review level. */
+    /**
+     * Matches the workspace name and the end user's id, name or email; with
+     * the `full` review level also the title and opening messages.
+     */
     q: z.string().trim().min(1).max(200).optional(),
   }),
 );

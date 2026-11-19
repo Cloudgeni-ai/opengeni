@@ -19,7 +19,7 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
 
 import {
   ConsoleLoadError,
-  endUserLabel,
+  EndUserName,
   formatCount,
   formatDuration,
   formatMicros,
@@ -200,8 +200,12 @@ export function ConsoleSessionRoute() {
       <DetailPageBody
         aside={
           <DetailAside>
-            <DetailAsideItem label="Workspace">{session.workspaceName}</DetailAsideItem>
-            <DetailAsideItem label="End user">{endUserLabel(session.endUser)}</DetailAsideItem>
+            <DetailAsideItem label="Workspace">
+              <span className="break-words">{session.workspaceName}</span>
+            </DetailAsideItem>
+            <DetailAsideItem label="End user">
+              <EndUserName endUser={session.endUser} copyable />
+            </DetailAsideItem>
             {model ? (
               <DetailAsideItem label="Model">
                 {current.reasoningEffort ? `${model} · ${current.reasoningEffort}` : model}

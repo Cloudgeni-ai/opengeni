@@ -18,6 +18,7 @@ import {
   consoleSpendByWorkspace,
   createDb,
   createSession,
+  createWorkspace,
   decodeConsoleSessionCursor,
   getConsoleReviewSettings,
   getConsoleSession,
@@ -28,7 +29,9 @@ import {
   markWorkspaceManagedByApiKey,
   recordConsoleAuditEvent,
   recordConsoleAuditEventOnce,
+  readConsoleEndUsers,
   rememberEndUserLabel,
+  resetRememberedEndUserLabels,
   setConsoleReviewLevel,
   setConsoleWorkspaceKind,
 } from "../src/index";
@@ -238,6 +241,175 @@ test("owners and admins review shared and end-user sessions, never Only me chats
   expect(counts.sessions.get(managedId)).toBe(2);
   expect(counts.sessions.get(teamId)).toBe(0);
   expect(counts.endUsers).toBe(1);
+});
+
+test("end-user display details: the latest wins, omitted fields keep, and Console searches them", async () => {
+  const { accountId, managedId } = await organization();
+  const teamId = (await createWorkspace(client.db, { accountId, name: "Northwind" })).id;
+  await markWorkspaceManagedByApiKey(client.db, {
+    accountId,
+    workspaceId: managedId,
+    apiKeyId: crypto.randomUUID(),
+  });
+  await markWorkspaceManagedByApiKey(client.db, {
+    accountId,
+    workspaceId: teamId,
+    apiKeyId: crypto.randomUUID(),
+  });
+  const ada = `external_user:${crypto.randomUUID()}`;
+  const grace = `external_user:${crypto.randomUUID()}`;
+  const plain = `external_user:${crypto.randomUUID()}`;
+  const adaSession = await session(accountId, managedId, { title: "Invoice", ownerSubjectId: ada });
+  const graceSession = await session(accountId, managedId, {
+    title: "Payroll",
+    ownerSubjectId: grace,
+  });
+  const plainSession = await session(accountId, managedId, {
+    title: "Budget",
+    ownerSubjectId: plain,
+  });
+  const teamSession = await session(accountId, teamId, { title: "Team chat" });
+  const read = async (subject: string) =>
+    (
+      await withAccountRls(client.db, accountId, (tx) =>
+        readConsoleEndUsers(tx, accountId, [subject]),
+      )
+    ).get(subject);
+
+  // Without display details nothing is stored beside the label (today's behaviour).
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: plain,
+    source: "default",
+    externalId: "auth0|plain",
+  });
+  expect(await read(plain)).toEqual({
+    subjectId: plain,
+    externalId: "auth0|plain",
+    source: "default",
+    displayName: null,
+    email: null,
+  });
+  const plainProfiles = await shared.admin`
+    select 1 from organization_end_user_profiles where subject_id = ${plain}`;
+  expect(plainProfiles).toHaveLength(0);
+
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: ada,
+    source: "default",
+    externalId: "auth0|ada",
+    displayName: "Ada Lovelace",
+    email: "ada@example.com",
+  });
+  expect(await read(ada)).toMatchObject({ displayName: "Ada Lovelace", email: "ada@example.com" });
+  // A new name wins; the omitted email keeps its stored value.
+  resetRememberedEndUserLabels();
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: ada,
+    source: "default",
+    externalId: "auth0|ada",
+    displayName: "Ada King",
+  });
+  expect(await read(ada)).toMatchObject({
+    externalId: "auth0|ada",
+    displayName: "Ada King",
+    email: "ada@example.com",
+  });
+  // Even within this process's memory, a changed value is written.
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: ada,
+    source: "default",
+    externalId: "auth0|ada",
+    email: "ada@analytical.engine",
+  });
+  expect(await read(ada)).toMatchObject({
+    displayName: "Ada King",
+    email: "ada@analytical.engine",
+  });
+  // Omitting both keeps both.
+  resetRememberedEndUserLabels();
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: ada,
+    source: "default",
+    externalId: "auth0|ada",
+  });
+  expect(await read(ada)).toMatchObject({
+    displayName: "Ada King",
+    email: "ada@analytical.engine",
+  });
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: grace,
+    source: "default",
+    externalId: "auth0|grace",
+    email: "grace@navy.example",
+  });
+  // An out-of-bounds value never fails the caller (the bounds check refuses it, best effort).
+  resetRememberedEndUserLabels();
+  await rememberEndUserLabel(client.db, {
+    accountId,
+    subjectId: grace,
+    source: "default",
+    externalId: "auth0|grace",
+    email: "x".repeat(400),
+  });
+  expect(await read(grace)).toMatchObject({ displayName: null, email: "grace@navy.example" });
+
+  const workspaces = [
+    { id: managedId, name: "Kontali dev: Acme Holdings AS (46 users)" },
+    { id: teamId, name: "Northwind" },
+  ];
+  const search = async (q: string, includeContent: boolean) =>
+    (
+      await listConsoleSessions(client.db, {
+        accountId,
+        workspaces,
+        limit: 50,
+        cursor: null,
+        q,
+        includeContent,
+      })
+    ).sessions
+      .map((entry) => entry.id)
+      .sort();
+
+  const list = await listConsoleSessions(client.db, {
+    accountId,
+    workspaces,
+    limit: 50,
+    cursor: null,
+    q: null,
+    includeContent: false,
+  });
+  expect(list.sessions.find((entry) => entry.id === adaSession)?.endUser).toEqual({
+    subjectId: ada,
+    externalId: "auth0|ada",
+    source: "default",
+    displayName: "Ada King",
+    email: "ada@analytical.engine",
+  });
+  expect(list.sessions.find((entry) => entry.id === adaSession)?.workspaceName).toBe(
+    "Kontali dev: Acme Holdings AS (46 users)",
+  );
+  // Names, emails and product ids at every review level.
+  expect(await search("ada king", false)).toEqual([adaSession]);
+  expect(await search("NAVY.example", false)).toEqual([graceSession]);
+  expect(await search("auth0|plain", false)).toEqual([plainSession]);
+  // Workspace names, in full.
+  expect(await search("acme holdings", false)).toEqual(
+    [adaSession, graceSession, plainSession].sort(),
+  );
+  expect(await search("northwind", false)).toEqual([teamSession]);
+  // Titles only with content.
+  expect(await search("payroll", false)).toEqual([]);
+  expect(await search("payroll", true)).toEqual([graceSession]);
+  expect(await search("nobody", true)).toEqual([]);
+  // LIKE wildcards are literal.
+  expect(await search("%", true)).toEqual([]);
 });
 
 test("review level, workspace kind and the audit log", async () => {

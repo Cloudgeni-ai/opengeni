@@ -95,6 +95,11 @@ export type ChatOptions = ChatTarget & {
    * Without a tenant or workspaceId, the user gets one workspace of their own.
    */
   user?: string | undefined;
+  /**
+   * Name and email Console shows for `user` (`asUser(user, { displayName, email })`).
+   * Display only; the latest sent wins and an omitted field keeps the stored one.
+   */
+  userProfile?: { displayName?: string | undefined; email?: string | undefined } | undefined;
   /** Stable conversation id; the session id is derived from it deterministically. */
   conversation: string;
   /** Prefer the actual Opengeni session ID for shared or existing conversations.

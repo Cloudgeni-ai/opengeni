@@ -2251,6 +2251,7 @@ export const FORCE_RLS_TABLES = [
   "organization_console_roles",
   "organization_credential_providers",
   "organization_end_user_labels",
+  "organization_end_user_profiles",
   "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
@@ -3109,7 +3110,10 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "interaction_operations",
   "interaction_resource_operations",
   "network_routes",
+  // 1508: a member's Console role; 'none' clears it, never deleted.
   "organization_console_roles",
+  // 1507: end-user display name and email; the latest value wins, never deleted.
+  "organization_end_user_profiles",
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",

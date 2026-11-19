@@ -156,7 +156,8 @@ An organization setting, `organization_session_review_settings`:
 - `full` (default, no row): titles, opening messages, transcripts and rating
   comments.
 - `metadata`: who, when, status, turns, ratings, tokens and cost; no titles,
-  messages, comments or transcripts, and no content search.
+  messages, comments or transcripts, and no content search (people and
+  workspace names are still searchable).
 - `off`: no session list or detail (`403`); Overview, Workspaces, Usage and
   API keys still work.
 
@@ -224,6 +225,28 @@ Console shows the product's own user id (`asUser(id)`) for an end user. The
 API records it in `organization_end_user_labels` when it resolves an external
 actor (best effort, never failing the request), and migration 1377 backfilled
 existing identities. It is a label, never authority.
+
+The product's backend may also send a display name and an email with the user:
+`asUser(id, { displayName, email })`, `identity.displayName`/`identity.email` on
+`addExternalWorkspaceMember`, or `displayName`/`email` from the session proxy's
+`resolve`. The API stores them in `organization_end_user_profiles` (migration
+1507), keyed like the labels. The latest value sent wins and a field left out
+keeps its stored value. They are never rejected: names are trimmed and cut to
+256 characters; an email is stored as given (trimmed), unless it has spaces or
+is longer than 320 characters, which drops it. They are not part of the
+identity: the same `externalId` and `source` are the same user whatever name
+is sent.
+
+Console names an end user by display name, then email, then the product's id;
+the id shows on hover and can be copied on the session page. Workspace names
+show in full; the product sets them when it creates a workspace (`name`, or the
+chat facade's `workspaceName`) and renames one with
+`updateWorkspace(workspaceId, { name })` (`PATCH /v1/workspaces/:workspaceId`; the
+key needs `workspace:admin`, which full-access keys have).
+
+Search (`q`) matches the workspace name and the end user's id, name or email
+at every review level, and the title and opening messages with full
+transcripts.
 
 ## Agents
 
