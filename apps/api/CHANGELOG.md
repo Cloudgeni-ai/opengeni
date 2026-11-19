@@ -1,5 +1,39 @@
 # @opengeni/api-router
 
+## 6.30.1
+
+### Patch Changes
+
+- 9cd3256: A workspace whose Microsoft Teams bot was disconnected can now be connected to a different Teams organization through the normal setup. Setup releases the old organization's binding in the same transaction: its account links, stored chat choices, routes, pending deliveries and chat context in the workspace are removed, the old organization can no longer reach the workspace, and the release is audited. A workspace that is still connected to another organization is refused with a message that says to disconnect the bot first.
+- Updated dependencies [24939b2]
+- Updated dependencies [c3d6b66]
+- Updated dependencies [9cd3256]
+  - @opengeni/db@6.30.1
+  - @opengeni/core@6.30.1
+  - @opengeni/documents@6.30.1
+  - @opengeni/events@6.30.1
+  - @opengeni/agent-proto@6.30.1
+  - @opengeni/artifact-tool@6.30.1
+  - @opengeni/capabilities@6.30.1
+  - @opengeni/codemode@6.30.1
+  - @opengeni/codex@6.30.1
+  - @opengeni/config@6.30.1
+  - @opengeni/contracts@6.30.1
+  - @opengeni/decisions@6.30.1
+  - @opengeni/github@6.30.1
+  - @opengeni/interaction@6.30.1
+  - @opengeni/network@6.30.1
+  - @opengeni/observability@6.30.1
+  - @opengeni/runtime@6.30.1
+  - @opengeni/storage@6.30.1
+  - @opengeni/tool-gateway@6.30.1
+  - @opengeni/vaults@6.30.1
+  - @opengeni/vaults-bitwarden@6.30.1
+  - @opengeni/vaults-keeper@6.30.1
+  - @opengeni/vaults-onepassword@6.30.1
+  - @opengeni/vaults-protonpass@6.30.1
+  - @opengeni/xai-subscription@6.30.1
+
 ## 6.30.0
 
 ### Minor Changes
