@@ -2218,6 +2218,7 @@ behind a generic 500, so its session lookups run through
 | `packages/vaults-bitwarden` | `@opengeni/vaults-bitwarden` | Bitwarden and Vaultwarden vault provider over the server's client API with the account's personal API key; decrypts locally, keeps no values, loaded only by dynamic import from the API and worker |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
+| `packages/cli` | `opengeni` | `opengeni` command-line interface: `agents deploy` (YAML agent files to an organization, through `PUT .../agents/by-key/:key/apply`) and `agents export`; ships the agent file JSON Schema (`schemas/agent.schema.json`, generated from `OrgAgentFile`) |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
 | `packages/xai-subscription` | `@opengeni/xai-subscription` | SuperGrok/xAI subscription authentication and transport |
 | `packages/subscriptions` | `@opengeni/subscriptions` | Pure provider-neutral subscription policy: settings, eligibility, placement, failover order, quota model, adapter types |

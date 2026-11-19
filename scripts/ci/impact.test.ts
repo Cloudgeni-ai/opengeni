@@ -238,6 +238,15 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("the unscoped opengeni CLI package is built, typechecked and tested when it changes", () => {
+    const plan = createImpactPlan(["packages/cli/src/index.ts"]);
+    expect(plan.mode).toBe("focused");
+    expect(plan.affectedPackages).toContain("opengeni");
+    expect(plan.buildPackages).toContain("opengeni");
+    expect(plan.typecheckProjects).toContain("packages/cli");
+    expect(plan.unitTests).toContain("packages/cli/test/cli.test.ts");
+  });
+
   test("documentation-only changes retain every non-runtime public guard", () => {
     const plan = createImpactPlan(["docs/artifact-engine.md", "README.md"]);
     expect(plan.mode).toBe("docs");

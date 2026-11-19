@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { publishableWorkspacePackages } from "./publishable-workspaces";
+import { isPublishedPackageName, publishableWorkspacePackages } from "./publishable-workspaces";
 
 export type PublishablePackage = {
   name: string;
@@ -30,7 +30,6 @@ export type VerifiedPackagePublicationReceipt = {
   bomPackages: ReleasePackageReceipt[];
 };
 
-const packageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9._-]*$/;
 const packageVersionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const sourceShaPattern = /^[0-9a-f]{40}$/;
 
@@ -45,7 +44,7 @@ export function parseExpectedPackages(value: string): PublishablePackage[] {
     const separator = spec.lastIndexOf("@");
     const name = spec.slice(0, separator);
     const version = spec.slice(separator + 1);
-    if (!packageNamePattern.test(name) || !packageVersionPattern.test(version)) {
+    if (!isPublishedPackageName(name) || !packageVersionPattern.test(version)) {
       throw new Error(`invalid expected package spec: ${spec}`);
     }
     if (seen.has(name)) {
@@ -257,7 +256,7 @@ export function reconcileReleasePackages(options: {
 export function loadPublishablePackages(root?: string): PublishablePackage[] {
   return publishableWorkspacePackages(root)
     .map(({ name, version }) => {
-      if (!packageNamePattern.test(name) || !packageVersionPattern.test(version)) {
+      if (!isPublishedPackageName(name) || !packageVersionPattern.test(version)) {
         throw new Error(`invalid publishable package manifest: ${name}@${version}`);
       }
       return { name, version };
@@ -460,7 +459,7 @@ function normalizePublishedPackageReceipts(value: unknown, label: string): Relea
       );
       if (
         typeof pkg.name !== "string" ||
-        !packageNamePattern.test(pkg.name) ||
+        !isPublishedPackageName(pkg.name) ||
         typeof pkg.version !== "string" ||
         !packageVersionPattern.test(pkg.version) ||
         pkg.state !== "published" ||

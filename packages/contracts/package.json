@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./organization-agents": {
+      "types": "./src/organization-agents.ts",
+      "default": "./src/organization-agents.ts"
+    },
     "./machine-access": {
       "types": "./src/machine-access.ts",
       "default": "./src/machine-access.ts"

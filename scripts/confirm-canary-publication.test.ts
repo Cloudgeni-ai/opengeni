@@ -81,6 +81,9 @@ describe("canary confirmation admission", () => {
     duplicate.packages.push(duplicate.packages[0]);
     expect(() => parseCanaryCohort(JSON.stringify(duplicate), identity)).toThrow("package");
     expect(() => parseCanaryCohort("not json", identity)).toThrow("not JSON");
+    const cli = structuredClone(valid);
+    cli.packages[0].name = "opengeni";
+    expect(parseCanaryCohort(JSON.stringify(cli), identity).packages[0]?.name).toBe("opengeni");
   });
 });
 

@@ -1,0 +1,60 @@
+name: Deploy Opengeni agents
+description: Deploy agents/<key>.yaml files to an Opengeni organization with `opengeni agents deploy`.
+author: Opengeni
+branding:
+  icon: upload-cloud
+  color: blue
+
+inputs:
+  directory:
+    description: Directory with one agent file per agent (<key>.yaml or <key>.yml).
+    required: false
+    default: agents
+  publish:
+    description: Publish the deployed versions (true or false).
+    required: false
+    default: "false"
+  move-running-chats:
+    description: With publish, also move running chats to the new versions (true or false).
+    required: false
+    default: "false"
+  dry-run:
+    description: Show what would change without saving (true or false).
+    required: false
+    default: "false"
+  organization-id:
+    description: Opengeni organization id.
+    required: true
+  api-key:
+    description: Organization API key with agents:manage. Pass it from a secret.
+    required: true
+  base-url:
+    description: Opengeni API URL.
+    required: false
+    default: https://app.opengeni.ai
+  version:
+    description: Version of the opengeni npm package to run. Pin it for repeatable deploys.
+    required: false
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: opengeni agents deploy
+      shell: bash
+      env:
+        OPENGENI_API_KEY: ${{ inputs.api-key }}
+        OPENGENI_ORGANIZATION_ID: ${{ inputs.organization-id }}
+        OPENGENI_BASE_URL: ${{ inputs.base-url }}
+        AGENTS_DIRECTORY: ${{ inputs.directory }}
+        AGENTS_PUBLISH: ${{ inputs.publish }}
+        AGENTS_MOVE_RUNNING_CHATS: ${{ inputs.move-running-chats }}
+        AGENTS_DRY_RUN: ${{ inputs.dry-run }}
+        OPENGENI_CLI_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        flags=()
+        [ "$AGENTS_PUBLISH" = "true" ] && flags+=(--publish)
+        [ "$AGENTS_MOVE_RUNNING_CHATS" = "true" ] && flags+=(--move-running-chats)
+        [ "$AGENTS_DRY_RUN" = "true" ] && flags+=(--dry-run)
+        npx --yes "opengeni@${OPENGENI_CLI_VERSION}" agents deploy "$AGENTS_DIRECTORY" ${flags[@]+"${flags[@]}"}

@@ -163,6 +163,7 @@ describe("release package evidence", () => {
       expect.objectContaining({ name: "@opengeni/worker-bundle" }),
     );
     expect(publishable).not.toContainEqual(expect.objectContaining({ name: "opengeni-web" }));
+    expect(publishable).toContainEqual(expect.objectContaining({ name: "opengeni" }));
   });
 
   test("parses a bounded comma/newline package set and rejects duplicates", () => {
@@ -175,6 +176,12 @@ describe("release package evidence", () => {
       "duplicate expected package",
     );
     expect(() => parseExpectedPackages("react@latest")).toThrow("invalid expected package spec");
+    expect(parseExpectedPackages("opengeni@6.30.2")).toEqual([
+      { name: "opengeni", version: "6.30.2" },
+    ]);
+    expect(() => parseExpectedPackages("opengeni-web@6.30.2")).toThrow(
+      "invalid expected package spec",
+    );
   });
 
   test("supports an application-only release with a complete published package BOM", () => {

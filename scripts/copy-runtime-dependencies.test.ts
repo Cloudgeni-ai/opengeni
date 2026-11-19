@@ -139,3 +139,30 @@ test("workspace runtime closure keeps published source and kernel assets without
     await rm(fixture, { recursive: true, force: true });
   }
 });
+
+test("the unscoped opengeni CLI workspace link keeps only its published files", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "opengeni-cli-runtime-closure-"));
+  try {
+    const root = join(fixture, "source");
+    const workspace = join(root, "packages/cli");
+    for (const directory of ["src", "dist", "test"]) {
+      await mkdir(join(workspace, directory), { recursive: true });
+      await writeFile(join(workspace, directory, "asset"), directory);
+    }
+    await writeFile(
+      join(workspace, "package.json"),
+      JSON.stringify({ name: "opengeni", files: ["src", "dist"] }),
+    );
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink("../packages/cli", join(root, "node_modules/opengeni"));
+    const output = join(fixture, "runtime");
+    await copyRuntimeDependencies(root, output, ".", ["opengeni"]);
+    expect((await readdir(join(output, "packages/cli"))).sort()).toEqual([
+      "dist",
+      "package.json",
+      "src",
+    ]);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});

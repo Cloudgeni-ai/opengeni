@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json",
+  "title": "Opengeni agent",
+  "description": "One Opengeni organization agent (agents/<key>.yaml). Deploy with `npx opengeni agents deploy <dir>`.",
+  "type": "object",
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "instructions": {
+      "type": "string",
+      "maxLength": 20000
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "reasoningEffort": {
+      "type": "string",
+      "enum": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "capabilities": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "all"
+        },
+        {
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "webSearch": {
+              "type": "boolean"
+            },
+            "humanInput": {
+              "type": "boolean"
+            },
+            "notifications": {
+              "type": "boolean"
+            },
+            "skills": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "const": "read"
+                },
+                {
+                  "type": "string",
+                  "const": "manage"
+                },
+                {
+                  "type": "boolean",
+                  "const": false
+                }
+              ]
+            },
+            "goals": {
+              "type": "boolean"
+            },
+            "subagents": {
+              "type": "boolean"
+            },
+            "knowledge": {
+              "type": "boolean"
+            },
+            "schedules": {
+              "type": "boolean"
+            },
+            "artifacts": {
+              "type": "boolean"
+            },
+            "browser": {
+              "type": "boolean"
+            },
+            "secrets": {
+              "type": "boolean"
+            },
+            "media": {
+              "type": "boolean"
+            },
+            "workspaceFiles": {
+              "type": "boolean"
+            },
+            "workspaceConnectors": {
+              "type": "boolean"
+            },
+            "workspaceAdmin": {
+              "type": "boolean"
+            },
+            "privacyFacts": {
+              "type": "boolean"
+            },
+            "from": {
+              "type": "string",
+              "enum": [
+                "all",
+                "none"
+              ]
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "renderer": {
+      "type": "string",
+      "enum": [
+        "opengeni",
+        "markdown"
+      ]
+    },
+    "titleInstructions": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "toolServers": {
+      "maxItems": 32,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          "tools": {
+            "default": {
+              "mode": "selected",
+              "enabled": []
+            },
+            "type": "object",
+            "properties": {
+              "mode": {
+                "default": "selected",
+                "type": "string",
+                "enum": [
+                  "selected",
+                  "all"
+                ]
+              },
+              "enabled": {
+                "default": [],
+                "maxItems": 2000,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "approval": {
+            "default": {
+              "ask": []
+            },
+            "type": "object",
+            "properties": {
+              "ask": {
+                "default": [],
+                "anyOf": [
+                  {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  {
+                    "maxItems": 2000,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "eager": {
+            "default": [],
+            "maxItems": 2000,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "newTools": {
+            "default": "off",
+            "type": "string",
+            "enum": [
+              "off",
+              "on",
+              "on_with_approval"
+            ]
+          }
+        },
+        "required": [
+          "server"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "workers": {
+      "type": "object",
+      "properties": {
+        "shareInstructions": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "key",
+    "name"
+  ],
+  "additionalProperties": false
+}
