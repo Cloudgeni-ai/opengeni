@@ -18,8 +18,12 @@
  * The patch is applied one file section at a time through the inner tool as
  * structured operations, which is how the SDK applies a parsed patch anyway:
  * every section reports its own result, and a failed section does not undo or
- * stop the others. Input this parser cannot read is passed through unchanged,
- * so it keeps the SDK's own handling and error.
+ * stop the others. When there is more than one section or one failed, each
+ * result names its operation and path ("Updated a.py: Patch applied.",
+ * "Update b.py failed: ..."), and a partly applied patch says that only the
+ * failed sections need resending. A single applied section keeps the plain
+ * "Patch applied.". Input this parser cannot read is passed through
+ * unchanged, so it keeps the SDK's own handling and error.
  */
 import type { Tool } from "@openai/agents";
 import { isRecord } from "@opengeni/contracts/values";
@@ -280,6 +284,30 @@ function outputText(output: unknown): string {
 
 export type ApplyPatchFileReader = (path: string) => Promise<string | null>;
 
+const APPLIED = "Patch applied.";
+const FAILURE_PREFIX = /^(?:Failed to apply patch|Patch failed): ?/;
+export const PARTIAL_APPLY_NOTE =
+  "Sections that applied are saved; resend only the failed sections.";
+
+function sectionTarget(operation: RobustPatchOperation): string {
+  return operation.type === "update_file" && operation.moveTo
+    ? `${operation.path} (moved to ${operation.moveTo})`
+    : operation.path;
+}
+
+/** One section's result named by its operation and path. */
+export function labelSectionResult(operation: RobustPatchOperation, output: string): string {
+  const [done, verb] =
+    operation.type === "create_file"
+      ? ["Added", "Add"]
+      : operation.type === "delete_file"
+        ? ["Deleted", "Delete"]
+        : ["Updated", "Update"];
+  const target = sectionTarget(operation);
+  if (output === APPLIED) return `${done} ${target}: ${APPLIED}`;
+  return `${verb} ${target} failed: ${output.replace(FAILURE_PREFIX, "") || "Patch failed."}`;
+}
+
 /**
  * Apply the function `apply_patch` one file section at a time (see the module
  * comment). `readFile` reads the current text of a workspace file, or null.
@@ -313,7 +341,7 @@ export function withApplyPatchRobust(
         const patch = typeof input === "string" ? patchOf(input) : null;
         const operations = patch === null ? null : parseRobustPatch(patch);
         if (!operations) return await invoke(runContext, input, details);
-        const outputs: string[] = [];
+        const results: { operation: RobustPatchOperation; output: string }[] = [];
         for (const operation of operations) {
           let output = await applyOne(runContext, operation, details);
           const failure = CONTEXT_FAILURE.exec(output);
@@ -330,9 +358,13 @@ export function withApplyPatchRobust(
               output = `${output.trimEnd()}\n${closestContextRegion(content, context, operation.path)}`;
             }
           }
-          if (output) outputs.push(output);
+          results.push({ operation, output: output || APPLIED });
         }
-        return outputs.join("\n") || "Patch applied.";
+        const applied = results.filter((result) => result.output === APPLIED).length;
+        if (results.length === 1 && applied === 1) return APPLIED;
+        const lines = results.map((result) => labelSectionResult(result.operation, result.output));
+        if (applied > 0 && applied < results.length) lines.push(PARTIAL_APPLY_NOTE);
+        return lines.join("\n");
       },
     };
   });

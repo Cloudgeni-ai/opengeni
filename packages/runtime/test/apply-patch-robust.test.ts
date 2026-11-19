@@ -5,9 +5,11 @@ import type { Settings } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   closestContextRegion,
+  PARTIAL_APPLY_NOTE,
   parseRobustPatch,
   reorderHunksByFile,
 } from "../src/apply-patch-robust";
+import { applyPatchSucceeded } from "../src/apply-patch-then";
 import { buildAgentCapabilities } from "../src/index";
 
 type FunctionTool = Extract<Tool<unknown>, { type: "function" }>;
@@ -160,7 +162,7 @@ describe("robust apply_patch", () => {
       patch:
         "*** Begin Patch\n*** Add File: pkg/__init__.py\n*** Add File: pkg/a.py\n+x = 1\n*** End Patch",
     });
-    expect(output).toBe("Patch applied.\nPatch applied.");
+    expect(output).toBe("Added pkg/__init__.py: Patch applied.\nAdded pkg/a.py: Patch applied.");
     expect(files.get("pkg/__init__.py")).toBe("");
     expect(files.get("pkg/a.py")).toBe("x = 1\n");
   });
@@ -180,20 +182,22 @@ describe("robust apply_patch", () => {
     const output = await call(applyPatchTool(session, robust()), {
       patch: "*** Begin Patch\n*** Add File: e.txt\n*** End Patch",
     });
-    expect(output).toBe("Failed to apply patch: e.txt already exists");
+    expect(output).toBe("Add e.txt failed: e.txt already exists");
   });
 
-  test("an Invalid Context failure shows the closest region; other sections still apply", async () => {
+  test("an Invalid Context failure shows the closest region; other sections still apply and are named", async () => {
     const { session, files } = memorySession({ "m.py": PY });
     const output = await call(applyPatchTool(session, robust()), {
       patch:
         "*** Begin Patch\n*** Update File: m.py\n@@\n def b():\n-    return 22\n+    return 3\n*** Add File: n.txt\n+n\n*** End Patch",
     });
-    const [first, ...rest] = output.split("\n");
-    expect(first).toBe("Failed to apply patch: Invalid Context 0:");
+    const lines = output.split("\n");
+    expect(lines[0]).toBe("Update m.py failed: Invalid Context 0:");
     expect(output).toContain("Closest match in m.py (lines 1-8):");
     expect(output).toContain("5|     return 2");
-    expect(rest.at(-1)).toBe("Patch applied.");
+    expect(lines.at(-2)).toBe("Added n.txt: Patch applied.");
+    expect(lines.at(-1)).toBe(PARTIAL_APPLY_NOTE);
+    expect(applyPatchSucceeded(output)).toBe(false);
     expect(files.get("m.py")).toBe(PY);
     expect(files.get("n.txt")).toBe("n\n");
   });
@@ -219,5 +223,46 @@ describe("robust apply_patch", () => {
     expect(files.get("empty.txt")).toBe("");
     expect(commands).toEqual(["ls"]);
     expect(output.startsWith("Patch applied.\n\nthen:\n")).toBe(true);
+  });
+
+  test("a single applied section stays plain; several are named, deletes and moves included", async () => {
+    const { session, files, commands } = memorySession({ "m.py": PY, "old.txt": "x\n" });
+    const tool = applyPatchTool(session, robust());
+    expect(
+      await call(tool, { patch: "*** Begin Patch\n*** Add File: one.txt\n+1\n*** End Patch" }),
+    ).toBe("Patch applied.");
+    const output = await call(tool, {
+      patch:
+        "*** Begin Patch\n*** Update File: m.py\n*** Move to: n.py\n@@\n def a():\n-    return 1\n+    return 10\n*** Delete File: old.txt\n*** End Patch",
+      then: "pytest",
+    });
+    expect(output.split("\n\nthen:\n")[0]).toBe(
+      "Updated m.py (moved to n.py): Patch applied.\nDeleted old.txt: Patch applied.",
+    );
+    expect(commands).toEqual(["pytest"]);
+    expect(files.has("old.txt")).toBe(false);
+    expect(files.get("n.py")).toContain("return 10");
+  });
+
+  test("`then` does not run when a section failed", async () => {
+    const { session, commands } = memorySession({ "m.py": PY });
+    const output = await call(applyPatchTool(session, robust()), {
+      patch:
+        "*** Begin Patch\n*** Add File: ok.txt\n+ok\n*** Update File: m.py\n@@\n-nope\n+yes\n*** End Patch",
+      then: "pytest",
+    });
+    expect(commands).toEqual([]);
+    expect(output).toContain("Added ok.txt: Patch applied.\nUpdate m.py failed: Invalid Context");
+    expect(output).toContain(
+      `${PARTIAL_APPLY_NOTE}\n\nthen: not run because the patch did not apply.`,
+    );
+  });
+
+  test("applyPatchSucceeded accepts named section results only when all applied", () => {
+    expect(applyPatchSucceeded("Added a: Patch applied.\nUpdated b: Patch applied.")).toBe(true);
+    expect(
+      applyPatchSucceeded("Added a: Patch applied.\nUpdate b failed: Invalid Context 0:"),
+    ).toBe(false);
+    expect(applyPatchSucceeded(`Added a: Patch applied.\n${PARTIAL_APPLY_NOTE}`)).toBe(false);
   });
 });

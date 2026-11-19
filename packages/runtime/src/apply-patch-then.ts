@@ -91,7 +91,14 @@ export function applyPatchSucceeded(output: unknown): boolean {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  return lines.length > 0 && lines.every((line) => line === "Patch applied.");
+  // The robust apply_patch labels each section's result ("Updated a.py: Patch applied.").
+  return (
+    lines.length > 0 &&
+    lines.every(
+      (line) =>
+        line === "Patch applied." || /^(?:Added|Updated|Deleted) .+: Patch applied\.$/.test(line),
+    )
+  );
 }
 
 function outputText(output: unknown): string {
