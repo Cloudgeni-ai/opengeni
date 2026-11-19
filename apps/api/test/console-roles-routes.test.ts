@@ -15,6 +15,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import {
+  OPEN_SUFFIX_RUN_STATE_BLOB,
   signDelegatedAccessToken,
   type AccessContext,
   type AccessGrant,
@@ -28,6 +29,7 @@ import type {
   SessionWorkflowClient,
 } from "@opengeni/core";
 import {
+  applySessionTurnSettlement,
   claimSessionWorkForAttempt,
   createApiKey,
   createDb,
@@ -735,6 +737,20 @@ const MATRIX: Record<string, RouteCase> = {
     path: (f, caller) => `${testChatPath(f, caller)}/messages`,
     body: {},
   },
+  [`POST ${A}/:agentId/test-chats/:sessionId/approvals/:approvalId`]: {
+    need: "editor",
+    key: "allowed",
+    ok: 422,
+    path: (f, caller) => `${testChatPath(f, caller)}/approvals/call-matrix`,
+    body: {},
+  },
+  [`POST ${A}/:agentId/test-chats/:sessionId/control`]: {
+    need: "editor",
+    key: "allowed",
+    ok: 422,
+    path: (f, caller) => `${testChatPath(f, caller)}/control`,
+    body: {},
+  },
   // End users' stored tool logins: owners and admins among people.
   [`PUT ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 422, path: credentials, body: {} },
   [`GET ${CREDENTIALS}`]: { need: "full", key: "allowed", ok: 404, path: credentials },
@@ -1069,37 +1085,29 @@ describe("Console roles: reads, writes and lifecycle", () => {
     ).toBe("viewer");
   }, 60_000);
 
-  test("a Console role goes only on a pending invitation to join as a member", async () => {
+  test("an invitation's Console role is chosen when inviting and can't change", async () => {
     if (!fixture) return;
     const { accountId, people } = fixture;
-    const invite = async (role: "member" | "admin") => {
-      const invited = await call(
-        "POST",
-        `/v1/organizations/${accountId}/invitations`,
-        people.owner.headers,
-        {
-          email: `console-roles-${crypto.randomUUID()}@example.test`,
-          role,
-          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-          operationId: crypto.randomUUID(),
-        },
-      );
-      expect(invited.status).toBe(201);
-      return invited.body.id as string;
-    };
-    const put = (invitationId: string) =>
-      call("PUT", `${console_(fixture!)}/member-roles`, people.owner.headers, {
-        invitationId,
-        role: "viewer",
-      });
-    const asAdmin = await put(await invite("admin"));
-    expect([asAdmin.status, asAdmin.body.details?.code]).toEqual([
-      422,
-      "console_role_not_applicable",
-    ]);
-    const missing = await put(missingId);
-    expect([missing.status, missing.body.details?.code]).toEqual([404, "invitation_not_found"]);
-    expect((await put(await invite("member"))).status).toBe(200);
+    const invited = await call(
+      "POST",
+      `/v1/organizations/${accountId}/invitations`,
+      people.owner.headers,
+      {
+        email: `console-roles-${crypto.randomUUID()}@example.test`,
+        role: "member",
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(invited.status).toBe(201);
+    const before = await stateFingerprint(accountId);
+    // PUT member-roles names a member; an invitation id alone is refused.
+    const put = await call("PUT", `${console_(fixture)}/member-roles`, people.owner.headers, {
+      invitationId: invited.body.id,
+      role: "viewer",
+    });
+    expect(put.status).toBe(422);
+    expect(await stateFingerprint(accountId)).toBe(before);
   }, 120_000);
 
   test("owners and admins set members' Console roles, never owners' or admins'", async () => {
@@ -1144,14 +1152,6 @@ describe("Console roles: reads, writes and lifecycle", () => {
       role: "viewer",
     });
     expect([stranger.status, stranger.body.details?.code]).toEqual([404, "member_not_found"]);
-    const badInvitation = await put(people.owner.headers, {
-      invitationId: missingId,
-      role: "viewer",
-    });
-    expect([badInvitation.status, badInvitation.body.details?.code]).toEqual([
-      404,
-      "invitation_not_found",
-    ]);
     // An Editor can't raise anyone, themselves included.
     const selfRaise = await put(people.editor.headers, {
       subjectId: people.viewer.subjectId,
@@ -1294,6 +1294,10 @@ describe("Console roles: Console test chats", () => {
       consoleEvents: (await call("GET", `${consolePath}/events`, who)).status,
       consoleSend: (await call("POST", `${consolePath}/messages`, who, { message: "mine now" }))
         .status,
+      consoleApprove: (
+        await call("POST", `${consolePath}/approvals/call-probe`, who, { decision: "approve" })
+      ).status,
+      consoleStop: (await call("POST", `${consolePath}/control`, who, { action: "pause" })).status,
       appRead: (await call("GET", appPath, who)).status,
       appEvents: (await call("GET", `${appPath}/events`, who)).status,
       appSend: (
@@ -1371,6 +1375,8 @@ describe("Console roles: Console test chats", () => {
       consoleRead: 404,
       consoleEvents: 404,
       consoleSend: 404,
+      consoleApprove: 404,
+      consoleStop: 404,
       appRead: 403,
       appEvents: 403,
       appSend: 403,
@@ -1495,6 +1501,8 @@ describe("Console roles: Console test chats", () => {
         consoleRead: 403,
         consoleEvents: 403,
         consoleSend: 403,
+        consoleApprove: 403,
+        consoleStop: 403,
         appRead: 403,
         appEvents: 403,
         appSend: 403,
@@ -1502,6 +1510,117 @@ describe("Console roles: Console test chats", () => {
       expect(await stateFingerprint(accountId)).toBe(before);
     }
   }, 300_000);
+
+  test("a tester answers an approval in their own test chat, and stops and resumes it", async () => {
+    if (!fixture) return;
+    const { people, agentId } = fixture;
+    const started = await startTestChat(people.editor.headers, "Refund invoice 1042");
+    expect(started.status).toBe(201);
+    const sessionId = started.body.sessionId as string;
+    const url = testChatUrl(agentId, sessionId);
+    // The turn waits on an "Ask first" tool call, as the worker leaves it.
+    const workspaceId = await testWorkspaceId();
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client!.db, workspaceId, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      agentInstructionsProtocol: 1,
+      orgAgentProtocol: 1,
+    });
+    if (claimed.action !== "claimed") throw new Error(`turn not claimed: ${claimed.reason}`);
+    await applySessionTurnSettlement(client!.db, workspaceId, {
+      sessionId,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
+        pendingApprovals: [{ id: "call-refund" }],
+        humanInputRequests: [],
+      },
+      events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+    });
+    // Nobody else answers or stops it.
+    const before = await stateFingerprint(fixture.accountId);
+    expect(
+      (
+        await call("POST", `${url}/approvals/call-refund`, people.owner.headers, {
+          decision: "approve",
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (await call("POST", `${url}/control`, people.owner.headers, { action: "pause" })).status,
+    ).toBe(404);
+    expect(await stateFingerprint(fixture.accountId)).toBe(before);
+
+    const unknown = await call("POST", `${url}/approvals/call-other`, people.editor.headers, {
+      decision: "approve",
+    });
+    expect(unknown.status).toBe(409);
+    const approved = await call("POST", `${url}/approvals/call-refund`, people.editor.headers, {
+      decision: "approve",
+      clientEventId: "approve-refund",
+    });
+    expect([approved.status, approved.body.type, approved.body.payload?.approvalId]).toEqual([
+      202,
+      "user.approvalDecision",
+      "call-refund",
+    ]);
+    // The same decision again is the same answer.
+    const replayed = await call("POST", `${url}/approvals/call-refund`, people.editor.headers, {
+      decision: "approve",
+      clientEventId: "approve-refund",
+    });
+    expect([replayed.status, replayed.body.id]).toEqual([202, approved.body.id]);
+    const events = await call("GET", `${url}/events`, people.editor.headers);
+    expect(
+      (events.body.events as { type: string }[]).filter(
+        (event) => event.type === "user.approvalDecision",
+      ),
+    ).toHaveLength(1);
+
+    const stopped = await call("POST", `${url}/control`, people.editor.headers, {
+      action: "pause",
+    });
+    expect([stopped.status, stopped.body.paused]).toEqual([200, true]);
+    expect((await call("GET", url, people.editor.headers)).body.paused).toBe(true);
+    const resumed = await call("POST", `${url}/control`, people.editor.headers, {
+      action: "resume",
+    });
+    expect([resumed.status, resumed.body.paused]).toEqual([200, false]);
+    expect((await call("GET", url, people.editor.headers)).body.paused).toBe(false);
+  }, 120_000);
+
+  test("starting a test chat again with the same key returns the same chat", async () => {
+    if (!fixture) return;
+    const { people, agentId } = fixture;
+    const idempotencyKey = crypto.randomUUID();
+    const start = (who: Record<string, string>, message = "Twice?") =>
+      call("POST", `${agents(fixture!)}/${agentId}/test-chats`, who, {
+        version: 1,
+        message,
+        idempotencyKey,
+      });
+    const first = await start(people.editor.headers);
+    expect(first.status).toBe(201);
+    const again = await start(people.editor.headers);
+    expect([again.status, again.body.sessionId]).toEqual([200, first.body.sessionId]);
+    // Another tester's key is their own: a new chat of theirs, never this one.
+    const other = await start(people.owner.headers);
+    expect(other.status).toBe(201);
+    expect(other.body.sessionId).not.toBe(first.body.sessionId);
+    // A different start under the same key is refused, not merged.
+    const changed = await start(people.editor.headers, "Something else");
+    expect(changed.status).toBe(409);
+  }, 120_000);
 
   /** A live agent attempt on a test chat, as the worker runs it: its token and its tools. */
   async function testChatAgent(sessionId: string) {

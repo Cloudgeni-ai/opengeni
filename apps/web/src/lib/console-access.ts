@@ -62,10 +62,8 @@ export function consoleRolesApi(client: OrgAgentsTransport, organizationId: stri
         {},
         signal ? { signal } : {},
       ),
-    setMemberRole: (
-      target: { subjectId: string } | { invitationId: string },
-      role: ConsoleMemberRole,
-    ) =>
+    /** A member's Console role; an invitation's is set when inviting. */
+    setMemberRole: (target: { subjectId: string }, role: ConsoleMemberRole) =>
       client.requestJson<ConsoleMemberRoleEntry>("PUT", `${base(organizationId)}/member-roles`, {
         ...target,
         role,

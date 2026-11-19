@@ -8,6 +8,7 @@ import {
   AgentTitleInstructions,
 } from "./agent-config";
 import { ConsoleEndUser } from "./console";
+import { McpElicitationContent } from "./mcp-elicitation";
 import { ReasoningEffort } from "./reasoning-effort";
 import { secretValue } from "./secret-value";
 import { SessionStatus } from "./session-topology-primitives";
@@ -956,6 +957,11 @@ export const CreateOrgAgentTestChatRequest = /* @__PURE__ */ defineSchema(() =>
       version: z.number().int().positive(),
       message: z.string().trim().min(1).max(100_000),
       toolLogins: secretValue(z.record(OrgToolServerKey, z.string().min(1).max(16_384))).optional(),
+      /**
+       * One start of a test chat: the same key again (a double click, a
+       * retry) returns the chat it started instead of a second one.
+       */
+      idempotencyKey: z.string().trim().min(1).max(200).optional(),
     })
     .strict(),
 );
@@ -989,6 +995,8 @@ export const OrgAgentTestChatResponse = /* @__PURE__ */ defineSchema(() =>
     agentId: z.string().uuid(),
     version: z.number().int().positive().nullable(),
     status: SessionStatus,
+    /** Stopped (`POST .../control` with `pause`) until resumed. */
+    paused: z.boolean(),
   }),
 );
 export type OrgAgentTestChatResponse = z.infer<typeof OrgAgentTestChatResponse>;
@@ -1007,6 +1015,44 @@ export const SendOrgAgentTestChatMessageRequest = /* @__PURE__ */ defineSchema((
   z.object({ message: z.string().trim().min(1).max(100_000) }).strict(),
 );
 export type SendOrgAgentTestChatMessageRequest = z.input<typeof SendOrgAgentTestChatMessageRequest>;
+
+/**
+ * `POST .../test-chats/:sessionId/approvals/:approvalId`: approve or decline
+ * one "Ask first" tool call waiting in the caller's test chat. `content` and
+ * `elicitationRound` answer the tool server's questions, as in the app.
+ */
+export const DecideOrgAgentTestChatApprovalRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      decision: z.enum(["approve", "reject"]),
+      message: z.string().max(100_000).optional(),
+      content: McpElicitationContent.optional(),
+      elicitationRound: z.number().int().positive().optional(),
+      clientEventId: z.string().trim().min(1).max(200).optional(),
+    })
+    .strict(),
+);
+export type DecideOrgAgentTestChatApprovalRequest = z.input<
+  typeof DecideOrgAgentTestChatApprovalRequest
+>;
+
+/**
+ * `POST .../test-chats/:sessionId/control`: stop the caller's test chat
+ * (`pause`, which interrupts what runs) or let it go on (`resume`).
+ */
+export const ControlOrgAgentTestChatRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      action: z.enum(["pause", "resume"]),
+      clientEventId: z.string().trim().min(1).max(200).optional(),
+    })
+    .strict(),
+);
+export type ControlOrgAgentTestChatRequest = z.input<typeof ControlOrgAgentTestChatRequest>;
+export const ControlOrgAgentTestChatResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ paused: z.boolean() }),
+);
+export type ControlOrgAgentTestChatResponse = z.infer<typeof ControlOrgAgentTestChatResponse>;
 
 /* --------------------------------------------------------- session create input */
 

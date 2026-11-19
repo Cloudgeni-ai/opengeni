@@ -93,7 +93,7 @@ const { ManagedInConsoleAgents } = await import("@/components/agents/managed-in-
 const { orgAgentsApi, computeMenuOptions, computeOptionFor, runsOnForChoice, runsOnMenuOptions } =
   await import("@/lib/organization-agents");
 const { RunsOnField } = await import("./agent-editor");
-const { loadTestChat } = await import("./agent-test-chat");
+const { appendEvents, loadTestChat } = await import("./agent-test-chat");
 
 const at = "2026-11-18T10:00:00.000Z";
 
@@ -191,7 +191,8 @@ const toolServer = {
   updatedAt: at,
 };
 
-const requestJson = mock(async (method: string, path: string, _body?: unknown) => {
+const requestJson = mock(
+  async (method: string, path: string, _body?: unknown, query?: Record<string, string>) => {
   const base = `/v1/organizations/${organizationId}`;
   if (!path.startsWith("/v1/workspaces/") && !flagOn) {
     throw Object.assign(new Error("Agent not found."), { status: 404 });
@@ -254,26 +255,46 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
   }
   // Test chats: only through the agent's test-chats routes, never the app's session routes.
   if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}`) {
-    return { workspaceId, sessionId: chatId, agentId, version: 3, status: "running" };
+    return {
+      workspaceId,
+      sessionId: chatId,
+      agentId,
+      version: 3,
+      status: "running",
+      paused: false,
+    };
   }
   if (method === "GET" && path === `${base}/agents/${agentId}/test-chats/${chatId}/events`) {
-    return {
-      events: [
-        {
-          id: "13131313-1313-4131-8131-131313131313",
-          sessionId: chatId,
-          sequence: 1,
-          type: "user.message",
-          payload: { text: "Refund invoice 1042" },
-          createdAt: at,
-        },
-      ],
-      hasMore: false,
-      nextAfter: null,
-    };
+    // One event at sequence 1: nothing new after it.
+    const after = Number(query?.after ?? 0);
+    return after >= 1
+      ? { events: [], hasMore: false, nextAfter: after }
+      : {
+          events: [
+            {
+              id: "13131313-1313-4131-8131-131313131313",
+              sessionId: chatId,
+              sequence: 1,
+              type: "user.message",
+              payload: { text: "Refund invoice 1042" },
+              createdAt: at,
+            },
+          ],
+          hasMore: false,
+          nextAfter: 1,
+        };
   }
   if (method === "POST" && path === `${base}/agents/${agentId}/test-chats/${chatId}/messages`) {
     return { id: "14141414-1414-4141-8141-141414141414" };
+  }
+  if (
+    method === "POST" &&
+    path === `${base}/agents/${agentId}/test-chats/${chatId}/approvals/call_refund`
+  ) {
+    return { id: "15151515-1515-4151-8151-151515151515" };
+  }
+  if (method === "POST" && path === `${base}/agents/${agentId}/test-chats/${chatId}/control`) {
+    return { paused: (_body as { action?: string }).action === "pause" };
   }
   if (method === "GET" && path === `/v1/workspaces/${workspaceId}/organization-agents`) {
     // The server lists only published agents, and none while the flag is off.
@@ -293,7 +314,8 @@ const requestJson = mock(async (method: string, path: string, _body?: unknown) =
     };
   }
   throw new Error(`Unexpected ${method} ${path}`);
-});
+  },
+);
 
 const client = {
   requestJson,
@@ -729,16 +751,46 @@ describe("Test chat", () => {
     const api = orgAgentsApi(client as never, organizationId);
     requestJson.mockClear();
     const loaded = await loadTestChat(api, agentId, { workspaceId, sessionId: chatId });
-    expect(loaded.status).toBe("running");
+    expect([loaded.status, loaded.paused, loaded.nextAfter]).toEqual(["running", false, 1]);
     expect(loaded.events.map((event) => event.type)).toEqual(["user.message"]);
     await api.sendTestChatMessage(agentId, chatId, { message: "And invoice 1043?" });
+    await api.decideTestChatApproval(agentId, chatId, "call_refund", { decision: "approve" });
+    expect(
+      await api.controlTestChat(agentId, chatId, { action: "pause", clientEventId: "stop-1" }),
+    ).toEqual({ paused: true });
     const paths = requestJson.mock.calls.map(([method, path]) => `${method} ${path}`);
     const testChat = `/v1/organizations/${organizationId}/agents/${agentId}/test-chats/${chatId}`;
     expect(paths.sort()).toEqual(
-      [`GET ${testChat}`, `GET ${testChat}/events`, `POST ${testChat}/messages`].sort(),
+      [
+        `GET ${testChat}`,
+        `GET ${testChat}/events`,
+        `POST ${testChat}/messages`,
+        `POST ${testChat}/approvals/call_refund`,
+        `POST ${testChat}/control`,
+      ].sort(),
     );
     // Nobody is a member of the test workspace: no app session route is used.
     expect(paths.some((path) => path.includes("/v1/workspaces/"))).toBe(false);
+  });
+
+  test("polls only what is new and appends it", async () => {
+    const api = orgAgentsApi(client as never, organizationId);
+    const first = await loadTestChat(api, agentId, { workspaceId, sessionId: chatId });
+    requestJson.mockClear();
+    const next = await loadTestChat(
+      api,
+      agentId,
+      { workspaceId, sessionId: chatId },
+      { after: first.nextAfter },
+    );
+    const events = requestJson.mock.calls.find(([, path]) => path.endsWith("/events"));
+    expect(events?.[3]).toEqual({ after: "1", limit: "500" });
+    expect([next.events, next.nextAfter, next.hasMore]).toEqual([[], 1, false]);
+    // Each event once, in order.
+    const [event] = first.events;
+    const more = { ...event!, id: "16161616-1616-4161-8161-161616161616", sequence: 2 };
+    expect(appendEvents(first.events, [event!, more]).map((item) => item.sequence)).toEqual([1, 2]);
+    expect(appendEvents(first.events, [])).toBe(first.events);
   });
 });
 

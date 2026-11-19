@@ -10,8 +10,11 @@ import {
   orgAgentDefinitionToFile,
   orgAgentFileToDefinition,
   type CreateOrgAgentRequest,
+  type ControlOrgAgentTestChatRequest,
+  type ControlOrgAgentTestChatResponse,
   type CreateOrgAgentTestChatRequest,
   type CreateOrgAgentTestChatResponse,
+  type DecideOrgAgentTestChatApprovalRequest,
   type CreateOrgToolServerRequest,
   type ListOrgAgentComputeResponse,
   type ListOrgAgentSessionsResponse,
@@ -192,6 +195,25 @@ export function orgAgentsApi(client: OrgAgentsTransport, organizationId: string)
       client.requestJson<unknown>(
         "POST",
         `${agent(id)}/test-chats/${encode(sessionId)}/messages`,
+        request,
+      ),
+    /** Approve or decline an "Ask first" tool call waiting in your test chat. */
+    decideTestChatApproval: (
+      id: string,
+      sessionId: string,
+      approvalId: string,
+      request: DecideOrgAgentTestChatApprovalRequest,
+    ) =>
+      client.requestJson<unknown>(
+        "POST",
+        `${agent(id)}/test-chats/${encode(sessionId)}/approvals/${encode(approvalId)}`,
+        request,
+      ),
+    /** Stop (`pause`) or resume your test chat. */
+    controlTestChat: (id: string, sessionId: string, request: ControlOrgAgentTestChatRequest) =>
+      client.requestJson<ControlOrgAgentTestChatResponse>(
+        "POST",
+        `${agent(id)}/test-chats/${encode(sessionId)}/control`,
         request,
       ),
     /** Organization machines and Sandbox Environments "Runs on" can pick. */

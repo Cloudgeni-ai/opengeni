@@ -387,22 +387,14 @@ export const ConsoleMemberRolesResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type ConsoleMemberRolesResponse = z.infer<typeof ConsoleMemberRolesResponse>;
 
-/** Sets the Console role of one member (`subjectId`) or pending invitation (`invitationId`). */
+/**
+ * Sets the Console role of one member (`subjectId`). An invitation's role is
+ * chosen when inviting (`consoleRole`) and can't change afterwards.
+ */
 export const SetConsoleMemberRoleRequest = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      subjectId: z.string().trim().min(6).max(1024).optional(),
-      invitationId: primitives.optionalUuid,
-      role: ConsoleMemberRole,
-    })
-    .superRefine((value, context) => {
-      if ((value.subjectId === undefined) === (value.invitationId === undefined)) {
-        context.addIssue({
-          code: "custom",
-          path: ["subjectId"],
-          message: "name exactly one of subjectId or invitationId",
-        });
-      }
-    }),
+  z.object({
+    subjectId: z.string().trim().min(6).max(1024),
+    role: ConsoleMemberRole,
+  }),
 );
 export type SetConsoleMemberRoleRequest = z.infer<typeof SetConsoleMemberRoleRequest>;

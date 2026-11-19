@@ -106,8 +106,8 @@ import {
 
 /* ----------------------------------------------------------------------------
    Console roles (docs/opengeni-console.md, "Roles"). In Console the list has
-   a Console column (owners and admins read Full), a member's or pending
-   invitation's page sets it, and Invite picks one. In the app a member with a
+   a Console column (owners and admins read Full), a member's page sets it,
+   and Invite picks one (an invitation's page shows it). In the app a member with a
    Console role shows a small "Console: Viewer" label next to their role.
    -------------------------------------------------------------------------- */
 
@@ -125,12 +125,7 @@ export type ConsoleRolesView = {
   /** The roles set in the organization; null while unknown. */
   roles: readonly ConsoleRoleEntry[] | null;
   /** Saves one role (Console only). */
-  setRole?:
-    | ((
-        target: { subjectId: string } | { invitationId: string },
-        role: ConsoleRoleValue,
-      ) => Promise<void>)
-    | undefined;
+  setRole?: ((target: { subjectId: string }, role: ConsoleRoleValue) => Promise<void>) | undefined;
 };
 
 const ConsoleRolesContext = createContext<ConsoleRolesView | null>(null);
@@ -179,7 +174,7 @@ function ConsoleRolePicker({
 }: {
   name: string;
   value: ConsoleRoleValue;
-  target: { subjectId: string } | { invitationId: string };
+  target: { subjectId: string };
 }) {
   const view = useContext(ConsoleRolesContext);
   const headingId = useId();
@@ -1237,22 +1232,15 @@ function ConsoleRolePickerFor({ member, name }: { member: OrganizationMember; na
   );
 }
 
-function ConsoleRolePickerForInvitation({
-  invitation,
-  name,
-}: {
-  invitation: OrganizationInvitation;
-  name: string;
-}) {
+/** An invitation's Console role, chosen when inviting. */
+function ConsoleRoleForInvitation({ invitation }: { invitation: OrganizationInvitation }) {
   const view = useContext(ConsoleRolesContext);
   if (view?.mode !== "console" || !view.roles) return null;
   const value = invitationConsoleRole(view.roles, invitation);
   return (
-    <ConsoleRolePicker
-      name={name}
-      value={value === "full" ? "none" : value}
-      target={{ invitationId: invitation.id }}
-    />
+    <DetailSection title="Console role">
+      <p className="text-sm text-fg">{CONSOLE_ROLE_LABELS[value]}</p>
+    </DetailSection>
   );
 }
 
@@ -1369,7 +1357,7 @@ function InvitationPage({
           <p className="text-sm text-fg">{ORGANIZATION_ROLE_LABELS[invitation.role]}</p>
         </DetailSection>
         {invitation.role === "member" ? (
-          <ConsoleRolePickerForInvitation invitation={invitation} name={name} />
+          <ConsoleRoleForInvitation invitation={invitation} />
         ) : null}
         <DetailSection
           title="Workspace access"

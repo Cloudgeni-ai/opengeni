@@ -2,14 +2,20 @@
 // organization's Console test workspace. Only you can see or continue it, and
 // only here (nobody is a member of that workspace). Servers that log in per
 // user take a pasted test token, kept only as that chat's own login. The
-// conversation is the app's own transcript component.
+// conversation is the app's own transcript component, with its approval
+// cards for "Ask first" tools and a Stop control.
 import type { OrgAgent, OrgToolServer } from "@opengeni/contracts";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
-import { RotateCcwIcon, SendIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { PauseIcon, PlayIcon, RotateCcwIcon, SendIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { MessageTimeline } from "@opengeni/react/session-ui";
+import { approvalsDecidable, projectPendingApprovals } from "@opengeni/react/session";
+import {
+  ApprovalSurface,
+  MessageTimeline,
+  type ApprovalSurfaceProps,
+} from "@opengeni/react/session-ui";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { Button } from "@opengeni/react/ui/button";
 import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
@@ -18,27 +24,60 @@ import { Notice } from "@opengeni/react/ui/notice";
 import type { OrgAgentsApi } from "@/lib/organization-agents";
 
 const POLL_MS = 2_000;
+const PAGE_SIZE = 500;
+/** Statuses with a turn under way, which Stop interrupts. */
+const WORKING: ReadonlySet<SessionStatus> = new Set([
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+]);
 
 type TestChat = { workspaceId: string; sessionId: string };
 
 /**
- * The test chat's status and events, through the test chat routes: test
- * chats are yours alone, and nobody is a member of the test workspace.
+ * The test chat's status and its events after `after` (oldest first),
+ * through the test chat routes: test chats are yours alone, and nobody is a
+ * member of the test workspace. Each poll reads only what is new.
  */
 export async function loadTestChat(
   api: OrgAgentsApi,
   agentId: string,
   chat: TestChat,
-  signal?: AbortSignal,
-): Promise<{ events: SessionEvent[]; status: SessionStatus | null }> {
+  options: { after?: number; signal?: AbortSignal } = {},
+): Promise<{
+  events: SessionEvent[];
+  status: SessionStatus | null;
+  paused: boolean;
+  nextAfter: number;
+  hasMore: boolean;
+}> {
+  const { signal } = options;
+  const after = options.after ?? 0;
   const [session, page] = await Promise.all([
     api.getTestChat(agentId, chat.sessionId, signal),
     api.listTestChatEvents(agentId, chat.sessionId, {
-      limit: 1_000,
+      after,
+      limit: PAGE_SIZE,
       ...(signal ? { signal } : {}),
     }),
   ]);
-  return { events: page.events, status: session.status };
+  return {
+    events: page.events,
+    status: session.status,
+    paused: session.paused === true,
+    nextAfter: page.nextAfter ?? after,
+    hasMore: page.hasMore,
+  };
+}
+
+/** `events` with `more` appended, each event once. */
+export function appendEvents(events: SessionEvent[], more: SessionEvent[]): SessionEvent[] {
+  if (more.length === 0) return events;
+  const seen = new Set(events.map((event) => event.id));
+  const fresh = more.filter((event) => !seen.has(event.id));
+  return fresh.length === 0 ? events : [...events, ...fresh];
 }
 
 /** Per-user servers the agent uses: each takes an optional pasted test token. */
@@ -71,22 +110,31 @@ export function AgentTestChat({
   const [starting, setStarting] = useState(false);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [status, setStatus] = useState<SessionStatus | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [controlling, setControlling] = useState(false);
   const [loadError, setLoadError] = useState<unknown>(null);
+  // One key per start, so a double click or retry starts one chat.
+  const startKey = useRef<string | null>(null);
   const servers = perUserServers(agent, toolServers);
   const version = agent.latestVersion;
+  const approvals = useMemo(() => projectPendingApprovals(events), [events]);
 
   useEffect(() => {
     if (!chat) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let after = 0;
     const tick = () => {
-      loadTestChat(api, agent.id, chat, controller.signal).then(
+      loadTestChat(api, agent.id, chat, { after, signal: controller.signal }).then(
         (result) => {
           if (controller.signal.aborted) return;
-          setEvents(result.events);
+          after = result.nextAfter;
+          setEvents((current) => appendEvents(current, result.events));
           setStatus(result.status);
+          setPaused(result.paused);
           setLoadError(null);
-          timer = setTimeout(tick, POLL_MS);
+          // A long chat catches up page by page, then polls.
+          timer = setTimeout(tick, result.hasMore ? 0 : POLL_MS);
         },
         (error: unknown) => {
           if (controller.signal.aborted) return;
@@ -111,16 +159,21 @@ export function AgentTestChat({
   const start = async () => {
     const text = message.trim();
     if (!text) return;
+    if (starting) return;
     setStarting(true);
+    startKey.current ??= crypto.randomUUID();
     try {
       await api.ensureTestWorkspace();
       const started = await api.startTestChat(agent.id, {
         version,
         message: text,
+        idempotencyKey: startKey.current,
         ...(Object.keys(toolLogins).length > 0 ? { toolLogins } : {}),
       });
+      startKey.current = null;
       setEvents([]);
       setStatus(null);
+      setPaused(false);
       setChat(started);
       setMessage("");
     } catch (error) {
@@ -144,6 +197,41 @@ export function AgentTestChat({
     }
   };
 
+  const decide = async (
+    approvalId: string,
+    decision: "approve" | "reject",
+    answer?: Parameters<ApprovalSurfaceProps["onApprove"]>[1],
+  ) => {
+    if (!chat) return;
+    try {
+      await api.decideTestChatApproval(agent.id, chat.sessionId, approvalId, {
+        decision,
+        ...answer,
+      });
+    } catch (error) {
+      toast.error("Couldn't submit the decision", { description: userErrorText(error) });
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  };
+
+  const control = async (action: "pause" | "resume") => {
+    if (!chat) return;
+    setControlling(true);
+    try {
+      const result = await api.controlTestChat(agent.id, chat.sessionId, {
+        action,
+        clientEventId: crypto.randomUUID(),
+      });
+      setPaused(result.paused);
+    } catch (error) {
+      toast.error(action === "pause" ? "Couldn't stop the chat" : "Couldn't resume the chat", {
+        description: userErrorText(error),
+      });
+    } finally {
+      setControlling(false);
+    }
+  };
+
   return (
     <div className="flex min-w-0 flex-col gap-4 py-8">
       {unsaved ? <Notice tone="waiting">Save draft to test your latest changes.</Notice> : null}
@@ -159,6 +247,7 @@ export function AgentTestChat({
               onClick={() => {
                 setChat(null);
                 setEvents([]);
+                setPaused(false);
               }}
             >
               <RotateCcwIcon aria-hidden="true" />
@@ -171,6 +260,13 @@ export function AgentTestChat({
           <div className="h-[480px] overflow-hidden rounded-[12px] border border-border">
             <MessageTimeline events={events} status={status} className="h-full" />
           </div>
+          {approvals.length > 0 && approvalsDecidable(status) ? (
+            <ApprovalSurface
+              approvals={approvals}
+              onApprove={(approval, answer) => decide(approval.id, "approve", answer)}
+              onReject={(approval) => decide(approval.id, "reject")}
+            />
+          ) : null}
           <form
             className="flex items-end gap-2"
             onSubmit={(event) => {
@@ -185,6 +281,27 @@ export function AgentTestChat({
               value={message}
               onChange={(event) => setMessage(event.target.value)}
             />
+            {paused ? (
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={controlling}
+                onClick={() => void control("resume")}
+              >
+                <PlayIcon aria-hidden="true" />
+                Resume
+              </Button>
+            ) : status && WORKING.has(status) ? (
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={controlling}
+                onClick={() => void control("pause")}
+              >
+                <PauseIcon aria-hidden="true" />
+                Stop
+              </Button>
+            ) : null}
             <Button type="submit" disabled={starting || !message.trim()}>
               <SendIcon aria-hidden="true" />
               Send
@@ -207,7 +324,11 @@ export function AgentTestChat({
               <TextArea
                 rows={3}
                 value={message}
-                onChange={(event) => setMessage(event.target.value)}
+                onChange={(event) => {
+                  // A different start is a new chat.
+                  startKey.current = null;
+                  setMessage(event.target.value);
+                }}
               />
             </Field>
             {servers.map((server) => (

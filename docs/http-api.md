@@ -59,9 +59,10 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   `PUT /by-key/:key/apply`), tool servers (`/tool-servers[/:key[/tools]]`),
   chats and usage per agent (`GET /:agentId/sessions|usage`, also
   `sessions:read`), the Console test workspace (`POST /test-workspace`) and
-  test chats (`POST /:agentId/test-chats`; the tester's own chat through
-  `GET /:agentId/test-chats/:sessionId[/events]` and
-  `POST /:agentId/test-chats/:sessionId/messages`). Tool server writes and
+  test chats (`POST /:agentId/test-chats`, `idempotencyKey` to start once;
+  the tester's own chat through `GET /:agentId/test-chats/:sessionId[/events]`
+  and `POST /:agentId/test-chats/:sessionId/messages|approvals/:approvalId|control`).
+  Tool server writes and
   publishing with `moveRunningChats` need a key for all workspaces. See
   [`agents.md` § Console agents](agents.md#console-agents)
 - `PUT|GET|DELETE /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`

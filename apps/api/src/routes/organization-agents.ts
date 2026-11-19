@@ -45,11 +45,14 @@ import {
   ApplyOrgAgentRequest,
   ApplyOrgAgentResponse,
   ArchiveOrgAgentRequest,
+  ControlOrgAgentTestChatRequest,
+  ControlOrgAgentTestChatResponse,
   CreateOrgAgentRequest,
   CONSOLE_TEST_CHAT_SUBJECT_PREFIX,
   CreateOrgAgentTestChatRequest,
   CreateOrgAgentTestChatResponse,
   CreateOrgToolServerRequest,
+  DecideOrgAgentTestChatApprovalRequest,
   EndUserToolCredentialResponse,
   ListOrgAgentComputeResponse,
   ListOrgAgentPublishOperationsResponse,
@@ -94,7 +97,8 @@ import {
   acceptSessionUserMessage,
   accountScopedApiKeyWorkspaceAuthority,
   captureOrgAgentToolCatalog,
-  createSessionForRequest,
+  controlHumanSessionWorkstream,
+  createSessionForRequestWithOutcome,
   hasPermission,
   listOrgToolServerToolsByKey,
   MissingPermissionRefusal,
@@ -102,10 +106,12 @@ import {
   requireAccessContext,
   requireAccessGrant,
   resolveWorkspaceCatalogSettings,
+  workflowIdForSession,
   type AccountScopedApiKeyWorkspaceAuthority,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  acceptSessionApprovalDecision,
   applyOrgAgent,
   archiveOrgAgent,
   computeReachIncludesManagedWorkspaces,
@@ -148,6 +154,7 @@ import {
   readExternalIdentity,
   rlsContextForWorkspace,
   saveOrgAgentDraft,
+  SessionApprovalAnswerError,
   setOrgAgentManagement,
   updateOrgAgent,
   updateOrgToolServer,
@@ -160,12 +167,15 @@ import {
   type OrgAgentPublishMoveFailure,
 } from "@opengeni/db";
 import { configuredStaticUsageLimits } from "@opengeni/config";
+import { sha256Hex } from "@opengeni/contracts/values";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { recordAcceptedApiAdmission } from "../admission-trace";
-import { ApiHttpError } from "../http/api-error";
+import { ApiHttpError, approvalForbiddenHttpError } from "../http/api-error";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { measureSessionCreatePhase } from "../session-create-observability";
 import {
   CONSOLE_ROLE_REQUIRED,
   consoleAccessCovers,
@@ -1041,10 +1051,14 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(`${base}/:agentId/test-chats`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"], "editor");
+    const caller = await measureSessionCreatePhase(deps.observability, "authorization", () =>
+      orgCaller(c, deps, ["agents:manage"], "editor"),
+    );
     const agentId = uuidParam(c, "agentId");
     const request = CreateOrgAgentTestChatRequest.parse(
-      await parseRequestJson(c, CreateOrgAgentTestChatRequest),
+      await measureSessionCreatePhase(deps.observability, "body_read", () =>
+        parseRequestJson(c, CreateOrgAgentTestChatRequest),
+      ),
     );
     const version = await getOrgAgentVersion(
       deps.db,
@@ -1066,13 +1080,19 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     // resolution) applies. Logins pasted here are this chat's own.
     const logins = Object.entries(request.toolLogins ?? {});
     const grant = consoleTestChatGrant(caller, workspaceId);
+    // Create keys are per workspace and every tester shares this one: the
+    // stored key is derived from the tester's principal and the agent, so a
+    // replay only ever returns this tester's own chat of this agent.
+    const idempotencyKey = request.idempotencyKey
+      ? `console-test:${await sha256Hex(`${grant.subjectId}\u0000${agentId}\u0000${request.idempotencyKey}`)}`
+      : undefined;
     let created: { id: string };
+    let replayed = false;
     try {
-      created = await createSessionForRequest(
-        await withWorkspaceCatalogSettings(deps, grant),
-        grant,
-        workspaceId,
-        {
+      const catalogDeps = await withWorkspaceCatalogSettings(deps, grant);
+      const result = await measureSessionCreatePhase(deps.observability, "core_create", () =>
+        createSessionForRequestWithOutcome(catalogDeps, grant, workspaceId, {
+          ...(idempotencyKey ? { idempotencyKey } : {}),
           initialMessage: request.message,
           // Every tester's chats share the test workspace: the agent reaches
           // only its own chat tree and keeps no Memory another tester's chat
@@ -1091,14 +1111,16 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
                 }
               : {}),
           },
-        },
+        }),
       );
+      created = result.session;
+      replayed = result.replay;
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
     return c.json(
       CreateOrgAgentTestChatResponse.parse({ workspaceId, sessionId: created.id }),
-      201,
+      replayed ? 200 : 201,
     );
   });
 
@@ -1134,6 +1156,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         agentId: session.orgAgent!.id,
         version: session.orgAgent?.version ?? null,
         status: session.status,
+        paused: session.effectiveControl.state === "paused",
       }),
     );
   });
@@ -1174,6 +1197,84 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     }
     recordAcceptedApiAdmission(deps.observability, result);
     return c.json(result.accepted, 202);
+  });
+
+  // Approve or decline an "Ask first" tool call waiting in the caller's own
+  // test chat: the app's approval decision, recorded as the tester's.
+  app.post(`${base}/:agentId/test-chats/:sessionId/approvals/:approvalId`, async (c) => {
+    const { grant, workspaceId, session } = await ownTestChat(c);
+    const approvalId = c.req.param("approvalId") ?? "";
+    if (approvalId.length === 0 || approvalId.length > 256) {
+      throw httpError(404, "approval_not_found", "Approval not found.");
+    }
+    const request = await parseRequestJson(c, DecideOrgAgentTestChatApprovalRequest);
+    let accepted: Awaited<ReturnType<typeof acceptSessionApprovalDecision>>;
+    try {
+      accepted = await acceptSessionApprovalDecision(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        respondedByKind: "human",
+        // Never confirms an app-action change: that needs the app's own sign-in.
+        decidedBySignedInPerson: false,
+        payload: {
+          approvalId,
+          decision: request.decision,
+          ...(request.message !== undefined ? { message: request.message } : {}),
+          ...(request.content !== undefined ? { content: request.content } : {}),
+          ...(request.elicitationRound !== undefined
+            ? { elicitationRound: request.elicitationRound }
+            : {}),
+        },
+        clientEventId: request.clientEventId ?? null,
+      });
+    } catch (error) {
+      if (error instanceof SessionApprovalAnswerError) {
+        throw httpError(422, "validation_failed", error.message);
+      }
+      const forbidden = approvalForbiddenHttpError(error);
+      if (forbidden) throw forbidden;
+      throw error;
+    }
+    if (accepted.action === "conflict") {
+      throw httpError(409, "conflict", accepted.message);
+    }
+    await publishDurableSessionEvents(deps.bus, workspaceId, session.id, accepted.events);
+    await deps.workflowClient.signalApprovalDecision({
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      eventId: accepted.event.id,
+      workflowId: workflowIdForSession(session.id),
+      workflowWakeRevision: accepted.workflowWakeRevision,
+    });
+    return c.json(accepted.event, 202);
+  });
+
+  // Stop the caller's own test chat (pause interrupts what runs) or resume it.
+  app.post(`${base}/:agentId/test-chats/:sessionId/control`, async (c) => {
+    const { grant, workspaceId, session } = await ownTestChat(c);
+    const request = await parseRequestJson(c, ControlOrgAgentTestChatRequest);
+    try {
+      const response = await controlHumanSessionWorkstream(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+        },
+        { action: request.action, clientEventId: request.clientEventId ?? crypto.randomUUID() },
+      );
+      return c.json(
+        ControlOrgAgentTestChatResponse.parse({
+          paused: response.effectiveControl.state === "paused",
+        }),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
   });
 
   // ---------------------------------------------------------------- workspaces

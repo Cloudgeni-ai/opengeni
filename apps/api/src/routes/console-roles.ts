@@ -41,12 +41,9 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  ConsoleRoleTargetNotFoundError,
   getConsoleMemberRole,
-  getOrganizationInvitationForAdministration,
   listConsoleMemberRoles,
   listOrganizationAdministrationMembers,
-  nestedPostgresSqlState,
   setConsoleMemberRole,
   type Database,
 } from "@opengeni/db";
@@ -175,7 +172,8 @@ function organizationIdOf(c: Context): string {
  * `GET  /v1/organizations/:organizationId/console/member-roles`: every
  *   Console role set (owners and admins).
  * `PUT  /v1/organizations/:organizationId/console/member-roles`: set one
- *   member's or pending invitation's Console role (owners and admins).
+ *   member's Console role (owners and admins). An invitation's role is
+ *   chosen when inviting (`consoleRole` on the invitation) and can't change.
  */
 export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/organizations/:organizationId/console";
@@ -211,62 +209,29 @@ export function registerConsoleRoleRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "Owners and admins always have full Console access",
         details: { code: "console_role_not_applicable" },
       });
-    const invitationNotFound = () =>
-      new ApiHttpError(404, {
-        code: "not_found",
-        message: "Invitation not found",
-        details: { code: "invitation_not_found" },
-      });
     // Checked in the role write's transaction, after its lock, so a
-    // concurrent offboarding or acceptance can't be overtaken.
+    // concurrent offboarding can't be overtaken: a current member of this
+    // organization whose organization role is member (owners and admins are
+    // always full, and nobody else has one).
     const verifyTarget = async (tx: Database) => {
-      if (request.subjectId !== undefined) {
-        // A current member of this organization whose organization role is
-        // member: owners and admins are always full, and nobody else has one.
-        const members = await listOrganizationAdministrationMembers(tx, {
-          organizationId,
-          actorSubjectId: admin.subjectId,
-        });
-        const member = members.find(
-          (candidate) =>
-            candidate.subjectId === request.subjectId && candidate.status !== "revoked",
-        );
-        if (!member || !member.subjectId.startsWith("user:")) throw memberNotFound();
-        if (member.role !== "member") throw notApplicable();
-        return;
-      }
-      // A pending invitation to join as a member.
-      let invitation: Awaited<ReturnType<typeof getOrganizationInvitationForAdministration>>;
-      try {
-        invitation = await getOrganizationInvitationForAdministration(tx, {
-          organizationId,
-          actorSubjectId: admin.subjectId,
-          invitationId: request.invitationId!,
-        });
-      } catch (error) {
-        // P0002: no such invitation in this organization.
-        if (nestedPostgresSqlState(error) === "P0002") throw invitationNotFound();
-        throw error;
-      }
-      if (invitation.status !== "pending") throw invitationNotFound();
-      if (invitation.role !== "member") throw notApplicable();
-    };
-    try {
-      const result = await setConsoleMemberRole(deps.db, {
-        accountId: organizationId,
-        target:
-          request.subjectId !== undefined
-            ? { subjectId: request.subjectId }
-            : { invitationId: request.invitationId! },
-        role: request.role,
+      const members = await listOrganizationAdministrationMembers(tx, {
+        organizationId,
         actorSubjectId: admin.subjectId,
-        actorLabel: admin.label,
-        verifyTarget,
       });
-      return c.json(result.entry);
-    } catch (error) {
-      if (error instanceof ConsoleRoleTargetNotFoundError) throw invitationNotFound();
-      throw error;
-    }
+      const member = members.find(
+        (candidate) => candidate.subjectId === request.subjectId && candidate.status !== "revoked",
+      );
+      if (!member || !member.subjectId.startsWith("user:")) throw memberNotFound();
+      if (member.role !== "member") throw notApplicable();
+    };
+    const result = await setConsoleMemberRole(deps.db, {
+      accountId: organizationId,
+      target: { subjectId: request.subjectId },
+      role: request.role,
+      actorSubjectId: admin.subjectId,
+      actorLabel: admin.label,
+      verifyTarget,
+    });
+    return c.json(result.entry);
   });
 }

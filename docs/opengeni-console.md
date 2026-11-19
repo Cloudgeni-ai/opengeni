@@ -184,8 +184,9 @@ for specific workspaces or edit a code-managed one. Refusals are `403` with
 An owner or admin sets a member's role on Console's Members page, or chooses
 one when inviting (`consoleRole` on `POST /v1/organizations/:id/invitations`,
 `none`, `viewer` or `editor`; refused for owner and admin invitations); a
-Console-only invitee gets no workspace access. Only a pending invitation to
-join as a member takes a role. Accepting an invitation sets the member's
+Console-only invitee gets no workspace access. Only an invitation to join as
+a member takes a role, chosen when inviting: to change it, revoke the
+invitation and invite again (`PUT member-roles` names members only). Accepting an invitation sets the member's
 Console role to the invitation's, or to none when it carried none, in the
 acceptance's transaction (once: a replayed acceptance never overwrites a
 later change). Changing a member's organization role or offboarding them
@@ -200,8 +201,11 @@ and `sessions:create`, `sessions:read` and `sessions:control` there, never
 `workspace:admin`, so never `agents:manage`), and nobody is a member of that
 workspace, owners and admins included. A tester reads and continues only their
 own test chats (the ones their principal started), through `GET`
-`/v1/organizations/:id/agents/:agentId/test-chats/:sessionId` (and `/events`)
-and `POST .../messages`, while their Console access is Editor or more; anyone
+`/v1/organizations/:id/agents/:agentId/test-chats/:sessionId` (with `paused`)
+and `/events?after&limit`, and `POST .../messages`,
+`POST .../approvals/:approvalId` (`{ decision: approve | reject }`, answering
+an "Ask first" tool call) and `POST .../control` (`{ action: pause | resume }`,
+Stop and Resume), while their Console access is Editor or more; anyone
 else (another Editor, an owner) gets `404`, and the app's session routes refuse
 everyone without workspace access. A test chat's agent holds no more than
 that principal and is created with `agentAccess: "session"` and Memory off, so
@@ -342,7 +346,7 @@ mirrored by `@opengeni/sdk` methods. Contracts: `packages/contracts/src/console.
 | `GET audit-log?limit&cursor&sessionId` | `listConsoleAuditLog` |
 | `GET api-keys?range` | `getConsoleApiKeyUsage` |
 | `GET access` (the caller's Console role: `full`, `editor`, `viewer` or `none`) | none yet (`requestJson`) |
-| `GET member-roles`, `PUT member-roles` `{ subjectId \| invitationId, role }` (owners and admins) | none yet (`requestJson`) |
+| `GET member-roles`, `PUT member-roles` `{ subjectId, role }` (owners and admins) | none yet (`requestJson`) |
 
 Keys are created and revoked with the ordinary organization API-key routes
 (`createOrganizationApiKey`, `deleteOrganizationApiKey`).
