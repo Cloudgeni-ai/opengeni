@@ -1283,7 +1283,8 @@ describe("Console roles: Console test chats", () => {
     return {
       consoleRead: (await call("GET", consolePath, who)).status,
       consoleEvents: (await call("GET", `${consolePath}/events`, who)).status,
-      consoleSend: (await call("POST", `${consolePath}/messages`, who, { message: "mine now" })).status,
+      consoleSend: (await call("POST", `${consolePath}/messages`, who, { message: "mine now" }))
+        .status,
       appRead: (await call("GET", appPath, who)).status,
       appEvents: (await call("GET", `${appPath}/events`, who)).status,
       appSend: (
@@ -1304,13 +1305,20 @@ describe("Console roles: Console test chats", () => {
     for (const name of ["owner", "admin", "editor"] as const) {
       const sessionId = fixture.testChats[name]!;
       const [row] = await shared.admin<
-        { created_by_kind: string; created_by_subject_id: string; owner_subject_id: string | null }[]
+        {
+          created_by_kind: string;
+          created_by_subject_id: string;
+          owner_subject_id: string | null;
+        }[]
       >`
         select created_by_kind, created_by_subject_id, owner_subject_id
         from sessions where id = ${sessionId}`;
-      expect([name, row?.created_by_kind, row?.created_by_subject_id, row?.owner_subject_id]).toEqual(
-        [name, "service", consoleTestChatSubjectId(fixture.people[name].subjectId), null],
-      );
+      expect([
+        name,
+        row?.created_by_kind,
+        row?.created_by_subject_id,
+        row?.owner_subject_id,
+      ]).toEqual([name, "service", consoleTestChatSubjectId(fixture.people[name].subjectId), null]);
     }
     // The principal holds its own chats and nothing that administers anything.
     for (const mode of ["legacy", "explicit", undefined] as const) {
