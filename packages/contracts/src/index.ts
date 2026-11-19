@@ -221,6 +221,7 @@ export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
 export * from "./agents";
+export * from "./organization-agents";
 export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
