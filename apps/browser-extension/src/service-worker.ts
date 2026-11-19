@@ -96,8 +96,6 @@ type LiveState = {
   // Tabs an agent opened (with tabs.create) that are still open: only in
   // those can an agent set a site permission.
   createdTabs?: number[];
-  // The tab groups that show which tabs an agent controls.
-  tabIndicator?: TabIndicatorState;
 };
 const LIVE_STATE_KEY = "liveState";
 // How a new worker found the live state of the workers before it, newest
@@ -110,6 +108,10 @@ const ATTACHMENT_PROBE_METHOD = "Target.getTargetInfo";
 // How long a tab stays in the controlled tabs' group after control ends, in
 // case it starts again (see TabIndicator).
 const TAB_INDICATOR_RELEASE_MS = 2_000;
+// The controlled tabs' groups, in chrome.storage.local: unlike session
+// storage it outlives an update or reload of the extension, which ends every
+// control, so the next run can put those tabs back where they were.
+const TAB_INDICATOR_KEY = "tabIndicator";
 
 let nativePort: chrome.runtime.Port | null = null;
 let connectionGeneration: string | null = null;
@@ -143,9 +145,10 @@ const tabIndicator =
         title: BRAND.product,
         color: "grey",
         releaseDelayMs: TAB_INDICATOR_RELEASE_MS,
-        onChange: () => void recordLiveState(),
+        onChange: (state) => void recordTabIndicator(state),
       })
     : null;
+let tabIndicatorWrite: Promise<void> = Promise.resolve();
 // Starts at a random number, so a number from before this worker restarted
 // does not name one of its attachments.
 let lastAttachment = Math.floor(Math.random() * 2 ** 40);
@@ -192,14 +195,14 @@ async function resumeLiveState(): Promise<string> {
   } catch {
     // Without session storage this worker's state is all there is.
     currentStateGeneration = crypto.randomUUID();
-    void tabIndicator?.resume(null, []);
+    void tabIndicator?.resume(recordedTabIndicator(), []);
     return currentStateGeneration;
   }
   if (!stored) {
     currentStateGeneration = crypto.randomUUID();
-    // Groups an earlier run of the extension left (it reloaded, updated or
-    // Chrome restarted) control nothing now.
-    void tabIndicator?.resume(null, []);
+    // The extension reloaded or updated, or Chrome restarted: tabs an earlier
+    // run grouped are no longer controlled.
+    void tabIndicator?.resume(recordedTabIndicator(), []);
     await recordLiveState();
     return currentStateGeneration;
   }
@@ -223,7 +226,7 @@ async function resumeLiveState(): Promise<string> {
   }
   // Only now: until then nothing records the attachments or applies an update.
   currentStateGeneration = stored.stateGeneration;
-  void tabIndicator?.resume(stored.tabIndicator ?? null, attachedDebuggerTabs.keys());
+  void tabIndicator?.resume(recordedTabIndicator(), attachedDebuggerTabs.keys());
   await recordLiveState();
   await recordResumption({ attachmentsKept: kept, attachmentsEnded: detached, tabsClosed: closed });
   maybeApplyUpdate();
@@ -248,7 +251,6 @@ function parseLiveState(value: unknown): LiveState | null {
     createdTabs: Array.isArray(state.createdTabs)
       ? state.createdTabs.filter((tabId) => Number.isSafeInteger(tabId))
       : [],
-    tabIndicator: parseTabIndicatorState(state.tabIndicator) ?? undefined,
   };
 }
 
@@ -264,12 +266,24 @@ function recordLiveState(): Promise<void> {
       [...attachedDebuggerTabs].map(([tabId, attachment]) => [String(tabId), attachment]),
     ),
     createdTabs: [...agentCreatedTabs],
-    ...(tabIndicator ? { tabIndicator: tabIndicator.state() } : {}),
   };
   liveStateWrite = liveStateWrite
     .then(async () => await chrome.storage.session.set({ [LIVE_STATE_KEY]: state }))
     .catch(() => undefined);
   return liveStateWrite;
+}
+
+async function recordedTabIndicator(): Promise<TabIndicatorState | null> {
+  return parseTabIndicatorState(
+    (await chrome.storage.local.get(TAB_INDICATOR_KEY))[TAB_INDICATOR_KEY],
+  );
+}
+
+/** Record the controlled tabs' groups for the next run, in order. */
+function recordTabIndicator(state: TabIndicatorState): void {
+  tabIndicatorWrite = tabIndicatorWrite
+    .then(async () => await chrome.storage.local.set({ [TAB_INDICATOR_KEY]: state }))
+    .catch(() => undefined);
 }
 
 async function recordResumption(result: {

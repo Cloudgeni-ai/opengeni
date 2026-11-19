@@ -21,6 +21,7 @@ class TabStrip {
   readonly popupWindows = new Set<number>();
   private nextGroup = 100;
   dragging = 0;
+  failTitles = false;
 
   constructor(tabs: { id: number; windowId?: number; groupId?: number; pinned?: boolean }[]) {
     for (const tab of tabs)
@@ -70,6 +71,18 @@ class TabStrip {
     this.prune();
   }
 
+  /** What a person does: drag a whole group to another window, where Chrome
+   * gives it a new id. */
+  moveGroup(groupId: number, windowId: number): number {
+    const old = this.groups.get(groupId)!;
+    const id = this.nextGroup++;
+    this.groups.set(id, { ...old, id, windowId });
+    for (const tab of this.tabs.values())
+      if (tab.groupId === groupId) Object.assign(tab, { groupId: id, windowId });
+    this.prune();
+    return id;
+  }
+
   close(tabId: number) {
     this.tabs.delete(tabId);
     this.order.splice(this.order.indexOf(tabId), 1);
@@ -113,6 +126,13 @@ class TabStrip {
         const count = this.strip(this.tab(tabId).windowId).length;
         if (index < 0 || index >= count) throw new Error("Invalid index.");
         this.place(tabId, index);
+        // A tab moved between two tabs of a group joins it.
+        const strip = this.strip(this.tab(tabId).windowId);
+        const at = strip.indexOf(tabId);
+        const before = this.tabs.get(strip[at - 1] ?? -1)?.groupId ?? -1;
+        const after = this.tabs.get(strip[at + 1] ?? -1)?.groupId ?? -1;
+        this.tab(tabId).groupId = before !== -1 && before === after ? before : -1;
+        this.prune();
         return this.view(tabId);
       },
       group: async ({ tabIds, groupId, createProperties }) => {
@@ -160,6 +180,7 @@ class TabStrip {
       query: async ({ title, color }) =>
         [...this.groups.values()].filter((group) => group.title === title && group.color === color),
       update: async (groupId, properties) => {
+        if (this.failTitles) throw new Error("Could not update the group.");
         Object.assign(this.groups.get(groupId)!, properties);
         return this.groups.get(groupId);
       },
@@ -361,37 +382,119 @@ describe("the controlled tabs' group", () => {
     expect(strip.groupOf(1)?.title).toBe("Opengeni");
   });
 
-  test("a new worker carries on: ended control leaves, left-behind groups dissolve", async () => {
+  test("a released tab put back by its old index never lands inside a group", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]);
+    const { indicator: tabs } = indicator(strip);
+    await tabs.show(5);
+    await tabs.show(2);
+    expect(strip.strip()).toEqual([1, 3, 4, 5, 2]);
+    // Meanwhile the person groups the tabs around its old place.
+    const work = strip.userGroup(1, "Work");
+    strip.move(1, work);
+    strip.move(3, work);
+    await tabs.releaseNow(2);
+    expect(strip.groupOf(2)).toBeNull();
+    expect(strip.groupOf(1)?.id).toBe(work);
+    expect(strip.groupOf(3)?.id).toBe(work);
+  });
+
+  test("a group the person drags to another window stays the group", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3, windowId: 2 }]);
+    const { indicator: tabs } = indicator(strip);
+    await tabs.show(1);
+    await tabs.show(2);
+    const moved = strip.moveGroup(strip.groupOf(1)!.id, 2);
+    await tabs.groupChanged(1);
+    await tabs.groupChanged(2);
+    expect(tabs.state().declined).toEqual([]);
+    await tabs.releaseNow(1);
+    await tabs.releaseNow(2);
+    expect(strip.groups.has(moved)).toBe(false);
+    expect(strip.groups.size).toBe(0);
+  });
+
+  test("a release refused while the person drags a tab is tried again", async () => {
+    const strip = new TabStrip([{ id: 1 }]);
+    const { indicator: tabs, elapse } = indicator(strip);
+    await tabs.show(1);
+    strip.dragging = 20;
+    await tabs.releaseNow(1);
+    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(Object.keys(tabs.state().tabs)).toEqual(["1"]);
+    strip.dragging = 0;
+    await elapse();
+    expect(strip.groupOf(1)).toBeNull();
+    expect(tabs.state().tabs).toEqual({});
+  });
+
+  test("a group it cannot title is not left behind", async () => {
+    const strip = new TabStrip([{ id: 1 }]);
+    strip.failTitles = true;
+    const { indicator: tabs } = indicator(strip);
+    await tabs.show(1);
+    expect(strip.groups.size).toBe(0);
+    expect(tabs.state().tabs).toEqual({});
+  });
+
+  test("a new worker carries on without touching the person's groups", async () => {
     const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]);
     const saved: TabIndicatorState[] = [];
     const first = indicator(strip, saved).indicator;
-    await first.show(1);
+    await first.show(5);
     await first.show(2);
-    // A group the extension left with no record (it reloaded meanwhile).
-    const orphan = strip.userGroup(1, "Opengeni");
-    strip.groups.get(orphan)!.color = "grey";
-    strip.move(5, orphan);
-    // A person's group that happens to share the title in another colour.
+    // The person's own group with the same title and colour.
     const theirs = strip.userGroup(1, "Opengeni");
-    strip.move(4, theirs);
+    strip.groups.get(theirs)!.color = "grey";
+    strip.move(1, theirs);
 
     const state = parseTabIndicatorState(JSON.parse(JSON.stringify(saved.at(-1))))!;
-    // Tab 1 is still controlled; tab 2 no longer; tab 3 became controlled.
+    // Tab 5 is still controlled; tab 2 no longer; tab 3 became controlled.
     const second = indicator(strip).indicator;
-    await second.resume(state, [1, 3]);
-    expect(strip.groupOf(1)?.title).toBe("Opengeni");
-    expect(strip.groupOf(3)?.id).toBe(strip.groupOf(1)!.id);
+    await second.resume(state, [5, 3]);
+    expect(strip.groupOf(5)?.title).toBe("Opengeni");
+    expect(strip.groupOf(3)?.id).toBe(strip.groupOf(5)!.id);
     expect(strip.groupOf(2)).toBeNull();
-    expect(strip.groupOf(5)).toBeNull();
-    expect(strip.groupOf(4)?.id).toBe(theirs);
-    expect(Object.keys(second.state().tabs).sort()).toEqual(["1", "3"]);
+    expect(strip.strip().indexOf(2)).toBe(1);
+    expect(strip.groupOf(1)?.id).toBe(theirs);
+    expect(Object.keys(second.state().tabs).sort()).toEqual(["3", "5"]);
   });
 
-  test("a fresh start dissolves every group a former run left", async () => {
+  test("after an update or reload, tabs go back to the person's groups", async () => {
     const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
-    await indicator(strip).indicator.show(1);
+    const work = strip.userGroup(1, "Work");
+    strip.move(1, work);
+    strip.move(2, work);
+    const saved: TabIndicatorState[] = [];
+    await indicator(strip, saved).indicator.show(2);
+    expect(strip.groupOf(2)?.title).toBe("Opengeni");
+    // Reloading ended every control.
+    await indicator(strip).indicator.resume(saved.at(-1)!, []);
+    expect(strip.groupOf(2)?.id).toBe(work);
+  });
+
+  test("after Chrome restarts, groups left behind are found by title and colour", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    const saved: TabIndicatorState[] = [];
+    await indicator(strip, saved).indicator.show(1);
+    const recorded = saved.at(-1)!;
+    // Chrome restored the group under a new id, and the person has a group
+    // with the same title in another colour.
+    const restored = strip.moveGroup(strip.groupOf(1)!.id, 1);
+    const theirs = strip.userGroup(1, "Opengeni");
+    strip.move(3, theirs);
+    await indicator(strip).indicator.resume(recorded, []);
+    expect(strip.groups.has(restored)).toBe(false);
+    expect(strip.groupOf(1)).toBeNull();
+    expect(strip.groupOf(3)?.id).toBe(theirs);
+  });
+
+  test("with nothing recorded, no group is touched", async () => {
+    const strip = new TabStrip([{ id: 1 }]);
+    const theirs = strip.userGroup(1, "Opengeni");
+    strip.groups.get(theirs)!.color = "grey";
+    strip.move(1, theirs);
     await indicator(strip).indicator.resume(null, []);
-    expect(strip.groups.size).toBe(0);
+    expect(strip.groupOf(1)?.id).toBe(theirs);
   });
 
   test("parses only well-formed recorded state", () => {

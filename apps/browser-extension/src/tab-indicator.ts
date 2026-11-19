@@ -6,20 +6,26 @@
  * only that something is being debugged, not which tabs.
  *
  * - A tab the person had in a group of their own goes back to that group when
- *   control ends, if it still exists; any other tab is ungrouped, and one
- *   the group moved goes back to where it was in the window. A group
- *   left with no controlled tab is dissolved, along with any tab the person
- *   dragged into it.
+ *   control ends, if it still exists; any other tab is ungrouped, and one the
+ *   group moved goes back to where it was in the window. A group left with
+ *   no controlled tab is dissolved, along with any tab the person dragged
+ *   into it.
  * - Control often ends for a moment and starts again (a dialog the agent lets
  *   Chrome close, a navigation Chrome detaches on), so a tab leaves the group
  *   only once control has stayed ended for `releaseDelayMs`.
  * - A tab the person drags out of the group (or a group they ungroup) stays
  *   out until control ends; the next time an agent takes the tab it is
- *   grouped again.
+ *   grouped again. A group the person drags to another window stays the
+ *   group.
  * - Every session shares the window's one group: the extension cannot tell
  *   which session holds which tab.
  * - Pinned tabs and tabs outside normal windows cannot be grouped; they are
  *   left as they are.
+ * - The state is recorded in storage that outlives the worker and an
+ *   extension update or reload (which end every control), so the next run
+ *   puts tabs back where they were. Only when the recorded groups are gone
+ *   (Chrome restarted, and restored them with new ids) are groups found by
+ *   their title and colour.
  */
 
 /** The part of Chrome's tabs and tabGroups APIs this uses. */
@@ -36,7 +42,7 @@ export type TabIndicatorChrome = {
     ungroup(tabIds: number[]): Promise<void>;
   };
   tabGroups: {
-    get(groupId: number): Promise<unknown>;
+    get(groupId: number): Promise<{ title?: string; color: TabGroupColor }>;
     query(query: { title: string; color: TabGroupColor }): Promise<{ id: number }[]>;
     update(groupId: number, properties: { title: string; color: TabGroupColor }): Promise<unknown>;
   };
@@ -72,7 +78,7 @@ export type IndicatedTabEntry = {
   restoreIndex: number | null;
 };
 
-/** What outlives the extension's worker (see LiveState in the worker). */
+/** What the next run carries on with. */
 export type TabIndicatorState = {
   /** Tabs in the group, by tab id. */
   tabs: Record<string, IndicatedTabEntry>;
@@ -84,7 +90,7 @@ export type TabIndicatorOptions = {
   title: string;
   color: TabGroupColor;
   releaseDelayMs: number;
-  /** Called after every change, to record the state for the next worker. */
+  /** Called after every change, to record the state for the next run. */
   onChange?: (state: TabIndicatorState) => void;
   setTimeout?: (callback: () => void, ms: number) => unknown;
   clearTimeout?: (timer: unknown) => void;
@@ -94,6 +100,8 @@ export type TabIndicatorOptions = {
 const DRAGGING = /cannot be edited right now/iu;
 const DRAG_RETRIES = 5;
 const DRAG_RETRY_MS = 300;
+
+const dragging = (error: unknown) => error instanceof Error && DRAGGING.test(error.message);
 
 export class TabIndicator {
   private readonly indicated = new Map<number, IndicatedTabEntry>();
@@ -126,22 +134,10 @@ export class TabIndicator {
         tab.groupId !== NO_GROUP && tab.groupId !== existing ? tab.groupId : null;
       let groupId: number;
       try {
-        if (existing !== null) {
-          groupId = await this.edit(() =>
-            this.chrome.tabs.group({ groupId: existing, tabIds: [tabId] }),
-          );
-        } else {
-          groupId = await this.edit(() =>
-            this.chrome.tabs.group({
-              tabIds: [tabId],
-              createProperties: { windowId: tab.windowId },
-            }),
-          );
-          await this.chrome.tabGroups.update(groupId, {
-            title: this.options.title,
-            color: this.options.color,
-          });
-        }
+        groupId =
+          existing !== null
+            ? await this.edit(() => this.chrome.tabs.group({ groupId: existing, tabIds: [tabId] }))
+            : await this.newGroup(tabId, tab.windowId);
       } catch {
         // A tab in a popup or app window, or one closed meanwhile.
         return;
@@ -178,31 +174,18 @@ export class TabIndicator {
         return;
       }
       this.indicated.delete(tabId);
-      this.changed();
-      const tab = await this.chrome.tabs.get(tabId).catch(() => null);
-      if (tab && tab.groupId === entry.groupId) {
-        try {
-          const restore =
-            entry.restoreGroupId !== null &&
-            (await this.chrome.tabGroups.get(entry.restoreGroupId).then(
-              () => true,
-              () => false,
-            ));
-          if (restore) {
-            await this.edit(() =>
-              this.chrome.tabs.group({ groupId: entry.restoreGroupId!, tabIds: [tabId] }),
-            );
-          } else {
-            await this.edit(() => this.chrome.tabs.ungroup([tabId]));
-            if (entry.restoreIndex !== null) {
-              const count = (await this.chrome.tabs.query({ windowId: tab.windowId })).length;
-              const index = Math.min(entry.restoreIndex, count - 1);
-              await this.edit(() => this.chrome.tabs.move(tabId, { index }));
-            }
-          }
-        } catch {
-          // Closed meanwhile.
+      try {
+        await this.putBack(tabId, entry);
+      } catch (error) {
+        if (dragging(error)) {
+          // The person is still dragging a tab: try again later.
+          this.indicated.set(tabId, entry);
+          this.release(tabId);
+          return;
         }
+        // Closed meanwhile.
+      } finally {
+        this.changed();
       }
       await this.dissolveIfUnused(entry.groupId);
     });
@@ -233,44 +216,51 @@ export class TabIndicator {
       if (!entry) return;
       const tab = await this.chrome.tabs.get(tabId).catch(() => null);
       if (!tab || tab.groupId === entry.groupId) return;
-      this.indicated.delete(tabId);
-      this.declined.add(tabId);
+      // Dragging a whole group to another window gives it a new id there.
+      if (tab.groupId !== NO_GROUP && (await this.isOurs(tab.groupId))) {
+        this.indicated.set(tabId, { ...entry, groupId: tab.groupId, restoreIndex: null });
+      } else {
+        this.indicated.delete(tabId);
+        this.declined.add(tabId);
+      }
       this.changed();
     });
   }
 
   /**
-   * A new worker carries on with an earlier one's state. Tabs no longer
-   * controlled leave the group; groups this extension left behind with no
-   * record (after the extension reloaded or updated, or Chrome restarted)
-   * are dissolved; controlled tabs get the indicator.
+   * A new run carries on with the state the last one recorded: tabs no
+   * longer controlled leave the group and go back where they were;
+   * controlled tabs get the indicator. A recorded group that is gone means
+   * Chrome restarted and restored its groups with new ids: then groups with
+   * this title and colour that hold no controlled tab are dissolved.
    */
-  resume(state: TabIndicatorState | null, controlled: Iterable<number>): Promise<void> {
+  resume(
+    recorded: TabIndicatorState | null | Promise<TabIndicatorState | null>,
+    controlled: Iterable<number>,
+  ): Promise<void> {
     const live = new Set(controlled);
-    const work = this.run(async () => {
+    return this.run(async () => {
+      const state = await Promise.resolve(recorded).catch(() => null);
+      let lost = false;
       for (const [tab, entry] of Object.entries(state?.tabs ?? {})) {
-        this.indicated.set(Number(tab), entry);
+        const tabId = Number(tab);
+        if (!(await this.isOurs(entry.groupId))) {
+          lost = true;
+          continue;
+        }
+        const current = await this.chrome.tabs.get(tabId).catch(() => null);
+        if (current?.groupId === entry.groupId) this.indicated.set(tabId, entry);
       }
       for (const tabId of state?.declined ?? []) if (live.has(tabId)) this.declined.add(tabId);
-      const groups = await this.chrome.tabGroups
-        .query({ title: this.options.title, color: this.options.color })
-        .catch(() => []);
-      for (const group of groups) {
-        const tabs = await this.chrome.tabs.query({ groupId: group.id }).catch(() => []);
-        const leftovers = tabs
-          .map((tab) => tab.id)
-          .filter((id): id is number => id !== undefined && !this.indicated.has(id));
-        if (leftovers.length > 0)
-          await this.edit(() => this.chrome.tabs.ungroup(leftovers)).catch(() => undefined);
-      }
+      if (lost) await this.dissolveLeftBehind();
       this.changed();
+    }).then(async () => {
+      const ended = [...this.indicated.keys()].filter((tabId) => !live.has(tabId));
+      await Promise.all([
+        ...ended.map((tabId) => this.releaseNow(tabId)),
+        ...[...live].map((tabId) => this.show(tabId)),
+      ]);
     });
-    const ended = [...this.indicatedAfter(state)].filter((tabId) => !live.has(tabId));
-    return Promise.all([
-      work,
-      ...ended.map((tabId) => this.releaseNow(tabId)),
-      ...[...live].map((tabId) => this.show(tabId)),
-    ]).then(() => undefined);
   }
 
   state(): TabIndicatorState {
@@ -285,8 +275,69 @@ export class TabIndicator {
     return this.queue;
   }
 
-  private indicatedAfter(state: TabIndicatorState | null): number[] {
-    return Object.keys(state?.tabs ?? {}).map(Number);
+  private async newGroup(tabId: number, windowId: number): Promise<number> {
+    const groupId = await this.edit(() =>
+      this.chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId } }),
+    );
+    try {
+      await this.edit(() =>
+        this.chrome.tabGroups.update(groupId, {
+          title: this.options.title,
+          color: this.options.color,
+        }),
+      );
+    } catch (error) {
+      // An untitled group would say nothing, and nothing would remove it.
+      await this.edit(() => this.chrome.tabs.ungroup([tabId])).catch(() => undefined);
+      throw error;
+    }
+    return groupId;
+  }
+
+  /** Takes a tab still in its group out of it: back to the person's group it
+   * came from, or else to where it was. */
+  private async putBack(tabId: number, entry: IndicatedTabEntry): Promise<void> {
+    const tab = await this.chrome.tabs.get(tabId).catch(() => null);
+    if (!tab || tab.groupId !== entry.groupId) return;
+    const restoreGroupId = entry.restoreGroupId;
+    if (
+      restoreGroupId !== null &&
+      (await this.chrome.tabGroups.get(restoreGroupId).then(
+        () => true,
+        () => false,
+      ))
+    ) {
+      await this.edit(() => this.chrome.tabs.group({ groupId: restoreGroupId, tabIds: [tabId] }));
+      return;
+    }
+    await this.edit(() => this.chrome.tabs.ungroup([tabId]));
+    if (entry.restoreIndex === null) return;
+    const count = (await this.chrome.tabs.query({ windowId: tab.windowId })).length;
+    const index = Math.min(entry.restoreIndex, count - 1);
+    await this.edit(() => this.chrome.tabs.move(tabId, { index }));
+    // Tabs have moved since, so that place may now be inside a group.
+    const moved = await this.chrome.tabs.get(tabId);
+    if (moved.groupId !== NO_GROUP) await this.edit(() => this.chrome.tabs.ungroup([tabId]));
+  }
+
+  /** Dissolves groups with this title and colour holding no controlled tab. */
+  private async dissolveLeftBehind(): Promise<void> {
+    const groups = await this.chrome.tabGroups
+      .query({ title: this.options.title, color: this.options.color })
+      .catch(() => []);
+    for (const group of groups) {
+      const tabs = await this.chrome.tabs.query({ groupId: group.id }).catch(() => []);
+      if (tabs.some((tab) => tab.id !== undefined && this.indicated.has(tab.id))) continue;
+      const left = tabs.map((tab) => tab.id).filter((id): id is number => id !== undefined);
+      if (left.length > 0)
+        await this.edit(() => this.chrome.tabs.ungroup(left)).catch(() => undefined);
+    }
+  }
+
+  /** Whether the group exists with this indicator's title and colour. */
+  private async isOurs(groupId: number): Promise<boolean> {
+    const group = await this.chrome.tabGroups.get(groupId).catch(() => null);
+    return group?.title === this.options.title && group.color === this.options.color;
   }
 
   private async groupInWindow(windowId: number): Promise<number | null> {
@@ -312,8 +363,7 @@ export class TabIndicator {
       try {
         return await change();
       } catch (error) {
-        if (attempt >= DRAG_RETRIES || !(error instanceof Error) || !DRAGGING.test(error.message))
-          throw error;
+        if (attempt >= DRAG_RETRIES || !dragging(error)) throw error;
         await new Promise<void>((resolve) => this.schedule(resolve, DRAG_RETRY_MS));
       }
     }

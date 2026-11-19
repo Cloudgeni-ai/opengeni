@@ -24,8 +24,10 @@ sits in a tab group named after the product, one per window, so the tab strip
 shows which tabs are in use without changing the page. `src/tab-indicator.ts`
 owns this: a tab leaves the group once control has stayed ended for a moment,
 and goes back to where it was, or to the person's own group it came from. A
-tab the person drags out stays out until that control ends, and groups left
-behind after the extension reloads or Chrome restarts are removed. Chrome's
+tab the person drags out stays out until that control ends. The state is kept
+in local storage, so tabs still grouped when the extension updates or reloads
+go back where they were; only after Chrome restarts are left-behind groups
+found by their title and colour. Chrome's
 debugger notification, with its Cancel button, stays the way to stop every
 agent at once.
 
