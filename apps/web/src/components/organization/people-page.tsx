@@ -196,6 +196,7 @@ function ConsoleRolePicker({
         roles={CONSOLE_ROLE_OPTIONS}
         value={value === "none" ? null : value}
         noAccessLabel="None"
+        noAccessDescription="No Console access."
         subjectName={name}
         onValueChange={async (role) => {
           const next: ConsoleRoleValue = role ?? "none";
