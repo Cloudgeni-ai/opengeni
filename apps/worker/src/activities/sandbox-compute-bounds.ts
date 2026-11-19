@@ -201,7 +201,8 @@ export async function boundComputeBoundedWarmBoxes(
         sandboxPlanTierUnpaid(standing.tier, {
           subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
         }) && !standing.paidHistory;
-      const cardBlocked = unpaid && (await organizationCardBlocked(services, accountId, planLimits));
+      const cardBlocked =
+        unpaid && (await organizationCardBlocked(services, accountId, planLimits));
       if (!organizationHasComputeBounds(limit) && !turnlessYoung && !cardBlocked) return;
       organizations.set(accountId, {
         cardBlocked,
