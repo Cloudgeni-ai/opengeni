@@ -111,6 +111,9 @@ async function rejection(promise: Promise<unknown>): Promise<{ status: number; m
 // Rig or Connected Machine on the new chat) is refused by the initial-turn
 // acceptance, which runs after the session row is committed.
 const nothingToAttach = { mode: "session", sharedOutputWarningVersion: 1 } as const;
+// Its refusal says why, instead of the generic invalid-request answer.
+const NOTHING_TO_ATTACH =
+  "This chat uses no personal Rig or Connected Machine, so there is nothing to attach. Leave out personalResourceAttachment; Connections are chosen with connectionAccounts.";
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("session-create-attachment-rejection");
@@ -143,7 +146,7 @@ describe("a create refused while accepting its first turn's personal resources",
     );
     expect(refused).toEqual({
       status: 422,
-      message: "The personal-resource attachment request is invalid",
+      message: NOTHING_TO_ATTACH,
     });
     expect(await storedSessions(sessionId)).toEqual({ sessions: 0, events: 0, turns: 0 });
 
@@ -168,7 +171,7 @@ describe("a create refused while accepting its first turn's personal resources",
       const first = await rejection(create(request));
       expect(first).toEqual({
         status: 422,
-        message: "The personal-resource attachment request is invalid",
+        message: NOTHING_TO_ATTACH,
       });
       expect(await storedSessions(sessionId)).toEqual({ sessions: 0, events: 0, turns: 0 });
       // The same request with the same key gets the same answer.
