@@ -3658,6 +3658,17 @@ save in its own object storage: a session whose latest save is a directory
 snapshot is restored from it into a tar destination, so that snapshot is the
 last one it reads and it never writes another. A box that is still live keeps
 the mode it was created in until it is next restored.
+A tar save or restore never holds the archive in the worker's or API's memory.
+On a save, `tar -c` runs in the box and its stdout streams through Modal's exec
+stream into a private disk spool on the worker, hashed and checked member by
+member as it arrives; the spool is then uploaded and read back as before. On a
+restore, cold restore downloads the object into a verified disk spool (size and
+SHA-256 against the descriptor) before any box is created, then streams it into
+`tar -x` reading stdin in the new box. Every chunk passes the SDK's tar member
+checks before the box sees it and is hashed again, so a spool that changed
+after it was verified fails the restore. The restored tree is then
+fingerprinted against the descriptor as before. A provider without these
+stream methods reads the verified spool into one buffer and hydrates from it.
 Filesystem snapshot recovery boots the exact selected immutable Image directly,
 attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
