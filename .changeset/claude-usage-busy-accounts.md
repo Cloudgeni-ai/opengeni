@@ -1,5 +1,0 @@
----
-"@opengeni/db": patch
----
-
-Claude accounts that are serving turns no longer show "Usage unavailable" on the Models page. A live usage reading was stamped with the time its request left, so whenever a turn on the same account stored its response headers while Claude was answering (about two seconds), the stored quota counted as newer and the reading was dropped and reported as unavailable. Readings are now stamped when Claude's answer arrives, as Codex readings already are; whether a refusal stored meanwhile still stands is still judged from the request time. A reading that a genuinely newer stored observation supersedes now counts as a successful check. Every live check that still ends unavailable logs why (Claude's HTTP status, the kind of transport error, or why the reading was not stored), without tokens or response text. When a check does fail, the account row and the account page keep showing the last saved reading with its age, and say "Usage unavailable" only for an account Claude has never reported.

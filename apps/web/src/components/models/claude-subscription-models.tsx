@@ -104,7 +104,7 @@ export function ClaudeAccountUsageReadout({
   });
   if (account.status !== "active") return null;
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
-  return <ClaudeUsageReadout state={usage} plan={account.plan} saved={account.usage} />;
+  return <ClaudeUsageReadout state={usage} plan={account.plan} />;
 }
 export function ClaudeRow({
   claude,
@@ -230,12 +230,7 @@ function AccountUsage({
   });
   return (
     <>
-      <ClaudeUsage
-        state={usage}
-        plan={account.plan}
-        onReconnect={onReconnect}
-        saved={account.usage}
-      />
+      <ClaudeUsage state={usage} plan={account.plan} onReconnect={onReconnect} />
       <ClaudeLimitResetsSection usage={usage.value} />
     </>
   );

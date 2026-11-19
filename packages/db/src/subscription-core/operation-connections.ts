@@ -31,7 +31,6 @@ import {
   subscriptionCoreOperations,
   subscriptionCoreQuotaBlocksNow,
   subscriptionCoreUsageMergeOptions,
-  subscriptionCoreUsageNotRecorded,
   type SubscriptionCoreConnectionCredential,
   type SubscriptionCoreConnectionCredentialLoad,
   type SubscriptionCoreConnectionRefreshDeps,
@@ -39,7 +38,6 @@ import {
   type SubscriptionCoreFetch,
   type SubscriptionCoreOperationLeaseRef,
   type SubscriptionCoreOperationScope,
-  type SubscriptionCoreUsageNotApplied,
 } from "./operations";
 import {
   memoByProvider,
@@ -124,10 +122,6 @@ export type SubscriptionCoreUsageProbe =
        * the write failed).
        */
       applied: boolean;
-      /** Why it was not written (absent when it was). */
-      notApplied?: SubscriptionCoreUsageNotApplied;
-      /** The error of a failed write (`notApplied: "write_failed"`). */
-      writeError?: unknown;
       /** The observation ended a stored exhaustion (the caller wakes waiters). */
       recovered: boolean;
     };
@@ -493,17 +487,8 @@ export const subscriptionCoreOperationConnections = memoByProvider(
         refreshGeneration: prepared.current().credentialVersion,
         ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
       });
-      if (!quota)
-        return {
-          kind: "read",
-          response,
-          quota: null,
-          applied: false,
-          recovered: false,
-          notApplied: "no_reading",
-        };
-      let writeError: unknown;
-      const record = await operations()
+      if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
+      const applied = await operations()
         .recordSubscriptionCoreUsageObservation(
           db,
           scope,
@@ -511,18 +496,13 @@ export const subscriptionCoreOperationConnections = memoByProvider(
           quota,
           subscriptionCoreUsageMergeOptions(provider.adapter, response),
         )
-        .catch((error: unknown) => {
-          writeError = error;
-          return subscriptionCoreUsageNotRecorded("write_failed");
-        });
+        .catch(() => ({ applied: false, recovered: false }));
       return {
         kind: "read",
         response,
         quota,
-        applied: record.applied,
-        recovered: record.recovered,
-        ...(record.notApplied ? { notApplied: record.notApplied } : {}),
-        ...(writeError !== undefined ? { writeError } : {}),
+        applied: applied.applied,
+        recovered: applied.recovered,
       };
     }
 

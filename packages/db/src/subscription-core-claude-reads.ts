@@ -48,7 +48,6 @@ import { subscriptionCoreProvider } from "./subscription-core-providers";
 import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
 import {
   projectSubscriptionCoreClaudeUsage,
-  subscriptionCoreClaudeUsageErrorKind,
   subscriptionCoreClaudeUsageVersion,
   type SubscriptionCoreClaudeUsageReading,
   type SubscriptionCoreClaudeUsageRefresh,
@@ -268,11 +267,7 @@ function unreadableClaudeUsage(
  * reading younger than the interval answers first; else this replica's
  * remembered attempt, when it is younger than the interval and newer than
  * the stored reading. A reading the core did not apply (the generation
- * fence, or a failed write) is reported `unavailable`, never `available`;
- * one a newer stored observation superseded (a turn's response headers that
- * arrived meanwhile) is a successful check of an account whose stored quota
- * is at least as current. Every check that ends `unavailable` is logged with
- * its cause (`logClaudeUsageCheckFailure`).
+ * fence, or a failed write) is reported `unavailable`, never `available`.
  * `deps.force` reads live whatever the throttle says: a limit reset claim
  * has just changed the provider's answer.
  */
@@ -294,7 +289,6 @@ export async function refreshSubscriptionCoreClaudeWorkspaceUsage(
   const binding = claudeBinding();
   return await refreshClaudeUsage({
     key: [input.accountId, input.workspaceId, target.connectionId],
-    log: { route: "workspace", accountId: input.accountId, connectionId: target.connectionId },
     row: target.row,
     now: deps.now ?? Date.now,
     force: deps.force === true,
@@ -370,7 +364,6 @@ export async function refreshSubscriptionCoreClaudeOrganizationUsage(
 ): Promise<{ usage: ClaudeSubscriptionUsage; recovered: boolean }> {
   return await refreshClaudeUsage({
     key: [input.organizationId, "organization", input.row.id],
-    log: { route: "organization", accountId: input.organizationId, connectionId: input.row.id },
     row: input.row,
     now: deps.now ?? Date.now,
     force: deps.force === true,
@@ -409,56 +402,10 @@ export async function refreshSubscriptionCoreClaudeOrganizationUsage(
   });
 }
 
-/** Where a live check ran, for its failure log. */
-type ClaudeUsageCheckContext = {
-  route: "organization" | "workspace";
-  accountId: string;
-  connectionId: string;
-};
-
-/**
- * One operator log line for a live usage check that ended `unavailable`:
- * the probe's outcome, Claude's HTTP status or the transport error's kind,
- * or why a reading was not stored. Never a token, header, message or body.
- */
-function logClaudeUsageCheckFailure(
-  context: ClaudeUsageCheckContext,
-  probe: SubscriptionCoreUsageProbe,
-  durationMs: number,
-): void {
-  const reading =
-    probe.kind === "read" ? (probe.response as SubscriptionCoreClaudeUsageReading | null) : null;
-  const failure = reading?.failure;
-  const cause =
-    probe.kind === "token_error" || probe.kind === "fetch_error"
-      ? { reason: probe.kind, error: subscriptionCoreClaudeUsageErrorKind(probe.error) }
-      : probe.kind !== "read"
-        ? { reason: probe.kind }
-        : failure?.kind === "http_status"
-          ? { reason: "http_status", httpStatus: failure.status }
-          : failure?.kind === "fetch_error"
-            ? { reason: "fetch_error", error: failure.error }
-            : failure?.kind === "no_reading"
-              ? { reason: "no_reading" }
-              : {
-                  reason: "not_applied",
-                  notApplied: probe.notApplied ?? "unknown",
-                  ...(probe.writeError !== undefined
-                    ? { error: subscriptionCoreClaudeUsageErrorKind(probe.writeError) }
-                    : {}),
-                };
-  console.warn("[claude-usage] live usage check failed", {
-    ...context,
-    ...cause,
-    durationMs: Math.round(durationMs),
-  });
-}
-
 /** The throttled live read, its projection and the committed read-back, for either route. */
 async function refreshClaudeUsage(plan: {
   /** The throttle key's scope: organization, workspace (or the organization route) and connection. */
   key: readonly string[];
-  log: ClaudeUsageCheckContext;
   row: SubscriptionCoreConnectionRow;
   now: () => number;
   /** Read live even within the throttle interval. */
@@ -493,39 +440,28 @@ async function refreshClaudeUsage(plan: {
       usage: projectSubscriptionCoreClaudeUsage(plan.row, last.refresh, { now: now() }),
       recovered: false,
     };
-  const startedAt = performance.now();
   const probe = await plan.probe();
   // A seam that refuses (not visible here: another scope, maintenance, a
   // revoked authority, personal connections switched off) or cannot read
   // reads nothing: the stored projection, `unavailable` with no check time
   // unless the row itself needs a new sign-in or the usage scope. Nothing
   // was sent, so the refusal is not remembered and never outlives its cause.
-  if (probe.kind === "not_visible" || probe.kind === "unsupported") {
-    const usage = unreadableClaudeUsage(plan.row, now());
-    if (usage.refreshStatus === "unavailable")
-      logClaudeUsageCheckFailure(plan.log, probe, performance.now() - startedAt);
-    return { usage, recovered: false };
-  }
+  if (probe.kind === "not_visible" || probe.kind === "unsupported")
+    return { usage: unreadableClaudeUsage(plan.row, now()), recovered: false };
   const checkedAt = new Date(now()).toISOString();
   const reading =
     probe.kind === "read" ? (probe.response as SubscriptionCoreClaudeUsageReading) : null;
   const refresh: SubscriptionCoreClaudeUsageRefresh =
     reading !== null && probe.kind === "read"
       ? {
-          // An available reading the core did not record is not reported as
-          // read, unless the stored quota already holds a newer observation.
-          status:
-            reading.status === "available" && !probe.applied && probe.notApplied !== "superseded"
-              ? "unavailable"
-              : reading.status,
+          // An available reading the core did not record is not reported as read.
+          status: reading.status === "available" && !probe.applied ? "unavailable" : reading.status,
           checkedAt: reading.checkedAt,
         }
       : probe.kind === "relogin"
         ? { status: "reconnect", checkedAt }
         : // A credential or transport failure: a remembered failed attempt.
           { status: "unavailable", checkedAt };
-  if (refresh.status === "unavailable")
-    logClaudeUsageCheckFailure(plan.log, probe, performance.now() - startedAt);
   rememberAttempt(key, { at: now(), refresh });
   // The reading (or a relogin the refresh seam recorded) is read back as
   // committed. When the read-back fails (or the connection is no longer

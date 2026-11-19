@@ -246,56 +246,6 @@ export type SubscriptionCoreUsageObservationWrite = {
   recovered: boolean;
 };
 
-/**
- * Why a live usage reading changed nothing on the stored quota:
- *
- * - `no_reading`: the response carried no quota;
- * - `not_visible`: the connection is no longer readable in the scope;
- * - `credential_changed`: the credential was refreshed or replaced while the
- *   reading was in flight (the refresh-generation fence);
- * - `superseded`: the stored quota already holds a newer observation, so the
- *   reading succeeded and what is stored is at least as current;
- * - `contended`: other quota writes kept moving the row under the reading;
- * - `write_failed`: the write threw.
- */
-export type SubscriptionCoreUsageNotApplied =
-  | "no_reading"
-  | "not_visible"
-  | "credential_changed"
-  | "superseded"
-  | "contended"
-  | "write_failed";
-
-/** The outcome of recording one usage reading; `notApplied` says why it was not. */
-export type SubscriptionCoreUsageRecord = {
-  applied: boolean;
-  recovered: boolean;
-  notApplied?: SubscriptionCoreUsageNotApplied;
-};
-
-/** A reading that changed nothing, and why. */
-export function subscriptionCoreUsageNotRecorded(
-  notApplied: SubscriptionCoreUsageNotApplied,
-): SubscriptionCoreUsageRecord {
-  return { applied: false, recovered: false, notApplied };
-}
-
-/**
- * Why `mergeSubscriptionCoreUsageObservation` returned no write: the reading
- * was made with another credential generation, or the stored quota already
- * holds a newer observation.
- */
-export function subscriptionCoreUsageMergeSkipped(
-  refreshGeneration: number,
-  observation: Pick<SubscriptionQuota, "observedRefreshGeneration">,
-): SubscriptionCoreUsageRecord {
-  return subscriptionCoreUsageNotRecorded(
-    observation.observedRefreshGeneration === refreshGeneration
-      ? "superseded"
-      : "credential_changed",
-  );
-}
-
 export const SUBSCRIPTION_MODEL_CATALOG_TTL_MS = 60_000;
 
 /**
@@ -821,7 +771,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     observation: SubscriptionQuota,
     options: SubscriptionCoreUsageMergeOptions = {},
     ref: SubscriptionCoreOperationLeaseRef | null = null,
-  ): Promise<SubscriptionCoreUsageRecord> {
+  ): Promise<{ applied: boolean; recovered: boolean }> {
     const { accountId } = scopeTenant(scope);
     const access = await withOperationScope(db, scope, async (tx) => {
       const [connection] = await rawRows<{ refresh_generation: number | string }>(
@@ -830,13 +780,13 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
           ${routineArgs(scope, connectionId, ref)}
         )`,
       );
-      if (!connection) return subscriptionCoreUsageNotRecorded("not_visible");
+      if (!connection) return { applied: false, recovered: false };
       // Preserve the fetched measurement even if generation/merge policy declines it.
       if (observation.source === "usage_endpoint" || observation.source === "response_headers")
         await recordSubscriptionUsageReading(tx, accountId, connectionId, providerId, observation);
       const refreshGeneration = Number(connection.refresh_generation);
       if (ref && observation.observedRefreshGeneration !== refreshGeneration)
-        return subscriptionCoreUsageNotRecorded("credential_changed");
+        return { applied: false, recovered: false };
       const [row] = await rawRows<SubscriptionCoreStoredQuotaRow>(
         tx,
         sql`select quota, revision as quota_revision,
@@ -852,7 +802,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         observation,
         options,
       );
-      if (!write) return subscriptionCoreUsageMergeSkipped(refreshGeneration, observation);
+      if (!write) return { applied: false, recovered: false };
       await tx.execute(
         sql`insert into subscription_connection_quota (
           account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
@@ -869,7 +819,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
       );
       return { applied: true, recovered: write.recovered };
     });
-    return access?.value ?? subscriptionCoreUsageNotRecorded("not_visible");
+    return access?.value ?? { applied: false, recovered: false };
   }
 
   /** Read-only quota evidence under the same exact live grant as credentials. */
