@@ -991,10 +991,13 @@ describe("organization tool servers and end users' logins", () => {
       "clientSecretDropped",
       "endUserLoginsRemoved",
     ];
-    const moves = audits.map(({ detail }): Record<string, unknown> =>
-      Object.fromEntries(
-        fields.filter((field) => detail[field] !== undefined).map((field) => [field, detail[field]]),
-      ),
+    const moves = audits.map(
+      ({ detail }): Record<string, unknown> =>
+        Object.fromEntries(
+          fields
+            .filter((field) => detail[field] !== undefined)
+            .map((field) => [field, detail[field]]),
+        ),
     );
     expect(moves).toEqual([
       {},

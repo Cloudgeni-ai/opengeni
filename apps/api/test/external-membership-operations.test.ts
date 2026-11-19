@@ -990,9 +990,7 @@ test("removing or offboarding an end user erases their Console agent tool logins
 
   // Leaving one workspace takes that workspace's logins; the profile stays.
   await f.service.removeWorkspaceMember(f.workspace.id, f.identity.subjectId);
-  expect(await logins()).toEqual(
-    [`first:${someoneElse}`, `other:${f.identity.subjectId}`].sort(),
-  );
+  expect(await logins()).toEqual([`first:${someoneElse}`, `other:${f.identity.subjectId}`].sort());
   expect(await profiles()).toBe(1);
 
   // Offboarding takes the logins everywhere and the profile.

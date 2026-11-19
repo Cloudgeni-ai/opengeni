@@ -212,9 +212,11 @@ async function provisionFixture(): Promise<Fixture> {
         permissions = ${JSON.stringify(explicit)}::jsonb where id = ${created.id}`;
     }
     if (onlyWorkspaces) {
-      await shared!.admin`update api_keys set workspace_scope = 'selected' where id = ${created.id}`;
+      await shared!
+        .admin`update api_keys set workspace_scope = 'selected' where id = ${created.id}`;
       for (const workspaceId of onlyWorkspaces) {
-        await shared!.admin`insert into organization_api_key_workspaces (api_key_id, workspace_id, account_id)
+        await shared!
+          .admin`insert into organization_api_key_workspaces (api_key_id, workspace_id, account_id)
           values (${created.id}, ${workspaceId}, ${accountId})`;
       }
     }
@@ -643,7 +645,9 @@ describe("Console agents routes", () => {
     const server = { key: "limited-crm", name: "CRM", url: "https://crm.example.com/mcp" };
 
     expect(
-      refused(await call("POST", `${org()}/tool-servers`, limited, { ...server, authMode: "none" })),
+      refused(
+        await call("POST", `${org()}/tool-servers`, limited, { ...server, authMode: "none" }),
+      ),
     ).toEqual(workspaceLimited);
     const created = await call("POST", `${org()}/tool-servers`, keys.agentsManage, {
       ...server,
@@ -706,9 +710,7 @@ describe("Console agents routes", () => {
       expectedVersion: publish.body.agent.rowVersion,
     });
     expect(fullMove.status).toBe(200);
-    expect((await call("DELETE", `${org()}/tool-servers/limited-crm`, keys.full)).status).toBe(
-      204,
-    );
+    expect((await call("DELETE", `${org()}/tool-servers/limited-crm`, keys.full)).status).toBe(204);
   }, 120_000);
 
   test("workspaces list their published organization agents; the test workspace is created once", async () => {
