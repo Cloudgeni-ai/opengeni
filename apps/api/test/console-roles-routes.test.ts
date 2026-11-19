@@ -1589,9 +1589,17 @@ describe("Console roles: Console test chats", () => {
         await shared!.admin<{ count: number }[]>`
           select count(*)::int as count from session_events where session_id = ${sessionId}`
       )[0]!.count;
-    const before = { events: await eventsOf(theirs), state: await stateFingerprint(fixture.accountId) };
+    const before = {
+      events: await eventsOf(theirs),
+      state: await stateFingerprint(fixture.accountId),
+    };
     const viaApp = (method: string, suffix: string, body?: unknown) =>
-      call(method, `/v1/workspaces/${agent.workspaceId}/sessions${suffix}`, { authorization: agent.bearer }, body);
+      call(
+        method,
+        `/v1/workspaces/${agent.workspaceId}/sessions${suffix}`,
+        { authorization: agent.bearer },
+        body,
+      );
     // Its own chat works; the other tester's chat is not there, through HTTP...
     expect((await viaApp("GET", `/${mine}`)).status).toBe(200);
     expect((await viaApp("GET", `/${theirs}`)).status).toBe(404);
@@ -1614,7 +1622,11 @@ describe("Console roles: Console test chats", () => {
       ["session_events", { sessionId: theirs }],
       [
         "session_queue_message",
-        { sessionId: theirs, text: "from another tester's agent", idempotencyKey: crypto.randomUUID() },
+        {
+          sessionId: theirs,
+          text: "from another tester's agent",
+          idempotencyKey: crypto.randomUUID(),
+        },
       ],
     ] as const) {
       expect([name, (await agent.tool(name, args)).ok]).toEqual([name, false]);
