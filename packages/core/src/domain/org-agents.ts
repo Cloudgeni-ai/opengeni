@@ -57,7 +57,11 @@ import {
   withoutUndefined,
   type MaterializedOrgToolServer,
 } from "./org-agent-config";
-import { applyOrgAgentRunsOn, OrgAgentRunsOnError } from "./org-agent-runs-on";
+import {
+  applyOrgAgentRunsOn,
+  OrgAgentRunsOnError,
+  type OrgAgentRunsOnDeps,
+} from "./org-agent-runs-on";
 
 type OrgAgentCreateGrant = Pick<AccessGrant, "accountId" | "subjectId" | "permissions"> &
   Partial<Pick<AccessGrant, "metadata">>;
@@ -106,6 +110,8 @@ export type OrgAgentSessionCreateDeps = {
   observability?: Observability | null;
   /** Test seam: the tools a server offers now, or null when unknown. */
   listToolServerTools?: OrgToolServerToolLister;
+  /** Test seams for Runs on (machine and environment lookups). */
+  runsOn?: Omit<OrgAgentRunsOnDeps, "db" | "settings">;
 };
 
 export type OrgToolServerToolLister = (input: {
@@ -140,9 +146,7 @@ export async function prepareOrgAgentSessionCreate(
   } catch (error) {
     recordOrgAgentResolve(
       deps.observability,
-      error instanceof OrgAgentSessionCreateError || error instanceof OrgAgentRunsOnError
-        ? error.code
-        : "error",
+      error instanceof OrgAgentSessionCreateError ? error.code : "error",
     );
     throw error;
   }
@@ -317,11 +321,16 @@ async function bind(
   });
   // Where the chat runs: the version's Runs on, with the request on top.
   const placed = await applyOrgAgentRunsOn({
-    deps: { db: deps.db, settings: deps.settings },
+    deps: { db: deps.db, settings: deps.settings, ...deps.runsOn },
     grant,
     workspaceId,
     payload: plan.payload,
     runsOn: config.runsOn,
+  }).catch((error: unknown) => {
+    if (error instanceof OrgAgentRunsOnError) {
+      throw new OrgAgentSessionCreateError(error.httpStatus, error.code, error.message);
+    }
+    throw error;
   });
   const overrides =
     plan.overrides || Object.keys(placed.overrides).length > 0

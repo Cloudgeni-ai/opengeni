@@ -169,6 +169,7 @@ export * from "./domain/automation-templates";
 export * from "./domain/agents";
 export * from "./domain/org-agent-config";
 export * from "./domain/org-agents";
+export * from "./domain/org-agent-runs-on";
 export * from "./domain/org-agent-moves";
 export * from "./domain/agent-memory";
 export * from "./domain/bot-templates";
