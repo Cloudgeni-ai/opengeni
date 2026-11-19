@@ -31,6 +31,7 @@ import {
   sitePermissionsState,
   turnOffSitePermissions,
 } from "./site-permissions";
+import { TabIndicator, parseTabIndicatorState, type TabIndicatorState } from "./tab-indicator";
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const RECONNECT_MAX_MS = 30_000;
@@ -95,6 +96,8 @@ type LiveState = {
   // Tabs an agent opened (with tabs.create) that are still open: only in
   // those can an agent set a site permission.
   createdTabs?: number[];
+  // The tab groups that show which tabs an agent controls.
+  tabIndicator?: TabIndicatorState;
 };
 const LIVE_STATE_KEY = "liveState";
 // How a new worker found the live state of the workers before it, newest
@@ -104,6 +107,9 @@ const MAX_STATE_RESUMPTIONS = 20;
 // A debugger command that reads and changes nothing, and that Chrome refuses
 // unless this extension is attached to the tab.
 const ATTACHMENT_PROBE_METHOD = "Target.getTargetInfo";
+// How long a tab stays in the controlled tabs' group after control ends, in
+// case it starts again (see TabIndicator).
+const TAB_INDICATOR_RELEASE_MS = 2_000;
 
 let nativePort: chrome.runtime.Port | null = null;
 let connectionGeneration: string | null = null;
@@ -129,6 +135,17 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Map<number, number>();
 // Tabs an agent opened that are still open.
 const agentCreatedTabs = new Set<number>();
+// Puts the tabs an agent controls in a tab group named after the product.
+// Chromium browsers without tab groups go without.
+const tabIndicator =
+  chrome.tabGroups && typeof chrome.tabs.group === "function"
+    ? new TabIndicator(chrome as never, {
+        title: BRAND.product,
+        color: "grey",
+        releaseDelayMs: TAB_INDICATOR_RELEASE_MS,
+        onChange: () => void recordLiveState(),
+      })
+    : null;
 // Starts at a random number, so a number from before this worker restarted
 // does not name one of its attachments.
 let lastAttachment = Math.floor(Math.random() * 2 ** 40);
@@ -175,10 +192,14 @@ async function resumeLiveState(): Promise<string> {
   } catch {
     // Without session storage this worker's state is all there is.
     currentStateGeneration = crypto.randomUUID();
+    void tabIndicator?.resume(null, []);
     return currentStateGeneration;
   }
   if (!stored) {
     currentStateGeneration = crypto.randomUUID();
+    // Groups an earlier run of the extension left (it reloaded, updated or
+    // Chrome restarted) control nothing now.
+    void tabIndicator?.resume(null, []);
     await recordLiveState();
     return currentStateGeneration;
   }
@@ -202,6 +223,7 @@ async function resumeLiveState(): Promise<string> {
   }
   // Only now: until then nothing records the attachments or applies an update.
   currentStateGeneration = stored.stateGeneration;
+  void tabIndicator?.resume(stored.tabIndicator ?? null, attachedDebuggerTabs.keys());
   await recordLiveState();
   await recordResumption({ attachmentsKept: kept, attachmentsEnded: detached, tabsClosed: closed });
   maybeApplyUpdate();
@@ -226,6 +248,7 @@ function parseLiveState(value: unknown): LiveState | null {
     createdTabs: Array.isArray(state.createdTabs)
       ? state.createdTabs.filter((tabId) => Number.isSafeInteger(tabId))
       : [],
+    tabIndicator: parseTabIndicatorState(state.tabIndicator) ?? undefined,
   };
 }
 
@@ -241,6 +264,7 @@ function recordLiveState(): Promise<void> {
       [...attachedDebuggerTabs].map(([tabId, attachment]) => [String(tabId), attachment]),
     ),
     createdTabs: [...agentCreatedTabs],
+    ...(tabIndicator ? { tabIndicator: tabIndicator.state() } : {}),
   };
   liveStateWrite = liveStateWrite
     .then(async () => await chrome.storage.session.set({ [LIVE_STATE_KEY]: state }))
@@ -592,6 +616,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       await frameRemovals.get(tabId);
       await requireControllableTab(tabId);
       if (!attachedDebuggerTabs.has(tabId)) await attachDebugger(tabId);
+      void tabIndicator?.show(tabId);
       return { attached: true, attachment: attachedDebuggerTabs.get(tabId) };
     }
     case "debugger.detach": {
@@ -767,6 +792,7 @@ async function requireControllableTab(tabId: number): Promise<void> {
 
 async function detachDebugger(tabId: number): Promise<void> {
   if (attachedDebuggerTabs.delete(tabId)) void recordLiveState();
+  tabIndicator?.release(tabId);
   // Also an attachment an earlier worker left without recording it.
   try {
     await chrome.debugger.detach({ tabId });
@@ -1390,6 +1416,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (attachment === undefined) return;
   attachedDebuggerTabs.delete(source.tabId);
   void recordLiveState();
+  tabIndicator?.release(source.tabId);
   appendDebuggerEvent({
     tabId: String(source.tabId),
     sessionId: null,
@@ -1405,6 +1432,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (agentCreatedTabs.delete(tabId)) void recordLiveState();
+  void tabIndicator?.closed(tabId);
   frameRemovalTimes.delete(tabId);
   frameRemovals.delete(tabId);
   finishedFrameRemovals.delete(tabId);
@@ -1415,6 +1443,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     method: "Target.targetDestroyed",
     params: { targetId: String(tabId) },
   });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.groupId !== undefined) void tabIndicator?.groupChanged(tabId);
 });
 
 function appendDebuggerEvent(event: Omit<BridgeDebuggerEvent, "sequence">): void {

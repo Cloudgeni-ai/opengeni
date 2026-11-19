@@ -36,6 +36,12 @@ class FakeChrome {
   readonly session: Record<string, unknown> = {};
   readonly local: Record<string, unknown> = {};
   readonly calls: string[] = [];
+  // Chrome's tab groups, which outlive the extension: each tab's group, and
+  // each group's title and colour. A group disappears with its last tab.
+  readonly tabGroup = new Map<number, number>();
+  readonly groups = new Map<number, { title: string; color: string }>();
+  // Callbacks the worker scheduled after the controlled tab release delay.
+  readonly releaseTimers: (() => void)[] = [];
   current: ReturnType<FakeChrome["startWorker"]> | null = null;
 
   /** Chrome stops the extension's worker (keeping everything above) and,
@@ -136,22 +142,51 @@ class FakeChrome {
             "onReplaced",
           ].map((name) => [name, event()]),
         ),
-        query: async () => [...profile.tabs].map((id) => tabOf(id)),
+        move: async () => ({}),
+        query: async (query: { groupId?: number } = {}) =>
+          [...profile.tabs]
+            .filter((id) => query.groupId === undefined || profile.groupOf(id) === query.groupId)
+            .map((id) => profile.tabOf(id)),
         get: async (id: number) => {
           if (!profile.tabs.has(id)) throw new Error(`No tab with id: ${id}.`);
-          return tabOf(id);
+          return profile.tabOf(id);
         },
         create: async () => {
           const id = Math.max(...profile.tabs) + 1;
           profile.tabs.add(id);
-          return tabOf(id);
+          return profile.tabOf(id);
         },
+        group: async ({ tabIds, groupId }: { tabIds: number[]; groupId?: number }) => {
+          const id = groupId ?? Math.max(100, ...profile.groups.keys()) + 1;
+          if (!profile.groups.has(id)) profile.groups.set(id, { title: "", color: "grey" });
+          for (const tabId of tabIds) profile.tabGroup.set(tabId, id);
+          return id;
+        },
+        ungroup: async (tabIds: number[]) => {
+          for (const tabId of tabIds) profile.tabGroup.delete(tabId);
+          profile.pruneGroups();
+        },
+      },
+      tabGroups: {
+        get: async (id: number) => {
+          if (!profile.groups.has(id)) throw new Error(`No group with id: ${id}.`);
+          return { id, ...profile.groups.get(id) };
+        },
+        query: async ({ title, color }: { title: string; color: string }) =>
+          [...profile.groups]
+            .filter(([, group]) => group.title === title && group.color === color)
+            .map(([id, group]) => ({ id, ...group })),
+        update: async (id: number, properties: { title: string; color: string }) =>
+          Object.assign(profile.groups.get(id)!, properties),
       },
     };
     new Function("chrome", "navigator", "setTimeout", "clearTimeout", worker)(
       chrome,
       { userAgent: "Chrome/153.0.0.0" },
-      () => 0,
+      (callback: () => void, ms: number) => {
+        if (ms === 2_000) profile.releaseTimers.push(callback);
+        return 0;
+      },
       () => {},
     );
     const started = {
@@ -197,6 +232,24 @@ class FakeChrome {
     };
     this.current = started;
     return started;
+  }
+
+  groupOf(id: number): number {
+    return this.tabGroup.get(id) ?? -1;
+  }
+
+  pruneGroups() {
+    for (const id of this.groups.keys())
+      if (![...this.tabGroup.values()].includes(id)) this.groups.delete(id);
+  }
+
+  /** The title of the tab's group, or null. */
+  groupTitle(id: number): string | null {
+    return this.groups.get(this.groupOf(id))?.title ?? null;
+  }
+
+  tabOf(id: number) {
+    return { ...tabOf(id), groupId: this.groupOf(id) };
   }
 }
 
@@ -336,5 +389,56 @@ describe("a restarted extension worker", () => {
     const second = chrome.restartWorker();
     await second.ready();
     expect((chrome.session.liveState as any).createdTabs).toEqual([10]);
+  });
+});
+
+describe("the tabs an agent controls", () => {
+  const releaseDelay = async (chrome: FakeChrome) => {
+    for (const run of chrome.releaseTimers.splice(0)) run();
+    await flush();
+    await flush();
+  };
+
+  test("are in a tab group named after the product while the agent controls them", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    expect(await command({ type: "debugger.attach", tabId: "8" })).toMatchObject({ ok: true });
+    await flush();
+    expect(chrome.groupTitle(8)).toBe("Opengeni");
+    expect(chrome.groups.get(chrome.groupOf(8))?.color).toBe("grey");
+    expect(chrome.groupTitle(7)).toBeNull();
+    expect(chrome.groupTitle(9)).toBeNull();
+
+    expect(await command({ type: "debugger.detach", tabId: "8" })).toMatchObject({ ok: true });
+    await releaseDelay(chrome);
+    expect(chrome.groupTitle(8)).toBeNull();
+    expect(chrome.groups.size).toBe(0);
+  });
+
+  test("leave the group when Chrome ends the agent's control", async () => {
+    const chrome = new FakeChrome();
+    const started = chrome.startWorker();
+    const command = await started.ready();
+    await command({ type: "debugger.attach", tabId: "7" });
+    await flush();
+    expect(chrome.groupTitle(7)).toBe("Opengeni");
+    chrome.attached.delete(7);
+    started.detached(7, "canceled_by_user");
+    await releaseDelay(chrome);
+    expect(chrome.groupTitle(7)).toBeNull();
+  });
+
+  test("a restarted worker keeps the group; a reloaded extension removes it", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    await command({ type: "debugger.attach", tabId: "9" });
+    await flush();
+    await chrome.restartWorker().ready();
+    await flush();
+    expect(chrome.groupTitle(9)).toBe("Opengeni");
+    // Reloading ends every attachment, and the group shows none.
+    await chrome.reloadExtension().ready();
+    await flush();
+    expect(chrome.groupTitle(9)).toBeNull();
   });
 });

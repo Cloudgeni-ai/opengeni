@@ -65,7 +65,8 @@ removes its local extension storage. Closing a tab or disconnecting a profile
 does not erase information already sent to a deployment or its providers.
 Contact your deployment operator for access, deletion, retention, and provider
 details. Chrome displays a debugger notification when the extension attaches
-to a tab. Chrome-restricted pages cannot be controlled.
+to a tab, and tabs an agent is controlling sit in a tab group named after the
+product. Chrome-restricted pages cannot be controlled.
 
 ## Contact
 

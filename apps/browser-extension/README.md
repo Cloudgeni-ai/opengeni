@@ -17,6 +17,18 @@ The extension privacy notice is [PRIVACY.md](PRIVACY.md). Store descriptions
 must disclose the local agent requirement and the forwarding of browser data
 to the configured deployment.
 
+## Controlled tabs
+
+While an agent controls a tab (the extension's debugger is attached), the tab
+sits in a tab group named after the product, one per window, so the tab strip
+shows which tabs are in use without changing the page. `src/tab-indicator.ts`
+owns this: a tab leaves the group once control has stayed ended for a moment,
+and goes back to where it was, or to the person's own group it came from. A
+tab the person drags out stays out until that control ends, and groups left
+behind after the extension reloads or Chrome restarts are removed. Chrome's
+debugger notification, with its Cancel button, stays the way to stop every
+agent at once.
+
 ## Site permissions
 
 `contentSettings` is an optional permission. The extension asks for it only when

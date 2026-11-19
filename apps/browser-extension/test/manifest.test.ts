@@ -36,4 +36,9 @@ describe("packaged manifest", () => {
     expect(store.key).toBeUndefined();
     expect(store.version).toBe("0.1.3");
   });
+
+  test("may group tabs, to show which ones an agent controls", async () => {
+    const { permissions } = await readJson("manifest.json");
+    expect(permissions).toContain("tabGroups");
+  });
 });

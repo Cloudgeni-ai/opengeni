@@ -12,6 +12,7 @@
     "nativeMessaging",
     "scripting",
     "storage",
+    "tabGroups",
     "tabs",
     "webNavigation"
   ],
