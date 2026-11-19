@@ -589,7 +589,9 @@ describe("organization agents: versions and publishing", () => {
       await shared.admin.begin(async (tx) => {
         await tx`set local session_replication_role = replica`;
         await tx`update sessions set agent_id = ${agent.id}, agent_version = 1,
-          agent_prompt_version = 1, created_by_subject_id = ${subjectId} where id = ${session.id}`;
+          agent_prompt_version = 1 where id = ${session.id}`;
+        if (subjectId)
+          await tx`update sessions set created_by_subject_id = ${subjectId} where id = ${session.id}`;
       });
       return session.id;
     };
