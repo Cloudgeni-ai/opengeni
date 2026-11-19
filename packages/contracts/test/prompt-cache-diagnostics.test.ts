@@ -49,6 +49,52 @@ describe("prompt-cache warm-miss classification", () => {
     observation: { request: fingerprint(100) },
   });
 
+  test("a prompt a release changed is told apart from one a session changed", () => {
+    const before = sample({
+      sourceKey: "previous",
+      observation: { request: fingerprint(100), release: "rev-1" },
+    });
+    const after = (release: string | undefined, request: PromptCacheRequestFingerprint) =>
+      sample({
+        sourceKey: "current",
+        inputTokens: 190_000,
+        cachedTokens: 0,
+        occurredAt: at(30),
+        observation: { request, ...(release ? { release } : {}) },
+      });
+    const system = fingerprint(110, { system: digest("c") });
+    const tools = fingerprint(110, { tools: digest("d") });
+    expect(classifyPromptCacheWarmMiss(before, after("rev-2", system))?.class).toBe(
+      "release_changed",
+    );
+    expect(classifyPromptCacheWarmMiss(before, after("rev-2", tools))?.class).toBe(
+      "release_changed",
+    );
+    expect(classifyPromptCacheWarmMiss(before, after("rev-1", system))?.class).toBe(
+      "system_changed",
+    );
+    expect(classifyPromptCacheWarmMiss(before, after("rev-1", tools))?.class).toBe("tools_changed");
+    // A call recorded before releases were stored cannot prove a release.
+    expect(classifyPromptCacheWarmMiss(before, after(undefined, system))?.class).toBe(
+      "system_changed",
+    );
+    // A history rewrite is never a release's doing.
+    expect(
+      classifyPromptCacheWarmMiss(before, after("rev-2", fingerprint(110, { rewrittenFrom: 8 })))
+        ?.class,
+    ).toBe("history_rewritten");
+  });
+
+  test("the release is kept only with a request fingerprint and in a bounded form", () => {
+    expect(parsePromptCacheObservation({ request: fingerprint(4), release: "v1.2.3+abc" })).toEqual(
+      { request: fingerprint(4), release: "v1.2.3+abc" },
+    );
+    expect(
+      parsePromptCacheObservation({ request: fingerprint(4), release: "x".repeat(129) }),
+    ).toEqual({ request: fingerprint(4) });
+    expect(parsePromptCacheObservation({ release: "rev-1" })).toBeNull();
+  });
+
   test("a call that reads the warm prefix is not a miss", () => {
     expect(
       classifyPromptCacheWarmMiss(
@@ -106,6 +152,12 @@ describe("prompt-cache warm-miss classification", () => {
     ).toMatchObject({ class: "idle_gap" });
     expect(
       classifyPromptCacheWarmMiss(previous, sample({ ...miss, occurredAt: at(10) })),
+    ).toMatchObject({ class: "unobserved" });
+    expect(
+      classifyPromptCacheWarmMiss(
+        previous,
+        sample({ ...miss, occurredAt: at(10), observation: { request: fingerprint(104) } }),
+      ),
     ).toMatchObject({ class: "unexplained" });
   });
 

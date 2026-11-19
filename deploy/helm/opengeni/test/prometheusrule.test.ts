@@ -848,6 +848,34 @@ describe("turn-capacity Prometheus alerts", () => {
   });
 });
 
+describe("prompt-cache prefix Prometheus alerts", () => {
+  test("read the per-call warm-miss classification, not a hit ratio", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const changed = alertExpression(template, "OpenGeniPromptCachePrefixChanged");
+    // A release that edits model-facing text is release_changed and must not
+    // page; only a change within one deployment is a defect.
+    expect(changed).toContain('class=~"tools_changed|system_changed"');
+    expect(changed).not.toContain("release_changed");
+    expect(changed).toContain("[24h])) >= 5");
+    const history = alertExpression(template, "OpenGeniPromptCacheHistoryRewriteLossHigh");
+    expect(history).toContain('class=~"history_rewritten|thinking_dropped"');
+    expect(history).toContain("opengeni_model_cached_tokens_total");
+    expect(history).toContain(") > 0.02");
+    const blind = alertExpression(template, "OpenGeniPromptCacheDiagnosticsBlind");
+    expect(blind).toContain('class="unobserved"');
+    expect(blind).toContain(") > 0.5");
+    for (const expression of [changed, history, blind]) {
+      expect(expression).not.toContain("cache_hit_ratio");
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+  });
+});
+
 describe("Codex pool Prometheus alerts", () => {
   test("cache telemetry alerts distinguish missing fields from absent usage, not counter skew", async () => {
     const template = await readFile(
