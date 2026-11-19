@@ -859,14 +859,19 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = uuidParam(c, "workspaceId");
     const context = await requireAccessContext(c, deps);
     let accountId: string;
+    const workspaceNotFound = () => new HTTPException(404, { message: "workspace not found" });
     try {
       accountId = (await rlsContextForWorkspace(deps.db, workspaceId)).accountId;
     } catch (error) {
-      if (error instanceof WorkspaceNotFoundError) {
-        throw new HTTPException(404, { message: "workspace not found" });
-      }
+      if (error instanceof WorkspaceNotFoundError) throw workspaceNotFound();
       throw error;
     }
+    // Callers outside the organization learn nothing about its workspaces.
+    const apiKey = accountScopedApiKeyWorkspaceAuthority(context);
+    const related = apiKey
+      ? apiKey.accountId === accountId
+      : context.accountGrants.some((grant) => grant.accountId === accountId);
+    if (!related) throw workspaceNotFound();
     const caller = authorizeOrgAgentsCaller(deps, context, accountId, [permission]);
     if (!inScope(caller, workspaceId)) {
       throw new HTTPException(403, { message: "workspace is outside organization key scope" });
