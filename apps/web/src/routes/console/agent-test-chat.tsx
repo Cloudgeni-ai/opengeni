@@ -118,6 +118,12 @@ export function AgentTestChat({
   const servers = perUserServers(agent, toolServers);
   const version = agent.latestVersion;
   const approvals = useMemo(() => projectPendingApprovals(events), [events]);
+  const loginsKey = JSON.stringify(tokens);
+
+  // A different version or different logins is a new start, not a retry.
+  useEffect(() => {
+    startKey.current = null;
+  }, [version, loginsKey]);
 
   useEffect(() => {
     if (!chat) return;

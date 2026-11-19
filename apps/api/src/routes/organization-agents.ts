@@ -306,6 +306,10 @@ async function orgCaller(
  * An agent made available in team workspaces runs there too, so changing or
  * publishing it is for owners and admins: Editors get 403
  * `agent_in_team_workspaces`.
+ * This read runs before the write's transaction, but draft and publish both
+ * require `expectedVersion`, and adding team workspaces bumps the agent's row
+ * version: an admin change landing after this check makes the write fail
+ * with `agent_version_conflict` instead.
  */
 async function requireEditableByCaller(
   deps: ApiRouteDeps,
@@ -1235,7 +1239,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   // Approve or decline an "Ask first" tool call waiting in the caller's own
   // test chat: the app's approval decision, recorded as the tester's.
   app.post(`${base}/:agentId/test-chats/:sessionId/approvals/:approvalId`, async (c) => {
-    const { grant, workspaceId, session } = await ownTestChat(c);
+    const { caller, grant, workspaceId, session } = await ownTestChat(c);
     const approvalId = c.req.param("approvalId") ?? "";
     if (approvalId.length === 0 || approvalId.length > 256) {
       throw httpError(404, "approval_not_found", "Approval not found.");
@@ -1248,7 +1252,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
         workspaceId,
         sessionId: session.id,
         subjectId: grant.subjectId,
-        respondedByKind: "human",
+        respondedByKind: caller.apiKey ? "api" : "human",
         // Never confirms an app-action change: that needs the app's own sign-in.
         decidedBySignedInPerson: false,
         payload: {
