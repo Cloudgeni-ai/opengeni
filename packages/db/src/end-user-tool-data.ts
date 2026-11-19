@@ -9,7 +9,7 @@
  * deletion is recorded in the Console audit log.
  */
 import { sql } from "drizzle-orm";
-import { forgetRememberedEndUserProfile, insertConsoleAuditEvent } from "./console";
+import { insertConsoleAuditEvent } from "./console";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 export type EndUserToolDataErasure = {
@@ -66,7 +66,6 @@ export async function eraseEndUserToolData(
           ).length > 0,
       )
     : false;
-  if (input.includeProfile) forgetRememberedEndUserProfile(input.accountId, input.subjectId);
   if (removedLogins > 0 || profileRemoved) {
     await withRlsContext(tx, { accountId: input.accountId, workspaceId: null }, (scoped) =>
       insertConsoleAuditEvent(scoped, {
