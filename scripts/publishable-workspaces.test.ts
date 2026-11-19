@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   OPENGENI_CLI_PACKAGE_NAME,
+  isBestEffortPublication,
   isPublishedPackageName,
   npmTarballStem,
   publishableWorkspacePackages,
   publishedPackageOfSpecifier,
+  releaseContractPackages,
 } from "./publishable-workspaces";
 
 describe("published package names", () => {
@@ -53,5 +55,18 @@ describe("published package names", () => {
     );
     expect(cli?.dir).toBe("packages/cli");
     expect(publishableWorkspacePackages().map((pkg) => pkg.name)).not.toContain("opengeni-web");
+  });
+
+  test("the release contract is the publishable set without the best-effort CLI", () => {
+    expect(isBestEffortPublication(OPENGENI_CLI_PACKAGE_NAME)).toBe(true);
+    expect(isBestEffortPublication("@opengeni/sdk")).toBe(false);
+    const contract = releaseContractPackages().map((pkg) => pkg.name);
+    expect(contract).not.toContain(OPENGENI_CLI_PACKAGE_NAME);
+    expect(contract).toContain("@opengeni/sdk");
+    expect(contract).toEqual(
+      publishableWorkspacePackages()
+        .map((pkg) => pkg.name)
+        .filter((name) => name !== OPENGENI_CLI_PACKAGE_NAME),
+    );
   });
 });

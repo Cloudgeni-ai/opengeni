@@ -680,11 +680,8 @@ describe("immutable origin receipts and archives", () => {
       ["packages/other/package.json", { name: "left-pad", version: "1.0.0" }],
     ] as const)
       files.set(path, bytes(manifest));
-    expect(sourceCohort(files).map((p) => p.name)).toEqual([
-      "opengeni",
-      "@opengeni/z",
-      "@opengeni/a",
-    ]);
+    // The best-effort unscoped CLI is never part of a canary cohort.
+    expect(sourceCohort(files).map((p) => p.name)).toEqual(["@opengeni/z", "@opengeni/a"]);
   });
 });
 

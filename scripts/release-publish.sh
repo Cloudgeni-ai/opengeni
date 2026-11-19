@@ -52,10 +52,10 @@ bun scripts/rewrite-workspace-deps.ts --strip-dev-dependencies
 # committed; run with `--restore` locally to undo it.
 bun scripts/rewrite-entry-points.ts
 
-# Publish the unscoped `opengeni` CLI first: `changeset publish` below runs in
-# no fixed order, and the CLI is the only package outside the @opengeni scope.
-# A token that cannot write it then fails here, before any @opengeni package is
-# published, and the release can be rerun once the token is fixed.
+# Publish the unscoped `opengeni` CLI best-effort: it is outside the release
+# contract. If npm refuses it (for example an NPM_TOKEN limited to the @opengeni
+# scope), this step warns, marks the CLI private in this ephemeral checkout so
+# `changeset publish` skips it, and the release continues.
 bun scripts/publish-unscoped-first.ts
 
 # changeset publish reads publishConfig (access: public, provenance: true) from

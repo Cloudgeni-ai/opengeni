@@ -49,17 +49,15 @@ export function npmTarballStem(name: string): string {
 }
 
 /**
- * The order a release publishes packages in: the unscoped `opengeni` CLI first,
- * then the given (dependency) order. It is the only name outside the
- * `@opengeni` scope, so an npm token limited to that scope fails on it before
- * any other package is published, and the release can simply be rerun once
- * the token is fixed.
+ * Whether a package is published best-effort, outside the release contract.
+ * The unscoped `opengeni` CLI is: it is built, guarded and versioned in
+ * lockstep with the `@opengeni` packages, but a release that cannot write it
+ * (for example an npm token limited to the `@opengeni` scope) warns and
+ * continues. It is never part of release candidates, expected package sets,
+ * BOMs or canary cohorts.
  */
-export function publicationOrder<T extends { name: string }>(packages: readonly T[]): T[] {
-  return [
-    ...packages.filter((pkg) => pkg.name === OPENGENI_CLI_PACKAGE_NAME),
-    ...packages.filter((pkg) => pkg.name !== OPENGENI_CLI_PACKAGE_NAME),
-  ];
+export function isBestEffortPublication(name: string): boolean {
+  return name === OPENGENI_CLI_PACKAGE_NAME;
 }
 
 export type PackageJson = Record<string, unknown> & {
@@ -159,6 +157,15 @@ export function publishableWorkspacePackages(root = repoRoot): WorkspacePackage[
       pkg.packageJson.private !== true &&
       !ignored.has(pkg.name),
   );
+}
+
+/**
+ * The packages every release must publish: the publishable packages without
+ * the best-effort ones. Release candidates, expected package sets, post-publish
+ * verification and canary cohorts use this set.
+ */
+export function releaseContractPackages(root = repoRoot): WorkspacePackage[] {
+  return publishableWorkspacePackages(root).filter((pkg) => !isBestEffortPublication(pkg.name));
 }
 
 export function workspaceDependencyNames(
