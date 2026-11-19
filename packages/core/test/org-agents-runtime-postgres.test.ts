@@ -93,8 +93,8 @@ async function organization() {
       await shared.admin`insert into agent_revisions (agent_id, account_id, workspace_id, revision,
           name, instructions, config, tool_catalog, source, config_hash)
         values (${id}, ${accountId}, null, ${index + 1}, ${key}, ${version.instructions},
-          ${JSON.stringify(version.config ?? {})}::jsonb,
-          ${JSON.stringify({ crm: [{ name: "lookup" }] })}::jsonb, 'console',
+          ${JSON.stringify(version.config ?? {})}::text::jsonb,
+          ${JSON.stringify({ crm: [{ name: "lookup" }] })}::text::jsonb, 'console',
           ${hash(`${id}:${index}`)})`;
     }
     return id;

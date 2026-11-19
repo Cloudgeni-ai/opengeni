@@ -81,7 +81,7 @@ async function fixture() {
       insert into organization_tool_servers (account_id, server_key, name, url, auth_mode,
         shared_headers_encrypted, oauth_refresh)
       values (${accountId}, ${serverKey}, ${serverKey.toUpperCase()}, ${url(serverKey)}, ${authMode},
-        ${sharedHeaders}, ${oauthRefresh === null ? null : JSON.stringify(oauthRefresh)}::jsonb)
+        ${sharedHeaders}, ${oauthRefresh === null ? null : JSON.stringify(oauthRefresh)}::text::jsonb)
       returning id::text`;
     servers[serverKey] = row!.id;
   }
@@ -93,7 +93,7 @@ async function fixture() {
   await shared.admin`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
       instructions, config, tool_catalog, source, config_hash)
     values (${agentId}, ${accountId}, null, 1, 'Support', '',
-      ${JSON.stringify({ toolServers: seeds.map(([server]) => ({ server })) })}::jsonb, '{}'::jsonb,
+      ${JSON.stringify({ toolServers: seeds.map(([server]) => ({ server })) })}::text::jsonb, '{}'::jsonb,
       'console', ${`sha256:${createHash("sha256").update(agentId).digest("hex")}`})`;
   async function storeLogin(
     serverKey: string,

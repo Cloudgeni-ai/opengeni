@@ -106,7 +106,7 @@ async function organization() {
       await shared.admin`insert into agent_revisions (agent_id, account_id, workspace_id, revision,
           name, instructions, config, tool_catalog, source, config_hash)
         values (${id}, ${accountId}, null, ${index + 1}, ${key}, ${version.instructions},
-          ${JSON.stringify(config)}::jsonb, '{}'::jsonb, 'console',
+          ${JSON.stringify(config)}::text::jsonb, '{}'::jsonb, 'console',
           ${hash(`${id}:${index}`)})`;
     }
     return id;
@@ -573,7 +573,7 @@ describe("organization agents at runtime", () => {
     const [server] = await shared.admin<{ id: string }[]>`
       insert into organization_tool_servers (account_id, server_key, name, url, auth_mode, oauth_refresh)
       values (${org.accountId}, 'crm', 'CRM', 'https://crm.example.com/mcp', 'per_user',
-        ${JSON.stringify({ tokenUrl: "https://crm.example.com/token", clientId: "c" })}::jsonb)
+        ${JSON.stringify({ tokenUrl: "https://crm.example.com/token", clientId: "c" })}::text::jsonb)
       returning id::text`;
     const subjectId = "external_user:alice";
     const [credential] = await shared.admin<{ id: string }[]>`
