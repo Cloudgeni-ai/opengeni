@@ -1864,7 +1864,12 @@ export function createInteractionAttemptToolDefinitions(
             try {
               return await options.execute(value, executionContext);
             } catch (error) {
-              throw await withUserSetupCard(error, options.name, input.postSetupCard);
+              throw await withUserSetupCard(
+                error,
+                options.name,
+                input.postSetupCard,
+                selected.has("capability_authorization_request"),
+              );
             }
           },
           options.readOnly,
@@ -4916,6 +4921,8 @@ async function withUserSetupCard(
   error: unknown,
   toolName: string,
   post: UserSetupCardPoster | undefined,
+  /** Whether this agent has capability_authorization_request to post it itself. */
+  cardTool: boolean,
 ): Promise<unknown> {
   if (!(error instanceof OpenGeniApiError)) return error;
   const blocker = userSetupBlocker(error.code);
@@ -4940,7 +4947,7 @@ async function withUserSetupCard(
       ? userSetupUnavailableMessage(blocker)
       : posted
         ? userSetupCardShownMessage(blocker, posted.chatUrl)
-        : userSetupCardUnpostedMessage(blocker),
+        : userSetupCardUnpostedMessage(blocker, cardTool),
     // Not retryable: finishing the card continues the chat, so a retry only
     // repeats the refusal. The reference ID stays for support.
     { code: blocker.code, retryable: false, correlationId: error.correlationId },

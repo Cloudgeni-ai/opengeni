@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  agentConfigFirstPartyMcpTools,
   allAgentCapabilities,
+  resolveAgentConfig,
+  resolveAgentToolFamilies,
+  type AgentCapabilities,
   type FirstPartyMcpToolName,
   type Permission,
   type ResolvedAgentConfig,
@@ -493,5 +497,80 @@ describe("buildAgent instructions: tool availability", () => {
       [],
     );
     expect(PROMPT_NAMED_TOOLS.filter((tool) => names(inspection.composed, tool))).toEqual([]);
+  });
+});
+
+describe("prompt text names only setup tools the capability set has", () => {
+  /** A new session's turn: stored selection, then the turn's capability gate. */
+  function composeFor(capabilities: AgentCapabilities) {
+    const config = resolveAgentConfig({
+      creator: "api",
+      workspace: { defaults: null, humanInputEnabled: true },
+      deployment: { unavailable: {} },
+      goal: false,
+      request: { capabilities },
+    }).config!;
+    const selected = resolveAgentToolFamilies(config).firstPartyTools(
+      agentConfigFirstPartyMcpTools(config, DEFAULT_FIRST_PARTY_MCP_TOOLS),
+    );
+    const composed = composeModularAgentInstructions({
+      capabilities: config.capabilities,
+      renderer: "opengeni",
+      identity: DEFAULT_AGENT_IDENTITY,
+      resources: ALL_RESOURCES,
+      toolAvailability: deriveAgentPromptToolAvailability({ selectedFirstPartyTools: selected }),
+    }).composed;
+    return { composed, selected };
+  }
+
+  const SETUP_TOOLS = [
+    "capability_catalog_search",
+    "capability_authorization_request",
+    "custom_mcp_setup_request",
+  ] as const satisfies readonly FirstPartyMcpToolName[];
+
+  test("an agent without workspace admin is told about the Connect card it has, and only that", () => {
+    const { composed, selected } = composeFor({ from: "all", workspaceAdmin: false });
+    expect(selected).toContain("capability_authorization_request");
+    expect(composed).toContain("# Integration setup");
+    expect(names(composed, "capability_authorization_request")).toBe(true);
+    expect(names(composed, "capability_catalog_search")).toBe(false);
+    expect(names(composed, "custom_mcp_setup_request")).toBe(false);
+  });
+
+  test("workspace admin keeps its integration setup text unchanged", () => {
+    const admin = composeFor("all").composed;
+    expect(admin).toBe(
+      compose(
+        deriveAgentPromptToolAvailability({
+          selectedFirstPartyTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        }),
+      ),
+    );
+    expect(admin).toContain(
+      "For a suitable match with `setup.nextAction`, call `capability_authorization_request`",
+    );
+  });
+
+  test("across capability sets, no setup tool is named that the agent lacks", () => {
+    const sets: AgentCapabilities[] = [
+      "all",
+      "none",
+      { from: "all", workspaceAdmin: false },
+      { from: "all", workspaceConnectors: false },
+      { from: "all", workspaceAdmin: false, workspaceConnectors: false },
+      { from: "none", workspaceConnectors: true },
+      { from: "none", workspaceAdmin: true },
+      { from: "none", browser: true },
+      { from: "none", secrets: true, workspaceConnectors: true },
+    ];
+    for (const capabilities of sets) {
+      const { composed, selected } = composeFor(capabilities);
+      const named = SETUP_TOOLS.filter((tool) => names(composed, tool));
+      expect({ capabilities, unlisted: named.filter((tool) => !selected.includes(tool)) }).toEqual({
+        capabilities,
+        unlisted: [],
+      });
+    }
   });
 });

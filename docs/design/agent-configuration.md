@@ -190,6 +190,15 @@ Rules:
    wait: an answer to `request_human_input` resumes the paused turn and a new
    message starts one. Legacy sessions keep both unconditionally. The Codemode
    directive needs compute or `run_on` as well.
+   `capability_authorization_request` (the Connect card) and its integration
+   setup guidance come with `workspaceConnectors` or `workspaceAdmin`: posting
+   a card is the person's own connection, not workspace administration, and
+   grants nothing, so an agent that can use connected apps can also offer to
+   connect one. Without `workspaceAdmin` it has no `capability_catalog_search`,
+   so it uses a capability ID that a tool result, notice or the tool's own
+   description names (for example `api:connected-machine`), and reconnect
+   guidance points the person to Connections instead. Text the agent reads
+   names a setup tool only when the agent has it.
 2. **Selectable capabilities** (each owns its tools and, where it has one, its
    prompt module). The single source of truth is the registry in
    `packages/contracts/src/agent-config.ts`; a test maps every first-party tool.
@@ -210,7 +219,7 @@ Rules:
 | `media` | `generate_image`, `generate_video`, hosted `image_generation`; their guidance only when one is attached | off |
 | `workspaceFiles` | files server | off |
 | `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken families; hosted Atlassian MCP | off |
-| `workspaceAdmin` | variable sets and environments, capability and connector setup, machines, sandboxes, rigs, projects | off |
+| `workspaceAdmin` | variable sets and environments, capability catalog search and custom MCP setup, machines, sandboxes, rigs, projects | off |
 
 3. **Omitted ⇒ the workspace default, else `"all"`.** Explicit ⇒ starting point
    plus toggles; nothing is added beyond derived tools.

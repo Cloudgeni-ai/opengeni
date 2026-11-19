@@ -628,19 +628,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       `not loaded this turn: ${unavailableMcpConnectorReasonText(connector.reason)}`,
     ]),
   );
-  const mcpAvailabilityNote = unavailableMcpOperationalContext({
-    connectors: unavailableMcpConnectors,
-    omittedCount: deps.unavailableMcpConnectors.omittedCount,
-    needsReconnect,
-    connected: connectedMcpConnectors({
-      servers: canonicalRunSettings.mcpServers,
-      tools: [...canonicalTurnTools, ...turnTools],
-      unavailableIds: preparationUnavailableMcpServers.keys(),
-      bindings: turn.mcpAccountBindings,
-      apiIntegrations,
-      brokenConnectionIds: new Set(brokenConnections.map((connection) => connection.connectionId)),
-    }),
-  });
   const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
@@ -824,6 +811,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ),
     startedUnattended,
   );
+  // Written after the selection, which its reconnect guidance follows.
+  const mcpAvailabilityNote = unavailableMcpOperationalContext({
+    connectors: unavailableMcpConnectors,
+    omittedCount: deps.unavailableMcpConnectors.omittedCount,
+    needsReconnect,
+    connected: connectedMcpConnectors({
+      servers: canonicalRunSettings.mcpServers,
+      tools: [...canonicalTurnTools, ...turnTools],
+      unavailableIds: preparationUnavailableMcpServers.keys(),
+      bindings: turn.mcpAccountBindings,
+      apiIntegrations,
+      brokenConnectionIds: new Set(brokenConnections.map((connection) => connection.connectionId)),
+    }),
+    // Reconnect guidance names only the setup tools this turn's agent has.
+    setupTools: {
+      catalog: selectedFirstPartyMcpTools.includes("capability_catalog_search"),
+      card: selectedFirstPartyMcpTools.includes("capability_authorization_request"),
+    },
+  });
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
     agentConfig: session.agent,

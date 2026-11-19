@@ -20,6 +20,10 @@ import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
  * Every locked case has goals on, so every case with a sandbox or Connected
  * Machine kept its bytes; a session with compute but without goals gets the
  * goal-free verification rule (compose.test.ts).
+ * Cases with workspace connectors but without workspace admin later gained
+ * the short "# Integration setup" section for the Connect card tool, which
+ * now comes with workspace connectors too (the prompt changelog); nothing
+ * else changed.
  */
 const LOCKED: Record<string, string> = {
   "all/none": "30744:ae30fc59cc95777c2dd684a953c187baa0faacd762d87ef566c27db9b033d030",
@@ -109,17 +113,17 @@ const LOCKED: Record<string, string> = {
   "all-without-workspaceConnectors/selfhosted":
     "37695:b63e54d836f30fb1a9523e52bc85fc77cc33eff1c8edd475262753534b9a8960",
   "all-without-workspaceAdmin/none":
-    "29425:3ea8c42e05163407b2f67d865a256128203d910edbf237a23409fc2e52089f9f",
+    "29902:71f740f76b334712d8ee52bafb971a555ab31f743d9fec84b198134067378261",
   "all-without-workspaceAdmin/docker":
-    "34702:4ce08b8580f28b2667d83e51a20fab16417adbedb1864f75565c36b9d8d26bb7",
+    "35179:b0d80b67ab370db319809b8582977322f5cb702cde72fd51349745d2cc3198aa",
   "all-without-workspaceAdmin/selfhosted":
-    "36376:f61b58035b70ec05cdef16505b590304d2e3dcde487b4071c9efcecb9151dc66",
+    "36853:41d57ad45c8317977b2e3c796780f0f1a8f2cea16b4db8ddc16ec66099be4c52",
   "none-with-features/docker":
-    "27161:b4f5f26780dcfdebe1d25c51bdc753b83e3cc8fb8cf7c909556ae44207cccb80",
+    "27638:012362c0a18ed4947d0c10324495a4a8d3fad2e73548f7aef9ba9378b4ec1a54",
   "none-with-features/selfhosted":
-    "28835:6aedb9580b977415a4f4d50749b0e63aa21c422c1320435a43cae88d077603f9",
+    "29312:70e9ef0017056407ee3655d9344964057307710e863017ae0cba9668e6aeddf6",
   "none-with-features-and-workspace/none":
-    "22049:d5bd66efb9d6479ff1f032c1eb903a1d0dc54cbef39babd56fe56e13d92c2155",
+    "22526:4137f980b117ffe3f5a7133b8588c148987338bb5a73dec66dcec76d05875475",
   "none-with-features-manage/none":
     "20801:a95d45dbf3b8d24fe285e437334bc474081bde693e6ec56643109703bee6f2a4",
 };
@@ -231,7 +235,7 @@ describe("an absent feature only omits its own text", () => {
     // The base case's only setup-card source is workspace connectors.
     setupCards: {
       options: without({ workspaceConnectors: false }),
-      gone: ["show its setup card"],
+      gone: ["show its setup card", "# Integration setup", "capability_authorization_request"],
       pure: false,
     },
     waitForInput: {

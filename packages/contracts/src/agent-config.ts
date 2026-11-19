@@ -316,6 +316,13 @@ export function isDerivedAgentToolOwner(
  * `runtime` tools are mechanics every agent needs regardless of what it may do:
  * - `wait_for_input`: ends the turn and waits for the next input.
  * - `set_session_title`: session titling.
+ * - `capability_authorization_request`: posts a Connect card the person
+ *   finishes themselves. It is derived like `wait_for_input`: an agent gets
+ *   it whenever it has something the person may have to connect
+ *   (`workspaceConnectors` or `workspaceAdmin`; see `connectCards` in
+ *   `resolveAgentToolFamilies`). Posting a card is the person's own
+ *   connection, not workspace administration, and grants nothing: the card
+ *   offers only what the person's own access can finish.
  *
  * `sandbox` tools are derived from attached compute and never toggled:
  * - `command_read` / `command_wait`: read/await the session's own background
@@ -325,6 +332,7 @@ export function isDerivedAgentToolOwner(
 export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
   wait_for_input: "runtime",
+  capability_authorization_request: "runtime",
   // Reaching the person: a push to the phones of whoever started the session.
   notify_user: "notifications",
   notification_withdraw: "notifications",
@@ -416,7 +424,6 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   variable_set_set_variable: "secrets",
   environment_set_variable: "secrets",
   capability_catalog_search: "workspaceAdmin",
-  capability_authorization_request: "workspaceAdmin",
   custom_mcp_setup_request: "workspaceAdmin",
 
   sessions_list: "subagents",
@@ -771,10 +778,16 @@ export function resolveAgentToolFamilies(
     enabled("browser") ||
     enabled("workspaceAdmin") ||
     media;
+  // A Connect card is for something the agent could use once the person
+  // connects it: an integration (`workspaceConnectors`), or anything set up
+  // from the integration catalog or the machine list (`workspaceAdmin`). An
+  // agent with neither could not use what a card connects.
+  const connectCards = enabled("workspaceConnectors") || enabled("workspaceAdmin");
   const allowsFirstPartyTool = (name: FirstPartyMcpToolName): boolean => {
     const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
     if (owner === "sandbox") return sandboxTools;
     if (name === "wait_for_input") return waitForInput;
+    if (name === "capability_authorization_request") return connectCards;
     if (owner === "notifications") return notifications;
     return owner === "runtime" || enabled(owner);
   };
@@ -783,6 +796,8 @@ export function resolveAgentToolFamilies(
     humanInput,
     notifications,
     waitForInput,
+    /** `capability_authorization_request` and its guidance (configured agents only). */
+    connectCards,
     media,
     subagents: enabled("subagents"),
     /** Secret references resolve, the secret_* tools and the ask-card secret kind exist. */
