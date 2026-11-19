@@ -2725,6 +2725,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_codex_rotation_settings",
   "organization_connectors",
   "organization_credential_providers",
+  // 1507: end-user display name and email; erased when the end user is offboarded.
+  "organization_end_user_profiles",
   "organization_identity_issuers",
   "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
@@ -3112,8 +3114,6 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "network_routes",
   // 1508: a member's Console role; 'none' clears it, never deleted.
   "organization_console_roles",
-  // 1507: end-user display name and email; the latest value wins, never deleted.
-  "organization_end_user_profiles",
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",

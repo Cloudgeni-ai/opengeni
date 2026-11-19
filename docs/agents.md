@@ -683,6 +683,19 @@ server's login comes from, in order:
 A `per_user` server never falls back to a shared key. Without a login the
 chat runs without that server and records `session.tool_server.unavailable`.
 
+Stored secrets stay with the origin they were given for. Changing a tool
+server's URL to another origin drops its shared key (unless the same request
+sets a new one) and deletes every end user's stored login for it; changing the
+OAuth token URL to another origin (or adding one) drops the client secret
+(unless re-supplied) and deletes the stored OAuth logins. The audit row says
+what was dropped. Removing an end user from a workspace deletes their stored
+logins there; offboarding them from the organization deletes their logins in
+every workspace and the display name and email the product sent.
+
+Tool server writes and publishing with `moveRunningChats` reach every
+workspace of the organization, so an organization key limited to selected
+workspaces gets 403 `organization_key_workspace_limited` for them.
+
 ### Runs on
 
 `runsOn` says where an agent's chats run:
@@ -730,6 +743,11 @@ version (or an older one, a rollback) changes what new chats run.
 `moveRunningChats` also moves chats on other versions; a moved chat gets the
 new Instructions as a history item at its next turn
 (`sessions.agent_prompt_version` trails `agent_version` until then).
+The publish operation is `pending` until the move runs. When the move cannot
+start, the version stays published and the operation is `failed` with
+`failureReason`: `move_unavailable` (the deployment has no move workflow),
+`move_start_failed` (publish again to retry) or `superseded` (a later publish
+came before it started).
 
 ### Access and rollout
 
@@ -775,7 +793,11 @@ are on per organization (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`, see
 - Tool servers (`organization_tool_servers`) are referenced by key in versions.
   A shared key and an OAuth client secret are stored encrypted and never
   returned. End users' logins (`end_user_tool_credentials`) are stored per
-  managed workspace and end user (`external_user:<id>`), encrypted, write-only.
+  managed workspace and end user (`external_user:<id>`), encrypted, write-only;
+  a workspace context sees its own, the account context all of the
+  organization's (to delete them across workspaces when a server moves to
+  another origin or an end user is offboarded, see
+  `packages/db/src/end-user-tool-data.ts`).
 - Every write records a Console audit row (`agent.*`, `tool_server.*`,
   `tool_credential.*`).
 - Drafts run only in the organization's Console test workspace
