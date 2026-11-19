@@ -997,8 +997,10 @@ async function withinFrameRemovalTimeout<T>(script: Promise<T>): Promise<T> {
 
 /** Runs in a page frame, in this extension's isolated world: removes elements
  * showing another extension's page, also inside closed shadow roots (where
- * password managers put their inline menus), and returns those extensions'
- * ids. Self-contained, since Chrome runs it from its source. */
+ * password managers put their inline menus), and returns their addresses'
+ * hosts: the extension's id, or a random one for a page served at a dynamic
+ * address (use_dynamic_url, as Bitwarden's menu is). Self-contained, since
+ * Chrome runs it from its source. */
 function removeFramesOfOtherExtensions(ownId: string): string[] {
   const removed = new Set<string>();
   const shadowRootOf = (element: Element): ShadowRoot | null => {
@@ -1018,7 +1020,7 @@ function removeFramesOfOtherExtensions(ownId: string): string[] {
           : element instanceof HTMLObjectElement
             ? element.data
             : "";
-      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(source)?.[1]?.toLowerCase();
+      const id = /^chrome-extension:\/\/([^/?#]+)\//i.exec(source)?.[1]?.toLowerCase();
       if (id && id !== ownId) {
         removed.add(id);
         element.remove();
@@ -1071,7 +1073,7 @@ async function blankCreatedExtensionFrames(tabId: number): Promise<BlankCreatedF
   const ownId = chrome.runtime.id;
   const extensionFrames = (await withinFrameRemovalTimeout(chrome.debugger.getTargets())).flatMap(
     (target) => {
-      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(target.url)?.[1]?.toLowerCase();
+      const id = /^chrome-extension:\/\/([^/?#]+)\//i.exec(target.url)?.[1]?.toLowerCase();
       return target.type === "other" && id && id !== ownId ? [id] : [];
     },
   );
@@ -1207,7 +1209,7 @@ async function unseenFrames(token: string): Promise<UnseenFrames | null> {
           : element instanceof HTMLObjectElement
             ? element.data
             : "";
-      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(source)?.[1]?.toLowerCase();
+      const id = /^chrome-extension:\/\/([^/?#]+)\//i.exec(source)?.[1]?.toLowerCase();
       if (id && id !== chrome.runtime.id) addressed += 1;
       if (
         (element instanceof HTMLIFrameElement || element instanceof HTMLFrameElement) &&
