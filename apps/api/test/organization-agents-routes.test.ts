@@ -361,7 +361,7 @@ describe("Console agents routes", () => {
       instructions: "Two.",
       expectedVersion: rowVersion,
     });
-    expect([draft.status, draft.body.created, draft.body.version.version]).toEqual([200, true, 2]);
+    expect([draft.status, draft.body.created, draft.body.version.version]).toEqual([201, true, 2]);
     rowVersion = draft.body.agent.rowVersion;
     const stale = await call("PUT", `${org()}/${agentId}/draft`, keys.full, {
       name: "Flow",

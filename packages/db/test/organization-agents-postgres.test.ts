@@ -927,7 +927,7 @@ describe("organization agents: visibility gate, isolation and grants", () => {
           return result;
         },
       );
-      expect(counts).toEqual(Object.fromEntries(tables.map((table) => [table, 0])));
+      expect(counts as unknown).toEqual(Object.fromEntries(tables.map((table) => [table, 0])));
     }
     const [bServer] = await shared.admin<{ id: string }[]>`
       select id from organization_tool_servers where account_id = ${b.accountId}`;
