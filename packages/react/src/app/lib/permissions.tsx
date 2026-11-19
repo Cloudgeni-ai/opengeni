@@ -48,6 +48,9 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "rigs:manage": "Sandbox Environments",
   "artifacts:read": "Artifacts",
   "artifacts:publish": "Artifacts",
+  "agents:read": "Console agents",
+  "agents:manage": "Console agents",
+  "tool_credentials:write": "Console agents",
   "enrollments:read": "Machines",
   "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
@@ -76,6 +79,7 @@ const permissionGroupOrder = [
   "Goals",
   "Sandbox Environments",
   "Artifacts",
+  "Console agents",
   "Admin & account",
 ];
 

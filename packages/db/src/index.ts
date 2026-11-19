@@ -98,6 +98,7 @@ import {
 export * from "./organization-slack-bots";
 export * from "./slack-agents";
 export * from "./agents";
+export * from "./organization-agents";
 export * from "./slack-agent-proposals";
 export * from "./slack-agent-updates";
 export * from "./voice-transcription-settlement";
@@ -716,7 +717,11 @@ export * from "./site-sql";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
-export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
+export {
+  grantWorkspaceAccess,
+  insertWorkspaceMembershipIfAbsent,
+  listWorkspaceMembers,
+} from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 export { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 import { z } from "zod";

@@ -79,6 +79,12 @@ export const ORG_AGENT_ERROR_CODES = [
   "workspace_not_managed",
   /** Only an organization owner can change who manages an agent. */
   "agent_management_requires_owner",
+  /** A workspace named in the request is not one of this organization's shared workspaces. */
+  "workspace_not_found",
+  /** The tool server settings do not fit together (for example a shared key on a `per_user` server). */
+  "tool_server_invalid",
+  /** The version's settings are larger than an agent version can store. */
+  "agent_config_too_large",
 ] as const;
 export type OrgAgentErrorCode = (typeof ORG_AGENT_ERROR_CODES)[number];
 
@@ -454,6 +460,21 @@ export const SaveOrgAgentDraftRequest = /* @__PURE__ */ defineSchema(() =>
 export type SaveOrgAgentDraftRequest = z.input<typeof SaveOrgAgentDraftRequest>;
 
 /**
+ * The saved version. `created` is false when the definition equals an
+ * existing version (same config hash), which is returned instead.
+ */
+export const SaveOrgAgentDraftResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ agent: OrgAgent, version: OrgAgentVersion, created: z.boolean() }),
+);
+export type SaveOrgAgentDraftResponse = z.infer<typeof SaveOrgAgentDraftResponse>;
+
+/** `POST .../agents/:agentId/archive`. */
+export const ArchiveOrgAgentRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ expectedVersion: z.number().int().positive() }).strict(),
+);
+export type ArchiveOrgAgentRequest = z.input<typeof ArchiveOrgAgentRequest>;
+
+/**
  * `POST .../agents/:agentId/publish`. Publishing an older version is a
  * rollback. `moveRunningChats` also moves chats pinned to other versions to
  * this one (their prompt cache starts over); otherwise only new chats get it.
@@ -492,6 +513,12 @@ export const PublishOrgAgentResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ agent: OrgAgent, operation: OrgAgentPublishOperation }),
 );
 export type PublishOrgAgentResponse = z.infer<typeof PublishOrgAgentResponse>;
+export const ListOrgAgentPublishOperationsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ operations: z.array(OrgAgentPublishOperation) }),
+);
+export type ListOrgAgentPublishOperationsResponse = z.infer<
+  typeof ListOrgAgentPublishOperationsResponse
+>;
 
 /** Chats that would move if this publish also moved running chats. */
 export const OrgAgentMovableChatsResponse = /* @__PURE__ */ defineSchema(() =>
@@ -582,6 +609,23 @@ export const ListOrgAgentSessionsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ sessions: z.array(OrgAgentSessionEntry), nextCursor: z.string().nullable() }),
 );
 export type ListOrgAgentSessionsResponse = z.infer<typeof ListOrgAgentSessionsResponse>;
+export const ListOrgAgentSessionsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: z.string().min(1).max(512).optional(),
+    version: z.coerce.number().int().positive().optional(),
+  }),
+);
+export type ListOrgAgentSessionsQuery = z.infer<typeof ListOrgAgentSessionsQuery>;
+
+/** `GET .../usage?from=&to=`: defaults to the last 30 days; at most 366 days. */
+export const OrgAgentUsageQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
+  }),
+);
+export type OrgAgentUsageQuery = z.infer<typeof OrgAgentUsageQuery>;
 
 export const OrgAgentUsageResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -750,6 +794,56 @@ export type EndUserToolCredential = z.infer<typeof EndUserToolCredential>;
 export const EndUserToolCredentialResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ credential: EndUserToolCredential }),
 );
+
+/* ------------------------------------------------- workspace and Console test */
+
+/**
+ * `GET /v1/workspaces/:workspaceId/organization-agents`: the published
+ * organization agents chats in this workspace can name (read-only).
+ */
+export const WorkspaceOrgAgent = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    key: OrgAgentKey,
+    name: z.string(),
+    description: z.string(),
+    managedBy: OrgAgentManagedBy,
+    publishedVersion: z.number().int().positive(),
+  }),
+);
+export type WorkspaceOrgAgent = z.infer<typeof WorkspaceOrgAgent>;
+export const ListWorkspaceOrgAgentsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ agents: z.array(WorkspaceOrgAgent) }),
+);
+export type ListWorkspaceOrgAgentsResponse = z.infer<typeof ListWorkspaceOrgAgentsResponse>;
+
+/** `POST .../agents/test-workspace`: the organization's Console test workspace. */
+export const OrgAgentTestWorkspaceResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ workspaceId: z.string().uuid(), created: z.boolean() }),
+);
+export type OrgAgentTestWorkspaceResponse = z.infer<typeof OrgAgentTestWorkspaceResponse>;
+
+/**
+ * `POST .../agents/:agentId/test-chats`: a chat with one version (drafts
+ * included) in the Console test workspace. `toolLogins` are bearer tokens for
+ * this chat only, by tool server key; never stored beyond the chat.
+ */
+export const CreateOrgAgentTestChatRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.number().int().positive(),
+      message: z.string().trim().min(1).max(100_000),
+      toolLogins: z
+        .record(OrgToolServerKey, secretValue(z.string().min(1).max(16_384)))
+        .optional(),
+    })
+    .strict(),
+);
+export type CreateOrgAgentTestChatRequest = z.input<typeof CreateOrgAgentTestChatRequest>;
+export const CreateOrgAgentTestChatResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ workspaceId: z.string().uuid(), sessionId: z.string().uuid() }),
+);
+export type CreateOrgAgentTestChatResponse = z.infer<typeof CreateOrgAgentTestChatResponse>;
 
 /* --------------------------------------------------------- session create input */
 
