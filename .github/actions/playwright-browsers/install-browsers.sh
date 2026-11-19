@@ -264,29 +264,30 @@ finish_deb_cache() {
 
 # Installs the given packages from the deb cache with no network.
 install_from_deb_cache() {
-  local files=() package file
+  local package
   for package in "$@"; do
-    file="$(deb_file "${package}")"
-    if [ -z "${file}" ]; then
+    if [ -z "$(deb_file "${package}")" ]; then
       echo "The deb cache has no ${package}."
       return 1
     fi
-    files+=("${file}")
   done
   mkdir -p "${DEB_DIR}/partial"
   echo "::group::Install $# browser system packages from the deb cache"
   # apt resolves against the image's package lists and uses the cached debs
-  # when their versions match; dpkg installs the cached debs when the lists
-  # moved on. Only missing packages are installed, so nothing is downgraded.
+  # when their versions match. When they don't (the cache was filled after a
+  # list refresh, or on another runner image), the lists are refreshed and apt
+  # tries once more. Never `dpkg -i` the cached debs directly: a deb set built
+  # against other lists can pair a library with a sibling at another version
+  # (for example two mesa packages one point release apart), which leaves
+  # dpkg broken and every later apt run failing on unmet dependencies.
   local status=0
   sudo apt-get install -y --no-install-recommends --no-download \
     -o Dir::Cache::archives="${DEB_DIR}" "$@" || status=$?
   if [ "${status}" -ne 0 ]; then
+    timeout --kill-after="${KILL_AFTER_SECONDS}s" 120s sudo apt-get update || true
     status=0
-    sudo dpkg -i --refuse-downgrade "${files[@]}" || status=$?
-    if [ "${status}" -ne 0 ]; then
-      sudo dpkg --configure -a >/dev/null 2>&1 || true
-    fi
+    sudo apt-get install -y --no-install-recommends --no-download \
+      -o Dir::Cache::archives="${DEB_DIR}" "$@" || status=$?
   fi
   echo "::endgroup::"
   finish_deb_cache

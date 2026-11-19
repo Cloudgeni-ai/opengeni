@@ -479,18 +479,18 @@ describe("workflow timeout contract", () => {
     ]);
     expect(saving.outputs).toContain("debs-complete=true");
 
-    // The image's package lists moved on: dpkg installs the cached debs.
+    // The image's package lists moved on: refresh them and let apt retry, never
+    // `dpkg -i` a deb set that may mix versions.
     const moved = await runPlaywrightInstall({
       dryRun: ["libb", "-"],
       debs: ["libb"],
-      apt: [100],
+      apt: [100, 0, 0],
       install: [0],
     });
     expect(moved.exitCode).toBe(0);
-    expect(moved.calls).toContain("apt no-download libb");
-    expect(moved.calls).toContainEqual(
-      expect.stringMatching(/^sudo dpkg -i --refuse-downgrade \S+\/libb_1_amd64\.deb$/u),
-    );
+    expect(moved.calls.filter((call) => call === "apt no-download libb")).toHaveLength(2);
+    expect(moved.calls).toContain("apt update");
+    expect(moved.calls.some((call) => call.startsWith("sudo dpkg -i"))).toBe(false);
     expect(moved.calls.some((call) => call.startsWith("bun install-deps chromium"))).toBe(false);
 
     // Cold cache: downloads every browser's debs once, then installs offline.
