@@ -138,7 +138,11 @@ import {
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
-import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
+import {
+  createToolAuthNeededCardLedger,
+  rollingSafeToolAuthNeededPayload,
+  shouldPublishToolAuthNeededForTurn,
+} from "./admission";
 import {
   unavailableMcpConnectorReasonText,
   unavailableMcpOperationalContext,
@@ -697,21 +701,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       subjectId: turn.initiator.subjectId,
     },
   } as const;
+  // One card per missing access in a turn: repeats reuse the posted card.
+  const authNeededCards = createToolAuthNeededCardLedger();
   const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
     if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
       return;
     }
-    await eventing.publish!(
-      [
-        {
-          type: "tool.auth_needed",
-          payload: rollingSafeToolAuthNeededPayload(
-            accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
-          ),
-        },
-      ],
-      true,
-    );
+    await authNeededCards.post(payload, async () => {
+      await eventing.publish!(
+        [
+          {
+            type: "tool.auth_needed",
+            payload: rollingSafeToolAuthNeededPayload(
+              accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
+            ),
+          },
+        ],
+        true,
+      );
+    });
   };
   const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,

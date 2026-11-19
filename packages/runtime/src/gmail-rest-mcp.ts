@@ -67,7 +67,7 @@ const MUTATION_TOOLS = new Set([
  * is asked in the chat to allow more, through the same connect card.
  */
 const GMAIL_MORE_ACCESS_NEEDED =
-  "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; try again after they do.";
+  "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; until they do, calling it again fails the same way.";
 const GMAIL_NOT_AVAILABLE_FOR_CONNECTION =
   "This Gmail action is not available for the connected account.";
 

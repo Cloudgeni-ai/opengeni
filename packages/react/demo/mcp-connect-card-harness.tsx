@@ -5,7 +5,10 @@
 // so nothing reaches an API or the service.
 //   ?service=calendar|added|gmail-step-up|gmail-fixed   ?theme=light|dark
 // gmail-step-up: a connected account that needs more access for one tool, as
-// the session renders it (the stock "Allow" row for that exact account).
+// the session renders it (the stock row naming the action, for that exact
+// account). The agent hit it twice: the chat shows one card.
+//   ?state=waiting|done shows the card while Google's page is open, or after
+//   the person allowed it (press the button to see it).
 // gmail-fixed: the same tool on an account whose access is fixed (for example
 // managed by an integration platform): the stock row, with no action.
 // Open the card's setup dialog with its button to see the dialog.
@@ -36,6 +39,7 @@ const service =
     ? serviceParam
     : "calendar";
 const dark = params.get("theme") === "dark";
+const recoveryState = params.get("state");
 
 const CALENDAR = {
   id: "mcp:catalog:google-calendar",
@@ -139,27 +143,26 @@ function events(): SessionEvent[] {
   const turn = "turn-connect";
   if (service === "gmail-step-up" || service === "gmail-fixed") {
     const fixed = service === "gmail-fixed";
-    log.push("user.message", { text: "Draft a reply to Ola about Friday." });
-    log.push(
-      "tool.auth_needed",
-      {
-        serverId: "gmail",
-        toolName: "create_draft",
-        providerDomain: "gmail.googleapis.com",
-        connectionId: "conn-gmail-1",
-        ...(fixed
-          ? { reason: "unsupported_auth", accountReason: "account_scope_fixed" }
-          : { reason: "insufficient_scope" }),
-        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
-      },
-      turn,
-    );
+    log.push("user.message", { text: "Mark the newsletters in my inbox as read." });
+    const needed = {
+      serverId: "gmail",
+      toolName: "batch_modify_messages",
+      providerDomain: "gmailmcp.googleapis.com",
+      connectionId: "conn-gmail-1",
+      ...(fixed
+        ? { reason: "unsupported_auth", accountReason: "account_scope_fixed" }
+        : { reason: "insufficient_scope" }),
+      scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+    };
+    log.push("tool.auth_needed", needed, turn);
+    // The agent retried the same tool before reading the answer.
+    if (!fixed) log.push("tool.auth_needed", needed, turn);
     log.push(
       "agent.message.completed",
       {
         text: fixed
-          ? "The connected Gmail account can't create drafts, so I couldn't draft the reply."
-          : "Allow Gmail to write drafts and I'll carry on.",
+          ? "The connected Gmail account can't change messages, so nothing was marked as read."
+          : "Nothing is marked as read yet. Allow it in the chat and I'll carry on.",
       },
       turn,
     );
@@ -255,7 +258,13 @@ function Preview() {
                     />
                   ) : undefined;
                 }}
-                onReconnect={() => {}}
+                onReconnect={() =>
+                  recoveryState === "done"
+                    ? Promise.resolve({ outcome: "done" as const })
+                    : recoveryState === "waiting"
+                      ? new Promise<never>(() => {})
+                      : undefined
+                }
               />
             </main>
           </div>

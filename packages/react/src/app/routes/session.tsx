@@ -38,6 +38,12 @@ import {
 } from "../lib/session-composer-readiness";
 import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
+import { reserveBrowserConnectNavigation } from "@opengeni/connect";
+import type {
+  AuthNeededRecoveryHandler,
+  AuthNeededRecoveryOptions,
+  AuthNeededRecoveryResult,
+} from "../../components/auth-needed-row";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
 import { useMessageSenderRenderer } from "../components/session/message-senders";
 import {
@@ -1179,7 +1185,7 @@ export function SessionRoute({
     personalGitHubConnection !== null &&
     personalGitHubConnection.status !== "active" &&
     personalGitHubConnection.status !== "revoked";
-  const onReconnect = useCallback(
+  const reconnectViaSetup = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
         if (!item.authorizationUrl) {
@@ -1227,6 +1233,9 @@ export function SessionRoute({
               : {}),
             displayName: account.label,
             returnUrl: page.href(),
+            // Sign-in runs in a popup: it ends on a page that closes it,
+            // never on a second copy of this chat.
+            finishInPopup: true,
             idempotencyKey: crypto.randomUUID(),
           };
           reconnectCardConnections.current.set(request, item.connectionId);
@@ -1345,6 +1354,111 @@ export function SessionRoute({
       workspaceId,
       reconnectTransport,
     ],
+  );
+  // A connected account that needs more access (an OAuth step-up) goes
+  // straight from its card to the provider's consent page: no setup dialog
+  // in between, and the card follows it until the account is updated.
+  // Anything the card can't finish in one step falls back to the dialog.
+  const onReconnect = useCallback(
+    async (
+      item: AuthNeededItem,
+      options?: AuthNeededRecoveryOptions,
+    ): Promise<AuthNeededRecoveryResult | undefined> => {
+      const connectionId = item.connectionId;
+      const stepUp =
+        item.authoritySource !== "host" &&
+        item.reason === "insufficient_scope" &&
+        !!connectionId &&
+        item.scopes.length > 0 &&
+        !item.capability &&
+        !item.setupRequest;
+      // The consent window must open in the click itself, before anything
+      // asynchronous, or the browser blocks it.
+      let window_: ReturnType<typeof reserveBrowserConnectNavigation> | null = null;
+      if (stepUp && typeof window !== "undefined") {
+        try {
+          window_ = reserveBrowserConnectNavigation(window);
+        } catch {
+          window_ = null;
+        }
+      }
+      if (!window_ || !connectionId) {
+        await reconnectViaSetup(item);
+        return undefined;
+      }
+      const reserved = window_;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        reserved.close();
+      };
+      try {
+        const { findConnectRecoveryAccount } = await import("@opengeni/connect");
+        const target = await findConnectRecoveryTarget({
+          workspaceId,
+          connectionId,
+          accounts: (id) => reconnectTransport.accounts(id),
+          ownAccounts: () =>
+            context.client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
+          find: findConnectRecoveryAccount,
+        });
+        if (
+          !target ||
+          target.via !== "native" ||
+          !connectProviderAcceptsRequestedScopes(target.account.providerId)
+        ) {
+          release();
+          await reconnectViaSetup(item);
+          return undefined;
+        }
+        const { account } = target;
+        const request: NativeConnectRequest = {
+          scope: { workspaceId: target.workspaceId, transport: reconnectTransport },
+          providerId: account.providerId,
+          ownership: account.ownership,
+          reconnectAccountId: account.id,
+          requestedScopes: [...item.scopes],
+          displayName: account.label,
+          returnUrl: page.href(),
+          finishInPopup: true,
+          idempotencyKey: crypto.randomUUID(),
+        };
+        const { runConnectionStepUp } = await import("../lib/connection-step-up");
+        const outcome = await runConnectionStepUp({
+          transport: reconnectTransport,
+          workspaceId: target.workspaceId,
+          begin: {
+            providerId: request.providerId,
+            ownership: request.ownership,
+            returnUrl: request.returnUrl,
+            idempotencyKey: request.idempotencyKey,
+            reconnectAccountId: account.id,
+            requestedScopes: [...item.scopes],
+          },
+          window: { navigation: reserved.navigation, close: release },
+          signal: options?.signal,
+        });
+        if (outcome.status === "needs_setup") {
+          // The dialog resumes this same attempt (same account and access).
+          reconnectCardConnections.current.set(request, connectionId);
+          setReconnectRequest(request);
+          return undefined;
+        }
+        // Same continuation as after setup from the dialog: the server checks
+        // the account now has what the card asked for and wakes the agent at
+        // most once per card. Never fails the finished step-up.
+        void Promise.resolve()
+          .then(() =>
+            context.client.continueAfterCapabilitySetup(workspaceId, sessionId, { connectionId }),
+          )
+          .catch(() => undefined);
+        return { outcome: "done" };
+      } finally {
+        release();
+      }
+    },
+    [context.client, page, reconnectTransport, reconnectViaSetup, sessionId, workspaceId],
   );
 
   // The workspace shell already needs the capability catalog for session tool
@@ -2264,7 +2378,7 @@ function SessionChatPane(props: {
   onRestoreArchived?: (() => Promise<boolean>) | undefined;
   onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
-  onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  onReconnect: AuthNeededRecoveryHandler;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
   onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;

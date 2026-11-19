@@ -136,32 +136,62 @@ describe("authNeededPresentation", () => {
     expect(providerLabel(t, "gmailmcp.googleapis.com")).toBe("Gmail");
   });
 
-  test("a connected account that needs more access is asked to allow it, in plain words", () => {
+  test("a connected account that needs more access names the action it allows", () => {
     const view = authNeededPresentation(
       t,
       item({
         providerDomain: "gmailmcp.googleapis.com",
         connectionId: "conn-1",
         reason: "insufficient_scope",
-        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
-        toolName: "send_message",
+        scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+        toolName: "batch_modify_messages",
       }),
     );
-    expect(view.title).toBe("Give Gmail more access");
-    expect(view.actionLabel).toBe("Allow");
+    expect(view.moreAccess).toBe(true);
+    // The title is the action, never "give the service access" (which reads
+    // as connecting it to this chat).
+    expect(view.title).toBe("Allow Opengeni to organize your Gmail");
     expect(view.reasonLine).toBe(
-      "It needs your permission to draft and send email. Everything it can already do stays the same.",
+      "This includes marking mail as read, labeling and archiving it. You allow this once for your Gmail account, in every chat.",
     );
+    // The button says where it goes: Google's consent page.
+    expect(view.actionLabel).toBe("Allow in Google");
+    expect(view.pendingLabel).toBe("Waiting for Google…");
+    expect(view.doneLabel).toBe("Allowed");
     expect(view.footnote).toBe("After you allow it, the agent carries on where it stopped.");
     expect(view.canRecover).toBe(true);
-    expect(`${view.title} ${view.footnote}`).not.toMatch(/reconnect/i);
-    // Unknown access keeps the generic line; the button still says Allow.
+    expect(`${view.title} ${view.reasonLine} ${view.footnote}`).not.toMatch(/reconnect|connect/i);
+    // The host's product name, not Opengeni's, in an embedding product.
+    const hosted = authNeededPresentation(
+      createOpenGeniText({ productName: "Acme" }),
+      item({
+        providerDomain: "gmailmcp.googleapis.com",
+        connectionId: "conn-1",
+        reason: "insufficient_scope",
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+      }),
+    );
+    expect(hosted.title).toBe("Allow Acme to write and send email from your Gmail");
+    expect(hosted.reasonLine).toStartWith("This includes writing drafts and sending mail as you.");
+    // Unknown access still says it is one more kind of action, for this
+    // account, and the button names the provider it opens.
     const generic = authNeededPresentation(
       t,
       item({ connectionId: "conn-1", reason: "insufficient_scope", scopes: ["write"] }),
     );
-    expect(generic.title).toBe("Give Linear more access");
-    expect(generic.reasonLine).toBe("It needs additional access to continue.");
+    expect(generic.title).toBe("Allow Opengeni more access to Linear");
+    expect(generic.reasonLine).toBe(
+      "Linear needs your approval for one more kind of action. You allow this once for your Linear account, in every chat.",
+    );
+    expect(generic.actionLabel).toBe("Allow in Linear");
+    // Other cards keep their own words and are not step-ups.
+    const lapsed = authNeededPresentation(t, item({ connectionId: "conn-1" }));
+    expect(lapsed.moreAccess).toBe(false);
+    expect(lapsed.pendingLabel).toBe("Opening…");
+    expect(lapsed.doneLabel).toBe("Reconnected");
+    expect(authNeededPresentation(t, item({ reason: "missing_connection" })).doneLabel).toBe(
+      "Connected",
+    );
   });
 
   test("a fixed-access account says it can't do this, with no step-up or other action", () => {

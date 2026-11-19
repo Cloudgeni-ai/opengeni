@@ -13,6 +13,15 @@ export type AuthNeededPresentation = {
   reasonLine: string;
   /** The button's words: Connect, Review or Reconnect (only for a lapsed connection). */
   actionLabel: string;
+  /** The button's words while its sign-in is open ("Waiting for Google…"). */
+  pendingLabel: string;
+  /** What the card says once the person finished it ("Allowed"). */
+  doneLabel: string;
+  /**
+   * A connected account is asked to allow one more kind of action (OAuth
+   * step-up). Repeats of the same ask show one card.
+   */
+  moreAccess: boolean;
   /** "Provider: example.com" under an agent's request, otherwise null. */
   providerLine: string | null;
   /** The variables an agent's request needs, otherwise null. */
@@ -38,14 +47,53 @@ const UNAVAILABLE_REASONS = new Set<AuthNeededItem["reason"]>([
   "account_scope_fixed",
 ]);
 
-/** Plain words for access a reviewed connector asks for later (incremental consent). */
-type AdditionalAccessKey =
-  | "messageTimeline.accessDraftAndSendEmail"
-  | "messageTimeline.accessOrganizeMailbox";
-const ADDITIONAL_ACCESS_KEYS: Record<string, AdditionalAccessKey> = {
-  "https://www.googleapis.com/auth/gmail.compose": "messageTimeline.accessDraftAndSendEmail",
-  "https://www.googleapis.com/auth/gmail.modify": "messageTimeline.accessOrganizeMailbox",
+/**
+ * Plain words for access a reviewed connector asks for later (incremental
+ * consent): the action it allows, for the title, and what that includes.
+ */
+type AdditionalAccess = {
+  action:
+    | "messageTimeline.accessOrganizeProvider"
+    | "messageTimeline.accessWriteAndSendFromProvider";
+  includes:
+    | "messageTimeline.accessOrganizeMailboxIncludes"
+    | "messageTimeline.accessWriteAndSendIncludes";
 };
+const ADDITIONAL_ACCESS: Record<string, AdditionalAccess> = {
+  "https://www.googleapis.com/auth/gmail.compose": {
+    action: "messageTimeline.accessWriteAndSendFromProvider",
+    includes: "messageTimeline.accessWriteAndSendIncludes",
+  },
+  "https://www.googleapis.com/auth/gmail.modify": {
+    action: "messageTimeline.accessOrganizeProvider",
+    includes: "messageTimeline.accessOrganizeMailboxIncludes",
+  },
+};
+
+/**
+ * Who shows the consent page for a scope, by the scope's host: Google's
+ * scopes are approved at Google, whichever Google service needs them.
+ */
+const CONSENT_HOSTS: ReadonlyArray<readonly [suffix: string, name: string]> = [
+  ["googleapis.com", "Google"],
+  ["google.com", "Google"],
+  ["microsoft.com", "Microsoft"],
+  ["microsoftonline.com", "Microsoft"],
+];
+
+function consentName(scopes: readonly string[]): string | null {
+  for (const scope of scopes) {
+    let host: string;
+    try {
+      host = new URL(scope).hostname.toLowerCase();
+    } catch {
+      continue;
+    }
+    const match = CONSENT_HOSTS.find(([suffix]) => host === suffix || host.endsWith(`.${suffix}`));
+    if (match) return match[1];
+  }
+  return null;
+}
 
 /** Service names for connection identities whose domain says nothing to a person. */
 const KNOWN_PROVIDER_NAMES: Record<string, string> = {
@@ -93,9 +141,11 @@ export function authNeededPresentation(
   // A connected account that needs more access is asked to allow it, not to
   // "reconnect": nothing lapsed.
   const moreAccess = !request && item.reason === "insufficient_scope" && !!item.connectionId;
-  const accessKeys = moreAccess
-    ? [...new Set(item.scopes.flatMap((scope) => ADDITIONAL_ACCESS_KEYS[scope] ?? []))]
+  const access = moreAccess
+    ? [...new Set(item.scopes.flatMap((scope) => ADDITIONAL_ACCESS[scope] ?? []))]
     : [];
+  // The step-up opens the provider's own consent page: the button says so.
+  const consent = moreAccess ? (consentName(item.scopes) ?? provider) : provider;
   // A plugin is installed for the workspace, not connected to an account.
   const plugin = recommendation?.kind === "plugin";
   const actionLabel = reconnect
@@ -107,7 +157,7 @@ export function authNeededPresentation(
       : missing || request
         ? t("messageTimeline.connect")
         : moreAccess
-          ? t("messageTimeline.allowAccess")
+          ? t("messageTimeline.allowInConsent", { consent })
           : t("messageTimeline.reconnect");
   const title = reconnect
     ? `${actionLabel} ${provider}`
@@ -126,15 +176,26 @@ export function authNeededPresentation(
           : unavailable
             ? t("messageTimeline.providerToolsUnavailable", { provider })
             : moreAccess
-              ? t("messageTimeline.giveProviderMoreAccess", { provider })
+              ? access.length > 0
+                ? t("messageTimeline.allowProductTo", {
+                    access: access
+                      .map((entry) => t(entry.action, { provider }))
+                      .join(t("messageTimeline.accessJoin")),
+                  })
+                : t("messageTimeline.allowProductMoreProviderAccess", { provider })
               : `${actionLabel} ${provider}`;
+  // A step-up says what the new kind of action includes, and that allowing
+  // it is a one-time decision for the account, not for this chat.
   const reasonLine =
     recommendation?.rationale ??
     item.setupRequest?.rationale ??
-    (accessKeys.length > 0
-      ? t("messageTimeline.itNeedsPermissionTo", {
-          access: accessKeys.map((key) => t(key)).join(t("messageTimeline.accessJoin")),
-        })
+    (moreAccess
+      ? [
+          ...(access.length > 0
+            ? access.map((entry) => t(entry.includes))
+            : [t("messageTimeline.accessOneMoreKindOfAction", { provider })]),
+          t("messageTimeline.accessAppliesToAccount", { provider }),
+        ].join(" ")
       : authReasonLine(t, item.reason));
   const hostManaged = item.authoritySource === "host";
   const firstTime = missing || !!request;
@@ -143,6 +204,15 @@ export function authNeededPresentation(
     title,
     reasonLine,
     actionLabel,
+    pendingLabel: moreAccess
+      ? t("messageTimeline.waitingForConsent", { consent })
+      : t("messageTimeline.opening"),
+    doneLabel: moreAccess
+      ? t("messageTimeline.allowed")
+      : firstTime
+        ? t("messageTimeline.connected")
+        : t("messageTimeline.reconnected"),
+    moreAccess,
     providerLine: request
       ? t("messageTimeline.providerProviderdomain", { providerDomain: item.providerDomain })
       : null,

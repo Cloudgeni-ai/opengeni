@@ -551,7 +551,7 @@ describe("Gmail REST MCP adapter", () => {
     })) as { isError?: boolean; content: Array<{ text: string }>; structuredContent: unknown };
     expect(send.isError).toBe(true);
     expect(send.content[0]!.text).toBe(
-      "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; try again after they do.",
+      "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; until they do, calling it again fails the same way.",
     );
     expect(send.structuredContent).toEqual({
       error: {

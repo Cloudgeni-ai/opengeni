@@ -139,6 +139,42 @@ export function shouldPublishToolAuthNeededForTurn(
 }
 
 /**
+ * Remembers which connection cards a turn already posted. A tool that hits
+ * the same missing or lapsed access again in the same turn (the agent
+ * retried, or ran several calls that need it) reuses the card already in the
+ * chat instead of posting an identical one. Agent capability requests are
+ * never folded together. `post` publishes only a first ask, and forgets it
+ * when publishing fails so a later call can try again.
+ */
+export function createToolAuthNeededCardLedger(): {
+  post(payload: ToolAuthNeededPayload, publish: () => Promise<void>): Promise<void>;
+} {
+  const posted = new Set<string>();
+  return {
+    async post(payload, publish) {
+      if (payload.capability || payload.setupRequest) return await publish();
+      const key = JSON.stringify([
+        payload.serverId,
+        payload.providerDomain.trim().toLowerCase(),
+        payload.connectionId ?? null,
+        payload.reason,
+        [...new Set(payload.scopes ?? [])].sort(),
+        payload.resource ?? null,
+        payload.authoritySource ?? null,
+      ]);
+      if (posted.has(key)) return;
+      posted.add(key);
+      try {
+        await publish();
+      } catch (error) {
+        posted.delete(key);
+        throw error;
+      }
+    },
+  };
+}
+
+/**
  * Keep host-owned auth events inert in browsers from before authoritySource
  * existed. Those bundles treat unsupported_auth as unavailable and therefore
  * do not invoke native OAuth; upgraded clients read hostReason and the

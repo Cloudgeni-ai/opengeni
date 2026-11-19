@@ -232,7 +232,7 @@ import { isChunkLoadError } from "../lib/chunk-load-error";
 import { LazyPart } from "./lazy-part";
 import { MessageAttachments } from "./message-attachments";
 import { LoadFailureNotice } from "./load-failure-notice";
-import { AuthNeededRow } from "./auth-needed-row";
+import { AuthNeededRow, type AuthNeededRecoveryHandler } from "./auth-needed-row";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
 const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
@@ -308,7 +308,7 @@ export type MessageTimelineProps = {
    * Rejecting surfaces a calm inline error on the card; the library never draws
    * a Reconnect button without a handler to run it.
    */
-  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  onReconnect?: AuthNeededRecoveryHandler | undefined;
   /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
   renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   /**
@@ -3586,7 +3586,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
     | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
-  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  onReconnect?: AuthNeededRecoveryHandler | undefined;
   /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
   renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
@@ -4034,7 +4034,7 @@ type FoldedGroupBehavior = {
     | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
-  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  onReconnect?: AuthNeededRecoveryHandler | undefined;
   renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
@@ -4352,7 +4352,7 @@ export function TimelineRow({
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
-  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  onReconnect?: AuthNeededRecoveryHandler | undefined;
   /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
   renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
