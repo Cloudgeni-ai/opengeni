@@ -373,7 +373,11 @@ const credentials = (f: Fixture) =>
 const MATRIX: Record<string, RouteCase> = {
   // Console (src/routes/console.ts, console-roles.ts): people only.
   [`GET ${C}/access`]: { need: "any", key: "people_only", path: (f) => `${console_(f)}/access` },
-  [`GET ${C}/summary`]: { need: "viewer", key: "people_only", path: (f) => `${console_(f)}/summary` },
+  [`GET ${C}/summary`]: {
+    need: "viewer",
+    key: "people_only",
+    path: (f) => `${console_(f)}/summary`,
+  },
   [`GET ${C}/workspaces`]: {
     need: "viewer",
     key: "people_only",
@@ -385,7 +389,11 @@ const MATRIX: Record<string, RouteCase> = {
     path: (f) => `${console_(f)}/workspaces/${f.teamWorkspaceId}`,
     body: {},
   },
-  [`GET ${C}/sessions`]: { need: "viewer", key: "people_only", path: (f) => `${console_(f)}/sessions` },
+  [`GET ${C}/sessions`]: {
+    need: "viewer",
+    key: "people_only",
+    path: (f) => `${console_(f)}/sessions`,
+  },
   [`GET ${C}/workspaces/:workspaceId/sessions/:sessionId`]: {
     need: "viewer",
     key: "people_only",
@@ -396,15 +404,27 @@ const MATRIX: Record<string, RouteCase> = {
     key: "people_only",
     path: (f) => `${console_(f)}/workspaces/${f.managedWorkspaceId}/sessions/${missingId}/events`,
   },
-  [`GET ${C}/settings`]: { need: "full", key: "people_only", path: (f) => `${console_(f)}/settings` },
+  [`GET ${C}/settings`]: {
+    need: "full",
+    key: "people_only",
+    path: (f) => `${console_(f)}/settings`,
+  },
   [`PUT ${C}/settings`]: {
     need: "full",
     key: "people_only",
     path: (f) => `${console_(f)}/settings`,
     body: {},
   },
-  [`GET ${C}/audit-log`]: { need: "full", key: "people_only", path: (f) => `${console_(f)}/audit-log` },
-  [`GET ${C}/api-keys`]: { need: "full", key: "people_only", path: (f) => `${console_(f)}/api-keys` },
+  [`GET ${C}/audit-log`]: {
+    need: "full",
+    key: "people_only",
+    path: (f) => `${console_(f)}/audit-log`,
+  },
+  [`GET ${C}/api-keys`]: {
+    need: "full",
+    key: "people_only",
+    path: (f) => `${console_(f)}/api-keys`,
+  },
   [`GET ${C}/member-roles`]: {
     need: "full",
     key: "people_only",
@@ -468,7 +488,11 @@ const MATRIX: Record<string, RouteCase> = {
     path: (f) => `${agents(f)}/by-key/matrix/apply`,
     body: {},
   },
-  [`GET ${A}/:agentId`]: { need: "viewer", key: "allowed", path: (f) => `${agents(f)}/${f.agentId}` },
+  [`GET ${A}/:agentId`]: {
+    need: "viewer",
+    key: "allowed",
+    path: (f) => `${agents(f)}/${f.agentId}`,
+  },
   [`PATCH ${A}/:agentId`]: {
     need: "full",
     key: "allowed",
@@ -631,11 +655,7 @@ describe("Console roles: authorization matrix", () => {
       editor: "editor",
     } as const;
     for (const [name, access] of Object.entries(expected)) {
-      const reply = await call(
-        "GET",
-        `${console_(fixture)}/access`,
-        headersOf(name as CallerName),
-      );
+      const reply = await call("GET", `${console_(fixture)}/access`, headersOf(name as CallerName));
       expect([name, reply.status, reply.body.access]).toEqual([name, 200, access]);
     }
   }, 60_000);
@@ -721,18 +741,12 @@ describe("Console roles: reads, writes and lifecycle", () => {
     );
     expect(applied).toHaveLength(1);
     expect(applied[0]!.detail.reason).toBe("invitation_accepted");
-    expect(changes.some((row) => row.detail.invitationId && row.detail.to === "editor")).toBe(
-      true,
-    );
+    expect(changes.some((row) => row.detail.invitationId && row.detail.to === "editor")).toBe(true);
     const listed = await call("GET", `${console_(fixture)}/member-roles`, people.admin.headers);
     expect(listed.status).toBe(200);
     const roles = listed.body.roles as { subjectId: string | null; role: string }[];
-    expect(roles.find((entry) => entry.subjectId === people.viewer.subjectId)?.role).toBe(
-      "viewer",
-    );
-    expect(roles.find((entry) => entry.subjectId === people.editor.subjectId)?.role).toBe(
-      "editor",
-    );
+    expect(roles.find((entry) => entry.subjectId === people.viewer.subjectId)?.role).toBe("viewer");
+    expect(roles.find((entry) => entry.subjectId === people.editor.subjectId)?.role).toBe("editor");
     expect(roles.some((entry) => entry.subjectId === people.none.subjectId)).toBe(false);
   }, 60_000);
 
@@ -772,19 +786,22 @@ describe("Console roles: reads, writes and lifecycle", () => {
     const { people } = fixture;
     const put = (headers: Record<string, string>, body: unknown) =>
       call("PUT", `${console_(fixture!)}/member-roles`, headers, body);
-    const set = await put(people.admin.headers, { subjectId: people.none.subjectId, role: "viewer" });
+    const set = await put(people.admin.headers, {
+      subjectId: people.none.subjectId,
+      role: "viewer",
+    });
     expect([set.status, set.body.role]).toEqual([200, "viewer"]);
-    expect(
-      (await call("GET", `${console_(fixture)}/sessions`, people.none.headers)).status,
-    ).toBe(200);
+    expect((await call("GET", `${console_(fixture)}/sessions`, people.none.headers)).status).toBe(
+      200,
+    );
     const cleared = await put(people.owner.headers, {
       subjectId: people.none.subjectId,
       role: "none",
     });
     expect([cleared.status, cleared.body.role]).toEqual([200, "none"]);
-    expect(
-      (await call("GET", `${console_(fixture)}/sessions`, people.none.headers)).status,
-    ).toBe(403);
+    expect((await call("GET", `${console_(fixture)}/sessions`, people.none.headers)).status).toBe(
+      403,
+    );
     const changes = (await auditRows("member.console_role_changed")).filter(
       (row) => row.detail.subjectId === people.none.subjectId,
     );
@@ -834,11 +851,16 @@ describe("Console roles: reads, writes and lifecycle", () => {
     });
     expect(deployed.status).toBeLessThan(300);
     const codeAgentId = (deployed.body.agent?.id ?? deployed.body.id) as string;
-    const draft = await call("PUT", `${agents(fixture)}/${codeAgentId}/draft`, people.editor.headers, {
-      name: "Edited",
-      instructions: "Edited.",
-      expectedVersion: 1,
-    });
+    const draft = await call(
+      "PUT",
+      `${agents(fixture)}/${codeAgentId}/draft`,
+      people.editor.headers,
+      {
+        name: "Edited",
+        instructions: "Edited.",
+        expectedVersion: 1,
+      },
+    );
     expect([draft.status, draft.body.details?.code]).toEqual([403, "console_role_required"]);
     const publish = await call(
       "POST",

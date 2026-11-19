@@ -149,11 +149,11 @@ export function ConsoleSessionRoute() {
             title="Session review is off"
             action={
               access !== "full" ? undefined : (
-              <Button variant="outline" asChild>
-                <Link to="/console/settings" search={search}>
-                  Data and privacy
-                </Link>
-              </Button>
+                <Button variant="outline" asChild>
+                  <Link to="/console/settings" search={search}>
+                    Data and privacy
+                  </Link>
+                </Button>
               )
             }
           />

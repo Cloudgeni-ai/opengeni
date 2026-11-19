@@ -100,7 +100,12 @@ const NAV: { group: string | null; items: NavEntry[] }[] = [
     group: "Organization",
     items: [
       { to: "/console/members", label: "Members", icon: <UsersIcon />, fullOnly: true },
-      { to: "/console/usage", label: "Usage and billing", icon: <CreditCardIcon />, fullOnly: true },
+      {
+        to: "/console/usage",
+        label: "Usage and billing",
+        icon: <CreditCardIcon />,
+        fullOnly: true,
+      },
       { to: "/console/settings", label: "Settings", icon: <SettingsIcon />, fullOnly: true },
     ],
   },
@@ -214,7 +219,9 @@ export function ConsoleShellRoute() {
   // first, then those where they have a Console role.
   const withConsole = [
     ...administered,
-    ...orgs.filter((org) => !org.canAdminister && (accessByOrg?.[org.accountId] ?? "none") !== "none"),
+    ...orgs.filter(
+      (org) => !org.canAdminister && (accessByOrg?.[org.accountId] ?? "none") !== "none",
+    ),
   ];
   const organization =
     orgs.find((org) => org.accountId === requestedOrg) ??

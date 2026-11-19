@@ -82,8 +82,10 @@ describe("organization_console_roles", () => {
     const a = await organization();
     const b = await organization();
     const member = `user:${crypto.randomUUID()}`;
-    await asAccount(a.accountId, (sql) =>
-      sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
+    await asAccount(
+      a.accountId,
+      (sql) =>
+        sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
         values (${a.accountId}, ${member}, 'viewer', ${a.owner})`,
     );
     const seenByB = await asAccount(
@@ -99,15 +101,19 @@ describe("organization_console_roles", () => {
     // Writing another organization's row is refused by the policy.
     expect(
       await sqlState(() =>
-        asAccount(b.accountId, (sql) =>
-          sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
+        asAccount(
+          b.accountId,
+          (sql) =>
+            sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
             values (${a.accountId}, ${`user:${crypto.randomUUID()}`}, 'editor', ${b.owner})`,
         ),
       ),
     ).toBe("42501");
     const updated = await asAccount(
       b.accountId,
-      (sql) => sql`update organization_console_roles set role = 'editor' where subject_id = ${member}
+      (
+        sql,
+      ) => sql`update organization_console_roles set role = 'editor' where subject_id = ${member}
         returning id`,
     );
     expect(updated).toHaveLength(0);
@@ -121,8 +127,10 @@ describe("organization_console_roles", () => {
   test("the runtime reads, inserts and updates, never deletes", async () => {
     const a = await organization();
     const member = `user:${crypto.randomUUID()}`;
-    await asAccount(a.accountId, (sql) =>
-      sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
+    await asAccount(
+      a.accountId,
+      (sql) =>
+        sql`insert into organization_console_roles (account_id, subject_id, role, updated_by_subject_id)
         values (${a.accountId}, ${member}, 'viewer', ${a.owner})`,
     );
     expect(
@@ -135,7 +143,9 @@ describe("organization_console_roles", () => {
       where table_name = 'organization_console_roles' and grantee = 'opengeni_app'
       order by privilege_type`;
     expect(grants.map((row) => row.privilege_type)).toEqual(["INSERT", "SELECT", "UPDATE"]);
-    const [posture] = await shared.admin<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+    const [posture] = await shared.admin<
+      { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
+    >`
       select relrowsecurity, relforcerowsecurity from pg_class
       where oid = 'organization_console_roles'::regclass`;
     expect(posture).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
@@ -143,23 +153,41 @@ describe("organization_console_roles", () => {
 
   test("the CHECK refuses malformed rows", async () => {
     const a = await organization();
-    const insert = (columns: { subject: string | null; invitation: string | null; role: string; applied?: boolean }) =>
+    const insert = (columns: {
+      subject: string | null;
+      invitation: string | null;
+      role: string;
+      applied?: boolean;
+    }) =>
       sqlState(() =>
-        asAccount(a.accountId, (sql) =>
-          sql`insert into organization_console_roles
+        asAccount(
+          a.accountId,
+          (sql) =>
+            sql`insert into organization_console_roles
             (account_id, subject_id, invitation_id, role, applied_at, updated_by_subject_id)
             values (${a.accountId}, ${columns.subject}, ${columns.invitation}, ${columns.role},
               ${columns.applied ? new Date() : null}, ${a.owner})`,
         ),
       );
-    expect(await insert({ subject: `user:${crypto.randomUUID()}`, invitation: null, role: "admin" })).toBe("23514");
+    expect(
+      await insert({ subject: `user:${crypto.randomUUID()}`, invitation: null, role: "admin" }),
+    ).toBe("23514");
     expect(await insert({ subject: "api_key:x", invitation: null, role: "viewer" })).toBe("23514");
     expect(await insert({ subject: null, invitation: null, role: "viewer" })).toBe("23514");
     expect(
-      await insert({ subject: `user:${crypto.randomUUID()}`, invitation: a.invitationId, role: "viewer" }),
+      await insert({
+        subject: `user:${crypto.randomUUID()}`,
+        invitation: a.invitationId,
+        role: "viewer",
+      }),
     ).toBe("23514");
     expect(
-      await insert({ subject: `user:${crypto.randomUUID()}`, invitation: null, role: "viewer", applied: true }),
+      await insert({
+        subject: `user:${crypto.randomUUID()}`,
+        invitation: null,
+        role: "viewer",
+        applied: true,
+      }),
     ).toBe("23514");
     expect(await insert({ subject: null, invitation: a.invitationId, role: "editor" })).toBeNull();
   });
@@ -169,8 +197,10 @@ describe("organization_console_roles", () => {
     const b = await organization();
     expect(
       await sqlState(() =>
-        asAccount(a.accountId, (sql) =>
-          sql`insert into organization_console_roles (account_id, invitation_id, role, updated_by_subject_id)
+        asAccount(
+          a.accountId,
+          (sql) =>
+            sql`insert into organization_console_roles (account_id, invitation_id, role, updated_by_subject_id)
             values (${a.accountId}, ${b.invitationId}, 'viewer', ${a.owner})`,
         ),
       ),
@@ -240,12 +270,12 @@ describe("organization_console_roles", () => {
     expect(await getConsoleMemberRole(app.db, a.accountId, invitee)).toBe("viewer");
 
     const listed = await listConsoleMemberRoles(app.db, a.accountId);
-    expect(
-      listed.map((entry) => [entry.subjectId, entry.invitationId, entry.role]).sort(),
-    ).toEqual([
-      [invitee, null, "viewer"],
-      [member, null, "viewer"],
-    ].sort());
+    expect(listed.map((entry) => [entry.subjectId, entry.invitationId, entry.role]).sort()).toEqual(
+      [
+        [invitee, null, "viewer"],
+        [member, null, "viewer"],
+      ].sort(),
+    );
 
     expect(
       await clearConsoleMemberRole(app.db, {

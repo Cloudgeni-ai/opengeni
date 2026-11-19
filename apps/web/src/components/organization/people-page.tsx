@@ -126,7 +126,10 @@ export type ConsoleRolesView = {
   roles: readonly ConsoleRoleEntry[] | null;
   /** Saves one role (Console only). */
   setRole?:
-    | ((target: { subjectId: string } | { invitationId: string }, role: ConsoleRoleValue) => Promise<void>)
+    | ((
+        target: { subjectId: string } | { invitationId: string },
+        role: ConsoleRoleValue,
+      ) => Promise<void>)
     | undefined;
 };
 
@@ -758,7 +761,9 @@ function PeopleList({
                       ...(inConsole
                         ? {
                             console:
-                              CONSOLE_ROLE_LABELS[memberConsoleRole(consoleRoles?.roles ?? null, member)],
+                              CONSOLE_ROLE_LABELS[
+                                memberConsoleRole(consoleRoles?.roles ?? null, member)
+                              ],
                           }
                         : {}),
                       workspaces: (
@@ -800,7 +805,9 @@ function PeopleList({
                   ...(inConsole
                     ? {
                         console:
-                          CONSOLE_ROLE_LABELS[invitationConsoleRole(consoleRoles?.roles ?? null, invitation)],
+                          CONSOLE_ROLE_LABELS[
+                            invitationConsoleRole(consoleRoles?.roles ?? null, invitation)
+                          ],
                       }
                     : {}),
                   workspaces: (

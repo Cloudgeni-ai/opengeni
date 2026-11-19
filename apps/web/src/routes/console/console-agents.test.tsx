@@ -355,7 +355,13 @@ describe("Console nav", () => {
       section.items.map((item) => item.label),
     );
     expect(full).toEqual(
-      expect.arrayContaining(["API keys", "Members", "Settings", "Workspaces", "Usage and billing"]),
+      expect.arrayContaining([
+        "API keys",
+        "Members",
+        "Settings",
+        "Workspaces",
+        "Usage and billing",
+      ]),
     );
   });
 
