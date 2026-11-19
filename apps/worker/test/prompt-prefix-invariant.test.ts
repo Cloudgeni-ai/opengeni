@@ -97,14 +97,7 @@ export const TRANSITIONS: readonly Transition[] = [
  * to fail; once its fix lands the case passes, `test.failing` fails, and the
  * entry must be removed. Never add an entry to make a new change pass.
  */
-const KNOWN_BREAKS: Readonly<Record<string, string>> = {
-  // goal_resume and its sentence appear with a chat's first goal (#7163).
-  "the first goal is set": "fixed by #7919",
-  // The system prompt's last line names the machine's workspace root.
-  "the chat moves to another machine": "fixed by #7918",
-  "the chat moves from a managed sandbox to a Connected Machine": "fixed by #7918",
-  "the chat moves from a Connected Machine to a managed sandbox": "fixed by #7918",
-};
+const KNOWN_BREAKS: Readonly<Record<string, string>> = {};
 
 /**
  * Accepted changes: the request follows a real change in what the agent can
