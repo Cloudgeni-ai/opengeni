@@ -101767,6 +101767,7 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
 
 export * from "./feedback";
 export * from "./console";
+export * from "./console-roles";
 export * from "./session-final-reply";
 export * from "./knowledge-entries";
 

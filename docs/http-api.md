@@ -35,7 +35,8 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   creation, plus explicit invitation revoke
 - `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
 - `GET|PATCH /v1/organizations/:id/retention-policy`
-- `/v1/organizations/:id/console/*` for organization owners and admins:
+- `/v1/organizations/:id/console/*` for organization owners and admins, and
+  members by Console role (`GET access`, `GET|PUT member-roles`):
   summary, workspaces (managed by product or team), reviewable sessions with
   audited transcript reads, review level settings, audit log and API key
   usage; never available to API keys (see [`opengeni-console.md`](opengeni-console.md)).

@@ -3,7 +3,7 @@
 import type { ConsoleRange } from "@opengeni/sdk";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { CreditCardIcon, UserPlusIcon, UsersIcon } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { canInviteOrganizationRole } from "@opengeni/react/app/lib/organization-admin";
@@ -21,7 +21,11 @@ import {
   useConsole,
 } from "./console-shared";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
-import { OrganizationPeoplePage } from "@/components/organization/people-page";
+import {
+  OrganizationPeoplePage,
+  type ConsoleRolesView,
+} from "@/components/organization/people-page";
+import { consoleRolesApi, useConsoleMemberRoles } from "@/lib/console-access";
 import type { ConsoleMembersSearch, ConsoleUsageSearch } from "@/lib/console-route";
 
 import {
@@ -39,9 +43,23 @@ const CheckoutCreditsCelebration = lazy(async () => {
 
 export function ConsoleMembersRoute() {
   const navigate = useNavigate();
-  const { appWorkspaceId, search } = useConsole();
+  const { appWorkspaceId, search, client, organizationId } = useConsole();
   const { person, invitation, view } = useSearch({ strict: false }) as ConsoleMembersSearch;
   const access = useConsoleOrganizationAccess();
+  // Members' Console roles (docs/opengeni-console.md, "Roles").
+  const roles = useConsoleMemberRoles(client, organizationId, true);
+  const { refresh } = roles;
+  const consoleRoles = useMemo<ConsoleRolesView>(
+    () => ({
+      mode: "console",
+      roles: roles.data?.roles ?? (roles.error ? [] : null),
+      setRole: async (target, role) => {
+        await consoleRolesApi(client, organizationId).setMemberRole(target, role);
+        await refresh();
+      },
+    }),
+    [client, organizationId, refresh, roles.data, roles.error],
+  );
   const subPage = Boolean(person || invitation || view);
   return (
     <ConsolePage>
@@ -72,6 +90,7 @@ export function ConsoleMembersRoute() {
           view={view}
           canManageBilling={access.canManageBilling}
           hideEndUsers
+          consoleRoles={consoleRoles}
         />
       </ConsoleOrganizationProvider>
     </ConsolePage>

@@ -249,6 +249,8 @@ function member(id: string, subjectId: string, name: string, role: string) {
 let container: HTMLDivElement;
 let root: Root;
 
+let consoleAccess: "viewer" | "editor" | "full" = "full";
+
 async function render(node: ReactNode) {
   container = document.createElement("div");
   document.body.append(container);
@@ -264,6 +266,7 @@ async function render(node: ReactNode) {
             organizationLabel: "Kontali",
             search: { org: organizationId },
             appWorkspaceId: workspaceId,
+            access: consoleAccess,
           },
         },
         node,
@@ -299,6 +302,7 @@ afterAll(() => {
 
 beforeEach(async () => {
   if (root) await act(async () => root.unmount());
+  consoleAccess = "full";
   document.body.innerHTML = "";
   navigate.mockClear();
   for (const fn of Object.values(client)) fn.mockClear();

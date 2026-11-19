@@ -16,8 +16,16 @@
  *   plus `sessions:read` for chats and usage). Legacy full keys hold them
  *   through `workspace:admin`; a key limited to selected workspaces reads and
  *   names only those workspaces;
- * - the organization's owners and admins (organization administration),
- *   who have every permission here. Other members have none, as in Console.
+ * - people, by Console role (`./console-roles.ts`, docs/opengeni-console.md
+ *   "Roles"): owners and admins (`full`) may do everything here except what
+ *   is owner-only; an Editor reads, creates agents (without team workspace
+ *   availability), saves drafts of and publishes or rolls back
+ *   Console-managed agents, and runs test chats; a Viewer reads agents,
+ *   versions, tool servers, publish operations and an agent's chats and
+ *   usage. Tool server writes, code deploys (`apply`), team workspace
+ *   availability, archiving and end users' tool logins are for owners and
+ *   admins. Members without a Console role, and agents or personal keys
+ *   acting for a person, are refused with 403 `console_role_required`.
  * - Changing who manages an agent (`POST .../management`) is for the
  *   organization's owner only; an API key is refused with
  *   `agent_management_requires_owner`.
@@ -63,6 +71,7 @@ import {
   UpdateOrgAgentRequest,
   UpdateOrgToolServerRequest,
   type AccessContext,
+  type ConsoleAccessLevel,
   type ErrorCode,
   type OrgAgentDefinition as OrgAgentDefinitionValue,
   type OrgAgentPublishOperation,
@@ -72,7 +81,6 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   captureOrgAgentToolCatalog,
   hasPermission,
-  holdsOrganizationAdministration,
   listOrgToolServerToolsByKey,
   MissingPermissionRefusal,
   organizationWorkspaceInScope,
@@ -137,6 +145,13 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import {
+  CONSOLE_ROLE_REQUIRED,
+  consoleAccessCovers,
+  consoleRoleRefusal,
+  resolveConsoleAccess,
+  type ConsoleAccess,
+} from "./console-roles";
 
 const Uuid = z.string().uuid();
 const PositiveInt = z.coerce.number().int().positive();
@@ -195,6 +210,8 @@ type Caller = {
   organizationId: string;
   context: AccessContext;
   apiKey: AccountScopedApiKeyWorkspaceAuthority | null;
+  /** A person's Console access (console-roles.ts); null for an API key. */
+  access: Exclude<ConsoleAccessLevel, "none"> | null;
   actor: OrgAgentActor;
 };
 
@@ -206,15 +223,18 @@ function uuidParam(c: Context, name: string): string {
 
 /**
  * The caller, after the flag (404 when off) and the permissions: an
- * organization key holding each of `permissions`, or an organization owner or
- * admin (who hold them all).
+ * organization key holding each of `permissions`, or a person whose Console
+ * access covers `people` (console-roles.ts): owners and admins are full,
+ * members have their Console role (Viewer, Editor or none). Each route names
+ * both: what a key needs, and the least Console access a person needs.
  */
-export function authorizeOrgAgentsCaller(
-  deps: Pick<ApiRouteDeps, "settings">,
+export async function authorizeOrgAgentsCaller(
+  deps: Pick<ApiRouteDeps, "settings" | "db">,
   context: AccessContext,
   organizationId: string,
   permissions: readonly Permission[],
-): Caller {
+  people: ConsoleAccess,
+): Promise<Caller> {
   if (!orgAgentsEnabledForAccount(deps.settings, organizationId)) throw agentNotFound();
   const apiKey = accountScopedApiKeyWorkspaceAuthority(context);
   const actor = { subjectId: context.subjectId, label: context.subjectLabel ?? null };
@@ -227,27 +247,46 @@ export function authorizeOrgAgentsCaller(
         throw new MissingPermissionRefusal(permission);
       }
     }
-    return { organizationId, context, apiKey, actor };
+    return { organizationId, context, apiKey, access: null, actor };
   }
-  if (
-    context.subjectId.startsWith("external_user:") ||
-    !holdsOrganizationAdministration(context, organizationId)
-  ) {
-    throw new MissingPermissionRefusal(permissions[0] ?? "agents:read", {
-      message: "Console agents are managed by the organization's owners and admins",
-    });
+  const access = await resolveConsoleAccess(deps, context, organizationId);
+  if (access === "none" || !consoleAccessCovers(access, people)) {
+    throw consoleRoleRefusal(access === "none" ? "viewer" : people);
   }
-  return { organizationId, context, apiKey: null, actor };
+  return { organizationId, context, apiKey: null, access, actor };
 }
 
 async function orgCaller(
   c: Context,
   deps: ApiRouteDeps,
   permissions: readonly Permission[],
+  people: ConsoleAccess,
 ): Promise<Caller> {
   const organizationId = uuidParam(c, "organizationId");
   const context = await requireAccessContext(c, deps);
-  return authorizeOrgAgentsCaller(deps, context, organizationId, permissions);
+  return await authorizeOrgAgentsCaller(deps, context, organizationId, permissions, people);
+}
+
+/**
+ * Editors change Console-managed agents only. Owners and admins (and keys,
+ * by permission) go on to the agent's own rules, which refuse Console edits of
+ * a code-managed agent for everyone.
+ */
+async function requireEditableByCaller(
+  deps: ApiRouteDeps,
+  caller: Caller,
+  agentId: string,
+): Promise<void> {
+  if (caller.access !== "editor") return;
+  const agent = await getOrgAgent(deps.db, caller.organizationId, { id: agentId });
+  if (!agent) throw agentNotFound();
+  if (agent.managedBy !== "console") {
+    throw httpError(
+      403,
+      CONSOLE_ROLE_REQUIRED,
+      "This agent is managed by code. Only organization owners and admins can switch it to Console.",
+    );
+  }
 }
 
 /** Only the organization's owner, as a person (never an API key). */
@@ -405,13 +444,13 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   // ---------------------------------------------------------------- tool servers
 
   app.get(`${base}/tool-servers`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const toolServers = await listOrgToolServers(deps.db, caller.organizationId);
     return c.json(ListOrgToolServersResponse.parse({ toolServers }));
   });
 
   app.post(`${base}/tool-servers`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "full");
     const request = await parseRequestJson(c, CreateOrgToolServerRequest);
     const toolServer = await mapped(() =>
       createOrgToolServer(deps.db, {
@@ -431,14 +470,14 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   }
 
   app.get(`${base}/tool-servers/:key`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const toolServer = await getOrgToolServer(deps.db, caller.organizationId, toolServerKey(c));
     if (!toolServer) throw httpError(404, "tool_server_not_found", "Tool server not found.");
     return c.json(OrgToolServerResponse.parse({ toolServer }));
   });
 
   app.patch(`${base}/tool-servers/:key`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "full");
     const key = toolServerKey(c);
     const request = await parseRequestJson(c, UpdateOrgToolServerRequest);
     const toolServer = await mapped(() =>
@@ -454,7 +493,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.delete(`${base}/tool-servers/:key`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "full");
     const key = toolServerKey(c);
     const expected = c.req.query("expectedVersion");
     const expectedVersion = expected === undefined ? undefined : PositiveInt.safeParse(expected);
@@ -474,7 +513,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.get(`${base}/tool-servers/:key/tools`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const login = c.req.header(ORG_TOOL_LOGIN_HEADER)?.trim() || null;
     const tools = await listOrgToolServerToolsByKey({
       db: deps.db,
@@ -490,7 +529,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   // ---------------------------------------------------------------- test workspace
 
   app.post(`${base}/test-workspace`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "editor");
     const result = await ensureTestWorkspace(deps, caller);
     return c.json(OrgAgentTestWorkspaceResponse.parse(result), result.created ? 201 : 200);
   });
@@ -498,7 +537,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   // ---------------------------------------------------------------- agents
 
   app.get(base, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const agents = await listOrgAgents(deps.db, caller.organizationId, {
       includeArchived: c.req.query("includeArchived") === "true",
     });
@@ -508,7 +547,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   // Runs on: the organization machines and sandbox environments an agent can
   // name, and whether each works in the workspaces the product manages.
   app.get(`${base}/compute`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const compute = await listOrgAgentCompute(deps.db, caller.organizationId);
     const option = (entry: (typeof compute.machines)[number]) => ({
       id: entry.id,
@@ -525,9 +564,13 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(base, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "editor");
     const request = CreateOrgAgentRequest.parse(await parseRequestJson(c, CreateOrgAgentRequest));
     requireWorkspacesInScope(caller, request.workspaceIds);
+    // Which team workspaces an agent is available in is for owners and admins.
+    if (caller.access === "editor" && (request.workspaceIds?.length ?? 0) > 0) {
+      throw consoleRoleRefusal("full");
+    }
     const definition = OrgAgentDefinition.parse({
       name: request.name,
       description: request.description ?? "",
@@ -555,7 +598,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   }
 
   app.get(`${base}/by-key/:key`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const agent = await getOrgAgent(
       deps.db,
       caller.organizationId,
@@ -567,7 +610,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.put(`${base}/by-key/:key/apply`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "full");
     const key = agentKey(c);
     const request = ApplyOrgAgentRequest.parse(await parseRequestJson(c, ApplyOrgAgentRequest));
     const { publish, moveRunningChats, dryRun, expectedVersion, ...rest } = request;
@@ -596,7 +639,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.get(`${base}/:agentId`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const agent = await getOrgAgent(
       deps.db,
       caller.organizationId,
@@ -608,7 +651,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.patch(`${base}/:agentId`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "full");
     const agentId = uuidParam(c, "agentId");
     const request = UpdateOrgAgentRequest.parse(await parseRequestJson(c, UpdateOrgAgentRequest));
     requireWorkspacesInScope(caller, request.workspaceIds);
@@ -625,8 +668,9 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.put(`${base}/:agentId/draft`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "editor");
     const agentId = uuidParam(c, "agentId");
+    await requireEditableByCaller(deps, caller, agentId);
     const request = SaveOrgAgentDraftRequest.parse(
       await parseRequestJson(c, SaveOrgAgentDraftRequest),
     );
@@ -647,7 +691,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.get(`${base}/:agentId/versions`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const versions = await listOrgAgentVersions(
       deps.db,
       caller.organizationId,
@@ -658,7 +702,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.get(`${base}/:agentId/versions/:version`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const agentId = uuidParam(c, "agentId");
     const version = PositiveInt.safeParse(c.req.param("version"));
     if (!version.success) throw httpError(404, "agent_version_not_found", "Version not found.");
@@ -668,8 +712,9 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(`${base}/:agentId/publish`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "editor");
     const agentId = uuidParam(c, "agentId");
+    await requireEditableByCaller(deps, caller, agentId);
     const request = PublishOrgAgentRequest.parse(await parseRequestJson(c, PublishOrgAgentRequest));
     const result = await mapped(() =>
       publishOrgAgent(deps.db, {
@@ -686,7 +731,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.get(`${base}/:agentId/publish-operations`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const operations = await listOrgAgentPublishOperations(
       deps.db,
       caller.organizationId,
@@ -719,7 +764,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   }
 
   app.get(`${base}/:agentId/movable-chats`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read"], "viewer");
     const agentId = uuidParam(c, "agentId");
     const version = PositiveInt.safeParse(c.req.query("version"));
     if (!version.success) throw httpError(422, "validation_failed", "version is required");
@@ -734,7 +779,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(`${base}/:agentId/management`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "full");
     requireOwner(caller);
     const agentId = uuidParam(c, "agentId");
     const request = SetOrgAgentManagementRequest.parse(
@@ -753,7 +798,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(`${base}/:agentId/archive`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "full");
     const agentId = uuidParam(c, "agentId");
     const request = ArchiveOrgAgentRequest.parse(await parseRequestJson(c, ArchiveOrgAgentRequest));
     const agent = await mapped(() =>
@@ -768,7 +813,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.get(`${base}/:agentId/sessions`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read", "sessions:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read", "sessions:read"], "viewer");
     const agentId = uuidParam(c, "agentId");
     const query = parseRequestQuery(ListOrgAgentSessionsQuery, c.req.query(), {
       status: 422,
@@ -796,7 +841,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.get(`${base}/:agentId/usage`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:read", "sessions:read"]);
+    const caller = await orgCaller(c, deps, ["agents:read", "sessions:read"], "viewer");
     const agentId = uuidParam(c, "agentId");
     const query = parseRequestQuery(OrgAgentUsageQuery, c.req.query(), {
       status: 422,
@@ -819,7 +864,7 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   app.post(`${base}/:agentId/test-chats`, async (c) => {
-    const caller = await orgCaller(c, deps, ["agents:manage"]);
+    const caller = await orgCaller(c, deps, ["agents:manage"], "editor");
     const agentId = uuidParam(c, "agentId");
     const request = CreateOrgAgentTestChatRequest.parse(
       await parseRequestJson(c, CreateOrgAgentTestChatRequest),
@@ -912,7 +957,8 @@ export function registerOrganizationAgentRoutes(app: Hono, deps: ApiRouteDeps): 
       ? apiKey.accountId === accountId
       : context.accountGrants.some((grant) => grant.accountId === accountId);
     if (!related) throw workspaceNotFound();
-    const caller = authorizeOrgAgentsCaller(deps, context, accountId, [permission]);
+    // Stored logins are for owners and admins among people (keys by permission).
+    const caller = await authorizeOrgAgentsCaller(deps, context, accountId, [permission], "full");
     if (!inScope(caller, workspaceId)) {
       throw new HTTPException(403, { message: "workspace is outside organization key scope" });
     }

@@ -1,17 +1,22 @@
 /**
  * Opengeni Console API: `/v1/organizations/:organizationId/console/*`.
  *
- * For organization owners and admins only (never an API key or a product's
- * end user). They review the sessions of the workspaces the product manages
- * (created by an organization API key, or marked in Console), see metered
- * cost, and read the audit log. Team workspaces show cost and counts only.
+ * For the organization's people, never an API key or a product's end user.
+ * Owners and admins have full access; a member has the Console role an owner
+ * or admin gave them (console-roles.ts): Viewer and Editor read the
+ * summary, workspaces, sessions and transcripts (at the review level) and
+ * cost; settings, the audit log, API key usage, marking workspaces and
+ * Console roles stay with owners and admins. Each route names the least
+ * access it needs. Readers review the sessions of the workspaces the product
+ * manages (created by an organization API key, or marked in Console) and see
+ * metered cost. Team workspaces show cost and counts only.
  *
  * What a reader may see is enforced here and in `@opengeni/db/console`:
  * managed workspaces only; shared sessions and end users' private sessions
  * only (an Opengeni account's private chat never); no content at the
  * `metadata` review level and nothing at `off`. Every transcript or metadata
- * open is written to the audit log before it is returned. All reads are
- * read-only.
+ * open is written to the audit log, with the reader, before it is returned,
+ * whatever their Console role. All reads are read-only.
  */
 import {
   ConsoleApiKeyUsageResponse,
@@ -36,7 +41,6 @@ import {
 import {
   accountScopedApiKeyWorkspaceAuthority,
   holdsOrganizationAdministration,
-  requireAccessContext,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -66,6 +70,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { registerConsoleRoleRoutes, requireConsoleAccess } from "./console-roles";
 
 const Id = z.string().uuid();
 
@@ -116,14 +121,6 @@ export function requireConsoleAdministratorContext(
   return { context, subjectId: context.subjectId, label: context.subjectLabel ?? null };
 }
 
-async function requireConsoleAdministrator(
-  c: Context,
-  deps: ApiRouteDeps,
-  organizationId: string,
-): Promise<ConsoleAdministrator> {
-  return requireConsoleAdministratorContext(await requireAccessContext(c, deps), organizationId);
-}
-
 /** The organization's managed workspaces, by id. */
 async function managedWorkspaces(
   deps: ApiRouteDeps,
@@ -149,10 +146,11 @@ function withLevelGate(level: ConsoleReviewLevel): { includeContent: boolean } {
 
 export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/organizations/:organizationId/console";
+  registerConsoleRoleRoutes(app, deps);
 
   app.get(`${base}/summary`, async (c) => {
     const organizationId = param(c, "organizationId");
-    await requireConsoleAdministrator(c, deps, organizationId);
+    await requireConsoleAccess(c, deps, organizationId, "viewer");
     const { range } = parseRequestQuery(ConsoleRangeQuery, c.req.query(), {
       status: 400,
       message: "invalid Console query",
@@ -216,7 +214,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/workspaces`, async (c) => {
     const organizationId = param(c, "organizationId");
-    await requireConsoleAdministrator(c, deps, organizationId);
+    await requireConsoleAccess(c, deps, organizationId, "viewer");
     const query = parseRequestQuery(ListConsoleWorkspacesQuery, c.req.query(), {
       status: 400,
       message: "invalid Console workspace query",
@@ -263,7 +261,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put(`${base}/workspaces/:workspaceId`, async (c) => {
     const organizationId = param(c, "organizationId");
     const workspaceId = param(c, "workspaceId");
-    const admin = await requireConsoleAdministrator(c, deps, organizationId);
+    const admin = await requireConsoleAccess(c, deps, organizationId, "full");
     const body = await parseRequestJson(c, UpdateConsoleWorkspaceRequest);
     const all = await listConsoleOrganizationWorkspaces(deps.db, organizationId);
     if (!all.some((workspace) => workspace.id === workspaceId)) {
@@ -281,7 +279,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/sessions`, async (c) => {
     const organizationId = param(c, "organizationId");
-    await requireConsoleAdministrator(c, deps, organizationId);
+    await requireConsoleAccess(c, deps, organizationId, "viewer");
     const query = parseRequestQuery(ListConsoleSessionsQuery, c.req.query(), {
       status: 400,
       message: "invalid Console session query",
@@ -331,7 +329,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/workspaces/:workspaceId/sessions/:sessionId`, async (c) => {
     const organizationId = param(c, "organizationId");
-    const admin = await requireConsoleAdministrator(c, deps, organizationId);
+    const admin = await requireConsoleAccess(c, deps, organizationId, "viewer");
     const settings = await getConsoleReviewSettings(deps.db, organizationId);
     const { includeContent } = withLevelGate(settings.reviewLevel);
     const { workspace, detail } = await reviewableSession(c, organizationId, includeContent);
@@ -367,7 +365,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/workspaces/:workspaceId/sessions/:sessionId/events`, async (c) => {
     const organizationId = param(c, "organizationId");
-    const admin = await requireConsoleAdministrator(c, deps, organizationId);
+    const admin = await requireConsoleAccess(c, deps, organizationId, "viewer");
     const settings = await getConsoleReviewSettings(deps.db, organizationId);
     if (settings.reviewLevel !== "full") {
       throw new HTTPException(403, {
@@ -411,14 +409,14 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/settings`, async (c) => {
     const organizationId = param(c, "organizationId");
-    await requireConsoleAdministrator(c, deps, organizationId);
+    await requireConsoleAccess(c, deps, organizationId, "full");
     const settings = await getConsoleReviewSettings(deps.db, organizationId);
     return c.json(ConsoleSettings.parse({ organizationId, ...settings }));
   });
 
   app.put(`${base}/settings`, async (c) => {
     const organizationId = param(c, "organizationId");
-    const admin = await requireConsoleAdministrator(c, deps, organizationId);
+    const admin = await requireConsoleAccess(c, deps, organizationId, "full");
     const body = await parseRequestJson(c, UpdateConsoleSettingsRequest);
     const settings = await setConsoleReviewLevel(deps.db, {
       accountId: organizationId,
@@ -431,7 +429,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/audit-log`, async (c) => {
     const organizationId = param(c, "organizationId");
-    await requireConsoleAdministrator(c, deps, organizationId);
+    await requireConsoleAccess(c, deps, organizationId, "full");
     const query = parseRequestQuery(ListConsoleAuditEventsQuery, c.req.query(), {
       status: 400,
       message: "invalid Console audit query",
@@ -467,7 +465,7 @@ export function registerConsoleRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/api-keys`, async (c) => {
     const organizationId = param(c, "organizationId");
-    await requireConsoleAdministrator(c, deps, organizationId);
+    await requireConsoleAccess(c, deps, organizationId, "full");
     const { range } = parseRequestQuery(ConsoleRangeQuery, c.req.query(), {
       status: 400,
       message: "invalid Console query",

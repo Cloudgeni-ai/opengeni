@@ -280,6 +280,7 @@ export const ConsoleAuditAction = /* @__PURE__ */ defineSchema(() =>
     "tool_server.deleted",
     "tool_credential.written",
     "tool_credential.deleted",
+    "member.console_role_changed",
   ]),
 );
 export type ConsoleAuditAction = z.infer<typeof ConsoleAuditAction>;
@@ -339,3 +340,69 @@ export const ConsoleApiKeyUsageResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type ConsoleApiKeyUsageResponse = z.infer<typeof ConsoleApiKeyUsageResponse>;
+
+/**
+ * A member's Console role, set by an owner or admin. `none` (the default) is
+ * no Console access; `viewer` reads sessions (at the review level), cost and
+ * agents; `editor` also creates, edits, tests and publishes Console-managed
+ * agents. Owners and admins are always full in Console and have no row. A
+ * Console role never grants access to app workspaces.
+ */
+export const ConsoleMemberRole = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["none", "viewer", "editor"]),
+);
+export type ConsoleMemberRole = z.infer<typeof ConsoleMemberRole>;
+
+/** What the signed-in person may do in an organization's Console. */
+export const ConsoleAccessLevel = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["full", "editor", "viewer", "none"]),
+);
+export type ConsoleAccessLevel = z.infer<typeof ConsoleAccessLevel>;
+
+export const ConsoleAccessResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    organizationId: primitives.uuid,
+    access: ConsoleAccessLevel,
+  }),
+);
+export type ConsoleAccessResponse = z.infer<typeof ConsoleAccessResponse>;
+
+/** One member's (`subjectId`) or pending invitation's (`invitationId`) Console role. */
+export const ConsoleMemberRoleEntry = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    subjectId: primitives.nullableString,
+    invitationId: primitives.nullableUuid,
+    role: ConsoleMemberRole,
+    updatedBySubjectId: primitives.string,
+    updatedAt: primitives.dateTime,
+  }),
+);
+export type ConsoleMemberRoleEntry = z.infer<typeof ConsoleMemberRoleEntry>;
+
+/** Every Console role set in the organization. Anyone not listed has `none`. */
+export const ConsoleMemberRolesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    roles: z.array(ConsoleMemberRoleEntry),
+  }),
+);
+export type ConsoleMemberRolesResponse = z.infer<typeof ConsoleMemberRolesResponse>;
+
+/** Sets the Console role of one member (`subjectId`) or pending invitation (`invitationId`). */
+export const SetConsoleMemberRoleRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      subjectId: z.string().trim().min(6).max(1024).optional(),
+      invitationId: primitives.optionalUuid,
+      role: ConsoleMemberRole,
+    })
+    .superRefine((value, context) => {
+      if ((value.subjectId === undefined) === (value.invitationId === undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["subjectId"],
+          message: "name exactly one of subjectId or invitationId",
+        });
+      }
+    }),
+);
+export type SetConsoleMemberRoleRequest = z.infer<typeof SetConsoleMemberRoleRequest>;

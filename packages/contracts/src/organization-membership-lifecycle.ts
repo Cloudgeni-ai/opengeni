@@ -507,6 +507,12 @@ export const CreateOrganizationInvitationRequest = /* @__PURE__ */ defineSchema(
     role: OrganizationMembershipRole.default("member"),
     expiresAt: primitives.string.datetime({ offset: true }),
     operationId: primitives.uuid,
+    /**
+     * The invited member's Console role once they accept (owners and admins
+     * are always full there). Only an organization owner or admin, signed in
+     * as themselves, may set one other than `none`.
+     */
+    consoleRole: z.enum(["none", "viewer", "editor"]).optional(),
   }),
 );
 export type CreateOrganizationInvitationRequest = z.infer<

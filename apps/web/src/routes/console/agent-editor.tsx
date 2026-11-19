@@ -59,7 +59,7 @@ import {
   withToolOn,
   type OrgAgentsApi,
 } from "@/lib/organization-agents";
-import { useConsole, useConsoleQuery, type ConsoleQuery } from "./console-shared";
+import { useConsole, useConsoleCan, useConsoleQuery, type ConsoleQuery } from "./console-shared";
 
 /** The newest version (draft or published): what the editor starts from. */
 export function newestVersion(agent: OrgAgent) {
@@ -129,7 +129,11 @@ export function AgentEditor({
 }) {
   const context = useAppContext();
   const { client, organizationId, appWorkspaceId } = useConsole();
-  const readOnly = agent.managedBy === "code";
+  // Read-only for a code-managed agent and for a Viewer; where it's
+  // available (team workspaces) is for owners and admins.
+  const canEdit = useConsoleCan("editor");
+  const full = useConsoleCan("full");
+  const readOnly = agent.managedBy === "code" || !canEdit;
   const base = useMemo(() => initialDefinition(agent), [agent]);
   const [definition, setDefinition] = useState<OrgAgentDefinition>(base);
   const [workspaceIds, setWorkspaceIds] = useState<string[]>(agent.workspaceIds);
@@ -375,7 +379,7 @@ export function AgentEditor({
           onRetryWorkspaces={teamWorkspaces.reload}
           selected={workspaceIds}
           onSelectedChange={setWorkspaceIds}
-          disabled={readOnly}
+          disabled={readOnly || !full}
           emptyText="This organization has no team workspaces."
         />
       </DetailSection>

@@ -1,7 +1,9 @@
 // Console > Agents > one agent: Settings (the editor), Test, Versions and
 // Sessions. The header's one primary is Publish while a draft waits; Export
 // as YAML, who manages it and Archive are in the ⋯ menu. A code-managed agent
-// opens read-only; an organization owner can move it to Console.
+// opens read-only; an organization owner can move it to Console. A Viewer
+// (Console role) sees Settings, Versions and Sessions read-only; an Editor
+// also tests and publishes; Archive is for owners and admins.
 import type { OrgAgent, OrgAgentPublishOperation } from "@opengeni/contracts";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { BotIcon } from "lucide-react";
@@ -33,6 +35,7 @@ import { AgentVersions, PublishDialog, usePublishOperation } from "./agent-versi
 import {
   ConsoleLoadError,
   useConsole,
+  useConsoleCan,
   useConsoleQuery,
   useOrgAgentsApi,
   useOrgAgentsEnabled,
@@ -68,6 +71,10 @@ export function ConsoleAgentRoute() {
   const tab = query.tab ?? "settings";
   const api = useOrgAgentsApi();
   const owner = useIsOrganizationOwner();
+  const canEdit = useConsoleCan("editor");
+  const full = useConsoleCan("full");
+  const tabs = canEdit ? TABS : TABS.filter((entry) => entry.id !== "test");
+  const shownTab = tabs.some((entry) => entry.id === tab) ? tab : "settings";
   const loaded = useConsoleQuery((signal) => api.getAgent(agentId, signal), [api, agentId]);
   const toolServers = useConsoleQuery((signal) => api.listToolServers(signal), [api]);
   const [agent, setAgent] = useState<OrgAgent | null>(null);
@@ -149,7 +156,7 @@ export function ConsoleAgentRoute() {
         ]}
         actions={
           <>
-            {!code && draftWaiting ? (
+            {!code && draftWaiting && canEdit ? (
               <Button size="sm" disabled={dirty} onClick={() => setPublishing(agent.latestVersion)}>
                 Publish v{agent.latestVersion}
               </Button>
@@ -165,17 +172,21 @@ export function ConsoleAgentRoute() {
                   Manage by code
                 </DropdownMenuItem>
               ) : null}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem variant="destructive" onSelect={() => setArchiving(true)}>
-                Archive
-              </DropdownMenuItem>
+              {full ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onSelect={() => setArchiving(true)}>
+                    Archive
+                  </DropdownMenuItem>
+                </>
+              ) : null}
             </MoreMenu>
           </>
         }
         tabs={
           <LineTabsNav aria-label="Agent">
-            {TABS.map((entry) => (
-              <LineTabsLink key={entry.id} asChild active={tab === entry.id}>
+            {tabs.map((entry) => (
+              <LineTabsLink key={entry.id} asChild active={shownTab === entry.id}>
                 <Link
                   to="/console/agents/$agentId"
                   params={{ agentId }}
@@ -206,7 +217,7 @@ export function ConsoleAgentRoute() {
         </Notice>
       ) : null}
 
-      {tab === "settings" ? (
+      {shownTab === "settings" ? (
         <AgentEditor
           agent={agent}
           api={api}
@@ -214,14 +225,14 @@ export function ConsoleAgentRoute() {
           onSaved={setAgent}
           onDirtyChange={setDirty}
         />
-      ) : tab === "test" ? (
+      ) : shownTab === "test" ? (
         <AgentTestChat
           agent={agent}
           api={api}
           toolServers={toolServers.data?.toolServers ?? null}
           unsaved={dirty}
         />
-      ) : tab === "versions" ? (
+      ) : shownTab === "versions" ? (
         <AgentVersions
           agent={agent}
           api={api}

@@ -1122,6 +1122,31 @@ export function holdsOrganizationAdministration(
 }
 
 /**
+ * Whether this person may hold a Console role as a member of this
+ * organization (docs/opengeni-console.md, "Roles"): their live role in it is
+ * `member` and they signed in to Opengeni as themselves (the canonical
+ * managed browser session or an approved native app credential). Their Console
+ * role itself (none, viewer or editor) is stored per organization; this only
+ * says the request is theirs. API keys, services, end users, agents and
+ * personal keys acting for a member, and people of other organizations never
+ * qualify. Owners and admins are covered by
+ * {@link holdsOrganizationAdministration} instead.
+ */
+export function holdsOrganizationMemberConsoleStanding(
+  context: AccessContext,
+  organizationId: string,
+): boolean {
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return false;
+  if (!canonicalManagedCookieContexts.has(context)) return false;
+  const matching = context.accountGrants.filter(
+    (candidate) => candidate.accountId === organizationId,
+  );
+  if (matching.length !== 1) return false;
+  const accountGrant = matching[0]!;
+  return accountGrant.subjectId === context.subjectId && accountGrant.role === "member";
+}
+
+/**
  * {@link holdsOrganizationAdministration} for a resolved workspace
  * authorization, in that workspace's organization. A literal `account:admin`
  * account grant keeps its existing meaning; the role path needs the exact
