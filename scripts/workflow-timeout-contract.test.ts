@@ -791,6 +791,9 @@ async function runPlaywrightInstall(options: {
           PLAYWRIGHT_APT_MIRRORS: mirrors,
           PLAYWRIGHT_BROWSERS_PATH: join(dir, "browsers"),
           PLAYWRIGHT_DEBS_SAVE: options.save ? "true" : "false",
+          // The parallel prefetch is best effort ahead of the apt download
+          // these fakes model; it is exercised against a real archive instead.
+          PLAYWRIGHT_PARALLEL_PREFETCH: "false",
         },
         stdout: "pipe",
         stderr: "pipe",

@@ -149,6 +149,60 @@ deb_file() {
   compgen -G "${DEB_DIR}/${1}_*.deb" | head -n 1
 }
 
+# Fetches the debs apt would download in parallel, each from the first mirror
+# that serves it at a usable speed. One archive mirror can trickle a single
+# file for minutes while answering others at once; apt fetches one file at a
+# time from one mirror, so a few trickling files exhaust the whole budget.
+# Here a transfer slower than PREFETCH_SPEED_LIMIT bytes/s for
+# PREFETCH_SPEED_TIME seconds moves on to the next mirror, and many files
+# download at once. Best effort: apt still fetches whatever this leaves, and
+# verifies every deb it uses against the signed package lists.
+prefetch_debs() {
+  local deadline=$1 remaining uris uri mirrors=()
+  shift
+  [ "${PLAYWRIGHT_PARALLEL_PREFETCH:-true}" = "true" ] || return 0
+  remaining=$((deadline - SECONDS))
+  [ "${remaining}" -gt 30 ] || return 0
+  if [ -f "${APT_MIRRORS}" ]; then
+    mapfile -t mirrors < <(awk '!/^#/ && NF { print $1 }' "${APT_MIRRORS}")
+  fi
+  for uri in ${FALLBACK_MIRRORS}; do
+    case " ${mirrors[*]} " in *" ${uri} "*) ;; *) mirrors+=("${uri}") ;; esac
+  done
+  [ "${#mirrors[@]}" -gt 0 ] || return 0
+  uris="$(sudo apt-get install -y -qq --no-install-recommends --download-only --print-uris \
+    -o Dir::Cache::archives="${DEB_DIR}" "$@" 2>/dev/null | grep "^'")" || return 0
+  [ -n "${uris}" ] || return 0
+  echo "Prefetching $(wc -l <<<"${uris}") browser system packages in parallel."
+  local fetch_dir
+  fetch_dir="$(mktemp -d)"
+  # Each line: 'URI' file size SHA256:hash. Mirror-list URIs name the list
+  # file, so the pool path is joined onto each mirror in turn.
+  PREFETCH_MIRRORS="${mirrors[*]}" PREFETCH_DIR="${fetch_dir}" \
+    timeout --kill-after="${KILL_AFTER_SECONDS}s" "$((remaining - 20))s" \
+    xargs -P 16 -L 1 bash -c '
+      uri="$0" file="$1" algo="${3%%:*}" hash="${3#*:}"
+      case "${algo}" in
+        SHA512) sum=sha512sum ;; SHA256) sum=sha256sum ;; SHA1) sum=sha1sum ;; MD5Sum) sum=md5sum ;;
+        *) exit 0 ;;
+      esac
+      path="${uri#*/pool/}"
+      [ "${path}" != "${uri}" ] || exit 0
+      for mirror in ${PREFETCH_MIRRORS}; do
+        if curl --fail --silent --location --connect-timeout 5 \
+          --speed-limit "${PREFETCH_SPEED_LIMIT:-100000}" --speed-time "${PREFETCH_SPEED_TIME:-8}" \
+          --max-time 180 --output "${PREFETCH_DIR}/${file}" "${mirror%/}/pool/${path}" &&
+          [ "$("${sum}" "${PREFETCH_DIR}/${file}" | cut -d " " -f 1)" = "${hash}" ]; then
+          exit 0
+        fi
+        rm -f "${PREFETCH_DIR}/${file}"
+      done
+      exit 0
+    ' <<<"${uris}" || true
+  sudo cp -n "${fetch_dir}"/*.deb "${DEB_DIR}/" 2>/dev/null || true
+  rm -rf "${fetch_dir}"
+}
+
 # Fills the deb cache with every browser's packages, using the network only
 # for what it lacks. Succeeds when the cache holds them all, at the versions
 # and hashes the package lists name.
@@ -174,6 +228,7 @@ fill_deb_cache() {
     # runner image's lists soon name debs that 404. A partly failed refresh
     # still leaves usable lists, so it never stops the download.
     timeout --kill-after="${KILL_AFTER_SECONDS}s" "${remaining}s" sudo apt-get update || true
+    prefetch_debs "${deadline}" ${all}
     remaining=$((deadline - SECONDS))
     status=124
     if [ "${remaining}" -ge 1 ]; then
