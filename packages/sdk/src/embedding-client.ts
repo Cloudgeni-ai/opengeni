@@ -275,7 +275,15 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
    * authority on each request. `displayName` and `email` are display details
    * Console shows for the user (the latest sent wins; omit to keep them);
    * they never change who the user is. */
-  asUser(externalId: string, options: AsUserOptions = {}): this {
+  asUser(
+    externalId: string,
+    options: {
+      source?: string;
+      membership?: ExternalActorStatedMembership;
+      displayName?: string;
+      email?: string;
+    } = {},
+  ): this {
     if (typeof window !== "undefined")
       throw new Error("asUser is a server-side API; keep organization keys on your backend");
     if (
@@ -578,11 +586,28 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
    * needed for the default path: an `asUser` request through a key with
    * `members:manage` adds a missing member with conversation permissions on
    * first use. Change an existing member with `updateExternalWorkspaceMember`.
+   * `identity.displayName` and `identity.email` are display details Console
+   * shows (the latest sent wins).
    */
   async addExternalWorkspaceMember(
     workspaceId: string,
     request: {
-      /** `displayName` and `email` are display details Console shows (latest wins). */
+      identity: { externalId: string; source?: string };
+      permissions: AddWorkspaceMemberRequest["permissions"];
+      operationId?: string;
+    },
+  ): Promise<import("@opengeni/contracts/external-identities").ExternalIdentity>;
+  async addExternalWorkspaceMember(
+    workspaceId: string,
+    request: {
+      identity: { externalId: string; source?: string; displayName?: string; email?: string };
+      permissions: AddWorkspaceMemberRequest["permissions"];
+      operationId?: string;
+    },
+  ): Promise<import("@opengeni/contracts/external-identities").ExternalIdentity>;
+  async addExternalWorkspaceMember(
+    workspaceId: string,
+    request: {
       identity: { externalId: string; source?: string; displayName?: string; email?: string };
       permissions: AddWorkspaceMemberRequest["permissions"];
       operationId?: string;
