@@ -21,7 +21,7 @@ import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { SessionMessageSearchRequest } from "@opengeni/contracts";
+import { SessionMessageSearchRequest, sessionAgentFieldNamesOrgAgent } from "@opengeni/contracts";
 import {
   GitHubRepositoryUnavailableError,
   ModelPolicyRefusedError,
@@ -875,7 +875,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
-      const requestedProfile = CreateSessionRequest.parse(payload).profile;
+      const requestedProfile = CreateSessionRequest.parse(
+        withoutOrgAgentFieldsForPreflight(payload),
+      ).profile;
       // only a person present in the app or the host's server sets a
       // task usage limit; an agent acting for a person cannot, even null.
       if (
@@ -7247,6 +7249,20 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
     return undefined;
   }
   return Math.floor(sequence);
+}
+
+/**
+ * The create body as the route's early check reads it. An `agent` that names
+ * an organization agent (a key, an id or `{ ref }`) is not today's agent
+ * object; the core create resolves and validates it, so the early check reads
+ * the rest of the body. Every other body is returned unchanged.
+ */
+function withoutOrgAgentFieldsForPreflight(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const request = payload as Record<string, unknown>;
+  if (!sessionAgentFieldNamesOrgAgent(request["agent"])) return payload;
+  const { agent: _orgAgent, ...rest } = request;
+  return rest;
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */

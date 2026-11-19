@@ -8,6 +8,8 @@ import {
   createSession,
   ensureManagedAccessForUser,
   forkSessionContent,
+  getSession,
+  readSessionAgentPrompt,
   type DbClient,
 } from "../src/index";
 
@@ -68,6 +70,12 @@ const COPIED = [
   // (migration 1244, docs/agents.md): a fork is a chat with the same agent.
   "agent_id",
   "agent_prompt_revision",
+  // The organization agent version the chat runs, the version whose
+  // Instructions are in its prompt and what the chat changed (migration 1502,
+  // docs/run-lifecycle.md): a fork runs the same organization agent.
+  "agent_version",
+  "agent_prompt_version",
+  "agent_overrides",
 ] as const;
 
 const fresh = (value: unknown) => () => value;
@@ -579,5 +587,81 @@ describe("a fork is the same agent as its source", () => {
     expect(await mcpServers(fork.sessionId)).toEqual(
       (await mcpServers(sourceId)).filter((server) => server.server_id === "public-docs"),
     );
+  }, 180_000);
+
+  test("a fork of an organization-agent chat runs the same agent version", async () => {
+    const org = await organization();
+    const agentId = crypto.randomUUID();
+    await shared.admin`insert into agents (id, account_id, workspace_id, scope, visibility, name,
+        name_key, origin, current_revision, agent_key, managed_by, published_revision)
+      values (${agentId}, ${org.accountId}, null, 'organization', 'workspace', 'Support',
+        'support', 'app', 2, ${`support-${agentId.slice(0, 8)}`}, 'console', 2)`;
+    for (const version of [1, 2]) {
+      await shared.admin`insert into agent_revisions (agent_id, account_id, workspace_id, revision,
+          name, instructions, config, tool_catalog, source, config_hash)
+        values (${agentId}, ${org.accountId}, null, ${version}, 'Support',
+          ${`Support instructions v${version}.`}, '{}'::jsonb, '{}'::jsonb, 'console',
+          ${`sha256:${String(version).repeat(64)}`})`;
+    }
+    const overrides = { model: { agent: "agent-model", chat: "test-model" } };
+    const source = await createSession(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: org.owner },
+      subjectId: org.owner,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      orgAgent: { agentId, version: 2, promptVersion: 1, overrides },
+      mcpServers: [
+        {
+          id: "tickets",
+          name: "Tickets",
+          url: "https://mcp.example.test/tickets",
+          allowedTools: ["search"],
+          timeoutMs: null,
+          cacheToolsList: true,
+        },
+      ],
+    });
+    await completedExchange(org, source.id);
+    const fork = await forkSessionContent(client.db, {
+      sourceWorkspaceId: org.workspaceId,
+      sourceSessionId: source.id,
+      actorSubjectId: org.member,
+      destinationWorkspaceId: org.workspaceId,
+      destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
+      operationKey: `fork-${crypto.randomUUID()}`,
+    });
+    const { fork: row } = await expectSameAgent(org, source.id, fork.sessionId, org.member);
+    expect({
+      agent_id: row.agent_id,
+      agent_version: row.agent_version,
+      agent_prompt_version: row.agent_prompt_version,
+      agent_prompt_revision: row.agent_prompt_revision,
+      agent_overrides: row.agent_overrides,
+    }).toEqual({
+      agent_id: agentId,
+      agent_version: 2,
+      agent_prompt_version: 1,
+      agent_prompt_revision: null,
+      agent_overrides: overrides,
+    });
+    // The agent's tool servers are ordinary session servers: they come along.
+    expect(await mcpServers(fork.sessionId)).toEqual(await mcpServers(source.id));
+    expect((await getSession(client.db, org.workspaceId, fork.sessionId))?.orgAgent).toEqual(
+      (await getSession(client.db, org.workspaceId, source.id))?.orgAgent,
+    );
+    const prompt = await readSessionAgentPrompt(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      sessionId: fork.sessionId,
+    });
+    expect(JSON.stringify(prompt)).toContain("Support instructions v1.");
   }, 180_000);
 });
