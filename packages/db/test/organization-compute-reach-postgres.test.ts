@@ -731,6 +731,31 @@ describe("Runs on: organization machines and environments only", () => {
       },
     });
     expect(agent.draft?.config.runsOn).toEqual({ kind: "machine", machine: "Build box" });
+    // The version keeps the id the name resolved to (config keeps the name).
+    const savedTarget = async (agentId: string) =>
+      (
+        await shared.admin<Array<{ target: unknown }>>`
+          select runs_on_target as target from agent_revisions
+          where agent_id = ${agentId} order by revision desc limit 1`
+      )[0]?.target;
+    expect(await savedTarget(agent.id)).toEqual({ machineId: machine.enrollmentId });
+    const onRig = await createOrgAgent(client.db, {
+      accountId: org.accountId,
+      actor,
+      key: "on-rig",
+      definition: {
+        name: "On rig",
+        config: { runsOn: { kind: "sandbox", environment: "python 3.13" } },
+      },
+    });
+    expect(await savedTarget(onRig.id)).toEqual({ environmentId: rig.id });
+    const toolsOnly = await createOrgAgent(client.db, {
+      accountId: org.accountId,
+      actor,
+      key: "tools-only",
+      definition: { name: "Tools only", config: { runsOn: { kind: "none" } } },
+    });
+    expect(await savedTarget(toolsOnly.id)).toBeNull();
     expect(
       await refusal(
         saveOrgAgentDraft(client.db, {

@@ -2166,6 +2166,10 @@ shape the machine list reports as `reach` for organization machines
 workspaces** in the picker, migration 1509) adds every workspace the
 organization's product manages (`organization_managed_workspaces`), including
 ones it creates later, without listing them; omitted keeps the current value.
+So a client that predates the setting (an older SDK or UI) leaves it on when
+it narrows the list: switch it off explicitly to take those workspaces away.
+Every chat in a managed workspace can use the machine, including your end
+customers' chats, not only organization agent chats.
 [Console agents](agents.md#runs-on) that run on an organization machine need
 it (or every shared workspace), because their chats run in those workspaces.
 It needs
