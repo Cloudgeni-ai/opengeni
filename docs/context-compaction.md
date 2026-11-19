@@ -453,6 +453,17 @@ the start of every later request:
   appends a new item that replaces the old one; withdrawn governance appends an
   explicit "no workspace governance" item. Compaction re-adds only the latest
   governance item after the Skill catalog.
+- The active workspace's filesystem layout names its root, which differs
+  between a managed sandbox (`/workspace`) and each Connected Machine (its
+  host-native working directory). The SDK's `# Filesystem` section is turned
+  off (`filesystemInstructions: false`); the system prompt keeps a static
+  section that points at the latest `<opengeni_workspace_filesystem>` developer
+  item, written like governance before the turn that first sees a new layout
+  and frozen for that turn's attempts. A `sandbox_swap` within a turn returns
+  the new `workspaceRoot` in its tool result; the next turn appends the new
+  layout. Compaction re-adds only the latest layout item after governance.
+  Before this, every machine swap rewrote the end of the system prompt and
+  every later request of the session re-read its whole history uncached.
 - An agent's Instructions are the exception that is allowed in the system
   prompt, because every chat of one agent shares them: chats bound to an agent
   revision (`sessions.agent_prompt_revision`) carry that revision as their own
