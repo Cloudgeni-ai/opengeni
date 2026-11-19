@@ -307,7 +307,9 @@ export type SessionProxyHandlerOptions = {
    * active sandbox and Codex account, forks, and `chat/completions`.
    *
    * Without it, the browser creates chats with Opengeni's own create request,
-   * limited by the user's permissions.
+   * limited by the user's permissions. An organization agent is named only
+   * here: a browser-sent `agent` key or `{ ref }` and `agentOverrides` are
+   * dropped.
    */
   createSession?:
     | ((
@@ -937,6 +939,7 @@ export function createSessionProxyHandler(
           // Opengeni's own create request, as the user, with the server's additions.
           const { modelContext: sent, ...created } = browserPayload(body) as CreateSessionRequest;
           if (!modelSelection) for (const field of MODEL_FIELDS) delete created[field];
+          withoutBrowserOrgAgent(created as Record<string, unknown>);
           const browser = withBrowserContext(sent);
           const extras = await messageExtras({
             delivery: "create",
@@ -2059,6 +2062,23 @@ async function clearSentNewSessionDraft(
   } catch (error) {
     if (!(error instanceof OpenGeniApiError)) throw error;
   }
+}
+
+/**
+ * A browser create cannot pick an organization agent (an `agent` key or id,
+ * or an object with `ref`) or `agentOverrides`; the host names one from its
+ * `createSession` hook. They are dropped, like a locked model. Today's agent
+ * object passes through unchanged.
+ */
+function withoutBrowserOrgAgent(created: Record<string, unknown>): void {
+  const agent = created.agent;
+  if (
+    typeof agent === "string" ||
+    (agent !== null && typeof agent === "object" && !Array.isArray(agent) && Object.hasOwn(agent, "ref"))
+  ) {
+    delete created.agent;
+  }
+  delete created.agentOverrides;
 }
 
 /** Browser payloads cannot supply server-owned credential rotations. */

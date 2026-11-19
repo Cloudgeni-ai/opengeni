@@ -33,6 +33,8 @@ import {
   WorkspaceOpenRouterCustomModelsResponse as ContractWorkspaceOpenRouterCustomModelsResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  CreateSessionAgentField as ContractCreateSessionAgentField,
+  OrgAgentOverridesMode as ContractOrgAgentOverridesMode,
   CreateSessionResponse as ContractCreateSessionResponse,
   CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
   KnowledgeMemory as ContractKnowledgeMemory,
@@ -601,9 +603,18 @@ describe("SDK / contracts parity", () => {
     // firstPartyMcpPermissions is deliberately `string[]` in the SDK (forward
     // compatible with new server-side permissions), so it is checked at
     // runtime by the server rather than at compile time here.
+    // `agent` also names an organization agent (Console agents) and
+    // `agentOverrides` goes with it; the contract checks that field with
+    // CreateSessionAgentField until session create widens its `agent`.
     const acceptCreateRequest = (
-      value: Omit<CreateSessionRequest, "firstPartyMcpPermissions">,
+      value: Omit<CreateSessionRequest, "firstPartyMcpPermissions" | "agent" | "agentOverrides">,
     ): z.input<typeof ContractCreateSessionRequest> => value;
+    const acceptCreateAgentField = (
+      value: NonNullable<CreateSessionRequest["agent"]>,
+    ): z.input<typeof ContractCreateSessionAgentField> => value;
+    const acceptAgentOverrides = (
+      value: NonNullable<CreateSessionRequest["agentOverrides"]>,
+    ): z.input<typeof ContractOrgAgentOverridesMode> => value;
     const acceptClientEvent = (
       value: ClientSessionEventInput,
     ): z.input<typeof ClientSessionEvent> => value;
@@ -629,6 +640,8 @@ describe("SDK / contracts parity", () => {
     };
     const checks = [
       acceptSession,
+      acceptCreateAgentField,
+      acceptAgentOverrides,
       acceptAgentTopologyPage,
       acceptCreateResponse,
       acceptEvent,

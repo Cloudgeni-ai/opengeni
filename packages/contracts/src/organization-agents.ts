@@ -805,6 +805,7 @@ export const OrgAgentSessionRequest = /* @__PURE__ */ defineSchema(() =>
   }).strict(),
 );
 export type OrgAgentSessionRequest = z.infer<typeof OrgAgentSessionRequest>;
+export type OrgAgentSessionRequestInput = z.input<typeof OrgAgentSessionRequest>;
 
 /**
  * The public `agent` field of session create: today's agent configuration
@@ -815,6 +816,7 @@ export const CreateSessionAgentField = /* @__PURE__ */ defineSchema(() =>
   z.union([AgentConfigRequest, OrgAgentRef, OrgAgentSessionRequest]),
 );
 export type CreateSessionAgentField = z.infer<typeof CreateSessionAgentField>;
+export type CreateSessionAgentFieldInput = z.input<typeof CreateSessionAgentField>;
 
 /** Whether a create names an organization agent (a string or an object with `ref`). */
 export function sessionAgentFieldNamesOrgAgent(agent: unknown): boolean {
