@@ -19,14 +19,22 @@ import type { SqlStorage, SqlStorageValue, SyncKvStorage } from "./site-database
 
 /** Raised when a database cannot be copied as it is; the database stays where it was. */
 export class RelocationError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** The HTTP status of the legacy object's refusal, when it refused a step. */
+    readonly status?: number,
+  ) {
     super(message);
     this.name = "RelocationError";
   }
 }
 
-/** A value with its SQLite storage class: integers and reals as exact text, blobs as base64. */
-export type EncodedValue = null | string | { i: string } | { r: string } | { b: string };
+/**
+ * A value with its SQLite storage class: integers and reals as exact text,
+ * text and blobs as base64 of their stored bytes (so text that is not valid
+ * UTF-8 is copied and compared byte for byte).
+ */
+export type EncodedValue = null | { i: string } | { r: string } | { t: string } | { b: string };
 
 export type SchemaEntry = {
   type: "table" | "index" | "view" | "trigger";
@@ -49,6 +57,8 @@ export type RelocationState = {
   /** User schema objects in creation order (Cloudflare, Opengeni and SQLite internals excluded). */
   schema: SchemaEntry[];
   tables: Array<CopiedTable & { rows: number; digest: string }>;
+  /** FTS5 settings (`<table>_config` rows other than `version`), by table then key. */
+  ftsConfig: Array<{ table: string; key: string; value: EncodedValue }>;
   /** AUTOINCREMENT counters (`sqlite_sequence`), by table name. */
   sequences: Array<{ name: string; seq: string }>;
   /** Migration records (`mig:` keys), by key. */
@@ -61,16 +71,24 @@ export type PageCursor = { t: number; r?: string; o?: number };
 
 export type RelocationPage = {
   table: string;
+  /** The table's position among the copied tables. */
+  index: number;
   /** Each row: the rowid (when the table has an alias) then one value per column. */
   rows: EncodedValue[][];
   next: PageCursor | null;
 };
 
-/** Staging rows in the EU object before the copy is built (excluded from user schema reads). */
+/**
+ * Staging in the EU object before the copy is built (excluded from user
+ * schema reads): one table per copied table (`_og_relocation_<index>`, one
+ * untyped column per value, so every value keeps its storage class and no
+ * staged value is larger than it was in the source) and a list of them.
+ */
 export const STAGING_TABLE = "_og_relocation";
 
 const PAGE_MAX_ROWS = 2_000;
-const PAGE_MAX_BYTES = 2 * 1024 * 1024;
+/** UTF-8 bytes of the rows in one page (a page always holds at least one row). */
+const PAGE_MAX_BYTES = 1024 * 1024;
 const DIGEST_CHUNK_ROWS = 500;
 const INTERNAL_NAME = /^(?:sqlite_|_cf_|_og_)/iu;
 
@@ -92,13 +110,18 @@ export function schemaEntries(sql: SqlStorage): SchemaEntry[] {
     }));
 }
 
-function tableKinds(sql: SqlStorage): Map<string, string> {
+type TableKind = { type: string; withoutRowid: boolean };
+
+function tableKinds(sql: SqlStorage): Map<string, TableKind> {
   return new Map(
     sql
       .exec("PRAGMA table_list")
       .toArray()
       .filter((row) => row.schema === "main")
-      .map((row) => [String(row.name), String(row.type)]),
+      .map((row) => [
+        String(row.name),
+        { type: String(row.type), withoutRowid: Number(row.wr) === 1 },
+      ]),
   );
 }
 
@@ -106,7 +129,7 @@ function tableKinds(sql: SqlStorage): Map<string, string> {
 export function userTables(sql: SqlStorage, schema = schemaEntries(sql)): string[] {
   const kinds = tableKinds(sql);
   return schema
-    .filter((entry) => entry.type === "table" && kinds.get(entry.name) !== "shadow")
+    .filter((entry) => entry.type === "table" && kinds.get(entry.name)?.type !== "shadow")
     .map((entry) => entry.name);
 }
 
@@ -119,7 +142,7 @@ export function copiedTables(sql: SqlStorage, schema = schemaEntries(sql)): Copi
   const tables: CopiedTable[] = [];
   for (const entry of schema) {
     if (entry.type !== "table") continue;
-    const kind = kinds.get(entry.name);
+    const kind = kinds.get(entry.name)?.type;
     if (kind === "shadow") continue;
     const virtual = kind === "virtual";
     if (
@@ -139,11 +162,16 @@ export function copiedTables(sql: SqlStorage, schema = schemaEntries(sql)): Copi
       );
     const info = sql.exec(`PRAGMA table_xinfo(${quoteSiteSqlIdentifier(entry.name)})`).toArray();
     const names = new Set(info.map((column) => String(column.name).toLowerCase()));
+    const withoutRowid = !virtual && kinds.get(entry.name)!.withoutRowid;
     const alias = virtual
       ? "rowid"
-      : /\bWITHOUT\s+ROWID\b/iu.test(entry.sql ?? "")
+      : withoutRowid
         ? null
         : (["rowid", "_rowid_", "oid"].find((name) => !names.has(name)) ?? null);
+    if (!withoutRowid && alias === null)
+      throw new RelocationError(
+        `Table ${entry.name} has columns named rowid, _rowid_ and oid, so its rowids cannot be copied`,
+      );
     tables.push({
       name: entry.name,
       virtual,
@@ -152,6 +180,12 @@ export function copiedTables(sql: SqlStorage, schema = schemaEntries(sql)): Copi
     });
   }
   return tables;
+}
+
+function drainCursor(cursor: { raw(): Iterable<unknown> }): void {
+  for (const _ of cursor.raw()) {
+    // run to completion
+  }
 }
 
 function toBase64(bytes: ArrayBuffer): string {
@@ -179,7 +213,7 @@ function encodeValue(type: SqlStorageValue, value: SqlStorageValue): EncodedValu
     case "real":
       return { r: encodeReal(Number(value)) };
     case "text":
-      return String(value);
+      return { t: toBase64(value as ArrayBuffer) };
     case "blob":
       return { b: toBase64(value as ArrayBuffer) };
     default:
@@ -194,7 +228,7 @@ function selectList(table: CopiedTable): string {
     const quoted = quoteSiteSqlIdentifier(column);
     parts.push(
       `typeof(${quoted})`,
-      `CASE typeof(${quoted}) WHEN 'integer' THEN CAST(${quoted} AS TEXT) ELSE ${quoted} END`,
+      `CASE typeof(${quoted}) WHEN 'integer' THEN CAST(${quoted} AS TEXT) WHEN 'text' THEN CAST(${quoted} AS BLOB) ELSE ${quoted} END`,
     );
   }
   return parts.join(", ");
@@ -240,6 +274,8 @@ function readRows(
   }));
 }
 
+const utf8 = new TextEncoder();
+
 /** One page of rows for the copy, bounded in rows and bytes. */
 export function readPage(
   sql: SqlStorage,
@@ -258,7 +294,7 @@ export function readPage(
     let bytes = 0;
     let last = chunk[0]!;
     for (const entry of chunk) {
-      const size = JSON.stringify(entry.row).length + 1;
+      const size = utf8.encode(JSON.stringify(entry.row)).byteLength + 1;
       if (rows.length > 0 && bytes + size > PAGE_MAX_BYTES) break;
       rows.push(entry.row);
       bytes += size;
@@ -268,7 +304,7 @@ export function readPage(
       table.alias === null
         ? { t: position.t, o: (position.o ?? 0) + rows.length }
         : { t: position.t, r: last.rowid! };
-    return { table: table.name, rows, next };
+    return { table: table.name, index: position.t, rows, next };
   }
   return null;
 }
@@ -292,6 +328,29 @@ async function tableDigest(
       table.alias === null ? { o: (position.o ?? 0) + chunk.length } : { r: chunk.at(-1)!.rowid! };
   }
   return { rows, digest };
+}
+
+/** The FTS5 settings of the virtual tables (`rank`, `automerge`, ...), read from `<table>_config`. */
+function ftsConfig(
+  sql: SqlStorage,
+  tables: CopiedTable[],
+): Array<{ table: string; key: string; value: EncodedValue }> {
+  const settings: Array<{ table: string; key: string; value: EncodedValue }> = [];
+  for (const table of tables) {
+    if (!table.virtual) continue;
+    const config = quoteSiteSqlIdentifier(`${table.name}_config`);
+    for (const [key, type, value] of sql
+      .exec(
+        `SELECT k, typeof(v), CASE typeof(v) WHEN 'integer' THEN CAST(v AS TEXT) WHEN 'text' THEN CAST(v AS BLOB) ELSE v END FROM ${config} WHERE k <> 'version' ORDER BY k`,
+      )
+      .raw())
+      settings.push({
+        table: table.name,
+        key: String(key),
+        value: encodeValue(type ?? "null", value ?? null),
+      });
+  }
+  return settings;
 }
 
 function kvEntries(kv: SyncKvStorage, prefix: string): Array<[string, unknown]> {
@@ -320,6 +379,7 @@ export async function relocationState(
   return {
     schema,
     tables,
+    ftsConfig: ftsConfig(sql, tables),
     sequences,
     migrations: kvEntries(kv, "mig:"),
     requests: kvEntries(kv, "rq:"),
@@ -356,6 +416,8 @@ export function compareStates(source: RelocationState, copy: RelocationState): s
       return `table ${table.name} has ${other.rows} rows in the copy, ${table.rows} in the source`;
     if (table.digest !== other.digest) return `the rows of table ${table.name} differ in the copy`;
   }
+  if (JSON.stringify(source.ftsConfig) !== JSON.stringify(copy.ftsConfig))
+    return "the FTS5 settings differ in the copy";
   if (JSON.stringify(source.sequences) !== JSON.stringify(copy.sequences))
     return "the AUTOINCREMENT counters differ in the copy";
   if (JSON.stringify(source.migrations) !== JSON.stringify(copy.migrations))
@@ -365,21 +427,12 @@ export function compareStates(source: RelocationState, copy: RelocationState): s
 
 // --- writing (EU object) ----------------------------------------------------
 
-/** Keep one page of the source until the whole copy is built in one transaction. */
-export function stagePage(sql: SqlStorage, page: RelocationPage): void {
-  sql.exec(
-    `CREATE TABLE IF NOT EXISTS ${STAGING_TABLE} (seq INTEGER PRIMARY KEY, tbl TEXT NOT NULL, rows TEXT NOT NULL)`,
-  );
-  sql.exec(
-    `INSERT INTO ${STAGING_TABLE} (tbl, rows) VALUES (?, ?)`,
-    page.table,
-    JSON.stringify(page.rows),
-  );
+function stagingTable(index: number): string {
+  return quoteSiteSqlIdentifier(`${STAGING_TABLE}_${index}`);
 }
 
 function bindValue(value: EncodedValue): { expression: string; binding: unknown } {
   if (value === null) return { expression: "?", binding: null };
-  if (typeof value === "string") return { expression: "?", binding: value };
   if ("i" in value) return { expression: "CAST(? AS INTEGER)", binding: value.i };
   if ("r" in value) {
     const number = Number(value.r);
@@ -387,7 +440,43 @@ function bindValue(value: EncodedValue): { expression: string; binding: unknown 
     const binding = Number.isFinite(number) ? number : number > 0 ? "9e999" : "-9e999";
     return { expression: "CAST(? AS REAL)", binding };
   }
+  // The stored bytes, read back as text without decoding them.
+  if ("t" in value) return { expression: "CAST(? AS TEXT)", binding: fromBase64(value.t) };
   return { expression: "?", binding: fromBase64(value.b) };
+}
+
+/** Keep one page of the source, each value with its storage class, until the copy is built. */
+export function stagePage(sql: SqlStorage, page: RelocationPage): void {
+  if (!Number.isSafeInteger(page.index) || page.index < 0)
+    throw new RelocationError("A page arrived without its table position");
+  const width = page.rows[0]?.length ?? 0;
+  sql.exec(
+    `CREATE TABLE IF NOT EXISTS ${STAGING_TABLE} (idx INTEGER PRIMARY KEY, tbl TEXT NOT NULL, width INTEGER NOT NULL)`,
+  );
+  const [known] = sql
+    .exec(`SELECT tbl, width FROM ${STAGING_TABLE} WHERE idx = ?`, page.index)
+    .toArray();
+  if (!known) {
+    if (width < 1) throw new RelocationError(`A page of table ${page.table} has no values`);
+    sql.exec(
+      `INSERT INTO ${STAGING_TABLE} (idx, tbl, width) VALUES (?, ?, ?)`,
+      page.index,
+      page.table,
+      width,
+    );
+    const columns = Array.from({ length: width }, (_, column) => `c${column}`).join(", ");
+    sql.exec(`CREATE TABLE ${stagingTable(page.index)} (${columns})`);
+  } else if (known.tbl !== page.table || Number(known.width) !== width)
+    throw new RelocationError(`Pages of table ${page.table} do not line up`);
+  for (const row of page.rows) {
+    if (row.length !== width)
+      throw new RelocationError(`A row of table ${page.table} has the wrong width`);
+    const bound = row.map(bindValue);
+    sql.exec(
+      `INSERT INTO ${stagingTable(page.index)} VALUES (${bound.map((value) => value.expression).join(", ")})`,
+      ...bound.map((value) => value.binding),
+    );
+  }
 }
 
 /**
@@ -403,30 +492,39 @@ export function buildCopy(sql: SqlStorage, kv: SyncKvStorage, source: Relocation
       if (!entry.sql) throw new RelocationError(`Table ${entry.name} has no definition`);
       sql.exec(entry.sql);
     }
-  let seq = 0;
-  for (;;) {
-    const [staged] = sql
-      .exec(`SELECT seq, tbl, rows FROM ${STAGING_TABLE} WHERE seq > ? ORDER BY seq LIMIT 1`, seq)
-      .toArray();
-    if (!staged) break;
-    seq = Number(staged.seq);
-    const table = copied.get(String(staged.tbl));
-    if (!table)
-      throw new RelocationError(`Rows arrived for an unknown table ${String(staged.tbl)}`);
+  for (const setting of source.ftsConfig) {
+    // FTS5 takes its settings as a command row: INSERT INTO t(t, rank) VALUES (key, value).
+    const table = quoteSiteSqlIdentifier(setting.table);
+    const value = bindValue(setting.value);
+    sql.exec(
+      `INSERT INTO ${table} (${table}, rank) VALUES (?, ${value.expression})`,
+      setting.key,
+      value.binding,
+    );
+  }
+  const hasStaging =
+    sql
+      .exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", STAGING_TABLE)
+      .toArray().length > 0;
+  const staged = hasStaging
+    ? sql.exec(`SELECT idx, tbl, width FROM ${STAGING_TABLE} ORDER BY idx`).toArray()
+    : [];
+  for (const entry of staged) {
+    const table = copied.get(String(entry.tbl));
+    if (!table) throw new RelocationError(`Rows arrived for an unknown table ${String(entry.tbl)}`);
     const names = [
       ...(table.alias === null ? [] : [table.alias]),
       ...table.columns.map(quoteSiteSqlIdentifier),
     ];
-    const into = `INSERT INTO ${quoteSiteSqlIdentifier(table.name)} (${names.join(", ")}) VALUES `;
-    for (const row of JSON.parse(String(staged.rows)) as EncodedValue[][]) {
-      if (row.length !== names.length)
-        throw new RelocationError(`A row of table ${table.name} has the wrong width`);
-      const bound = row.map(bindValue);
+    if (Number(entry.width) !== names.length)
+      throw new RelocationError(`The rows of table ${table.name} have the wrong width`);
+    const columns = names.map((_, column) => `c${column}`).join(", ");
+    drainCursor(
       sql.exec(
-        `${into}(${bound.map((value) => value.expression).join(", ")})`,
-        ...bound.map((value) => value.binding),
-      );
-    }
+        `INSERT INTO ${quoteSiteSqlIdentifier(table.name)} (${names.join(", ")}) SELECT ${columns} FROM ${stagingTable(Number(entry.idx))} ORDER BY rowid`,
+      ),
+    );
+    sql.exec(`DROP TABLE ${stagingTable(Number(entry.idx))}`);
   }
   for (const entry of source.schema)
     if (entry.type !== "table" && entry.sql !== null) sql.exec(entry.sql);
@@ -436,9 +534,7 @@ export function buildCopy(sql: SqlStorage, kv: SyncKvStorage, source: Relocation
       value,
       name,
     );
-    for (const _ of updated.raw()) {
-      // drain
-    }
+    drainCursor(updated);
     if (updated.rowsWritten === 0)
       sql.exec(
         "INSERT INTO sqlite_sequence (name, seq) VALUES (?, CAST(? AS INTEGER))",
@@ -451,6 +547,6 @@ export function buildCopy(sql: SqlStorage, kv: SyncKvStorage, source: Relocation
     throw new RelocationError(
       `The copy breaks ${violations.length} foreign key reference(s), first in table ${String(violations[0]!.table)}`,
     );
-  sql.exec(`DROP TABLE ${STAGING_TABLE}`);
+  if (hasStaging) sql.exec(`DROP TABLE ${STAGING_TABLE}`);
   for (const [key, value] of [...source.migrations, ...source.requests]) kv.put(key, value);
 }

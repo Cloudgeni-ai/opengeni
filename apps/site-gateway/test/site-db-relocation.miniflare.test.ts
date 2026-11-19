@@ -89,7 +89,7 @@ async function ok<T>(response: { status: number; json(): Promise<unknown> }): Pr
 }
 
 type LegacyStatus = {
-  moved: { site: string } | null;
+  moved: { site: string; at: string; erased?: boolean } | null;
   fenced: boolean;
   empty: boolean;
   tables: Array<{ name: string; rows: number }>;
@@ -172,7 +172,7 @@ async function startWorker(): Promise<Miniflare> {
         API_ORIGIN: "http://127.0.0.1:18787",
         APP_ORIGIN: "https://app.test",
         GATEWAY_SECRET: TEST_SECRET,
-        ENVIRONMENT: "production",
+        ENVIRONMENT: "test",
       },
       durableObjects: { SITE_DB: { className: "SiteDatabase", useSQLite: true } },
     });
@@ -193,21 +193,33 @@ afterAll(async () => {
 });
 
 describe("Site database location", () => {
-  test("a new Site's database starts in the EU and writes nothing to a legacy object", async () => {
+  test("a new Site's database starts in the EU; its legacy object keeps only a marker", async () => {
     const site = newSiteId();
     const response = await call(site, "inspect", {});
     expect(response.status).toBe(200);
     expect(response.headers.get(LOCATION)).toBe("eu");
     await ok(await call(site, "migrate", { migrations: [SCHEMA], maxDatabaseBytes: MAX_DB }));
     expect(await legacyStatus(site)).toEqual({
-      moved: null,
+      moved: { site, at: expect.any(String), erased: true },
       fenced: false,
       empty: true,
       tables: [],
     });
+    // An earlier gateway release reaching the legacy object writes to the EU database.
+    const old = await legacy(site, "insert", {
+      table: "notes",
+      columns: ["body"],
+      rows: [["from an earlier gateway"]],
+      maxDatabaseBytes: MAX_DB,
+    });
+    expect(old.status).toBe(200);
+    expect(old.headers.get(LOCATION)).toBe("eu");
+    const rows = await ok<SiteDbRunResponse>(await agentRun(site, "SELECT body FROM notes"));
+    expect(rows.rows).toEqual([{ body: "from an earlier gateway" }]);
+    expect((await legacyStatus(site)).empty).toBe(true);
   });
 
-  test("a legacy database moves exactly, keeps working and is never deleted", async () => {
+  test("a legacy database moves exactly, keeps working and its legacy copy stays until a reset", async () => {
     const site = newSiteId();
     await seedLegacy(site);
     const before = await ok<SiteDbRunResponse>(
@@ -298,7 +310,8 @@ describe("Site database location", () => {
     expect(status.fenced).toBe(false);
     expect(status.tables).toContainEqual({ name: "people", rows: 3 });
     expect(status.tables).toContainEqual({ name: "pets", rows: 3 });
-    expect((await legacy(site, "inspect", {}, "relay")).status).toBe(409);
+    // The frozen copy is never served, even to a relay.
+    expect((await legacy(site, "inspect", {}, "relay")).status).toBe(503);
 
     // An earlier gateway release still reaching the legacy object is sent to the EU copy.
     const old = await legacy(site, "run", {
@@ -317,11 +330,106 @@ describe("Site database location", () => {
     expect(names.rows.map((row) => row.name)).toEqual(["Ada", "Bob", "Cy", "Dee", "Old gateway"]);
     expect((await legacyStatus(site)).tables).toContainEqual({ name: "people", rows: 3 });
 
-    // A reset or rebuild of the EU database never brings the legacy copy back.
+    // A reset erases the frozen legacy copy too, and never brings it back.
     await ok(await call(site, "reset", {}));
     const empty = await call(site, "inspect", {});
     expect(empty.headers.get(LOCATION)).toBe("eu");
     expect(((await empty.json()) as SiteDbInspectResponse).tables).toEqual([]);
+    expect(await legacyStatus(site)).toEqual({
+      moved: { site, at: expect.any(String), erased: true },
+      fenced: false,
+      empty: true,
+      tables: [],
+    });
+  });
+
+  test("a reset or rebuild erases the legacy copy, and a reset before the move copies nothing", async () => {
+    // Reset before the database moved: the legacy database is erased, not copied.
+    const unmoved = newSiteId();
+    await seedLegacy(unmoved);
+    const reset = await call(unmoved, "reset", {});
+    expect(reset.status).toBe(200);
+    expect(reset.headers.get(LOCATION)).toBe("eu");
+    expect(await legacyStatus(unmoved)).toMatchObject({
+      moved: { site: unmoved, erased: true },
+      empty: true,
+      tables: [],
+    });
+    const after = await ok<SiteDbInspectResponse>(await call(unmoved, "inspect", {}));
+    expect(after.tables).toEqual([]);
+
+    // Rebuild after the move: the frozen legacy copy is erased first.
+    const moved = newSiteId();
+    await seedLegacy(moved);
+    await ok(await call(moved, "inspect", {}));
+    expect((await legacyStatus(moved)).empty).toBe(false);
+    await ok(
+      await call(moved, "migrate", {
+        migrations: [SCHEMA],
+        rebuild: true,
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    expect(await legacyStatus(moved)).toMatchObject({ moved: { erased: true }, empty: true });
+    const rebuilt = await ok<SiteDbRunResponse>(
+      await agentRun(moved, "SELECT count(*) AS n FROM people"),
+    );
+    expect(rebuilt.rows).toEqual([{ n: 0 }]);
+  });
+
+  test("text bytes, rowids, FTS5 settings and large values move exactly", async () => {
+    const site = newSiteId();
+    const odd = migration(
+      "odd",
+      [
+        "CREATE TABLE odd (label TEXT DEFAULT 'WITHOUT ROWID', raw TEXT)",
+        "CREATE TABLE wide (t TEXT)",
+        "CREATE TABLE big (b BLOB)",
+        "CREATE VIRTUAL TABLE s USING fts5(body)",
+      ].join(";\n"),
+    );
+    await ok(await legacy(site, "migrate", { migrations: [odd], maxDatabaseBytes: MAX_DB }));
+    await ok(
+      await legacy(site, "script", {
+        sql: [
+          "INSERT INTO odd (rowid, raw) VALUES (7, CAST(x'ff80c3' AS TEXT)), (100, 'plain')",
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) INSERT INTO wide (t) SELECT replace(hex(zeroblob(400)), '00', '漢') FROM n",
+          "INSERT INTO big (b) VALUES (zeroblob(1900000))",
+          "INSERT INTO s (s, rank) VALUES ('rank', 'bm25(10.0)')",
+          "INSERT INTO s (s, rank) VALUES ('automerge', 2)",
+          "INSERT INTO s (rowid, body) VALUES (3, 'hello there')",
+        ].join(";\n"),
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    const first = await call(site, "inspect", {});
+    expect(first.headers.get(RELOCATION_ERROR)).toBeNull();
+    expect(first.headers.get(LOCATION)).toBe("eu");
+    const oddRows = await ok<SiteDbRunResponse>(
+      await agentRun(
+        site,
+        "SELECT rowid AS r, label, hex(raw) AS raw, typeof(raw) AS t FROM odd ORDER BY rowid",
+      ),
+    );
+    expect(oddRows.rows).toEqual([
+      { r: 7, label: "WITHOUT ROWID", raw: "FF80C3", t: "text" },
+      { r: 100, label: "WITHOUT ROWID", raw: "706C61696E", t: "text" },
+    ]);
+    const wide = await ok<SiteDbRunResponse>(
+      await agentRun(site, "SELECT count(*) AS n, sum(length(t)) AS chars FROM wide"),
+    );
+    expect(wide.rows).toEqual([{ n: 2000, chars: 800_000 }]);
+    const big = await ok<SiteDbRunResponse>(
+      await agentRun(site, "SELECT length(b) AS n, typeof(b) AS t FROM big"),
+    );
+    expect(big.rows).toEqual([{ n: 1_900_000, t: "blob" }]);
+    const config = await ok<SiteDbRunResponse>(
+      await agentRun(site, "SELECT k, v FROM s_config WHERE k <> 'version' ORDER BY k"),
+    );
+    expect(config.rows).toEqual([
+      { k: "automerge", v: 2 },
+      { k: "rank", v: "bm25(10.0)" },
+    ]);
   });
 
   test("writes during the move wait for it and none is lost", async () => {
@@ -438,7 +546,7 @@ describe("Site database location", () => {
     ]);
     expect(results[2]!.error).toContain("without its own content");
     expect((await legacyStatus(idle)).moved?.site).toBe(idle);
-    expect(await legacyStatus(fresh)).toMatchObject({ moved: null, empty: true });
+    expect(await legacyStatus(fresh)).toMatchObject({ moved: { site: fresh }, empty: true });
     // Running it again changes nothing.
     expect((await sweep()).map((result) => result.location)).toEqual(["eu", "eu", "legacy", null]);
   });

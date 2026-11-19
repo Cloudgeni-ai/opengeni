@@ -2,15 +2,19 @@
 /**
  * Move Site SQL databases that were created before databases lived in the EU
  * (docs/site-data.md, "Location"). A database moves the first time it is
- * used; this touches the ones that are not being used, so every database
- * moves without waiting for traffic. It only reads (`inspect`), so it is safe
- * to run again; a database already in the EU is left as it is.
+ * used; this uses the ones that are not being used (a read-only `inspect`
+ * call, whose first use copies the database to the EU), so every database
+ * moves without waiting for traffic. It is safe to run again: a database
+ * already in the EU is left as it is.
  *
  *   OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN=https://internal.<sites domain> \
  *   OPENGENI_SITES_GATEWAY_SECRET=... \
  *   bun apps/site-gateway/scripts/move-site-databases-to-eu.ts <siteId>... (or one id per line on stdin)
  *
- * The ids are every `site_sql_databases.site_id`. Prints one line per Site
+ * The ids are every `site_sql_databases.site_id`; that table has row-level
+ * security, so list them as the table owner (the migrations role), for
+ * example `psql "$MIGRATIONS_DATABASE_URL" -Atc 'select site_id from site_sql_databases'`.
+ * Prints one line per Site
  * (`eu`, or `legacy` with the reason it could not move yet) and exits 1 when
  * any Site is not in the EU. Never deletes anything.
  */
@@ -34,6 +38,9 @@ export type MoveResult = {
 };
 
 type Fetch = (url: string, init: RequestInit) => Promise<Response>;
+
+/** One Site's copy runs inside its request; give a large one time, but never hang. */
+const REQUEST_TIMEOUT_MS = 120_000;
 
 /** Touch each Site's database once through the gateway's signed internal route. */
 export async function moveSiteDatabases(options: {
@@ -74,6 +81,7 @@ export async function moveSiteDatabases(options: {
         },
         body,
         redirect: "manual",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       const text = await response.text();
       let message: string | null = response.headers.get(SITE_DB_RELOCATION_ERROR_HEADER);
@@ -110,6 +118,11 @@ if (import.meta.main) {
   const siteIds = (args.length > 0 ? args : (await Bun.stdin.text()).split(/\s+/u))
     .map((id) => id.trim())
     .filter(Boolean);
+  if (siteIds.length === 0) {
+    // An empty list is a mistake (for example a query that row-level security filtered), not success.
+    console.error("No Site ids given.");
+    process.exit(2);
+  }
   const results = await moveSiteDatabases({ origin, secret, siteIds });
   for (const result of results)
     console.log(

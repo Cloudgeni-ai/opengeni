@@ -19,18 +19,21 @@
  * Location (`site-db-location.ts`): the gateway calls a Site's object in the
  * EU jurisdiction (role `primary`). The first time, that object looks for the
  * Site's legacy object (plain `idFromName`, created before databases moved to
- * the EU) and, when it holds a database, copies it (`site-db-relocation.ts`):
- * the legacy object is fenced (it refuses every other caller), its rows are
- * staged here, the copy is built in one transaction and accepted only when
- * its schema, row counts, row digests, AUTOINCREMENT counters and migration
- * records equal the source's. Then this object becomes the database's home
- * and the legacy object is marked moved: it keeps its data, frozen, and sends
- * any request from an earlier gateway release here. Requests that arrive
- * while the copy runs wait for it (one object, one copy at a time), so no
- * write is lost. When the copy fails, nothing changes for the Site: the
- * legacy object is released and serves (relayed by this object), the reason
- * is reported on the response, and the copy is retried later with backoff.
- * Nothing here deletes a legacy object; cleanup is a separate, explicit step.
+ * the EU). An empty one only records a moved marker. One that holds a
+ * database is copied (`site-db-relocation.ts`): the legacy object is fenced
+ * (earlier gateway releases are refused until the copy commits or is
+ * released; the fence never expires), its rows are staged here, the copy is
+ * built in one transaction and accepted only when its schema, FTS5 settings,
+ * row counts, row digests, AUTOINCREMENT counters and migration records equal
+ * the source's. Then this object becomes the database's home and the legacy
+ * object is marked moved: it keeps its data, frozen, and sends any request
+ * from an earlier gateway release here. Requests that arrive while the copy
+ * runs wait for it (one object, one copy at a time), so no write is lost.
+ * When the copy fails, nothing changes for the Site: the legacy object is
+ * released and serves (relayed by this object), the reason is reported on the
+ * response, and the copy is retried later with backoff. Nothing here deletes
+ * a legacy object; only a reset or rebuild erases its data (`erase`), and
+ * removing the objects is a separate, explicit step.
  */
 import {
   compileSiteSql,
@@ -60,6 +63,7 @@ import {
 } from "@opengeni/contracts";
 import { errorMessage, isRecord, sha256Hex } from "@opengeni/contracts/values";
 import {
+  canEmulateJurisdiction,
   primarySiteDbNamespace,
   siteDbStub,
   SITE_DB_LOCATION_HEADER,
@@ -142,26 +146,49 @@ const HOME_KEY = "loc:home";
 const FAILURE_KEY = "loc:failure";
 /** EU object: a copy in progress (left behind when the object stopped mid-copy). */
 const ATTEMPT_KEY = "loc:attempt";
-/** Legacy object: a copy holds it; every other caller is refused until `until`. */
+/**
+ * Legacy object: a copy holds it; earlier gateway releases are refused until
+ * the copy commits (the fence becomes `loc:moved`) or is released. It never
+ * expires on its own, so no write can land here between the copy's last read
+ * and its commit.
+ */
 const FENCE_KEY = "loc:fence";
 /** Legacy object: the database moved to the EU object; this copy is frozen. */
 const MOVED_KEY = "loc:moved";
 
-/** How long a fence holds without the copy touching it. */
-const FENCE_MS = 10 * 60_000;
 const RETRY_MIN_MS = 60_000;
 const RETRY_MAX_MS = 60 * 60_000;
+/** A legacy object still on the previous release (Cloudflare can defer its code update). */
+const NOT_READY_RETRY_MS = 30_000;
+/** How often a home retries marking its legacy object moved. */
+const MARK_RETRY_MS = 60_000;
+/**
+ * The largest legacy database copied on first use. The copy runs inside a
+ * request (CPU and memory bounds), so a larger one stays where it is, served
+ * and reported (`x-og-site-db-relocation-error`), until it can move in parts.
+ */
+const RELOCATE_MAX_BYTES = 32 * 1024 * 1024;
 
 type HomeRecord = {
   since: string;
   from: "legacy" | "none";
   token: string | null;
   legacyMarked: boolean;
+  /** The frozen legacy copy was erased (the database was reset or rebuilt). */
+  legacyErased?: boolean;
 };
 type FailureRecord = { at: string; attempts: number; retryAt: number; message: string };
 type AttemptRecord = { token: string; at: string };
-type FenceRecord = { token: string; until: number; site: string };
-type MovedRecord = { site: string; at: string };
+type FenceRecord = { token: string; site: string };
+/** `erased`: nothing of the database is left here (reset, rebuilt, or never written). */
+type MovedRecord = { site: string; at: string; erased?: boolean };
+type BeginResult = {
+  empty?: boolean;
+  moved?: boolean;
+  erased?: boolean;
+  tooLarge?: boolean;
+  bytes?: number;
+};
 
 type Home = { location: "eu" } | { location: "legacy"; reason: string };
 
@@ -201,9 +228,24 @@ function errorResponse(code: SiteDbErrorCode, message: string): Response {
   return Response.json({ error: { code, message } }, { status: STATUS[code] });
 }
 
-/** A retryable refusal: nothing ran. */
+/** A retryable refusal: nothing ran, so the caller may safely try again. */
 function unavailable(message: string): Response {
-  return Response.json({ error: { code: "internal", message } }, { status: 503 });
+  return Response.json(
+    { error: { code: "internal", message, retryable: true, outcomeUnknown: false } },
+    { status: 503 },
+  );
+}
+
+/** Whether an operation erases the database (so its frozen legacy copy goes too). */
+function erasesDatabase(operation: SiteDbOperation, body: ArrayBuffer): boolean {
+  if (operation === "reset") return true;
+  if (operation !== "migrate") return false;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
+    return isRecord(parsed) && parsed.rebuild === true;
+  } catch {
+    return false;
+  }
 }
 
 /** A response (possibly from another object) that says where it was served. */
@@ -345,12 +387,12 @@ export class SiteDatabase {
   private readonly kv: SyncKvStorage;
   /** The copy from the legacy object in progress, which other requests wait for. */
   private relocation: Promise<Home | null> | null = null;
-  /** Whether this instance already tried to mark the legacy object moved. */
-  private legacyMarkTried = false;
+  /** When this instance may next try to mark the legacy object moved. */
+  private markRetryAt = 0;
 
   constructor(
     private readonly state: DurableObjectStateLike,
-    private readonly env: { SITE_DB?: unknown } | undefined,
+    private readonly env: { SITE_DB?: unknown; ENVIRONMENT?: string } | undefined,
   ) {
     this.sql = state.storage.sql;
     this.kv = state.storage.kv;
@@ -372,26 +414,41 @@ export class SiteDatabase {
       const site = request.headers.get(SITE_DB_SITE_HEADER) ?? "";
       if (!UUID.test(site)) return errorResponse("validation", "The Site id is missing");
       const body = await request.arrayBuffer();
+      const erasing = erasesDatabase(operation, body);
       let home: Home;
       try {
-        home = await this.home(site);
+        // A reset needs no copy: the legacy database is erased instead.
+        home = await this.home(site, operation === "reset");
       } catch (error) {
         console.error("site-gateway: Site database location check failed", error);
         return unavailable("The Site database is temporarily unavailable");
       }
       if (home.location === "legacy") return this.relayToLegacy(site, operation, body, home.reason);
+      if (erasing) {
+        // Erasing the database erases its frozen legacy copy too, first, so
+        // a reset or rebuild never leaves the old data behind.
+        try {
+          await this.eraseLegacy(site);
+        } catch (error) {
+          console.error(`site-gateway: could not erase the legacy Site database ${site}`, error);
+          return unavailable("The Site database is temporarily unavailable");
+        }
+      }
       return located(await this.serve(operation, body), "eu");
     }
     // A legacy object: relayed by the Site's EU object, or called by an
     // earlier gateway release that does not know about locations.
     const moved = this.kv.get<MovedRecord>(MOVED_KEY);
     if (moved) {
+      // A relay here means the EU object lost its record of the move: refuse,
+      // and never serve the frozen copy.
       if (role === "relay")
-        return errorResponse("conflict", "This database moved to the EU; this copy is frozen");
+        return unavailable("This database moved to the EU; its earlier copy is frozen");
       return this.forwardToHome(moved.site, operation, await request.arrayBuffer());
     }
-    const fence = this.kv.get<FenceRecord>(FENCE_KEY);
-    if (fence && fence.until > Date.now())
+    // The EU object relays only while no copy runs, so only earlier gateway
+    // releases are held off by a fence.
+    if (role !== "relay" && this.kv.get<FenceRecord>(FENCE_KEY))
       return unavailable("The Site database is moving to its EU location; try again shortly");
     return located(await this.serve(operation, await request.arrayBuffer()), "legacy");
   }
@@ -464,6 +521,7 @@ export class SiteDatabase {
     if (!response.ok || value === null)
       throw new RelocationError(
         `The legacy database refused ${step} (HTTP ${response.status}): ${value?.error?.message ?? "no details"}`,
+        response.status,
       );
     return value;
   }
@@ -488,10 +546,11 @@ export class SiteDatabase {
   }
 
   /**
-   * Where this Site's database lives, copying a legacy database here first.
-   * Concurrent requests wait for the one copy.
+   * Where this Site's database lives, copying a legacy database here first
+   * (or, for a reset, erasing it instead). Concurrent requests wait for the
+   * one copy.
    */
-  private async home(site: string): Promise<Home> {
+  private async home(site: string, resetting = false): Promise<Home> {
     for (;;) {
       if (this.relocation) {
         await this.relocation;
@@ -499,22 +558,81 @@ export class SiteDatabase {
       }
       const home = this.kv.get<HomeRecord>(HOME_KEY);
       if (home) {
-        if (!home.legacyMarked && !this.legacyMarkTried) {
-          this.legacyMarkTried = true;
+        if (!home.legacyMarked && Date.now() >= this.markRetryAt) {
+          this.markRetryAt = Date.now() + MARK_RETRY_MS;
           await this.markLegacyMoved(site, home);
         }
         return { location: "eu" };
       }
-      const failure = this.kv.get<FailureRecord>(FAILURE_KEY);
-      if (failure && Date.now() < failure.retryAt)
-        return { location: "legacy", reason: failure.message };
-      const relocation = this.relocate(site).finally(() => {
-        this.relocation = null;
-      });
+      if (!resetting) {
+        const failure = this.kv.get<FailureRecord>(FAILURE_KEY);
+        if (failure && Date.now() < failure.retryAt)
+          return { location: "legacy", reason: failure.message };
+      }
+      const relocation = (resetting ? this.abandonLegacy(site) : this.relocate(site)).finally(
+        () => {
+          this.relocation = null;
+        },
+      );
       this.relocation = relocation;
       const outcome = await relocation;
       if (outcome) return outcome;
     }
+  }
+
+  /** This object is the home of a database that is new, empty or erased (nothing to copy). */
+  private homeWithoutCopy(): void {
+    this.kv.put(HOME_KEY, {
+      since: new Date().toISOString(),
+      from: "none",
+      token: null,
+      legacyMarked: true,
+      legacyErased: true,
+    } satisfies HomeRecord);
+    this.kv.delete(FAILURE_KEY);
+  }
+
+  /** A legacy object still on the previous release cannot take part yet: serve there, retry soon. */
+  private notReady(error: unknown): Home | null {
+    if (!(error instanceof RelocationError) || error.status !== 404) return null;
+    const message = "The legacy database is still on the previous release; it moves shortly";
+    const previous = this.kv.get<FailureRecord>(FAILURE_KEY);
+    this.kv.put(FAILURE_KEY, {
+      at: new Date().toISOString(),
+      attempts: previous?.attempts ?? 0,
+      retryAt: Date.now() + NOT_READY_RETRY_MS,
+      message,
+    } satisfies FailureRecord);
+    return { location: "legacy", reason: message };
+  }
+
+  /**
+   * Make this object the home of an empty database, for a reset that has not
+   * moved yet: erase the legacy database (it is being reset anyway) and mark
+   * it moved, instead of copying data only to delete it.
+   */
+  private async abandonLegacy(site: string): Promise<Home | null> {
+    if (this.kv.get<AttemptRecord>(ATTEMPT_KEY)) {
+      await this.wipeKeepingLocation();
+      this.kv.delete(ATTEMPT_KEY);
+    }
+    try {
+      await this.relocationCall(site, "erase", {});
+    } catch (error) {
+      const waiting = this.notReady(error);
+      if (waiting) return waiting;
+      throw error;
+    }
+    this.homeWithoutCopy();
+    return null;
+  }
+
+  /** Erase the frozen legacy copy of a database that moved here (before a reset or rebuild). */
+  private async eraseLegacy(site: string): Promise<void> {
+    const home = this.kv.get<HomeRecord>(HOME_KEY);
+    if (!home || home.legacyErased || home.from !== "legacy") return;
+    await this.relocationCall(site, "erase", {});
+    this.kv.put(HOME_KEY, { ...home, legacyMarked: true, legacyErased: true } satisfies HomeRecord);
   }
 
   /**
@@ -533,25 +651,41 @@ export class SiteDatabase {
       return this.recordFailure("An earlier copy to the EU did not finish");
     }
     const token = crypto.randomUUID();
-    // Unreachable legacy object: refuse this request rather than guess (no
-    // fallback could serve it either, and a new Site must not start there).
-    const begun = await this.relocationCall<{ empty: boolean; moved: boolean }>(site, "begin", {
-      token,
-    });
-    if (begun.moved)
-      throw new RelocationError(
-        "The legacy database is marked moved, but this EU database has no record of the copy",
+    let begun: BeginResult;
+    try {
+      begun = await this.relocationCall<BeginResult>(site, "begin", {
+        token,
+        maxBytes: RELOCATE_MAX_BYTES,
+      });
+    } catch (error) {
+      const waiting = this.notReady(error);
+      if (waiting) return waiting;
+      console.error(`site-gateway: could not start moving Site database ${site}`, error);
+      return this.recordFailure(
+        error instanceof RelocationError
+          ? error.message
+          : `The legacy database is unreachable: ${errorMessage(error)}`,
       );
+    }
+    if (begun.moved) {
+      // Erased there (a reset that stopped before this home was recorded): nothing to copy.
+      if (begun.erased) {
+        this.homeWithoutCopy();
+        return null;
+      }
+      return this.recordFailure(
+        "The legacy database is marked moved, but this EU database has no record of the copy; an operator must check it",
+      );
+    }
     if (begun.empty) {
-      this.kv.put(HOME_KEY, {
-        since: new Date().toISOString(),
-        from: "none",
-        token: null,
-        legacyMarked: true,
-      } satisfies HomeRecord);
-      this.kv.delete(FAILURE_KEY);
+      // The legacy object marked itself moved without storing any data.
+      this.homeWithoutCopy();
       return null;
     }
+    if (begun.tooLarge)
+      return this.recordFailure(
+        `The database (${Math.ceil((begun.bytes ?? 0) / (1024 * 1024))} MiB) is too large to move automatically; it stays where it is`,
+      );
     this.kv.put(ATTEMPT_KEY, { token, at: new Date().toISOString() } satisfies AttemptRecord);
     try {
       await this.wipeKeepingLocation();
@@ -585,6 +719,8 @@ export class SiteDatabase {
           : `The copy failed: ${errorMessage(error)}`,
       );
     }
+    // The fence still holds the legacy object (it never expires), so it took
+    // no write since the state was read: the copy is the database.
     const home: HomeRecord = {
       since: new Date().toISOString(),
       from: "legacy",
@@ -594,7 +730,7 @@ export class SiteDatabase {
     this.kv.put(HOME_KEY, home);
     this.kv.delete(FAILURE_KEY);
     this.kv.delete(ATTEMPT_KEY);
-    this.legacyMarkTried = true;
+    this.markRetryAt = Date.now() + MARK_RETRY_MS;
     await this.markLegacyMoved(site, home);
     return null;
   }
@@ -605,8 +741,8 @@ export class SiteDatabase {
       await this.relocationCall(site, "commit", { token: home.token });
       this.kv.put(HOME_KEY, { ...home, legacyMarked: true } satisfies HomeRecord);
     } catch (error) {
-      // The copy is the database now; the legacy object stays fenced until it
-      // expires, and the next start of this object tries again.
+      // The copy is the database now; the legacy object stays fenced, and a
+      // later request tries again.
       console.error(`site-gateway: could not mark the legacy Site database ${site} moved`, error);
     }
   }
@@ -643,7 +779,11 @@ export class SiteDatabase {
     body: ArrayBuffer,
   ): Promise<Response> {
     try {
-      const response = await siteDbStub(primarySiteDbNamespace(this.binding()), site).fetch(
+      const namespace = primarySiteDbNamespace(
+        this.binding(),
+        canEmulateJurisdiction(this.env?.ENVIRONMENT),
+      );
+      const response = await siteDbStub(namespace, site).fetch(
         `https://site-db.internal/${operation}`,
         {
           method: "POST",
@@ -678,18 +818,25 @@ export class SiteDatabase {
       switch (step) {
         case "begin": {
           if (!token || !UUID.test(site)) throw new SiteDbError("validation", "Give a token");
-          if (this.kv.get<MovedRecord>(MOVED_KEY))
-            return Response.json({ empty: false, moved: true });
-          // Nothing to copy: write nothing, so a new Site never stores data here.
-          if (isEmptyDatabase(this.sql, this.kv))
-            return Response.json({ empty: true, moved: false });
+          const moved = this.kv.get<MovedRecord>(MOVED_KEY);
+          if (moved) return Response.json({ moved: true, erased: moved.erased === true });
+          if (isEmptyDatabase(this.sql, this.kv)) {
+            // Nothing to copy. Store only the moved marker (no Site data), so
+            // an earlier gateway release is sent to the EU object too.
+            this.kv.put(MOVED_KEY, {
+              site,
+              at: new Date().toISOString(),
+              erased: true,
+            } satisfies MovedRecord);
+            this.kv.delete(FENCE_KEY);
+            return Response.json({ empty: true });
+          }
+          const bytes = this.sql.databaseSize;
+          if (typeof body.maxBytes === "number" && bytes > body.maxBytes)
+            return Response.json({ tooLarge: true, bytes });
           // One EU object per Site copies at a time; a newer token replaces a dead one.
-          this.kv.put(FENCE_KEY, {
-            token,
-            until: Date.now() + FENCE_MS,
-            site,
-          } satisfies FenceRecord);
-          return Response.json({ empty: false, moved: false });
+          this.kv.put(FENCE_KEY, { token, site } satisfies FenceRecord);
+          return Response.json({ bytes });
         }
         case "page": {
           this.holdFence(token);
@@ -703,7 +850,6 @@ export class SiteDatabase {
           return Response.json(await relocationState(this.sql, this.kv));
         }
         case "commit": {
-          // Accepted after the fence expired too: the copy is already the database.
           const fence = this.kv.get<FenceRecord>(FENCE_KEY);
           const moved = this.kv.get<MovedRecord>(MOVED_KEY);
           if (moved) return Response.json({ moved: true });
@@ -716,13 +862,26 @@ export class SiteDatabase {
           this.kv.delete(FENCE_KEY);
           return Response.json({ moved: true });
         }
+        case "erase": {
+          // The database was reset or rebuilt in the EU (or is being reset
+          // before it moved): delete everything here, keeping only the marker
+          // that sends earlier gateway releases to the EU object.
+          if (!UUID.test(site)) throw new SiteDbError("validation", "The Site id is missing");
+          const moved = this.kv.get<MovedRecord>(MOVED_KEY);
+          await this.state.storage.deleteAll();
+          this.kv.put(MOVED_KEY, {
+            site: moved?.site ?? site,
+            at: new Date().toISOString(),
+            erased: true,
+          } satisfies MovedRecord);
+          return Response.json({ erased: true });
+        }
         case "status": {
           // Read-only: what this legacy object holds and whether it moved.
-          const fence = this.kv.get<FenceRecord>(FENCE_KEY);
           return Response.json(
             guarded(() => ({
               moved: this.kv.get<MovedRecord>(MOVED_KEY) ?? null,
-              fenced: fence !== undefined && fence.until > Date.now(),
+              fenced: this.kv.get<FenceRecord>(FENCE_KEY) !== undefined,
               empty: isEmptyDatabase(this.sql, this.kv),
               tables: userTables(this.sql).map((name) => ({
                 name,
@@ -750,12 +909,11 @@ export class SiteDatabase {
     }
   }
 
-  /** Refuse a step whose fence is gone or expired (the source may have changed), else extend it. */
+  /** Refuse a step whose fence is gone or replaced (the source may have changed). */
   private holdFence(token: string | null): void {
     const fence = this.kv.get<FenceRecord>(FENCE_KEY);
-    if (!fence || fence.token !== token || fence.until <= Date.now())
+    if (!fence || fence.token !== token)
       throw new SiteDbError("conflict", "The copy lost its hold on the database; start again");
-    this.kv.put(FENCE_KEY, { ...fence, until: Date.now() + FENCE_MS } satisfies FenceRecord);
   }
 
   // --- bookkeeping (key-value storage, out of reach of user SQL) ----------

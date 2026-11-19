@@ -3,6 +3,8 @@ import {
   SITE_GATEWAY_SIGNATURE_HEADER,
   SITE_GATEWAY_SIGNATURE_VERSION,
   SITE_GATEWAY_TIMESTAMP_HEADER,
+  SITE_DB_LOCATION_HEADER,
+  SITE_DB_RELOCATION_ERROR_HEADER,
   siteDbInternalPath,
   siteGatewayCanonicalString,
   type SiteDbErrorBody,
@@ -150,6 +152,14 @@ export async function callSiteDb<T>(
   } catch {
     parsed = null;
   }
+  // A database not yet in the EU is served from its earlier location (apps/site-gateway, "Location").
+  const relocationError = response.headers.get(SITE_DB_RELOCATION_ERROR_HEADER);
+  if (relocationError)
+    console.warn("[site-sql] Site database is not in the EU yet", {
+      siteId,
+      location: response.headers.get(SITE_DB_LOCATION_HEADER),
+      reason: relocationError,
+    });
   if (response.ok && parsed !== null && typeof parsed === "object") return parsed as T;
   const error = (parsed as Partial<SiteDbErrorBody> | null)?.error;
   const code = typeof error?.code === "string" ? error.code : "unavailable";
@@ -162,7 +172,8 @@ export async function callSiteDb<T>(
       503,
       "unavailable",
       response.status >= 500 ? message : "Site SQL is not reachable on this deployment",
-      response.status >= 500 && !READ_ONLY.has(operation),
+      // The gateway says when nothing ran (a database briefly held while it moves).
+      response.status >= 500 && !READ_ONLY.has(operation) && error?.outcomeUnknown !== false,
     );
   throw new SiteDbCallError(response.status, code, message);
 }

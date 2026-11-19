@@ -15,6 +15,7 @@ import { sha256Hex, timingSafeEqual } from "./crypto";
 import type { GatewayConfig, GatewayEnv } from "./env";
 import { applySecurityHeaders, jsonError } from "./headers";
 import {
+  canEmulateJurisdiction,
   primarySiteDbNamespace,
   siteDbStub,
   SITE_DB_LOCATION_HEADER,
@@ -157,7 +158,10 @@ export async function handleSiteDbInternal(
   let response: Response;
   try {
     // The EU object; it relocates a legacy database before serving.
-    const stub = siteDbStub(primarySiteDbNamespace(namespace), target.siteId);
+    const stub = siteDbStub(
+      primarySiteDbNamespace(namespace, canEmulateJurisdiction(config.environment)),
+      target.siteId,
+    );
     response = await stub.fetch(`https://site-db.internal/${target.operation}`, {
       method: "POST",
       headers: {

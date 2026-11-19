@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  canEmulateJurisdiction,
   primarySiteDbNamespace,
   SITE_DB_JURISDICTION,
   type DurableObjectNamespaceLike,
@@ -46,11 +47,20 @@ describe("primarySiteDbNamespace", () => {
     expect(() => primarySiteDbNamespace(failing)).toThrow("Invalid jurisdiction");
   });
 
-  test("emulates the EU namespace by name only where workerd has no jurisdictions", () => {
-    const { namespace, names } = fakeNamespace(() => {
+  test("emulates the EU namespace by name only in local runs where workerd has no jurisdictions", () => {
+    const unsupported = () => {
       throw new Error("Jurisdiction restrictions are not implemented in workerd.");
-    });
-    const primary = primarySiteDbNamespace(namespace);
+    };
+    // A deployed Worker never falls back to an unrestricted namespace.
+    expect(() => primarySiteDbNamespace(fakeNamespace(unsupported).namespace)).toThrow(
+      /not implemented/u,
+    );
+    expect(canEmulateJurisdiction("production")).toBe(false);
+    expect(canEmulateJurisdiction("staging")).toBe(false);
+    expect(canEmulateJurisdiction(undefined)).toBe(false);
+    expect(canEmulateJurisdiction("test")).toBe(true);
+    const { namespace, names } = fakeNamespace(unsupported);
+    const primary = primarySiteDbNamespace(namespace, true);
     primary.idFromName("33333333-3333-4333-8333-333333333333");
     expect(names).toEqual(["eu:33333333-3333-4333-8333-333333333333"]);
   });
@@ -63,6 +73,7 @@ function state(overrides: Partial<RelocationState> = {}): RelocationState {
       { type: "index", name: "a_x", tbl: "a", sql: "CREATE INDEX a_x ON a (x)" },
     ],
     tables: [{ name: "a", virtual: false, alias: "rowid", columns: ["x"], rows: 2, digest: "d1" }],
+    ftsConfig: [],
     sequences: [{ name: "a", seq: "9" }],
     migrations: [["mig:one", { checksum: "c", appliedAt: "t", position: 0 }]],
     requests: [["rq:1", 1]],
@@ -92,6 +103,12 @@ describe("compareStates", () => {
     expect(compareStates(source, state({ tables: [{ ...table, alias: null }] }))).toContain(
       "different columns",
     );
+    expect(
+      compareStates(
+        source,
+        state({ ftsConfig: [{ table: "a", key: "automerge", value: { i: "2" } }] }),
+      ),
+    ).toContain("FTS5 settings");
     expect(compareStates(source, state({ sequences: [] }))).toContain("AUTOINCREMENT");
     expect(compareStates(source, state({ migrations: [] }))).toContain("migration records");
   });

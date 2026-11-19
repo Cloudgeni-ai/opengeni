@@ -13,6 +13,9 @@ import { errorMessage } from "@opengeni/contracts/values";
  * used (`site-db-relocation.ts`) and the legacy object is kept, frozen, until
  * an explicit cleanup.
  *
+ * The ops deploy workflows refuse a gateway source without this file: an
+ * earlier release would serve the frozen legacy copies of moved databases.
+ *
  * These headers travel only between the gateway and its own Durable Objects
  * (stub fetches the gateway builds itself), never from or to a client.
  */
@@ -24,10 +27,8 @@ export const SITE_DB_JURISDICTION = "eu";
 export const SITE_DB_ROLE_HEADER = "x-og-site-db-role";
 /** The Site id, sent with every role. */
 export const SITE_DB_SITE_HEADER = "x-og-site-db-site";
-/** On responses: where the request was served, `eu` or `legacy`. */
-export const SITE_DB_LOCATION_HEADER = "x-og-site-db-location";
-/** On responses served from the legacy object: why the database has not moved yet. */
-export const SITE_DB_RELOCATION_ERROR_HEADER = "x-og-site-db-relocation-error";
+/** On responses: where the request was served, and why a database has not moved yet. */
+export { SITE_DB_LOCATION_HEADER, SITE_DB_RELOCATION_ERROR_HEADER } from "@opengeni/contracts";
 
 /**
  * `primary`: the gateway calling a Site's EU object, which serves the
@@ -56,13 +57,15 @@ const primaries = new WeakMap<object, DurableObjectNamespaceLike>();
  * never created outside the EU by mistake.
  *
  * Local workerd (`wrangler dev`, Miniflare) refuses jurisdictions ("not
- * implemented in workerd"). There the EU namespace is emulated by naming
- * objects `eu:<siteId>`, a separate object like the real one, so relocation
- * runs the same way in development and tests. Cloudflare itself supports
- * jurisdictions, so the emulation never applies to a deployed Worker.
+ * implemented in workerd"). Only when `emulate` is set (`ENVIRONMENT` is
+ * `development` or `test`, see `canEmulateJurisdiction`) is the EU namespace
+ * then emulated by naming objects `eu:<siteId>`, a separate object like the
+ * real one, so relocation runs the same way in development and tests. A
+ * deployed Worker never emulates: it fails instead.
  */
 export function primarySiteDbNamespace(
   binding: DurableObjectNamespaceLike,
+  emulate = false,
 ): DurableObjectNamespaceLike {
   const cached = primaries.get(binding);
   if (cached) return cached;
@@ -72,7 +75,7 @@ export function primarySiteDbNamespace(
   try {
     primary = binding.jurisdiction(SITE_DB_JURISDICTION);
   } catch (error) {
-    if (!/not implemented in workerd/iu.test(errorMessage(error))) throw error;
+    if (!emulate || !/not implemented in workerd/iu.test(errorMessage(error))) throw error;
     primary = {
       idFromName: (name) => binding.idFromName(`${SITE_DB_JURISDICTION}:${name}`),
       get: (id) => binding.get(id),
@@ -80,6 +83,11 @@ export function primarySiteDbNamespace(
   }
   primaries.set(binding, primary);
   return primary;
+}
+
+/** Whether a Worker's `ENVIRONMENT` allows emulating the jurisdiction (local runs only). */
+export function canEmulateJurisdiction(environment: unknown): boolean {
+  return environment === "development" || environment === "test";
 }
 
 /** The stub of a Site's object in `namespace`. */
