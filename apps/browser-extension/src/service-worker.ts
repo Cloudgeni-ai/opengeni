@@ -638,6 +638,12 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       const tabId = numericTabId(command.tabId);
       await keepProfileOpenWithout(tabId);
       if (attachedDebuggerTabs.has(tabId)) await detachDebugger(tabId);
+      // Out of the group first: Chrome keeps a group closed with its window
+      // among the person's saved groups.
+      await Promise.race([
+        tabGroup?.releaseNow(tabId),
+        new Promise((resolve) => setTimeout(resolve, CONTROLLED_TAB_RELEASE_MS)),
+      ]);
       await chrome.tabs.remove(tabId);
       scheduleInventory();
       return { tabs: await tabs() };
@@ -1487,9 +1493,12 @@ chrome.webNavigation?.onCommitted?.addListener(({ tabId, frameId, transitionQual
   if (frameId === 0) void tabIcon?.navigated(tabId, transitionQualifiers.includes("forward_back"));
 });
 
-// A tab the person takes out of the group stays out until control ends.
 chrome.tabs.onUpdated.addListener((tabId, change) => {
+  // A tab the person takes out of the group stays out until control ends.
   if (change.groupId !== undefined) void tabGroup?.groupChanged(tabId);
+  // A page Chrome showed without a new commit (a prerendered one) gets the
+  // cursor too; marking a marked page changes nothing.
+  if (change.status === "complete") void tabIcon?.navigated(tabId);
 });
 
 // Chrome puts a tab opened from a controlled tab in the group.

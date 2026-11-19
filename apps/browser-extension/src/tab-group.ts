@@ -73,6 +73,10 @@ export type TabGroupColor =
 /** How a group looks in the tab strip. */
 export type GroupLook = { title?: string; color: TabGroupColor; collapsed?: boolean };
 
+/** Ends the group's title, unseen: a group the person names after the
+ * product is never taken for this one. */
+export const GROUP_TITLE_MARK = "\u200b";
+
 /** Chrome's groupId for a tab in no group. */
 const NO_GROUP = -1;
 
@@ -124,10 +128,13 @@ export class TabGroup {
   private readonly schedule: (callback: () => void, ms: number) => unknown;
   private readonly cancel: (timer: unknown) => void;
 
+  private readonly title: string;
+
   constructor(
     private readonly chrome: TabGroupChrome,
     private readonly options: TabGroupOptions,
   ) {
+    this.title = options.title + GROUP_TITLE_MARK;
     this.schedule = options.setTimeout ?? ((callback, ms) => setTimeout(callback, ms));
     this.cancel =
       options.clearTimeout ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
@@ -154,7 +161,16 @@ export class TabGroup {
             ? await this.edit(() => this.chrome.tabs.group({ groupId: existing, tabIds: [tabId] }))
             : await this.newGroup(tabId, tab.windowId);
       } catch {
-        // A tab in a popup or app window, or one closed meanwhile.
+        // A tab in a popup or app window, or one closed meanwhile, or a group
+        // that could not be titled: the tab goes back to the person's group.
+        if (restoreGroupId !== null)
+          await this.rejoin(
+            tabId,
+            tab.windowId,
+            restoreGroupId,
+            restoreGroup,
+            tab.active ?? false,
+          ).catch(() => undefined);
         return;
       }
       const moved = await this.chrome.tabs.get(tabId).catch(() => null);
@@ -323,7 +339,7 @@ export class TabGroup {
     try {
       await this.edit(() =>
         this.chrome.tabGroups.update(groupId, {
-          title: this.options.title,
+          title: this.title,
           color: this.options.color,
         }),
       );
@@ -352,13 +368,7 @@ export class TabGroup {
     const tab = await this.chrome.tabs.get(tabId).catch(() => null);
     if (!tab || tab.groupId !== entry.groupId) return;
     const restoreGroupId = entry.restoreGroupId;
-    if (
-      restoreGroupId !== null &&
-      (await this.chrome.tabGroups.get(restoreGroupId).then(
-        () => true,
-        () => false,
-      ))
-    ) {
+    if (restoreGroupId !== null && (await this.exists(restoreGroupId))) {
       await this.edit(() => this.chrome.tabs.group({ groupId: restoreGroupId, tabIds: [tabId] }));
       return;
     }
@@ -371,19 +381,43 @@ export class TabGroup {
       const moved = await this.chrome.tabs.get(tabId);
       if (moved.groupId !== NO_GROUP) await this.edit(() => this.chrome.tabs.ungroup([tabId]));
     }
-    if (!entry.restoreGroup) return;
-    // Collapsing the group of the active tab would make another tab active.
-    const look = tab.active ? { ...entry.restoreGroup, collapsed: false } : entry.restoreGroup;
-    const groupId = await this.edit(() =>
-      this.chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } }),
+    if (entry.restoreGroup)
+      await this.rejoin(tabId, tab.windowId, null, entry.restoreGroup, tab.active ?? false);
+  }
+
+  /** Puts the tab in the person's group it came from, or makes that group
+   * again as it looked if it is gone (the tab was its only one). */
+  private async rejoin(
+    tabId: number,
+    windowId: number,
+    groupId: number | null,
+    look: GroupLook | null | undefined,
+    active: boolean,
+  ): Promise<void> {
+    if (groupId !== null && (await this.exists(groupId))) {
+      await this.edit(() => this.chrome.tabs.group({ groupId, tabIds: [tabId] }));
+      return;
+    }
+    if (!look) return;
+    const made = await this.edit(() =>
+      this.chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId } }),
     );
-    await this.edit(() => this.chrome.tabGroups.update(groupId, look)).catch(() => undefined);
+    // Collapsing the group of the active tab would make another tab active.
+    const shown = active ? { ...look, collapsed: false } : look;
+    await this.edit(() => this.chrome.tabGroups.update(made, shown)).catch(() => undefined);
+  }
+
+  private exists(groupId: number): Promise<boolean> {
+    return this.chrome.tabGroups.get(groupId).then(
+      () => true,
+      () => false,
+    );
   }
 
   /** Dissolves groups with this title and colour holding no controlled tab. */
   private async dissolveLeftBehind(): Promise<void> {
     const groups = await this.chrome.tabGroups
-      .query({ title: this.options.title, color: this.options.color })
+      .query({ title: this.title, color: this.options.color })
       .catch(() => []);
     for (const group of groups) {
       const tabs = await this.chrome.tabs.query({ groupId: group.id }).catch(() => []);
@@ -397,7 +431,7 @@ export class TabGroup {
   /** Whether the group exists with this indicator's title and colour. */
   private async isOurs(groupId: number): Promise<boolean> {
     const group = await this.chrome.tabGroups.get(groupId).catch(() => null);
-    return group?.title === this.options.title && group.color === this.options.color;
+    return group?.title === this.title && group.color === this.options.color;
   }
 
   private async groupInWindow(windowId: number): Promise<number | null> {

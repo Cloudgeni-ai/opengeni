@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { packagedManifest, storeManifest } from "../scripts/manifest";
 
 const root = resolve(import.meta.dir, "..");
@@ -49,5 +50,26 @@ describe("packaged manifest", () => {
     ]);
     // runtime.getURL returns the dynamic URL from Chrome 130.
     expect(source.minimum_chrome_version).toBe("130");
+  });
+
+  test("the build ships every resource a page may load, in the folder and the archive", async () => {
+    const out = await mkdtemp(join(tmpdir(), "extension-build-"));
+    try {
+      const build = Bun.spawnSync(["bun", "scripts/build.ts", "--out", out], { cwd: root });
+      expect(build.exitCode).toBe(0);
+      const manifest = JSON.parse(await readFile(join(out, "manifest.json"), "utf8")) as {
+        web_accessible_resources: { resources: string[] }[];
+      };
+      const resources = manifest.web_accessible_resources.flatMap((entry) => entry.resources);
+      expect(resources).toContain("icons/agent-cursor.png");
+      const archive = new Bun.Archive(await readFile(join(out, "opengeni-browser-extension.tar")));
+      const entries = [...(await archive.files()).keys()];
+      for (const file of resources) {
+        expect(await Bun.file(join(out, file)).exists()).toBe(true);
+        expect(entries).toContain(`opengeni-browser-extension/${file}`);
+      }
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
   });
 });

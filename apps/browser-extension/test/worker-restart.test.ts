@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import { GROUP_TITLE_MARK } from "../src/tab-group";
 
 const build = await Bun.build({
   entrypoints: [resolve(import.meta.dir, "../src/service-worker.ts")],
@@ -48,6 +49,8 @@ class FakeChrome {
   // each group's title and colour. A group disappears with its last tab.
   readonly tabGroup = new Map<number, number>();
   readonly groups = new Map<number, { title: string; color: string }>();
+  /** Each closed tab, and whether it was still in a group then. */
+  readonly closedGrouped: [number, boolean][] = [];
   current: ReturnType<FakeChrome["startWorker"]> | null = null;
 
   /** Chrome stops the extension's worker (keeping everything above) and,
@@ -194,6 +197,12 @@ class FakeChrome {
           for (const tabId of tabIds) profile.tabGroup.delete(tabId);
           profile.pruneGroups();
         },
+        remove: async (tabId: number) => {
+          profile.closedGrouped.push([tabId, profile.tabGroup.has(tabId)]);
+          profile.tabs.delete(tabId);
+          profile.tabGroup.delete(tabId);
+          profile.pruneGroups();
+        },
       },
       tabGroups: {
         get: async (id: number) => {
@@ -259,6 +268,7 @@ class FakeChrome {
       detached: (tabId: number, reason: string) => debuggerEvents.onDetach.emit({ tabId }, reason),
       navigated: (tabId: number, frameId = 0, transitionQualifiers: string[] = []) =>
         navigation.onCommitted.emit({ tabId, frameId, transitionQualifiers }),
+      loaded: (tabId: number) => chrome.tabs.onUpdated.emit(tabId, { status: "complete" }),
     };
     this.current = started;
     return started;
@@ -434,7 +444,7 @@ describe("the tabs an agent controls", () => {
     const command = await chrome.startWorker().ready();
     expect(await command({ type: "debugger.attach", tabId: "8" })).toMatchObject({ ok: true });
     await flush();
-    expect(chrome.groupTitle(8)).toBe("Opengeni");
+    expect(chrome.groupTitle(8)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
     expect(chrome.groups.get(chrome.groupOf(8))?.color).toBe("grey");
     expect(chrome.groupTitle(7)).toBeNull();
     expect(chrome.scripts).toEqual(["showMark 8"]);
@@ -445,7 +455,7 @@ describe("the tabs an agent controls", () => {
     expect(await command({ type: "debugger.detach", tabId: "8" })).toMatchObject({ ok: true });
     await flush();
     expect(chrome.scripts).toEqual(["showMark 8"]);
-    expect(chrome.groupTitle(8)).toBe("Opengeni");
+    expect(chrome.groupTitle(8)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
     await releaseDelay(chrome);
     expect(chrome.scripts).toEqual(["showMark 8", "removeMark 8"]);
     expect(chrome.groupTitle(8)).toBeNull();
@@ -465,13 +475,36 @@ describe("the tabs an agent controls", () => {
     expect(chrome.scripts).toEqual(["showMark 7", "showMark 7"]);
   });
 
+  test("a page shown without a new commit gets the mark too", async () => {
+    const chrome = new FakeChrome();
+    const started = chrome.startWorker();
+    const command = await started.ready();
+    await command({ type: "debugger.attach", tabId: "7" });
+    await flush();
+    started.loaded(7);
+    started.loaded(9);
+    await flush();
+    expect(chrome.scripts).toEqual(["showMark 7", "showMark 7"]);
+  });
+
+  test("a tab the agent closes leaves the group first, so Chrome saves no group", async () => {
+    const chrome = new FakeChrome();
+    const command = await chrome.startWorker().ready();
+    await command({ type: "debugger.attach", tabId: "8" });
+    await flush();
+    expect(chrome.groupTitle(8)).not.toBeNull();
+    expect(await command({ type: "tabs.close", tabId: "8" })).toMatchObject({ ok: true });
+    expect(chrome.closedGrouped).toEqual([[8, false]]);
+    expect(chrome.groups.size).toBe(0);
+  });
+
   test("Chrome ending the agent's control gives the tab its icon and place back", async () => {
     const chrome = new FakeChrome();
     const started = chrome.startWorker();
     const command = await started.ready();
     await command({ type: "debugger.attach", tabId: "7" });
     await flush();
-    expect(chrome.groupTitle(7)).toBe("Opengeni");
+    expect(chrome.groupTitle(7)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
     chrome.attached.delete(7);
     started.detached(7, "canceled_by_user");
     await releaseDelay(chrome);
@@ -488,7 +521,7 @@ describe("the tabs an agent controls", () => {
     await chrome.restartWorker().ready();
     await flush();
     expect(chrome.scripts.filter((script) => script.startsWith("removeMark"))).toEqual([]);
-    expect(chrome.groupTitle(9)).toBe("Opengeni");
+    expect(chrome.groupTitle(9)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
     await chrome.reloadExtension().ready();
     await flush();
     await flush();
@@ -509,6 +542,6 @@ describe("the tabs an agent controls", () => {
     await flush();
     expect(chrome.scripts.filter((script) => script.startsWith("removeMark"))).toEqual([]);
     expect(chrome.scripts.at(-1)).toBe("showMark 9");
-    expect(chrome.groupTitle(9)).toBe("Opengeni");
+    expect(chrome.groupTitle(9)).toBe(`Opengeni${GROUP_TITLE_MARK}`);
   });
 });

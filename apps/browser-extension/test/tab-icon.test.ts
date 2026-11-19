@@ -409,6 +409,18 @@ describe("the controlled tabs' icons", () => {
     expect(calls).toEqual([`showMark 4 ${ICON}`, "removeMark 4", "removeMark 4"]);
   });
 
+  test("a new run leaves alone a recorded tab closed meanwhile", async () => {
+    const { tabs, calls } = indicator();
+    let read!: (state: TabIconState) => void;
+    const resumed = tabs.resume(new Promise((done) => (read = done)), () => []);
+    tabs.closed(4);
+    read({ tabs: [4, 5] });
+    await resumed;
+    await tabs.settled();
+    expect(calls).toEqual(["removeMark 5"]);
+    expect(tabs.state()).toEqual({ tabs: [] });
+  });
+
   test("a tab attached while the record is read stays marked", async () => {
     const { tabs, calls } = indicator();
     const attached = new Set<number>();

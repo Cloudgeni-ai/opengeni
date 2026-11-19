@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  GROUP_TITLE_MARK,
   TabGroup,
   parseTabGroupState,
   type GroupedTab,
@@ -224,19 +225,22 @@ function indicator(strip: TabStrip, saved: TabGroupState[] = []) {
   };
 }
 
+/** Our group's title as Chrome shows it. */
+const OURS = `Opengeni${GROUP_TITLE_MARK}`;
+
 describe("the controlled tabs' group", () => {
   test("a controlled tab joins a group named after the product, and leaves it when released", async () => {
     const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3 }]);
     const { indicator: tabs, elapse } = indicator(strip);
     await tabs.show(2);
-    expect(strip.groupOf(2)).toMatchObject({ title: "Opengeni", color: "grey", windowId: 1 });
+    expect(strip.groupOf(2)).toMatchObject({ title: OURS, color: "grey", windowId: 1 });
     expect(strip.groupOf(1)).toBeNull();
     expect(strip.groupOf(3)).toBeNull();
 
     tabs.release(2);
     await tabs.settled();
     // Still shown until control stays ended for the release delay.
-    expect(strip.groupOf(2)?.title).toBe("Opengeni");
+    expect(strip.groupOf(2)?.title).toBe(OURS);
     await elapse();
     expect(strip.groupOf(2)).toBeNull();
     expect(strip.groups.size).toBe(0);
@@ -266,13 +270,13 @@ describe("the controlled tabs' group", () => {
     expect(strip.groupOf(1)!.id).toBe(strip.groupOf(2)!.id);
     expect(strip.groupOf(3)!.id).toBe(strip.groupOf(4)!.id);
     expect(strip.groupOf(1)!.id).not.toBe(strip.groupOf(3)!.id);
-    expect(strip.groupOf(3)).toMatchObject({ title: "Opengeni", windowId: 2 });
+    expect(strip.groupOf(3)).toMatchObject({ title: OURS, windowId: 2 });
 
     // Releasing one keeps the group for the other.
     tabs.release(1);
     await elapse();
     expect(strip.groupOf(1)).toBeNull();
-    expect(strip.groupOf(2)?.title).toBe("Opengeni");
+    expect(strip.groupOf(2)?.title).toBe(OURS);
   });
 
   test("a tab taken from the person's own group goes back to it", async () => {
@@ -282,7 +286,7 @@ describe("the controlled tabs' group", () => {
     strip.move(2, work);
     const { indicator: tabs, elapse } = indicator(strip);
     await tabs.show(2);
-    expect(strip.groupOf(2)?.title).toBe("Opengeni");
+    expect(strip.groupOf(2)?.title).toBe(OURS);
     expect(strip.groupOf(1)?.title).toBe("Work");
     tabs.release(2);
     await elapse();
@@ -375,10 +379,10 @@ describe("the controlled tabs' group", () => {
     tabs.release(1);
     await elapse();
     expect(strip.groupOf(1)).toBeNull();
-    expect(strip.groupOf(2)?.title).toBe("Opengeni");
+    expect(strip.groupOf(2)?.title).toBe(OURS);
     // The next control shows it again.
     await tabs.show(1);
-    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(strip.groupOf(1)?.title).toBe(OURS);
   });
 
   test("its own group changes are not taken for the person's", async () => {
@@ -432,7 +436,7 @@ describe("the controlled tabs' group", () => {
     strip.dragging = 2;
     const { indicator: tabs } = indicator(strip);
     await tabs.show(1);
-    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(strip.groupOf(1)?.title).toBe(OURS);
   });
 
   test("a released tab put back by its old index never lands inside a group", async () => {
@@ -472,7 +476,7 @@ describe("the controlled tabs' group", () => {
     await tabs.show(1);
     strip.dragging = 20;
     await tabs.releaseNow(1);
-    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(strip.groupOf(1)?.title).toBe(OURS);
     expect(Object.keys(tabs.state().tabs)).toEqual(["1"]);
     strip.dragging = 0;
     await elapse();
@@ -491,7 +495,7 @@ describe("the controlled tabs' group", () => {
     await shown;
     strip.dragging = 0;
     await elapse();
-    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(strip.groupOf(1)?.title).toBe(OURS);
     expect(Object.keys(tabs.state().tabs)).toEqual(["1"]);
   });
 
@@ -503,8 +507,37 @@ describe("the controlled tabs' group", () => {
     tabs.release(2);
     await tabs.settled();
     await elapse();
-    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(strip.groupOf(1)?.title).toBe(OURS);
     expect(strip.groupOf(2)).toBeNull();
+  });
+
+  test("the person's own grey group named after the product is theirs", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    const theirs = strip.userGroup(1, "Opengeni");
+    strip.groups.get(theirs)!.color = "grey";
+    strip.move(3, theirs);
+    const { indicator: tabs } = indicator(strip);
+    await tabs.show(1);
+    // The person drags the controlled tab into their group.
+    strip.move(1, theirs);
+    await tabs.groupChanged(1);
+    expect(tabs.state().declined).toEqual([1]);
+    await tabs.releaseNow(1);
+    expect(strip.groupOf(1)?.id).toBe(theirs);
+    expect(strip.groupOf(3)?.id).toBe(theirs);
+  });
+
+  test("a tab whose group cannot be titled goes back to the person's group", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const work = strip.userGroup(1, "Work");
+    strip.move(1, work);
+    strip.move(2, work);
+    strip.failTitles = true;
+    const { indicator: tabs } = indicator(strip);
+    await tabs.show(1);
+    expect(strip.groupOf(1)?.id).toBe(work);
+    expect(strip.groups.size).toBe(1);
+    expect(tabs.state().tabs).toEqual({});
   });
 
   test("a group it cannot title is not left behind", async () => {
@@ -531,7 +564,7 @@ describe("the controlled tabs' group", () => {
     // Tab 5 is still controlled; tab 2 no longer; tab 3 became controlled.
     const second = indicator(strip).indicator;
     await second.resume(state, () => [5, 3]);
-    expect(strip.groupOf(5)?.title).toBe("Opengeni");
+    expect(strip.groupOf(5)?.title).toBe(OURS);
     expect(strip.groupOf(3)?.id).toBe(strip.groupOf(5)!.id);
     expect(strip.groupOf(2)).toBeNull();
     expect(strip.strip().indexOf(2)).toBe(1);
@@ -551,7 +584,7 @@ describe("the controlled tabs' group", () => {
       if (reads++ === 1) live.push(1);
       return [...live];
     });
-    expect(strip.groupOf(1)?.title).toBe("Opengeni");
+    expect(strip.groupOf(1)?.title).toBe(OURS);
     expect(Object.keys(next.state().tabs)).toEqual(["1"]);
   });
 
@@ -574,7 +607,7 @@ describe("the controlled tabs' group", () => {
     strip.move(2, work);
     const saved: TabGroupState[] = [];
     await indicator(strip, saved).indicator.show(2);
-    expect(strip.groupOf(2)?.title).toBe("Opengeni");
+    expect(strip.groupOf(2)?.title).toBe(OURS);
     // Reloading ended every control.
     await indicator(strip).indicator.resume(saved.at(-1)!, () => []);
     expect(strip.groupOf(2)?.id).toBe(work);
@@ -594,6 +627,31 @@ describe("the controlled tabs' group", () => {
     expect(strip.groups.has(restored)).toBe(false);
     expect(strip.groupOf(1)).toBeNull();
     expect(strip.groupOf(3)?.id).toBe(theirs);
+  });
+
+  test("after Chrome restarts, the person's grey group named after the product stays", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const saved: TabGroupState[] = [];
+    await indicator(strip, saved).indicator.show(1);
+    const recorded = saved.at(-1)!;
+    const restored = strip.moveGroup(strip.groupOf(1)!.id, 1);
+    const theirs = strip.userGroup(1, "Opengeni");
+    strip.groups.get(theirs)!.color = "grey";
+    strip.move(2, theirs);
+    await indicator(strip).indicator.resume(recorded, () => []);
+    expect(strip.groups.has(restored)).toBe(false);
+    expect(strip.groupOf(2)?.id).toBe(theirs);
+  });
+
+  test("a new run keeps only the declines of tabs still controlled", async () => {
+    const strip = new TabStrip([{ id: 1 }, { id: 2 }]);
+    const tabs = indicator(strip).indicator;
+    await tabs.resume({ tabs: {}, declined: [1, 2] }, () => [2]);
+    expect(tabs.state().declined).toEqual([2]);
+    // Tab 1 is no longer declined, so the next control groups it.
+    await tabs.show(1);
+    expect(strip.groupOf(1)?.title).toBe(OURS);
+    expect(strip.groupOf(2)).toBeNull();
   });
 
   test("with nothing recorded, no group is touched", async () => {
