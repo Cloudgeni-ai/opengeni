@@ -1197,7 +1197,7 @@ export function createRecordingActivities(
         let audioMilliseconds = 0;
         // Audio actually sent to the model, which is what it bills.
         let sentMilliseconds = 0;
-        const languages = new Set<string>();
+        const languages: string[] = [];
         const ourDiarizer = diarizerFor(settings);
         // Recognizing voices needs every speaker's voice vector, which only
         // our diarizer gives, so it tells the speakers apart whatever the model.
@@ -1426,7 +1426,7 @@ export function createRecordingActivities(
             } else if (diarize && result.diarized) {
               providerDiarized = true;
             }
-            for (const language of result.languages) languages.add(language);
+            languages.push(...result.languages);
             audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
             trackWords.push({
               trackNumber: plan.trackNumber,
@@ -1654,7 +1654,7 @@ export function createRecordingActivities(
         text: string;
         words: never[];
       }> = [];
-      const languages = new Set<string>();
+      const languages: string[] = [];
       let audioMilliseconds = 0;
       let creditCostMicros = 0;
       let charged = false;
@@ -1804,7 +1804,7 @@ export function createRecordingActivities(
             ? estimateRecordingTranscriptionCostMicros(heard.model, durationMilliseconds)
             : null;
           if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
-          for (const language of result.languages ?? []) languages.add(language);
+          languages.push(...(result.languages ?? []));
           audioMilliseconds += durationMilliseconds;
           const text = result.text.trim();
           if (!text) continue;
