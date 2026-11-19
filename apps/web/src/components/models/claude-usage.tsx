@@ -271,35 +271,61 @@ export function claudeUsageReportedAt(
   );
 }
 
-/** The usage cell of an account row: the week, and the 5h only while it holds the account back. */
+/**
+ * The usage cell of an account row: the week, and the 5h only while it
+ * holds the account back. A failed live check is not evidence of no usage:
+ * the row keeps the account's last saved reading (the failed check's own
+ * projection, else `saved`, the reading the account listing carries) and
+ * says how old it is. Only an account Claude has never reported says
+ * "Usage unavailable".
+ */
 export function ClaudeUsageReadout({
   state,
   plan,
+  saved,
 }: {
   state: ClaudeUsageState;
   plan?: string | null | undefined;
+  /** The account's saved reading from the account listing. */
+  saved?: ClaudeSubscriptionUsage | null | undefined;
 }) {
   const now = useMinuteNow();
-  const unavailable =
+  const value = state.value ?? saved ?? null;
+  const failed =
     state.error ||
     state.value?.refreshStatus === "unavailable" ||
     state.value?.refreshStatus === "reconnect";
-  const windows = claudeUsageListWindows(unavailable ? null : state.value, now, plan);
+  const windows = claudeUsageListWindows(value, now, plan);
   // A reading whose windows are all kept off the list is not "no usage".
-  const reported = !unavailable && (state.value?.windows?.length ?? 0) > 0;
-  // A failed live check is not evidence of no usage (or a fresh old reading).
-  return (
+  const reported = (value?.windows?.length ?? 0) > 0;
+  const savedAt = failed && reported && !state.loading ? claudeUsageReportedAt(value, now) : null;
+  const cell = (
     <SubscriptionUsageCell
       windows={windows}
       loading={state.loading}
       fallback={
-        unavailable || state.value?.refreshStatus === "scope_required"
-          ? "Usage unavailable"
-          : reported
-            ? null
+        reported
+          ? null
+          : failed || value?.refreshStatus === "scope_required"
+            ? "Usage unavailable"
             : "No usage yet"
       }
     />
+  );
+  if (!savedAt) return cell;
+  return (
+    <div
+      className="flex flex-col items-end"
+      title="Couldn't check usage just now. The last reported reading is shown."
+    >
+      {cell}
+      <RelativeTime
+        date={savedAt}
+        prefix="Reported"
+        now={now}
+        className="text-2xs leading-4 text-fg-subtle"
+      />
+    </div>
   );
 }
 
@@ -307,14 +333,17 @@ export function ClaudeUsage({
   state,
   plan,
   onReconnect,
+  saved,
 }: {
   state: ClaudeUsageState;
   /** The account's plan: Ultra's 5h shows only while it holds the account back. */
   plan?: string | null | undefined;
   onReconnect?: (() => void) | undefined;
+  /** The account's saved reading from the account listing, shown when no check answered. */
+  saved?: ClaudeSubscriptionUsage | null | undefined;
 }) {
   const now = useMinuteNow();
-  const value = state.value;
+  const value = state.value ?? (state.loading ? null : (saved ?? null));
   const readings = claudeUsageReadings(value, now, plan);
   const reportedAt = claudeUsageReportedAt(value, now);
   const stale = Boolean(reportedAt && now - Date.parse(reportedAt) > 5 * 60_000);

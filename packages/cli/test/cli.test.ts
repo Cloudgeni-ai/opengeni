@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildBinary } from "../build-binary";
 import { CLI_EXIT, OPENGENI_CLI_VERSION, runCli } from "../src/index";
 
 const packageRoot = join(import.meta.dir, "..");
@@ -137,18 +138,11 @@ describe("opengeni executable", () => {
   test("the Node CommonJS bundle runs under Node", async () => {
     const node = Bun.which("node");
     if (!node && process.env.CI) throw new Error("node is required for the opengeni Node check");
-    if (!node) return;
     bundleDirectory = mkdtempSync(join(tmpdir(), "opengeni-cli-bundle-"));
-    const bundle = await Bun.build({
-      entrypoints: [join(packageRoot, "src", "bin.ts")],
-      outdir: bundleDirectory,
-      naming: "opengeni.cjs",
-      format: "cjs",
-      target: "node",
-      banner: "#!/usr/bin/env node",
-    });
-    expect(bundle.success).toBe(true);
-    const executable = join(bundleDirectory, "opengeni.cjs");
+    // The same build step package build.ts runs for dist/bin/opengeni.cjs.
+    const executable = await buildBinary(join(bundleDirectory, "bin"));
+    expect((await Bun.file(executable).text()).startsWith("#!/usr/bin/env node\n")).toBe(true);
+    if (!node) return;
     expect(await run([node, executable, "--version"])).toEqual({
       exitCode: 0,
       stdout: `${manifest.version}\n`,

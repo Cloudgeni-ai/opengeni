@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { gunzipSync, inflateRawSync } from "node:zlib";
-import { isPublishedPackageName } from "./publishable-workspaces";
+import { isBestEffortPublication, isPublishedPackageName } from "./publishable-workspaces";
 
 export const REPOSITORY = "Cloudgeni-ai/opengeni";
 export const REPOSITORY_URL = `https://github.com/${REPOSITORY}`;
@@ -95,7 +95,12 @@ export function sourceCohort(files: ReadonlyMap<string, Buffer>): SourcePackage[
     .map((p) => ({ ...p, name: text(p.manifest.name) }));
   requireThat(new Set(all.map((p) => p.name)).size === all.length, "Duplicate source workspace");
   const selected = all.filter(
-    (p) => isPublishedPackageName(p.name) && p.manifest.private !== true && !ignored.has(p.name),
+    // Same set as publish-canary: releaseContractPackages (no best-effort CLI).
+    (p) =>
+      isPublishedPackageName(p.name) &&
+      !isBestEffortPublication(p.name) &&
+      p.manifest.private !== true &&
+      !ignored.has(p.name),
   );
   requireThat(selected.length > 0 && selected.length <= 64, "Source cohort outside bound");
   const byName = new Map(selected.map((p) => [p.name, p]));

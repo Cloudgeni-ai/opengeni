@@ -163,7 +163,8 @@ describe("release package evidence", () => {
       expect.objectContaining({ name: "@opengeni/worker-bundle" }),
     );
     expect(publishable).not.toContainEqual(expect.objectContaining({ name: "opengeni-web" }));
-    expect(publishable).toContainEqual(expect.objectContaining({ name: "opengeni" }));
+    // The best-effort unscoped CLI is outside the release contract.
+    expect(publishable).not.toContainEqual(expect.objectContaining({ name: "opengeni" }));
   });
 
   test("parses a bounded comma/newline package set and rejects duplicates", () => {

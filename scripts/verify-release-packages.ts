@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { isPublishedPackageName, publishableWorkspacePackages } from "./publishable-workspaces";
+import { isPublishedPackageName, releaseContractPackages } from "./publishable-workspaces";
 
 export type PublishablePackage = {
   name: string;
@@ -254,7 +254,8 @@ export function reconcileReleasePackages(options: {
 }
 
 export function loadPublishablePackages(root?: string): PublishablePackage[] {
-  return publishableWorkspacePackages(root)
+  // The release contract: the best-effort unscoped CLI is never an expected package.
+  return releaseContractPackages(root)
     .map(({ name, version }) => {
       if (!isPublishedPackageName(name) || !packageVersionPattern.test(version)) {
         throw new Error(`invalid publishable package manifest: ${name}@${version}`);

@@ -6,10 +6,8 @@
  */
 import { spawnSync } from "node:child_process";
 
-import {
-  publishableWorkspacePackages,
-  topologicallySortedPackages,
-} from "./publishable-workspaces";
+import { releaseContractPackages, topologicallySortedPackages } from "./publishable-workspaces";
+import { publishUnscopedFirst } from "./publish-unscoped-first";
 import { sharedLockstepVersion } from "./release/lockstep-version";
 
 function run(command: string, args: string[], cwd?: string): void {
@@ -26,13 +24,15 @@ function published(name: string, version: string): boolean {
 
 export function main(): void {
   if (!process.env.NODE_AUTH_TOKEN) throw new Error("NODE_AUTH_TOKEN is required");
-  const packages = topologicallySortedPackages(publishableWorkspacePackages());
+  const packages = topologicallySortedPackages(releaseContractPackages());
   const version = sharedLockstepVersion(packages);
   process.stdout.write(`Publishing ${packages.length} packages at ${version} as latest\n`);
   run("bun", ["run", "build:packages"]);
   run("bun", ["scripts/publish-closure-guard.ts"]);
   run("bun", ["scripts/rewrite-workspace-deps.ts", "--strip-dev-dependencies"]);
   run("bun", ["scripts/rewrite-entry-points.ts"]);
+  // The unscoped CLI is best-effort: a refused write warns and never fails this run.
+  publishUnscopedFirst();
   for (const pkg of packages) {
     if (published(pkg.name, pkg.version)) {
       process.stdout.write(`${pkg.name}@${pkg.version} already published; tagging latest\n`);
