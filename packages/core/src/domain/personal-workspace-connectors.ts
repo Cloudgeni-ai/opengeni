@@ -79,13 +79,57 @@ function refMatchesConnection(
   connection: ConnectionMetadata,
 ): boolean {
   return (
+    refMatchesLoginService(ref, connection) &&
+    (!ref.connectionId || ref.connectionId === connection.id)
+  );
+}
+
+/** The provider, kind and resource match, whichever account the reference pins. */
+function refMatchesLoginService(
+  ref: McpServerConnectionRef,
+  connection: ConnectionMetadata,
+): boolean {
+  return (
     ref.authoritySource !== "host" &&
     sameConnectorProviderDomain(ref.providerDomain, connection.providerDomain) &&
     (!ref.kind || ref.kind === connection.kind) &&
-    (!ref.connectionId || ref.connectionId === connection.id) &&
     (!ref.resource ||
       (typeof connection.metadata.resource === "string" &&
         canonicalUrl(connection.metadata.resource) === canonicalUrl(ref.resource)))
+  );
+}
+
+/**
+ * The connector a login was made for, when it is a connector's sign-in: the
+ * MCP endpoint it was connected for. Null for any other login.
+ */
+export function loginConnectorEndpoint(connection: ConnectionMetadata): string | null {
+  const mcpUrl = connection.metadata.mcpUrl;
+  return typeof mcpUrl === "string" && mcpUrl.trim() ? mcpUrl : null;
+}
+
+/** Whether two connector endpoints are the same, written either way. */
+export function sameConnectorEndpoint(left: string, right: string): boolean {
+  return canonicalUrl(left) === canonicalUrl(right);
+}
+
+/**
+ * Whether a workspace has turned on the connector a login signs in to: one of
+ * its enabled connectors is that endpoint, or binds that provider's accounts
+ * (the account binder's provider, kind and resource match). Whose account an
+ * enabled connector is set to use is a separate question; this only says
+ * whether the connector is on.
+ */
+export function loginConnectorTurnedOn(
+  servers: readonly Pick<EnabledMcpCapabilityServer, "url" | "connectionRef">[],
+  connection: ConnectionMetadata,
+): boolean {
+  const endpoint = loginConnectorEndpoint(connection);
+  return servers.some(
+    (server) =>
+      (endpoint !== null && canonicalUrl(server.url) === canonicalUrl(endpoint)) ||
+      (server.connectionRef !== undefined &&
+        refMatchesLoginService(server.connectionRef, connection)),
   );
 }
 

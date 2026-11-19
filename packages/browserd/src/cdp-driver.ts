@@ -461,17 +461,23 @@ type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
 /** Where a browser lets a session set permissions only in tabs it opened. */
 export const PERMISSION_OPENED_TABS_ONLY =
   "A permission can be set only in a tab this session opened and no other session is using; open the site in a new tab and set it there.";
-const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
-  geolocation: "geolocation",
-  notifications: "notifications",
-  camera: "videoCapture",
-  microphone: "audioCapture",
-  midi: "midi",
-  midi_sysex: "midiSysex",
-  sensors: "sensors",
-  idle_detection: "idleDetection",
-  local_fonts: "localFonts",
-  window_management: "windowManagement",
+/** Each permission as `Browser.setPermission` takes it: a web Permissions API
+ * descriptor, not Chrome's internal permission type (`audioCapture` and the
+ * like, which only `Browser.grantPermissions` accepts). The motion sensors
+ * share one Chrome permission, which any of their descriptors sets. */
+export const CDP_PERMISSION_DESCRIPTORS: Readonly<
+  Record<BrowserPermissionAction["permission"], Readonly<{ name: string; sysex?: true }>>
+> = {
+  geolocation: { name: "geolocation" },
+  notifications: { name: "notifications" },
+  camera: { name: "camera" },
+  microphone: { name: "microphone" },
+  midi: { name: "midi" },
+  midi_sysex: { name: "midi", sysex: true },
+  sensors: { name: "accelerometer" },
+  idle_detection: { name: "idle-detection" },
+  local_fonts: { name: "local-fonts" },
+  window_management: { name: "window-management" },
 };
 const USER_AGENT_METADATA_EXPRESSION = `(async () => {
   const data = navigator.userAgentData;
@@ -8205,7 +8211,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Browser.setPermission",
         {
           ...this.contextScope(),
-          permission: { name: CDP_PERMISSION_NAMES[action.permission] },
+          permission: { ...CDP_PERMISSION_DESCRIPTORS[action.permission] },
           setting: action.setting,
           origin,
         },

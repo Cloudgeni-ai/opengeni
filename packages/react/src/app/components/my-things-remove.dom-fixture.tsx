@@ -187,3 +187,80 @@ test("a failed removal says so and keeps the login", async () => {
   expect(fake.listOwnResources).toHaveBeenCalledTimes(1);
   await view.unmount();
 });
+
+test("a login whose connector isn't on reads as off there, and its switch turns both on", async () => {
+  const NOTES = "66666666-6666-4666-8666-666666666666";
+  const endpoint = "https://notes.example.com/mcp";
+  const fake = client([
+    {
+      resourceKind: "connection",
+      resourceId: NOTES,
+      name: "sam@example.com",
+      provider: "notes.example.com",
+      plan: null,
+      workspaces: [
+        personal,
+        row("Design", true, { current: true, connectorOff: true }),
+        row("Research", true, { connectorOff: true }),
+      ],
+    },
+  ]);
+  fake.listCapabilities.mockImplementation(async () => ({
+    items: [
+      {
+        id: "mcp:notes",
+        kind: "mcp",
+        name: "Notes",
+        enabled: false,
+        authKind: "oauth2",
+        providerDomain: "notes.example.com",
+        mcpUrl: endpoint,
+        endpointUrl: endpoint,
+        connectionRef: null,
+      } as unknown as CapabilityCatalogItem,
+    ],
+    installations: [],
+  }));
+  fake.listOwnConnectionAccounts.mockImplementation(async () => [
+    {
+      id: NOTES,
+      workspaceId: "home",
+      version: 1,
+      status: "active",
+      authorityId: "77777777-7777-4777-8777-777777777777",
+      subjectId: "user:sam",
+      kind: "oauth2",
+      providerDomain: "notes.example.com",
+      metadata: { mcpUrl: endpoint },
+    } as unknown as ConnectionMetadata,
+  ]);
+  fake.setOwnResourceReach.mockImplementation((async (
+    workspaceId: string,
+    request: { on: boolean },
+  ) => ({
+    workspace: row("Design", request.on, { workspaceId, current: true }),
+  })) as never);
+  const view = await render(<MyThings client={fake} workspaceId="design" />);
+  const loginRow = [...view.container.querySelectorAll("button")].find((candidate) =>
+    candidate.textContent?.startsWith("Notes"),
+  );
+  // On in Design and Research, but Notes isn't turned on there: it works only in Personal.
+  expect(loginRow!.textContent).toContain("Works only in your Personal workspace");
+  await act(async () => loginRow!.click());
+  const design = () =>
+    document.querySelector('[aria-label="Use Notes (sam@example.com) in Design"]')!;
+  expect(design().getAttribute("aria-checked")).toBe("false");
+  expect(document.body.textContent).toContain(
+    "This workspace. Not used here yet. Turning it on turns Notes on here too",
+  );
+  // One switch turns the login and Notes on here.
+  await act(async () => (design() as HTMLButtonElement).click());
+  expect(fake.setOwnResourceReach).toHaveBeenCalledWith("design", {
+    resourceKind: "connection",
+    resourceId: NOTES,
+    on: true,
+  });
+  expect(design().getAttribute("aria-checked")).toBe("true");
+  expect(loginRow!.textContent).toContain("Works in your Personal workspace and Design");
+  await view.unmount();
+});

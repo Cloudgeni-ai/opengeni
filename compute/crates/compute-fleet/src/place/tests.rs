@@ -23,6 +23,7 @@ fn capacity(free_mib: u64) -> Capacity {
         reclaimable_memory_mib: 0,
         cpu_millis: 64_000,
         free_cpu_millis: 64_000,
+        vcpus_awake: 0,
         free_disk_mib: 100_000,
         ready: Vec::new(),
         sandboxes: 0,
@@ -34,6 +35,7 @@ fn demand(memory_mib: u64) -> Demand {
         memory_mib,
         memory_max_mib: memory_mib * 2,
         cpu_millis: 0,
+        vcpus: 0,
         disk_mib: 1_000,
         reach: Offers::NONE,
         prefer: Prefer::Any,
@@ -499,6 +501,95 @@ fn hosts_of_different_sizes_fill_by_the_share_of_their_room_free() {
                 .host,
             HostId(1)
         );
+    }
+}
+
+/// A VM guaranteed little processor time can still keep all its
+/// processors busy, as a build runner does: the second of two goes to the
+/// host whose processors the first does not already share, though the
+/// other host has the larger share of its memory free, and neither is ever
+/// refused for its processors.
+#[test]
+fn awake_vms_spread_by_the_processors_they_have() {
+    let runner = Demand {
+        cpu_millis: 1_270,
+        vcpus: 12,
+        ..demand(12_288)
+    };
+    // Sixteen processors and more memory free, by share and amount.
+    let fewer_processors = Capacity {
+        memory_mib: 58_965,
+        free_memory_mib: 45_780,
+        cpu_millis: 15_000,
+        free_cpu_millis: 15_000,
+        ..capacity(0)
+    };
+    // Thirty-two processors and a smaller share of its memory free: by
+    // that share alone, the second runner would join the first.
+    let more_processors = Capacity {
+        memory_mib: 50_000,
+        free_memory_mib: 26_000,
+        cpu_millis: 30_000,
+        free_cpu_millis: 30_000,
+        ..capacity(0)
+    };
+    let mut fleet = Fleet::new();
+    fleet.upsert(
+        HostId(0),
+        info(0),
+        HostState::Live,
+        fewer_processors.clone(),
+    );
+    fleet.upsert(HostId(1), info(1), HostState::Live, more_processors);
+    let mut rng = Rng::new(3);
+    let mut order = Vec::new();
+    for _ in 0..4 {
+        let placed = fleet.place(&runner, &HashSet::new(), &mut rng).unwrap();
+        order.push(placed.host);
+        fleet.reserve(placed, &runner);
+    }
+    // The third goes where processors are shared least; the fourth
+    // fits only where memory is left, and shares them there.
+    assert_eq!(order, [HostId(0), HostId(1), HostId(1), HostId(0)]);
+    let (_, _, capacity) = fleet.get(HostId(0)).unwrap();
+    assert_eq!(
+        capacity.vcpus_awake, 24,
+        "more than it has, and not refused"
+    );
+
+    // Two hosts alike but for the processors their awake VMs have: the
+    // one with fewer of them taken is better.
+    let mut fleet = Fleet::new();
+    let shared = Capacity {
+        vcpus_awake: 8,
+        ..fewer_processors_with(30_000)
+    };
+    fleet.upsert(HostId(0), info(0), HostState::Live, shared);
+    fleet.upsert(
+        HostId(1),
+        info(1),
+        HostState::Live,
+        fewer_processors_with(30_000),
+    );
+    for _ in 0..100 {
+        let placed = fleet.place(&runner, &HashSet::new(), &mut rng).unwrap();
+        assert_eq!(placed.host, HostId(1));
+    }
+
+    // A host of an earlier release tells none: as if no VM shared them.
+    let mut fleet = Fleet::new();
+    fleet.upsert(HostId(0), info(0), HostState::Live, fewer_processors);
+    let placed = fleet.place(&runner, &HashSet::new(), &mut rng).unwrap();
+    assert_eq!(placed.host, HostId(0));
+}
+
+fn fewer_processors_with(free_memory_mib: u64) -> Capacity {
+    Capacity {
+        memory_mib: 58_965,
+        free_memory_mib,
+        cpu_millis: 15_000,
+        free_cpu_millis: 15_000,
+        ..capacity(0)
     }
 }
 

@@ -422,7 +422,7 @@ test("your login added in another workspace is offered here with one standing ch
   });
   const useItHere = () =>
     [...document.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Use it here",
+      (button) => button.textContent?.trim() === "Use my Mail here",
     );
   const view = await renderComponent(
     <SessionConversation
@@ -444,7 +444,7 @@ test("your login added in another workspace is offered here with one standing ch
     expect(document.body.textContent).not.toContain("Review access before signing in");
     expect(connectButton()).toBeUndefined();
     await actRun(() => useItHere()!.click());
-    await waitFor(() => issued.length === 1, "Use it here did not turn the login on");
+    await waitFor(() => issued.length === 1, "Using your login did not turn it on");
     expect(issued[0]).toEqual({
       workspaceId: WORKSPACE_ID,
       authorityId: "authority-own-mail",
@@ -487,13 +487,13 @@ test("your login already on here is used for a connector not set up here, withou
     await waitFor(
       () =>
         document.body.textContent?.includes("Use it for your messages here too?") === true &&
-        buttonNamed("Use it here") !== undefined,
+        buttonNamed("Use my Mail here") !== undefined,
       "The card did not offer your login that is already on here",
     );
     expect(document.body.textContent).toContain("You added me@mail.example in another workspace.");
     expect(connectButton()).toBeUndefined();
-    await actRun(() => buttonNamed("Use it here")!.click());
-    await waitFor(finished, "Use it here did not finish");
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
     // Set up for each person's own account; the login is already on here.
     expect(enabled).toEqual([
       {
@@ -509,9 +509,10 @@ test("your login already on here is used for a connector not set up here, withou
   }
 });
 
-test("a shareable connector asks who can use it first, then offers your login that is on here", async () => {
+test("a shareable connector offers your login that is on here first; one for everyone stays a choice", async () => {
   // Mail shares one workspace connection by default and the workspace has
-  // other people: who can use a new connection comes first.
+  // other people. You already connected your own account, so the card offers
+  // it without asking who can use it; a connection for everyone stays a choice.
   const login = ownMailLogin({ turnedOnHere: true, turnedOnHereGrantId: "grant-standing" });
   const { client, steps, enabled, issued } = await notSetUpHere(login, { catalogItem: mail });
   const view = await renderConversation(client);
@@ -520,32 +521,29 @@ test("a shareable connector asks who can use it first, then offers your login th
       .find((node) => node.textContent?.trim() === label)
       ?.querySelector("input") as HTMLInputElement | undefined;
   try {
-    await waitFor(() => connectButton() !== undefined, "The Connect card did not render");
-    expect(buttonNamed("Use it here")).toBeUndefined();
-    await actRun(() => connectButton()!.click());
     await waitFor(
-      () => document.body.textContent?.includes("Who can use this connection?") === true,
-      "The card did not ask who can use the connection",
+      () => buttonNamed("Use my Mail here") !== undefined,
+      "The card did not offer your login first",
     );
-    expect(buttonNamed("Use it here")).toBeUndefined();
-    expect(buttonNamed("Continue to Mail")).toBeDefined();
-    await actRun(() => radio("Only me")!.click());
-    await waitFor(
-      () => buttonNamed("Use it here") !== undefined,
-      "Choosing Only me did not offer your login",
-    );
+    expect(document.body.textContent).not.toContain("Who can use this connection?");
     expect(document.body.textContent).toContain("You added me@mail.example in another workspace.");
-    // The choice stays visible, so the person can go back to a shared connection.
-    await actRun(() => radio("Everyone in this workspace")!.click());
+    expect(connectButton()).toBeUndefined();
+    // The other choice: a new connection for everyone, asked as before.
+    await actRun(() => buttonNamed("Connect an account for everyone instead")!.click());
     await waitFor(
       () =>
-        buttonNamed("Use it here") === undefined && buttonNamed("Continue to Mail") !== undefined,
-      "Choosing everyone did not go back to a new shared connection",
+        document.body.textContent?.includes("Who can use this connection?") === true &&
+        buttonNamed("Continue to Mail") !== undefined,
+      "Choosing everyone did not go to a new shared connection",
     );
+    expect(radio("Everyone in this workspace")!.checked).toBe(true);
+    expect(buttonNamed("Use my Mail here")).toBeUndefined();
+    expect(steps).toEqual([]);
+    // Only me brings your login back.
     await actRun(() => radio("Only me")!.click());
-    await waitFor(() => buttonNamed("Use it here") !== undefined, "No offer after Only me again");
-    await actRun(() => buttonNamed("Use it here")!.click());
-    await waitFor(finished, "Use it here did not finish");
+    await waitFor(() => buttonNamed("Use my Mail here") !== undefined, "No offer after Only me");
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
     expect(enabled).toEqual([
       {
         workspaceId: WORKSPACE_ID,
@@ -566,15 +564,15 @@ test("a login connected in this workspace is offered again when its connector is
   const view = await renderConversation(client);
   try {
     await waitFor(
-      () => buttonNamed("Use it here") !== undefined,
+      () => buttonNamed("Use my Mail here") !== undefined,
       "The card did not offer the login connected here",
     );
     expect(document.body.textContent).toContain(
       "You already connected me@mail.example. Use it for your messages here?",
     );
     expect(document.body.textContent).not.toContain("in another workspace");
-    await actRun(() => buttonNamed("Use it here")!.click());
-    await waitFor(finished, "Use it here did not finish");
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
     expect(steps).toEqual(["enable"]);
   } finally {
     await view.unmount();
@@ -587,11 +585,11 @@ test("a login off here is set up and turned on for a connector not set up here, 
   const view = await renderConversation(client);
   try {
     await waitFor(
-      () => buttonNamed("Use it here") !== undefined,
+      () => buttonNamed("Use my Mail here") !== undefined,
       "The card did not offer your login that is off here",
     );
-    await actRun(() => buttonNamed("Use it here")!.click());
-    await waitFor(finished, "Use it here did not finish");
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
+    await waitFor(finished, "Using your login did not finish");
     // Turned on for each person's own account first, so a refusal leaves the
     // login as it was; then the login is turned on here.
     expect(steps).toEqual(["enable", "turn on here"]);
@@ -619,8 +617,11 @@ test("when only an admin can turn the connector on, using your login says so and
   const { client, steps, issued } = await notSetUpHere(login, { refuseEnable: forbidden() });
   const view = await renderConversation(client);
   try {
-    await waitFor(() => buttonNamed("Use it here") !== undefined, "No offer to use your login");
-    await actRun(() => buttonNamed("Use it here")!.click());
+    await waitFor(
+      () => buttonNamed("Use my Mail here") !== undefined,
+      "No offer to use your login",
+    );
+    await actRun(() => buttonNamed("Use my Mail here")!.click());
     await waitFor(
       () => document.body.textContent?.includes("Only an admin can turn on Mail.") === true,
       "The card did not say an admin has to turn it on",

@@ -1721,7 +1721,7 @@ test("the card asks who can use a connection only when someone else could", asyn
  * login (D-54), so it is only ever listed with their accounts.
  */
 function ownLoginElsewhereClient(options: {
-  /** Already listed before signing in (the card can offer "Use it here"). */
+  /** Already listed before signing in (the card can offer "Use my Example service here"). */
   listedBeforeSignIn: boolean;
   /** Whether the server turned the reused login on here. */
   turnedOnBySignIn: boolean;
@@ -1912,7 +1912,7 @@ test("a capability not set up here offers your own login from another workspace 
   try {
     await flush();
     const use = [...document.querySelectorAll("button.og-session-capability-primary")].find(
-      (node) => node.textContent === "Use it here",
+      (node) => node.textContent === "Use my Example service here",
     ) as HTMLButtonElement | undefined;
     expect(use).toBeDefined();
     await actRun(() => use!.click());
@@ -1927,17 +1927,31 @@ test("a capability not set up here offers your own login from another workspace 
   }
 });
 
-test("a shareable capability with others in the workspace asks who can use it before offering your own login", async () => {
+test("a shareable capability with others in the workspace offers your own login first, without asking who can use it", async () => {
+  // You already chose to connect your own account; asking again only adds a
+  // step. A new connection for everyone stays a choice.
   sessionStorage.clear();
   const h = ownLoginElsewhereClient({ listedBeforeSignIn: true, turnedOnBySignIn: false });
-  const view = await renderOwnLoginElsewhereCard(h.client, () => {}, false);
+  let configured = 0;
+  const view = await renderOwnLoginElsewhereCard(
+    h.client,
+    () => {
+      configured += 1;
+    },
+    false,
+  );
   try {
     await flush();
-    expect(document.body.textContent).toContain("Who can use this connection?");
-    expect(
-      [...document.querySelectorAll("button")].some((node) => node.textContent === "Use it here"),
-    ).toBe(false);
-    expect(h.calls).toEqual([]);
+    expect(document.body.textContent).not.toContain("Who can use this connection?");
+    const button = (label: string) =>
+      [...document.querySelectorAll("button")].find((node) => node.textContent === label);
+    expect(button("Connect an account for everyone instead")).toBeDefined();
+    await actRun(() => button("Use my Example service here")!.click());
+    await flush();
+    expect(h.begins).toEqual([]);
+    expect(h.calls).toEqual(["enableCapability", "issueUserResourceGrant"]);
+    expect(h.enables).toEqual([personalEnable]);
+    expect(configured).toBe(1);
   } finally {
     await view.unmount();
   }
@@ -1957,7 +1971,7 @@ test("using your own login here when only an admin can turn the capability on le
   try {
     await flush();
     const use = [...document.querySelectorAll("button.og-session-capability-primary")].find(
-      (node) => node.textContent === "Use it here",
+      (node) => node.textContent === "Use my Example service here",
     ) as HTMLButtonElement | undefined;
     expect(use).toBeDefined();
     await actRun(() => use!.click());
@@ -2048,7 +2062,7 @@ test("using your own login here that waits for a passkey step-up offers it, then
     await flush();
     const button = (label: string) =>
       [...document.querySelectorAll("button")].find((node) => node.textContent === label);
-    await actRun(() => button("Use it here")!.click());
+    await actRun(() => button("Use my Example service here")!.click());
     await flush();
     expect(document.body.textContent).toContain(
       "Confirm it's you with your passkey to turn on Example service.",

@@ -901,6 +901,7 @@ impl Store for Chunked {
                     .map(|manifest| MadeAt {
                         vcpus: stored.vcpus,
                         memory_bytes: Some(manifest.disk_len),
+                        runtime: stored.runtime.clone(),
                     }),
                 None => Ok(MadeAt::default()),
             }

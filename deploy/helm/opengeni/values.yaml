@@ -1851,6 +1851,14 @@ observability:
     # the slowest single observation, so one slow write on a quiet deployment
     # would page.
     sessionEventMinSamples: 100
+    # An API pod whose event loop is blocked longer than this cannot answer
+    # anything, including its own health checks. Requests that hang that long
+    # are usually cut off by a probe restart before they complete, so they
+    # never reach the request-latency histogram, and this is the only signal
+    # that sees them. Pages when one pod blocks at least apiEventLoopBlockedMinBlocks
+    # times within 10 minutes; a single block (one large response) does not.
+    apiEventLoopBlockedSeconds: 5
+    apiEventLoopBlockedMinBlocks: 2
     labels: {}
     annotations: {}
     rules: []

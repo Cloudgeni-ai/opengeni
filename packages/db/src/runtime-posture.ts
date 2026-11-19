@@ -151,9 +151,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, settling a call sends no ended push and those phones ring out.
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
- * 1404 withholds the inventory of cold sandboxes whose chats are all
- * archived; until it is granted, such a non-compute sandbox keeps its saved
- * workspace until its chats are deleted (as before).
+ * 1404 withheld the inventory of cold sandboxes whose chats are all archived
+ * and 1502 grants it.
  * 1475 withheld the organization-wide sandbox counts and 1479 granted them.
  * 1482 withheld the check of which Nango connections a live connection
  * stands for and 1487 the listing of live Nango rows' owners; 1499 granted
@@ -173,7 +172,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
-  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];

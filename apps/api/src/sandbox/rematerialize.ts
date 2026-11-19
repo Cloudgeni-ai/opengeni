@@ -16,6 +16,7 @@ import {
 } from "@opengeni/db";
 import {
   inlineWorkspaceArchiveForRestore,
+  workspaceArchiveObjectRestoresFromSpool,
   describeLegacyNativeSnapshotArchive,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
@@ -80,14 +81,9 @@ async function materializeArchiveObjectRef(
       { retryable: true },
     );
   }
-  const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
-  if (
-    process.platform === "linux" &&
-    descriptor?.version === 1 &&
-    descriptor.workspace.projection === "sdk_local_archive_v1"
-  ) {
-    return envelope;
-  }
+  // Cold restore spools portable archives from object storage itself, after
+  // verifying them, and streams them into the new box.
+  if (workspaceArchiveObjectRestoresFromSpool(sessionState)) return envelope;
   return {
     ...envelope,
     sessionState: await inlineWorkspaceArchiveForRestore(sessionState, (key) =>

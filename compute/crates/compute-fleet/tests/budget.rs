@@ -91,6 +91,7 @@ fn capacity(free_memory_mib: u64, sandboxes: u32, rng: &mut Rng) -> Capacity {
         reclaimable_memory_mib: 0,
         cpu_millis: 1_000_000,
         free_cpu_millis: 1_000_000,
+        vcpus_awake: 0,
         free_disk_mib: 2_000_000,
         ready,
         sandboxes,
@@ -103,6 +104,7 @@ fn demand(rng: &mut Rng) -> Demand {
         memory_mib,
         memory_max_mib: memory_mib * 2,
         cpu_millis: 0,
+        vcpus: 0,
         disk_mib: 1_024,
         reach: compute_fleet::Offers::NONE,
         // Creates and adopts in equal parts.

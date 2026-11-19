@@ -33,6 +33,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             memory_reclaimable_mib: 3_000,
             cpu_millis: 6_500,
             cpu_free_millis: 6_372,
+            vcpus_awake: 14,
             disk_free_mib: 90_000,
             disk_available_mib: Some(95_000),
             disk_reclaimable_mib: 4_000,
@@ -75,6 +76,21 @@ fn the_leader_reports_each_hosts_registration_and_restarts() {
             "compute_fleet_host_agent_restarts{host_name=\"hosts-a\"}"
         ),
         Some(3.0)
+    );
+}
+
+/// The processors a host's awake VMs have, which placement steers by.
+#[test]
+fn the_leader_reports_the_processors_awake_vms_have() {
+    let metrics = Metrics::default();
+    metrics.leads(true);
+    let text = metrics.render(&[host(1, "hosts-a", HostState::Live)]);
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_vcpus_awake{host_name=\"hosts-a\"}"
+        ),
+        Some(14.0)
     );
 }
 

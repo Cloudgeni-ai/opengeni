@@ -459,6 +459,12 @@ async function privateTemporaryDirectory(root: string | null) {
   invalid("no private disk temporary directory exists outside the workspace");
 }
 
+/** A private, owner-marked disk directory for an archive spool that has no
+ * host workspace to stay out of (a remote session's streamed tar). */
+export async function privateArchiveSpoolDirectory(): Promise<string> {
+  return await privateTemporaryDirectory(null);
+}
+
 async function writeAll(handle: FileHandle, bytes: Uint8Array) {
   let offset = 0;
   while (offset < bytes.byteLength) {
@@ -510,7 +516,7 @@ class Base64Encoder {
   }
 }
 
-function ownedSpool(
+export function ownedArchiveSpool(
   directory: string,
   path: string,
   byteSize: number,
@@ -650,7 +656,7 @@ export async function captureHostWorkspaceArchive(
     // would reject without giving the caller the spool it must dispose.
     handleClosed = true;
     await handle.close();
-    const spool = ownedSpool(temporary, path, writer.byteSize, writer.hash.digest("hex"));
+    const spool = ownedArchiveSpool(temporary, path, writer.byteSize, writer.hash.digest("hex"));
     temporary = undefined;
     return { spool, workspace: archived };
   } catch (error) {

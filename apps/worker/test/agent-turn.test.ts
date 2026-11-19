@@ -22,6 +22,7 @@ import {
   CodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
+  createCodexTurnState,
   type CodexRequestContext,
 } from "@opengeni/codex";
 import {
@@ -765,6 +766,42 @@ describe("connector accounts that stopped working", () => {
     expect(
       unavailableMcpOperationalContext({ connectors: [], needsReconnect: [] }),
     ).toBeUndefined();
+  });
+
+  test("names the setup tools only for an agent that has both", () => {
+    const needsReconnect = [
+      {
+        connector: { id: "mail", name: "Mail" },
+        account: "ada@example.test",
+        ownership: "personal" as const,
+        stoppedWorkingOn: "2026-10-29",
+        reconnectHere: true,
+      },
+    ];
+    const withTools = unavailableMcpOperationalContext({
+      connectors: [],
+      needsReconnect,
+      setupTools: { catalog: true, card: true },
+    })!;
+    expect(withTools).toBe(unavailableMcpOperationalContext({ connectors: [], needsReconnect }));
+    expect(withTools).toContain("capability_catalog_search lists it under setup.reconnect");
+    for (const setupTools of [
+      { catalog: false, card: true },
+      { catalog: true, card: false },
+      { catalog: false, card: false },
+    ]) {
+      const notice = unavailableMcpOperationalContext({
+        connectors: [],
+        needsReconnect,
+        setupTools,
+      })!;
+      expect(notice).not.toContain("capability_catalog_search");
+      expect(notice).not.toContain("capability_authorization_request");
+      expect(notice).toContain("reconnecting it in Connections fixes it");
+      expect(notice).toContain(
+        'the person\'s account "ada@example.test" stopped working on 2026-10-29.',
+      );
+    }
   });
 });
 
@@ -7216,6 +7253,7 @@ describe("transient provider error classifier", () => {
       nextRequestId: () => "main-request",
       betaFeatures: ["main-only"],
       turnMetadata: { request_kind: "agent_turn" },
+      turnState: createCodexTurnState(),
     };
     const titleCodexContext = sessionTitleCodexRequestContext(codexContext, () => "title-request");
 
@@ -7237,6 +7275,8 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
     expect(titleCodexContext.onRequestOpaqueArtifacts).toBeUndefined();
     expect(titleCodexContext.betaFeatures).toBeUndefined();
+    // A title is not part of the turn's sticky routing.
+    expect(titleCodexContext.turnState).toBeUndefined();
 
     const getXaiToken = mock(async () => ({ accessToken: "xai-token", userId: "user" }));
     const refreshXaiToken = mock(async () => ({ accessToken: "xai-token-2", userId: "user" }));

@@ -334,7 +334,7 @@ and switches single capabilities: `{ from: "none", webSearch: true }`.
 | `schedules` | create and manage scheduled tasks |
 | `knowledge` | search and save workspace Knowledge, task notes and instructions |
 | `workspaceFiles` | read files uploaded to the workspace |
-| `workspaceConnectors` | use the workspace's connected apps and integrations |
+| `workspaceConnectors` | use the workspace's connected apps and integrations, and show Connect cards for the person to connect one (or their own computer) |
 | `secrets` | use saved secrets by `{{secret:…}}` reference, save new ones and ask for them with a secure card |
 | `workspaceAdmin` | manage projects, rigs, machines and connector setup |
 

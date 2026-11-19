@@ -5,6 +5,7 @@ import {
   type ResponsesTransportOptions,
 } from "@opengeni/network/responses-websocket";
 import type { FetchLike } from "./fetch";
+import { CODEX_TURN_STATE_HEADER } from "./request-context";
 
 export {
   MODEL_TRANSPORT_HEADER as CODEX_TRANSPORT_HEADER,
@@ -54,6 +55,9 @@ export const CODEX_RESPONSES_WEBSOCKET_ENDPOINT = {
   conversationScoped: true,
   url: /^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/,
   beta: CODEX_RESPONSES_WEBSOCKET_BETA,
+  // The connection is already pinned to its backend. The turn's routing token
+  // is for requests that leave it, and must not split the turn's connection.
+  perRequestHeaders: [CODEX_TURN_STATE_HEADER],
   eventHeaders: (event: Record<string, unknown>) =>
     event.type === "codex.rate_limits"
       ? codexRateLimitHeaders(event)

@@ -119,8 +119,9 @@ function ScopedCard({
   const reconnecting = Boolean(reconnectConnectionId);
   const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
   // Your own login, off here or for a connector not set up here yet: one
-  // click uses it here instead of signing in again. Where others could use a
-  // shared connection the flow offers it only once "Only me" is chosen.
+  // click uses it here instead of signing in again. It comes first even where
+  // others could use a shared connection; connecting one for everyone stays
+  // a choice.
   const useOwnLoginHere = offHere !== null && !connected && item !== null;
   const ownLoginAccount = useOwnLoginHere
     ? connectionAccountLabel(
@@ -220,32 +221,32 @@ function ScopedCard({
     : [];
 
   // Who can use a new connection: asked only where someone else could.
-  const ownershipChooser =
-    item && !item.connectionRef && !personalOnly && !reconnecting ? (
-      <fieldset disabled={busy}>
-        <legend>
-          {ownershipCopy?.legend ?? t("sessionMcpCapabilityCard.whoCanUseThisConnection")}
-        </legend>
-        <label>
-          <input
-            type="radio"
-            name={`${capabilityId}-ownership`}
-            checked={ownership === "workspace"}
-            onChange={() => flow.setOwnership("workspace")}
-          />
-          {t("sessionMcpCapabilityCard.everyoneInThisWorkspace")}
-        </label>
-        <label>
-          <input
-            type="radio"
-            name={`${capabilityId}-ownership`}
-            checked={ownership === "personal"}
-            onChange={() => flow.setOwnership("personal")}
-          />
-          {t("sessionMcpCapabilityCard.onlyMe")}
-        </label>
-      </fieldset>
-    ) : null;
+  const canShare = item !== null && !item.connectionRef && !personalOnly && !reconnecting;
+  const ownershipChooser = canShare ? (
+    <fieldset disabled={busy}>
+      <legend>
+        {ownershipCopy?.legend ?? t("sessionMcpCapabilityCard.whoCanUseThisConnection")}
+      </legend>
+      <label>
+        <input
+          type="radio"
+          name={`${capabilityId}-ownership`}
+          checked={ownership === "workspace"}
+          onChange={() => flow.setOwnership("workspace")}
+        />
+        {t("sessionMcpCapabilityCard.everyoneInThisWorkspace")}
+      </label>
+      <label>
+        <input
+          type="radio"
+          name={`${capabilityId}-ownership`}
+          checked={ownership === "personal"}
+          onChange={() => flow.setOwnership("personal")}
+        />
+        {t("sessionMcpCapabilityCard.onlyMe")}
+      </label>
+    </fieldset>
+  ) : null;
 
   return (
     <SessionCapabilityFrame
@@ -262,7 +263,7 @@ function ScopedCard({
       complete={flow.complete}
       actionLabel={
         useOwnLoginHere
-          ? t("sessionMcpCapabilityCard.useItHere")
+          ? t("sessionMcpCapabilityCard.useMyNameHere", { name: item.name })
           : connected
             ? sessionId
               ? t("sessionMcpCapabilityCard.useInThisConversation")
@@ -279,6 +280,23 @@ function ScopedCard({
       }
       onOpen={useOwnLoginHere ? flow.useHere : flow.open}
       opensDialog={!useOwnLoginHere}
+      details={
+        // Your own login comes first; a new connection for everyone stays a choice.
+        useOwnLoginHere && canShare && !flow.expanded ? (
+          <div className="og-session-capability-setup">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                flow.setOwnership("workspace");
+                flow.open();
+              }}
+            >
+              {t("sessionMcpCapabilityCard.connectAnAccountForEveryone")}
+            </button>
+          </div>
+        ) : undefined
+      }
       busy={useOwnLoginHere && busy}
       onClose={flow.close}
       dialogOnly={dialogOnly}
@@ -348,19 +366,30 @@ function ScopedCard({
                     : t("sessionMcpCapabilityCard.addAPasskey")}
               </button>
             ) : ownLoginQuestion ? (
+              // Your own login first: you already chose to connect your own
+              // account, so the card doesn't ask who can use it. A shared
+              // connection for everyone stays a choice where others could use it.
               <>
-                {ownershipChooser}
                 <p className="og-session-capability-scope">{ownLoginQuestion}</p>
                 <button
                   className="og-session-capability-primary"
                   disabled={busy || flow.view.busy}
                   onClick={flow.useHere}
                 >
-                  {t("sessionMcpCapabilityCard.useItHere")}
+                  {t("sessionMcpCapabilityCard.useMyNameHere", { name: item.name })}
                 </button>
                 <button type="button" disabled={busy} onClick={flow.signIn}>
                   {t("sessionMcpCapabilityCard.connectADifferentAccount")}
                 </button>
+                {canShare ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => flow.setOwnership("workspace")}
+                  >
+                    {t("sessionMcpCapabilityCard.connectAnAccountForEveryone")}
+                  </button>
+                ) : null}
               </>
             ) : !connected && adminApproval ? (
               // The organization has to approve first: that help is the step,
