@@ -170,8 +170,8 @@ Console.
 | Role | Who | Console |
 | --- | --- | --- |
 | Full | Organization owners and admins, always | Everything. Switching an agent between code and Console management is owner-only |
-| Editor | A member given it | Viewer, plus creating and editing agents (including pointing "Runs on" at an organization machine or Sandbox Environment whose reach covers the workspaces the agent works in), test chats, and publishing or rolling back Console-managed agents that aren't available in team workspaces (also moving running chats) |
-| Viewer | A member given it | Overview, Workspaces, Sessions with their detail and transcripts (under the review level) and cost, and Agents, versions, tool servers and an agent's sessions and usage, read-only |
+| Editor | A member given it | Viewer, plus creating and editing agents (including pointing "Runs on" at an organization machine or Sandbox Environment whose reach covers the workspaces the agent works in, and using the organization's tool servers), test chats (the first one creates the Console test workspace, which counts toward the workspace limit), and publishing or rolling back Console-managed agents that aren't available in team workspaces (also moving running chats) |
+| Viewer | A member given it | Overview and Workspaces (names, spend and activity of every workspace in the organization, including team workspaces), Sessions with their detail and transcripts (under the review level) and cost, and Agents, versions, tool servers and an agent's sessions and usage, read-only |
 | None | Every other member (default) | Nothing (`403`) |
 
 Full only: marking workspaces managed or team, Settings (review level, audit

@@ -146,7 +146,8 @@ const CONSOLE_ROLE_OPTIONS = [
   {
     id: "editor" as const,
     label: "Editor",
-    description: "Also creates, tests and publishes agents.",
+    description:
+      "Also creates, tests and publishes agents, including running them on the organization's machines and tool servers.",
   },
 ];
 
