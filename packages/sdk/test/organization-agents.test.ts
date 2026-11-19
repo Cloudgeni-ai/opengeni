@@ -153,9 +153,9 @@ describe("organization agents", () => {
     const byKey: CreateSessionRequest = { initialMessage: "Hi", agent: "support" };
     const withChanges: CreateSessionRequest = {
       initialMessage: "Hi",
+      model: "gpt-5.5",
       agent: {
         ref: "support",
-        model: "gpt-5.5",
         instructions: "The user is on the Pro plan.",
         toolServers: [{ server: "crm", disableTools: ["delete_contact"], headers: { authorization: "Bearer x" } }],
       },

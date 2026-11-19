@@ -30,7 +30,7 @@ export type DeployResult =
 
 function apiErrorMessage(error: unknown, key: string): { message: string; code?: string; status?: number } {
   if (!(error instanceof CliApiError)) return { message: (error as Error).message ?? String(error) };
-  const base = { code: error.code, status: error.status };
+  const base = { ...(error.code ? { code: error.code } : {}), status: error.status };
   if (error.code === "agent_managed_in_console") {
     return {
       ...base,
