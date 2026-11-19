@@ -199,7 +199,10 @@ export function AgentVersions({
   );
   const rows = [...(versions.data?.versions ?? [])].sort((a, b) => b.version - a.version);
   const canEdit = useConsoleCan("editor");
-  const editable = agent.managedBy === "console" && canEdit;
+  const full = useConsoleCan("full");
+  // An agent in team workspaces runs there too: only owners and admins publish it.
+  const editable =
+    agent.managedBy === "console" && canEdit && (full || agent.workspaceIds.length === 0);
   const newest = rows[0]?.version;
   const right = to ?? newest;
   const left = from ?? (right !== undefined ? previous(rows, right) : undefined);

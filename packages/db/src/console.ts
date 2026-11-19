@@ -3,8 +3,9 @@
  * level, the Console audit log, end-user labels, and the reviewable session
  * reads with their metered cost.
  *
- * Authorization lives in the API (`requireConsoleAdministrator` in
- * @opengeni/core): only organization owners and admins reach these reads.
+ * Authorization lives in the API (`requireConsoleAccess` in
+ * apps/api/src/routes/console-roles.ts): only the organization's owners, admins
+ * and members with a Console role reach these reads.
  * This module enforces what they may see, in SQL, on every read:
  *
  * - only workspaces marked in `organization_managed_workspaces`;
