@@ -8,6 +8,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type DependencyList,
@@ -30,6 +31,7 @@ import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { onConsoleHost } from "@/lib/console-route";
 import { rememberConsoleSignedOut } from "@/lib/console-sign-in";
+import { orgAgentsApi, orgAgentsEnabled, type OrgAgentsApi } from "@/lib/organization-agents";
 
 export type ConsoleClient = ChatClient<OpenGeniBrowserClient>;
 
@@ -49,6 +51,19 @@ export function useConsole(): ConsoleContextValue {
   const value = useContext(ConsoleContext);
   if (!value) throw new Error("Console context is not ready");
   return value;
+}
+
+/** Console agents and tool servers calls for this organization. */
+export function useOrgAgentsApi(): OrgAgentsApi {
+  const { client, organizationId } = useConsole();
+  return useMemo(() => orgAgentsApi(client, organizationId), [client, organizationId]);
+}
+
+/** Whether this organization has Console agents (the per-organization flag). */
+export function useOrgAgentsEnabled(): boolean {
+  const { organizationId } = useConsole();
+  const { clientConfig } = useAppContext();
+  return orgAgentsEnabled(clientConfig, organizationId);
 }
 
 /* -------------------------------------------------------------- loading */

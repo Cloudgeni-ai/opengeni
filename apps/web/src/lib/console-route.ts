@@ -58,6 +58,37 @@ export function parseConsoleUsageSearch(search: Record<string, unknown>): Consol
   return result;
 }
 
+/** One agent's page: its tab, the chat whose changes are open, the versions compared. */
+export type ConsoleAgentTab = "settings" | "test" | "versions" | "sessions";
+export type ConsoleAgentSearch = {
+  tab?: ConsoleAgentTab;
+  session?: string;
+  from?: number;
+  to?: number;
+};
+
+const AGENT_TABS = new Set<ConsoleAgentTab>(["settings", "test", "versions", "sessions"]);
+
+function positiveInteger(value: unknown): number | undefined {
+  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
+export function parseConsoleAgentSearch(search: Record<string, unknown>): ConsoleAgentSearch {
+  const result: ConsoleAgentSearch = {};
+  if (typeof search.tab === "string" && AGENT_TABS.has(search.tab as ConsoleAgentTab)) {
+    result.tab = search.tab as ConsoleAgentTab;
+  }
+  if (typeof search.session === "string" && UUID.test(search.session)) {
+    result.session = search.session;
+  }
+  const from = positiveInteger(search.from);
+  const to = positiveInteger(search.to);
+  if (from !== undefined) result.from = from;
+  if (to !== undefined) result.to = to;
+  return result;
+}
+
 /**
  * The social sign-in buttons a host offers. A GitHub OAuth app has one
  * callback host, the app's, so the Console host offers Google only.
@@ -86,6 +117,7 @@ const CONSOLE_PAGES = new Set([
   "workspaces",
   "api-keys",
   "agents",
+  "tool-servers",
   "members",
   "usage",
   "settings",

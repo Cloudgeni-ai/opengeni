@@ -14,6 +14,7 @@ import {
   LogOutIcon,
   MenuIcon,
   MessagesSquareIcon,
+  PlugIcon,
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
@@ -46,6 +47,7 @@ import { NavGroup, NavItem } from "@opengeni/react/ui/settings-nav";
 import { Sheet, SheetContent, SheetTitle } from "@opengeni/react/ui/sheet";
 
 import { CONSOLE_PATH, onConsoleHost, type ConsoleSearch } from "@/lib/console-route";
+import { orgAgentsEnabled } from "@/lib/organization-agents";
 import {
   ConsoleContext,
   ConsoleForbidden,
@@ -57,13 +59,20 @@ type ConsoleDestination =
   | "/console"
   | "/console/sessions"
   | "/console/agents"
+  | "/console/tool-servers"
   | "/console/workspaces"
   | "/console/api-keys"
   | "/console/members"
   | "/console/usage"
   | "/console/settings";
 
-type NavEntry = { to: ConsoleDestination; label: string; icon: ReactNode };
+type NavEntry = {
+  to: ConsoleDestination;
+  label: string;
+  icon: ReactNode;
+  /** Shown only for organizations with Console agents. */
+  orgAgents?: true;
+};
 
 const NAV: { group: string | null; items: NavEntry[] }[] = [
   { group: null, items: [{ to: "/console", label: "Overview", icon: <LayoutDashboardIcon /> }] },
@@ -71,7 +80,8 @@ const NAV: { group: string | null; items: NavEntry[] }[] = [
     group: "Build",
     items: [
       { to: "/console/sessions", label: "Sessions", icon: <MessagesSquareIcon /> },
-      { to: "/console/agents", label: "Agents", icon: <BotIcon /> },
+      { to: "/console/agents", label: "Agents", icon: <BotIcon />, orgAgents: true },
+      { to: "/console/tool-servers", label: "Tool servers", icon: <PlugIcon />, orgAgents: true },
       { to: "/console/workspaces", label: "Workspaces", icon: <Building2Icon /> },
       { to: "/console/api-keys", label: "API keys", icon: <KeyRoundIcon /> },
     ],
@@ -194,6 +204,11 @@ export function ConsoleShellRoute() {
   );
 
   const active = consoleNavDestination(pathname);
+  const agentsOn = orgAgentsEnabled(context.clientConfig, organization?.accountId ?? null);
+  const nav = NAV.map((section) => ({
+    ...section,
+    items: section.items.filter((item) => !item.orgAgents || agentsOn),
+  }));
   const switchable = administered.length > 0 ? administered : orgs;
   const displayName =
     context.authSession?.user.name ||
@@ -255,7 +270,7 @@ export function ConsoleShellRoute() {
         </DropdownMenu>
       ) : null}
       <nav aria-label="Console" className="mt-3 flex w-full flex-col gap-3 overflow-y-auto">
-        {NAV.map((section) => (
+        {nav.map((section) => (
           <NavGroup key={section.group ?? "main"} label={section.group ?? undefined}>
             {section.items.map((item) => (
               <NavItem

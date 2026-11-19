@@ -1,8 +1,8 @@
-// Agents, Members and Usage and billing. Members and billing are the app's
+// Members and Usage and billing. Members and billing are the app's
 // own organization settings pages, kept inside Console.
 import type { ConsoleRange } from "@opengeni/sdk";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { BotIcon, CreditCardIcon, UserPlusIcon, UsersIcon } from "lucide-react";
+import { CreditCardIcon, UserPlusIcon, UsersIcon } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -37,20 +37,6 @@ const CheckoutCreditsCelebration = lazy(async () => {
     await import("@opengeni/react/app/components/credits/checkout-credits-celebration");
   return { default: module.CheckoutCreditsCelebration };
 });
-
-export function ConsoleAgentsRoute() {
-  return (
-    <ConsolePage>
-      <PageHeader title="Agents" icon={<BotIcon />} />
-      <EmptyState
-        variant="page"
-        icon={<BotIcon />}
-        title="Organization agents are coming"
-        description="For now, agents live in each workspace."
-      />
-    </ConsolePage>
-  );
-}
 
 export function ConsoleMembersRoute() {
   const navigate = useNavigate();
