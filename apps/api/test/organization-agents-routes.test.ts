@@ -830,13 +830,12 @@ describe("Console agents routes", () => {
     const [marker] = await shared!.admin<{ source: string }[]>`
       select source from organization_managed_workspaces where workspace_id = ${first.body.workspaceId}`;
     expect(marker!.source).toBe("console_test");
-    // The test workspace lists drafts' agents too, as a managed workspace.
-    const testList = await call(
-      "GET",
-      `/v1/workspaces/${first.body.workspaceId}/organization-agents`,
-      cookie,
-    );
-    expect(testList.status).toBe(200);
+    // Nobody becomes a member of the test workspace, its creator included;
+    // an organization key still reads it as any managed workspace.
+    const testList = (who: Record<string, string>) =>
+      call("GET", `/v1/workspaces/${first.body.workspaceId}/organization-agents`, who);
+    expect((await testList(cookie)).status).toBe(403);
+    expect((await testList(keys.full)).status).toBe(200);
 
     const missingVersion = await call("POST", `${org()}/${agentId}/test-chats`, keys.full, {
       version: 7,
