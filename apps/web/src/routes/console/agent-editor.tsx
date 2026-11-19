@@ -44,13 +44,13 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
-  COMPUTE_NOT_IN_MANAGED_WORKSPACES,
   NEW_TOOLS_OPTIONS,
-  RUNS_ON_CHOICES,
+  computeMenuOptions,
   computeOptionFor,
   definitionOfVersion,
   runsOnChoice,
   runsOnForChoice,
+  runsOnMenuOptions,
   newToolServerConfig,
   sameDefinition,
   toolRows,
@@ -427,26 +427,6 @@ export function RunsOnField({
   onChange: (runsOn: OrgAgentRunsOn | undefined) => void;
 }) {
   const choice = runsOnChoice(runsOn);
-  const options = (list: ListOrgAgentComputeResponse["machines"] | undefined, ref?: string) => {
-    const entries = (list ?? []).map((entry) => ({
-      value: entry.id,
-      label: entry.name,
-      disabled: !entry.worksInManagedWorkspaces,
-      disabledReason: entry.worksInManagedWorkspaces
-        ? undefined
-        : COMPUTE_NOT_IN_MANAGED_WORKSPACES,
-    }));
-    // A reference from code that names nothing here still shows, and says so.
-    if (ref && compute.data && !computeOptionFor(list, ref)) {
-      entries.push({
-        value: ref,
-        label: ref,
-        disabled: true,
-        disabledReason: "Not found in this organization.",
-      });
-    }
-    return entries;
-  };
   const environmentRef = runsOn?.kind === "sandbox" ? runsOn.environment : undefined;
   const machineRef = runsOn?.kind === "machine" ? runsOn.machine : undefined;
   const environment = computeOptionFor(compute.data?.environments, environmentRef);
@@ -457,10 +437,7 @@ export function RunsOnField({
       <Field label="Runs on">
         <SelectMenu
           aria-label="Runs on"
-          options={RUNS_ON_CHOICES.map((option) => ({
-            ...option,
-            meta: option.value === suggested ? "Suggested" : undefined,
-          }))}
+          options={runsOnMenuOptions(suggested)}
           value={choice}
           disabled={disabled}
           onValueChange={(next) => onChange(runsOnForChoice(next))}
@@ -472,7 +449,7 @@ export function RunsOnField({
             aria-label="Sandbox Environment"
             options={[
               { value: "", label: "Default" },
-              ...options(compute.data?.environments, environmentRef),
+              ...computeMenuOptions(compute.data?.environments, environmentRef),
             ]}
             value={environment?.id ?? environmentRef ?? ""}
             loading={!compute.data && !compute.error}
@@ -489,7 +466,7 @@ export function RunsOnField({
             <SelectMenu
               aria-label="Machine"
               placeholder="Choose a machine"
-              options={options(compute.data?.machines, machineRef)}
+              options={computeMenuOptions(compute.data?.machines, machineRef)}
               value={machine?.id ?? machineRef ?? null}
               loading={!compute.data && !compute.error}
               disabled={disabled}

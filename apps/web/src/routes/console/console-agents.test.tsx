@@ -90,7 +90,7 @@ const { AgentSessions } = await import("./agent-sessions");
 const { ConsoleToolServersRoute, parseHeaderLines, toolServerChanges } =
   await import("./tool-servers");
 const { ManagedInConsoleAgents } = await import("@/components/agents/managed-in-console-agents");
-const { orgAgentsApi, computeOptionFor, runsOnForChoice } =
+const { orgAgentsApi, computeMenuOptions, computeOptionFor, runsOnForChoice, runsOnMenuOptions } =
   await import("@/lib/organization-agents");
 const { RunsOnField } = await import("./agent-editor");
 
@@ -447,56 +447,59 @@ describe("Runs on", () => {
   });
 
   test("omitted is the workspace default, and the suggestion follows the built-in tools", async () => {
-    const onChange = mock((_runsOn: unknown) => undefined);
     await render(
       createElement(RunsOnField, {
         runsOn: undefined,
         suggested: "none",
         compute: { data: compute as never, error: null },
         disabled: false,
-        onChange,
+        onChange: () => undefined,
       }),
     );
     expect(text()).toContain("Workspace default");
     expect(text()).not.toContain("Machine");
-    const trigger = document.querySelector<HTMLButtonElement>('button[role="combobox"]')!;
-    await act(async () => trigger.click());
-    await settle();
-    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const menu = runsOnMenuOptions("none");
+    expect(menu.map((option) => option.label)).toEqual([
+      "Workspace default",
+      "No computer",
+      "Cloud sandbox",
+      "Organization machine",
+    ]);
     expect(
-      options.find((option) => option.textContent?.startsWith("No computer"))?.textContent,
-    ).toContain("Suggested");
-    await act(async () =>
-      options.find((option) => option.textContent?.startsWith("Organization machine"))!.click(),
-    );
-    expect(onChange).toHaveBeenCalledWith({ kind: "machine" });
+      menu.filter((option) => option.meta === "Suggested").map((option) => option.value),
+    ).toEqual(["none"]);
+    expect(runsOnMenuOptions("sandbox").find((option) => option.meta)?.value).toBe("sandbox");
   });
 
   test("offers only machines that work in product-managed workspaces", async () => {
-    const onChange = mock((_runsOn: unknown) => undefined);
     await render(
       createElement(RunsOnField, {
         runsOn: { kind: "machine" },
         suggested: "sandbox",
         compute: { data: compute as never, error: null },
         disabled: false,
-        onChange,
+        onChange: () => undefined,
       }),
     );
-    const machinePicker = [
-      ...document.querySelectorAll<HTMLButtonElement>('button[role="combobox"]'),
-    ].find((button) => button.textContent?.includes("Choose a machine"))!;
-    await act(async () => machinePicker.click());
-    await settle();
-    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
-    const mac = options.find((option) => option.textContent?.startsWith("Design Mac"))!;
-    expect(mac.textContent).toContain("Not available in product-managed workspaces.");
-    await act(async () => mac.click());
-    expect(onChange).not.toHaveBeenCalled();
-    await act(async () =>
-      options.find((option) => option.textContent?.startsWith("Build box"))!.click(),
-    );
-    expect(onChange).toHaveBeenCalledWith({ kind: "machine", machine: buildBox.id });
+    expect(text()).toContain("Choose a machine");
+    expect(text()).toContain("Every end customer's chats share this machine.");
+    expect(computeMenuOptions(compute.machines, undefined)).toEqual([
+      { value: buildBox.id, label: "Build box" },
+      {
+        value: designMac.id,
+        label: "Design Mac",
+        disabled: true,
+        disabledReason: "Not available in product-managed workspaces. Change where it can be used.",
+      },
+    ]);
+    // A name from code that matches nothing here still shows, and says so.
+    expect(computeMenuOptions(compute.machines, "Gone box").at(-1)).toEqual({
+      value: "Gone box",
+      label: "Gone box",
+      disabled: true,
+      disabledReason: "Not found in this organization.",
+    });
+    expect(computeMenuOptions(compute.machines, "build box")).toHaveLength(2);
   });
 
   test("a cloud sandbox can use a Sandbox Environment named in code", async () => {

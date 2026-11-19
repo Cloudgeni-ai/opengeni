@@ -607,3 +607,46 @@ export function computeOptionFor(
 
 export const COMPUTE_NOT_IN_MANAGED_WORKSPACES =
   "Not available in product-managed workspaces. Change where it can be used.";
+
+/** The "Runs on" menu, with the choice its built-in tools suggest marked. */
+export function runsOnMenuOptions(suggested: "none" | "sandbox") {
+  return RUNS_ON_CHOICES.map((option) => ({
+    ...option,
+    meta: option.value === suggested ? "Suggested" : undefined,
+  }));
+}
+
+/**
+ * A machine or environment menu: only ones that work in product-managed
+ * workspaces can be picked; the others say why. A reference from code that
+ * names nothing in the loaded list still shows, and says so.
+ */
+export function computeMenuOptions(
+  list: readonly OrgAgentComputeOption[] | null | undefined,
+  ref: string | undefined,
+) {
+  const entries: {
+    value: string;
+    label: string;
+    disabled?: boolean;
+    disabledReason?: string;
+  }[] = (list ?? []).map((entry) =>
+    entry.worksInManagedWorkspaces
+      ? { value: entry.id, label: entry.name }
+      : {
+          value: entry.id,
+          label: entry.name,
+          disabled: true,
+          disabledReason: COMPUTE_NOT_IN_MANAGED_WORKSPACES,
+        },
+  );
+  if (ref && list && !computeOptionFor(list, ref)) {
+    entries.push({
+      value: ref,
+      label: ref,
+      disabled: true,
+      disabledReason: "Not found in this organization.",
+    });
+  }
+  return entries;
+}
