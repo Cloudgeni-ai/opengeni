@@ -244,23 +244,25 @@ describe("Runs on at create", () => {
 
 describe("where an organization agent chat finally lands", () => {
   const access = { accountId: ACCOUNT, workspaceId: WORKSPACE, subjectId: "user:1" };
-  const check = (scope: string | null) =>
+  const check = (sandbox: { scope: string | null } | null) =>
     assertOrgAgentChatMachine(
-      { db: {} as never, sandboxScope: async () => scope },
+      { db: {} as never, readSandbox: async () => sandbox },
       access,
       BUILD_BOX.sandboxId!,
     );
 
-  test("organization and workspace machines pass", async () => {
-    await check("organization");
-    await check("workspace");
+  test("organization and workspace machines and cloud boxes pass", async () => {
+    await check({ scope: "organization" });
+    await check({ scope: "workspace" });
+    // A cloud sandbox is not a Connected Machine and has no machine scope.
+    await check({ scope: null });
   });
 
   test("a Personal machine is refused", async () => {
-    expect(await refusal(check("user"))).toBe("personal_machine_not_allowed");
+    expect(await refusal(check({ scope: "user" }))).toBe("personal_machine_not_allowed");
   });
 
-  test("a machine the caller can't read is refused", async () => {
+  test("a target the caller can't read is refused", async () => {
     expect(await refusal(check(null))).toBe("runs_on_unavailable");
   });
 });
