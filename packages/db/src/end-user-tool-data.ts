@@ -34,7 +34,7 @@ export async function eraseEndUserToolData(
     return { removedLogins: 0, profileRemoved: false };
   }
   // The account context sees every workspace's logins of the organization
-  // (1502 policy); a workspace context only its own.
+  // (1503 policy); a workspace context only its own.
   const removedLogins = await withRlsContext(
     tx,
     { accountId: input.accountId, workspaceId: input.workspaceId },

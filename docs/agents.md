@@ -580,7 +580,7 @@ version is published; new chats run it, and each chat stays on the version
 it started on until a publish moves it.
 
 Contracts: `packages/contracts/src/organization-agents.ts`. Tables and the
-visibility rule: migrations `1502`–`1506`. Agents in this section are separate
+visibility rule: migrations `1503`–`1507`. Agents in this section are separate
 from the workspace agents above: `agentId` on session create keeps naming a
 workspace agent and never an organization agent.
 
@@ -757,7 +757,7 @@ its own.
 
 The machine or environment must be an organization one whose reach includes
 the workspaces the chats run in: every shared workspace, or **All
-product-managed workspaces** (`allowManagedWorkspaces`, migration 1509), which
+product-managed workspaces** (`allowManagedWorkspaces`, migration 1510), which
 also covers managed workspaces created later. Saving or deploying a version
 refuses a name that matches no organization machine or environment (422
 `machine_not_found` / `environment_not_found`); Personal (Only me) and
@@ -768,7 +768,7 @@ lists the organization machines and environments with
 `worksInManagedWorkspaces`.
 
 A saved version keeps the machine or environment it named by id
-(`agent_revisions.runs_on_target`, migration 1509), and its chats use that id.
+(`agent_revisions.runs_on_target`, migration 1510), and its chats use that id.
 Renaming the machine, or adding another with the same name, neither moves nor
 breaks the agent. If it is removed, chats look the written name up again
 (for example the same machine connected again), and refuse with
@@ -834,7 +834,7 @@ and uses across its workspaces, edited in Console or deployed from code. They
 are on per organization (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`, see
 [deployment](deployment.md)); routes are listed in [`http-api.md`](http-api.md).
 
-- Data (migration 1502): an `agents` row with `scope = 'organization'`, no
+- Data (migration 1503): an `agents` row with `scope = 'organization'`, no
   home workspace, an `agent_key` unique in the organization,
   `published_revision` and `managed_by` (`console` or `code`). Each version is
   one immutable `agent_revisions` row with `config`, `tool_catalog`, `source`

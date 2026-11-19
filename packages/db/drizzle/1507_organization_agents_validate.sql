@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
--- Validates the checks 1502 added NOT VALID. They have been enforced on every
--- write since 1502, and every older row satisfies them (new columns are NULL
+-- Validates the checks 1503 added NOT VALID. They have been enforced on every
+-- write since 1503, and every older row satisfies them (new columns are NULL
 -- or default, the widened checks accept every older value). VALIDATE
 -- CONSTRAINT takes only SHARE UPDATE EXCLUSIVE: reads and writes continue
 -- while it scans. sessions_agent_version_check stays NOT VALID like

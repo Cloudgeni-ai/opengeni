@@ -1226,7 +1226,7 @@ below.
   backoff (30 seconds doubling to 10 minutes) for up to six hours, then counts
   what is left as failed. A newer publish ends the move. Model, built-ins and
   other scalar settings are not moved.
-- **Claim gate (migration 1502).** A BEFORE INSERT trigger on
+- **Claim gate (migration 1503).** A BEFORE INSERT trigger on
   `session_turn_attempts` refuses, with SQLSTATE 55000, an attempt for a chat
   with a non-NULL `agent_version` unless the claim set
   `opengeni.org_agent_protocol_v1 = '1'`, which this worker sets around its

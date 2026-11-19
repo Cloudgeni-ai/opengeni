@@ -121,7 +121,7 @@ export function OrganizationComputeReachDialog({
 }) {
   const [draft, setDraft] = useState<WorkspaceReach>(() => reachDraft(reach));
   // A current server always reports the setting. Only a server before
-  // migration 1509 omits it (this response isn't parsed against the contract),
+  // migration 1510 omits it (this response isn't parsed against the contract),
   // and then the switch stays hidden so a save never sends a field it refuses.
   const managedSupported = reach.allowManagedWorkspaces !== undefined;
   const [managed, setManaged] = useState(reach.allowManagedWorkspaces ?? false);

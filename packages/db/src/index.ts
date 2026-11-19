@@ -24533,7 +24533,7 @@ export type OrganizationComputeReachInput = {
   homeWorkspaceId: string;
   allowedWorkspaceIds: string[] | null;
   allowPersonalWorkspaces: boolean;
-  /** Every workspace the product manages (1509); omitted keeps the current setting. */
+  /** Every workspace the product manages (1510); omitted keeps the current setting. */
   allowManagedWorkspaces?: boolean | undefined;
   subjectId: string;
 };
@@ -81479,7 +81479,7 @@ export type ClaimSessionWorkForAttemptInput = {
   agentInstructionsProtocol?: 1;
   /** Internal worker-build declaration: this build pins organization agent
    * versions (Instructions layer, tool server logins). Without it, a claim of
-   * a chat with `agent_version` is refused (SQLSTATE 55000, migration 1502). */
+   * a chat with `agent_version` is refused (SQLSTATE 55000, migration 1503). */
   orgAgentProtocol?: 1;
   sessionId: string;
   workflowId: string;

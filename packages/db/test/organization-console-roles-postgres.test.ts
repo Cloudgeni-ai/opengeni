@@ -1,4 +1,4 @@
-// organization_console_roles (migration 1508) under the production database
+// organization_console_roles (migration 1509) under the production database
 // setup (NOSUPERUSER NOBYPASSRLS owner, FORCE RLS, restricted runtime role):
 // rows stay in their organization, the runtime reads, inserts and updates but
 // never deletes, the CHECK refuses malformed rows, an invitation row can only

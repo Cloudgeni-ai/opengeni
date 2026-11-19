@@ -5,7 +5,7 @@
  *
  * Organization agent rows (`agents.scope = 'organization'`) are hidden by a
  * restrictive policy unless the transaction sets `opengeni.org_agents_v1`
- * (migration 1502). Every function here that touches them runs in
+ * (migration 1503). Every function here that touches them runs in
  * {@link withOrgAgentsScope}; nothing else in the codebase sets it, so Slack
  * placement, Teams routing and the app's agent lists never see them. That is
  * a visibility rule, not authorization: callers check `agents:read`,
@@ -1883,7 +1883,7 @@ export async function updateOrgToolServer(
         where account_id = ${input.accountId}::uuid and id = ${current.id}::uuid
         returning ${TOOL_SERVER_COLUMNS}`,
     );
-    // The account context sees every workspace's logins (1502 policy). Turns
+    // The account context sees every workspace's logins (1503 policy). Turns
     // read the server before its logins, and this runs in the same
     // transaction as the URL change, so no turn pairs a login with the new
     // origin.
