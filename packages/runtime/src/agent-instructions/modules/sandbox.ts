@@ -9,7 +9,7 @@ import {
 
 /** Prompt A/B arm (OPENGENI_EXPERIMENT_APPLY_PATCH_THEN_GUIDANCE): suggest `then`. */
 export const APPLY_PATCH_THEN_GUIDANCE =
-  "When you already know the command you would run right after an edit, such as a test, build or type check, pass it as `then` in the same `apply_patch` call instead of making a separate call.";
+  "When you would run a test, build or type check right after an edit anyway, pass it as `then` in the same `apply_patch` call instead of making a separate call. Don't add a check to an edit you know is incomplete.";
 
 function workspacePathRule(context: AgentPromptContext): string {
   const { managedSandbox, connectedMachine } = context.resources;
