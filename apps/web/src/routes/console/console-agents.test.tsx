@@ -48,6 +48,32 @@ const appContext = () => ({
   revalidatePrincipalAccess: mock(async () => undefined),
   handleManagedSignOut: mock(async () => undefined),
 });
+// The Radix dialog is a portal; this inline stand-in keeps its contract.
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
+  ConfirmDialog: ({
+    open,
+    title,
+    description,
+    confirmLabel,
+    children,
+  }: {
+    open: boolean;
+    title: ReactNode;
+    description?: ReactNode;
+    confirmLabel: string;
+    children?: ReactNode;
+  }) =>
+    open
+      ? createElement(
+          "div",
+          { role: "dialog" },
+          createElement("h2", null, title),
+          createElement("p", null, description),
+          children,
+          createElement("button", { type: "button" }, confirmLabel),
+        )
+      : null,
+}));
 const AppContextModule = await import("@opengeni/react/app/app-context");
 mock.module("@opengeni/react/app/app-context", () => ({
   ...AppContextModule,
@@ -376,8 +402,14 @@ describe("Publish", () => {
     expect(page).toContain("Also move running chats");
     expect(page).toContain("7 running chats move to v3");
     expect(page).toContain("Moving breaks the prompt cache and can raise cost slightly.");
-    const checked = document.querySelector("[role=radio][aria-checked=true], input[type=radio]:checked");
-    expect(checked?.closest("label, [role=radio]")?.textContent ?? "").toContain("New chats only");
+    const checked = document.querySelector(
+      "[role=radio][aria-checked=true], [role=radio][data-state=checked], input[type=radio]:checked",
+    );
+    expect(checked).not.toBeNull();
+    const card = checked?.closest("label") ?? checked;
+    expect(card?.textContent ?? checked?.parentElement?.textContent ?? "").toContain(
+      "New chats only",
+    );
   });
 });
 

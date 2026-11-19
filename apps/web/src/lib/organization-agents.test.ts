@@ -35,7 +35,7 @@ const definition = OrgAgentDefinition.parse({
   config: {
     model: "azure-sol/gpt-6.1-sol",
     reasoningEffort: "medium",
-    capabilities: { webSearch: true },
+    capabilities: { from: "none", webSearch: true },
     toolServers: [
       {
         server: "billing",
