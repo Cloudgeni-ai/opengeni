@@ -33,6 +33,7 @@ import {
   OpenGeniProvider,
   sessionAuthRecommendation,
   useOpenGeniText,
+  buildTimeline,
   type AuthNeededItem,
 } from "@opengeni/react";
 import { AppContext } from "@opengeni/react/app/app-context";
@@ -40,11 +41,10 @@ import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
 import { EventLog } from "./timeline-fixtures";
 import { AuthNeededRow } from "../src/components/auth-needed-row";
-import { buildTimeline } from "../src/timeline/projection";
 import { pendingConnectionCard } from "../src/timeline/pending-connection-card";
-import { SessionRowContent } from "../src/app/components/rail/session-row-content";
-import { summarizeRailRow } from "../src/app/lib/sessions-group";
-import { sessionStateLabel } from "../src/app/lib/session-rail";
+import { SessionRowContent } from "@opengeni/react/app/components/rail/session-row-content";
+import { summarizeRailRow } from "@opengeni/react/app/lib/sessions-group";
+import { sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
 import { MockOpenGeniClient } from "./mock";
 import "./styles.css";
 
@@ -319,7 +319,7 @@ function RailPreview() {
       {RAIL.map(({ title, session }) => (
         <div
           key={title}
-          className="flex h-9 items-center gap-1 rounded-sm px-2 text-sm text-fg hover:bg-surface-raised"
+          className="flex h-9 items-center gap-1 rounded-sm px-2 text-sm text-fg hover:bg-surface-2"
         >
           <SessionRowContent
             title={title}

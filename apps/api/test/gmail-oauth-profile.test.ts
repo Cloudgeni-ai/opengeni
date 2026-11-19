@@ -4,6 +4,7 @@ import { GMAIL_REST_MCP_TOOLS } from "@opengeni/runtime";
 import {
   gmailOAuthClientConfigured,
   missingRequiredScopes,
+  stepUpScopesFor,
 } from "../src/integrations/oauth-client";
 import {
   OFFICIAL_GMAIL_MCP_SCOPES,
@@ -174,5 +175,22 @@ describe("Gmail REST OAuth profile", () => {
     // Added access this sign-in didn't ask for is not required.
     expect(missingRequiredScopes(profile, [read], [read])).toEqual([]);
     expect(missingRequiredScopes(profile, [read, compose], [])).toEqual([read, compose]);
+  });
+
+  test("only access a reconnect newly asks for must be granted", () => {
+    const read = "https://www.googleapis.com/auth/gmail.readonly";
+    const modify = "https://www.googleapis.com/auth/gmail.modify";
+    const compose = "https://www.googleapis.com/auth/gmail.compose";
+    const asked = [read, compose, modify];
+    // A plain reconnect, or a first connection, asks for nothing added.
+    expect(stepUpScopesFor(undefined, [read, compose], asked)).toEqual({});
+    expect(stepUpScopesFor([modify], undefined, asked)).toEqual({});
+    // Access the account already holds is not a step-up.
+    expect(stepUpScopesFor([compose], [read, compose], asked)).toEqual({});
+    expect(stepUpScopesFor([modify, compose], [read, compose], asked)).toEqual({
+      stepUpScopes: [modify],
+    });
+    // Access that isn't actually requested from the provider is never required.
+    expect(stepUpScopesFor(["https://mail.google.com/"], [read], asked)).toEqual({});
   });
 });

@@ -456,3 +456,7 @@ BEGIN
   );
 END
 $pin$;
+
+-- Trigger functions fire without EXECUTE; nobody calls them directly.
+REVOKE ALL ON FUNCTION opengeni_private.track_session_connection_wait_v1() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.reset_session_connection_wait_v1() FROM PUBLIC;
