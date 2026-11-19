@@ -72,7 +72,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * which Nango connections a live connection still stands for (1482), the
  * unpaid sandbox fleet counts behind the fleet limits (1486), and the
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
- * (1487), and the managed warm box count fleet pressure reads (1492).
+ * (1487), and the managed warm box count fleet pressure reads (1492), and
+ * the subscription needs-sign-in notice sync (1503).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -115,6 +116,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "sandbox_unpaid_fleet_v1(uuid, boolean)",
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
+  "sync_subscription_relogin_notice_v1(uuid)",
 ] as const;
 
 /**
@@ -162,6 +164,10 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * pressure reads the warm count of every lease, self-hosted ones included.
  * 1501 withholds the discard of a refused keyed session create; until it is
  * granted, such a shell stays (as before).
+ * 1503 withholds the subscription needs-sign-in notice sync; until it is
+ * granted, only a status write by the tables' owner (the definer that records
+ * a model request refused after refresh, and the migration's backfill) opens
+ * or resolves a notice, and the person dismisses one left after a reconnect.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -174,6 +180,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
+  "sync_subscription_relogin_notice_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -322,6 +329,15 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_events",
     "session_turns",
     "session_create_idempotency_guard",
+  ],
+  "sync_subscription_relogin_notice_v1(uuid)": [
+    "subscription_connections",
+    "organization_memberships",
+    "workspace_memberships",
+    "auth_sessions",
+    "opengeni_private.inbox_items",
+    "opengeni_private.native_push_devices",
+    "opengeni_private.native_push_deliveries",
   ],
 };
 
@@ -542,6 +558,11 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 1213: clears a new session's archive marker; triggers fire
   // without the inserting role holding EXECUTE.
   "session_insert_not_archived()",
+  // Migration 1503: the sign-in stamp and needs-sign-in notice triggers on
+  // subscription connections. Triggers fire without the writing role
+  // holding EXECUTE.
+  "stamp_subscription_connection_sign_in()",
+  "subscription_connection_relogin_notice()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,

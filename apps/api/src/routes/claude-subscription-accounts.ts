@@ -44,6 +44,7 @@ function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: strin
     version: account.version,
     expiresAt: account.expiresAt?.toISOString() ?? null,
     lastRefreshAt: account.lastRefreshAt?.toISOString() ?? null,
+    signedInAt: account.signedInAt?.toISOString() ?? null,
     lastError: account.lastError,
     allocatorEnabled: account.allocatorEnabled,
     allocatorVersion: account.allocatorVersion,

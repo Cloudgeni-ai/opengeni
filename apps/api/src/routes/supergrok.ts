@@ -128,6 +128,7 @@ function accountJson(row: XaiSubscriptionAccountMetadata, activeCredentialId: st
     active: row.id === activeCredentialId,
     expiresAt: row.expiresAt?.toISOString() ?? null,
     lastRefreshAt: row.lastRefreshAt?.toISOString() ?? null,
+    signedInAt: row.signedInAt?.toISOString() ?? null,
     lastError: row.lastError,
     allocatorEnabled: row.allocatorEnabled,
     allocatorVersion: row.allocatorVersion,

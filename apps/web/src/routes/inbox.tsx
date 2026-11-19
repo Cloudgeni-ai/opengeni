@@ -4,7 +4,7 @@
 // withdrawn or dismissed, and it always stays in its session's timeline.
 import {
   openGeniConsolePath,
-  type InboxItem,
+  type InboxEntry,
   type InboxSettings,
   type InboxTidyPolicy,
   type SessionHumanInputRequest,
@@ -18,6 +18,7 @@ import {
 } from "@opengeni/react/timeline-model";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  ArrowRightIcon,
   ArrowUpRightIcon,
   BellIcon,
   BellRingIcon,
@@ -66,11 +67,17 @@ import { Toolbar } from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import { secretSaveTargets } from "@opengeni/react/app/lib/secrets-ui";
-import { hasInbox, isNeedsYouKind, useInbox } from "@opengeni/react/app/lib/inbox";
+import {
+  hasInbox,
+  inboxItemSessionId,
+  inboxLinkAppPath,
+  isNeedsYouKind,
+  useInbox,
+} from "@opengeni/react/app/lib/inbox";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { BillingInboxSection } from "../components/billing-inbox";
 
-const KIND_WORD: Record<InboxItem["kind"], string> = {
+const KIND_WORD: Record<InboxEntry["kind"], string> = {
   question: "Question",
   approval: "Approval",
   goal_paused: "Goal paused",
@@ -78,7 +85,7 @@ const KIND_WORD: Record<InboxItem["kind"], string> = {
   reply: "Reply",
 };
 
-function KindIcon({ item }: { item: InboxItem }) {
+function KindIcon({ item }: { item: InboxEntry }) {
   // An MCP server's question is an approval of its call, but reads as a question.
   if (item.kind === "question" || (item.kind === "approval" && item.serverQuestion)) {
     return <MessageCircleQuestionIcon />;
@@ -139,7 +146,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
  * An agent's notification: its message (short paragraphs and bullets) and the
  * facts it chose to show, as a quiet two-column list.
  */
-function NotificationContent({ item }: { item: InboxItem }) {
+function NotificationContent({ item }: { item: InboxEntry }) {
   const blocks = parseNotificationText(item.body);
   if (blocks.length === 0 && item.facts.length === 0) return null;
   return (
@@ -184,7 +191,7 @@ function NotificationContent({ item }: { item: InboxItem }) {
   );
 }
 
-function isSnoozed(item: InboxItem, now: number): boolean {
+function isSnoozed(item: InboxEntry, now: number): boolean {
   return item.snoozedUntil !== null && Date.parse(item.snoozedUntil) > now;
 }
 
@@ -227,7 +234,7 @@ function InboxList({ label, children }: { label: string; children: ReactNode }) 
 
 /** One inbox row. Exported for the DEV UI kit. */
 export function InboxRow(props: {
-  item: InboxItem;
+  item: InboxEntry;
   unread: boolean;
   title: string;
   subtitle?: string;
@@ -353,7 +360,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const inbox = useInbox({ pollMs: 10_000, workspaceId });
   const [scope, setScope] = useState<"all" | "workspace">("all");
   const [busy, setBusy] = useState<Record<string, string>>({});
-  const [answering, setAnswering] = useState<InboxItem | null>(null);
+  const [answering, setAnswering] = useState<InboxEntry | null>(null);
   // Unread items keep their dot for this visit; the server learns they were seen.
   const unreadThisVisit = useRef(new Set<string>());
   const now = Date.now();
@@ -402,12 +409,20 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   }, [items, context.client, patchItems]);
 
   // Opens on the moment the item was raised, not just the latest message.
-  const openSession = (item: InboxItem) => {
+  const openSession = (item: InboxEntry) => {
     if (item.unread) {
       patchItems((current) =>
         current.map((each) => (each.id === item.id ? { ...each, unread: false } : each)),
       );
       void context.client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
+    }
+    if (item.sessionId === null) {
+      // A notice about something other than a chat opens its link.
+      if (!item.link) return;
+      const path = inboxLinkAppPath(item.link.url, window.location.origin);
+      if (path) void navigate({ href: path });
+      else window.open(item.link.url, "_blank", "noopener,noreferrer");
+      return;
     }
     if (item.sessionAvailable === false) return;
     void navigate({
@@ -417,10 +432,10 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     });
   };
 
-  const leave = (item: InboxItem) =>
+  const leave = (item: InboxEntry) =>
     inbox.patchItems((current) => current.filter((candidate) => candidate.id !== item.id));
 
-  const run = async (item: InboxItem, label: string, action: () => Promise<unknown>) => {
+  const run = async (item: InboxEntry, label: string, action: () => Promise<unknown>) => {
     setBusy((current) => ({ ...current, [item.id]: label }));
     try {
       await action();
@@ -432,9 +447,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     }
   };
 
-  const decide = (item: InboxItem, decision: "approve" | "reject") =>
+  const decide = (item: InboxEntry, decision: "approve" | "reject") =>
     void run(item, decision, async () => {
-      await context.client.sendApprovalDecision(item.workspaceId, item.sessionId, {
+      await context.client.sendApprovalDecision(item.workspaceId, inboxItemSessionId(item), {
         approvalId: item.sourceKey,
         decision,
         // An MCP server's confirmation is answered for the question shown.
@@ -449,7 +464,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       );
     });
 
-  const snooze = (item: InboxItem, until: Date | null) =>
+  const snooze = (item: InboxEntry, until: Date | null) =>
     void run(item, "snooze", async () => {
       const snoozedUntil = until ? until.toISOString() : null;
       inbox.patchItems((current) =>
@@ -460,18 +475,18 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       await context.client.updateInboxItem(item.id, { snoozedUntil });
     });
 
-  const dismiss = (item: InboxItem) =>
+  const dismiss = (item: InboxEntry) =>
     void run(item, "dismiss", async () => {
       leave(item);
       await context.client.updateInboxItem(item.id, { dismissed: true });
     });
 
   // One tap on an offered option answers the question, exactly as the form would.
-  const choose = (item: InboxItem, choice: { id: string; label: string }) =>
+  const choose = (item: InboxEntry, choice: { id: string; label: string }) =>
     void run(item, `choice:${choice.id}`, async () => {
       const request = await context.client.getHumanInputRequest(
         item.workspaceId,
-        item.sessionId,
+        inboxItemSessionId(item),
         item.sourceKey,
       );
       const question = request.questions[0];
@@ -484,7 +499,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       }
       await context.client.submitHumanInputResponse(
         item.workspaceId,
-        item.sessionId,
+        inboxItemSessionId(item),
         item.sourceKey,
         { outcome: "answered", answers: [{ questionId: question.id, values: [choice.id] }] },
       );
@@ -493,14 +508,14 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     });
 
   // Under the title: what exactly is asked for, or the agent's note.
-  const description = (item: InboxItem): ReactNode => {
+  const description = (item: InboxEntry): ReactNode => {
     if (!item.body) return undefined;
     if (item.kind === "reply") return notificationPlainText(item.body) || undefined;
     return undefined;
   };
 
   // Where it comes from. The kind word is left out where the row already says it.
-  const meta = (item: InboxItem): string[] => {
+  const meta = (item: InboxEntry): string[] => {
     const parts: string[] = [];
     // Another member's agent sent it: say who, first.
     if (item.sender) parts.push(`From ${item.sender.label}`);
@@ -528,7 +543,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     return parts;
   };
 
-  const control = (item: InboxItem): ReactNode => {
+  const control = (item: InboxEntry): ReactNode => {
     const pending = busy[item.id];
     if (item.kind === "approval" && item.serverQuestion) {
       // A plain confirmation is answered here; a form is answered in the
@@ -585,6 +600,14 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       );
     }
     if (item.kind === "notification" && item.link) {
+      if (item.sessionId === null && inboxLinkAppPath(item.link.url, window.location.origin)) {
+        return (
+          <RowButton onClick={() => openSession(item)}>
+            {item.link.label}
+            <ArrowRightIcon />
+          </RowButton>
+        );
+      }
       return (
         <RowButton asChild>
           <a href={item.link.url} target="_blank" rel="noreferrer">
@@ -597,7 +620,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     return null;
   };
 
-  const row = (item: InboxItem) => {
+  const row = (item: InboxEntry) => {
     const unread = item.unread || unreadThisVisit.current.has(item.id);
     return (
       <InboxRow
@@ -612,7 +635,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         when={item.updatedAt}
         actions={control(item)}
         onOpen={() => openSession(item)}
-        canOpen={item.sessionAvailable !== false}
+        canOpen={item.sessionAvailable !== false || (item.sessionId === null && !!item.link)}
         dismiss={
           item.kind === "notification" || item.kind === "reply"
             ? {
@@ -1005,9 +1028,9 @@ function AnswerDialog({
   onClose,
   onAnswered,
 }: {
-  item: InboxItem | null;
+  item: InboxEntry | null;
   onClose: () => void;
-  onAnswered: (item: InboxItem) => void;
+  onAnswered: (item: InboxEntry) => void;
 }) {
   const context = useAppContext();
   const [request, setRequest] = useState<SessionHumanInputRequest | null>(null);
@@ -1022,7 +1045,7 @@ function AnswerDialog({
     if (!item) return;
     let current = true;
     void context.client
-      .getHumanInputRequest(item.workspaceId, item.sessionId, item.sourceKey)
+      .getHumanInputRequest(item.workspaceId, inboxItemSessionId(item), item.sourceKey)
       .then((loaded) => {
         if (!current) return;
         if (loaded.status !== "pending") {
@@ -1047,7 +1070,7 @@ function AnswerDialog({
     try {
       await context.client.submitHumanInputResponse(
         item.workspaceId,
-        item.sessionId,
+        inboxItemSessionId(item),
         item.sourceKey,
         response,
       );

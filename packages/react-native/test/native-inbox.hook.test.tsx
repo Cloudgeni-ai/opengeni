@@ -88,3 +88,42 @@ test("disabled (signed out): nothing is read", async () => {
   expect(hook.result.current.data).toBeNull();
   await hook.unmount();
 });
+
+test("a notice about something other than a chat shows in the list with the chat items", async () => {
+  const client = {
+    listInbox: async () => ({
+      items: [
+        {
+          id: "item",
+          kind: "question",
+          title: "Which branch?",
+          sessionId: "s1",
+          workspaceId: "w1",
+          createdAt: "2026-11-17T10:00:00.000Z",
+          updatedAt: "2026-11-17T10:00:00.000Z",
+        },
+      ],
+      notices: [
+        {
+          id: "notice",
+          kind: "notification",
+          title: "Sign in to Claude again",
+          sessionId: null,
+          workspaceId: "w1",
+          link: {
+            url: "https://console.example.test/workspaces/w1/organization",
+            label: "Sign in again",
+          },
+          createdAt: "2026-11-18T10:00:00.000Z",
+          updatedAt: "2026-11-18T10:00:00.000Z",
+        },
+      ],
+    }),
+  } as unknown as Parameters<typeof useNativeInbox>[0];
+  const hook = await renderHook(() => useNativeInbox(client), undefined);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(hook.result.current.data?.items.map((item) => item.id)).toEqual(["notice", "item"]);
+  await hook.unmount();
+});
