@@ -1912,6 +1912,76 @@ spec:
             user_impact: 'No user impact; we cannot measure Codex cache efficiency.'
             next_step: 'Not urgent: an engineer should check whether the Codex usage format changed.'
             description: For 15m, at least 3 Codex-subscription calls and over 5% of those reporting usage in 30m have omitted cached-token fields, or active HTTP-success traffic has produced no call that reported usage. Calls without any usage count as status="no_usage", not missing. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
+        # ── Prompt-cache prefix stability ───────────────────────────────────
+        # A cache hit ratio cannot see a defect that rewrites a session's
+        # prefix once: the median call stays warm. These read the per-call
+        # warm-miss classification instead (opengeni_model_prompt_cache_*),
+        # which compares each call with the previous call of the same model in
+        # the same session.
+        - alert: OpenGeniPromptCachePrefixChanged
+          # Within one deployment a session's tools and system prompt must not
+          # change: every transition (goals, compute, connectors, Skills, ...)
+          # is designed to keep them byte-identical. A release that edits
+          # model-facing text is classed release_changed and never counts here.
+          # Five in a day is far above noise and catches a defect that hits
+          # only some sessions once each.
+          expr: |
+            sum by (provider, model) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},class=~"tools_changed|system_changed"}[24h])) >= 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Sessions on {{ "{{ $labels.model }}" }} are changing their tools or system prompt mid-session.'
+            headline: 'Prompt cache prefix changing'
+            value: '{{ "{{ $value | humanize }}" }} misses in 24h'
+            user_impact: 'Affected turns re-send their whole prompt uncached: slower replies and higher model cost.'
+            next_step: 'Find the calls whose prompt_cache_diagnostics warmMiss class is tools_changed or system_changed and diff their requests; the prompt prefix invariant test should reproduce the transition.'
+            description: At least 5 model calls in 24h read much less prompt cache than the previous call of the same model in the same session made warm, and their request fingerprints prove the tools or system prompt changed within one deployment. That is a prompt-cache stability defect, not provider behaviour. Inspect model_call_facts.prompt_cache_diagnostics for the affected sessions.
+        - alert: OpenGeniPromptCacheHistoryRewriteLossHigh
+          # Rewritten history (an item an earlier request already sent changed,
+          # or signed thinking newly dropped) has a known baseline, so it alerts
+          # on its share of prompt tokens the cache served rather than a count.
+          expr: |
+            (
+              sum by (provider) (increase(opengeni_model_prompt_cache_missed_tokens_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},class=~"history_rewritten|thinking_dropped"}[6h]))
+              /
+              clamp_min(sum by (provider) (increase(opengeni_model_cached_tokens_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[6h])), 1)
+            ) > 0.02
+            and
+            sum by (provider) (increase(opengeni_model_cached_tokens_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[6h])) >= 10000000
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Rewritten history is costing {{ "{{ $labels.provider }}" }} over 2% of its cached prompt tokens.'
+            headline: 'Prompt cache lost to history rewrites'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of cached tokens'
+            user_impact: 'Affected turns re-send part of their history uncached: slower replies and higher model cost.'
+            next_step: 'Group the affected calls by warmMiss class and divergedWithinItems in prompt_cache_diagnostics to find which projection rewrites earlier items.'
+            description: Over 6h, prompt tokens lost to history_rewritten and thinking_dropped warm misses exceed 2% of the tokens the provider served from cache, with at least 10M cached tokens. An earlier request's items are being sent differently on a later request.
+        - alert: OpenGeniPromptCacheDiagnosticsBlind
+          # A warm miss with no request fingerprint on either call cannot be
+          # explained, so a defect that rewrites prefixes would go unseen.
+          # Most misses unobserved means the fingerprint path is broken for
+          # that provider's transport.
+          expr: |
+            (
+              sum by (provider) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},class="unobserved"}[24h]))
+              /
+              clamp_min(sum by (provider) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[24h])), 1)
+            ) > 0.5
+            and
+            sum by (provider) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[24h])) >= 20
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Most prompt-cache misses on {{ "{{ $labels.provider }}" }} have no request fingerprint.'
+            headline: 'Prompt cache diagnostics blind'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of misses unobserved'
+            user_impact: 'No direct impact; prompt-cache defects on this provider would go undetected.'
+            next_step: 'Check that the provider transport passes its request body to the prompt-cache fingerprint observer.'
+            description: Over 24h more than half of this provider's warm prompt-cache misses (at least 20) lack a request fingerprint on the call or its predecessor, so tools, system prompt and history changes cannot be told apart from provider eviction.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
           # Only infrastructure faults count (infrastructure="true": offline,
