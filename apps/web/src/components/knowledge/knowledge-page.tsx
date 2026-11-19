@@ -22,6 +22,7 @@ import {
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useAgent } from "@opengeni/react/app/lib/agents";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
   canContributeWorkspaceContent,
@@ -108,6 +109,10 @@ export function KnowledgePage({
 
   const nav = useKnowledgeNavigation(workspaceId);
   const navigate = useNavigate();
+  // Memory opened from an agent's page reads "Agents › <agent> › Memory" and
+  // goes back to that agent.
+  const fromAgentId = search.entry ? (search.agent ?? null) : null;
+  const fromAgent = useAgent(workspaceId, fromAgentId).agent ?? null;
   const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView());
   const [refresh, setRefresh] = useState(0);
   const changed = useCallback(() => setRefresh((value) => value + 1), []);
@@ -266,6 +271,22 @@ export function KnowledgePage({
   }
 
   const backToTab = () => nav.showTab(tab);
+  const agentContext = fromAgentId
+    ? {
+        backLabel: fromAgent?.name ?? "Agent",
+        onBack: () =>
+          void navigate({
+            to: "/workspaces/$workspaceId/agents/$agentId",
+            params: { workspaceId, agentId: fromAgentId },
+          }),
+        section: {
+          label: "Agents",
+          onClick: () =>
+            void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } }),
+        },
+        ...(fromAgent?.memory.collectionId === search.entry ? { title: "Memory" } : {}),
+      }
+    : null;
   const openEntry = (id: string, revision?: string) =>
     nav.openEntry(id, { ...(revision ? { revision } : {}), from: tab });
 
@@ -368,8 +389,10 @@ export function KnowledgePage({
           canEdit={canEdit}
           canWriteOrganization={canWriteOrganization}
           refresh={refresh}
-          backLabel={TAB_LABEL[tab]}
-          onBack={backToTab}
+          backLabel={agentContext?.backLabel ?? (tab === "library" ? "Knowledge" : TAB_LABEL[tab])}
+          onBack={agentContext?.onBack ?? backToTab}
+          {...(agentContext ? { section: agentContext.section } : {})}
+          {...(agentContext?.title ? { title: agentContext.title } : {})}
           onOpenEntry={openEntry}
           onEdit={(id) => nav.openPage("edit", { entry: id })}
           onAddInCollection={(collection) => nav.openPage("add", { collection })}

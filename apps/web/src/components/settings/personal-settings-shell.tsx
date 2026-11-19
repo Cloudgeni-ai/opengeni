@@ -25,6 +25,7 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
   return (
     <SettingsShell
       label="Settings"
+      windowBarSection="Account settings"
       back={back}
       home={settingsHomeLink()}
       sections={[

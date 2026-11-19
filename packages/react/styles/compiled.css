@@ -3279,6 +3279,10 @@
     border-top-right-radius: 4px;
     border-bottom-right-radius: 4px;
   }
+:where(.og-root).rounded-r-\[6px\],:where(.og-root) .rounded-r-\[6px\] {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+  }
 :where(.og-root).rounded-r-none,:where(.og-root) .rounded-r-none {
     border-top-right-radius: 0;
     border-bottom-right-radius: 0;
@@ -3448,6 +3452,12 @@
     border-color: var(--color-danger);
     @supports (color: color-mix(in lab, red, red)) {
       border-color: color-mix(in oklab, var(--color-danger) 50%, transparent);
+    }
+  }
+:where(.og-root).border-danger\/60,:where(.og-root) .border-danger\/60 {
+    border-color: var(--color-danger);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--color-danger) 60%, transparent);
     }
   }
 :where(.og-root).border-danger\/70,:where(.og-root) .border-danger\/70 {
@@ -3676,6 +3686,12 @@
     border-color: var(--color-status-idle);
     @supports (color: color-mix(in lab, red, red)) {
       border-color: color-mix(in oklab, var(--color-status-idle) 30%, transparent);
+    }
+  }
+:where(.og-root).border-status-idle\/70,:where(.og-root) .border-status-idle\/70 {
+    border-color: var(--color-status-idle);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--color-status-idle) 70%, transparent);
     }
   }
 :where(.og-root).border-status-running\/25,:where(.og-root) .border-status-running\/25 {
@@ -3939,16 +3955,10 @@
       background-color: color-mix(in oklab, var(--color-danger) 15%, transparent);
     }
   }
-:where(.og-root).bg-danger\/25,:where(.og-root) .bg-danger\/25 {
+:where(.og-root).bg-danger\/\[0\.06\],:where(.og-root) .bg-danger\/\[0\.06\] {
     background-color: var(--color-danger);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-danger) 25%, transparent);
-    }
-  }
-:where(.og-root).bg-danger\/\[0\.07\],:where(.og-root) .bg-danger\/\[0\.07\] {
-    background-color: var(--color-danger);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-danger) 7.000000000000001%, transparent);
+      background-color: color-mix(in oklab, var(--color-danger) 6%, transparent);
     }
   }
 :where(.og-root).bg-destructive,:where(.og-root) .bg-destructive {
@@ -4437,22 +4447,16 @@
       background-color: color-mix(in oklab, var(--color-status-idle) 20%, transparent);
     }
   }
-:where(.og-root).bg-status-idle\/25,:where(.og-root) .bg-status-idle\/25 {
-    background-color: var(--color-status-idle);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-status-idle) 25%, transparent);
-    }
-  }
 :where(.og-root).bg-status-idle\/\[0\.06\],:where(.og-root) .bg-status-idle\/\[0\.06\] {
     background-color: var(--color-status-idle);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-status-idle) 6%, transparent);
     }
   }
-:where(.og-root).bg-status-idle\/\[0\.08\],:where(.og-root) .bg-status-idle\/\[0\.08\] {
+:where(.og-root).bg-status-idle\/\[0\.07\],:where(.og-root) .bg-status-idle\/\[0\.07\] {
     background-color: var(--color-status-idle);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-status-idle) 8%, transparent);
+      background-color: color-mix(in oklab, var(--color-status-idle) 7.000000000000001%, transparent);
     }
   }
 :where(.og-root).bg-status-queued,:where(.og-root) .bg-status-queued {
@@ -4783,6 +4787,9 @@
   }
 :where(.og-root).px-\[var\(--og-model-picker-row-padding-x\)\],:where(.og-root) .px-\[var\(--og-model-picker-row-padding-x\)\] {
     padding-inline: var(--og-model-picker-row-padding-x);
+  }
+:where(.og-root).px-px,:where(.og-root) .px-px {
+    padding-inline: 1px;
   }
 :where(.og-root).py-0,:where(.og-root) .py-0 {
     padding-block: calc(var(--spacing) * 0);
@@ -12601,6 +12608,11 @@
 :where(.og-root).\[\&\>code\]\:text-inherit,:where(.og-root) .\[\&\>code\]\:text-inherit {
     &>code {
       color: inherit;
+    }
+  }
+:where(.og-root).\[\&\>div\]\:py-0,:where(.og-root) .\[\&\>div\]\:py-0 {
+    &>div {
+      padding-block: calc(var(--spacing) * 0);
     }
   }
 :where(.og-root).\[\&\>div\>button\]\:ml-auto,:where(.og-root) .\[\&\>div\>button\]\:ml-auto {

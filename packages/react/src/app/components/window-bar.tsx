@@ -3,7 +3,13 @@
 // traffic lights, and the bar's row, the page's title line. The bar itself is
 // drawn by the app's stylesheet (`html[data-desktop]::before`), as are the
 // rules that lift a row into it (`[data-window-bar-row] > [data-titlebar]`).
-import { ChevronsLeftIcon, ChevronsRightIcon, CopyIcon, PanelLeftIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  ChevronsLeftIcon,
+  ChevronsRightIcon,
+  CopyIcon,
+  PanelLeftIcon,
+} from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
@@ -15,7 +21,11 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "../../ui/context-menu";
-import { PageHeaderWindowBarContext } from "../../ui/window-bar-title";
+import {
+  PageHeaderWindowBarContext,
+  type WindowBarCrumb,
+  type WindowBarPlace,
+} from "../../ui/window-bar-title";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import { useActionShortcut } from "../lib/actions/actions-provider";
 import { copyTitle } from "../lib/copy-link";
@@ -129,12 +139,20 @@ export function SidebarToggleButton({
  * repeat. Render it as the canvas's first child, with `data-window-bar-row`
  * on the canvas (`useWindowBarRow`).
  */
+const NO_TRAIL: readonly WindowBarCrumb[] = [];
+
 export function WindowBarTitle({
   copyable = false,
+  trail = NO_TRAIL,
   children,
 }: {
   /** A title worth copying (a Site's): right-click it for Copy title. */
   copyable?: boolean;
+  /**
+   * Where the page is, before its title: the rail section and, on a detail
+   * page, the list it belongs to. "Knowledge › Library › Meeting preparation".
+   */
+  trail?: readonly WindowBarCrumb[];
   children: ReactNode;
 }) {
   const text = useRef<HTMLSpanElement>(null);
@@ -147,6 +165,16 @@ export function WindowBarTitle({
       data-window-bar-title
       className="flex min-w-0 shrink-0 items-center gap-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))]"
     >
+      {trail.length > 0 ? (
+        <nav aria-label="Location" className="flex min-w-0 shrink items-center gap-1">
+          {trail.map((crumb) => (
+            <span key={crumb.label} className="flex min-w-0 shrink items-center gap-1">
+              <WindowBarCrumbLink crumb={crumb} />
+              <ChevronRightIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
+            </span>
+          ))}
+        </nav>
+      ) : null}
       {/* The page's own header keeps the page's heading for assistive tech. */}
       {copyable ? (
         // A copyable title's words leave the drag region, so they can be
@@ -180,6 +208,47 @@ export function WindowBarTitle({
   );
 }
 
+/** A trail step: muted, the page's title stays the one strong word in the bar. */
+function WindowBarCrumbLink({ crumb }: { crumb: WindowBarCrumb }) {
+  const className =
+    "min-w-0 truncate rounded-[6px] px-1 -mx-1 text-[15px] leading-6 font-medium tracking-[-0.01em] text-fg-muted outline-hidden transition-colors duration-[120ms] hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55 [-webkit-app-region:no-drag] [app-region:no-drag]";
+  if (crumb.href) {
+    return (
+      <a href={crumb.href} onClick={crumb.onClick} className={className}>
+        {crumb.label}
+      </a>
+    );
+  }
+  if (crumb.onClick) {
+    return (
+      <button type="button" onClick={crumb.onClick} className={className}>
+        {crumb.label}
+      </button>
+    );
+  }
+  return <span className={cn(className, "hover:text-fg-muted")}>{crumb.label}</span>;
+}
+
+/** The trail before a title: the section, then the page's list, skipping repeats. */
+export function windowBarTrail(
+  title: string | null | undefined,
+  section: WindowBarCrumb | null | undefined,
+  parent: WindowBarCrumb | null | undefined,
+): WindowBarCrumb[] {
+  const trail: WindowBarCrumb[] = [];
+  const same = (a: string, b: string | null | undefined) =>
+    a.trim().toLowerCase() === (b ?? "").trim().toLowerCase();
+  if (section && !same(section.label, title)) trail.push(section);
+  if (
+    parent &&
+    !same(parent.label, title) &&
+    !trail.some((crumb) => same(crumb.label, parent.label))
+  ) {
+    trail.push(parent);
+  }
+  return trail;
+}
+
 /**
  * The window bar's row for a page's canvas: while `active`, the canvas is the
  * bar's row (`data-window-bar-row` on it, from `rowProps`, with its left edge
@@ -204,28 +273,44 @@ export function useWindowBarRow(
 export function WindowBarPageTitle({
   enabled,
   fallbackTitle,
+  section,
   children,
 }: {
   enabled: boolean;
   fallbackTitle?: ReactNode;
+  /** The rail section the page is in ("Agents"), first in the bar's trail. */
+  section?: WindowBarCrumb | null | undefined;
   children: ReactNode;
 }) {
   // In the order the headers mounted (the page's order); a header keeps its
   // place while its title is briefly empty.
   const [claims, setClaims] = useState<
-    readonly { id: string; title: string | null; fallback: boolean; copyable: boolean }[]
+    readonly {
+      id: string;
+      title: string | null;
+      fallback: boolean;
+      copyable: boolean;
+      place: WindowBarPlace | null;
+    }[]
   >([]);
   const [registry] = useState(() => ({
-    set(id: string, title: string | null, fallback = false, copyable = false) {
+    set(
+      id: string,
+      title: string | null,
+      fallback = false,
+      copyable = false,
+      place: WindowBarPlace | null = null,
+    ) {
       setClaims((current) => {
         const existing = current.find((claim) => claim.id === id);
         if (
           existing?.title === title &&
           existing.fallback === fallback &&
-          existing.copyable === copyable
+          existing.copyable === copyable &&
+          existing.place === place
         )
           return current;
-        const claim = { id, title, fallback, copyable };
+        const claim = { id, title, fallback, copyable, place };
         return existing
           ? current.map((other) => (other.id === id ? claim : other))
           : [...current, claim];
@@ -240,14 +325,24 @@ export function WindowBarPageTitle({
     claims.find((claim) => claim.title && !claim.fallback) ?? claims.find((claim) => claim.title);
   const title = owner ? owner.title : fallbackTitle;
   const ownerId = owner?.id ?? null;
+  const parent = owner?.place?.parent ?? null;
+  const trail = windowBarTrail(
+    typeof title === "string" ? title : null,
+    owner?.place?.section ?? section,
+    parent,
+  );
+  // The page's back link may leave the page only when the trail carries it.
+  const parentInTrail = parent !== null && trail.includes(parent);
   const value = useMemo(
-    () => (enabled ? { ...registry, owner: ownerId } : null),
-    [enabled, ownerId, registry],
+    () => (enabled ? { ...registry, owner: ownerId, parentInTrail } : null),
+    [enabled, ownerId, parentInTrail, registry],
   );
   return (
     <PageHeaderWindowBarContext.Provider value={value}>
       {enabled && title != null && title !== "" ? (
-        <WindowBarTitle copyable={owner?.copyable ?? false}>{title}</WindowBarTitle>
+        <WindowBarTitle copyable={owner?.copyable ?? false} trail={trail}>
+          {title}
+        </WindowBarTitle>
       ) : null}
       {children}
     </PageHeaderWindowBarContext.Provider>
