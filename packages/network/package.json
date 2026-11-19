@@ -23,6 +23,10 @@
       "types": "./src/azure-entra.ts",
       "default": "./src/azure-entra.ts"
     },
+    "./responses-replay": {
+      "types": "./src/responses-replay.ts",
+      "default": "./src/responses-replay.ts"
+    },
     "./responses-websocket": {
       "types": "./src/responses-websocket.ts",
       "default": "./src/responses-websocket.ts"
