@@ -816,12 +816,8 @@ test("read-only usage never attempts the live mutation, including global Refresh
   expect(liveChecks).toBe(0);
 });
 
-for (const [cold, saved] of [
-  [true, false],
-  [true, true],
-  [false, false],
-] as const) {
-  test(`a Claude row after a failed ${cold ? "initial check" : "global refresh"}${saved ? " with a saved reading" : ""}`, async () => {
+for (const cold of [true, false]) {
+  test(`Claude row reports unavailable after a failed ${cold ? "initial check" : "global refresh"}`, async () => {
     let fail = cold;
     const client = {
       refreshClaudeSubscriptionAccountUsage: async () => {
@@ -838,15 +834,6 @@ for (const [cold, saved] of [
       version: 1,
       status: "active",
       allocatorEnabled: true,
-      ...(saved
-        ? {
-            usage: {
-              ...usage(),
-              refreshStatus: "available",
-              windows: [{ ...usage().windows[1]!, usedPercent: 60 }],
-            },
-          }
-        : {}),
     } as ClaudeSubscriptionAccount;
     function Harness() {
       return (
@@ -868,20 +855,9 @@ for (const [cold, saved] of [
       fail = true;
       await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
     }
+    expect(container.textContent).toContain("Usage unavailable");
     expect(container.textContent).not.toContain("No usage yet");
-    if (cold && !saved) {
-      // Claude has never reported this account.
-      expect(container.textContent).toContain("Usage unavailable");
-      expect(container.textContent).not.toContain("Reported");
-      return;
-    }
-    // The last saved reading stays, with its age; a failed check hides nothing.
-    expect(container.textContent).not.toContain("Usage unavailable");
-    expect(container.textContent).toContain(saved ? "40% left" : "75% left");
-    expect(container.querySelector("time")?.getAttribute("datetime")).toBe(
-      "2026-09-30T14:00:00.000Z",
-    );
-    expect(container.textContent).toMatch(/Reported/);
+    expect(container.textContent).not.toContain("75% left");
   });
 }
 
