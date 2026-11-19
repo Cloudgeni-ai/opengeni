@@ -1,5 +1,12 @@
 # @opengeni/storage
 
+## 6.30.2
+
+### Patch Changes
+
+- @opengeni/config@6.30.2
+- @opengeni/contracts@6.30.2
+
 ## 6.30.1
 
 ### Patch Changes
