@@ -79,9 +79,7 @@ function catalogEntries(
   tools: readonly { name: string; description?: string | undefined }[],
 ): OrgAgentToolCatalogEntry[] {
   return tools
-    .filter(
-      (tool) => typeof tool.name === "string" && tool.name.length > 0 && tool.name.length <= 200,
-    )
+    .filter((tool) => typeof tool.name === "string" && tool.name.length > 0 && tool.name.length <= 200)
     .slice(0, ORG_AGENT_TOOL_NAMES_MAX)
     .map((tool) => ({
       name: tool.name,

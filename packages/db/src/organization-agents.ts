@@ -547,11 +547,7 @@ async function insertAgent(
   assertConfigSize(definition);
   await lockKey(tx, `org-agents:${input.accountId}`);
   if (await selectAgentRow(tx, input.accountId, { key: input.key })) {
-    throw new OrgAgentError(
-      409,
-      "agent_key_taken",
-      `An agent with key '${input.key}' already exists.`,
-    );
+    throw new OrgAgentError(409, "agent_key_taken", `An agent with key '${input.key}' already exists.`);
   }
   const [count] = await rawRows<{ count: number }>(
     tx,
@@ -586,11 +582,7 @@ async function insertAgent(
     );
   } catch (error) {
     if (nestedPostgresSqlState(error) === "23505") {
-      throw new OrgAgentError(
-        409,
-        "agent_key_taken",
-        `An agent with key '${input.key}' already exists.`,
-      );
+      throw new OrgAgentError(409, "agent_key_taken", `An agent with key '${input.key}' already exists.`);
     }
     throw error;
   }
@@ -802,11 +794,7 @@ async function publishLocked(
   },
 ): Promise<OrgAgentPublishOperation> {
   if (!(await selectRevision(tx, input.accountId, input.row.id, input.version))) {
-    throw new OrgAgentError(
-      404,
-      "agent_version_not_found",
-      `Version ${input.version} does not exist.`,
-    );
+    throw new OrgAgentError(404, "agent_version_not_found", `Version ${input.version} does not exist.`);
   }
   await bumpAgent(tx, input.accountId, input.row.id, sql`published_revision = ${input.version}`);
   const [operation] = await rawRows<OperationRow>(
@@ -828,8 +816,7 @@ async function publishLocked(
       key: input.row.agent_key,
       fromVersion: input.row.published_revision,
       toVersion: input.version,
-      rollback:
-        input.row.published_revision !== null && input.version < input.row.published_revision,
+      rollback: input.row.published_revision !== null && input.version < input.row.published_revision,
       moveRunningChats: input.moveRunningChats,
       operationId: operation!.id,
     },
@@ -930,12 +917,7 @@ export async function applyOrgAgent(
   const configHash = orgAgentConfigHash(definition);
   return await withOrgAgentsScope(db, { accountId: input.accountId }, async (tx) => {
     await lockKey(tx, `org-agent-key:${input.accountId}:${input.key}`);
-    const existing = await selectAgentRow(
-      tx,
-      input.accountId,
-      { key: input.key },
-      { forUpdate: true },
-    );
+    const existing = await selectAgentRow(tx, input.accountId, { key: input.key }, { forUpdate: true });
     if (!existing) {
       await assertToolServersExist(tx, input.accountId, definition);
       if (input.expectedVersion !== undefined) throw notFound();
@@ -1584,10 +1566,7 @@ function toolServerNotFound(key: string): OrgAgentError {
   return new OrgAgentError(404, "tool_server_not_found", `No tool server '${key}'.`);
 }
 
-export async function listOrgToolServers(
-  db: Database,
-  accountId: string,
-): Promise<OrgToolServer[]> {
+export async function listOrgToolServers(db: Database, accountId: string): Promise<OrgToolServer[]> {
   const rows = await withAccountRls(db, accountId, (tx) =>
     rawRows<ToolServerRow>(
       tx,
@@ -1640,9 +1619,7 @@ export async function createOrgToolServer(
       ? encryptHeaders(input.encryptionKey, request.sharedHeaders)
       : null;
   const sharedHeaderNames = Object.keys(request.sharedHeaders ?? {}).sort();
-  const oauth = request.oauthRefresh
-    ? encryptOAuthRefresh(input.encryptionKey, request.oauthRefresh)
-    : null;
+  const oauth = request.oauthRefresh ? encryptOAuthRefresh(input.encryptionKey, request.oauthRefresh) : null;
   return await withAccountRls(db, input.accountId, async (tx) => {
     await lockKey(tx, `org-tool-servers:${input.accountId}`);
     if (await selectToolServer(tx, input.accountId, request.key)) {
@@ -1747,8 +1724,7 @@ export async function updateOrgToolServer(
       nextOAuth = { ...encryptOAuthRefresh(input.encryptionKey, oauth), ...kept };
     }
     const changed = Object.keys(request).filter(
-      (field) =>
-        field !== "expectedVersion" && request[field as keyof typeof request] !== undefined,
+      (field) => field !== "expectedVersion" && request[field as keyof typeof request] !== undefined,
     );
     const [row] = await rawRows<ToolServerRow>(
       tx,
@@ -1827,9 +1803,10 @@ export function decodeOrgToolServerSecrets(
     sharedHeaders:
       row.shared_headers_encrypted === null
         ? null
-        : (JSON.parse(
-            decryptEnvironmentValue(requireKey(key), row.shared_headers_encrypted),
-          ) as Record<string, string>),
+        : (JSON.parse(decryptEnvironmentValue(requireKey(key), row.shared_headers_encrypted)) as Record<
+            string,
+            string
+          >),
     oauthRefresh: oauth
       ? {
           tokenUrl: oauth.tokenUrl,
@@ -1888,9 +1865,7 @@ export function decodeEndUserToolCredentialMaterial(
   key: Uint8Array | null,
   stored: string,
 ): EndUserToolCredentialMaterial {
-  return JSON.parse(
-    decryptEnvironmentValue(requireKey(key), stored),
-  ) as EndUserToolCredentialMaterial;
+  return JSON.parse(decryptEnvironmentValue(requireKey(key), stored)) as EndUserToolCredentialMaterial;
 }
 
 type CredentialRow = {
@@ -1953,9 +1928,7 @@ export async function putEndUserToolCredential(
       : {
           kind: "oauth",
           accessToken: credential.accessToken,
-          ...(credential.refreshToken !== undefined
-            ? { refreshToken: credential.refreshToken }
-            : {}),
+          ...(credential.refreshToken !== undefined ? { refreshToken: credential.refreshToken } : {}),
           tokenType: credential.tokenType ?? "Bearer",
         };
   const encrypted = encodeEndUserToolCredentialMaterial(input.encryptionKey, material);
