@@ -35,15 +35,23 @@ const REPOSITORY: ResourceRef = { kind: "repository", uri: "https://github.com/a
 const FILE: ResourceRef = { kind: "file", fileId: FILE_ID };
 const MACHINE_ROOT = "/home/user";
 
+// mock.module is process-wide, so every other file id keeps the real lookup.
+const realRequireFileForSubject = realDb.requireFileForSubject;
 mock.module("@opengeni/db", () => ({
   ...realDb,
-  requireFileForSubject: async (_db: unknown, input: { fileId: string }) => ({
-    id: input.fileId,
-    objectKey: `files/${input.fileId}/original`,
-    safeFilename: FILENAME,
-    sizeBytes: 12,
-    sha256: "a".repeat(64),
-  }),
+  requireFileForSubject: async (
+    db: Parameters<typeof realRequireFileForSubject>[0],
+    input: Parameters<typeof realRequireFileForSubject>[1],
+  ) =>
+    input.fileId === FILE_ID
+      ? {
+          id: input.fileId,
+          objectKey: `files/${input.fileId}/original`,
+          safeFilename: FILENAME,
+          sizeBytes: 12,
+          sha256: "a".repeat(64),
+        }
+      : await realRequireFileForSubject(db, input),
 }));
 
 const { sandboxFileDownloadsForRun } = await import("../src/activities/agent-turn/file-resources");
@@ -203,18 +211,20 @@ describe("a turn with an attached file", () => {
     expect(result?.downloaded).toBe(true);
   });
 
-  // The active box can differ from the deployment's default backend (a
-  // session on another provider, or moved to a Connected Machine). Its file
-  // mounts must follow the box it runs on, as its downloads do.
+  // Runtime API contract: buildOpenGeniAgent's activeSandboxBackend can
+  // differ from settings.sandboxBackend, and file mounts must follow the
+  // active box, as its downloads do.
   for (const deploymentBackend of SANDBOX_BACKENDS.filter((backend) => backend !== "none")) {
     for (const objectStorageBackend of OBJECT_STORAGE_BACKENDS) {
-      test(`a ${deploymentBackend} deployment with ${objectStorageBackend} starts it on every other backend`, async () => {
-        const settings = settingsFor(deploymentBackend, objectStorageBackend);
-        for (const active of SANDBOX_BACKENDS) {
-          if (active === "none" || active === deploymentBackend) continue;
-          await startTurnWithAttachment(settings, active);
-        }
-      });
+      for (const active of SANDBOX_BACKENDS) {
+        if (active === "none" || active === deploymentBackend) continue;
+        test(`a ${deploymentBackend} deployment with ${objectStorageBackend} starts it on an active ${active} box`, async () => {
+          await startTurnWithAttachment(
+            settingsFor(deploymentBackend, objectStorageBackend),
+            active,
+          );
+        });
+      }
     }
   }
 });
