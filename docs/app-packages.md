@@ -1,0 +1,109 @@
+# App packages
+
+An app (a Site) can be exported as one package file and installed into another
+workspace as a new app. The installed app is a working copy: same version,
+same data definitions, empty data (or the author's demo data). There are no
+upgrades; installing again makes another copy.
+
+Code: `packages/contracts/src/app-package.ts` (format and lenient parser),
+`apps/api/src/app-packages/` (export, install and the syncs hook),
+`apps/api/src/routes/app-packages.ts`, `apps/api/src/mcp/app-package-tools.ts`,
+`packages/react/src/app/components/artifacts/app-package.tsx` (console).
+
+## Format (version 1)
+
+One JSON file, named `<title>.opengeni-app.json`:
+
+| Field | Contents |
+| --- | --- |
+| `format`, `version` | `"opengeni.app-package"`, `1` |
+| `exportedAt` | ISO time of the export |
+| `app` | `title`, `description`, `html` of the current version, and its retained editable `source` when it has one |
+| `tools` | The tool identities the version requests ([requested tools](published-sites.md)) |
+| `data.collections` | Site Data collection definitions (name, access mode, schema), no records |
+| `sql.migrations` | Site SQL migrations in applied order (`name`, `sql`) |
+| `sql.queries` | Site SQL named queries (`name`, `sql`, access, parameters) |
+| `syncs` | Data sync definitions, as plain objects (see [Syncs](#syncs)) |
+| `demoData` | Only when the author asked: `records` per collection and `sqlRows` per table |
+
+Limits: 24 MiB per package; demo data at most 1,000 records per collection,
+5,000 rows per table and 8 MiB in total; 50 syncs. Parts over a limit are left
+out and listed in the export's `notExported`, not a failed export. SQL tables
+with blob values are left out of demo rows.
+
+Install validates leniently: unknown fields are ignored, a newer `version` is
+read as far as version 1 goes, and an invalid collection, migration, query,
+sync or record is skipped and reported. Only a file that isn't a package at all
+(wrong `format`, or no app HTML) is refused.
+
+## Export
+
+`POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/package`
+(`artifacts:read` and manager of the app, the same check as reading its data
+definitions). Body `{ demoData?: true | { collections?, tables? } }`; without
+`demoData` the package carries no data. Returns `{ package, filename, notExported }`.
+
+## Install
+
+`POST /v1/workspaces/:workspaceId/app-packages/install` (`artifacts:publish`,
+like creating an app). Body `{ package, title?, visibility?, demoData?, idempotencyKey }`.
+Returns 201 with `{ app, replayed, installed, notInstalled }`, or 200 with
+`replayed: true` when the same key installed it before.
+
+Steps, each reported rather than failing the install:
+
+1. Create the app from the package's version, with the person as owner.
+2. Define the collections.
+3. If Site SQL is available: enable it, apply the migrations in order (an
+   existing migration name is skipped; the first failure stops the rest), then
+   define the queries. Otherwise every SQL part is listed in `notInstalled`.
+4. Create the syncs, paused, through the syncs hook.
+5. Load demo data (default on when the package has some; `demoData: false`
+   declines), only into empty collections and tables.
+
+The idempotency key makes the app creation replay; the later steps are
+idempotent themselves (upserts, skipped existing migrations, demo data only
+into empty targets), so a retried install completes a partial one.
+
+The installed app asks each viewer to connect its tools with their own
+accounts; nothing from the author's connections is packaged.
+
+## Syncs
+
+Packages carry syncs as plain definitions. `apps/api/src/app-packages/syncs.ts`
+holds the hook the data sync feature plugs into with `setAppSyncHooks`:
+
+- `list({ deps, grant, appId })`: the app's sync definitions, for export.
+- `createPaused({ deps, grant, appId, syncs, installKey })`: create them on the
+  new app, paused until the installer confirms the account; returns `created`
+  names and `notCreated` reasons.
+
+The default exports none and reports each packaged sync as not installed.
+
+## Agent tools
+
+- `app_export { appId, demoData? }` (`artifacts:read`): stores the package and
+  returns a short-lived download link, its filename and a summary of contents.
+- `app_install { fileId | package, title?, visibility?, demoData?, idempotencyKey }`
+  (`artifacts:publish`; `files:read` to read `fileId`): installs and returns
+  the app with an `[Open app](artifact:…)` reference and `notInstalled`.
+  An agent can only declare tools its chat has; other packaged tools are left
+  out and reported. Installing from the Apps page keeps them all.
+
+## Console
+
+The Sites tab of Artifacts has **Install app** for people who can publish:
+choose a package file, optionally include its demo data, Install. The new app
+opens. An app's "…" menu has **Export app** (no data) for its managers.
+
+## Self-hosting
+
+- Site SQL needs the Cloudflare Sites gateway. Without it, exports have no SQL
+  demo rows and installs skip migrations and queries, reported in `notInstalled`.
+- `app_export` needs object storage to hand the file to the agent; stored
+  packages are not swept automatically. The HTTP export returns the package
+  directly.
+- Syncs install only where data sync is deployed; otherwise they are reported.
+- Not packaged anywhere: Site files (`site_files`), records past the demo
+  limits, SQL blob values, publication settings, sharing and tool allowances.
+- No upgrades of an installed app from a newer package.

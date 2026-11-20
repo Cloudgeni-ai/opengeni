@@ -4716,6 +4716,8 @@ export type FirstPartyMcpToolName =
   | "site_sql_export"
   | "site_sql_import"
   | "site_sql_reset"
+  | "app_export"
+  | "app_install"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"

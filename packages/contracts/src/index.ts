@@ -70,6 +70,7 @@ import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./site-publishing";
 export * from "./site-sql";
+export * from "./app-package";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
 export * from "./claude-subscription-oauth";
@@ -1318,6 +1319,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_sql_export",
   "site_sql_import",
   "site_sql_reset",
+  "app_export",
+  "app_install",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
