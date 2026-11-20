@@ -21,6 +21,8 @@ on:
       - "packages/browserd/test/cua-linux*.e2e.test.ts"
       - "packages/browserd/test/cua-windows.e2e.test.ts"
       - "packages/browserd/test/fixtures/cua/**"
+      - "packages/browserd/src/sqlite-file.ts"
+      - "packages/browserd/test/sqlite-file.test.ts"
       - "packages/contracts/src/cua-desktop-tools*"
       - "packages/browserd/package.json"
 
@@ -92,6 +94,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install
         run: bun install --frozen-lockfile
+      - name: Open controller databases at long Windows paths
+        run: bun test packages/browserd/test/sqlite-file.test.ts
       - name: Stage the source-pinned Windows worker and transport
         run: bun packages/browserd/scripts/stage-cua-runtime.ts x64
       - name: Verify the source worker keeps the admitted Windows catalog unchanged
