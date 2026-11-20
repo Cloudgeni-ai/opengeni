@@ -13,6 +13,7 @@ export * from "./billing-card-verification";
 export * from "./secret-value";
 export * from "./citation-urls";
 export * from "./claude-cite-tags";
+export * from "./provider-citation-handles";
 export * from "./machine-access";
 export * from "./no-reply";
 import { NO_REPLY_SENTINEL } from "./no-reply";

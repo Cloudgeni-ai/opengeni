@@ -2,6 +2,7 @@ import { createSign, randomUUID } from "node:crypto";
 import { connect, type ClientHttp2Session } from "node:http2";
 import type { Settings } from "@opengeni/config";
 import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
+import { withoutProviderCitationHandles } from "@opengeni/contracts/provider-citation-handles";
 import {
   claimNativePushDeliveries,
   listSessionHumanInputRequests,
@@ -118,11 +119,12 @@ export type NativePushDispatchDeps = {
 
 /**
  * A notification message as plain text for the lock screen: links keep their
- * text, emphasis and code marks go, "- " bullets become "•", and bare source
- * links lose the tracking a hosted web search tagged onto them.
+ * text, emphasis and code marks go, "- " bullets become "•", bare source
+ * links lose the tracking a hosted web search tagged onto them, and web-search
+ * citation handles that name no openable page are removed.
  */
 export function plainNotificationText(markdown: string): string {
-  return withoutProviderTrackingInText(markdown)
+  return withoutProviderTrackingInText(withoutProviderCitationHandles(markdown))
     .replace(/\[([^\]]+)\]\((?:[^)]+)\)/gu, "$1")
     .replace(/(\*\*|__)(.+?)\1/gu, "$2")
     .replace(/`([^`]+)`/gu, "$1")

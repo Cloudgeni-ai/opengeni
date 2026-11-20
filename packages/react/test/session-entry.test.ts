@@ -68,6 +68,8 @@ describe("session-only entry", () => {
       "@opengeni/contracts/mcp-elicitation-model",
       // A quiet automation run's NO_REPLY answer stays out of the chat: a dependency-free leaf.
       "@opengeni/contracts/no-reply",
+      // Web-search citation handles that name no page stay out of the chat: a dependency-free leaf.
+      "@opengeni/contracts/provider-citation-handles",
       // The archive's stop reason, so an archive never reads as cancelled: a
       // dependency-free contracts leaf shared with the server.
       "@opengeni/contracts/session-history",

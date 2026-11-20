@@ -63,6 +63,14 @@ describe("native push presentation", () => {
     ).toBe("Permit rules: https://example.com/rules/4-1 and the guide");
   });
 
+  test("lock-screen text has no web-search citation handles", () => {
+    expect(
+      plainNotificationText(
+        "The permit is required. \uE200cite\uE202turn559410search0\uE201\n- **Due:** Friday",
+      ),
+    ).toBe("The permit is required.\n• Due: Friday");
+  });
+
   test("an MCP server's question shows as the question and opens the app", () => {
     const confirmation = {
       ...payload,
