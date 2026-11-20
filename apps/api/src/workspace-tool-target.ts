@@ -712,14 +712,14 @@ export async function invokeWorkspaceToolTarget(
           // A Block never reaches here (`prepareCall` refuses it).
           if (!routing) throw approvalRequiredError();
           // A choice saved before a first-party rename names the former tool.
-          const key = siteAllowanceKey(authorization, request, routing);
+          const allowanceKey = siteAllowanceKey(authorization, request, routing);
           const names =
-            key.serverId === "opengeni"
-              ? [key.toolName, ...firstPartyMcpToolAliasesOf(key.toolName)]
-              : [key.toolName];
+            allowanceKey.serverId === "opengeni"
+              ? [allowanceKey.toolName, ...firstPartyMcpToolAliasesOf(allowanceKey.toolName)]
+              : [allowanceKey.toolName];
           for (const toolName of names) {
             allowedForSite = await (options.hasAllowance ?? hasSiteToolAllowance)(deps.db, {
-              ...key,
+              ...allowanceKey,
               toolName,
             });
             if (allowedForSite) break;
