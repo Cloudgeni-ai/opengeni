@@ -2885,6 +2885,10 @@ through a signed internal gateway route. Postgres keeps the definitions
 pages run only named queries with `:viewer` bound by the API. See
 [`site-data.md`](site-data.md#site-sql-optional-cloudflare-storage).
 
+App packages export an app's current version and data definitions (no data
+unless the author includes demo data) as one file and install it into another
+workspace as a new app. See [`app-packages.md`](app-packages.md).
+
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
@@ -3456,6 +3460,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
+| App packages (export, install, syncs hook) | `packages/contracts/src/app-package.ts`, `apps/api/src/app-packages/`, `apps/api/src/routes/app-packages.ts`, `apps/api/src/mcp/app-package-tools.ts` | [`app-packages.md`](app-packages.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input and dictation | `packages/contracts/src/recordings.ts`, `apps/api/src/routes/recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Stateless model calls (chat and typed decisions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `apps/api/src/routes/decisions.ts`, `packages/runtime/src/single-model-call.ts`, `packages/runtime/src/configured-decision-model.ts` | [`chat-completions.md`](chat-completions.md), [`model-inference.md`](model-inference.md) |

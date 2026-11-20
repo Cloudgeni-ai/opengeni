@@ -669,6 +669,9 @@ Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
 agent as to a page viewer (managers run every query). The tools are only
 registered when the gateway origin and secret are configured.
 
+To move an app with its migrations, named queries and collection definitions
+to another workspace, export it as a package ([App packages](app-packages.md)).
+
 Site and console agents use identical native Site SQL authorization. Members
 are not pinned to the originating Site. Outside-workspace visitor conversations
 retain viewer-bound data tools: only their own Site's data and permitted named

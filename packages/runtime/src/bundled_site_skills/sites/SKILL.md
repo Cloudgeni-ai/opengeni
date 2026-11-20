@@ -265,6 +265,7 @@ Read the references the app needs with `skill_read`, for example
 | Saves records or files (Site Data) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (Site SQL) | `references/site-sql.md` |
 | Invited or public, with data, tools or an embedded agent | `references/publish-to-web.md` |
+| Moves to another workspace | `references/app-packages.md` |
 
 ## Show a visualization or Site inside chat
 
