@@ -12,7 +12,8 @@
 --   (shared with the workspace, or their own Only me App). A fact about a
 --   record in a collection where people read only their own records is
 --   visible to the record's owner and, unless records are private, to the
---   App's owner or creator and workspace administrators. Chat and usage
+--   App's managers as Site Data defines them (members who may publish
+--   Apps, and workspace administrators). Chat and usage
 --   facts keep their 1105 rules; they never carry an App.
 -- - Workspace webhooks may subscribe to the four app types. An AFTER INSERT
 --   trigger on App facts enqueues their deliveries, leaving out record
@@ -68,15 +69,14 @@ CREATE POLICY workspace_activity_read ON workspace_activity_events
           AND (
             workspace_activity_events.reader_subject_id IS NULL
             OR workspace_activity_events.reader_subject_id = opengeni_private.current_subject_id()
-            OR (NOT workspace_activity_events.reader_owner_only AND (
-              app.owner_subject_id = opengeni_private.current_subject_id()
-              OR app.created_by_subject_id = opengeni_private.current_subject_id()
-              OR EXISTS (
-                SELECT 1 FROM workspace_memberships member
-                WHERE member.account_id = workspace_activity_events.account_id
-                  AND member.workspace_id = workspace_activity_events.workspace_id
-                  AND member.subject_id = opengeni_private.current_subject_id()
-                  AND opengeni_private.workspace_membership_administers(member.role, member.permissions))))
+            OR (NOT workspace_activity_events.reader_owner_only AND EXISTS (
+              SELECT 1 FROM workspace_memberships member
+              WHERE member.account_id = workspace_activity_events.account_id
+                AND member.workspace_id = workspace_activity_events.workspace_id
+                AND member.subject_id = opengeni_private.current_subject_id()
+                AND (opengeni_private.workspace_membership_administers(member.role, member.permissions)
+                  OR coalesce(jsonb_typeof(member.permissions) = 'array'
+                    AND member.permissions ? 'artifacts:publish', false))))
           )))
     )
   );
@@ -114,7 +114,8 @@ BEGIN
       SELECT 1 FROM workspace_artifacts app
       WHERE app.workspace_id = NEW.workspace_id AND app.id = NEW.site_id
         AND app.visibility = 'workspace_shared') THEN
-      v_data := (v_data - 'record') || jsonb_build_object('recordWithheld', true);
+      v_data := (v_data - 'record' - 'recordKey' - 'recordOwnerSubjectId')
+        || jsonb_build_object('recordWithheld', true);
     END IF;
     v_data := v_data || jsonb_build_object('appId', NEW.site_id, 'chainDepth', NEW.chain_depth)
       || CASE WHEN NEW.automation_id IS NULL THEN '{}'::jsonb

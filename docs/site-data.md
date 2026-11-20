@@ -157,12 +157,13 @@ reads as its owner:
 - The person must be able to open the App: it is shared with the workspace,
   or it is their own Only me App.
 - In a collection where viewers read only their own records (`per_viewer`,
-  `append_only`), the record's owner sees it, and so do the App's owner or
-  creator and workspace administrators unless the records are private
-  (`privateRecords`), when only the owner does.
+  `append_only`), the record's owner sees it, and so do the App's managers
+  (members who may publish Apps, and workspace administrators) unless the
+  records are private (`privateRecords`), when only the owner does.
 
 Workspace webhooks receive every App fact of the workspace, but without the
-record's data when only some people may read it (`recordWithheld: true`): a
+record's data, key and owner when only some people may read it
+(`recordWithheld: true`): a
 record in a collection where people read only their own, or any record of an
 App that isn't shared with the workspace (an Only me App).
 Organization webhooks don't offer app types. Events for automations are

@@ -240,9 +240,16 @@ test("per-person records are visible to their owner and, unless private, the App
     ["ada", false],
     ["ada", true],
   ]);
+  // The App's managers are members who may publish Apps, as in Site Data.
+  await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${a.accountId}, ${a.workspaceId}, ${OWNER}, 'member', opengeni_private.workspace_member_role_permissions('member')),
+      (${a.accountId}, ${a.workspaceId}, 'carol', 'member', opengeni_private.workspace_member_role_permissions('member')),
+      (${a.accountId}, ${a.workspaceId}, 'bob', 'viewer', opengeni_private.workspace_member_role_permissions('viewer'))`;
   expect((await visibleTo(a, "ada")).length).toBe(2);
-  // The App's owner sees the per-person note but not the private diary entry.
+  // Managers see the per-person note but not the private diary entry.
   expect((await visibleTo(a, OWNER)).length).toBe(1);
+  expect((await visibleTo(a, "carol")).length).toBe(1);
+  // A viewer sees neither.
   expect((await visibleTo(a, "bob")).length).toBe(0);
 
   // Webhooks never carry contents of records only some people may read.
@@ -251,6 +258,7 @@ test("per-person records are visible to their owner and, unless private, the App
   expect(deliveries).toHaveLength(2);
   for (const delivery of deliveries) {
     expect(delivery.payload.data.record).toBeUndefined();
+    expect(delivery.payload.data.recordOwnerSubjectId).toBeUndefined();
     expect(delivery.payload.data.recordWithheld).toBe(true);
   }
 });
