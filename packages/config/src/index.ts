@@ -474,6 +474,9 @@ export function paidHostedToolsChargeCredits(
   return input.chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
 }
 
+/** Every object storage backend a deployment can configure. */
+export const OBJECT_STORAGE_BACKENDS = ["s3-compatible", "aws-s3", "azure-blob", "gcs"] as const;
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -2281,9 +2284,7 @@ const SettingsSchema = z.object({
   objectStorageEndpoint: z.string().url().optional(),
   objectStorageInternalEndpoint: z.string().url().optional(),
   objectStorageSandboxEndpoint: z.string().url().optional(),
-  objectStorageBackend: z
-    .enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"])
-    .default("s3-compatible"),
+  objectStorageBackend: z.enum(OBJECT_STORAGE_BACKENDS).default("s3-compatible"),
   objectStorageBucket: z.string().min(1).default("opengeni-files"),
   objectStorageRegion: z.string().min(1).default("us-east-1"),
   objectStorageS3Provider: z.string().min(1).default("Minio"),
