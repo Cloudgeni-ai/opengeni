@@ -27,7 +27,7 @@ import { unwrapSdkMcpResultProjection } from "../src/mcp-result-custom-data";
 import {
   projectAttemptToolResultForCaller,
   wrapAttemptToolDefinitions,
-} from "../src/tool-result-spill";
+} from "../src/model-tool-result-store";
 
 type Json = Record<string, any>;
 
@@ -863,7 +863,7 @@ describe("caller seam", () => {
     }
   });
 
-  test("a result still too large after compaction spills the exact bytes", async () => {
+  test("a result still too large after compaction stores the compact text whole", async () => {
     const entries = Array.from({ length: 4000 }, (_, index) =>
       entrySummary({
         label: `large-${index}`,
@@ -874,22 +874,30 @@ describe("caller seam", () => {
       }),
     );
     const original = textResult({ entries, nextCursor: null });
-    expect(
-      Buffer.byteLength(textOf(projectKnowledgeToolResultForModel(SEARCH, original))),
-    ).toBeGreaterThan(1_048_576);
-    const spilled: Array<{ result: unknown; serializedBytes: number }> = [];
+    const compact = textOf(projectKnowledgeToolResultForModel(SEARCH, original));
+    expect(Buffer.byteLength(compact)).toBeGreaterThan(1_048_576);
+    const stored: string[] = [];
     const projected = await projectAttemptToolResultForCaller(
       original,
       context("model"),
-      async (input) => {
-        spilled.push({ result: input.result, serializedBytes: input.serializedBytes });
-        return textResult({ spilled: true });
+      {
+        store: async ({ text }) => {
+          stored.push(text);
+          return {
+            resultId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            byteSize: Buffer.byteLength(text),
+            sandboxPath: null,
+          };
+        },
+        inlineMaxBytes: () => 100_000,
+        readers: () => ({ reader: "searchable", shell: false }),
       },
       SEARCH,
     );
-    expect(spilled).toHaveLength(1);
-    expect(spilled[0]!.result).toBe(original);
-    expect(textOf(projected)).toContain("spilled");
+    // The model reads on through exactly the compact copy it started on.
+    expect(stored).toEqual([compact]);
+    expect(textOf(projected)).toContain("tool_result_read");
+    expect(compact.startsWith(textOf(projected).slice(0, 50_000))).toBe(true);
   });
 });
 

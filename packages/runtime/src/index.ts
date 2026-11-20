@@ -435,23 +435,29 @@ import {
   type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
+  installModelToolResultStore,
   modelToolTextBudgetBytes,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
-  type SpillOversizedModelToolResult,
-} from "./tool-result-spill";
+  type ModelToolResultStore,
+} from "./model-tool-result-store";
 export {
+  installModelToolResultStore,
   modelToolResultFits,
-  modelToolResultOverflowError,
   modelToolTextBudgetBytes,
   projectAttemptToolResultForCaller,
-  spilledModelToolResult,
+  storeOversizedFunctionToolOutput,
+  storedToolResultView,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
+  STORED_TOOL_RESULT_READER_NAME,
+  TOOL_RESULT_STORED_META_KEY,
+  type ModelToolResultStore,
   type ProjectModelToolResult,
-  type SpilledToolResultReaders,
-  type SpillOversizedModelToolResult,
-} from "./tool-result-spill";
+  type StoredToolResult,
+  type StoredToolResultKey,
+  type StoredToolResultReaders,
+} from "./model-tool-result-store";
 export {
   CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
@@ -3116,6 +3122,13 @@ export type BuildAgentOptions = {
    */
   commandCompletionDelivery?: CommandCompletionDelivery | null;
   /**
+   * The attempt's store for function-tool output larger than the model's
+   * inline tool-output budget (model-tool-result-store.ts): the full text is
+   * kept and the model receives a view with the call that reads the rest.
+   * Attempt tools use the same store through `prepareAgentTools`.
+   */
+  modelToolResultStore?: ModelToolResultStore | null;
+  /**
    * Receives each sandbox setup notice appended to a tool result
    * (sandbox-setup-notices.ts), so audit views can show the tool's own output.
    */
@@ -4383,6 +4396,9 @@ export function buildOpenGeniAgent(
     }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     installRepeatedToolCallGuard(agent);
+    if (options.modelToolResultStore) {
+      installModelToolResultStore(agent, options.modelToolResultStore);
+    }
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
@@ -4555,6 +4571,9 @@ export function buildOpenGeniAgent(
   }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   installRepeatedToolCallGuard(agent);
+  if (options.modelToolResultStore) {
+    installModelToolResultStore(agent, options.modelToolResultStore);
+  }
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
@@ -6566,10 +6585,11 @@ export type PrepareToolsOptions = {
     resolveArguments?: ToolGatewayArgumentResolver;
   };
   /**
-   * Persist an oversized *model-visible* tool result as a workspace File and
-   * return the compact receipt. Codemode callers skip the 1 MiB cap entirely.
+   * Keeps the full text of a model-visible tool result larger than the
+   * model's inline tool-output budget, so the model receives a view and reads
+   * the rest with `tool_result_read`. Codemode callers receive exact results.
    */
-  spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+  modelToolResultStore?: ModelToolResultStore;
   /**
    * The current model's tool-output truncation policy in tokens, read for each
    * call so a mid-attempt model change is honoured. Local bridge projections
@@ -6966,7 +6986,7 @@ export async function prepareAgentTools(
   }
   const attemptToolDefinitions = wrapAttemptToolDefinitions(
     options.attemptToolDefinitions ?? [],
-    options.spillOversizedModelToolResult,
+    options.modelToolResultStore,
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
@@ -7896,7 +7916,7 @@ async function prepareAttemptToolEnvironment(
             ...definition,
             execute: wrapAttemptToolExecute(
               async (argumentsValue, context) => await definition.execute(argumentsValue, context),
-              options.spillOversizedModelToolResult,
+              options.modelToolResultStore,
               definition.identity,
               server?.hasModelToolResultProjection()
                 ? (result) =>
@@ -7907,7 +7927,7 @@ async function prepareAttemptToolEnvironment(
         }),
       ...wrapAttemptToolDefinitions(
         options.attemptToolDefinitions ?? [],
-        options.spillOversizedModelToolResult,
+        options.modelToolResultStore,
       ),
     ],
     registry,

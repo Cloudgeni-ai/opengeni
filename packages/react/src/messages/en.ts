@@ -6310,6 +6310,8 @@ export const englishMessages = {
   "timeline.toolStep.readGuide.running": "Reading skill",
   "timeline.toolStep.readPage.done": "Read the page",
   "timeline.toolStep.readPage.running": "Reading the page",
+  "timeline.toolStep.readToolOutput.done": "Read more output",
+  "timeline.toolStep.readToolOutput.running": "Reading more output",
   "timeline.toolStep.readPosts.done": "Read posts",
   "timeline.toolStep.readPosts.running": "Reading posts",
   "timeline.toolStep.readSlack.done": "Read Slack",

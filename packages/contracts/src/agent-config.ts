@@ -616,12 +616,13 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   view_image: "sandbox",
   repository_skill_read: "sandbox",
   code_search: "sandbox",
-  // Derived runtime mechanics: search router, operation recovery and credential
-  // renewal.
+  // Derived runtime mechanics: search router, operation recovery, stored
+  // tool-result reads and credential renewal.
   tool_search: "runtime",
   tool_list: "runtime",
   tool_invoke: "runtime",
   operation_read: "runtime",
+  tool_result_read: "runtime",
   refresh_credentials: "runtime",
 } as const satisfies Record<string, AgentFunctionToolClass>;
 export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIES;

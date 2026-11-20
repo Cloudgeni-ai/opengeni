@@ -76,6 +76,7 @@ import { createMcpOperationReadStore } from "../mcp-operation-store";
 import { createMcpOperationObserverResolver } from "../mcp-operation-observer";
 import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
+import { createToolResultReadAttemptToolDefinition } from "./tool-result-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import {
@@ -122,7 +123,7 @@ import {
   recordToolPreparationPhase,
   recordTurnStartupPhase,
 } from "../../observability-metrics";
-import { ToolResultSpill, spilledToolResultReadersForTurn } from "./tool-result-spill";
+import { ToolResultStore } from "./tool-result-store";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { turnToolRouterExpected } from "./tool-router-expectation";
@@ -132,6 +133,7 @@ import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
+  TOOL_RESULT_READ_TOOL_NAME,
   type AgentLearningDefaults,
   type ResourceRef,
   type Permission,
@@ -232,7 +234,7 @@ export type PrepareTurnToolRuntimeDeps = {
   attempt: AttemptIdentityState;
   sandboxState: SandboxRuntimeState;
   media: ReturnType<typeof createTurnMediaArtifacts>;
-  toolResultSpill: ToolResultSpill;
+  toolResultStore: ToolResultStore;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
@@ -542,7 +544,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     attempt,
     sandboxState,
     media,
-    toolResultSpill,
+    toolResultStore,
     turn,
     session,
     installedApiIntegrations,
@@ -1409,6 +1411,36 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolRouterExpected || !routerInstallable
       ? titleToolPlan.remoteFirstPartyMcpTools
       : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
+  // `tool_result_read` reads tool results too large to show whole. It is only
+  // needed after such a result, whose note names the exact call, so it is never
+  // in a first-request tool list: it joins as a deferred tool behind the
+  // turn's search router, loaded by exact name, and no session's prompt
+  // prefix changes for it. A turn without a router (tool search turned off, or
+  // an agent whose every tool is eager) has no reader: the shell copy, when a
+  // sandbox runs, is then its reader, otherwise the note says to narrow the
+  // call. The router decision above never counts the reader.
+  const searchRouterPresent =
+    toolRouterExpected &&
+    routerInstallable &&
+    (lazyToolTransport !== undefined || (Boolean(session.agent) && toolRouterInHistory));
+  const toolResultReader: "searchable" | "none" =
+    searchRouterPresent && attemptToolFamilies.allowsFunctionTool(TOOL_RESULT_READ_TOOL_NAME)
+      ? "searchable"
+      : "none";
+  toolResultStore.setReaders({
+    reader: toolResultReader,
+    shell: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+  });
+  const attemptToolDefinitionsWithReader =
+    toolResultReader === "none"
+      ? attemptToolDefinitions
+      : [
+          ...attemptToolDefinitions,
+          createToolResultReadAttemptToolDefinition({
+            read: toolResultStore.readBytes,
+            inlineMaxBytes: toolResultStore.inlineMaxBytes,
+          }),
+        ];
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -1629,16 +1661,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           // is read from the machine its ledger names, never the current one.
           return (await lookAtLedgerCommand?.(commandId)) ?? false;
         },
-        spillOversizedModelToolResult: async ({ operationId, result }) =>
-          await toolResultSpill.spill({
-            operationId,
-            result,
-            readers: spilledToolResultReadersForTurn({
-              tools: turnTools,
-              mcpServers: runSettings.mcpServers,
-              sandboxBackend: activeSandboxBackend ?? groupBoxBackend,
-            }),
-          }),
+        modelToolResultStore: toolResultStore,
         modelToolOutputTruncationTokens: () =>
           eventing.modelRunSettings.modelToolOutputTruncationTokens,
         localMcpServers,
@@ -1667,7 +1690,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         firstPartyTools: remoteFirstPartyMcpTools,
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
-        attemptToolDefinitions,
+        attemptToolDefinitions: attemptToolDefinitionsWithReader,
         connectorActionPolicy,
         attemptConnectorActionBindings,
       }),

@@ -93,7 +93,7 @@ import {
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
-import { ToolResultSpill } from "./tool-result-spill";
+import { ToolResultStore } from "./tool-result-store";
 import { attendanceChangeNote } from "./unattended";
 import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -468,7 +468,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sha256: string;
       filename: string;
     }> = [];
-    const toolResultSpill = new ToolResultSpill({
+    const toolResultStore = new ToolResultStore({
       db,
       objectStorage,
       observability,
@@ -488,7 +488,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getSetupBoxSession: () => sandboxState.setupBoxSession,
       getSdkOwnedSandboxSession: () => media.sdkOwnedSandboxSession,
       getSandboxGroupId: () => sandboxState.sandboxGroupId,
-      getTurnSandboxProvisioner: () => sandboxState.turnSandboxProvisioner,
       runWorkspaceMutation: runWorkspaceMutationForSandbox,
     });
     const historySink = createTurnHistorySink({
@@ -1874,7 +1873,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             attempt,
             sandboxState,
             media,
-            toolResultSpill,
+            toolResultStore,
             turn,
             session,
             fileAuthoritySubjectId,
@@ -1931,6 +1930,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxState,
             providerTurn,
             media,
+            toolResultStore,
             leases,
             turn,
             session,
@@ -2046,7 +2046,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             initialRunCredentialMaterial,
             sandboxCodemodeToken,
             media,
-            toolResultSpill,
             connectionScope,
             codemodeAuthority,
             rigVersion,
@@ -2324,7 +2323,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               historySink,
               checkpointBeforeProviderDispatch,
               media,
-              toolResultSpill,
               claimedResult,
               flushRuntimeBatcher,
               finalizeTurnOpStreamOps,

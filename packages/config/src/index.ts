@@ -1066,10 +1066,12 @@ const SettingsSchema = z.object({
   // Model-catalog auto-compact limit. When present it is clamped to
   // 90% of the raw window, matching Codex core's auto_compact_token_limit().
   contextAutoCompactThresholdTokens: z.coerce.number().int().positive().optional(),
-  // Provider-neutral fallback for canonical model-facing tool-result text.
-  // The current stable Codex catalog policy is 10k tokens; the truncator adds
-  // Codex's 1.2x JSON serialization allowance when applying it.
-  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(10_000),
+  // Provider-neutral fallback for how much tool-result text one result shows
+  // inline: 25k approximate tokens, 100,000 UTF-8 bytes (Claude Code's default
+  // MCP output limit). A larger result is stored whole and the model reads the
+  // rest by offset. The request-time safety truncation adds Codex's 1.2x
+  // serialization allowance on top, so it never cuts a result within this.
+  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(25_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -9953,6 +9955,28 @@ function acceptedDefinitionVersionMatches(
   );
 }
 
+/** Reproduce the previous default for digest checks only. The larger inline
+ * budget cannot change tool results already bounded and persisted by the old
+ * worker. Keep the live limit for new results and require all other fields to
+ * match a definition that the previous worker would have accepted. */
+function preLosslessToolOutputDefinition(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): ConfiguredModel | null {
+  // Pin both rollout values; a future default is a separate decision.
+  if (model.executionLimits?.toolOutputTruncationTokens !== 25_000) {
+    return null;
+  }
+  const historical = {
+    ...model,
+    executionLimits: {
+      ...model.executionLimits,
+      toolOutputTruncationTokens: 10_000,
+    },
+  };
+  return { ...historical, definitionVersion: definitionVersionFor(historical, provider) };
+}
+
 /**
  * Built-in models on Azure OpenAI or another base URL declared Ultrafast until
  * it was limited to the direct OpenAI API. A non-Ultrafast turn accepted under
@@ -10048,10 +10072,15 @@ export function configuredModelForAcceptedTurnExecutionPolicy(
     policy.definitionVersion === model.definitionVersion ||
     // Runtime test doubles may resolve a partial shape; a model without a
     // runnable web-search declaration has nothing to withhold.
-    model.capabilities?.hostedTools?.webSearch?.runnable !== true ||
-    !matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+    model.capabilities?.hostedTools?.webSearch?.runnable !== true
   ) {
     return model;
+  }
+  if (!matchesWebSearchEnablementDefinitionVersion(model, provider, policy)) {
+    const historical = preLosslessToolOutputDefinition(model, provider);
+    if (!historical || !matchesWebSearchEnablementDefinitionVersion(historical, provider, policy)) {
+      return model;
+    }
   }
   return {
     ...model,
@@ -10215,7 +10244,14 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
           effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
           autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
-          toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+          // Codex models show tool output inline up to the deployment policy
+          // like every other model; larger results are stored and read by
+          // offset. Never below the 10k-token policy their history was
+          // bounded under, so replayed items are never cut further.
+          toolOutputTruncationTokens: Math.max(
+            settings.modelToolOutputTruncationTokens,
+            CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+          ),
         };
       }),
   };
@@ -10973,13 +11009,27 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     : executable;
   // The individual-account cutover corrects subscription accounting labels.
   // Preserve an already accepted legacy policy only if its complete original
-  // executable digest matches; this exception cannot compose with other drift.
+  // executable digest matches, accounting for the inline output default rollout.
   const legacyClaudeScope =
     resolved.provider.kind === "claude-subscription-workspace"
       ? "workspace"
       : resolved.provider.kind === "claude-subscription-organization"
         ? "organization"
         : null;
+  let legacyOutputDefinition: ConfiguredModel | null | undefined;
+  const matchesBeforeOutputLimitRollout = (match: (model: ConfiguredModel) => boolean) => {
+    if (legacyOutputDefinition === undefined) {
+      legacyOutputDefinition = preLosslessToolOutputDefinition(resolved.model, resolved.provider);
+    }
+    return legacyOutputDefinition !== null && match(legacyOutputDefinition);
+  };
+  const matchesLegacyClaudeAccountingDigest = (model: ConfiguredModel) =>
+    parsed.definitionVersion ===
+    definitionVersionFor(
+      { ...model, credentialSource: parsed.credentialSource, billing: parsed.billing },
+      resolved.provider,
+      { includeAutoCompactTokenLimit: true },
+    );
   const legacyClaudeAccountingMatches =
     legacyClaudeScope !== null &&
     parsed.providerId === resolved.provider.id &&
@@ -10995,30 +11045,23 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
         upstreamPayer: legacyClaudeScope,
         metering: "external",
       }) &&
-    parsed.definitionVersion ===
-      definitionVersionFor(
-        {
-          ...resolved.model,
-          credentialSource: parsed.credentialSource,
-          billing: parsed.billing,
-        },
-        resolved.provider,
-        { includeAutoCompactTokenLimit: true },
-      );
+    (matchesLegacyClaudeAccountingDigest(resolved.model) ||
+      matchesBeforeOutputLimitRollout(matchesLegacyClaudeAccountingDigest));
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
   // "openai", so accept that one legacy digest only; Azure and every other
   // executable-definition change remain fail-closed. A model whose structured
   // output was enabled after acceptance is also checked in its one
   // pre-enablement form.
-  const structuredOutputHistorical = structuredOutputPreEnablementModel(
-    resolved.model,
-    resolved.provider,
-  );
+  const matchesDefinition = (model: ConfiguredModel) => {
+    if (acceptedDefinitionVersionMatches(model, resolved.provider, parsed)) return true;
+    const historical = structuredOutputPreEnablementModel(model, resolved.provider);
+    return (
+      historical !== null && acceptedDefinitionVersionMatches(historical, resolved.provider, parsed)
+    );
+  };
   const definitionVersionMatches =
-    acceptedDefinitionVersionMatches(resolved.model, resolved.provider, parsed) ||
-    (structuredOutputHistorical !== null &&
-      acceptedDefinitionVersionMatches(structuredOutputHistorical, resolved.provider, parsed));
+    matchesDefinition(resolved.model) || matchesBeforeOutputLimitRollout(matchesDefinition);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||

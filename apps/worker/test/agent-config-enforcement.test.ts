@@ -50,6 +50,7 @@ import {
   type OpenGeniRuntime,
   type PrepareToolsOptions,
 } from "@opengeni/runtime";
+import type { StoredToolResultReaders } from "@opengeni/runtime";
 import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { testSettings } from "@opengeni/testing/settings";
@@ -157,8 +158,6 @@ type FixtureOptions = {
   nestedAgentDepth?: number;
   /** The deployment Files server's allow-list (default: only the fixture tool). */
   filesAllowedTools?: string[];
-  /** Observes what the worker hands the spill port for an oversized result. */
-  onSpill?: (input: Parameters<PrepareTurnToolRuntimeDeps["toolResultSpill"]["spill"]>[0]) => void;
   /**
    * The product connector needs the person's own sign-in, and none was
    * admitted for this turn (no accepted account binding).
@@ -173,6 +172,16 @@ type FixtureOptions = {
 // token-scoped tools/list response, and transport providers. It never applies
 // agent capability filtering itself.
 async function captureWorkerRequest(options: FixtureOptions = {}) {
+  const toolResultReaders: StoredToolResultReaders[] = [];
+  const toolResultStore = {
+    store: async () => {
+      throw new Error("fixture results are small");
+    },
+    inlineMaxBytes: () => 100_000,
+    readers: () => toolResultReaders.at(-1) ?? { reader: "none" as const, shell: false },
+    setReaders: (readers: StoredToolResultReaders) => toolResultReaders.push(readers),
+    readBytes: async () => null,
+  } as unknown as PrepareTurnToolRuntimeDeps["toolResultStore"];
   const delegatedPayloads: Awaited<ReturnType<typeof verifyDelegatedAccessToken>>[] = [];
   const interactionPayloads: Awaited<ReturnType<typeof verifyDelegatedAccessToken>>[] = [];
   const mcp = startTestMcpServer({
@@ -520,16 +529,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       objectStorage: null,
       observability: createObservability(settings, { component: "worker" }),
       media: {} as BuildTurnAgentDeps["media"],
-      ...(options.onSpill
-        ? {
-            toolResultSpill: {
-              spill: async (spillInput) => {
-                options.onSpill!(spillInput);
-                return { content: [{ type: "text", text: "spilled" }] };
-              },
-            } as PrepareTurnToolRuntimeDeps["toolResultSpill"],
-          }
-        : {}),
+      toolResultStore,
       turn,
       session,
       fileAuthoritySubjectId: null,
@@ -566,6 +566,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       observability: createObservability(settings, { component: "worker" }),
       objectStorage: {} as NonNullable<BuildTurnAgentDeps["objectStorage"]>,
       media: {} as BuildTurnAgentDeps["media"],
+      toolResultStore,
       turn,
       session,
       runSettings: settings,
@@ -682,6 +683,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       interactionPayloads,
       request,
       names: request.tools.map(toolName).sort(),
+      toolResultReaders,
       visibleNames: visibleTools.map(toolName).sort(),
       catalog: prepared.attemptToolCatalog!,
       preparation: preparation!,
@@ -1932,48 +1934,30 @@ describe("request_human_input follows who can answer", () => {
   });
 });
 
-// A result too large to show names only the readers the session has.
-describe("oversized tool results", () => {
-  const readersFor = async (options: FixtureOptions) => {
-    const seen: unknown[] = [];
-    const captured = await captureWorkerRequest({
-      ...options,
-      onSpill: (input) => seen.push(input.readers),
-    });
-    await captured.preparation.spillOversizedModelToolResult!({
-      operationId: "66666666-6666-4666-8666-666666666666",
-      result: { content: [{ type: "text", text: "x" }] },
-      serializedBytes: 1,
-    });
-    return seen;
+// `tool_result_read` reads tool results too large to show whole. It is never
+// in a first-request tool list, so no session's prompt prefix changes for it.
+describe("stored tool result reader", () => {
+  const embedding: FixtureOptions = {
+    agent: agentConfig("none"),
+    builtins: false,
+    eagerProduct: true,
+    hasSkills: false,
   };
 
-  test("the embedding profile has no shell and no download tool", async () => {
-    expect(
-      await readersFor({
-        agent: agentConfig("none"),
-        builtins: false,
-        eagerProduct: true,
-        hasSkills: false,
-      }),
-    ).toEqual([{ shell: false, fileDownload: false }]);
+  test("with a search router it is a deferred tool, loaded by exact name; the tool list is unchanged", async () => {
+    const turn = await captureWorkerRequest({ lazy: true });
+    expect(turn.names).not.toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)?.reader).toBe("searchable");
+    expect(turn.deferredNames).toContain("tool_result_read");
   });
 
-  test("attached compute brings the shell", async () => {
-    expect(await readersFor({ agent: agentConfig("none"), machineAttached: true })).toEqual([
-      { shell: true, fileDownload: false },
-    ]);
-  });
-
-  test("full capabilities with compute bring the shell and the download tool", async () => {
-    const filesAllowedTools = ["search_documents", "files_get_download_url"];
-    expect(
-      await readersFor({ agent: agentConfig("all"), machineAttached: true, filesAllowedTools }),
-    ).toEqual([{ shell: true, fileDownload: true }]);
-    // The same session under capabilities "none" has no Files server selected.
-    expect(
-      await readersFor({ agent: agentConfig("none"), machineAttached: true, filesAllowedTools }),
-    ).toEqual([{ shell: true, fileDownload: false }]);
+  test("without a search router the tool list is unchanged and the sandbox copy is the reader", async () => {
+    const turn = await captureWorkerRequest(embedding);
+    expect(turn.names).not.toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: false });
+    const machine = await captureWorkerRequest({ ...embedding, machineAttached: true });
+    expect(machine.names).not.toContain("tool_result_read");
+    expect(machine.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: true });
   });
 });
 

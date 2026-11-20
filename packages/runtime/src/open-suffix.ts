@@ -2,6 +2,7 @@ import { RunContext, type Agent } from "@openai/agents";
 import { INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME } from "@opengeni/contracts";
 import { HUMAN_INPUT_TOOL_NAME } from "./run-events";
 import { runWithMcpInputAnswer, type McpInputAnswer } from "./mcp-input-requests";
+import { agentModelToolResultStoringTool } from "./model-tool-result-store";
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import {
   extractOpenSuffixMembers,
@@ -187,7 +188,9 @@ export async function invokePreparedAgentTool(input: {
       ? await input.agent.getMcpTools(new RunContext())
       : [];
   const mcp = mcpTools.find((tool) => tool.type === "function" && tool.name === input.toolName);
-  const tool = hosted ?? mcp;
+  const found = hosted ?? mcp;
+  // Stored and shown as a view like any call of this agent when oversized.
+  const tool = found ? agentModelToolResultStoringTool(input.agent, found) : found;
   if (!tool || tool.type !== "function") {
     throw new OpenSuffixUnresumableError(
       `Open suffix cannot invoke missing tool ${input.toolName}`,

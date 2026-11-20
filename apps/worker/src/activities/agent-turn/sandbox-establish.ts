@@ -75,7 +75,6 @@ import {
   measureTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
-import { ToolResultSpill } from "./tool-result-spill";
 import type { createTurnMediaArtifacts } from "./media-artifacts";
 
 import {
@@ -196,7 +195,6 @@ export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   initialRunCredentialMaterial: NormalizedRunCredentialMaterial | null;
   sandboxCodemodeToken: string | undefined;
   media: ReturnType<typeof createTurnMediaArtifacts>;
-  toolResultSpill: ToolResultSpill;
   connectionScope: { accountId: string; workspaceId: string };
   codemodeAuthority: SandboxCodemodeAuthority;
 };
@@ -1062,7 +1060,6 @@ export async function bindLazySandboxProvisioner(
     initialRunCredentialMaterial,
     sandboxCodemodeToken,
     media,
-    toolResultSpill,
     connectionScope,
     codemodeAuthority,
     objectStorage,
@@ -1347,7 +1344,6 @@ export async function bindLazySandboxProvisioner(
                 provisioned.established.session,
               );
             }
-            await toolResultSpill.materializeDeferred();
             throwIfTurnOperationCancelled(sandboxResumeSignal);
           } catch (error) {
             // Nothing the model asked for has reached the box yet, and every

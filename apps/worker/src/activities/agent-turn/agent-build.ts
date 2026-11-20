@@ -26,6 +26,7 @@ import {
   CommandCompletionDelivery,
   type ConnectorActionPolicyHooks,
   modelToolTextBudgetBytes,
+  type ModelToolResultStore,
   type RepositorySkillsIndex,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
@@ -143,6 +144,8 @@ export type BuildTurnAgentDeps = {
   sandboxState: SandboxRuntimeState;
   providerTurn: ProviderTurnState;
   media: ReturnType<typeof createTurnMediaArtifacts>;
+  /** Keeps tool results larger than the model may see inline; see tool-result-store.ts. */
+  toolResultStore: ModelToolResultStore;
   leases: ReturnType<typeof createTurnCredentialLeases>;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
@@ -223,6 +226,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     sandboxState,
     providerTurn,
     media,
+    toolResultStore,
     leases,
     turn,
     session,
@@ -909,6 +913,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
+        modelToolResultStore: toolResultStore,
         ...(session.agent
           ? {
               agentConfig: session.agent,

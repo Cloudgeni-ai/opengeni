@@ -319,11 +319,18 @@ See `packages/runtime/src/anthropic-request-size.ts`,
 
 ## Model-facing tool output
 
-Every resolved model carries a textual tool-output policy. The Codex catalog's
-10,000-token policy is the default; Opengeni applies Codex's exact 1.2x JSON
-serialization allowance, UTF-8-safe head/tail truncation, and explicit
-`…N tokens truncated…` marker. Structured textual parts share one sequential
-budget while images, files, and encrypted content remain structured.
+Every resolved model carries a textual tool-output policy: how much text one
+tool result shows inline, 25,000 approximate tokens (100,000 UTF-8 bytes) by
+default. A newly produced result over it is stored whole and the model gets a
+view with the call that reads the rest (see
+[run lifecycle](run-lifecycle.md), "Tool results are lossless"), so this
+truncation is only the safety net behind that store. It applies Codex's exact
+1.2x JSON serialization allowance, UTF-8-safe head/tail truncation, and
+explicit `…N tokens truncated…` marker. Structured textual parts share one
+sequential budget while images, files, and encrypted content remain
+structured. Codex models never go below the 10,000-token policy the default
+used to be, so the bound only grows and history bounded under the earlier
+policy replays unchanged.
 
 The same pure normalizer runs at both canonical boundaries: before new
 `session_history_items` rows are written and again at the final live model-input
