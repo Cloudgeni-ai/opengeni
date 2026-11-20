@@ -91,7 +91,7 @@ describe("simplified interface navigation", () => {
       "Apps, images, documents, and files built with Opengeni",
     );
     expect(itemDescription(artifacts, "Geni")).toBe(
-      "Sites, images, documents, and files built with Geni",
+      "Apps, images, documents, and files built with Geni",
     );
     for (const item of WORKSPACE_CONFIG_GROUPS.flatMap((group) => group.items)) {
       expect(itemDescription(item, "Geni")).not.toContain("Opengeni");
