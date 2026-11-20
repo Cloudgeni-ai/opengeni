@@ -486,6 +486,12 @@ describe("organization MCP named tool helpers", () => {
         "turn-b",
       ).event?.text,
     ).toBe("merged");
+    // Merged in one answer, finished in the next: the next call follows no turn.
+    expect(
+      waitState([{ sequence: 7, type: "turn.superseded", turnId: "turn-b" }], "turn-b"),
+    ).toEqual({
+      state: "running",
+    });
   });
 
   test("Skill names and approval links", () => {

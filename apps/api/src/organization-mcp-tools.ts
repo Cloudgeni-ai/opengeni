@@ -796,6 +796,8 @@ export function waitState(
 ): {
   state: "done" | "failed" | "needs_attention" | "running";
   event?: WaitEvent;
+  /** The turn to pass next time; none once the turn was merged into another. */
+  turnId?: string | undefined;
 } {
   // A turn merged into a later one hands its answer to that turn.
   const followed =
@@ -806,23 +808,24 @@ export function waitState(
     // A follow-up's own turn: an earlier turn ending isn't its answer.
     if (followed && event.turnId && event.turnId !== followed) continue;
     // Waiting for model capacity needs nobody; it resumes on its own.
-    if (event.type.includes("capacity")) return { state: "running", event };
-    if (event.type === "turn.completed") return { state: "done", event };
+    if (event.type.includes("capacity")) return { state: "running", event, turnId: followed };
+    if (event.type === "turn.completed") return { state: "done", event, turnId: followed };
     if (
       event.type === "turn.failed" ||
       event.type === "turn.cancelled" ||
       event.type === "rig.setup.failed"
     )
-      return { state: "failed", event };
-    if (event.type !== "turn.superseded") return { state: "needs_attention", event };
+      return { state: "failed", event, turnId: followed };
+    if (event.type !== "turn.superseded")
+      return { state: "needs_attention", event, turnId: followed };
   }
-  return { state: "running" };
+  return { state: "running", turnId: followed };
 }
 
 const waitFor = tool({
   name: "wait_for",
   title: "Wait for a chat",
-  description: `Wait up to ${WAIT_MAX_SECONDS} seconds for a delegated chat. done is true when its turn finished with a final answer (finalAnswer). Otherwise call again with the returned cursor. needs_attention means the person has to answer or approve something in the chat (url). After session_send, pass its turnId.`,
+  description: `Wait up to ${WAIT_MAX_SECONDS} seconds for a delegated chat. done is true when its turn finished with a final answer (finalAnswer). Otherwise call again with the returned cursor. needs_attention means the person has to answer or approve something in the chat (url). After session_send, pass its turnId, and then the turnId each answer returns.`,
   input: WaitForInput,
   readOnly: true,
   run: async (context, args) =>
@@ -844,7 +847,7 @@ const waitFor = tool({
       };
       const target = value.changed?.find((each) => each.sessionId === args.sessionId);
       const events = target?.events ?? [];
-      const { state, event } = waitState(events, args.turnId);
+      const { state, event, turnId } = waitState(events, args.turnId);
       return json({
         sessionId: args.sessionId,
         state,
@@ -871,6 +874,8 @@ const waitFor = tool({
             }
           : {}),
         cursor: target?.latestSequence ?? args.cursor,
+        // Pass it on the next call; gone once the turn merged into a later one.
+        ...(turnId ? { turnId } : {}),
         url: chatUrl(context, workspaceId, args.sessionId),
       });
     }),
