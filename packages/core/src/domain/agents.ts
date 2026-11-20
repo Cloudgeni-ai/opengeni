@@ -1,4 +1,6 @@
 import {
+  AgentSkillRef,
+  AgentToolPermissionRule,
   SessionAvatar,
   slackAgentHandle,
   slackAgentNameKey,
@@ -157,6 +159,62 @@ export function agentSlackAvailabilityView(
   return slackAvailability(agent, install, teamNames);
 }
 
+/**
+ * An agent's stored Can use rules, each read through the contract. A rule a
+ * later release wrote in a shape this one cannot read is skipped.
+ */
+export function agentToolPermissionsOf(agent: Pick<AgentRecord, "toolPermissions">) {
+  return agent.toolPermissions.flatMap((rule) => {
+    const parsed = AgentToolPermissionRule.safeParse(rule);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+/**
+ * The rule sets a chat enforces for one agent, each applied on its own with
+ * the strictest decision across sets winning. A rule this release can't read
+ * fully (for example a permission a later release added) still asks first
+ * rather than being ignored: it keeps its connector and tool when readable,
+ * else covers every tool of its connector, or of every connector. Those
+ * fallbacks form a separate set, so they can only make a call stricter and
+ * never outrank a readable Block.
+ */
+export function agentToolPermissionSetsForEnforcement(
+  agent: Pick<AgentRecord, "toolPermissions">,
+): AgentToolPermissionRule[][] {
+  const readable: AgentToolPermissionRule[] = [];
+  const fallbacks: AgentToolPermissionRule[] = [];
+  for (const rule of agent.toolPermissions) {
+    const parsed = AgentToolPermissionRule.safeParse(rule);
+    if (parsed.success) {
+      readable.push(parsed.data);
+      continue;
+    }
+    const raw = rule && typeof rule === "object" ? (rule as Record<string, unknown>) : {};
+    const fallback = AgentToolPermissionRule.safeParse({ ...raw, permission: "ask" });
+    if (fallback.success) {
+      fallbacks.push(fallback.data);
+      continue;
+    }
+    const connector = AgentToolPermissionRule.safeParse({
+      connector: raw.connector,
+      tool: "*",
+      permission: "ask",
+    });
+    fallbacks.push(
+      connector.success ? connector.data : { connector: "*", tool: "*", permission: "ask" },
+    );
+  }
+  return fallbacks.length > 0 ? [readable, fallbacks] : [readable];
+}
+
+function agentSkillsOf(agent: Pick<AgentRecord, "skills">) {
+  return agent.skills.flatMap((skill) => {
+    const parsed = AgentSkillRef.safeParse(skill);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
 /** An agent as lists show it. */
 export function agentSummaryView(agent: AgentRecord, context: AgentViewContext): AgentSummary {
   const avatar = SessionAvatar.safeParse(agent.avatar);
@@ -180,6 +238,9 @@ export function agentSummaryView(agent: AgentRecord, context: AgentViewContext):
       scope: agent.visibility === "private" ? "personal" : "workspace",
       reviewFirst: context.memoryReviewFirst,
     },
+    toolPermissions: agentToolPermissionsOf(agent),
+    skills: agentSkillsOf(agent),
+    templateKey: agent.templateKey,
     slack: context.installs
       .filter((install) => install.agentId === agent.id)
       .map((install) => slackAvailability(agent, install, context.slackTeamNames)),

@@ -19,7 +19,7 @@
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source)
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger)
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
@@ -981,6 +981,10 @@ type NewAutomationSearch = {
   sourceSessionId?: string;
   /** Start with a trigger on this event source. */
   source?: string;
+  /** Each run is a chat with this agent (its "Starts when"). */
+  agent?: string;
+  /** Start from this one of the agent's suggested triggers. */
+  agentTrigger?: number;
 };
 function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
   return {
@@ -998,6 +1002,14 @@ function newAutomationSearch(search: Record<string, unknown>): NewAutomationSear
       : {}),
     ...(typeof search.source === "string" && AUTOMATIONS_SEARCH_UUID.test(search.source)
       ? { source: search.source }
+      : {}),
+    ...(typeof search.agent === "string" && AUTOMATIONS_SEARCH_UUID.test(search.agent)
+      ? { agent: search.agent }
+      : {}),
+    ...(Number.isInteger(Number(search.agentTrigger)) &&
+    Number(search.agentTrigger) >= 0 &&
+    Number(search.agentTrigger) < 10
+      ? { agentTrigger: Number(search.agentTrigger) }
       : {}),
   };
 }
@@ -1653,11 +1665,20 @@ function Automations() {
 
 function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source } = workspaceAutomationNewRoute.useSearch();
+  const { template, from, sourceSessionId, source, agent, agentTrigger } =
+    workspaceAutomationNewRoute.useSearch();
   return (
     <LazyAutomationFormRoute
       workspaceId={workspaceId}
-      mode={{ kind: "create", template, from, sourceSessionId, eventSourceId: source }}
+      mode={{
+        kind: "create",
+        template,
+        from,
+        sourceSessionId,
+        eventSourceId: source,
+        agentId: agent,
+        agentTrigger,
+      }}
     />
   );
 }
