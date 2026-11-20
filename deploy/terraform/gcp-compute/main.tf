@@ -277,7 +277,6 @@ resource "google_compute_instance_template" "host" {
   network_interface {
     network    = var.network.network
     subnetwork = var.network.subnetwork
-    nic_type   = var.nic_type == "" ? null : var.nic_type
     dynamic "access_config" {
       for_each = var.assign_external_ip ? [1] : []
       content {}

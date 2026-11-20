@@ -434,8 +434,8 @@ restarting the guard, which would kill the VMs.
 On Google Cloud, the `gcp-compute` Terraform root writes both settings
 from `machine = "shared"` and `memory_total_mib`, and attaches the other
 work's disks (`extra_disks`); a bare-metal machine type there also needs
-`nested = false`, `shielded_vm = false`, `nic_type = "IDPF"`, an empty
-`min_cpu_platform` and a Hyperdisk `boot_disk_type` (see
+`nested = false`, `shielded_vm = false`, an empty `min_cpu_platform`
+and a Hyperdisk `boot_disk_type` (see
 `terraform.tfvars.example`). Since a fence never resets a shared
 machine, give its control service no instance group to reset either.
 

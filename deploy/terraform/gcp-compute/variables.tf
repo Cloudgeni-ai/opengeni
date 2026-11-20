@@ -57,7 +57,7 @@ variable "advertise_public_address" {
 }
 
 variable "machine_type" {
-  description = "Host machine type. Nested virtualization needs an Intel family such as n2 or c3; bare-metal types (*-metal, such as c3-highmem-192-metal or c4d-highmem-384-metal) run the bare-metal memory profile, with nested = false, shielded_vm = false, nic_type = \"IDPF\" and a Hyperdisk boot_disk_type."
+  description = "Host machine type. Nested virtualization needs an Intel family such as n2 or c3; bare-metal types (*-metal, such as c3-highmem-192-metal or c4d-highmem-384-metal) run the bare-metal memory profile, with nested = false, shielded_vm = false and a Hyperdisk boot_disk_type; they choose their own network interface (IDPF)."
   type        = string
   default     = "n2-standard-16"
 }
@@ -118,12 +118,6 @@ variable "shielded_vm" {
   description = "Boot hosts as Shielded VMs (secure boot, vTPM, integrity monitoring). Bare-metal machine types do not support it: false there."
   type        = bool
   default     = true
-}
-
-variable "nic_type" {
-  description = "Network interface type, such as IDPF, which bare-metal machine types need, or GVNIC. Empty: the machine type's default."
-  type        = string
-  default     = ""
 }
 
 variable "machine" {

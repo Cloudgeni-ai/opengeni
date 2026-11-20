@@ -40,7 +40,6 @@ state_disk = {
 # nested           = false
 # min_cpu_platform = ""
 # shielded_vm      = false
-# nic_type         = "IDPF"
 # boot_disk_type   = "hyperdisk-balanced"
 # state_disk       = { pd_type = "hyperdisk-balanced", pd_size_gb = 6000 }
 # machine          = "shared"
