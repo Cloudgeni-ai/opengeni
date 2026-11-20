@@ -20,6 +20,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createConnection,
+  ensureManagedAccessForUser,
   getConnectionMetadata,
   setConnectionStatus,
   createSession,
@@ -2636,6 +2637,144 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([two.mcp.close(), two.server.close()]);
     }
   }, 60_000);
+
+  test("a connector not turned on here, with the person's one own login for it, says the card uses that login", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const suffix = crypto.randomUUID().slice(0, 8);
+    // A person with their own logins: a signed-in user in a shared workspace.
+    const userId = `notes-owner-${suffix}`;
+    const owner = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Notes owner",
+    });
+    const team = access.workspaceGrants.find(
+      (grant) => grant.workspaceId === access.defaultWorkspaceId,
+    )!;
+    const capabilityId = `mcp:notes-own-login-${suffix}`;
+    const providerDomain = `notes-${suffix}.example.test`;
+    const mcpUrl = `https://notes-${suffix}.example.test/mcp`;
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: team.accountId,
+      workspaceId: team.workspaceId,
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: `Notes ${suffix}`,
+      endpointUrl: mcpUrl,
+      authModel: "oauth2",
+      authKind: "oauth2",
+      providerDomain,
+      metadata: { mcpServerId: `notes-own-login-${suffix}` },
+    });
+    const ownLogin = (email: string) =>
+      createConnection(client.db, {
+        accountId: team.accountId,
+        workspaceId: team.workspaceId,
+        subjectId: owner,
+        providerDomain,
+        kind: "oauth2",
+        credentialEncrypted: "unused-test-credential",
+        metadata: { email, mcpUrl },
+      });
+    const session = async () => {
+      const attempt = await seedAttempt(false, undefined, owner, undefined, team);
+      const server = buildOpenGeniMcpServer(
+        { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: team.accountId,
+          workspaceId: team.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "notes-own-login-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      const setup = async () =>
+        (
+          mcpJson(
+            await mcp.callTool({
+              name: "capability_catalog_search",
+              arguments: { query: `Notes ${suffix}` },
+            }),
+          ) as { matches: Array<{ capabilityId: string; setup: Record<string, unknown> }> }
+        ).matches.find((entry) => entry.capabilityId === capabilityId)?.setup;
+      return {
+        attempt,
+        mcp,
+        setup,
+        close: async () => await Promise.all([mcp.close(), server.close()]),
+      };
+    };
+
+    // No own login: an ordinary first connection, unchanged.
+    const none = await session();
+    try {
+      const setup = await none.setup();
+      expect(setup).toMatchObject({
+        status: "authorization_required",
+        action: "connect",
+        detail: "The user must confirm the provider domain and complete sign-in.",
+      });
+      expect(setup).not.toHaveProperty("reason");
+    } finally {
+      await none.close();
+    }
+
+    await ownLogin(`me-${suffix}@example.test`);
+    const one = await session();
+    try {
+      expect(await one.setup()).toMatchObject({
+        status: "authorization_required",
+        action: "connect",
+        reason: "not_enabled",
+        detail: `Notes ${suffix} isn't turned on in this workspace yet, but the person already has their own Notes ${suffix} login (me-${suffix}@example.test). Its card offers to use that login here, with no new sign-in, and turns Notes ${suffix} on here for each person's own account. If the person may not turn it on here, the card says so and a workspace admin has to turn it on.`,
+        nextAction: { toolName: "capability_authorization_request", capabilityId },
+      });
+      const request = await one.mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId, rationale: "Read the person's notes." },
+      });
+      expect(request.isError).not.toBe(true);
+      expect(mcpJson(request)).toMatchObject({
+        capabilityId,
+        status: "authorization_requested",
+        action: "connect",
+        reason: "not_enabled",
+        cardShown: true,
+        message: `The card was posted. Notes ${suffix} isn't turned on in this workspace yet; the card offers to use the person's existing Notes ${suffix} login here, with no new sign-in, and turns Notes ${suffix} on here for each person's own account. Nothing is turned on yet. Don't ask them to sign in again. If the card says only an admin can turn it on, tell them a workspace admin has to turn Notes ${suffix} on. When the person who asked finishes it, you get an update and continue then, so don't ask them to tell you when they're done.`,
+      });
+      // The card itself is the ordinary Connect card: it finds the login itself.
+      const events = await listSessionEvents(client.db, team.workspaceId, one.attempt.sessionId);
+      expect(events.find((event) => event.type === "tool.auth_needed")?.payload).toMatchObject({
+        reason: "missing_connection",
+        capability: { id: capabilityId, action: "connect" },
+      });
+    } finally {
+      await one.close();
+    }
+
+    // Two own logins: the card asks which account by signing in, as before.
+    await ownLogin(`work-${suffix}@example.test`);
+    const two = await session();
+    try {
+      const setup = await two.setup();
+      expect(setup).toMatchObject({
+        detail: "The user must confirm the provider domain and complete sign-in.",
+      });
+      expect(setup).not.toHaveProperty("reason");
+    } finally {
+      await two.close();
+    }
+  }, 60_000);
 });
 
 function mcpJson(result: Awaited<ReturnType<Client["callTool"]>>): unknown {
@@ -2652,6 +2791,7 @@ async function seedAttempt(
   ],
   initiatorSubjectId: string = workspace.subjectId,
   toolPolicy?: SessionToolPolicy,
+  target: { accountId: string; workspaceId: string } = workspace,
 ): Promise<{
   sessionId: string;
   turnId: string;
@@ -2659,8 +2799,8 @@ async function seedAttempt(
   executionGeneration: number;
 }> {
   const session = await createSession(client.db, {
-    accountId: workspace.accountId,
-    workspaceId: workspace.workspaceId,
+    accountId: target.accountId,
+    workspaceId: target.workspaceId,
     initialMessage: "Use GitHub for this task",
     resources: [],
     tools: [],
@@ -2680,7 +2820,7 @@ async function seedAttempt(
       status, position, prompt, model, reasoning_effort, sandbox_backend,
       execution_generation, initiator_kind, initiator_subject_id, initiator_context, mcp_account_bindings
     ) VALUES (
-      ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, gen_random_uuid(),
+      ${target.accountId}, ${target.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`capability-wf-${crypto.randomUUID()}`}, 'running', 0, 'Use GitHub',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
       ${initiatorSubjectId}, '{"accepted":true}'::jsonb, ${knownEmpty ? shared!.admin.json([]) : null}::jsonb
@@ -2700,7 +2840,7 @@ async function seedAttempt(
         state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
         verified_control_revision, mcp_approval_policies
       ) VALUES (
-        ${attemptId}, ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, ${turn!.id},
+        ${attemptId}, ${target.accountId}, ${target.workspaceId}, ${session.id}, ${turn!.id},
         ${executionGeneration}, 'running', 'capability-wf', ${`run-${attemptId}`},
         ${`activity-${attemptId}`}, 0, '{}'::jsonb
       )`;
