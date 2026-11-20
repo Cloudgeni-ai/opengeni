@@ -2255,6 +2255,31 @@ describe("buildTimeline", () => {
     );
   });
 
+  test("strips all UTM keys from assistant links without changing the source or other URL parts", () => {
+    reset();
+    const labelled =
+      "[The guide](https://example.com/guide?utm_campaign=launch&lang=en&lang=nb&utm_source=newsletter&q=a%20b+c#steps)";
+    const bare = "https://example.com/page?utm_medium=email&utm_medium=other#top";
+    const selfLabelled = "https://example.com/article?UTM%5FCONTENT=sidebar&id=7#footnote";
+    const code = "`https://example.com/example?utm_term=keep`";
+    const text = [labelled, `<${bare}>`, `[${selfLabelled}](${selfLabelled})`, code].join("\n");
+    const source = event("agent.message.completed", { text, phase: "final_answer" });
+    const userSource = event("user.message", { text: bare });
+
+    const items = buildTimeline(englishText, [source, userSource]);
+
+    expect(items.find((item) => item.kind === "agent-message")?.text).toBe(
+      [
+        "[The guide](https://example.com/guide?lang=en&lang=nb&q=a%20b+c#steps)",
+        "<https://example.com/page#top>",
+        "[https://example.com/article?id=7#footnote](https://example.com/article?id=7#footnote)",
+        code,
+      ].join("\n"),
+    );
+    expect(source.payload).toMatchObject({ text });
+    expect(items.find((item) => item.kind === "user-message")?.text).toBe(bare);
+  });
+
   test("keeps ordinary words that contain cite", () => {
     reset();
     const text = "Please cite turn 3 of the excited recital; citeturn4 stays.";
