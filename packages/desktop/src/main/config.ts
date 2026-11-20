@@ -65,7 +65,8 @@ export interface DesktopAppConfig {
    * IDs of the product's own Chrome extensions (its branded build of the
    * Opengeni Browser extension) that may reach this computer's agent, so
    * agents can work in the person's own Chrome through them. Each is Chrome's
-   * 32-letter extension ID. Opengeni Browser itself is always allowed.
+   * 32-letter extension ID. An app that configures branded IDs registers only
+   * those extensions; otherwise it registers Opengeni Browser.
    */
   browserExtensionIds?: readonly string[];
   /**
