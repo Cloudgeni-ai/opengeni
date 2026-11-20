@@ -25,7 +25,8 @@ beforeAll(async () => {
     if (requireRealDatabase) throw new Error("turn credit usage requires real PostgreSQL");
     return;
   }
-  client = createDb(shared.appUrl);
+  client = createDb(shared.appUrl, { max: 1 });
+  await client.db.execute(sql`set plan_cache_mode = force_generic_plan`);
 }, 900_000);
 
 afterAll(async () => {
@@ -154,6 +155,110 @@ async function terminalEvent(scope: Scope, turnId: string, type: string) {
 }
 
 describe("per-turn credit usage on terminal turn events", () => {
+  test("terminal usage does not read unrelated billing history under runtime RLS", async () => {
+    if (!client) return;
+    const scope = await seedSession("large billing history");
+    const hostedTurnId = await seedTurn(scope);
+    const subscriptionTurnId = await seedTurn(scope);
+    // The history is visible to this session's runtime connection, but has
+    // nothing to do with either turn. Exercise the real table policies.
+    await shared!.admin`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model, reasoning_effort,
+        sandbox_backend, resources, tools, metadata, started_at, finished_at
+      )
+      select md5(n::text)::uuid, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+        gen_random_uuid(), ${`session-${scope.sessionId}`}, 'completed', n + 1000,
+        '', 'scripted-model', 'medium', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, now(), now()
+      from generate_series(0, 999) fixture(n)`;
+    await shared!.admin`
+      insert into usage_events (
+        account_id, workspace_id, session_id, turn_id, event_type, quantity, unit, idempotency_key, occurred_at
+      )
+      select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+        md5((n / 100)::text)::uuid, 'model.tokens', 1, 'count', 'usage:history:' || n::text, now()
+      from generate_series(0, 99999) fixture(n)`;
+    await shared!.admin`
+      insert into credit_ledger_entries (account_id, workspace_id, type, amount_micros, idempotency_key)
+      select ${scope.accountId}, ${scope.workspaceId}, 'adjustment', 1,
+        'credit:history:' || n::text
+      from generate_series(1, 25000) fixture(n)`;
+    await shared!.admin`analyze usage_events`;
+    await shared!.admin`analyze credit_ledger_entries`;
+    const scans = async () => {
+      await db().execute(sql`select pg_stat_force_next_flush()`);
+      await Bun.sleep(50);
+      return await shared!.admin<{ relname: string; seq_tup_read: string }[]>`
+        select relname, seq_tup_read::text from pg_stat_user_tables
+        where relname in ('usage_events', 'credit_ledger_entries') order by relname`;
+    };
+
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      ...Array.from({ length: 277 }, (_, index) => ({
+        type: "agent.model.usage" as const,
+        turnId: subscriptionTurnId,
+        payload: modelUsage(
+          `subscription-${index}`,
+          index < 233
+            ? { settlement: { ...creditsSettlement(0), chargesOpenGeniCredits: false } }
+            : { pricedCostMicros: 0 },
+        ),
+      })),
+    ]);
+    await withRlsContext(db(), scope, async (scoped) => {
+      await scoped.execute(sql`insert into credit_ledger_entries
+        (account_id, workspace_id, type, amount_micros, idempotency_key)
+        values (${scope.accountId}::uuid, ${scope.workspaceId}::uuid, 'adjustment', -200,
+          ${`credit:byok_platform_fee:${subscriptionTurnId}:subscription-233`})`);
+    });
+    const beforeSubscription = await scans();
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      { type: "turn.completed", turnId: subscriptionTurnId, payload: { status: "completed" } },
+    ]);
+    const afterSubscription = await scans();
+    expect((await terminalEvent(scope, subscriptionTurnId, "turn.completed"))?.usage).toMatchObject(
+      {
+        creditsMicros: 200,
+        tokens: { input: 27_700, output: 2_770 },
+      },
+    );
+
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      {
+        type: "agent.model.usage",
+        turnId: hostedTurnId,
+        payload: modelUsage("settled", { settlement: creditsSettlement(100, 20) }),
+      },
+      {
+        type: "agent.model.usage",
+        turnId: hostedTurnId,
+        payload: modelUsage("owed", { settlement: creditsSettlement(100, 30) }),
+      },
+    ]);
+    await usageRow(
+      scope,
+      hostedTurnId,
+      "web_search.cost",
+      20,
+      `hosted:${hostedTurnId}:settled`,
+      `usage:web_search.cost:hosted:${hostedTurnId}:settled`,
+    );
+    const beforeHosted = await scans();
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      { type: "turn.completed", turnId: hostedTurnId, payload: { status: "completed" } },
+    ]);
+    const afterHosted = await scans();
+    expect((await terminalEvent(scope, hostedTurnId, "turn.completed"))?.usage).toMatchObject({
+      creditsMicros: 250,
+      breakdown: { model: 200, webSearch: 50 },
+    });
+    expect({ subscription: afterSubscription, hosted: afterHosted }).toEqual({
+      subscription: beforeSubscription,
+      hosted: beforeHosted,
+    });
+  });
+
   test("sums every charge of the turn once, including the last call's owed settlement", async () => {
     if (!client) return;
     const scope = await seedSession("credits");
