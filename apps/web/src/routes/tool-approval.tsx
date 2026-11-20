@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ShieldCheckIcon } from "lucide-react";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { FormPage } from "@opengeni/react/ui/form-dialog";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { ConsentFrame } from "@/components/organization-access/mcp-consent-page";
+import { ConsentFrame as BaseConsentFrame } from "@/components/organization-access/mcp-consent-page";
 
 /*
  * Approving one tool call a connected agent (Claude Code, Codex, Cursor...)
@@ -55,6 +55,15 @@ export function parsePendingToolCall(hash: string): PendingToolCall | null {
 }
 
 type Resolved = { definitionDigest: string; entry: { title?: string; description?: string } };
+
+/** The consent frame scrolls itself inside the app canvas. */
+function ConsentFrame({ children }: { children: ReactNode }) {
+  return (
+    <div data-workspace-scroll-owner="self-managed" className="flex h-full min-h-0 flex-col">
+      <BaseConsentFrame>{children}</BaseConsentFrame>
+    </div>
+  );
+}
 
 export function ToolApprovalRoute({ workspaceId }: { workspaceId: string }) {
   const { client } = useAppContext();
