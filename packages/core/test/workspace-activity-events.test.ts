@@ -14,7 +14,9 @@ import {
 const ada = "subject-ada";
 const bob = "subject-bob";
 
-function fact(overrides: Partial<WorkspaceActivityFact> = {}): WorkspaceActivityFact {
+function fact(
+  overrides: Partial<WorkspaceActivityFact> = {},
+): WorkspaceActivityFact {
   return {
     id: "8b0c7f0e-1111-4c2b-9a51-000000000001",
     type: "turn.completed",
@@ -57,7 +59,11 @@ describe("This workspace event types", () => {
         .find((entry) => entry.type === "turn.completed")
         ?.fields.map((field) => field.field),
     ).toEqual(
-      expect.arrayContaining(["data.sessionId", "data.startedByYou", "data.answerExcerpt"]),
+      expect.arrayContaining([
+        "data.sessionId",
+        "data.startedByYou",
+        "data.answerExcerpt",
+      ]),
     );
   });
 });
@@ -82,7 +88,9 @@ describe("activity facts as events", () => {
       },
     });
     expect(workspaceActivityEvent(fact(), bob).data.startedByYou).toBe(false);
-    expect(workspaceActivityEvent(fact({ chatTitle: null }), ada).summary).toBe("Chat finished");
+    expect(workspaceActivityEvent(fact({ chatTitle: null }), ada).summary).toBe(
+      "Chat finished",
+    );
   });
 
   test("a chat an automation run caused is Opengeni's own and keeps its depth", () => {
@@ -101,10 +109,16 @@ describe("activity facts as events", () => {
       summary: "Chat failed: Weekly report",
       actor: { kind: "opengeni", name: "Nightly report" },
       chainDepth: 2,
-      data: { automationId: "task-1", automationRunId: "run-1", startedByYou: true },
+      data: {
+        automationId: "task-1",
+        automationRunId: "run-1",
+        startedByYou: true,
+      },
     });
     // Opengeni's own notices carry no turn.
-    expect(workspaceActivityEvent(fact({ turnId: null }), ada).actor.kind).toBe("opengeni");
+    expect(workspaceActivityEvent(fact({ turnId: null }), ada).actor.kind).toBe(
+      "opengeni",
+    );
     expect(boundEvent(event, new Date()).chainDepth).toBe(2);
   });
 
@@ -126,7 +140,12 @@ describe("activity facts as events", () => {
       chatTitle: null,
       subjectLabel: null,
       url: null,
-      data: { scope: "workspace", threshold: 0.8, usedCredits: 80, limitCredits: 100 },
+      data: {
+        scope: "workspace",
+        threshold: 0.8,
+        usedCredits: 80,
+        limitCredits: 100,
+      },
     });
     expect(workspaceActivityEvent(usage, ada)).toMatchObject({
       subject: null,
@@ -135,12 +154,19 @@ describe("activity facts as events", () => {
       chainDepth: 0,
       data: { scope: "workspace", threshold: 0.8, forYou: false },
     });
-    const own = { ...usage, type: "usage.exhausted", subjectId: bob, data: { scope: "member" } };
+    const own = {
+      ...usage,
+      type: "usage.exhausted",
+      subjectId: bob,
+      data: { scope: "member" },
+    };
     expect(workspaceActivityEvent(own, bob)).toMatchObject({
       summary: "Usage used up your limit",
       data: { forYou: true },
     });
-    expect(workspaceActivityEvent(own, ada).summary).toBe("Usage used up a member's limit");
+    expect(workspaceActivityEvent(own, ada).summary).toBe(
+      "Usage used up a member's limit",
+    );
   });
 
   test("replaying a delivery produces the same events, depth included", () => {
@@ -153,7 +179,10 @@ describe("activity facts as events", () => {
       title: "Weekly sync",
       purpose: "meeting",
     };
-    const activity = [fact(), fact({ id: "other", automationRunId: "run-1", chainDepth: 3 })];
+    const activity = [
+      fact(),
+      fact({ id: "other", automationRunId: "run-1", chainDepth: 3 }),
+    ];
     const body = workspaceDeliveryBody([recording], activity);
     expect(workspaceDeliveryEvents(body, ada)).toEqual([
       expect.objectContaining({ type: "recording.transcript.ready" }),
@@ -161,8 +190,87 @@ describe("activity facts as events", () => {
       workspaceActivityEvent(activity[1]!, ada),
     ]);
     // A recordings-only body keeps its earlier shape.
-    expect(JSON.parse(new TextDecoder().decode(workspaceDeliveryBody([recording])))).toEqual({
+    expect(
+      JSON.parse(new TextDecoder().decode(workspaceDeliveryBody([recording]))),
+    ).toEqual({
       recordingEvents: [recording],
     });
+  });
+});
+
+describe("App data change facts as events", () => {
+  const appFact = (overrides: Partial<WorkspaceActivityFact> = {}) =>
+    fact({
+      type: "app.record.added",
+      sessionId: null,
+      turnId: null,
+      appId: "8b0c7f0e-6666-4c2b-9a51-000000000006",
+      appTitle: "Leads",
+      data: {
+        collection: "contacts",
+        recordId: "r1",
+        recordKey: "ada@example.com",
+      },
+      url: "https://opengeni.example/workspaces/w/sites/a",
+      ...overrides,
+    });
+
+  test("a person's write is theirs and names the App and collection", () => {
+    const event = workspaceActivityEvent(appFact(), ada);
+    expect(event).toMatchObject({
+      type: "app.record.added",
+      subject: "ada@example.com",
+      summary: "Record added in Leads / contacts",
+      actor: { kind: "person", name: "Ada" },
+      chainDepth: 0,
+      data: {
+        appId: appFact().appId,
+        appTitle: "Leads",
+        collection: "contacts",
+        writtenByYou: true,
+      },
+    });
+    expect(workspaceActivityEvent(appFact(), bob).data).toMatchObject({
+      writtenByYou: false,
+    });
+  });
+
+  test("an automation's write is Opengeni's own and keeps its chain depth", () => {
+    const event = workspaceActivityEvent(
+      appFact({
+        automationId: "a1",
+        automationRunId: "run-1",
+        automationName: "Sync",
+        chainDepth: 2,
+      }),
+      ada,
+    );
+    expect(event.actor).toEqual({ kind: "opengeni", name: "Sync" });
+    expect(event.chainDepth).toBe(2);
+    expect(event.data).toMatchObject({
+      automationId: "a1",
+      automationRunId: "run-1",
+    });
+  });
+
+  test("a write without a person, such as a guest or key, has an unknown actor", () => {
+    expect(
+      workspaceActivityEvent(appFact({ subjectId: null }), ada).actor,
+    ).toEqual({
+      kind: "unknown",
+      name: null,
+    });
+  });
+
+  test("every App event type is offered with fields", () => {
+    const types = workspaceEventTypeCatalog().map((entry) => entry.type);
+    expect(types).toEqual(
+      expect.arrayContaining([
+        "app.record.added",
+        "app.record.changed",
+        "app.record.removed",
+        "app.sql.changed",
+      ]),
+    );
   });
 });
