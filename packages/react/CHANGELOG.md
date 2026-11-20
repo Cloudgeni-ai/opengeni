@@ -1,5 +1,36 @@
 # @opengeni/react
 
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Console has Agents and Tool servers pages for organizations with Console agents turned on. Owners and admins create an agent, edit its Instructions, model, built-in tools, tool servers (each tool on or off, "Ask first", and what happens to tools a server adds later), workers and where it is available, save drafts, try a draft in a test chat, compare versions, publish or roll back (optionally moving running chats), and see each chat's version and what it changed. Code-managed agents open read-only with "Managed by code"; an owner can move one to Console. "Export as YAML" downloads the agent file. In the app, the Agents page lists the workspace's organization agents read-only under "Managed in Console". `AgentsPage` takes an optional `after` slot, the SDK knows the `agents:read`, `agents:manage` and `tool_credentials:write` permissions, and the permission picker shows them under Agents.
+- afb7be7: Console reads whether organization agents are on from `GET /v1/organizations/:id/console/access` (`orgAgentsEnabled`), so an organization without them makes no failing agent requests. `Session.orgAgent` carries the agent's `name`, and the chat header shows it. Console test chats no longer count toward an agent's chats, usage and cost, or appear in the Console Sessions list. CLI: `agents deploy --dry-run` reports `would create vN` or `unchanged vN`.
+- afb7be7: Marking or unmarking a product-managed workspace now needs an account-level context (migration 1512): Console, a workspace an organization API key creates and the Console test workspace still do it, but runtime code acting inside a workspace can't, since the mark decides organization machine and Sandbox Environment reach, organization agents and stored end-user logins. In the reach dialog, a machine's "All workspaces" and "All product-managed workspaces" options say they include the Console test workspace, where Editors run test chats. `WorkspaceReachFields` takes an optional `allDescription`.
+- afb7be7: Console roles for organization members: an owner or admin gives a member Console Viewer (sessions at the review level, cost, agents read-only) or Editor (also creates, tests and publishes Console-managed agents), on Console's Members page or when inviting (`consoleRole`). Owners and admins stay full. `GET /v1/organizations/:id/console/access` returns the caller's level and `GET|PUT .../console/member-roles` lists and sets roles; role changes are audited (`member.console_role_changed`). A Console role never grants app workspace access. `RoleSelect` takes an optional `noAccessDescription`.
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/sdk@6.32.0
+  - @opengeni/connect@6.32.0
+
 ## 6.31.1
 
 ### Patch Changes

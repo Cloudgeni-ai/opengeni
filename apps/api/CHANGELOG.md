@@ -1,5 +1,68 @@
 # @opengeni/api-router
 
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Organization agent Runs on is checked where a chat finally lands: a Personal (Only me) machine is refused whether the request names it, a default would pick it or a worker would join its parent's box on it, a person's own default machine is not used for organization agent chats, and a machine the caller can't read is refused as unavailable. A version now keeps the id of the machine or Sandbox Environment its `runsOn` named when it was saved (migration 1512 adds `agent_revisions.runs_on_target`), so renaming one, or adding another with the same name, no longer moves or breaks the agent; the written name stays for display and YAML. The reach dialog's "All product-managed workspaces" option says that every end customer's chats share the machine. Clients that predate `allowManagedWorkspaces` keep it unchanged when they narrow a machine's or environment's workspaces, so turn it off in Console or with a current SDK.
+- afb7be7: Console agents can say where their chats run with `runsOn`: no computer (`none`), each chat in its own cloud sandbox, optionally from an organization Sandbox Environment (`sandbox`), or one organization machine shared by every chat (`machine`). Omitted keeps today's placement. Saving or deploying refuses machines and environments that are not the organization's (Personal machines included), chat creation checks that the machine or environment is available in the chat's workspace, and a request's own `sandboxBackend`, `targetSandboxId` or `rigId` still wins within the usual checks and is recorded as the `runsOn` override; a Personal machine is never used for an organization agent chat. Organization machines and Sandbox Environments get an "All product-managed workspaces" reach option (`allowManagedWorkspaces`) that covers every workspace the organization's product manages, including ones created later. Console's agent editor has a "Runs on" setting and the reach picker the new option; `GET /v1/organizations/:organizationId/agents/compute` and the SDK's `listOrganizationAgentCompute` list the choices. The agent file JSON Schema includes `runsOn`.
+- afb7be7: Session create over HTTP accepts an organization agent named as `agent: "<key or id>"` or `agent: { ref, ... }`; the route's early body check no longer refuses it as an invalid agent object. The Console test chat route now reads its inner session create correctly when the caller accepts compressed responses. A fork of a chat that runs an organization agent runs the same agent version with the same recorded overrides.
+- afb7be7: Chats can run an organization (Console) agent. When Console agents are on for the organization, session create accepts `agent: "<key or id>"` or `agent: { ref, ... }`: the chat runs the agent's published version (a draft or `version` only in the organization's Console test workspace), its tool servers are attached as session MCP servers, and settings the request changes are recorded as `Session.orgAgent.overrides`; `agentOverrides: "reject"` refuses them with 422 `agent_override_rejected`. Inline `config` saves a version of a code-managed agent by config hash. Worker chats inherit the agent version, and its Instructions only when the version shares them. Turns resolve tool server logins from the credential provider, the end user's stored login (refreshed when it is about to expire) or the chat's own headers, never a shared key for per-user servers; a server without a login is attached as unavailable and the chat records `session.tool_server.unavailable`. A publish that moves running chats re-materializes each chat's tool servers on the new version and delivers its Instructions on the next turn. Chats that name no organization agent are unchanged.
+- afb7be7: Organization agents: changing "Ask first" on one of the agent's own tool servers after create may only ask first for more unless the caller holds `agents:manage` for the organization (403, `details.code` `agents_manage_required`). A chat's own tool login headers run only for turns its creator or its end user started, or that no person started; another person's turn needs their own login. Without `agents:manage`, an inline `config` matching a saved version runs only when that version is published (any version in the Console test workspace).
+- afb7be7: Organization agents: each turn re-checks that the agent is not archived and still reaches the chat's workspace; otherwise its shared-key tool servers and stored end-user logins are unavailable for that turn. An end user acting through an organization key no longer holds the key's `agents:manage` when changing "Ask first" on the agent's tool servers (403 `agents_manage_required`); the key without an actor still does.
+- afb7be7: Organization agents: saving an agent from an inline `config` on session create, turning on tools the agent left off, removing its "Ask first" tools, or replacing one of its tool servers through `mcpServers` now needs `agents:manage` for the organization (an organization key, or an owner or admin); workspace roles and keys never count, and other callers may only narrow the agent's tool servers (403 `agents_manage_required`). Inline saves are recorded in Console's audit log. A turn uses the stored tool login of the end user who sent it, never another person's. Stored OAuth logins refresh without holding a database lock during the token request. Per-chat tool logins under `agent.toolServers[].headers` are marked secret in the app action catalog. Session create refusals for an organization agent now use the route's envelope (`code` `SESSION_CREATE_FORBIDDEN` or `SESSION_CREATE_REJECTED`, the reason in `details.code`). A keyed retry of an organization agent create returns the original chat even after the agent was republished or archived, and an inline `config` retry saves nothing again. Live tool lists are read in parallel under one deadline. A worker chat moved to a version that does not share Instructions with workers keeps the ones it has.
+
+### Patch Changes
+
+- afb7be7: Console agents roles: Editors can't save drafts of, publish or roll back an agent that an owner or admin made available in team workspaces (403 `agent_in_team_workspaces`; Console shows it read-only for them). Counting the chats a publish would move needs Editor (or `agents:manage` for keys), and only callers who may publish re-drive a stalled move when listing publish operations; a start error there leaves it pending. Console roles and an agent's team workspaces are written only from the organization's account context.
+- afb7be7: Console test chats can answer "Ask first" approvals (`POST /v1/organizations/:id/agents/:agentId/test-chats/:sessionId/approvals/:approvalId`) and be stopped and resumed (`POST .../test-chats/:sessionId/control` with `pause` or `resume`; `GET .../test-chats/:sessionId` reports `paused`), only by the chat's own tester. `POST .../test-chats` takes an `idempotencyKey`, so starting twice with the same key returns the same chat. The Console test chat shows approval cards and a Stop control, and polls only new events. `PUT .../console/member-roles` now sets members' roles only; an invitation's Console role is chosen when inviting.
+- afb7be7: Console test chats are isolated from each other: they are created with `agentAccess: "session"` and Memory off, so one tester's agent can't read or message another tester's test chats; a test chat's own login headers run only for turns its tester's principal started; and `x-opengeni-service-initiator` refuses the server-reserved `console-test:` prefix (422).
+- afb7be7: Console test chats make nobody a member of the Console test workspace: a test chat runs as the tester's own test chat principal (only `workspace:read` and `sessions:create`, `sessions:read` and `sessions:control` there), and only its tester reads and continues it, through `GET /v1/organizations/:id/agents/:agentId/test-chats/:sessionId[/events]` and `POST .../test-chats/:sessionId/messages`, while their Console access is Editor or more. Console roles are reset in the same transaction as an organization role change or offboarding, set (to the invitation's role or none) when an invitation is accepted, written under a per-person lock that a concurrent offboarding can't overtake, only put on pending member invitations, and an invitation's Console role is written in the invitation's own transaction.
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/db@6.32.0
+  - @opengeni/core@6.32.0
+  - @opengeni/observability@6.32.0
+  - @opengeni/artifact-tool@6.32.0
+  - @opengeni/capabilities@6.32.0
+  - @opengeni/codemode@6.32.0
+  - @opengeni/codex@6.32.0
+  - @opengeni/config@6.32.0
+  - @opengeni/decisions@6.32.0
+  - @opengeni/documents@6.32.0
+  - @opengeni/events@6.32.0
+  - @opengeni/github@6.32.0
+  - @opengeni/interaction@6.32.0
+  - @opengeni/runtime@6.32.0
+  - @opengeni/storage@6.32.0
+  - @opengeni/tool-gateway@6.32.0
+  - @opengeni/vaults@6.32.0
+  - @opengeni/vaults-bitwarden@6.32.0
+  - @opengeni/vaults-keeper@6.32.0
+  - @opengeni/vaults-onepassword@6.32.0
+  - @opengeni/vaults-protonpass@6.32.0
+  - @opengeni/agent-proto@6.32.0
+  - @opengeni/network@6.32.0
+  - @opengeni/xai-subscription@6.32.0
+
 ## 6.31.1
 
 ### Patch Changes
