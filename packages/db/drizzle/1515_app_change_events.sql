@@ -16,7 +16,8 @@
 --   facts keep their 1105 rules; they never carry an App.
 -- - Workspace webhooks may subscribe to the four app types. An AFTER INSERT
 --   trigger on App facts enqueues their deliveries, leaving out record
---   contents a webhook may not see (private or per-person records).
+--   contents a webhook may not see (per-person records, and every record of
+--   an App not shared with the workspace).
 --
 -- Rolling: two nullable columns and a defaulted boolean on a 24-hour facts
 -- table, a replaced read policy whose chat and usage branches are unchanged,
@@ -96,8 +97,11 @@ ALTER TABLE workspace_webhooks ADD CONSTRAINT workspace_webhooks_event_types_chk
 ) NOT VALID;
 
 -- One delivery per subscribed workspace webhook for an App fact. Record
--- contents only some people may read stay out of the delivery; the ids,
--- collection and kind of change are still sent.
+-- contents only some people may read stay out of the delivery: records in a
+-- collection where people read only their own, and every record of an App
+-- that isn't shared with the workspace (an Only me App, or one this
+-- transaction can't see). The ids, collection and kind of change are still
+-- sent.
 CREATE FUNCTION opengeni_private.enqueue_app_activity_workspace_webhooks_v1() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
@@ -106,7 +110,10 @@ DECLARE
   v_data jsonb := NEW.data;
 BEGIN
   BEGIN
-    IF NEW.reader_subject_id IS NOT NULL THEN
+    IF NEW.reader_subject_id IS NOT NULL OR NOT EXISTS (
+      SELECT 1 FROM workspace_artifacts app
+      WHERE app.workspace_id = NEW.workspace_id AND app.id = NEW.site_id
+        AND app.visibility = 'workspace_shared') THEN
       v_data := (v_data - 'record') || jsonb_build_object('recordWithheld', true);
     END IF;
     v_data := v_data || jsonb_build_object('appId', NEW.site_id, 'chainDepth', NEW.chain_depth)

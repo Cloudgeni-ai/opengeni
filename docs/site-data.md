@@ -162,7 +162,9 @@ reads as its owner:
   (`privateRecords`), when only the owner does.
 
 Workspace webhooks receive every App fact of the workspace, but without the
-record's data when only some people may read it (`recordWithheld: true`).
+record's data when only some people may read it (`recordWithheld: true`): a
+record in a collection where people read only their own, or any record of an
+App that isn't shared with the workspace (an Only me App).
 Organization webhooks don't offer app types. Events for automations are
 rendered like other "This workspace" events: summary `Record added in
 <App> / <collection>`, the App's console address, `data.appId`,

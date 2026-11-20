@@ -52,7 +52,7 @@ afterAll(async () => {
 
 const OWNER = "app-owner";
 
-async function app() {
+async function app(visibility: "workspace_shared" | "user_private" = "workspace_shared") {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('App change events') returning id`;
   const accountId = String(account!.id);
@@ -64,7 +64,7 @@ async function app() {
     slug: `app-events-${crypto.randomUUID().slice(0, 8)}`,
     title: "Leads",
     description: null,
-    visibility: "workspace_shared",
+    visibility,
     ownerSubjectId: OWNER,
     contentKey: `app-events/${crypto.randomUUID()}.html`,
     contentSha256: "a".repeat(64),
@@ -253,4 +253,24 @@ test("per-person records are visible to their owner and, unless private, the App
     expect(delivery.payload.data.record).toBeUndefined();
     expect(delivery.payload.data.recordWithheld).toBe(true);
   }
+});
+
+test("an Only me App's records never reach workspace webhooks", async () => {
+  const store = createPostgresSiteDataStore(client.db);
+  const a = await app("user_private");
+  await shared.admin`insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types)
+    values (${a.accountId}, ${a.workspaceId}, 'https://example.test', 'sealed', array['app.record.added'])`;
+  const manager = a.caller(OWNER, "manager");
+  await store.defineCollection(manager, { name: "notes", accessMode: "shared" }, limits);
+  await store.write(manager, [{ op: "insert", collection: "notes", data: { text: "mine" } }], {
+    limits,
+  });
+  // The owner's own trigger still sees the change; nobody else does.
+  expect((await visibleTo(a, OWNER)).length).toBe(1);
+  expect((await visibleTo(a, "bob")).length).toBe(0);
+  const deliveries = await shared.admin<Array<{ payload: { data: Record<string, unknown> } }>>`
+    select payload from workspace_webhook_deliveries where workspace_id = ${a.workspaceId}`;
+  expect(deliveries).toHaveLength(1);
+  expect(deliveries[0]!.payload.data.record).toBeUndefined();
+  expect(deliveries[0]!.payload.data.recordWithheld).toBe(true);
 });
