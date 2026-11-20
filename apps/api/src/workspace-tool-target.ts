@@ -1165,6 +1165,8 @@ export async function describeWorkspaceSiteToolSetup(
     readOptions,
   );
   const published = isPublishedSiteToolAuthorization(authorization);
+  // The console's address, as other console links read it: the public base
+  // serves the console unless OPENGENI_WEB_BASE_URL names another origin.
   const base = (deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl ?? "").replace(/\/+$/u, "");
   const items = new Map<string, ToolGatewaySiteSetupItem>();
   for (const need of needs) {
@@ -1197,13 +1199,19 @@ export async function describeWorkspaceSiteToolSetup(
 }
 
 /**
- * A card item's key: its action, connector and account, with no ids, so the
- * same key reaches Site code and survives reloads for dismissal.
+ * A card item's key: its action and a digest of the catalog capability and
+ * the account's connection, so two connectors that share a display name stay
+ * apart. Stable across reloads (dismissals and `?connect=` use it); Site code
+ * sees the digest, never the ids behind it.
  */
 export function siteToolSetupKey(
-  need: Pick<SiteToolSetupNeed, "action" | "connector" | "account">,
+  need: Pick<SiteToolSetupNeed, "action" | "capabilityId" | "connectionId">,
 ) {
-  return [need.action, need.connector, need.account ?? ""].join(":");
+  const digest = createHash("sha256")
+    .update(`opengeni.app-connect-card.v1\0${need.capabilityId ?? ""}\0${need.connectionId ?? ""}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `${need.action}:${digest}`;
 }
 
 /**

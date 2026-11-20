@@ -198,9 +198,9 @@ export function AppConnectCard({
   const running = useRef<AbortController | null>(null);
   useEffect(() => () => running.current?.abort(), []);
   const connect = useCallback(
-    (key: string) => {
+    (key: string): boolean => {
       const item = items?.find((candidate) => candidate.key === key);
-      if (!item || !consent || running.current) return;
+      if (!item || !consent || running.current) return false;
       const abort = new AbortController();
       running.current = abort;
       setBusyKey(key);
@@ -214,18 +214,22 @@ export function AppConnectCard({
           setBusyKey(null);
           reload();
         });
+      return true;
     },
     [consent, items, reload, siteId, workspaceId],
   );
 
-  // Arrived from a published App's "Connect": open that dialog once.
+  // Arrived from a published App's "Connect": open that dialog once. Until
+  // the console's dialogs are ready (or another connect finishes) it waits;
+  // a key the list doesn't have is dropped.
   const handledKey = useRef<string | null>(null);
   useEffect(() => {
     if (!connectKey || !items || handledKey.current === connectKey) return;
+    const known = items.some((item) => item.key === connectKey);
+    if (known && !connect(connectKey)) return;
     handledKey.current = connectKey;
     onConnectKeyHandled?.();
-    if (items.some((item) => item.key === connectKey)) connect(connectKey);
-  }, [connect, connectKey, items, onConnectKeyHandled]);
+  }, [busyKey, connect, connectKey, items, onConnectKeyHandled]);
 
   const visible = useMemo(
     () => (items ? dismissals.visible(items) : []),
