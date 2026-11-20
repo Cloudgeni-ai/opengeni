@@ -90,9 +90,7 @@ test("model costs by app use the Breakdown table with its money formatting", asy
   expect(headers.slice(0, 4)).toEqual(["App", "Calls", "Charged", "API-equivalent"]);
   // Estimates carry the page's "~"; a partly priced amount gets the Breakdown asterisk.
   expect(cellTexts(container, "Operations app").join("|")).toContain("20|$3.00|~$9.00*");
-  expect(cellTexts(container, "Private or unavailable apps").join("|")).toContain(
-    "4|$0.00|~$1.00",
-  );
+  expect(cellTexts(container, "Private or unavailable apps").join("|")).toContain("4|$0.00|~$1.00");
   // Nothing priced: a dash with its reason, never a misleading $0.
   expect(cellTexts(container, "Unpriced app").join("|")).toContain("3|$0.00|—");
   expect(container.querySelector('[aria-label="Not priced"]')).not.toBeNull();

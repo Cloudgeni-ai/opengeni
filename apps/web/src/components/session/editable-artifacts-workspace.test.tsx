@@ -421,9 +421,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       expect(manager.container.querySelector("[data-site-preview]")).toBeNull();
       // Still in the session: settings open in place, with no link out.
       expect(manager.container.querySelector("a")).toBeNull();
-      const back = manager.container.querySelector<HTMLButtonElement>(
-        '[aria-label="Back to app"]',
-      );
+      const back = manager.container.querySelector<HTMLButtonElement>('[aria-label="Back to app"]');
       expect(back?.getAttribute("aria-pressed")).toBe("true");
       await act(async () => back?.click());
       expect(manager.container.querySelector("[data-site-preview]")).not.toBeNull();
