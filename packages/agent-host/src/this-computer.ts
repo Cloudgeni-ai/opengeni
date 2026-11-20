@@ -177,8 +177,8 @@ export interface ThisComputerDeps {
    */
   browserExtension?: boolean;
   /**
-   * IDs of the app's own Chrome extensions (its branded build of the Opengeni
-   * Browser extension) that may reach this agent besides Opengeni Browser.
+   * IDs of the app's own Chrome extensions (branded builds of Opengeni
+   * Browser). A hosted agent registers these instead of Opengeni Browser.
    * Each is Chrome's 32-letter extension ID. Ignored when `browserExtension`
    * is false.
    */

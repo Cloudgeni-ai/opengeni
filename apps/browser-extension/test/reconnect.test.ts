@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 
-const build = await Bun.build({
-  entrypoints: [resolve(import.meta.dir, "../src/service-worker.ts")],
-  target: "browser",
-  format: "iife",
-});
-if (!build.success) throw new Error("Could not build extension worker");
-const worker = await build.outputs[0]!.text();
+async function compileWorker(branded: boolean) {
+  const build = await Bun.build({
+    entrypoints: [resolve(import.meta.dir, "../src/service-worker.ts")],
+    target: "browser",
+    format: "iife",
+    define: { __EXTENSION_BRANDED__: String(branded) },
+  });
+  if (!build.success) throw new Error("Could not build extension worker");
+  return build.outputs[0]!.text();
+}
+const worker = await compileWorker(false);
+const extensionId = "dddddddddddddddddddddddddddddddd";
 const flush = async () => {
   for (let i = 0; i < 30; i++) await Promise.resolve();
 };
@@ -22,7 +27,7 @@ function event() {
     },
   };
 }
-function harness() {
+function harness(workerSource = worker) {
   const timers = new Map<number, { fn: () => void; delay: number }>();
   let timerId = 0;
   const ports: any[] = [];
@@ -32,6 +37,7 @@ function harness() {
   let updateChecks = 0;
   const chrome = {
     runtime: {
+      id: extensionId,
       getManifest: () => ({ version: "0.1.0" }),
       onMessage,
       getPlatformInfo: async () => ({ os: "mac", arch: "arm64" }),
@@ -46,8 +52,9 @@ function harness() {
         return { status: "no_update" };
       },
       lastError: undefined,
-      connectNative: () => {
+      connectNative: (hostName: string) => {
         const port = {
+          hostName,
           onMessage: event(),
           onDisconnect: event(),
           messages: [] as any[],
@@ -112,7 +119,7 @@ function harness() {
     pinned: false,
     incognito: false,
   });
-  new Function("chrome", "navigator", "setTimeout", "clearTimeout", worker)(
+  new Function("chrome", "navigator", "setTimeout", "clearTimeout", workerSource)(
     chrome,
     { userAgent: "Chrome/153.0.0.0" },
     (fn: () => void, delay: number) => {
@@ -213,6 +220,13 @@ describe("extension updates", () => {
 });
 
 describe("native bridge reconnection", () => {
+  test("the standard and branded workers request different native host registrations", async () => {
+    const standard = harness();
+    const branded = harness(await compileWorker(true));
+    await flush();
+    expect(standard.ports[0]?.hostName).toBe("ai.opengeni.browser");
+    expect(branded.ports[0]?.hostName).toBe(`ai.opengeni.browser.${extensionId}`);
+  });
   test("a wake-up alarm reconnects a worker whose connection dropped", async () => {
     const h = harness();
     await flush();

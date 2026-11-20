@@ -40,6 +40,7 @@ const result = await Bun.build({
   sourcemap: "external",
   naming: "[dir]/[name].js",
   define: {
+    __EXTENSION_BRANDED__: String(Boolean(args.brand)),
     __EXTENSION_BRAND_NAME__: JSON.stringify(brand.name),
     __EXTENSION_BRAND_PRODUCT__: JSON.stringify(brand.product),
   },
