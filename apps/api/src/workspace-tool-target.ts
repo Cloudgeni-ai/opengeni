@@ -4,6 +4,7 @@ import {
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   currentFirstPartyToolIdentity,
   firstPartyMcpToolAliasTarget,
+  firstPartyMcpToolAliasesOf,
   ToolGatewayInvokeResponse,
   ToolGatewayTargetApprovalResponse,
   ToolGatewaySiteConsentResponse,
@@ -710,9 +711,19 @@ export async function invokeWorkspaceToolTarget(
           // chose "Always allow for this Site" for this tool and connection.
           // A Block never reaches here (`prepareCall` refuses it).
           if (!routing) throw approvalRequiredError();
-          allowedForSite = await (options.hasAllowance ?? hasSiteToolAllowance)(deps.db, {
-            ...siteAllowanceKey(authorization, request, routing),
-          });
+          // A choice saved before a first-party rename names the former tool.
+          const key = siteAllowanceKey(authorization, request, routing);
+          const names =
+            key.serverId === "opengeni"
+              ? [key.toolName, ...firstPartyMcpToolAliasesOf(key.toolName)]
+              : [key.toolName];
+          for (const toolName of names) {
+            allowedForSite = await (options.hasAllowance ?? hasSiteToolAllowance)(deps.db, {
+              ...key,
+              toolName,
+            });
+            if (allowedForSite) break;
+          }
           if (!allowedForSite)
             throw siteConsentError(authorization, "tool_gateway_approval_required");
           approvalRequired = false;

@@ -4965,7 +4965,7 @@ export const englishMessages = {
   "sessionConnectionRequest.loadingConnectionDetails": "Loading connection details…",
   "sessionConnectionRequest.retry": "Retry",
   "sessionConnectionRequest.thisRequestCouldNotBe":
-    "This request could not be matched to one available OAuth connected tool. Review its connection settings before continuing.",
+    "This request could not be matched to one available connected tool. Review its connection settings before continuing.",
   "sessionConversation.archivedConversationReadOnly": "Archived conversation · Read only",
   "sessionConversation.loadingPreview": "Loading preview…",
   "sessionConversation.retry": "Retry",
@@ -5112,7 +5112,7 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.thisIntegrationSSelectedAccount":
     "This connected tool's selected account changed during setup. Review it before continuing.",
   "sessionMcpCapabilityCard.thisRecommendationIsNotAn":
-    "This recommendation is not an available OAuth MCP connected tool. Review the current connection catalog.",
+    "This recommendation is not an available connected tool. Review the current connection catalog.",
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
   "sessionMcpCapabilityCard.useMyNameHere": "Use my {name} here",

@@ -697,6 +697,64 @@ describe("portable known-tool calls", () => {
       f.close();
     }
   });
+  test("an Always allow saved under a former first-party name still skips the prompt", async () => {
+    const f = createFixture({ firstParty: true });
+    try {
+      f.settings.mcpServers.find((server) => server.id === "opengeni")!.requireApproval = true;
+      const asked: string[] = [];
+      const invoke = (saved: string | null) =>
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: { serverId: "opengeni", toolName: "app_data_query" } },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+            siteArtifactId: artifactId,
+            siteVersionId: versionId,
+          },
+          targetOptions({
+            readSiteVersion: siteVersion([{ serverId: "opengeni", toolName: "site_data_query" }]),
+            hasAllowance: async (_db, key) => {
+              asked.push(key.toolName);
+              return key.serverId === "opengeni" && key.toolName === saved;
+            },
+          }),
+        );
+      await expectHttpStatus(invoke(null), 409, "tool_gateway_approval_required");
+      expect(asked).toEqual(["app_data_query", "site_data_query"]);
+      for (const saved of ["site_data_query", "app_data_query"]) {
+        const response = await invoke(saved);
+        expect(JSON.stringify(response.result)).toContain("app_data_query ran");
+      }
+    } finally {
+      f.close();
+    }
+  });
+  test("a non-first-party tool named like a former first-party tool is not translated", async () => {
+    const { currentFirstPartyToolIdentity } = await import("@opengeni/contracts");
+    const foreign = { serverId: "grafana", toolName: "site_data_query" };
+    expect(currentFirstPartyToolIdentity(foreign)).toEqual(foreign);
+    const f = createFixture({ firstParty: true });
+    try {
+      // A version declaring another server's site_data_query does not declare app_data_query.
+      await expectHttpStatus(
+        resolveWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { path: ["opengeni", "site_data_query"] },
+            siteArtifactId: artifactId,
+            siteVersionId: versionId,
+          },
+          targetOptions({ readSiteVersion: siteVersion([foreign]) }),
+        ),
+        403,
+      );
+    } finally {
+      f.close();
+    }
+  });
   test("Site denial and pre-aborted requests cause zero provider preparation", async () => {
     const f = createFixture();
     try {

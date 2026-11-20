@@ -407,7 +407,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     currentFirstPartyToolIdentity(identity),
   ]);
   const allowed = declaredTools ? new Set(declaredTools.map(identityKey)) : null;
-  const allowedTools = new Set(declaredTools?.map((identity) => identity.toolName));
+  // Matched by name for a routed connector only: never widened by aliases.
+  const allowedTools = new Set(input.requestedTools?.map((identity) => identity.toolName));
   const frameId = crypto.randomUUID();
   const targeted =
     input.workspaceTools.$targetProtocol === 1 &&
