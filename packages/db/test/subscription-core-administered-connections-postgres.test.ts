@@ -1063,6 +1063,60 @@ describe("the organization's personal-connections rule (owner scope)", () => {
 });
 
 describe("refresh writers and request custody of both scopes", () => {
+  test("an organization administrator's refresh writes through the shared refresh writer with the plan, under the organization's own authority", async () => {
+    const { persistSubscriptionCoreAdministratorRefresh } =
+      await import("../src/subscription-core-repository");
+    const { setSubscriptionAdministrationSubject } =
+      await import("../src/subscription-core/account-administrator");
+    const org = await organization();
+    const sharedId = await sharedConnection(org, "org-plan");
+    const plain = await member(org);
+    await shared.admin`update subscription_connections set plan_type = 'pro'
+      where id = ${sharedId}::uuid`;
+    await shared.admin`insert into subscription_connection_quota
+      (account_id, connection_id, quota, observed_refresh_generation, revision)
+      values (${org.accountId}::uuid, ${sharedId}::uuid,
+        ${shared.admin.json({ modelCooldowns: { "pro-model": { until: "2999-01-01T00:00:00Z" } } })},
+        1, 1)`;
+    const refresh = (subjectId: string, generation: number, plan: string | null) =>
+      withRlsContext(client.db, { accountId: org.accountId, workspaceId: null }, async (tx) => {
+        await setSubscriptionAdministrationSubject(tx, { accountId: org.accountId, subjectId });
+        return await persistSubscriptionCoreAdministratorRefresh(tx, {
+          provider: FAKE_API_KEY_PROVIDER,
+          accountId: org.accountId,
+          connectionId: sharedId,
+          expectedRefreshGeneration: generation,
+          credentialEncrypted: credential("sk-org-plan-2"),
+          expiresAt: null,
+          lastRefreshAt: new Date(),
+          planType: plan,
+        });
+      });
+    const stored = async () => {
+      const [row] = await shared.admin<
+        { plan_type: string | null; generation: number; cooldowns: unknown }[]
+      >`select connection.plan_type, connection.refresh_generation::int as generation,
+          quota.quota->'modelCooldowns' as cooldowns
+        from subscription_connections connection
+        join subscription_connection_quota quota on quota.connection_id = connection.id
+        where connection.id = ${sharedId}::uuid`;
+      return row;
+    };
+    const cooldowns = { "pro-model": { until: "2999-01-01T00:00:00Z" } };
+
+    // A plain member's refresh, or a stale generation, writes nothing.
+    expect(await refresh(plain.subjectId, 1, "free")).toBe(false);
+    expect(await refresh(org.ownerSubjectId, 2, "free")).toBe(false);
+    expect(await stored()).toEqual({ plan_type: "pro", generation: 1, cooldowns });
+
+    // The administrator's refresh records the new plan and clears the old
+    // plan's model cooldowns; a token without a plan keeps the recorded one.
+    expect(await refresh(org.ownerSubjectId, 1, "free")).toBe(true);
+    expect(await stored()).toEqual({ plan_type: "free", generation: 2, cooldowns: {} });
+    expect(await refresh(org.ownerSubjectId, 2, null)).toBe(true);
+    expect(await stored()).toEqual({ plan_type: "free", generation: 3, cooldowns: {} });
+  });
+
   test("an expired credential is marked for sign-in by its own scope only", async () => {
     const org = await organization();
     const sharedId = await sharedConnection(org, "org-expired");

@@ -58,6 +58,7 @@ import type { SubscriptionCoreConnectionRead, SubscriptionQuota } from "@opengen
 import { rawRows, withRlsContext, type Database } from "../database";
 import { setSubscriptionAdministrationSubject } from "./account-administrator";
 import { nestedPostgresSqlState } from "../persistence-errors";
+import { persistSubscriptionCoreAdministratorRefresh } from "../subscription-core-repository";
 import {
   buildSubscriptionCoreCredentialResolver,
   subscriptionCoreRefreshPolicy,
@@ -252,20 +253,24 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
                 }
               : null;
           },
+          // The shared refresh write, on the row this administrator may refresh.
           async persist(tx, input) {
-            const rows = await rawRows<{ id: string }>(
+            const [locked] = await rawRows<{ id: string }>(
               tx,
-              sql`update subscription_connections as connection
-              set credential_encrypted = ${input.credentialEncrypted},
-                credential_format = split_part(${input.credentialEncrypted}, ':', 1),
-                expires_at = ${input.expiresAt?.toISOString() ?? null}::timestamptz,
-                last_refresh_at = ${input.refreshedAt.toISOString()}::timestamptz,
-                refresh_generation = connection.refresh_generation + 1,
-                updated_at = clock_timestamp()
-              where ${target} and connection.refresh_generation = ${input.refreshGeneration}
-              returning connection.id::text as id`,
+              sql`select connection.id::text as id from subscription_connections connection
+              where ${target} for update`,
             );
-            return rows.length > 0;
+            if (!locked) return false;
+            return await persistSubscriptionCoreAdministratorRefresh(tx, {
+              provider: providerId,
+              accountId: scope.accountId,
+              connectionId,
+              expectedRefreshGeneration: input.refreshGeneration,
+              credentialEncrypted: input.credentialEncrypted,
+              expiresAt: input.expiresAt,
+              lastRefreshAt: input.refreshedAt,
+              planType: input.planType,
+            });
           },
           async fail(tx, input) {
             const rows = await rawRows<{ id: string }>(
