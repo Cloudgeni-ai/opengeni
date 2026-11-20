@@ -3037,17 +3037,18 @@ type ControlCancellationPartialEvidence = {
   stoppingStateText: string;
 };
 
+export type CancelledPredecessorFence = {
+  control: "Steer" | "Pause";
+  controlRequestedSequence: number;
+  physicallyStoppedSequence: number;
+  /** Sequence of the control plane's own paused_recovery_settled event, once seen. */
+  pausedRecoverySettledSequence?: number;
+};
+
 type ControlCancellationAudit = {
   cursor: number;
   evidencePath: string;
-  fences: Map<
-    string,
-    {
-      control: "Steer" | "Pause";
-      controlRequestedSequence: number;
-      physicallyStoppedSequence: number;
-    }
-  >;
+  fences: Map<string, CancelledPredecessorFence>;
 };
 
 async function writeControlCancellationPartialEvidence(
@@ -3796,30 +3797,64 @@ async function auditCancelledPredecessorEvents(
 ): Promise<void> {
   while (true) {
     const page = await readFixtureEventPage(client, workspaceId, sessionId, audit.cursor);
-    const events = page.events;
-    for (const event of events) {
-      const fence = event.turnAttemptId ? audit.fences.get(event.turnAttemptId) : undefined;
-      if (!fence) continue;
-      if (
-        event.sequence > fence.controlRequestedSequence &&
-        event.type.startsWith("workspace.revision.")
-      ) {
-        throw new Error(
-          `cancelled predecessor ${event.turnId} committed forbidden ${event.type} after ${fence.control} acceptance`,
-        );
-      }
-      if (
-        event.sequence > fence.physicallyStoppedSequence &&
-        event.turnAssociation !== "late_rejected"
-      ) {
-        throw new Error(
-          `cancelled predecessor ${event.turnId} emitted authoritative ${event.type} after ${fence.control} physical cancellation`,
-        );
-      }
-    }
+    for (const event of page.events) assertCancelledPredecessorEvent(event, audit.fences);
     audit.cursor = page.nextAfter;
     if (!page.hasMore) return;
   }
+}
+
+type CancelledPredecessorAuditEvent = Pick<
+  SessionEvent,
+  "sequence" | "type" | "payload" | "clientEventId" | "turnId" | "turnAttemptId" | "turnAssociation"
+>;
+
+/**
+ * Pausing a turn parks it `recovering` and, in the same commit that records
+ * the attempt quiesced, the control plane settles the session `idle` with
+ * reason `paused_recovery_settled` (packages/db, docs/run-lifecycle.md). That
+ * row carries the fenced attempt's id but is the control plane's own write,
+ * not a late write by the cancelled worker, so it is the one event exempt
+ * from the post-stop fence, and only once per fenced attempt.
+ */
+function isPausedRecoverySettlement(
+  event: CancelledPredecessorAuditEvent,
+  fence: CancelledPredecessorFence,
+): boolean {
+  return (
+    fence.control === "Pause" &&
+    fence.pausedRecoverySettledSequence === undefined &&
+    event.type === "session.status.changed" &&
+    (event.turnAssociation ?? null) === null &&
+    event.clientEventId === `opengeni:paused-recovery-settled:${event.turnAttemptId}` &&
+    isRecord(event.payload) &&
+    event.payload.status === "idle" &&
+    event.payload.reason === "paused_recovery_settled"
+  );
+}
+
+export function assertCancelledPredecessorEvent(
+  event: CancelledPredecessorAuditEvent,
+  fences: ReadonlyMap<string, CancelledPredecessorFence>,
+): void {
+  const fence = event.turnAttemptId ? fences.get(event.turnAttemptId) : undefined;
+  if (!fence) return;
+  if (
+    event.sequence > fence.controlRequestedSequence &&
+    event.type.startsWith("workspace.revision.")
+  ) {
+    throw new Error(
+      `cancelled predecessor ${event.turnId} committed forbidden ${event.type} after ${fence.control} acceptance`,
+    );
+  }
+  if (event.sequence <= fence.physicallyStoppedSequence) return;
+  if (event.turnAssociation === "late_rejected") return;
+  if (isPausedRecoverySettlement(event, fence)) {
+    fence.pausedRecoverySettledSequence = event.sequence;
+    return;
+  }
+  throw new Error(
+    `cancelled predecessor ${event.turnId} emitted authoritative ${event.type} after ${fence.control} physical cancellation`,
+  );
 }
 
 async function listAllSessionEventsAfter(
