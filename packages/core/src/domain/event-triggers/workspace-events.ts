@@ -20,7 +20,9 @@ import { oneLine, type NormalizedEventInput } from "./normalize";
  * a chat finished, failed, was stopped, waits for an approval, asked a
  * question or sent a notification, and usage thresholds. A chat event counts
  * as Opengeni's own when an automation run caused it, and carries that run's
- * chain depth.
+ * chain depth. App data changes (migration 1515) come from the same table:
+ * records added, changed or removed in an App's collection and App SQL
+ * writes, with the same causation and chain depth.
  */
 
 /** One recording fact as the feed keeps it in a delivery body. */
@@ -81,6 +83,28 @@ const THRESHOLD_FIELD: Field = [
   "The share of the limit reached, such as 0.8; 1 is the whole limit",
 ];
 
+const APP_FIELDS: Field[] = [
+  ["data.appId", "The App, for the App tools"],
+  ["data.appTitle", "The App's title"],
+  [
+    "data.writtenByYou",
+    "true when the change was made for you: by you, your agent or your own automation",
+  ],
+  ["data.writer", "Who wrote it: user, guest, agent, schedule, service or other"],
+  ["data.automationId", "The automation whose run made the change; absent when a person did"],
+  ["data.automationRunId", "That automation's run"],
+];
+
+const APP_RECORD_FIELDS: Field[] = [
+  ...APP_FIELDS,
+  ["data.collection", "The collection the record is in"],
+  ["data.recordId", "The record's id"],
+  ["data.recordKey", "The record's key, if it has one"],
+  ["data.version", "The record's version after the change"],
+  ["data.recordOwnerSubjectId", "The person who owns the record, when a person does"],
+  ["data.record", "The record's data (up to 4 KB; larger records set data.recordTruncated)"],
+];
+
 const ACTIVITY_TYPES: Record<ActivityEventType, CatalogEntry & { fields: Field[] }> = {
   "turn.completed": {
     description: "A chat finished its work",
@@ -138,6 +162,30 @@ const ACTIVITY_TYPES: Record<ActivityEventType, CatalogEntry & { fields: Field[]
     description: "A new usage period started",
     summary: "New usage period",
     fields: USAGE_FIELDS,
+  },
+  "app.record.added": {
+    description: "A record was added to an App's collection",
+    summary: "Record added",
+    fields: APP_RECORD_FIELDS,
+  },
+  "app.record.changed": {
+    description: "A record in an App's collection was changed",
+    summary: "Record changed",
+    fields: APP_RECORD_FIELDS,
+  },
+  "app.record.removed": {
+    description: "A record was removed from an App's collection",
+    summary: "Record removed",
+    fields: APP_RECORD_FIELDS,
+  },
+  "app.sql.changed": {
+    description: "An App's SQL database was written to",
+    summary: "App database changed",
+    fields: [
+      ...APP_FIELDS,
+      ["data.query", "The saved query that wrote, if one did"],
+      ["data.rowsWritten", "How many rows were written"],
+    ],
   },
 };
 
@@ -298,6 +346,9 @@ export type WorkspaceActivityFact = {
   automationName: string | null;
   subjectLabel: string | null;
   url: string | null;
+  /** The App an app.* fact is about, and its title the reader saw. */
+  appId?: string | null;
+  appTitle?: string | null;
 };
 
 function percent(value: unknown): string | null {
@@ -346,6 +397,7 @@ export function workspaceActivityEvent(
       chainDepth: 0,
     };
   }
+  if (fact.type.startsWith("app.")) return appActivityEvent(fact, mine, what, occurredAt);
   const title = fact.chatTitle ? oneLine(fact.chatTitle, 300) : null;
   const byAutomation = fact.automationRunId !== null || fact.turnId === null;
   const forYou =
@@ -371,6 +423,46 @@ export function workspaceActivityEvent(
       ...(fact.automationId ? { automationId: fact.automationId } : {}),
       ...(fact.automationRunId ? { automationRunId: fact.automationRunId } : {}),
       ...forYou,
+    },
+    chainDepth: fact.chainDepth,
+  };
+}
+
+/**
+ * An App data change: a record added, changed or removed in a collection, or
+ * an App SQL write. It is Opengeni's own when an automation run made it, and
+ * otherwise the person's it was made for (or unknown, for guests and keys).
+ */
+function appActivityEvent(
+  fact: WorkspaceActivityFact,
+  mine: boolean,
+  what: string,
+  occurredAt: Date,
+): NormalizedEventInput {
+  const appTitle = fact.appTitle ? oneLine(fact.appTitle, 200) : null;
+  const collection = text(fact.data.collection);
+  const where = [appTitle, collection].filter((part): part is string => part !== null).join(" / ");
+  const recordKey = text(fact.data.recordKey);
+  const byAutomation = fact.automationRunId !== null;
+  return {
+    externalId: fact.id,
+    type: fact.type,
+    occurredAt,
+    subject: recordKey ?? text(fact.data.recordId) ?? appTitle,
+    summary: where ? `${what} in ${where}` : what,
+    url: fact.url,
+    actor: byAutomation
+      ? { kind: "opengeni", name: fact.automationName }
+      : fact.subjectId !== null
+        ? { kind: "person", name: fact.subjectLabel }
+        : { kind: "unknown", name: null },
+    data: {
+      ...fact.data,
+      ...(fact.appId ? { appId: fact.appId } : {}),
+      ...(appTitle ? { appTitle } : {}),
+      writtenByYou: mine,
+      ...(fact.automationId ? { automationId: fact.automationId } : {}),
+      ...(fact.automationRunId ? { automationRunId: fact.automationRunId } : {}),
     },
     chainDepth: fact.chainDepth,
   };
@@ -419,6 +511,8 @@ function activityFact(entry: unknown): WorkspaceActivityFact | null {
     automationName: nullableText(fact.automationName),
     subjectLabel: nullableText(fact.subjectLabel),
     url: nullableText(fact.url),
+    appId: nullableText(fact.appId),
+    appTitle: nullableText(fact.appTitle),
   };
 }
 

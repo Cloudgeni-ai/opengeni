@@ -27,6 +27,10 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "recording.speakers.updated",
   "recording.notes.updated",
   "recording.deleted",
+  "app.record.added",
+  "app.record.changed",
+  "app.record.removed",
+  "app.sql.changed",
 ] as const;
 
 /**

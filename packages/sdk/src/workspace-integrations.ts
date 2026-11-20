@@ -136,7 +136,9 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
   deliveryId: string | null;
 }> {
   const event = await verifiedObject(input);
-  const usageEvent = typeof event.type === "string" && event.type.startsWith("usage.");
+  const usageEvent =
+    typeof event.type === "string" &&
+    (event.type.startsWith("usage.") || event.type.startsWith("app."));
   const lane = event.lane === undefined ? "workspace" : event.lane;
   if (
     typeof event.id !== "string" ||
@@ -153,7 +155,8 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
           "usage.period_reset",
           OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
         ].includes(event.type) ||
-          event.type.startsWith("recording.")))
+          event.type.startsWith("recording.") ||
+          event.type.startsWith("app.")))
     )
   ) {
     throw new OpenGeniSignatureError();

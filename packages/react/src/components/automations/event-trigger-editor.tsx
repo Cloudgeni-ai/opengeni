@@ -466,8 +466,9 @@ const CUSTOM_PREFIX = "custom:";
 /** One empty list while types load, so the picker's options keep their identity. */
 const NO_EVENT_TYPES: EventTypeDescriptor[] = [];
 
-/** "This workspace" types under Chats, Usage and Meetings, in the catalog's order. */
+/** "This workspace" types under Chats, Usage, Meetings and Apps, in the catalog's order. */
 function workspaceEventGroup(t: OpenGeniText, type: string): string | undefined {
+  if (type.startsWith("app.")) return t("automations.picker.groupApps");
   if (type.startsWith("recording.")) return t("automations.picker.groupMeetings");
   if (type.startsWith("usage.")) return t("automations.picker.groupUsage");
   if (type.startsWith("turn.") || type.startsWith("session.")) {

@@ -56,6 +56,7 @@ Up to ten endpoints per workspace, each subscribed to any of:
 | `session.requiresAction`                                             | The agent waits for a tool approval                                                                              |
 | `session.humanInput.requested`                                       | The agent asks the user a structured question                                                                    |
 | `usage.threshold_reached` / `usage.exhausted` / `usage.period_reset` | A [usage allowance](/guides/usage-allowances) crosses a threshold, runs out, or resets (workspace webhooks only) |
+| `app.record.added` / `app.record.changed` / `app.record.removed` / `app.sql.changed` | A record in an App's collection was added, changed or removed, or an App's SQL database was written to (workspace webhooks only) |
 
 ```ts
 const { webhook, secret } = await og.createWorkspaceWebhook(workspaceId, {

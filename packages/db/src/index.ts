@@ -721,6 +721,7 @@ import {
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./site-data";
+export * from "./app-activity-events";
 export * from "./site-publishing";
 export { withSiteRuntimeAdmission } from "./site-runtime-admission";
 export * from "./site-platform";

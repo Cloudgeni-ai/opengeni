@@ -61,6 +61,23 @@ limit on chains of automations that wake each other.
 | `usage.exhausted` | A usage limit was used up | Yes |
 | `usage.period_reset` | A new usage period started | Yes |
 | `recording.*` | Meeting recording facts | Yes, as today |
+| `app.record.added` / `app.record.changed` / `app.record.removed` | A record was added to, changed in or removed from an App's collection | Yes (migration 1515) |
+| `app.sql.changed` | An App's SQL database was written to | Yes (migration 1515) |
+
+### App data changes (migration 1515)
+
+App writes add facts to the same table, written by the API in the write's
+transaction (Site Data) or right after the App's database commits (Site
+SQL), only while a "This workspace" source or a workspace webhook subscribed
+to an app type exists. Row security shows an App fact to people who may open
+the App, narrowed per record for collections whose viewers read only their own
+records; see [Site Data](../site-data.md#app-change-events-for-automations-and-webhooks).
+An agent's write records the automation run behind its turn exactly as chat
+facts do, so the chain limit and the storm guard apply to loops through App
+data. Facts reach workspace webhooks through an `AFTER INSERT` trigger on the
+table, which leaves out record data the webhook may not see. The picker lists
+them under Apps. Self-hosted deployments get Site Data events; Site SQL (and so
+`app.sql.changed`) needs the hosted gateway.
 
 `turn.superseded` (a turn handed over to a Steer) is not an outcome, so it is
 not offered; the turn that takes over ends with one of the three turn types.

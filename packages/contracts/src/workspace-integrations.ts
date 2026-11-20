@@ -148,6 +148,10 @@ export const OrganizationWebhookEventType = WorkspaceWebhookEventType.exclude([
   "usage.period_reset",
   "session.agentCall.ringing",
   "session.agentCall.settled",
+  "app.record.added",
+  "app.record.changed",
+  "app.record.removed",
+  "app.sql.changed",
 ]);
 export type OrganizationWebhookEventType = z.infer<typeof OrganizationWebhookEventType>;
 const OrganizationEventTypes = /* @__PURE__ */ defineSchema(() =>
@@ -158,6 +162,10 @@ const OrganizationEventTypes = /* @__PURE__ */ defineSchema(() =>
     .refine((types) => types.every((type) => !type.startsWith("usage.")), {
       message:
         "Organization webhooks accept session events only; subscribe to usage events on a workspace webhook.",
+    })
+    .refine((types) => types.every((type) => !type.startsWith("app.")), {
+      message:
+        "Organization webhooks accept session events only; subscribe to App events on a workspace webhook.",
     })
     .transform((types) => [...new Set(types)]),
 );
@@ -344,6 +352,49 @@ export const WorkspaceUsageWebhookEvent = /* @__PURE__ */ defineSchema(() =>
 );
 export type WorkspaceUsageWebhookEvent = z.infer<typeof WorkspaceUsageWebhookEvent>;
 /**
+ * App data changes (workspace webhooks only): a record added, changed or
+ * removed in an App's collection, or an App SQL write. `data.record` carries
+ * the record when everyone who can open the App may read it and it is small;
+ * otherwise `recordWithheld` or `recordTruncated` is set.
+ */
+export const WorkspaceAppWebhookEvent = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    lane: z.literal("workspace").default("workspace"),
+    id: primitives.uuid,
+    type: z.enum(["app.record.added", "app.record.changed", "app.record.removed", "app.sql.changed"]),
+    workspaceId: primitives.uuid,
+    workspace: z
+      .object({
+        id: primitives.uuid,
+        externalSource: primitives.nullableString,
+        externalId: primitives.nullableString,
+      })
+      .optional(),
+    sessionId: z.null().optional(),
+    turnId: z.null().optional(),
+    occurredAt: primitives.string,
+    data: z
+      .object({
+        appId: primitives.uuid,
+        collection: z.string().optional(),
+        change: z.enum(["added", "changed", "removed"]).optional(),
+        recordId: z.string().optional(),
+        recordKey: z.string().optional(),
+        version: z.number().int().optional(),
+        record: z.record(z.string(), z.unknown()).optional(),
+        recordWithheld: z.boolean().optional(),
+        recordTruncated: z.boolean().optional(),
+        query: z.string().optional(),
+        rowsWritten: z.number().int().optional(),
+        chainDepth: z.number().int().optional(),
+        automationId: z.string().optional(),
+        automationRunId: z.string().optional(),
+      })
+      .passthrough(),
+  }),
+);
+export type WorkspaceAppWebhookEvent = z.infer<typeof WorkspaceAppWebhookEvent>;
+/**
  * "Send test event": proves the endpoint is reachable and verifies the
  * signature. It names the workspace but no session, turn or sequence.
  */
@@ -368,7 +419,12 @@ export const WorkspaceTestWebhookEvent = /* @__PURE__ */ defineSchema(() =>
 );
 export type WorkspaceTestWebhookEvent = z.infer<typeof WorkspaceTestWebhookEvent>;
 export const WorkspaceWebhookEvent = /* @__PURE__ */ defineSchema(() =>
-  z.union([SessionWorkspaceWebhookEvent, WorkspaceUsageWebhookEvent, WorkspaceTestWebhookEvent]),
+  z.union([
+    SessionWorkspaceWebhookEvent,
+    WorkspaceUsageWebhookEvent,
+    WorkspaceAppWebhookEvent,
+    WorkspaceTestWebhookEvent,
+  ]),
 );
 export type WorkspaceWebhookEvent = z.infer<typeof WorkspaceWebhookEvent>;
 

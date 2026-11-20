@@ -118,11 +118,56 @@ others write (activity timing, never content); readable collections are fixed
 per connection until it reconnects. Without `OPENGENI_SITES_LIVE_ENABLED` and the `SITE_LIVE` gateway binding the live routes answer 404
 and pages keep their timed checks.
 
-Not covered: Site SQL writes (the Durable Object commit is not atomic with
-Postgres, so no event is published), and workspace webhooks or the "This
-workspace" automation source. `site_data_changes` with its listener flag is
-the seam for those: a consumer would keep `live_until` fresh and read rows by
-`change_seq`.
+Live hints do not cover Site SQL writes (the Durable Object commit is not
+atomic with Postgres, so no hint is published).
+
+### App change events for automations and webhooks
+
+Automations and workspace webhooks hear about App data changes through the
+same vocabulary as Opengeni's other events (migration `1515`,
+`packages/db/src/app-activity-events.ts`):
+
+- `app.record.added`, `app.record.changed`, `app.record.removed`: one fact per
+  record a write transaction inserted (`insert`, a new `put` key, an
+  `increment` that created the record), changed (`put`, `patch`, `increment`)
+  or deleted. A `put` or `patch` that leaves the stored data unchanged sends
+  nothing, so a sync that refreshes the same data stays quiet. Imports,
+  collection resets and collection deletes send none.
+- `app.sql.changed`: a Site SQL write (a saved write query or
+  `site_sql_execute`) that wrote rows. The App's database commits in its
+  Durable Object, outside Postgres, so the API records this fact right after
+  the call returns, best effort: a crash in between loses the event, never
+  the write.
+
+Facts go to `workspace_activity_events` (the 1105 facts table) with the App's
+id, in the write's own transaction, and only while someone listens: an active
+"This workspace" event source or an enabled workspace webhook subscribed to an
+app type. Otherwise the write pays one indexed lookup. A fact carries the
+collection, record id, key, version, the record owner's subject, the writer's
+kind and the record's data when it is at most 4 KB (`recordTruncated`
+otherwise), plus the automation run that caused the write and its chain depth:
+an agent's write is traced to the run behind its turn the way chat facts are
+(the turn's run, the automation's own chat, or up to eight parent chats), so
+a loop of automations stops at the chain limit (depth 3) and the storm guard
+applies. A fact that cannot be written is logged and never fails the write.
+
+Who sees a fact is decided by row security, as the "This workspace" source
+reads as its owner:
+
+- The person must be able to open the App: it is shared with the workspace,
+  or it is their own Only me App.
+- In a collection where viewers read only their own records (`per_viewer`,
+  `append_only`), the record's owner sees it, and so do the App's owner or
+  creator and workspace administrators unless the records are private
+  (`privateRecords`), when only the owner does.
+
+Workspace webhooks receive every App fact of the workspace, but without the
+record's data when only some people may read it (`recordWithheld: true`).
+Organization webhooks don't offer app types. Events for automations are
+rendered like other "This workspace" events: summary `Record added in
+<App> / <collection>`, the App's console address, `data.appId`,
+`data.appTitle`, `data.writtenByYou`, and the fields above. Filter on
+`data.appId` and `data.collection` to listen to one collection.
 
 ## Access rules
 
@@ -806,8 +851,9 @@ answered; a metering failure is logged and does not fail the call.
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
   principals.
-- Site Data change events to workspace webhooks and the "This workspace"
-  automation source (read `site_data_changes`); Site SQL change events.
+- App change events for imports, resets and file uploads; Site SQL change
+  events that name the tables a statement wrote; a durable outbox for Site
+  SQL change events instead of the best-effort write after the call.
 
 
 - Site SQL: per-call CPU time is bounded only by the Durable Object's own
