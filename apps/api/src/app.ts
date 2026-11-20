@@ -25,6 +25,7 @@ import {
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
   describeWorkspaceSiteToolReadiness,
+  describeWorkspaceSiteToolSetup,
   resetWorkspaceSiteToolAllowances,
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
@@ -105,6 +106,7 @@ import {
   ToolGatewayTargetApprovalRequest,
   ToolGatewaySiteConsentRequest,
   ToolGatewaySiteReadinessRequest,
+  ToolGatewaySiteSetupRequest,
   ToolGatewaySiteAllowancesResetRequest,
   ToolGatewayManifestRequest,
   type AccessGrant,
@@ -2393,6 +2395,7 @@ export function createAppComposition(
     "target-approvals",
     "manifest",
     "readiness",
+    "site-setup",
   ] as const) {
     app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
@@ -2420,7 +2423,9 @@ export function createAppComposition(
               ? ToolGatewayManifestRequest
               : operation === "readiness"
                 ? ToolGatewaySiteReadinessRequest
-                : ToolGatewayTargetApprovalRequest;
+                : operation === "site-setup"
+                  ? ToolGatewaySiteSetupRequest
+                  : ToolGatewayTargetApprovalRequest;
       parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
@@ -2455,12 +2460,19 @@ export function createAppComposition(
                       ToolGatewaySiteReadinessRequest.parse(body),
                       options,
                     )
-                  : await approveWorkspaceToolTarget(
-                      routeDeps,
-                      authorization,
-                      ToolGatewayTargetApprovalRequest.parse(body),
-                      options,
-                    );
+                  : operation === "site-setup"
+                    ? await describeWorkspaceSiteToolSetup(
+                        routeDeps,
+                        authorization,
+                        ToolGatewaySiteSetupRequest.parse(body),
+                        options,
+                      )
+                    : await approveWorkspaceToolTarget(
+                        routeDeps,
+                        authorization,
+                        ToolGatewayTargetApprovalRequest.parse(body),
+                        options,
+                      );
         c.header(
           "server-timing",
           `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"` +

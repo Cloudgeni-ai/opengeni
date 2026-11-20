@@ -10710,6 +10710,7 @@
         "ToolGatewayDeclarationsResponse",
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10729,6 +10730,7 @@
         "ToolGatewayDeclarationsResponse",
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10774,6 +10776,7 @@
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10791,6 +10794,7 @@
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10804,6 +10808,7 @@
       "response": [
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10821,6 +10826,7 @@
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10834,6 +10840,21 @@
       "response": [
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
+        "ToolGatewayTargetApprovalResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/tools/site-setup",
+      "sdk": [
+        "createSiteToolBridge"
+      ],
+      "request": [],
+      "response": [
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10851,6 +10872,7 @@
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
         "ToolGatewaySiteReadinessResponse",
+        "ToolGatewaySiteSetupResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -33136,6 +33158,43 @@
         "$.unavailableReason": "enum?=[\"\\\"account\\\"\"]"
       }
     },
+    "ToolGatewaySiteSetupAction": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"connect\\\"\",\"\\\"reconnect\\\"\"]"
+      }
+    },
+    "ToolGatewaySiteSetupItem": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.account": "string! null",
+        "$.action": "ref(ToolGatewaySiteSetupAction)!",
+        "$.capabilityId": "string! null",
+        "$.connectionId": "string! null",
+        "$.connector": "string!",
+        "$.key": "string!",
+        "$.openUrl": "string! null",
+        "$.shared": "boolean!",
+        "$.tools": "array!",
+        "$.tools[]": "ref(AttemptToolIdentity)"
+      }
+    },
+    "ToolGatewaySiteSetupResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.items": "array!",
+        "$.items[]": "ref(ToolGatewaySiteSetupItem)",
+        "$.version": "const!=[\"1\"]"
+      }
+    },
     "ToolGatewayTarget": {
       "io": [
         "output"
@@ -38908,6 +38967,9 @@
       "ToolGatewaySiteReadinessResponse": "type",
       "ToolGatewaySiteReadinessState": "type",
       "ToolGatewaySiteReadinessTool": "type",
+      "ToolGatewaySiteSetupItem": "type",
+      "ToolGatewaySiteSetupRequest": "type",
+      "ToolGatewaySiteSetupResponse": "type",
       "ToolGatewayTarget": "type",
       "ToolGatewayTargetApprovalRequest": "type",
       "ToolGatewayTargetApprovalResponse": "type",
@@ -40395,12 +40457,16 @@
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeEventMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isOpenGeniSiteConnectionStatus": "value",
       "isOpenGeniSiteDataChange": "value",
       "isSiteCatalogStaleError": "value",
       "isSiteHttpRequest": "value",
       "OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL": "value",
       "OPENGENI_SITE_BRIDGE_CANCEL": "value",
       "OPENGENI_SITE_BRIDGE_CONNECT": "value",
+      "OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD": "value",
+      "OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD": "value",
+      "OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_EVENT": "value",
       "OPENGENI_SITE_BRIDGE_LOCATION_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD": "value",
@@ -40428,6 +40494,8 @@
       "OpenGeniSiteCapabilities": "type",
       "OpenGeniSiteClient": "type",
       "OpenGeniSiteClientOptions": "type",
+      "OpenGeniSiteConnectionNeed": "type",
+      "OpenGeniSiteConnectionStatus": "type",
       "OpenGeniSiteData": "type",
       "OpenGeniSiteDataChange": "type",
       "OpenGeniSiteDataCollection": "type",
@@ -40464,7 +40532,11 @@
       "sanitizeOpenGeniSiteToolCallRequest": "value",
       "sanitizeOpenGeniSiteToolInvokeRequest": "value",
       "serveSiteHttp": "value",
+      "SITE_CONNECT_CARD_DISMISSED_PREFIX": "value",
       "SITE_DATA_PATH_PREFIX": "value",
+      "siteConnectCardDismissals": "value",
+      "siteConnectCardLabel": "value",
+      "siteConnectionStatus": "value",
       "SiteHttpRequest": "type",
       "siteSessionPath": "value",
       "SiteToolBridge": "type",
@@ -40486,6 +40558,8 @@
       "injectSiteBridgeBootstrap": "value",
       "isOpenGeniReservedSitePath": "value",
       "openGeniSiteBridgePortFromBootstrap": "value",
+      "OpenGeniSiteConnectionNeed": "type",
+      "OpenGeniSiteConnectionStatus": "type",
       "OpenGeniSiteDataChange": "type",
       "openGeniSiteLocationHref": "value",
       "openGeniSiteLocationValue": "value",
@@ -40493,6 +40567,7 @@
       "openGeniSitePath": "value",
       "resolveOpenGeniSiteLocation": "value",
       "SITE_BRIDGE_BOOTSTRAP_SCRIPT": "value",
+      "SiteBridgeConnectionHandlers": "type",
       "SiteBridgeDocumentLease": "value",
       "siteBridgeError": "value",
       "SiteBridgeHost": "value",
@@ -40503,6 +40578,9 @@
       "SiteBridgeRequestValue": "type",
       "SiteBridgeToolHandlers": "type",
       "SiteBridgeViewerHandlers": "type",
+      "siteConnectCardDismissals": "value",
+      "siteConnectCardLabel": "value",
+      "siteConnectionStatus": "value",
       "SiteHttpRequest": "type"
     },
     "@opengeni/sdk/site-document": {
