@@ -95,7 +95,19 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
       - name: Open controller databases at long Windows paths
-        run: bun test packages/browserd/test/sqlite-file.test.ts
+        # Hosted runners enable long Win32 paths; ordinary Windows installs
+        # do not, so the test runs with the ordinary setting.
+        shell: pwsh
+        run: |
+          $key = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
+          $previous = (Get-ItemProperty -Path $key -Name LongPathsEnabled).LongPathsEnabled
+          Set-ItemProperty -Path $key -Name LongPathsEnabled -Value 0
+          try {
+            bun test packages/browserd/test/sqlite-file.test.ts
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Set-ItemProperty -Path $key -Name LongPathsEnabled -Value $previous
+          }
       - name: Stage the source-pinned Windows worker and transport
         run: bun packages/browserd/scripts/stage-cua-runtime.ts x64
       - name: Verify the source worker keeps the admitted Windows catalog unchanged
