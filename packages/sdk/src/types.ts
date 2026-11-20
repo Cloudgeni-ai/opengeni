@@ -403,6 +403,28 @@ export type ToolGatewaySiteReadinessResponse = {
   /** One entry per requested target, in order. */
   tools: ToolGatewaySiteReadinessTool[];
 };
+/**
+ * One item of an App's (Site's) connect card: a connector the viewer has no
+ * account for yet (`connect`), or an account of theirs that must sign in
+ * again or allow more access (`reconnect`). Host data: Site code receives
+ * `OpenGeniSiteConnectionNeed` instead, without ids or addresses.
+ */
+export type ToolGatewaySiteSetupItem = {
+  /** Stable for this viewer, connector and account (the card's dismissal key). */
+  key: string;
+  action: "connect" | "reconnect";
+  connector: string;
+  capabilityId: string | null;
+  connectionId: string | null;
+  account: string | null;
+  shared: boolean;
+  /** The App's declared tools that wait on it. */
+  tools: ToolGatewayIdentity[];
+  /** On a published App: the App in Opengeni with this connect dialog open. */
+  openUrl: string | null;
+};
+export type ToolGatewaySiteSetupRequest = { siteArtifactId: string; siteVersionId: string };
+export type ToolGatewaySiteSetupResponse = { version: 1; items: ToolGatewaySiteSetupItem[] };
 /** Remove every "Always allow for this Site" choice the caller made on one Site (host code only). */
 export type ToolGatewaySiteAllowancesResetRequest = {
   siteArtifactId: string;

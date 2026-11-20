@@ -33,6 +33,20 @@ import {
 } from "./site-data";
 import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
 import { createOpenGeniSiteAi, type OpenGeniSiteAi } from "./site-ai";
+import {
+  isOpenGeniSiteConnectionStatus,
+  siteConnectionStatus,
+  type OpenGeniSiteConnectionStatus,
+} from "./site-connect-card";
+export {
+  isOpenGeniSiteConnectionStatus,
+  siteConnectCardDismissals,
+  siteConnectCardLabel,
+  siteConnectionStatus,
+  SITE_CONNECT_CARD_DISMISSED_PREFIX,
+  type OpenGeniSiteConnectionNeed,
+  type OpenGeniSiteConnectionStatus,
+} from "./site-connect-card";
 export type {
   OpenGeniSiteAi,
   OpenGeniSiteAiRequest,
@@ -107,6 +121,14 @@ export const OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD = "location.navigate" as const
  * for Sites that listen.
  */
 export const OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD = "data.watch" as const;
+/**
+ * Bridge request methods for the platform's connect card (advertised by
+ * `connections: 1`): what the viewer still has to connect, start one
+ * connect, or show the card again.
+ */
+export const OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD = "connections.status" as const;
+export const OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD = "connections.connect" as const;
+export const OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD = "connections.show" as const;
 /** Host-to-Site notification on a connected port, such as a location change. */
 export const OPENGENI_SITE_BRIDGE_EVENT = "opengeni.site.event" as const;
 
@@ -260,6 +282,8 @@ export type OpenGeniSiteBridgeReadyMessage = {
   toolReadiness?: 1;
   /** The host posts `data_changed` events when the Site's data changes (live hints). */
   dataChanges?: 1;
+  /** The host shows the platform's connect card and answers the `connections.*` methods. */
+  connections?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -296,6 +320,9 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_LOCATION_METHOD }
   | { method: typeof OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD }
+  | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD }
+  | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD; payload: { key?: string } }
+  | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD }
   | {
       method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
       payload: { to: string; replace?: boolean };
@@ -338,7 +365,10 @@ export type OpenGeniSiteBridgeResponseMessage = {
         | OpenGeniSiteViewer
         | OpenGeniSiteSignInResult
         | OpenGeniSiteLocationValue
-        | { watching: boolean };
+        | { watching: boolean }
+        | OpenGeniSiteConnectionStatus
+        | { connected: boolean }
+        | { shown: boolean };
     }
   | {
       ok: false;
@@ -409,6 +439,37 @@ export type OpenGeniSiteClient = {
    * Returns a function that stops listening.
    */
   onLocationChange(listener: (location: OpenGeniSiteLocation) => void): () => void;
+  /**
+   * The platform's connect card. Opengeni shows it by itself when the viewer
+   * opens the App and still has to connect (or reconnect) a tool the App
+   * declares; nothing shows when everything is ready, for people outside the
+   * workspace, or after the viewer closed it. Use these to show it where and
+   * when the App wants, or to draw your own.
+   */
+  readonly connections: {
+    /**
+     * What the viewer still has to connect: `{ supported, ready, needed }`,
+     * each need with its `key`, `action` (`connect` or `reconnect`),
+     * `connector`, `label` ("Connect Gmail") and the declared `tools` that
+     * wait on it. `supported` is false (and `ready` true) on hosts that can't
+     * tell: local previews, older hosts and people outside the workspace.
+     */
+    status(): Promise<OpenGeniSiteConnectionStatus>;
+    /**
+     * Start one need's single action (`key` from `status()`, or the first
+     * need when omitted): Opengeni's own connect dialog in the console; on a
+     * published App, Opengeni opens in a new tab. Resolves `{ connected }`;
+     * the App then hears `onChange`.
+     */
+    connect(key?: string): Promise<{ connected: boolean }>;
+    /**
+     * Show the platform card again even if the viewer closed it. Resolves
+     * `{ shown: false }` when there is nothing to connect or the host has no card.
+     */
+    showCard(): Promise<{ shown: boolean }>;
+    /** Call `listener` when what the viewer has connected may have changed. Returns a stop function. */
+    onChange(listener: () => void): () => void;
+  };
   readonly auth: {
     /**
      * Ask the host to sign the viewer in. On a published Site the host
@@ -528,6 +589,12 @@ export function createOpenGeniSiteClient(
       siteLocation(await transport.navigate(String(to), navigateOptions.replace === true)),
     onLocationChange: (listener) =>
       transport.subscribeLocation((value) => listener(siteLocation(value))),
+    connections: {
+      status: () => transport.connectionsStatus(),
+      connect: (key) => transport.connectionsConnect(key),
+      showCard: () => transport.connectionsShow(),
+      onChange: onReadinessChange,
+    },
     auth: { signIn: () => transport.signIn() },
     close: () => transport.close(),
   };
@@ -540,6 +607,9 @@ type SiteLocationTransport = {
   subscribeLocation(listener: (location: OpenGeniSiteLocationValue) => void): () => void;
   subscribeToolReadiness(listener: () => void): () => void;
   subscribeDataChanges(listener: (change: OpenGeniSiteDataChange) => void): () => void;
+  connectionsStatus(): Promise<OpenGeniSiteConnectionStatus>;
+  connectionsConnect(key?: string): Promise<{ connected: boolean }>;
+  connectionsShow(): Promise<{ shown: boolean }>;
 };
 
 function readinessUnsupported(): OpenGeniSiteBridgeError {
@@ -642,6 +712,19 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport, SiteL
   /** A local preview has no Opengeni frame to change what the viewer can do. */
   subscribeToolReadiness(_listener: () => void): () => void {
     return () => undefined;
+  }
+
+  /** A local preview has no connect card: it runs as its builder's own tools. */
+  async connectionsStatus(): Promise<OpenGeniSiteConnectionStatus> {
+    return siteConnectionStatus(null);
+  }
+
+  async connectionsConnect(): Promise<{ connected: boolean }> {
+    return { connected: false };
+  }
+
+  async connectionsShow(): Promise<{ shown: boolean }> {
+    return { shown: false };
   }
 
   /** A local preview has no published Site, so no data change hints. */
@@ -831,9 +914,16 @@ export function isOpenGeniSiteBridgeRequestMessage(
     value.method === OPENGENI_SITE_BRIDGE_VIEWER_METHOD ||
     value.method === OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD ||
     value.method === OPENGENI_SITE_BRIDGE_LOCATION_METHOD ||
-    value.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD
+    value.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD ||
+    value.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD ||
+    value.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD
   )
     return true;
+  if (value.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD)
+    return (
+      isRecord(value.payload) &&
+      (value.payload.key === undefined || typeof value.payload.key === "string")
+    );
   if (value.method === OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD)
     return isRecord(value.payload) && typeof value.payload.to === "string";
   if (value.method === "readiness")
@@ -933,6 +1023,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
   private locationSupported = false;
   private toolReadiness = false;
   private dataChanges = false;
+  private connections = false;
   private dataWatchSent = false;
   private readonly locationListeners = new Set<(location: OpenGeniSiteLocationValue) => void>();
   private readonly readinessListeners = new Set<() => void>();
@@ -1045,6 +1136,37 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
     return () => {
       this.locationListeners.delete(listener);
     };
+  }
+
+  async connectionsStatus(): Promise<OpenGeniSiteConnectionStatus> {
+    await this.connect();
+    if (!this.connections) return siteConnectionStatus(null);
+    const value = await this.request(
+      { method: OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD },
+      {},
+    );
+    return isOpenGeniSiteConnectionStatus(value) ? value : siteConnectionStatus(null);
+  }
+
+  async connectionsConnect(key?: string): Promise<{ connected: boolean }> {
+    await this.connect();
+    if (!this.connections) return { connected: false };
+    // Connecting waits on the viewer (a sign-in in another window), so no short timeout.
+    const value = await this.request(
+      {
+        method: OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD,
+        payload: key === undefined ? {} : { key: String(key) },
+      },
+      { timeoutMs: 30 * 60_000 },
+    );
+    return { connected: isRecord(value) && value.connected === true };
+  }
+
+  async connectionsShow(): Promise<{ shown: boolean }> {
+    await this.connect();
+    if (!this.connections) return { shown: false };
+    const value = await this.request({ method: OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD }, {});
+    return { shown: isRecord(value) && value.shown === true };
   }
 
   subscribeToolReadiness(listener: () => void): () => void {
@@ -1183,6 +1305,12 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
       | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
       | { method: typeof OPENGENI_SITE_BRIDGE_LOCATION_METHOD }
       | { method: typeof OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD }
+      | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD }
+      | {
+          method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD;
+          payload: { key?: string };
+        }
+      | { method: typeof OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD }
       | {
           method: typeof OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD;
           payload: { to: string; replace?: boolean };
@@ -1293,6 +1421,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         this.locationSupported = message.location === 1;
         this.toolReadiness = message.toolReadiness === 1;
         this.dataChanges = message.dataChanges === 1;
+        this.connections = message.connections === 1;
         if (this.locationSupported || this.toolReadiness || this.dataChanges)
           channel.port1.addEventListener("message", (hostEvent: MessageEvent<unknown>) => {
             const data = hostEvent.data;

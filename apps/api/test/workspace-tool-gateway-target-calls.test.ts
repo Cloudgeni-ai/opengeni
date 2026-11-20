@@ -199,6 +199,7 @@ const {
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
   describeWorkspaceSiteToolReadiness,
+  describeWorkspaceSiteToolSetup,
   resetWorkspaceSiteToolAllowances,
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
@@ -2479,6 +2480,112 @@ describe("Site tool readiness and typed failures", () => {
       expect(fixed).toMatchObject({ state: "unavailable", unavailableReason: "account" });
       expect(fixed!.scopes).toBeUndefined();
       // Nothing was prepared or sent to find this out.
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(preparations).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("the connect card lists what this viewer can connect or reconnect, one item per connector or account", async () => {
+    const f = createFixture();
+    try {
+      // The connector as the catalog offers it, so the card has something to click.
+      const withCapability = (
+        capabilityId: string | null,
+        account: { grantedScopes?: string[] } = {},
+        gmail = false,
+      ) => ({
+        readAccounts: async (...args: Parameters<typeof readSiteToolAccountInventory>) => {
+          const inventory = await readSiteToolAccountInventory(...args);
+          const canonicalServers = new Map(
+            [...inventory.canonical].map(([id, connect]) => [id, { ...connect, capabilityId }]),
+          );
+          const servers = new Map(inventory.servers);
+          if (gmail)
+            for (const [id, server] of servers)
+              servers.set(id, {
+                ...server,
+                url: "https://gmailmcp.googleapis.com/mcp/v1",
+                connectionRef: {
+                  providerDomain: "gmailmcp.googleapis.com",
+                  kind: "oauth2" as const,
+                },
+              });
+          return {
+            ...inventory,
+            canonical: canonicalServers,
+            servers,
+            accounts: inventory.accounts.map((entry) => ({ ...entry, ...account })),
+          };
+        },
+      });
+      const setup = async (options: TargetGatewayOptions, declared = [canonical]) =>
+        (
+          await describeWorkspaceSiteToolSetup(
+            f.deps,
+            targetAuthorization(),
+            site,
+            targetOptions({ readSiteVersion: siteVersion(declared), ...options }),
+          )
+        ).items;
+      // No account yet: Connect, once, with the declared tool waiting on it.
+      f.state.connections = [f.foreign];
+      const [connect, ...others] = await setup({
+        ...withCapability("capability-grafana"),
+        readReconnect: async () => [],
+      });
+      expect(others).toEqual([]);
+      expect(connect).toMatchObject({
+        action: "connect",
+        capabilityId: "capability-grafana",
+        connectionId: null,
+        account: null,
+        shared: false,
+        tools: [canonical],
+        // In the console the dialog opens in place.
+        openUrl: null,
+      });
+      expect(connect!.key).toBe(`connect:${connect!.connector}:`);
+      // Two declared tools on the same connector are one item.
+      const second = { serverId: "grafana", toolName: "list_dashboards" };
+      const merged = await setup(
+        { ...withCapability("capability-grafana"), readReconnect: async () => [] },
+        [canonical, second],
+      );
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.tools).toEqual([canonical, second]);
+      // An account that stopped working: Reconnect that same account.
+      const [reconnect] = await setup({
+        ...withCapability("capability-grafana"),
+        readReconnect: async () => [
+          {
+            canonicalServerId: "grafana",
+            connectionId: f.personal.id,
+            account: "ada@example.test",
+            shared: false,
+          },
+        ],
+      });
+      expect(reconnect).toMatchObject({
+        action: "reconnect",
+        connectionId: f.personal.id,
+        account: "ada@example.test",
+        key: `reconnect:${reconnect!.connector}:ada@example.test`,
+      });
+      // Nothing the catalog can connect from here: nothing to click, no item.
+      expect(await setup({ ...withCapability(null), readReconnect: async () => [] })).toEqual([]);
+      // Connected and ready: an empty card.
+      f.state.connections = [f.personal, f.foreign];
+      expect(await setup(withCapability("capability-grafana"))).toEqual([]);
+      // An account that must allow more access signs in again: Reconnect.
+      const [grant] = await setup(
+        withCapability("capability-grafana", { grantedScopes: [] }, true),
+      );
+      expect(grant).toMatchObject({ action: "reconnect", connectionId: f.personal.id });
+      // An App that declares nothing has nothing to connect.
+      expect(await setup(withCapability("capability-grafana"), [])).toEqual([]);
+      // The card never builds a provider or reaches one.
       expect(f.grafana.requests).toHaveLength(0);
       expect(preparations).toHaveLength(0);
     } finally {

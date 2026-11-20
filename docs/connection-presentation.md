@@ -27,6 +27,19 @@ supply the matching filtered catalogue. The SDK contains no product-specific
 service list. Hosts may compose other capability categories without adopting the
 console's entire capabilities page.
 
+## App connect card
+
+Apps (Sites) don't build their own connect screens. The console's App view and
+the published-App shell show a platform card, "Connect <tool>" with one button
+per connected tool the App declares that the viewer still has to connect or
+reconnect, built from `tools/site-setup` (`site-runtime` `tools/setup`) and
+the same readiness as `tools/readiness`. In the console its button runs the
+ordinary `McpConnectionCard` connect or reconnect dialog; on a published App
+it opens the App in the console with `?connect=<key>`, which opens that
+dialog. Account choice stays in the call's own confirmation. Apps can read
+and drive it with `site.connections`; see "Connect card" in
+[the published Sites API reference](site-runtime-api.md).
+
 ## OAuth details and conversation use
 
 `McpConnectionCard` without a session ID configures only a connection: it never

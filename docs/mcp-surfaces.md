@@ -430,6 +430,11 @@ the first-party bridge's own rule for what each tool needs
 Nango-held one) reads `unavailable` with `unavailableReason: "account"` instead. `POST tools/site-allowances/reset` removes the caller's own "Always
 allow" choices on one Site (people only).
 
+`POST tools/site-setup` (`{siteArtifactId, siteVersionId}`) runs that
+readiness over every tool the Site version declares and groups what the
+viewer must connect or reconnect into the App connect card's items; see
+"Connect card" in `docs/site-runtime-api.md`.
+
 In a chat, the same bridge rule decides the `tool.auth_needed` notice for a
 tool the account lacks access for: `insufficient_scope` with `scopes` (the
 "Give {provider} more access" step-up) when the account can be given more, or,
