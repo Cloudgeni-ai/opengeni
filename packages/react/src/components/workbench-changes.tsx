@@ -52,6 +52,7 @@ const OVERSCAN = 2;
 const HEADER_PX = 30;
 const LINE_PX = 18;
 const GUARD_BODY_PX = 52;
+const EMPTY_BODY_PX = 36;
 const COMPACT_SURFACE_PX = 560;
 const useChangesLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -316,11 +317,18 @@ function isGuarded(file: GitFileDiff): boolean {
   return file.isBinary || file.truncated;
 }
 
+/** A rename or mode change with no hunks: Pierre would draw nothing without its
+ *  own file header, so a one-line note stands in for the diff body. */
+function hasNoHunks(file: GitFileDiff): boolean {
+  return !isGuarded(file) && file.hunks.length === 0;
+}
+
 /** Estimate a section's rendered height for the windowing math. Line-count based,
  *  so it is close enough that the first paint barely shifts as real heights land. */
 function estimateSectionHeight(file: GitFileDiff, collapsed = false): number {
   if (collapsed) return HEADER_PX;
   if (isGuarded(file)) return HEADER_PX + GUARD_BODY_PX;
+  if (hasNoHunks(file)) return HEADER_PX + EMPTY_BODY_PX;
   let lines = 0;
   for (const hunk of file.hunks) lines += hunk.lines.length + 1;
   return HEADER_PX + Math.max(lines, 1) * LINE_PX + 8;
@@ -759,16 +767,19 @@ function DiffSection({
   // One header per file, drawn here so every file (diffable or guarded) folds
   // the same way; Pierre's own file header is turned off to avoid a second one.
   const guarded = isGuarded(file);
+  const empty = hasNoHunks(file);
   return (
     <section
       data-diff-file={file.path}
       data-diff-collapsed={collapsed ? "" : undefined}
-      {...(guarded ? {} : { "data-pierre-section": "" })}
+      {...(guarded || empty || collapsed ? {} : { "data-pierre-section": "" })}
       className={cn("border-b border-og-border", !collapsed && (guarded ? "pb-1" : "pb-2"))}
     >
       <DiffFileHeader file={file} collapsed={collapsed} onToggle={onToggle} />
       {collapsed ? null : guarded ? (
         <GuardBody file={file} {...(onOpenFile ? { onOpenFile } : {})} />
+      ) : empty ? (
+        <NoHunksBody />
       ) : (
         <PierreDiff
           diff={[file]}
@@ -873,6 +884,15 @@ function PullRequestAction({
 
 /** The per-file guard: a binary file or an over-cap diff opens live rather than
  *  inlining a body we don't (fully) have. */
+function NoHunksBody() {
+  const t = useOpenGeniText();
+  return (
+    <div className="px-3 py-2 text-og-sm text-og-fg-subtle">
+      {t("workbenchChanges.noContentChanges")}
+    </div>
+  );
+}
+
 function GuardBody({
   file,
   onOpenFile,

@@ -112,7 +112,7 @@ export function registerSessionCoordinationTools(
     "set_waiting_on",
     {
       description:
-        'Show that this chat is waiting on a person, as "Waiting on <person>" in the chat header and chat list, until they reply or approve here or you continue. Use it for waits outside this chat, such as a review or an answer elsewhere; your own questions and approvals already show who they wait on. person: a workspace member\'s name, email or id, or any name. reason: one short line, such as "review PR #2291". person null clears it.',
+        'Show "Waiting on <person>" in the header and list until they reply or approve here or you continue. Use it for waits on someone elsewhere, such as a review; your own questions and approvals already show who they wait on. person: a name, email or member id. reason: one short line, such as "review PR #2291". person null clears it.',
       inputSchema: {
         person: z
           .string()
@@ -164,7 +164,7 @@ export function registerSessionCoordinationTools(
     "session_links_add",
     {
       description:
-        'Link something this chat works on, shown in its Linked panel with live status where Opengeni can read it: an issue, a pull request, a Slack thread, an App record or any URL. Pull requests you open with the GitHub tools are linked automatically. Adding the same URL again updates its title. wakeWhen, for a GitHub pull request: "merged" wakes this chat once when it merges, "release_published" once when its repository next publishes a release; then report back where the work started, such as the Slack thread.',
+        'Add an issue, pull request, Slack thread, App record or any URL you work on to the Linked panel, with live status where available. Pull requests you open with the GitHub tools are linked automatically. Adding the same URL again updates its title. wakeWhen, for a GitHub pull request: "merged" wakes you once when it merges, "release_published" once when its repository next publishes a release; then report back where the work started, such as the Slack thread.',
       inputSchema: {
         url: z.string().url().max(SESSION_LINK_URL_MAX_LENGTH),
         title: z.string().trim().min(1).max(SESSION_LINK_TITLE_MAX_LENGTH).optional(),

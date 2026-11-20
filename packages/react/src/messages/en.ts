@@ -6638,6 +6638,7 @@ export const englishMessages = {
   "workbenchChanges.diffTooLargeToShow": "Diff too large to show here",
   "workbenchChanges.filesChanged_one": "{count} file changed",
   "workbenchChanges.filesChanged_other": "{count} files changed",
+  "workbenchChanges.noContentChanges": "No content changes",
   "workbenchChanges.liveDiff": "Live diff",
   "workbenchChanges.openInFiles": "Open in Files",
   "workbenchChanges.openPullRequest": "Open PR",
