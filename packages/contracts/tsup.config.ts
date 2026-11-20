@@ -16,6 +16,7 @@ export default defineConfig({
     "src/json-safe.ts",
     "src/citation-urls.ts",
     "src/claude-cite-tags.ts",
+    "src/provider-citation-handles.ts",
     "src/no-reply.ts",
     "src/usage-allowances.ts",
     "src/session-usage-limits.ts",
