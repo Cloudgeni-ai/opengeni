@@ -156,6 +156,7 @@ describe("agents through the API (real PostgreSQL)", () => {
       visibility: "workspace",
       toolPermissions: [
         { connector: "github.com", tool: "merge_pull_request", permission: "block" },
+        { connector: "github.com", tool: "pull_request_merge", permission: "block" },
       ],
       skills: [],
     });
