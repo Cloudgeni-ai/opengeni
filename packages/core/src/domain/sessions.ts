@@ -7,6 +7,13 @@ import type {
   TeamsConversationProof,
 } from "@opengeni/db";
 import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
+import { sessionAgentFieldNamesOrgAgent } from "@opengeni/contracts";
+import {
+  assertOrgAgentApprovalPolicyNarrows,
+  prepareOrgAgentSessionCreate,
+  refuseOrgAgentChatMachine,
+  type PreparedOrgAgentSessionCreate,
+} from "./org-agents";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
@@ -20,7 +27,10 @@ import {
   isClaudeSubscriptionModelId,
   isClaudeSubscriptionProviderId,
 } from "@opengeni/contracts/claude-subscription-model-ids";
-import { requireExplicitPermissionDelegation } from "../access";
+import {
+  authorizationHoldsOrganizationPermission,
+  requireExplicitPermissionDelegation,
+} from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import { unattendedRequestGoal } from "./unattended-request-goal";
@@ -815,11 +825,15 @@ export function validateSessionMcpServersForCreate(
   settings: Settings,
   grant: AccessGrant,
   servers: SessionMcpServerInput[],
+  /** An organization agent's own servers: attached without `mcp_servers:attach`. */
+  preauthorizedServerIds?: ReadonlySet<string>,
 ): ValidatedSessionMcpServers {
   if (servers.length === 0) {
     return { runtimeServers: [], dbServers: [], metadata: [] };
   }
-  requirePermission(grant, "mcp_servers:attach");
+  if (!preauthorizedServerIds || servers.some((server) => !preauthorizedServerIds.has(server.id))) {
+    requirePermission(grant, "mcp_servers:attach");
+  }
   const encryptionKey = servers.some((server) => Object.keys(server.headers ?? {}).length > 0)
     ? requireEnvironmentEncryption(settings)
     : null;
@@ -1118,6 +1132,13 @@ export async function createAndStartSessionWithOutcome(input: {
   unattended?: boolean;
   /** The agent (agents.id) the chat starts with, at its current revision. */
   boundAgentId?: string;
+  /** The organization agent version the chat runs (`sessions.agent_version`). */
+  boundOrgAgent?: {
+    agentId: string;
+    version: number;
+    promptVersion: number;
+    overrides: Record<string, { agent: unknown; chat: unknown }> | null;
+  };
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1409,6 +1430,7 @@ export async function createAndStartSessionWithOutcome(input: {
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
           ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+          ...(input.boundOrgAgent ? { orgAgent: input.boundOrgAgent } : {}),
           ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
           policyRole: input.policyRole ?? null,
@@ -1528,6 +1550,7 @@ export async function createAndStartSessionWithOutcome(input: {
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
         ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+        ...(input.boundOrgAgent ? { orgAgent: input.boundOrgAgent } : {}),
         ...(input.unattended ? { unattended: true } : {}),
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
         policyRole: input.policyRole ?? null,
@@ -2765,6 +2788,33 @@ async function createSessionForRequestInFileScope(
   agentChildPresentation?: AgentChildSessionCreatePresentation,
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
+  // An organization agent becomes an ordinary create body here; every other
+  // create skips this and keeps today's path unchanged.
+  const orgAgent: PreparedOrgAgentSessionCreate | null =
+    rawPayload !== null &&
+    typeof rawPayload === "object" &&
+    !Array.isArray(rawPayload) &&
+    sessionAgentFieldNamesOrgAgent((rawPayload as Record<string, unknown>)["agent"])
+      ? await prepareOrgAgentSessionCreate(
+          {
+            db: unresolvedDeps.db,
+            settings: unresolvedDeps.settings,
+            observability: unresolvedDeps.observability ?? null,
+          },
+          grant,
+          workspaceId,
+          rawPayload as Record<string, unknown>,
+          {
+            // The organization key's own agents:manage (held literally; never
+            // implied by workspace:admin, and never the end user's stated
+            // membership). An end user acting through that key counts here: the
+            // session proxy drops browser-sent organization agent fields, so
+            // they come only from the product's `createSession` hook.
+            manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage"),
+          },
+        )
+      : null;
+  if (orgAgent) rawPayload = orgAgent.payload;
   const payload = CreateSessionRequest.parse(rawPayload);
 
   // A tool whose backing workload this deployment does not run is dropped, not
@@ -3182,6 +3232,8 @@ async function createSessionForRequestInFileScope(
   // default ("Your default machine") places the chats they start themselves
   // ahead of the workspace default; automations and agent-created chats follow
   // the workspace default, and an unusable personal choice falls back to it.
+  // An organization agent chat never takes a person's own default: it can be
+  // their Personal (Only me) machine.
   if (
     !parentSession &&
     !payload.targetSandboxId &&
@@ -3189,7 +3241,10 @@ async function createSessionForRequestInFileScope(
     (payload.sandbox === undefined || payload.sandbox === "new")
   ) {
     const memberDefault =
-      !retainedKeyedShellExecution && !creationInitiator.actor && replayManagedHumanSubjectId
+      !retainedKeyedShellExecution &&
+      !creationInitiator.actor &&
+      !orgAgent &&
+      replayManagedHumanSubjectId
         ? await resolveMemberExecutionDefault(db, unresolvedDeps.settings, {
             accountId: grant.accountId,
             workspaceId,
@@ -3408,7 +3463,14 @@ async function createSessionForRequestInFileScope(
       ),
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
-    ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
+    ? orgAgent
+      ? validateSessionMcpServersForCreate(
+          capabilityRuntimeSettings,
+          grant,
+          payload.mcpServers,
+          orgAgent.agentServerIds,
+        )
+      : validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
     : parentSession
       ? validateInheritedSessionMcpServersForCreate(
           await listSessionMcpServersForChildInheritance(db, workspaceId, parentSession.id),
@@ -4246,6 +4308,20 @@ async function createSessionForRequestInFileScope(
         workingDir: payload.workingDir ?? null,
       }
     : inheritedActiveTarget;
+  // A Personal (Only me) machine never runs an organization agent chat, named
+  // on create or inherited by a worker, wherever the machine came from: the
+  // request, a default, or the parent's box a worker joins.
+  if (effectiveSeedTarget && (orgAgent || parentSession?.orgAgent)) {
+    await refuseOrgAgentChatMachine(
+      db,
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: personalResourceSubjectId ?? grant.subjectId ?? "",
+      },
+      effectiveSeedTarget.sandboxId,
+    );
+  }
   if (
     effectiveSandboxBackend === "selfhosted" &&
     effectiveSeedTarget === null &&
@@ -4463,6 +4539,16 @@ async function createSessionForRequestInFileScope(
       // The agent the chat starts with: its Instructions are a prompt layer
       // of their own, never copied into `instructions`.
       ...(payload.agentId ? { boundAgentId: payload.agentId } : {}),
+      ...(orgAgent
+        ? {
+            boundOrgAgent: {
+              agentId: orgAgent.binding.agentId,
+              version: orgAgent.binding.version,
+              promptVersion: orgAgent.binding.promptVersion,
+              overrides: orgAgent.binding.overrides,
+            },
+          }
+        : {}),
       // No person answers during the task. Never inherited by a child.
       ...(payload.unattended === true ? { unattended: true } : {}),
       // Session and agent-config vault narrowing, intersected (AX-2). Ancestor
@@ -5597,6 +5683,7 @@ export async function updateSessionMcpApprovalPolicy(
   sessionId: string,
   serverId: string,
   requireApproval: SessionMcpApprovalPolicy,
+  authorization?: AccessGrantAuthorization,
 ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
   const normalizedPolicy = SessionMcpApprovalPolicy.parse(requireApproval);
   await requireSessionAuthorization(deps, grant, {
@@ -5605,6 +5692,20 @@ export async function updateSessionMcpApprovalPolicy(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  // An organization agent's own tool server: the chat may only ask first for more.
+  await assertOrgAgentApprovalPolicyNarrows(deps, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    serverId,
+    requireApproval: normalizedPolicy,
+    // The session proxy passes this route through from the browser, so an end
+    // user acting through the organization key never inherits its
+    // agents:manage here; the product's server (the key without an actor) can.
+    manageAgents: authorizationHoldsOrganizationPermission(authorization, "agents:manage", {
+      endUsers: false,
+    }),
+  });
 
   const outcome: { server?: SessionMcpApprovalPolicyTarget } = {};
   const events = await appendSessionEventsWithLockedSessionUpdate(
@@ -5646,7 +5747,7 @@ export async function updateSessionMcpApprovalPolicy(
   };
 }
 
-function toolPolicyAuditSnapshot(
+export function toolPolicyAuditSnapshot(
   session: Session,
   tools: ToolRef[],
   firstPartyMcpTools: FirstPartyMcpToolName[],

@@ -5,21 +5,31 @@ import {
 } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
+  applyOrgAgent,
   claimSessionWorkForAttempt,
   createDb,
+  createOrgAgent,
   createRig,
   createSession,
   createWorkspace,
   ensureManagedAccessForUser,
+  ensureOrgAgentTestWorkspace,
   getRig,
   getSandbox,
+  isManagedWorkspace,
   initializeSessionStartAtomically,
   listEnrollments,
   listOrganizationCompute,
   listRigs,
+  markWorkspaceManagedByApiKey,
   materializeRigVersionForAttempt,
+  listOrgAgentCompute,
   nestedPostgresSqlState,
+  OrgAgentError,
+  resolveOrgAgentRunsOnInAccount,
   revokeScopedRig,
+  setConsoleWorkspaceKind,
+  saveOrgAgentDraft,
   updateOrganizationMachineReach,
   updateOrganizationRigReach,
   type DbClient,
@@ -120,18 +130,26 @@ async function attachAllowed(org: Org, workspaceId: string, sandboxId: string) {
   })) as boolean;
 }
 
-async function organizationMachine(org: Org) {
+async function organizationMachine(
+  org: Org,
+  options: {
+    scope?: "organization" | "workspace" | "user";
+    workspaceId?: string;
+    name?: string;
+  } = {},
+) {
+  const workspaceId = options.workspaceId ?? org.home;
   return (await app.begin(async (tx) => {
     await tx`select
       set_config('opengeni.account_id', ${org.accountId}, true),
-      set_config('opengeni.workspace_id', ${org.home}, true),
+      set_config('opengeni.workspace_id', ${workspaceId}, true),
       set_config('opengeni.subject_id', ${org.owner}, true)`;
     const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
       select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
       from finalize_scoped_enrollment(
-        ${org.accountId}::uuid, ${org.home}::uuid, 'organization',
+        ${org.accountId}::uuid, ${workspaceId}::uuid, ${options.scope ?? "organization"},
         ${`ed25519:reach-${crypto.randomUUID()}`}, false, false, 'linux', 'x86_64',
-        'Shared build box', true
+        ${options.name ?? "Shared build box"}, ${(options.scope ?? "organization") === "organization"}
       )`;
     return row!;
   })) as { enrollmentId: string; sandboxId: string };
@@ -211,6 +229,7 @@ describe("where an organization rig works", () => {
       homeWorkspaceId: org.home,
       allowedWorkspaceIds: null,
       allowPersonalWorkspaces: true,
+      allowManagedWorkspaces: false,
     });
     for (const workspaceId of [org.home, org.second, org.third, org.personal]) {
       expect(await visibleRigIds(org, workspaceId)).toContain(rig.id);
@@ -233,6 +252,7 @@ describe("where an organization rig works", () => {
         homeWorkspaceId: org.home,
         allowedWorkspaceIds: [org.third],
         allowPersonalWorkspaces: false,
+        allowManagedWorkspaces: false,
       },
     });
     expect(await visibleRigIds(org, org.home)).toContain(rig.id);
@@ -270,12 +290,28 @@ describe("where an organization rig works", () => {
       order by occurred_at`;
     expect(audit.map((row) => row.metadata)).toEqual([
       {
-        from: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
-        to: { allowedWorkspaceIds: [org.third], allowPersonalWorkspaces: false },
+        from: {
+          allowedWorkspaceIds: null,
+          allowPersonalWorkspaces: true,
+          allowManagedWorkspaces: false,
+        },
+        to: {
+          allowedWorkspaceIds: [org.third],
+          allowPersonalWorkspaces: false,
+          allowManagedWorkspaces: false,
+        },
       },
       {
-        from: { allowedWorkspaceIds: [org.third], allowPersonalWorkspaces: false },
-        to: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+        from: {
+          allowedWorkspaceIds: [org.third],
+          allowPersonalWorkspaces: false,
+          allowManagedWorkspaces: false,
+        },
+        to: {
+          allowedWorkspaceIds: null,
+          allowPersonalWorkspaces: true,
+          allowManagedWorkspaces: false,
+        },
       },
     ]);
   }, 120_000);
@@ -308,6 +344,7 @@ describe("where an organization machine works", () => {
       homeWorkspaceId: org.home,
       allowedWorkspaceIds: null,
       allowPersonalWorkspaces: true,
+      allowManagedWorkspaces: false,
     });
     expect(await attachAllowed(org, org.second, machine.sandboxId)).toBe(true);
 
@@ -320,7 +357,12 @@ describe("where an organization machine works", () => {
       ),
     ).toEqual({
       status: "updated",
-      reach: { homeWorkspaceId: org.home, allowedWorkspaceIds: [], allowPersonalWorkspaces: true },
+      reach: {
+        homeWorkspaceId: org.home,
+        allowedWorkspaceIds: [],
+        allowPersonalWorkspaces: true,
+        allowManagedWorkspaces: false,
+      },
     });
     expect(await visibleMachineIds(org, org.home)).toContain(machine.enrollmentId);
     expect(await visibleMachineIds(org, org.personal)).toContain(machine.enrollmentId);
@@ -371,6 +413,7 @@ describe("where an organization machine works", () => {
         homeWorkspaceId: org.home,
         allowedWorkspaceIds: [org.second],
         allowPersonalWorkspaces: true,
+        allowManagedWorkspaces: false,
       },
     });
     expect(await visibleMachineIds(org, org.home)).toContain(machine.enrollmentId);
@@ -428,6 +471,7 @@ describe("every organization machine and rig, wherever it works", () => {
           homeWorkspaceId: org.home,
           allowedWorkspaceIds: [],
           allowPersonalWorkspaces: false,
+          allowManagedWorkspaces: false,
         },
       },
     ]);
@@ -440,6 +484,7 @@ describe("every organization machine and rig, wherever it works", () => {
           homeWorkspaceId: org.home,
           allowedWorkspaceIds: [org.third],
           allowPersonalWorkspaces: false,
+          allowManagedWorkspaces: false,
         },
       },
     ]);
@@ -481,4 +526,437 @@ describe("every organization machine and rig, wherever it works", () => {
     );
     expect(nestedPostgresSqlState(refused)).toBe("42501");
   }, 120_000);
+});
+
+/** A workspace the organization's product manages, made now, that the owner can use. */
+async function managedWorkspace(
+  org: Org,
+  name = "Customer",
+  source: "api_key" | "console_test" = "api_key",
+) {
+  const workspaceId = (await createWorkspace(client.db, { accountId: org.accountId, name })).id;
+  await shared.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${org.accountId}, ${workspaceId}, ${org.owner}, 'owner', ${MEMBER_PERMISSIONS}::jsonb)`;
+  await shared.admin`
+    insert into organization_managed_workspaces (account_id, workspace_id, source)
+    values (${org.accountId}, ${workspaceId}, ${source})`;
+  return workspaceId;
+}
+
+describe("all product-managed workspaces", () => {
+  test("the Console test workspace needs the managed switch; all shared workspaces or a list never reach it", async () => {
+    const org = await organization();
+    const machine = await organizationMachine(org);
+    const rig = await createRig(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.home,
+      scope: "organization",
+      subjectId: org.owner,
+      allowOrganization: true,
+      name: `test-ws-rig-${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const customer = await managedWorkspace(org, "Customer");
+    const testWorkspace = await managedWorkspace(org, "Console test", "console_test");
+    const reaches = async (workspaceId: string) => ({
+      machine: (await visibleMachineIds(org, workspaceId)).includes(machine.enrollmentId),
+      attach: await attachAllowed(org, workspaceId, machine.sandboxId),
+      sandbox: (await getSandbox(client.db, access(org, workspaceId), machine.sandboxId)) !== null,
+      rig: (await visibleRigIds(org, workspaceId)).includes(rig.id),
+    });
+    const everywhere = { machine: true, attach: true, sandbox: true, rig: true };
+    const nowhere = { machine: false, attach: false, sandbox: false, rig: false };
+
+    // All shared workspaces (the default): other managed workspaces, not the test one.
+    expect(await reaches(customer)).toEqual(everywhere);
+    expect(await reaches(testWorkspace)).toEqual(nowhere);
+    const testAttempt = await chatOnRig(org, testWorkspace, rig.id, rig.activeVersion!.id);
+    const refused = await materializeRigVersionForAttempt(client.db, testAttempt).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
+
+    // Listing the test workspace by id doesn't reach it either.
+    await updateOrganizationMachineReach(
+      client.db,
+      machine.enrollmentId,
+      reachInput(org, [testWorkspace], false),
+    );
+    await updateOrganizationRigReach(client.db, rig.id, reachInput(org, [testWorkspace], false));
+    expect(await reaches(testWorkspace)).toEqual(nowhere);
+
+    // The explicit "All product-managed workspaces" switch does.
+    await updateOrganizationMachineReach(client.db, machine.enrollmentId, {
+      ...reachInput(org, null, false),
+      allowManagedWorkspaces: true,
+    });
+    await updateOrganizationRigReach(client.db, rig.id, {
+      ...reachInput(org, null, false),
+      allowManagedWorkspaces: true,
+    });
+    expect(await reaches(testWorkspace)).toEqual(everywhere);
+    expect((await materializeRigVersionForAttempt(client.db, testAttempt))?.version.id).toBe(
+      rig.activeVersion!.id,
+    );
+  }, 180_000);
+
+  test("covers managed workspaces made later, not other shared ones, until switched off", async () => {
+    const org = await organization();
+    const machine = await organizationMachine(org);
+    const rig = await createRig(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.home,
+      scope: "organization",
+      subjectId: org.owner,
+      allowOrganization: true,
+      name: `managed-rig-${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const before = await managedWorkspace(org, "Customer before");
+    const machineReach = await updateOrganizationMachineReach(client.db, machine.enrollmentId, {
+      ...reachInput(org, [], false),
+      allowManagedWorkspaces: true,
+    });
+    expect(machineReach).toEqual({
+      status: "updated",
+      reach: {
+        homeWorkspaceId: org.home,
+        allowedWorkspaceIds: [],
+        allowPersonalWorkspaces: false,
+        allowManagedWorkspaces: true,
+      },
+    });
+    await updateOrganizationRigReach(client.db, rig.id, {
+      ...reachInput(org, [], false),
+      allowManagedWorkspaces: true,
+    });
+    // Made after the switch: covered without listing it.
+    const later = await managedWorkspace(org, "Customer later");
+
+    for (const workspaceId of [before, later]) {
+      expect(await visibleMachineIds(org, workspaceId)).toContain(machine.enrollmentId);
+      expect(await visibleRigIds(org, workspaceId)).toContain(rig.id);
+      expect(
+        await getSandbox(client.db, access(org, workspaceId), machine.sandboxId),
+      ).not.toBeNull();
+      expect(await attachAllowed(org, workspaceId, machine.sandboxId)).toBe(true);
+    }
+    const attempt = await chatOnRig(org, later, rig.id, rig.activeVersion!.id);
+    expect((await materializeRigVersionForAttempt(client.db, attempt))?.version.id).toBe(
+      rig.activeVersion!.id,
+    );
+    // A shared workspace the product does not manage, and Personal, stay out.
+    for (const workspaceId of [org.second, org.personal]) {
+      expect(await visibleMachineIds(org, workspaceId)).not.toContain(machine.enrollmentId);
+      expect(await visibleRigIds(org, workspaceId)).not.toContain(rig.id);
+      expect(await attachAllowed(org, workspaceId, machine.sandboxId)).toBe(false);
+    }
+
+    // Reported where reach is listed.
+    expect(
+      (await listOrganizationCompute(client.db, access(org, org.home), "machine"))?.find(
+        (entry) => entry.id === machine.enrollmentId,
+      )?.reach.allowManagedWorkspaces,
+    ).toBe(true);
+    expect(
+      (await getRig(client.db, access(org, later), rig.id))?.reach?.allowManagedWorkspaces,
+    ).toBe(true);
+
+    // An update that leaves the switch out keeps it.
+    await updateOrganizationMachineReach(
+      client.db,
+      machine.enrollmentId,
+      reachInput(org, [org.third], false),
+    );
+    expect(await visibleMachineIds(org, later)).toContain(machine.enrollmentId);
+    expect(await visibleMachineIds(org, org.third)).toContain(machine.enrollmentId);
+
+    // Off: the managed workspaces lose it, from the next turn on.
+    await updateOrganizationMachineReach(client.db, machine.enrollmentId, {
+      ...reachInput(org, [], false),
+      allowManagedWorkspaces: false,
+    });
+    await updateOrganizationRigReach(client.db, rig.id, {
+      ...reachInput(org, [], false),
+      allowManagedWorkspaces: false,
+    });
+    expect(await visibleMachineIds(org, later)).not.toContain(machine.enrollmentId);
+    expect(await attachAllowed(org, later, machine.sandboxId)).toBe(false);
+    const refused = await materializeRigVersionForAttempt(client.db, attempt).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
+
+    const audit = await shared.admin<Array<{ metadata: Record<string, unknown> }>>`
+      select metadata from audit_events
+      where action = 'connected_machine.reach.changed' and target_id = ${machine.enrollmentId}
+      order by occurred_at`;
+    expect(audit.at(-1)?.metadata).toMatchObject({
+      from: { allowManagedWorkspaces: true },
+      to: { allowManagedWorkspaces: false },
+    });
+  }, 180_000);
+});
+
+describe("who can mark a workspace managed", () => {
+  // The marker decides machine and rig reach, organization agents and stored
+  // end-user logins, so runtime code inside one workspace can't mark, change
+  // or unmark it (1512); the account-level writers still can.
+  async function inWorkspace<T>(
+    org: Org,
+    workspaceId: string,
+    fn: (tx: postgres.TransactionSql) => Promise<T>,
+  ): Promise<T> {
+    return (await app.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${org.accountId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${org.owner}, true)`;
+      return await fn(tx);
+    })) as T;
+  }
+  async function inAccount<T>(org: Org, fn: (tx: postgres.TransactionSql) => Promise<T>) {
+    return (await app.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${org.accountId}, true),
+        set_config('opengeni.workspace_id', '', true),
+        set_config('opengeni.subject_id', ${org.owner}, true)`;
+      return await fn(tx);
+    })) as T;
+  }
+  const refused = async (promise: Promise<unknown>) =>
+    await promise.then(
+      () => null,
+      (error: unknown) => (error as { code?: string }).code ?? String(error),
+    );
+
+  test("not from a workspace context; Console, API key creation and the test workspace can", async () => {
+    const org = await organization();
+    // A workspace's own context: insert refused, update and delete see nothing.
+    expect(
+      await refused(
+        inWorkspace(
+          org,
+          org.second,
+          (tx) => tx`insert into organization_managed_workspaces
+            (account_id, workspace_id, source) values (${org.accountId}, ${org.second}, 'console')`,
+        ),
+      ),
+    ).toBe("42501");
+    expect(await isManagedWorkspace(client.db, org.accountId, org.second)).toBe(false);
+
+    const managed = await managedWorkspace(org);
+    const changed = await inWorkspace(org, managed, async (tx) => [
+      (
+        await tx`update organization_managed_workspaces set source = 'console'
+        where workspace_id = ${managed}`
+      ).count,
+      (await tx`delete from organization_managed_workspaces where workspace_id = ${managed}`).count,
+      // It still reads its own marker.
+      (await tx`select 1 from organization_managed_workspaces where workspace_id = ${managed}`)
+        .count,
+    ]);
+    expect(changed).toEqual([0, 0, 1]);
+    expect(await isManagedWorkspace(client.db, org.accountId, managed)).toBe(true);
+
+    // An account-only context writes, as every writer does.
+    expect(
+      await inAccount(
+        org,
+        async (tx) =>
+          (await tx`delete from organization_managed_workspaces where workspace_id = ${managed}`)
+            .count,
+      ),
+    ).toBe(1);
+    await markWorkspaceManagedByApiKey(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.third,
+      apiKeyId: null,
+    });
+    expect(await isManagedWorkspace(client.db, org.accountId, org.third)).toBe(true);
+    const actor = { actorSubjectId: org.owner, actorLabel: "Owner" };
+    await setConsoleWorkspaceKind(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.second,
+      kind: "managed",
+      ...actor,
+    });
+    expect(await isManagedWorkspace(client.db, org.accountId, org.second)).toBe(true);
+    await setConsoleWorkspaceKind(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.second,
+      kind: "team",
+      ...actor,
+    });
+    expect(await isManagedWorkspace(client.db, org.accountId, org.second)).toBe(false);
+    // The Console test workspace is created in its own workspace context and
+    // marked from the account context, as the route does.
+    const testWorkspace = await ensureOrgAgentTestWorkspace(client.db, {
+      accountId: org.accountId,
+      actor: { subjectId: org.owner, label: "Owner" },
+      create: (tx) => createWorkspace(tx, { accountId: org.accountId, name: "Console test" }),
+    });
+    expect(testWorkspace.created).toBe(true);
+    expect(await isManagedWorkspace(client.db, org.accountId, testWorkspace.workspaceId)).toBe(
+      true,
+    );
+  }, 180_000);
+});
+
+describe("Runs on: organization machines and environments only", () => {
+  test("the Console list says which work in managed workspaces; saves refuse others", async () => {
+    const org = await organization();
+    await managedWorkspace(org);
+    const machine = await organizationMachine(org, { name: "Build box" });
+    const narrow = await organizationMachine(org, { name: "Narrow box" });
+    await updateOrganizationMachineReach(
+      client.db,
+      narrow.enrollmentId,
+      reachInput(org, [], false),
+    );
+    const workspaceMachine = await organizationMachine(org, {
+      scope: "workspace",
+      workspaceId: org.second,
+      name: "Team box",
+    });
+    const rig = await createRig(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.home,
+      scope: "organization",
+      subjectId: org.owner,
+      allowOrganization: true,
+      name: "Python 3.13",
+    });
+
+    const listed = await listOrgAgentCompute(client.db, org.accountId);
+    expect(listed.machines.map((entry) => entry.name).sort()).toEqual(["Build box", "Narrow box"]);
+    expect(listed.machines.find((entry) => entry.id === machine.enrollmentId)).toMatchObject({
+      sandboxId: machine.sandboxId,
+      reach: { allowedWorkspaceIds: null },
+    });
+    expect(listed.machines.map((entry) => entry.id)).not.toContain(workspaceMachine.enrollmentId);
+    expect(listed.environments.map((entry) => entry.id)).toEqual([rig.id]);
+
+    const resolve = (runsOn: Parameters<typeof resolveOrgAgentRunsOnInAccount>[2]) =>
+      resolveOrgAgentRunsOnInAccount(client.db, org.accountId, runsOn);
+    // Names, ids and sandbox ids of organization machines and environments
+    // resolve to the machine's enrollment id or the environment's id.
+    for (const ref of ["build BOX", machine.enrollmentId, machine.sandboxId]) {
+      expect(await resolve({ kind: "machine", machine: ref })).toEqual({
+        target: { machineId: machine.enrollmentId },
+      });
+    }
+    expect(await resolve({ kind: "sandbox", environment: "Python 3.13" })).toEqual({
+      target: { environmentId: rig.id },
+    });
+    for (const runsOn of [{ kind: "sandbox" as const }, { kind: "none" as const }, undefined]) {
+      expect(await resolve(runsOn)).toEqual({ target: null });
+    }
+    // A workspace machine (like a Personal one) is never an organization agent's.
+    expect(
+      await resolve({
+        kind: "machine",
+        machine: workspaceMachine.sandboxId,
+      }),
+    ).toMatchObject({ problem: { code: "machine_not_found" } });
+    expect(await resolve({ kind: "sandbox", environment: "Nope" })).toMatchObject({
+      problem: { code: "environment_not_found" },
+    });
+    // A Personal (Only me) machine: the create path sees its scope and refuses
+    // it; saves never find it among the organization's.
+    const personalMachine = await organizationMachine(org, { scope: "user", name: "My laptop" });
+    expect(
+      (await getSandbox(client.db, access(org, org.home), personalMachine.sandboxId))?.scope,
+    ).toBe("user");
+    expect(listed.machines.map((entry) => entry.id)).not.toContain(personalMachine.enrollmentId);
+    for (const ref of ["My laptop", personalMachine.sandboxId, personalMachine.enrollmentId]) {
+      expect(await resolve({ kind: "machine", machine: ref })).toMatchObject({
+        problem: { code: "machine_not_found" },
+      });
+    }
+
+    // Create, draft and deploy (also a dry run) refuse them.
+    const actor = { subjectId: org.owner, label: "Owner" };
+    const refusal = async (promise: Promise<unknown>) =>
+      await promise.then(
+        () => null,
+        (error: unknown) => (error instanceof OrgAgentError ? [error.status, error.code] : error),
+      );
+    const onTeamBox = { kind: "machine" as const, machine: "Team box" };
+    expect(
+      await refusal(
+        createOrgAgent(client.db, {
+          accountId: org.accountId,
+          actor,
+          key: "on-team-box",
+          definition: { name: "On team box", config: { runsOn: onTeamBox } },
+        }),
+      ),
+    ).toEqual([422, "machine_not_found"]);
+    const agent = await createOrgAgent(client.db, {
+      accountId: org.accountId,
+      actor,
+      key: "on-build-box",
+      definition: {
+        name: "On build box",
+        config: { runsOn: { kind: "machine", machine: "Build box" } },
+      },
+    });
+    expect(agent.draft?.config.runsOn).toEqual({ kind: "machine", machine: "Build box" });
+    // The version keeps the id the name resolved to (config keeps the name).
+    const savedTarget = async (agentId: string) =>
+      (
+        await shared.admin<Array<{ target: unknown }>>`
+          select runs_on_target as target from agent_revisions
+          where agent_id = ${agentId} order by revision desc limit 1`
+      )[0]?.target;
+    expect(await savedTarget(agent.id)).toEqual({ machineId: machine.enrollmentId });
+    const onRig = await createOrgAgent(client.db, {
+      accountId: org.accountId,
+      actor,
+      key: "on-rig",
+      definition: {
+        name: "On rig",
+        config: { runsOn: { kind: "sandbox", environment: "python 3.13" } },
+      },
+    });
+    expect(await savedTarget(onRig.id)).toEqual({ environmentId: rig.id });
+    const toolsOnly = await createOrgAgent(client.db, {
+      accountId: org.accountId,
+      actor,
+      key: "tools-only",
+      definition: { name: "Tools only", config: { runsOn: { kind: "none" } } },
+    });
+    expect(await savedTarget(toolsOnly.id)).toBeNull();
+    expect(
+      await refusal(
+        saveOrgAgentDraft(client.db, {
+          accountId: org.accountId,
+          agentId: agent.id,
+          actor,
+          expectedVersion: agent.rowVersion,
+          definition: { name: "On build box", config: { runsOn: onTeamBox } },
+        }),
+      ),
+    ).toEqual([422, "machine_not_found"]);
+    for (const dryRun of [true, false]) {
+      expect(
+        await refusal(
+          applyOrgAgent(client.db, {
+            accountId: org.accountId,
+            key: "deployed",
+            actor: { subjectId: "api_key:deploy", label: "Deploy key" },
+            definition: {
+              name: "Deployed",
+              config: { runsOn: { kind: "sandbox", environment: "Nope" } },
+            },
+            publish: false,
+            moveRunningChats: false,
+            dryRun,
+          }),
+        ),
+      ).toEqual([422, "environment_not_found"]);
+    }
+  }, 180_000);
 });

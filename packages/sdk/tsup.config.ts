@@ -38,6 +38,7 @@ export default defineConfig({
     "src/document-authority.ts",
     "src/knowledge.ts",
     "src/workspace-integrations.ts",
+    "src/organization-agents.ts",
     "src/teams.ts",
     "src/external-vault-receiver.ts",
     "src/session-history-import.ts",

@@ -48,7 +48,14 @@ mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({ ...appContext, client }),
 }));
 
-const { ConsoleContext, formatMicros } = await import("./console-shared");
+const {
+  ConsoleContext,
+  END_USER_UNVERIFIED_NOTE,
+  endUserDisplay,
+  endUserLabel,
+  endUserMatches,
+  formatMicros,
+} = await import("./console-shared");
 const { ConsoleSessionsRoute } = await import("./sessions");
 const { ConsoleSettingsRoute } = await import("./settings");
 const { ConsoleNewApiKeyRoute } = await import("./api-keys");
@@ -60,11 +67,20 @@ function session(index: number, reviewLevel: "full" | "metadata") {
   return {
     id: `5555555${index}-5555-4555-8555-555555555555`,
     workspaceId,
-    workspaceName: "Northwind",
+    workspaceName: "kontali-dev: Northwind Traders AS (production)",
     title: reviewLevel === "full" ? `Refund question ${index}` : null,
     firstMessage: reviewLevel === "full" ? "I was charged twice" : null,
     visibility: "private",
-    endUser: { subjectId: "external_user:abc", externalId: `user-${index}`, source: "kontali" },
+    endUser:
+      index === 1
+        ? {
+            subjectId: "external_user:abc",
+            externalId: "email|66b45b",
+            source: "kontali",
+            displayName: "Ada Lovelace",
+            email: "ada@example.com",
+          }
+        : { subjectId: "external_user:abd", externalId: `user-${index}`, source: "kontali" },
     status: "idle",
     feedback: { positive: 1, negative: 0 },
     turns: 3,
@@ -239,6 +255,8 @@ function member(id: string, subjectId: string, name: string, role: string) {
 let container: HTMLDivElement;
 let root: Root;
 
+let consoleAccess: "viewer" | "editor" | "full" = "full";
+
 async function render(node: ReactNode) {
   container = document.createElement("div");
   document.body.append(container);
@@ -254,6 +272,7 @@ async function render(node: ReactNode) {
             organizationLabel: "Kontali",
             search: { org: organizationId },
             appWorkspaceId: workspaceId,
+            access: consoleAccess,
           },
         },
         node,
@@ -289,6 +308,7 @@ afterAll(() => {
 
 beforeEach(async () => {
   if (root) await act(async () => root.unmount());
+  consoleAccess = "full";
   document.body.innerHTML = "";
   navigate.mockClear();
   for (const fn of Object.values(client)) fn.mockClear();
@@ -300,17 +320,80 @@ describe("Console sessions", () => {
     await render(createElement(ConsoleSessionsRoute));
     expect(container.textContent).toContain("Refund question 1");
     expect(container.textContent).toContain("Refund question 2");
-    expect(container.textContent).toContain("user-1");
+    // Name, then email; the product's id on hover.
+    expect(container.textContent).toContain("Ada Lovelace");
+    expect(container.textContent).toContain("ada@example.com");
+    expect(
+      container.querySelector(`[title="email|66b45b\n${END_USER_UNVERIFIED_NOTE}"]`),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("user-2");
+    // The full workspace name, never cut.
+    expect(container.textContent).toContain("kontali-dev: Northwind Traders AS (production)");
     expect(container.textContent).toContain("$0.09");
-    expect(container.querySelector('input[aria-label="Search sessions"]')).not.toBeNull();
+    const search = container.querySelector<HTMLInputElement>('input[aria-label="Search sessions"]');
+    expect(search?.placeholder).toBe("Search questions, people and workspaces");
   });
 
-  test("hides search when only metadata is shown", async () => {
+  test("searches people and workspaces when only metadata is shown", async () => {
     reviewLevel = "metadata";
     await render(createElement(ConsoleSessionsRoute));
     expect(container.textContent).toContain("Content hidden");
     expect(container.textContent).toContain("user-2");
-    expect(container.querySelector('input[aria-label="Search sessions"]')).toBeNull();
+    const search = container.querySelector<HTMLInputElement>('input[aria-label="Search sessions"]');
+    expect(search?.placeholder).toBe("Search people and workspaces");
+  });
+});
+
+describe("Console end users", () => {
+  test("name, then email, then the product's id, then a short subject", () => {
+    expect(endUserDisplay(null)).toBeNull();
+    expect(
+      endUserDisplay({
+        subjectId: "external_user:1",
+        externalId: "auth0|1",
+        source: "default",
+        displayName: "Ada",
+        email: "ada@example.com",
+      }),
+    ).toEqual({ primary: "Ada", secondary: "ada@example.com", id: "auth0|1", unverified: true });
+    expect(
+      endUserDisplay({
+        subjectId: "external_user:1",
+        externalId: "auth0|1",
+        source: "default",
+        email: "ada@example.com",
+      }),
+    ).toEqual({ primary: "ada@example.com", secondary: null, id: "auth0|1", unverified: true });
+    // Older servers send no display details: today's label.
+    expect(
+      endUserDisplay({ subjectId: "external_user:1", externalId: "auth0|1", source: "default" }),
+    ).toEqual({ primary: "auth0|1", secondary: null, id: "auth0|1", unverified: false });
+    expect(
+      endUserLabel({
+        subjectId: "external_user:0123456789abcdef",
+        externalId: null,
+        source: null,
+        displayName: null,
+        email: null,
+      }),
+    ).toBe("0123456789ab…");
+    expect(endUserLabel(null)).toBe("—");
+  });
+
+  test("matches searches on name, email and id", () => {
+    const ada = {
+      subjectId: "external_user:1",
+      externalId: "auth0|1",
+      source: "default",
+      displayName: "Ada Lovelace",
+      email: "ada@example.com",
+    };
+    expect(endUserMatches(ada, "lovelace")).toBe(true);
+    expect(endUserMatches(ada, "EXAMPLE.com")).toBe(true);
+    expect(endUserMatches(ada, "auth0|1")).toBe(true);
+    expect(endUserMatches(ada, "grace")).toBe(false);
+    expect(endUserMatches(null, "ada")).toBe(false);
+    expect(endUserMatches(null, " ")).toBe(true);
   });
 });
 

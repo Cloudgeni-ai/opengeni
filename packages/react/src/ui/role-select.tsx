@@ -66,6 +66,8 @@ export interface RoleSelectProps<R extends string = string> {
   size?: "sm" | "md" | undefined;
   /** Adds a "No access" option (value null), for the person sheet and the matrix. */
   noAccessLabel?: string | undefined;
+  /** The "No access" option's description; defaults to the workspace one. */
+  noAccessDescription?: string | undefined;
   customLabel?: string | undefined;
   /** The person whose role this is, for confirmations and screen readers. */
   subjectName?: string | undefined;
@@ -167,6 +169,7 @@ export function RoleSelect<R extends string>({
   variant = "field",
   size = "sm",
   noAccessLabel,
+  noAccessDescription = NO_ACCESS_DESCRIPTION,
   customLabel = CUSTOM_ROLE_LABEL,
   subjectName,
   disabled,
@@ -277,7 +280,7 @@ export function RoleSelect<R extends string>({
             </div>
           ) : null}
           {noAccessLabel ? (
-            <ListOption value={NONE} label={noAccessLabel} description={NO_ACCESS_DESCRIPTION} />
+            <ListOption value={NONE} label={noAccessLabel} description={noAccessDescription} />
           ) : null}
           {roles.map((role) => (
             <ListOption
@@ -413,7 +416,7 @@ export function RoleSelect<R extends string>({
                 <MenuItem
                   value={NONE}
                   label={noAccessLabel}
-                  description={NO_ACCESS_DESCRIPTION}
+                  description={noAccessDescription}
                   muted
                 />
               ) : null}

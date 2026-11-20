@@ -7,7 +7,9 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import { bootstrapWorkspace, createDb, createRig, type DbClient } from "../src";
+import { sql } from "drizzle-orm";
+import { bootstrapWorkspace, createDb, type DbClient } from "../src";
+import { rawRows, withRlsContext } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
@@ -241,11 +243,21 @@ describe.skipIf(!realDatabase)("retired Variable Set table contraction", () => {
     await assertRuntimeDatabasePosture(client!.db, postureThroughMigration(migration));
     await provisionRoles(owned!.adminUrl, { appPassword: owned!.appPassword });
     await assertRuntimeDatabasePosture(client!.db, postureThroughMigration(migration));
-    const rig = await createRig(client!.db, {
-      ...scope,
-      name: "post-contract",
-      description: null,
-      initialVersion: { setupScript: "echo test" },
+    // A rig and its first version, written by the runtime role as createRig
+    // does, naming only columns this schema has: the database stops at 1287
+    // while current code (createRig's insert) also knows later rig columns.
+    const rig = await withRlsContext(client!.db, scope, async (tx) => {
+      const [created] = await rawRows<{ id: string; name: string }>(
+        tx,
+        sql`insert into rigs (account_id, workspace_id, name, description)
+          values (${scope.accountId}::uuid, ${scope.workspaceId}::uuid, 'post-contract', null)
+          returning id::text as id, name`,
+      );
+      await tx.execute(sql`insert into rig_versions (account_id, workspace_id, rig_id, version,
+          setup_script, checks, credential_hooks, provider_images, active)
+        values (${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${created!.id}::uuid, 1,
+          'echo test', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, true)`);
+      return created!;
     });
     expect(rig.name).toBe("post-contract");
     await applyContract();

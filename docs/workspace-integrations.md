@@ -399,6 +399,18 @@ A failed renewal keeps the last good material and retries with backoff. The
 agent can also call `refresh_credentials` (found through tool search) after a
 command fails on an expired token.
 
+### Organization tool servers
+
+Console agents (see [agents.md, "Console agents"](agents.md#console-agents))
+use organization tool servers. A `per_user` server's login comes from, in
+order: this credential provider (the server is in the request's `mcpServers`
+like any selected remote MCP, and the request body is unchanged), then the
+end user's stored login
+(`PUT /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`,
+`tool_credentials:write`, write-only), then headers the chat sent for that
+server. A `per_user` server never falls back to a shared key; without a
+login the chat runs without it and records `session.tool_server.unavailable`.
+
 ## Webhooks
 
 Up to ten endpoints per organization and ten per workspace, each with its own

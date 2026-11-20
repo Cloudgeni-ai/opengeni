@@ -156,6 +156,9 @@ export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileR
 export const recordRecentTurnTimingProfiles =
   defaultControlActivities.recordRecentTurnTimingProfiles;
 export const sweepUnusedNangoConnections = defaultControlActivities.sweepUnusedNangoConnections;
+export const beginOrgAgentPublishMove = defaultControlActivities.beginOrgAgentPublishMove;
+export const moveOrgAgentChatsBatch = defaultControlActivities.moveOrgAgentChatsBatch;
+export const finishOrgAgentPublishMove = defaultControlActivities.finishOrgAgentPublishMove;
 export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const maintainSessionWorkflowWakes = defaultControlActivities.maintainSessionWorkflowWakes;

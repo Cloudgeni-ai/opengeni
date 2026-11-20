@@ -23,6 +23,7 @@ export default defineConfig({
     "src/seat-upgrade.ts",
     "src/mcp-endpoint.ts",
     "src/index.ts",
+    "src/organization-agents.ts",
     "src/connect.ts",
     "src/prepared-mcp-setup.ts",
     "src/browser-storage.ts",
