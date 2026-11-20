@@ -223,6 +223,10 @@ import {
 } from "./slack-routing";
 import { slackTextNamesAgent } from "./slack-agent-address";
 import {
+  postSlackRouteChoiceWithAgentsCard,
+  slackRouteChoiceQuestion,
+} from "./slack-route-choice-card";
+import {
   buildSlackAgentSuggestionAskedMessage,
   buildSlackAgentSuggestionMessage,
   loadSlackAgentsForConnection,
@@ -2747,8 +2751,9 @@ async function askSlackRouteChoice(
 }
 
 /**
- * The picker in a channel of an installation with Slack agents: "Who answers
- * in #channel", with the agents first and then Opengeni in each workspace.
+ * The picker in a channel of an installation with Slack agents: "Who should
+ * answer in #channel?", with the agents and then the workspaces, each group
+ * under its own label.
  * Same prompt row, same ledger and the same re-authorization on the answer.
  */
 async function askSlackRouteChoiceWithAgents(
@@ -2790,51 +2795,16 @@ async function askSlackRouteChoiceWithAgents(
   });
   if (!opened) return;
   const channel = `<#${opened.prompt.slackChannelId}>`;
-  const question = `Who should answer in ${channel}?`;
-  const blocks: SlackMessageBlock[] = [
-    { type: "section", text: { type: "mrkdwn", text: question } },
-    {
-      type: "actions",
-      block_id: "opengeni-route-choice",
-      elements: [
-        ...opened.prompt.options.map((option) => ({
-          type: "button" as const,
-          action_id: "opengeni.route.select",
-          value: option.id,
-          text: {
-            type: "plain_text" as const,
-            // Rendered from the stored option, so a replay posts the same bytes.
-            text: option.candidateSlackAgentId
-              ? option.candidateLabel
-              : boundedSlackRouteLabel(`Opengeni in ${option.candidateLabel}`),
-          },
-        })),
-        {
-          type: "button" as const,
-          action_id: "opengeni.route.cancel",
-          value: opened.prompt.options[0]?.id ?? opened.prompt.id,
-          text: { type: "plain_text" as const, text: "Not now" },
-        },
-      ],
-    },
-  ];
-  const url = slackWorkspaceUrl(deps, home.workspaceId);
-  blocks.push({
-    type: "context",
-    elements: [
-      {
-        type: "mrkdwn",
-        text: url
-          ? `Remembered for ${channel}. Change it in <${url}|Opengeni> under Capabilities, then Slack.`
-          : `Remembered for ${channel}. Change it in Opengeni under Capabilities, then Slack.`,
-      },
-    ],
-  });
-  await client.postMessage({
+  await postSlackRouteChoiceWithAgentsCard(client, {
     operationId: opened.prompt.messageOperationId,
     userId: opened.prompt.slackUserId,
-    text: boundedOutput(question),
-    blocks,
+    text: boundedOutput(slackRouteChoiceQuestion(channel)),
+    channel,
+    // Rendered from the stored options, so a replay posts the same bytes.
+    options: opened.prompt.options,
+    cancelValue: opened.prompt.options[0]?.id ?? opened.prompt.id,
+    settingsUrl: slackWorkspaceUrl(deps, home.workspaceId),
+    boundLabel: boundedSlackRouteLabel,
   });
 }
 

@@ -13137,6 +13137,39 @@ describe("Slack agents", () => {
     expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
   }, 90_000);
 
+  test("the channel picker labels agents and workspaces as separate groups", async () => {
+    if (!available) return;
+    const { value } = await agentFixture();
+    await mention(value, "C_WHO_ANSWERS", "1765000003.000100", "what changed this week?");
+
+    const card = value.slack.posts.find((post) => post.text.startsWith("Who should answer"));
+    expect(card).toBeDefined();
+    type CardBlock = {
+      type: string;
+      text?: { text: string };
+      elements?: Array<{ text: { text: string } }>;
+    };
+    const rows = (card!.blocks as CardBlock[]).map((block) =>
+      block.type === "section"
+        ? block.text!.text
+        : block.type === "actions"
+          ? block.elements!.map((element) => element.text.text).join(",")
+          : block.type,
+    );
+    const names = await shared!.admin<{ name: string }[]>`
+      select name from workspaces
+      where id in (${value.owner.workspaceId}, ${value.routed!.workspaceId})`;
+    expect(rows[0]).toBe("Who should answer in <#C_WHO_ANSWERS>?");
+    expect(rows.slice(1, 4)).toEqual(["*Agents*", "Analytics", "Ops Desk"]);
+    expect(rows[4]).toBe("*Workspaces*");
+    expect(rows.slice(5, 7).sort()).toEqual(names.map((row) => row.name).sort());
+    expect(rows.slice(7)).toEqual(["divider", "Not now", "context"]);
+    expect(JSON.stringify(card!.blocks)).not.toContain("Opengeni in ");
+    // Nothing starts while the question is open.
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+  }, 90_000);
+
   test("with no agents, routing reads a +name as ordinary text", async () => {
     if (!available) return;
     const value = await fixture({ slackWorkspaceRouting: true });
