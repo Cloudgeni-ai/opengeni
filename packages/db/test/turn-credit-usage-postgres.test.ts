@@ -154,6 +154,56 @@ async function terminalEvent(scope: Scope, turnId: string, type: string) {
 }
 
 describe("per-turn credit usage on terminal turn events", () => {
+  test("terminal writes do not scan unrelated usage history for a hosted search receipt", async () => {
+    if (!client) return;
+    const scope = await seedSession("receipt probe");
+    const turnId = await seedTurn(scope);
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      {
+        type: "agent.model.usage",
+        turnId,
+        payload: modelUsage("probe", { settlement: creditsSettlement(100, 25) }),
+      },
+    ]);
+    // Other usage in the same tenant is visible to the trigger but cannot
+    // contribute to this turn's total.
+    await shared!.admin`
+      insert into usage_events (
+        account_id, workspace_id, event_type, quantity, unit,
+        source_resource_type, source_resource_id, idempotency_key, occurred_at
+      )
+      select ${scope.accountId}, ${scope.workspaceId}, 'web_search.cost', 1, 'usd_micros',
+        'model_response', 'unrelated:' || n, 'usage:web_search.cost:unrelated:' || n, now()
+      from generate_series(1, 10000) n
+    `;
+    await shared!.admin`analyze usage_events`;
+
+    await withRlsContext(db(), scope, async (scoped) => {
+      await scoped.execute(sql`set local plan_cache_mode = 'force_generic_plan'`);
+      const [event] = rowsOf<{ payload: Record<string, unknown> }>(
+        await scoped.execute(sql`
+          insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+          select ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${scope.sessionId}::uuid,
+            ${turnId}::uuid, max(sequence) + 1, 'turn.completed', '{}'::jsonb
+          from session_events where session_id = ${scope.sessionId}::uuid
+          returning payload
+        `),
+      );
+      expect(event?.payload.usage).toMatchObject({
+        creditsMicros: 125,
+        breakdown: { model: 100, webSearch: 25 },
+      });
+      const [stats] = rowsOf<{ sequentialRows: string | number }>(
+        await scoped.execute(sql`
+          select seq_tup_read as "sequentialRows"
+          from pg_stat_xact_user_tables
+          where relid = 'usage_events'::regclass
+        `),
+      );
+      expect(Number(stats?.sequentialRows)).toBe(0);
+    });
+  });
+
   test("sums every charge of the turn once, including the last call's owed settlement", async () => {
     if (!client) return;
     const scope = await seedSession("credits");
