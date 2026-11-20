@@ -1,5 +1,7 @@
 # @opengeni/artifact-kernel-wasm-presentation
 
+## 6.34.0
+
 ## 6.33.0
 
 ## 6.32.0

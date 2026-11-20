@@ -1,5 +1,16 @@
 # @opengeni/react-native
 
+## 6.34.0
+
+### Patch Changes
+
+- 9a84b63: Assistant links in web and native chat no longer show or open with UTM tracking parameters. Other URL parameters, fragments, stored messages, and model inputs are unchanged.
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/contracts@6.34.0
+  - @opengeni/react@6.34.0
+  - @opengeni/sdk@6.34.0
+
 ## 6.33.0
 
 ### Patch Changes
