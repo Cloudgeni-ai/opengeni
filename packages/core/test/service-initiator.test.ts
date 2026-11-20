@@ -31,6 +31,12 @@ describe("API-key service header provenance", () => {
         ),
       ).toThrow();
     }
+    // Console test chat principals are the server's own.
+    for (const name of ["console-test:user:someone", "console-test:api_key:k", "console-test:"]) {
+      expect(() =>
+        serviceInitiatorFromHeaders(new Headers({ "x-opengeni-service-initiator": name })),
+      ).toThrow("reserved console-test: prefix");
+    }
     for (const context of [
       "[]",
       "null",

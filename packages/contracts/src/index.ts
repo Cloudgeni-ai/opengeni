@@ -155,6 +155,7 @@ export const HostMcpCreateSelections = /* @__PURE__ */ defineSchema(() =>
 );
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { SessionOrgAgent } from "./organization-agents";
 import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
 import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
@@ -221,6 +222,7 @@ export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
 export * from "./agents";
+export * from "./organization-agents";
 export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
@@ -12835,14 +12837,18 @@ export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
  * Where an organization machine or rig works: always in the workspace it was
  * connected from or made in (`homeWorkspaceId`), plus every shared workspace
  * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
- * members' Personal workspaces when `allowPersonalWorkspaces` is on. Only
- * organization machines and rigs have it.
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on, and every
+ * workspace the organization's product manages (including ones it creates
+ * later) when `allowManagedWorkspaces` is on (migration 1512; servers before
+ * it omit the field). Only organization machines and rigs have it.
  */
 export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>
   z.object({
     homeWorkspaceId: primitives.uuid,
     allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
     allowPersonalWorkspaces: primitives.boolean,
+    /** Absent (older servers) means off. */
+    allowManagedWorkspaces: primitives.boolean.optional(),
   }),
 );
 export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
@@ -12852,12 +12858,14 @@ export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
  * PUT /v1/workspaces/:workspaceId/rigs/:rigId/reach: an organization owner or
  * admin changes where an organization machine or rig works. The ids are the
  * organization's shared workspaces; its home workspace always has it.
+ * `allowManagedWorkspaces` omitted keeps the current setting.
  */
 export const UpdateOrganizationComputeReachRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       allowedWorkspaceIds: z.array(primitives.uuid).max(1000).nullable(),
       allowPersonalWorkspaces: primitives.boolean,
+      allowManagedWorkspaces: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -17255,6 +17263,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * ordinary chat. Fixed at create. Omitted by older servers.
      */
     agentId: primitives.uuid.nullable().optional(),
+    /**
+     * The organization (Console) agent version this chat runs and what the
+     * chat changed from it; null or omitted for every other chat.
+     */
+    orgAgent: SessionOrgAgent.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -17928,6 +17941,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // A repository was attached to the chat after it started, such as one the
     // agent asked for and a person approved. The next turn clones it.
     "session.resources.added",
+    // An organization agent's tool server is attached without a usable login
+    // for this turn (`reason`: missing_credentials or credentials_expired).
+    "session.tool_server.unavailable",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -18214,6 +18230,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "turn.failed",
     "tool.auth_needed",
     "credential.auth_needed",
+    "session.tool_server.unavailable",
     "rig.setup.failed",
     "sandbox.operation.failed",
     "recording.failed",
@@ -24128,6 +24145,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: primitives.optionalBoolean,
+    // Console agents (organization agents) are on for the caller's organization.
+    // Absent on older servers and when off.
+    orgAgents: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z

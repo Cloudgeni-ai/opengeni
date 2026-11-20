@@ -1,5 +1,62 @@
 # @opengeni/worker-bundle
 
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Chats can run an organization (Console) agent. When Console agents are on for the organization, session create accepts `agent: "<key or id>"` or `agent: { ref, ... }`: the chat runs the agent's published version (a draft or `version` only in the organization's Console test workspace), its tool servers are attached as session MCP servers, and settings the request changes are recorded as `Session.orgAgent.overrides`; `agentOverrides: "reject"` refuses them with 422 `agent_override_rejected`. Inline `config` saves a version of a code-managed agent by config hash. Worker chats inherit the agent version, and its Instructions only when the version shares them. Turns resolve tool server logins from the credential provider, the end user's stored login (refreshed when it is about to expire) or the chat's own headers, never a shared key for per-user servers; a server without a login is attached as unavailable and the chat records `session.tool_server.unavailable`. A publish that moves running chats re-materializes each chat's tool servers on the new version and delivers its Instructions on the next turn. Chats that name no organization agent are unchanged.
+
+### Patch Changes
+
+- afb7be7: Console test chats are isolated from each other: they are created with `agentAccess: "session"` and Memory off, so one tester's agent can't read or message another tester's test chats; a test chat's own login headers run only for turns its tester's principal started; and `x-opengeni-service-initiator` refuses the server-reserved `console-test:` prefix (422).
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/db@6.32.0
+  - @opengeni/core@6.32.0
+  - @opengeni/sdk@6.32.0
+  - @opengeni/observability@6.32.0
+  - @opengeni/capabilities@6.32.0
+  - @opengeni/codemode@6.32.0
+  - @opengeni/codex@6.32.0
+  - @opengeni/config@6.32.0
+  - @opengeni/decisions@6.32.0
+  - @opengeni/documents@6.32.0
+  - @opengeni/events@6.32.0
+  - @opengeni/github@6.32.0
+  - @opengeni/interaction@6.32.0
+  - @opengeni/runtime@6.32.0
+  - @opengeni/storage@6.32.0
+  - @opengeni/tool-gateway@6.32.0
+  - @opengeni/vaults@6.32.0
+  - @opengeni/vaults-bitwarden@6.32.0
+  - @opengeni/vaults-keeper@6.32.0
+  - @opengeni/vaults-onepassword@6.32.0
+  - @opengeni/vaults-protonpass@6.32.0
+  - @opengeni/jev@6.32.0
+  - @opengeni/agent-proto@6.32.0
+  - @opengeni/network@6.32.0
+  - @opengeni/subscriptions@6.32.0
+  - @opengeni/xai-subscription@6.32.0
+
 ## 6.31.1
 
 ### Patch Changes

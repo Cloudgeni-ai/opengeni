@@ -79,6 +79,7 @@ import {
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
   landingOriginEntries,
+  orgAgentsEnabledForAccount,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -466,6 +467,7 @@ import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-i
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
 import { adminStepUpGuard } from "./auth/admin-step-up";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
+import { registerOrganizationAgentRoutes } from "./routes/organization-agents";
 import { registerConsoleRoutes } from "./routes/console";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
@@ -1712,6 +1714,9 @@ export function createAppComposition(
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
     let voiceInputModels: DictationModelOption[] = [];
+    // Console agents are on for the caller's organization (its workspace's, or
+    // an organization key's own).
+    let orgAgentsEnabled = false;
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (
       requestedWorkspaceId !== undefined &&
@@ -1747,6 +1752,7 @@ export function createAppComposition(
       const workspaceId = requestedWorkspaceId ?? context?.defaultWorkspaceId;
       if (context && workspaceId) {
         const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+        orgAgentsEnabled = orgAgentsEnabledForAccount(deps.settings, grant.accountId);
         await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
           // Catalog overlay and picker project the same live metadata, not two
           // separately loaded copies. Subscription/provider liveness stays fresh.
@@ -1844,6 +1850,7 @@ export function createAppComposition(
         // another workspace's authority; it can request an exact workspace.
         selections = [];
         modelSelectionForbidden = true;
+        orgAgentsEnabled = orgAgentsEnabledForAccount(deps.settings, context.defaultAccountId);
       }
     }
     const residencySettings = { ...deps.settings, requiredModelGeography };
@@ -1875,6 +1882,7 @@ export function createAppComposition(
           ? { azureOpenAIDeploymentIdentity: true }
           : {}),
         connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+        ...(orgAgentsEnabled ? { orgAgents: true } : {}),
         browserExtension: browserExtension(deps.settings),
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
@@ -2855,6 +2863,7 @@ export function createAppComposition(
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
   registerOrganizationSessionRoutes(app, routeDeps);
+  registerOrganizationAgentRoutes(app, routeDeps);
   registerConsoleRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);

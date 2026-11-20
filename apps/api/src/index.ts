@@ -150,6 +150,11 @@ export async function createTemporalWorkflowClient(
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
   startScheduledTaskEventRun: (occurrence: EventOccurrenceToStart) => Promise<void>;
+  startOrgAgentPublishMove: (input: {
+    accountId: string;
+    agentId: string;
+    operationId: string;
+  }) => Promise<void>;
   close: () => Promise<void>;
 }> {
   const connection = await Connection.connect(temporalConnectionOptions(settings));
@@ -487,6 +492,25 @@ export async function createTemporalWorkflowClient(
         if (!isWorkflowAlreadyStarted(error)) throw error;
       }
     },
+    // A publish that moves running chats. One operation, one run.
+    startOrgAgentPublishMove: async (input) => {
+      try {
+        await temporal.workflow.start("orgAgentPublishMoveWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `org-agent-publish-move-${input.operationId}`,
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              accountId: input.accountId,
+              agentId: input.agentId,
+              operationId: input.operationId,
+            },
+          ],
+        });
+      } catch (error) {
+        if (!isWorkflowAlreadyStarted(error)) throw error;
+      }
+    },
     close: async () => {
       await connection.close();
     },
@@ -644,6 +668,7 @@ export async function startApi(options: StartApiOptions = {}) {
       bus,
       workflowClient: traceClientCalls(workflowClient.client, "temporal"),
       documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
+      orgAgentPublishMoveStarter: workflowClient.startOrgAgentPublishMove,
       objectStorage,
       ...(editableArtifactComposition
         ? {

@@ -71,6 +71,12 @@ export const Permission = /* @__PURE__ */ defineSchema(() =>
     "rigs:manage",
     "artifacts:read",
     "artifacts:publish",
+    /** Read organization agents (Console agents), their versions and tool servers. */
+    "agents:read",
+    /** Create, edit, publish, deploy and archive organization agents and tool servers. */
+    "agents:manage",
+    /** Store end users' tool logins for organization tool servers (write-only). */
+    "tool_credentials:write",
   ]),
 );
 export type Permission = z.infer<typeof Permission>;

@@ -418,6 +418,21 @@ export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:fca875a68cdce099fabaf2ffd97b99fac77578efd6ad0b422425aa2a174e973f";
 
 /**
+ * Whether Console agents (organization agents, docs/agents.md) are on for this
+ * organization. Off for every organization unless its id is listed in
+ * OPENGENI_ORG_AGENTS_ACCOUNT_IDS.
+ */
+export function orgAgentsEnabledForAccount(
+  settings: Partial<Pick<Settings, "orgAgentsAccountIds">>,
+  accountId: string | null | undefined,
+): boolean {
+  return (
+    typeof accountId === "string" &&
+    (settings.orgAgentsAccountIds ?? []).includes(accountId.toLowerCase())
+  );
+}
+
+/**
  * Whether this account keeps the billing terms from before the app/API split:
  * any credit pays any use, no own-key platform fee, no newly metered tools.
  */
@@ -2626,6 +2641,19 @@ const SettingsSchema = z.object({
   // credit pays any use, no own-key platform fee, no newly metered tool
   // charges. Defaults to DEFAULT_BILLING_LEGACY_ACCOUNT_IDS (CloudGeni's host
   // account and our own team's organizations); "none" lists no account.
+  // Organizations with Console agents (organization agents, docs/agents.md
+  // "Console agents") turned on: comma-separated account ids. Empty (the
+  // default) turns them off everywhere.
+  orgAgentsAccountIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim().toLowerCase())
+            .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([]),
+  ),
   billingLegacyAccountIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -7077,6 +7105,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
+    orgAgentsAccountIds: optional("OPENGENI_ORG_AGENTS_ACCOUNT_IDS"),
     byokPlatformFeeBps: optional("OPENGENI_BYOK_PLATFORM_FEE_BPS"),
     apiConnectedSubscriptionsEnabled: optional("OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED"),
     paidHostedToolsCreditBilling: optional("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING"),

@@ -11,6 +11,7 @@
     "**/*.gen.ts",
     "**/*.gen.tsx",
     "**/*.gen.json",
+    "packages/cli/schemas/**",
     "packages/agent-proto/src/gen/**",
     "packages/db/drizzle/**",
     "**/test/golden/**",

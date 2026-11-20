@@ -4,18 +4,22 @@ import {
   type AppActionTargets,
 } from "@opengeni/contracts/app-actions";
 import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
+import { CONSOLE_TEST_CHAT_SUBJECT_PREFIX } from "@opengeni/contracts/organization-agents";
 import { and, eq, isNull, or, sql, type AnyColumn } from "drizzle-orm";
 import {
   rawRows,
   setSubjectRlsContext,
   withAccountRls,
   withRlsContext,
+  withWorkspaceRls,
   withWorkspaceSubjectRls,
   type Database,
 } from "./database";
 import { connectionSubjectVisibility } from "./connection-metadata";
 import { getManagedUserProfilesByIds, getRig } from "./index";
 import { listOrganizationMcpConnections } from "./mcp-oauth";
+import { getSessionCreator } from "./console-roles";
+import { findOrgAgentTestWorkspace, getOrgAgent } from "./organization-agents";
 import {
   getOrganizationInvitationForAdministration,
   listOrganizationMembers,
@@ -1076,6 +1080,52 @@ const agentLookup = (kind: string): Lookup =>
     }),
   );
 
+/** An organization (Console) agent of the chat's own organization, for its admins. */
+const organizationAgentLookup: Lookup = async (where) => {
+  ownOrganization(where);
+  await organizationMay(where, "account:admin");
+  canonicalUuid(where.id);
+  const agent = await getOrgAgent(
+    where.db,
+    where.accountId,
+    { id: where.id },
+    { includeArchived: true },
+  );
+  return agent
+    ? { kind: "organization agent", name: agent.name, facts: facts(["Key", agent.key]) }
+    : missing("organization agent");
+};
+
+/**
+ * A Console test chat, named only to the person who started it (as the
+ * test-chats routes serve it): anyone else's reads as not found.
+ */
+const consoleTestChatLookup: Lookup = async (where) => {
+  ownOrganization(where);
+  canonicalUuid(where.id);
+  const workspaceId = await findOrgAgentTestWorkspace(where.db, where.accountId);
+  if (!workspaceId) return missing("test chat");
+  const creator = await getSessionCreator(where.db, workspaceId, where.id);
+  if (
+    creator?.kind !== "service" ||
+    creator.subjectId !== `${CONSOLE_TEST_CHAT_SUBJECT_PREFIX}${where.subjectId}`
+  ) {
+    return missing("test chat");
+  }
+  const [row] = await withWorkspaceRls(where.db, workspaceId, (db) =>
+    rawRows<{ title: string | null; created_at: Date | string }>(
+      db,
+      sql`select title, created_at from sessions
+        where id = ${where.id}::uuid and workspace_id = ${workspaceId}::uuid limit 1`,
+    ),
+  );
+  return {
+    kind: "test chat",
+    name: row?.title?.trim() || "Untitled test chat",
+    facts: facts(["Started", row ? targetDay(row.created_at) : undefined]),
+  };
+};
+
 /** A rig through the rig routes' own read, which applies its scope and status. */
 const rigLookup: Lookup = async (where) => {
   const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "rigs:use");
@@ -1493,6 +1543,8 @@ const LOOKUPS: Record<string, Lookup> = {
   "event-sources/:sourceId": eventSourceLookup,
   "bot-templates/:templateId": agentLookup("bot template"),
   "agents/:agentId": agentLookup("agent"),
+  "organizations/agents/:agentId": organizationAgentLookup,
+  "test-chats/:sessionId": consoleTestChatLookup,
   "automation-templates/:templateId": named(
     "automation template",
     "scheduled_tasks:run",
@@ -1524,6 +1576,10 @@ const KNOWN_PARENTS = new Set([
 /** The lookup for one path id, or undefined when its route has none. */
 export function appActionTargetLookupKey(path: string, parameter: string): string | undefined {
   const segments = path.split("/");
+  // A Console test chat is a chat of the organization's test workspace, not
+  // of a workspace in the path.
+  if (parameter === "sessionId" && segments[segments.indexOf(`:${parameter}`) - 1] === "test-chats")
+    return "test-chats/:sessionId";
   if (LOOKUPS[`:${parameter}`]) return `:${parameter}`;
   const index = segments.indexOf(`:${parameter}`);
   if (index < 0) return undefined;

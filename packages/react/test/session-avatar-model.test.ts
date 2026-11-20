@@ -71,4 +71,14 @@ test("only agentId names a chat's agent; Slack metadata only lends its old name"
     id: AGENT_ID,
     name: null,
   });
+  // An organization agent names itself from the chat, by name or else key.
+  const orgAgent = { id: AGENT_ID, key: "support-desk", name: "Support desk" };
+  expect(sessionAgentRef({ agentId: AGENT_ID, metadata: {}, orgAgent })).toEqual({
+    id: AGENT_ID,
+    name: "Support desk",
+    managed: true,
+  });
+  expect(
+    sessionAgentRef({ agentId: AGENT_ID, orgAgent: { id: AGENT_ID, key: "support-desk" } }),
+  ).toEqual({ id: AGENT_ID, name: "support-desk", managed: true });
 });
