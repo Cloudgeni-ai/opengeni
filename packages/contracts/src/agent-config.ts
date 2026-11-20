@@ -562,6 +562,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   site_publication_update: "artifacts",
   site_publication_apply_fix: "artifacts",
   site_hostname_check: "artifacts",
+  app_export: "artifacts",
+  app_install: "artifacts",
   site_sql_inspect: "artifacts",
   site_sql_enable: "artifacts",
   site_sql_migrate: "artifacts",

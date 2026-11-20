@@ -185,7 +185,8 @@ type ArtifactMutationToolName =
   | "artifacts_publish"
   | "artifacts_rollback"
   | "artifacts_archive"
-  | "artifacts_restore";
+  | "artifacts_restore"
+  | "app_install";
 
 export class WorkspaceArtifactNotFoundError extends Error {
   readonly name = "WorkspaceArtifactNotFoundError";
