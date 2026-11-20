@@ -2358,6 +2358,11 @@ export const englishMessages = {
   "machineInputDisplay.videoUpdatesCount_other": "{count} video updates",
   "machineInputDisplay.waitEnded": "Wait ended",
   "machineInputDisplay.waitsEndedCount_other": "{count} waits ended",
+  "machineRequest.state.connecting": "Connecting",
+  "machineRequest.state.offline": "Offline",
+  "machineRequest.state.online": "Online",
+  "machineRequest.state.onlineNoDisplay": "Online · no display",
+  "machineRequest.state.reconnecting": "Reconnecting",
   "machineMetrics.cpu": "CPU",
   "machineMetrics.disk": "Disk",
   "machineMetrics.gpu": "GPU",
@@ -3814,6 +3819,44 @@ export const englishMessages = {
   "native.timeline.imageViewer.share": "Share",
   "native.timeline.inChatConnect.close": "Close",
   "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
+  "native.timeline.landmarks.details": "Details",
+  "native.timeline.landmarks.earlier": "+{count} earlier",
+  "native.timeline.landmarks.openAgentSession": "Open agent session",
+  "native.timeline.landmarks.openName": "Open {name}",
+  "native.timeline.machineRequest.allow": "Allow",
+  "native.timeline.machineRequest.allowing": "Allowing…",
+  "native.timeline.machineRequest.askedAgain":
+    "The agent asked to use a machine. It asked again below.",
+  "native.timeline.machineRequest.askedAgainChrome":
+    "The agent asked to connect Chrome. It asked again below.",
+  "native.timeline.machineRequest.askedForName": "The agent asked to use {name}.",
+  "native.timeline.machineRequest.askedOwnMachine":
+    "The agent asked to use this machine. Allowing it lets your agents use it in this workspace from now on, and moves this chat here.",
+  "native.timeline.machineRequest.askedSharedMachine":
+    "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it.",
+  "native.timeline.machineRequest.blockedArchived":
+    "This chat is archived. Continue in a new chat to use a machine.",
+  "native.timeline.machineRequest.blockedEnded":
+    "This chat has ended. Start a new chat to use a machine.",
+  "native.timeline.machineRequest.cantChange": "You can't change where this chat runs.",
+  "native.timeline.machineRequest.change": "Change",
+  "native.timeline.machineRequest.chooseWhere": "Choose where this chat runs.",
+  "native.timeline.machineRequest.connectAnother":
+    "To connect another computer, open this chat on that computer.",
+  "native.timeline.machineRequest.couldNotLoad": "Couldn't load your machines.",
+  "native.timeline.machineRequest.couldNotMove": "Couldn't move this chat to {name}. {reason}",
+  "native.timeline.machineRequest.inUse": "In use",
+  "native.timeline.machineRequest.moving": "Moving…",
+  "native.timeline.machineRequest.ownMachineNote": "Only your own messages run on it.",
+  "native.timeline.machineRequest.ownMachineSharedNote":
+    "Only your own messages run on it. This chat is shared, so people in this workspace see what the agent does there.",
+  "native.timeline.machineRequest.subtitle": "Your computer or server",
+  "native.timeline.machineRequest.tryAgain": "Try again.",
+  "native.timeline.machineRequest.turnOnName": "Turn on {name} to allow it here.",
+  "native.timeline.machineRequest.turnOnOne": "Turn on one of the machines below to use it here.",
+  "native.timeline.machineRequest.use": "Use",
+  "native.timeline.machineRequest.useDifferent": "Use a different machine",
+  "native.timeline.machineRequest.usingName": "Using {name}",
   /** Answers an MCP server's yes/no question from the inbox. */
   "native.timeline.inbox.allow": "Allow",
   "native.timeline.inbox.allowed": "Allowed",

@@ -13,6 +13,10 @@ import {
   useNativeTimelineTheme,
   type AnnotationReveal,
 } from "@opengeni/react-native/timeline";
+import {
+  personalMachineUseIntent,
+  type MachineMoveChat,
+} from "@opengeni/react/machine-request-model";
 import { buildTimeline } from "@opengeni/react/session";
 import type {
   ChatClient,
@@ -35,6 +39,17 @@ import { AppThemeProvider } from "@/theme";
 type Params = { scenario?: LabScenarioId; scheme?: "light" | "dark"; chrome?: string };
 
 const labSend = async () => true;
+
+/** A private chat that can take a Send, with the owner's machine consent. */
+const labChat = (): MachineMoveChat => ({
+  blocked: null,
+  awaitingHuman: false,
+  personalMachineIntent: personalMachineUseIntent(
+    { visibility: "private", authorityEpoch: 1 },
+    "always",
+  ),
+  extras: {},
+});
 
 /** Questions an agent is waiting on in the scenario, as the session reads them. */
 function pendingQuestions(events: readonly SessionEvent[]): SessionHumanInputRequest[] {
@@ -188,6 +203,7 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
       returnUrl: "https://example.com/connected",
       shareConversation: () => undefined,
     },
+    chat: labChat,
   });
   const questions = useMemo(() => pendingQuestions(scenario.events), [scenario.events]);
   const showChrome = params.chrome !== "0";

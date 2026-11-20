@@ -1,6 +1,5 @@
 import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useRef, useState } from "react";
-import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import type {
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
@@ -11,9 +10,10 @@ import type {
 } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
+import { swapFailureMessage } from "../machine-request-model";
 import { EMPTY_MACHINES, useSharedMachinesList } from "./shared-machines-list";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
-import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Dashboard list: cheap heartbeat read, keep the pill reasonably fresh. */
 export const MACHINES_DASHBOARD_POLL_MS = 10_000;
@@ -153,44 +153,6 @@ export type UseMachinesResult = {
   mutationError: Error | null;
   clearMutationError: () => void;
 };
-
-/**
- * Plain copy for a refused move, chosen by its typed code. The server's
- * `reason` is written for the agent and for logs, so it is never shown here.
- */
-function swapFailureMessage(t: OpenGeniText, result: SwapActiveSandboxResponse): string {
-  switch (result.code) {
-    case "recovery_in_progress":
-      return t("hooks.useMachines.itsComputerIsStillStarting");
-    case "recovery_degraded":
-      return t("hooks.useMachines.itsComputerIsntWorking");
-    case "recovery_unrecoverable":
-      return t("hooks.useMachines.itsComputerCouldntBeRestored");
-    case "offline_enrollment":
-      return t("hooks.useMachines.thatMachineIsOffline");
-    case "stale_pointer":
-      return t("hooks.useMachines.thatMachineIsNoLonger");
-    case "unsupported_backend_context":
-    case "transient_establishment":
-      return t("hooks.useMachines.thatMachineCouldntBeReached");
-    case "concurrent_swap":
-      return t("hooks.useMachines.itWasMovedSomewhere");
-    case "personal_machine_permission_required":
-      return t("hooks.useMachines.theMachineSOwnerHas");
-    case "personal_machine_not_permitted":
-      return t("hooks.useMachines.onlyTheMachineSOwner");
-    // Trying again won't help while the chat isn't allowed to use the machine.
-    case "machine_access_required":
-      return machineAccessNeededMessage();
-    // Neither is fixed by trying again: say what to do instead.
-    case "workspace_root_unavailable":
-      return t("hooks.useMachines.thatMachineHasntReported");
-    case "invalid_working_directory":
-      return t("hooks.useMachines.thisChatSWorkingFolder");
-    default:
-      return t("hooks.useMachines.tryAgain");
-  }
-}
 
 /**
  * The workspace Machines fleet: the selfhosted enrollments + the session's Modal

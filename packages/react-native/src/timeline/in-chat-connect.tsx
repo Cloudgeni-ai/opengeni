@@ -24,6 +24,7 @@ import {
   type ConnectWindowHost,
   type InChatConnectSource,
 } from "@opengeni/react/in-chat-connect-model";
+import type { MachineMoveChat } from "@opengeni/react/machine-request-model";
 import type { AuthNeededItem, TimelineItem } from "@opengeni/react/session";
 import type { HumanInputSecretSpec, OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -43,6 +44,11 @@ import { Icon, type NativeIconName } from "./icon";
 import { useInlineInputFocus } from "./inline-input-focus";
 import { SecureValueInput } from "./secret-field";
 import { defaultSecretFieldMessages, secretInputTraits } from "./secret-field-model";
+import {
+  NativeMachineRequestCard,
+  NativeRepeatedMachineRequestNote,
+  type NativeMachineRequestClient,
+} from "./machine-request-card";
 import { Selector } from "./selector";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
@@ -153,12 +159,22 @@ export function useNativeInChatConnect({
   sessionId,
   items,
   options,
+  chat,
+  onChatMoved,
 }: {
   client: ChatClient<OpenGeniClient> | undefined;
   workspaceId: string;
   sessionId: string;
   items: readonly TimelineItem[];
   options: NativeInChatConnectOptions | undefined;
+  /**
+   * What a composer Send would carry now, so allowing a machine the agent
+   * asked for moves the chat there by the composer's own rules. Without it a
+   * machine request offers only the link to open this chat on that computer.
+   */
+  chat?: (() => MachineMoveChat) | undefined;
+  /** Re-read the session once the chat moved to another machine. */
+  onChatMoved?: (() => Promise<void> | void) | undefined;
 }): ((item: AuthNeededItem) => ReactNode) | undefined {
   const needed = useMemo(
     () => items.some((item) => item.kind === "auth-needed" && isInChatConnectRequest(item)),
@@ -176,12 +192,41 @@ export function useNativeInChatConnect({
   );
   const latest = useRef(options);
   latest.current = options;
+  const chatRef = useRef(chat);
+  chatRef.current = chat;
+  const movedRef = useRef(onChatMoved);
+  movedRef.current = onChatMoved;
+  const hasChat = chat !== undefined;
+  const readChat = useCallback(() => chatRef.current!(), []);
+  const moved = useCallback(() => movedRef.current?.(), []);
   return useCallback(
     (item: AuthNeededItem) => {
       const host = latest.current;
-      // A computer connects from the computer itself, never from this phone.
-      if (item.capability?.id === "api:connected-machine")
-        return <NativeAuthNeededRow item={item} onShareConversation={host?.shareConversation} />;
+      if (item.capability?.id === "api:connected-machine") {
+        // The same request was made again further down, where its card is live.
+        if (item.askedAgainLater)
+          return <NativeRepeatedMachineRequestNote chrome={item.purpose === "chrome"} />;
+        // A computer (and its Chrome) connects from the computer itself,
+        // never from this phone: offer the link to open this chat there.
+        const share = (
+          <NativeAuthNeededRow item={item} onShareConversation={host?.shareConversation} />
+        );
+        if (item.purpose === "chrome" || !client || !hasChat) return share;
+        // A machine already connected can be chosen right here.
+        return (
+          <NativeMachineRequestCard
+            key={`${workspaceId}:${sessionId}:${item.id}`}
+            item={item}
+            client={client as unknown as NativeMachineRequestClient}
+            workspaceId={workspaceId}
+            sessionId={sessionId}
+            chat={readChat}
+            onMoved={moved}
+            onShareConversation={host?.shareConversation}
+            fallback={share}
+          />
+        );
+      }
       if (!client || !host || !chatConnections) return <NativeAuthNeededRow item={item} />;
       const key = `${workspaceId}:${sessionId}:${item.id}`;
       // A failed read says nothing about this person's access: offer to try
@@ -237,7 +282,7 @@ export function useNativeInChatConnect({
         );
       return <NativeAuthNeededRow item={item} />;
     },
-    [client, workspaceId, sessionId, support, chatConnections],
+    [client, workspaceId, sessionId, support, chatConnections, hasChat, readChat, moved],
   );
 }
 
