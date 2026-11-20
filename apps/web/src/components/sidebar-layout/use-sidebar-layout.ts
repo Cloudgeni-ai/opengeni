@@ -58,8 +58,14 @@ function load(client: Client, key: string, workspaceId: string): Promise<void> {
   if (running) return running;
   const generation = generations.get(key) ?? 0;
   const current = () => (generations.get(key) ?? 0) === generation;
-  const request = client
-    .getSidebarLayout(workspaceId)
+  // A host's own client may not have the sidebar (or may throw at once): the
+  // sidebar is then just empty, never an error for the page around it.
+  if (typeof (client as Partial<Client>).getSidebarLayout !== "function") {
+    if (!entries.has(key)) set(key, { layout: null, failed: false, loading: false });
+    return Promise.resolve();
+  }
+  const request = Promise.resolve()
+    .then(() => client.getSidebarLayout(workspaceId))
     .then((layout) => {
       if (current()) set(key, { layout: normalize(layout), failed: false, loading: false });
     })
