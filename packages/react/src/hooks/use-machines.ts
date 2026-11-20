@@ -10,7 +10,7 @@ import type {
 } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
-import { swapFailureMessage } from "../machine-request-model";
+import { swapFailureMessage } from "../machine-swap-copy";
 import { EMPTY_MACHINES, useSharedMachinesList } from "./shared-machines-list";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
 import { useOpenGeniText } from "../messages/runtime";
