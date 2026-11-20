@@ -182,7 +182,7 @@ describe("Slack channel routing dialog", () => {
     expect(labels.some((label) => label.includes("only you can see this"))).toBe(true);
   });
 
-  test("offers this connection's Slack agents beside Opengeni in each workspace", async () => {
+  test("offers this connection's Slack agents and workspaces in separate groups", async () => {
     const host = await renderDialog(null, {
       agents: [
         slackAgent(AGENT_ID, "Data", CONNECTION_ID, SHARED_ID),
@@ -192,8 +192,23 @@ describe("Slack channel routing dialog", () => {
     });
     const select = host.querySelector("select");
     expect(select?.getAttribute("aria-label")).toBe("Who answers in #eng");
-    const labels = [...host.querySelectorAll("option")].map((option) => option.textContent ?? "");
-    expect(labels).toEqual(["Ask me", "Data", "Opengeni in Home", "Opengeni in Platform"]);
+    const groups = [...host.querySelectorAll("optgroup")].map((group) => ({
+      label: group.label,
+      options: [...group.querySelectorAll("option")].map((option) => option.textContent ?? ""),
+    }));
+    expect(groups).toEqual([
+      { label: "Agents", options: ["Data"] },
+      { label: "Workspaces", options: ["Home", "Platform"] },
+    ]);
+    expect(host.textContent).not.toContain("Opengeni in Home");
+  });
+
+  test("says whether the chosen name is an agent or a workspace", async () => {
+    const agents = [slackAgent(AGENT_ID, "Data", CONNECTION_ID, SHARED_ID)];
+    const agentHost = await renderDialog({ target: SHARED_ID, slackAgentId: AGENT_ID }, { agents });
+    expect(agentHost.textContent).toContain("Data · agent");
+    const workspaceHost = await renderDialog(SHARED_ID, { agents });
+    expect(workspaceHost.textContent).toContain("Platform · workspace");
   });
 
   test("saves an agent together with its own workspace", async () => {
