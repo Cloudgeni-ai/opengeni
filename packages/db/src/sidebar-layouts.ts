@@ -178,3 +178,27 @@ export async function readSidebarApps(
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
 }
+
+/**
+ * Which of `appIds` are still apps of this workspace (not deleted or
+ * archived), whoever may open them. A sidebar write drops links to the rest.
+ */
+export async function readLiveSidebarAppIds(
+  db: Database,
+  scope: SidebarLayoutScopeKey,
+  appIds: readonly string[],
+): Promise<Set<string>> {
+  const ids = [...new Set(appIds.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()))];
+  if (!ids.length) return new Set();
+  return await withRlsContext(
+    db,
+    scope,
+    async (tx) => {
+      const result = await tx.execute(sql`select a.id::text as id from workspace_artifacts a
+        where a.account_id = ${scope.accountId}::uuid and a.workspace_id = ${scope.workspaceId}::uuid
+          and a.status = 'active' and a.id = any(${`{${ids.join(",")}}`}::uuid[])`);
+      return new Set(rows<{ id: string }>(result).map((row) => row.id));
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}

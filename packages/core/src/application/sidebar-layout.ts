@@ -10,6 +10,8 @@ import {
   mergeSidebarLayout,
   readStoredSidebarLayout,
   readStoredSidebarPersonalChanges,
+  sidebarLinkedAppIds,
+  withoutGoneSidebarApps,
   SIDEBAR_LIVE_LIST_DEFAULT_LIMIT,
   SIDEBAR_LIVE_LIST_LABELS,
   SIDEBAR_LIVE_LIST_MAX_LIMIT,
@@ -27,6 +29,7 @@ import {
   type UpdateSidebarLayoutRequest,
 } from "@opengeni/contracts";
 import {
+  readLiveSidebarAppIds,
   readSidebarApps,
   readSidebarLayouts,
   writeSidebarLayout,
@@ -280,17 +283,34 @@ export async function updateSidebarLayoutForGrant(
     if (request.expectedRevision !== undefined && request.expectedRevision !== current)
       throw new HTTPException(409, { message: SIDEBAR_LAYOUT_CONFLICT_MESSAGE });
     const workspace = readStoredSidebarLayout(rows.workspace?.layout);
+    const personal = readStoredSidebarPersonalChanges(rows.personal?.layout);
+    // Links to deleted or archived apps are dropped on the next write to the
+    // scope that holds them: nobody can see them to remove them, and they
+    // shouldn't count toward the limits.
+    const linked = sidebarLinkedAppIds(
+      request.scope === "workspace" ? workspace.items : personal.added.map((entry) => entry.item),
+    );
+    const live = linked.length ? await readLiveSidebarAppIds(deps.db, scope, linked) : null;
+    const prunedWorkspace =
+      live && request.scope === "workspace"
+        ? { ...workspace, items: withoutGoneSidebarApps(workspace.items, live) }
+        : workspace;
+    const prunedPersonal =
+      live && request.scope === "personal"
+        ? {
+            ...personal,
+            added: personal.added.flatMap((entry) => {
+              const [item] = withoutGoneSidebarApps([entry.item], live);
+              return item ? [{ ...entry, item }] : [];
+            }),
+          }
+        : personal;
     let layout: unknown;
     try {
       layout =
         request.scope === "workspace"
-          ? applyWorkspaceSidebarChanges(workspace, request.changes, newItemSuffix)
-          : applyPersonalSidebarChanges(
-              workspace,
-              readStoredSidebarPersonalChanges(rows.personal?.layout),
-              request.changes,
-              newItemSuffix,
-            );
+          ? applyWorkspaceSidebarChanges(prunedWorkspace, request.changes, newItemSuffix)
+          : applyPersonalSidebarChanges(workspace, prunedPersonal, request.changes, newItemSuffix);
     } catch (error) {
       if (error instanceof SidebarLayoutChangeError)
         throw new HTTPException(422, { message: error.message });

@@ -13,7 +13,10 @@ import {
   readResolvedSidebarItems,
   readStoredSidebarLayout,
   readStoredSidebarPersonalChanges,
+  sidebarLinkedAppIds,
   sidebarPersonalChangesCustomized,
+  withoutGoneSidebarApps,
+  knownSidebarItem,
   type SidebarLayoutChange,
   type MergedSidebarGroup,
 } from "../src/sidebar-layout";
@@ -85,7 +88,7 @@ describe("sidebar layout", () => {
     expect(member.hidden).toEqual(["incidents"]);
     expect(member.added).toHaveLength(1);
     const seen = mergeSidebarLayout(workspace, member);
-    expect(seen.items.map((item) => item.id)).toEqual(["engineering", "link-n1"]);
+    expect(seen.items.map((item) => item.id)).toEqual(["engineering", "my-link-n1"]);
     expect((seen.items[0] as MergedSidebarGroup).items.map((item) => item.id)).toEqual([
       "releases",
       "reviews",
@@ -127,7 +130,7 @@ describe("sidebar layout", () => {
     let seen = mergeSidebarLayout(workspace, member);
     expect((seen.items[0] as MergedSidebarGroup).items.map((item) => item.id)).toEqual([
       "status",
-      "mine",
+      "my-mine",
       "releases",
       "incidents",
     ]);
@@ -172,7 +175,7 @@ describe("sidebar layout", () => {
       parseChanges([{ op: "remove", itemId: "engineering" }]),
       ids(),
     );
-    expect(mergeSidebarLayout(workspace, member).items.map((item) => item.id)).toEqual(["mine"]);
+    expect(mergeSidebarLayout(workspace, member).items.map((item) => item.id)).toEqual(["my-mine"]);
   });
 
   test("unknown item types are ignored by readers and kept by writers", () => {
@@ -270,5 +273,143 @@ describe("sidebar layout", () => {
     ]);
     expect(flat.map((item) => item.id)).toEqual(["a", "r"]);
     expect(flat[1]!.type === "live_list" && flat[1]!.apps).toHaveLength(3);
+  });
+  test("moves name a neighbour, so items a reader can't see don't shift them", () => {
+    // `reviews` is an App this reader can't open: their view is releases, incidents, status.
+    const workspace = engineering();
+    const moved = applyWorkspaceSidebarChanges(
+      workspace,
+      parseChanges([{ op: "move", itemId: "incidents", beforeId: "releases" }]),
+      ids(),
+    );
+    const group = moved.items[0]!.items as { id: string }[];
+    expect(group.map((item) => item.id)).toEqual(["incidents", "releases", "reviews", "status"]);
+    const down = applyWorkspaceSidebarChanges(
+      workspace,
+      parseChanges([{ op: "move", itemId: "releases", afterId: "incidents" }]),
+      ids(),
+    );
+    expect((down.items[0]!.items as { id: string }[]).map((item) => item.id)).toEqual([
+      "reviews",
+      "incidents",
+      "releases",
+      "status",
+    ]);
+    const member = applyPersonalSidebarChanges(
+      workspace,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "move", itemId: "status", beforeId: "incidents" }]),
+      ids(),
+    );
+    const seen = mergeSidebarLayout(workspace, member).items[0] as MergedSidebarGroup;
+    expect(seen.items.map((item) => item.id)).toEqual([
+      "releases",
+      "reviews",
+      "status",
+      "incidents",
+    ]);
+    expect(() =>
+      applyWorkspaceSidebarChanges(
+        workspace,
+        parseChanges([{ op: "move", itemId: "releases", beforeId: "nowhere" }]),
+        ids(),
+      ),
+    ).toThrow(SidebarLayoutChangeError);
+  });
+
+  test("a person's own ids can't collide with items an admin adds later", () => {
+    const workspace = engineering();
+    const member = applyPersonalSidebarChanges(
+      workspace,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([
+        { op: "add", item: { id: "docs", type: "link", url: "https://d.example.com", label: "D" } },
+      ]),
+      ids(),
+    );
+    expect(member.added[0]!.item.id).toBe("my-docs");
+    const later = applyWorkspaceSidebarChanges(
+      workspace,
+      parseChanges([
+        { op: "add", item: { id: "docs", type: "link", url: "https://e.example.com", label: "E" } },
+      ]),
+      ids(),
+    );
+    expect(mergeSidebarLayout(later, member).items.map((item) => item.id)).toEqual([
+      "engineering",
+      "docs",
+      "my-docs",
+    ]);
+    expect(() =>
+      applyWorkspaceSidebarChanges(
+        workspace,
+        parseChanges([
+          {
+            op: "add",
+            item: { id: "my-x", type: "link", url: "https://x.example.com", label: "X" },
+          },
+        ]),
+        ids(),
+      ),
+    ).toThrow(SidebarLayoutChangeError);
+  });
+
+  test("a person's items count toward a workspace group's limit", () => {
+    const children = Array.from({ length: 50 }, (_, index) => ({
+      id: `l${index}`,
+      type: "link",
+      url: "https://x.example.com",
+      label: `L${index}`,
+    }));
+    const workspace = applyWorkspaceSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      parseChanges([{ op: "add", item: { id: "g", type: "group", label: "G", items: children } }]),
+      ids(),
+    );
+    expect(() =>
+      applyPersonalSidebarChanges(
+        workspace,
+        EMPTY_SIDEBAR_PERSONAL_CHANGES,
+        parseChanges([
+          {
+            op: "add",
+            groupId: "g",
+            item: { type: "link", url: "https://y.example.com", label: "Y" },
+          },
+        ]),
+        ids(),
+      ),
+    ).toThrow(SidebarLayoutChangeError);
+  });
+
+  test("fields from a newer version don't hide an item from older readers", () => {
+    expect(knownSidebarItem({ id: "a", type: "app", appId: APP_A, icon: "rocket" })).toEqual({
+      id: "a",
+      type: "app",
+      appId: APP_A,
+    });
+    const group = knownSidebarItem({
+      id: "g",
+      type: "group",
+      label: "G",
+      color: "blue",
+      items: [{ id: "s", type: "link", url: "https://s.example.com", label: "S", badge: 2 }],
+    });
+    expect(group).toEqual({
+      id: "g",
+      type: "group",
+      label: "G",
+      items: [{ id: "s", type: "link", url: "https://s.example.com", label: "S" }],
+    });
+  });
+
+  test("links to gone apps can be dropped", () => {
+    const items = engineering().items;
+    expect(sidebarLinkedAppIds(items).sort()).toEqual([APP_A, APP_B, APP_C].sort());
+    const kept = withoutGoneSidebarApps(items, new Set([APP_A]));
+    expect((kept[0]!.items as { id: string }[]).map((item) => item.id)).toEqual([
+      "releases",
+      "status",
+    ]);
   });
 });

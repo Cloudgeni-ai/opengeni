@@ -51,6 +51,14 @@ type OpenApp = { key: string; workspaceId: string; appId: string; siteHref: stri
  * frames, scroll and state survive. Frames are never reordered (moving an
  * iframe in the document reloads it); the least recently shown one closes.
  */
+/**
+ * The apps to keep after `key` comes on screen, most recent first: it and
+ * the last {@link APP_PAGES_KEPT_OPEN} others.
+ */
+export function keptAppPages(recent: readonly string[], key: string): string[] {
+  return [key, ...recent.filter((entry) => entry !== key)].slice(0, APP_PAGES_KEPT_OPEN + 1);
+}
+
 export function AppPages({ children }: { children: ReactNode }) {
   const location = useRouterState({
     select: (state) => ({
@@ -68,9 +76,8 @@ export function AppPages({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!match) return;
     const key = `${match.workspaceId}/${match.appId}`;
-    recency.current = [key, ...recency.current.filter((entry) => entry !== key)];
-    const keep = new Set(recency.current.slice(0, APP_PAGES_KEPT_OPEN + 1));
-    recency.current = recency.current.filter((entry) => keep.has(entry));
+    recency.current = keptAppPages(recency.current, key);
+    const keep = new Set(recency.current);
     setOpen((current) => {
       const next = current
         .filter((entry) => keep.has(entry.key))

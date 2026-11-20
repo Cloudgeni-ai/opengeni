@@ -50,6 +50,10 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
   const navigate = useNavigate();
   const rail = useRail();
   const index = actions.siblings.indexOf(item.id);
+  // Moves name the visible neighbour: the stored level may hold items this
+  // person doesn't see, so an index could land elsewhere.
+  const previous = index > 0 ? actions.siblings[index - 1] : undefined;
+  const following = index >= 0 ? actions.siblings[index + 1] : undefined;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -65,14 +69,14 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
         {actions.canChange ? (
           <>
             <DropdownMenuItem
-              disabled={index <= 0}
-              onSelect={() => actions.change([{ op: "move", itemId: item.id, index: index - 1 }])}
+              disabled={previous === undefined}
+              onSelect={() => actions.change([{ op: "move", itemId: item.id, beforeId: previous }])}
             >
               Move up
             </DropdownMenuItem>
             <DropdownMenuItem
-              disabled={index < 0 || index >= actions.siblings.length - 1}
-              onSelect={() => actions.change([{ op: "move", itemId: item.id, index: index + 1 }])}
+              disabled={following === undefined}
+              onSelect={() => actions.change([{ op: "move", itemId: item.id, afterId: following }])}
             >
               Move down
             </DropdownMenuItem>

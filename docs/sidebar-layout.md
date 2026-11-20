@@ -19,12 +19,18 @@ in Artifacts. The sidebar shows those pins through a **Pinned apps** list.
 | `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (Apps this person opened last), `limit` 1 to 20 (default 5). |
 
 Item ids are 1 to 64 letters, digits, `-` or `_`; the server makes one when a
-new item has none. A layout holds at most 50 top-level items and 50 per group.
+new item has none. A person's own items get ids starting with `my-` (a given id
+is prefixed), and default items can't use that prefix, so an item an admin adds
+later never takes the id of someone's own item. A layout holds at most 50
+top-level items and 50 per group, a person's own items in a group included.
 
 What a person sees is filtered for them: Apps they can't open (Only me Apps of
 someone else, archived or deleted Apps, or anything when they lack
 `artifacts:read`) are left out, and a group left with nothing they can open
-is left out too (admins still see it, to fill it).
+is left out too (admins still see it, to fill it). Links to deleted or
+archived Apps are also dropped from storage on the next change to the layout
+that holds them, so they don't count toward the limits; restoring an archived
+App doesn't bring its links back.
 
 The built-in default is empty, so nothing changes for a workspace until
 someone adds items.
@@ -62,9 +68,13 @@ before their own changes (`workspace.items`) and `workspace.canEdit: true`.
 - `scope: "personal"` changes the caller's own sidebar (`workspace:read`).
 - `scope: "workspace"` changes the default (`workspace:admin`, else 403).
 - `changes` (1 to 50, applied in order, all or nothing): `add` (`item`,
-  optional `groupId` and `index`), `update` (`label`, `path`, `url`,
-  `collapsed`, `limit`), `remove`, `show`, `move` (`index`, optional
-  `groupId`, `null` for the top level) and `reset`.
+  optional `groupId` and a position), `update` (`label`, `path`, `url`,
+  `collapsed`, `limit`), `remove`, `show`, `move` (optional `groupId`, `null`
+  for the top level, and a position) and `reset`.
+- A position is `beforeId` or `afterId` (an item of the target level) or an
+  `index`; the end when none is given. Prefer a neighbour: the stored level
+  can hold items the caller doesn't see (Apps they can't open), so an index
+  counts those too.
 - With `expectedRevision`, a newer revision is refused with 409 instead of
   changed on top of. Without it, the change applies to the latest revision.
 - A new App link must name an App the caller can open (422 otherwise);
@@ -102,7 +112,9 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   sidebar). Customize sidebar is also in the account menu and opens the
   Sidebar page (`/workspaces/<id>/sidebar`): Yours, and Workspace default for
   admins. Groups remember open or closed per browser. The icon-only rail
-  leaves the section out.
+  leaves the section out. Changes made elsewhere (an agent's tool call,
+  another tab or device) show when the window regains focus, on return to
+  the tab, or within two minutes.
 - **Phone browsers**: groups are flattened into one list and live lists show
   at most 3 Apps.
 - **The Opengeni phone app** doesn't show the layout yet.
@@ -119,10 +131,12 @@ Artifacts view:
   [Site runtime API](site-runtime-api.md#opengeni-look-for-apps)).
 - The last 3 Apps you left stay open while you go elsewhere, so coming back
   doesn't reload them or lose their state. More than that, the one shown
-  longest ago closes. Switching workspaces closes them.
+  longest ago closes. Switching workspaces closes them. Each return to an
+  App counts as opening it, for Recent apps.
 - Coming back to an App seen earlier in the tab draws its last copy at once
   (and refreshes it behind), and a first open is a blank canvas in the
-  App's theme, not a loading card.
+  App's theme, not a loading card. If the refresh finds the App gone or no
+  longer open to you, the copy is dropped and the error shown.
 
 The Site view (`/workspaces/<id>/sites/<id>`), with its chat and publishing,
 is unchanged.

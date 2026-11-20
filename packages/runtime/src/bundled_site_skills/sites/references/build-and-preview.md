@@ -173,8 +173,10 @@ elsewhere. Make it feel native:
   `--og-fg-muted`, `--og-accent`, ...) and classes: `og-app` on `<body>`,
   `og-page`, `og-title`, `og-heading`, `og-card`, `og-button`
   (`og-button-primary`), `og-input`, `og-badge`, `og-table`. It styles only what
-  you mark, so a user's own design stays theirs. In a Bun + React app put the
-  same tag in `index.html`.
+  you mark, so a user's own design stays theirs. In a Bun + React app the
+  bundler can't resolve that link; put
+  `<style>@import "/__opengeni/ui.css";</style>` in `index.html` instead (the
+  build leaves it alone).
 - Links to a page (`/releases`) work from the sidebar too: add one with
   `sidebar_layout_update` (an `app` item with the App's id and `path`).
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { matchAppPage, splitAppSiteHref } from "./app-page";
+import { APP_PAGES_KEPT_OPEN, keptAppPages, matchAppPage, splitAppSiteHref } from "./app-page";
 
 const APP = "0f8c1a52-7d4b-4c55-9a1e-2b3c4d5e6f70";
 
@@ -25,5 +25,15 @@ describe("app pages", () => {
   test("an app's own address splits back into the page URL", () => {
     expect(splitAppSiteHref("/")).toEqual({ splat: "", at: undefined });
     expect(splitAppSiteHref("/releases?tab=2#x")).toEqual({ splat: "releases", at: "?tab=2#x" });
+  });
+  test("the app on screen and the last 3 others stay open", () => {
+    expect(APP_PAGES_KEPT_OPEN).toBe(3);
+    let recent: string[] = [];
+    for (const key of ["a", "b", "c", "d", "e"]) recent = keptAppPages(recent, key);
+    expect(recent).toEqual(["e", "d", "c", "b"]);
+    // Coming back to one keeps the others; the one shown longest ago closes next.
+    recent = keptAppPages(recent, "c");
+    expect(recent).toEqual(["c", "e", "d", "b"]);
+    expect(keptAppPages(recent, "f")).toEqual(["f", "c", "e", "d"]);
   });
 });

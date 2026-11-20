@@ -503,7 +503,8 @@ An App can be added to the sidebar ([Sidebar layout](sidebar-layout.md)),
 optionally at one of its pages. Opened from there it is a page of Opengeni's
 own: it fills the main area with its address in the URL, follows the light or
 dark theme, stays open (up to 3) while you go elsewhere, and can opt into
-Opengeni's look with `<link rel="stylesheet" href="/__opengeni/ui.css">`
+Opengeni's look with `<link rel="stylesheet" href="/__opengeni/ui.css">`, or
+`<style>@import "/__opengeni/ui.css";</style>` in an App built by a bundler
 ([reference](site-runtime-api.md#opengeni-look-for-apps)). Publishing is not
 needed for any of this.
 

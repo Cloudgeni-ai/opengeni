@@ -423,15 +423,26 @@ Operations:
 
 Apps opened in Opengeni follow its light or dark theme: the frame's
 `color-scheme` is Opengeni's, so `prefers-color-scheme` inside the App
-matches it and changes without a reload. An App that wants Opengeni's own
-look opts in with one tag:
+matches it and changes without a reload. (Safari doesn't pass a frame's
+`color-scheme` to `prefers-color-scheme`, so there an App follows the
+system's theme; that differs only when Opengeni's appearance is set to the
+other one.) An App that wants Opengeni's own look opts in with one tag:
 
 ```html
 <link rel="stylesheet" href="/__opengeni/ui.css">
 ```
 
-Inside Opengeni the tag is replaced by the stylesheet itself (no request and
-no unstyled first paint). A published Site's gateway serves it at that path,
+A bundler (`bun build ./index.html`, Vite) tries to resolve that link and
+fails, so in a built App use a style that only imports it, which bundlers
+leave alone:
+
+```html
+<style>@import "/__opengeni/ui.css";</style>
+```
+
+Inside Opengeni either is replaced by the stylesheet itself (no request and
+no unstyled first paint). The path `/__opengeni/ui.css` is reserved: a Site's
+own file there is never served. A published Site's gateway serves it at that path,
 and so does the local preview (`createCodemodeSiteRequestHandler`). It styles
 nothing on its own; it defines:
 

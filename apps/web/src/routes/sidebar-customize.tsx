@@ -72,20 +72,22 @@ function itemDetail(item: ResolvedSidebarItem): string | null {
 
 function ItemRow({
   item,
-  index,
-  count,
+  siblings,
   indent,
   scope,
   onChange,
 }: {
   item: ResolvedSidebarItem;
-  index: number;
-  count: number;
+  /** The ids of the item's level, in order; moves name a neighbour. */
+  siblings: readonly string[];
   indent?: boolean;
   scope: Scope;
   onChange: (changes: SidebarLayoutChange[]) => void;
 }) {
   const detail = itemDetail(item);
+  const index = siblings.indexOf(item.id);
+  const previous = index > 0 ? siblings[index - 1] : undefined;
+  const following = index >= 0 ? siblings[index + 1] : undefined;
   const fromWorkspace = scope === "personal" && item.origin === "workspace";
   return (
     <div
@@ -109,8 +111,8 @@ function ItemRow({
         variant="ghost"
         size="icon-sm"
         aria-label={`Move ${item.label} up`}
-        disabled={index === 0}
-        onClick={() => onChange([{ op: "move", itemId: item.id, index: index - 1 }])}
+        disabled={previous === undefined}
+        onClick={() => onChange([{ op: "move", itemId: item.id, beforeId: previous }])}
         className="text-fg-subtle hover:text-fg pointer-coarse:size-11"
       >
         <ArrowUpIcon />
@@ -120,8 +122,8 @@ function ItemRow({
         variant="ghost"
         size="icon-sm"
         aria-label={`Move ${item.label} down`}
-        disabled={index === count - 1}
-        onClick={() => onChange([{ op: "move", itemId: item.id, index: index + 1 }])}
+        disabled={following === undefined}
+        onClick={() => onChange([{ op: "move", itemId: item.id, afterId: following }])}
         className="text-fg-subtle hover:text-fg pointer-coarse:size-11"
       >
         <ArrowDownIcon />
@@ -148,31 +150,26 @@ function ItemRows({
   onChange: (changes: SidebarLayoutChange[]) => void;
 }) {
   const rows: ReactNode[] = [];
-  items.forEach((item, index) => {
+  const topIds = items.map((item) => item.id);
+  items.forEach((item) => {
     rows.push(
-      <ItemRow
-        key={item.id}
-        item={item}
-        index={index}
-        count={items.length}
-        scope={scope}
-        onChange={onChange}
-      />,
+      <ItemRow key={item.id} item={item} siblings={topIds} scope={scope} onChange={onChange} />,
     );
-    if (item.type === "group")
-      item.items.forEach((child, childIndex) =>
+    if (item.type === "group") {
+      const childIds = item.items.map((child) => child.id);
+      item.items.forEach((child) =>
         rows.push(
           <ItemRow
             key={child.id}
             item={child}
-            index={childIndex}
-            count={item.items.length}
+            siblings={childIds}
             indent
             scope={scope}
             onChange={onChange}
           />,
         ),
       );
+    }
   });
   return <>{rows}</>;
 }

@@ -99,6 +99,10 @@ export type SidebarLayoutChange =
       groupId?: string;
       /** Position in its level; the end when omitted. */
       index?: number;
+      /** Put it just before this item of its level (instead of `index`). */
+      beforeId?: string;
+      /** Put it just after this item of its level (instead of `index`). */
+      afterId?: string;
     }
   | {
       op: "update";
@@ -113,7 +117,19 @@ export type SidebarLayoutChange =
   | { op: "remove"; itemId: string }
   /** Personal: shows a workspace item you hid. */
   | { op: "show"; itemId: string }
-  | { op: "move"; itemId: string; groupId?: string | null; index: number }
+  /**
+   * Reorder, or (your own items) move to another group. Prefer `beforeId` or
+   * `afterId`: the stored level can hold items you don't see, so an `index`
+   * counts those too. The end of the level when none is given.
+   */
+  | {
+      op: "move";
+      itemId: string;
+      groupId?: string | null;
+      index?: number;
+      beforeId?: string;
+      afterId?: string;
+    }
   /** Personal: back to the workspace default. Workspace: empties the default. */
   | { op: "reset" };
 

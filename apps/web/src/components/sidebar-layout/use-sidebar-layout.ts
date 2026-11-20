@@ -12,9 +12,8 @@ const EMPTY: Entry = { layout: null, failed: false, loading: true };
 const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const inFlight = new Map<string, Promise<void>>();
-
-/** Something else (an agent's tool call, another tab) may have changed the layout. */
-export const SIDEBAR_LAYOUT_CHANGED = "opengeni:sidebar-layout-changed";
+/** Bumped by each update, so a read that started before it can't overwrite its answer. */
+const generations = new Map<string, number>();
 
 function emit() {
   for (const listener of listeners) listener();
@@ -57,15 +56,22 @@ type Client = ReturnType<typeof useAppContext>["client"];
 function load(client: Client, key: string, workspaceId: string): Promise<void> {
   const running = inFlight.get(key);
   if (running) return running;
+  const generation = generations.get(key) ?? 0;
+  const current = () => (generations.get(key) ?? 0) === generation;
   const request = client
     .getSidebarLayout(workspaceId)
-    .then((layout) => set(key, { layout: normalize(layout), failed: false, loading: false }))
+    .then((layout) => {
+      if (current()) set(key, { layout: normalize(layout), failed: false, loading: false });
+    })
     .catch(() => {
+      if (!current()) return;
       const previous = entries.get(key);
       // Keep a known layout on a transient failure; retry on focus.
       set(key, { layout: previous?.layout ?? null, failed: true, loading: false });
     })
-    .finally(() => inFlight.delete(key));
+    .finally(() => {
+      if (inFlight.get(key) === request) inFlight.delete(key);
+    });
   inFlight.set(key, request);
   return request;
 }
@@ -85,13 +91,13 @@ export function useSidebarLayout(workspaceId: string, enabled = true) {
       void load(client, key, workspaceId);
     };
     refresh();
+    // Changes made elsewhere (an agent's tool call, another tab or device)
+    // show on focus, on return to the tab, or within two minutes.
     window.addEventListener("focus", refresh);
-    window.addEventListener(SIDEBAR_LAYOUT_CHANGED, refresh);
     document.addEventListener("visibilitychange", refresh);
     const timer = window.setInterval(refresh, 120_000);
     return () => {
       window.removeEventListener("focus", refresh);
-      window.removeEventListener(SIDEBAR_LAYOUT_CHANGED, refresh);
       document.removeEventListener("visibilitychange", refresh);
       window.clearInterval(timer);
     };
@@ -99,6 +105,9 @@ export function useSidebarLayout(workspaceId: string, enabled = true) {
   const update = useCallback(
     async (request: UpdateSidebarLayoutRequest) => {
       const layout = normalize(await client.updateSidebarLayout(workspaceId, request));
+      // Any read still running started before this answer: drop it.
+      generations.set(key, (generations.get(key) ?? 0) + 1);
+      inFlight.delete(key);
       set(key, { layout, failed: false, loading: false });
       return layout;
     },
@@ -111,5 +120,6 @@ export function useSidebarLayout(workspaceId: string, enabled = true) {
 export function resetSidebarLayoutCache() {
   entries.clear();
   inFlight.clear();
+  generations.clear();
   emit();
 }

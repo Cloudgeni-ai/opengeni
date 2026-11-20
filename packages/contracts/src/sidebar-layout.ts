@@ -258,13 +258,34 @@ export function readStoredSidebarPersonalChanges(value: unknown): StoredSidebarP
   };
 }
 
-/** A stored item as a built-in type, or null when it's malformed or from a newer version. */
+function knownFields(item: StoredSidebarItem): StoredSidebarItem {
+  const shape =
+    item.type === "app"
+      ? SidebarAppLinkItem.shape
+      : item.type === "link"
+        ? SidebarExternalLinkItem.shape
+        : item.type === "live_list"
+          ? SidebarLiveListItem.shape
+          : item.type === "group"
+            ? SidebarGroupItem.shape
+            : null;
+  if (!shape) return item;
+  return Object.fromEntries(
+    Object.entries(item).filter(([key]) => Object.hasOwn(shape, key)),
+  ) as StoredSidebarItem;
+}
+
+/**
+ * A stored item as a built-in type, or null when it's malformed or from a
+ * newer version. Fields a newer version added are ignored here (and kept in
+ * storage), so an older reader still shows the item.
+ */
 export function knownSidebarItem(item: StoredSidebarItem): SidebarItem | null {
   if (item.type === "group") {
     // A group from this version may hold children from a newer one: keep the group.
     const children = Array.isArray(item.items) ? (item.items as StoredSidebarItem[]) : [];
     const parsed = SidebarGroupItem.safeParse({
-      ...item,
+      ...knownFields(item),
       items: children.flatMap((child) => {
         const known = knownSidebarItem(child);
         return known && known.type !== "group" ? [known] : [];
@@ -272,7 +293,7 @@ export function knownSidebarItem(item: StoredSidebarItem): SidebarItem | null {
     });
     return parsed.success ? parsed.data : null;
   }
-  const parsed = SidebarItem.safeParse(item);
+  const parsed = SidebarItem.safeParse(knownFields(item));
   return parsed.success ? parsed.data : null;
 }
 
@@ -415,6 +436,10 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
         groupId: SidebarItemId.optional(),
         /** Position in its level; the end when omitted. */
         index: z.number().int().min(0).optional(),
+        /** Put it just before this item of its level (instead of `index`). */
+        beforeId: SidebarItemId.optional(),
+        /** Put it just after this item of its level (instead of `index`). */
+        afterId: SidebarItemId.optional(),
       })
       .strict(),
     z
@@ -447,7 +472,16 @@ export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
         itemId: SidebarItemId,
         /** Into this group, or null for the top level; its current level when omitted. */
         groupId: SidebarItemId.nullable().optional(),
-        index: z.number().int().min(0),
+        /**
+         * Position among the level's items. Prefer `beforeId` or `afterId`: the
+         * stored level can hold items a reader doesn't see, so a neighbour is
+         * exact where an index may not be. The end when none is given.
+         */
+        index: z.number().int().min(0).optional(),
+        /** Put it just before this item of the target level. */
+        beforeId: SidebarItemId.optional(),
+        /** Put it just after this item of the target level. */
+        afterId: SidebarItemId.optional(),
       })
       .strict(),
     z.object({ op: z.literal("reset") }).strict(),
@@ -481,9 +515,20 @@ export class SidebarLayoutChangeError extends Error {
   }
 }
 
-function newItemId(item: { type: string }, taken: Set<string>, randomId: () => string): string {
+/**
+ * Ids of a person's own items start with this, and workspace items' never do,
+ * so an item an admin adds later can't take the id of someone's own item.
+ */
+export const SIDEBAR_PERSONAL_ID_PREFIX = "my-";
+
+function newItemId(
+  item: { type: string },
+  taken: Set<string>,
+  randomId: () => string,
+  prefix: string,
+): string {
   for (;;) {
-    const id = `${item.type === "live_list" ? "list" : item.type}-${randomId()}`;
+    const id = `${prefix}${item.type === "live_list" ? "list" : item.type}-${randomId()}`;
     if (!taken.has(id)) return id;
   }
 }
@@ -492,11 +537,19 @@ function assignIds(
   item: NewSidebarItem,
   taken: Set<string>,
   randomId: () => string,
+  scope: "workspace" | "personal",
 ): StoredSidebarItem {
+  const prefix = scope === "personal" ? SIDEBAR_PERSONAL_ID_PREFIX : "";
   const take = (candidate: { id?: string | undefined; type: string }) => {
-    if (candidate.id !== undefined && taken.has(candidate.id))
-      throw new SidebarLayoutChangeError(`An item with id "${candidate.id}" already exists`);
-    const id = candidate.id ?? newItemId(candidate, taken, randomId);
+    let id = candidate.id;
+    if (id !== undefined && scope === "workspace" && id.startsWith(SIDEBAR_PERSONAL_ID_PREFIX))
+      throw new SidebarLayoutChangeError(
+        `Ids starting with "${SIDEBAR_PERSONAL_ID_PREFIX}" are for people's own items`,
+      );
+    if (id !== undefined && !id.startsWith(prefix)) id = `${prefix}${id}`.slice(0, 64);
+    if (id !== undefined && taken.has(id))
+      throw new SidebarLayoutChangeError(`An item with id "${id}" already exists`);
+    id ??= newItemId(candidate, taken, randomId, prefix);
     taken.add(id);
     return id;
   };
@@ -536,6 +589,10 @@ function locate(items: StoredSidebarItem[], id: string): Located | null {
     }
   }
   return null;
+}
+
+function levelIds(level: readonly StoredSidebarItem[]): string[] {
+  return level.map((item) => item.id);
 }
 
 function cloneItems(items: StoredSidebarItem[]): StoredSidebarItem[] {
@@ -582,6 +639,21 @@ function updateItem(
   return next;
 }
 
+type Position = {
+  index?: number | undefined;
+  beforeId?: string | undefined;
+  afterId?: string | undefined;
+};
+
+/** Where `position` falls among `ids` (the level without the item being placed). */
+function positionIndex(ids: readonly string[], position: Position): number | undefined {
+  const neighbour = position.beforeId ?? position.afterId;
+  if (neighbour === undefined) return position.index;
+  const at = ids.indexOf(neighbour);
+  if (at < 0) throw new SidebarLayoutChangeError(`No item "${neighbour}" next to it`);
+  return position.beforeId !== undefined ? at : at + 1;
+}
+
 function insertAt<T>(level: T[], item: T, index: number | undefined) {
   const at = index === undefined ? level.length : Math.min(Math.max(index, 0), level.length);
   level.splice(at, 0, item);
@@ -599,6 +671,34 @@ function checkLimits(items: StoredSidebarItem[]) {
       throw new SidebarLayoutChangeError(`A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`);
 }
 
+/** App ids linked anywhere in `items` (lowercase). */
+export function sidebarLinkedAppIds(items: readonly StoredSidebarItem[]): string[] {
+  const ids = new Set<string>();
+  const visit = (item: StoredSidebarItem) => {
+    if (item.type === "app" && typeof item.appId === "string") ids.add(item.appId.toLowerCase());
+    if (item.type === "group" && Array.isArray(item.items))
+      for (const child of item.items as StoredSidebarItem[]) visit(child);
+  };
+  for (const item of items) visit(item);
+  return [...ids];
+}
+
+/** `items` without links to apps that are gone (`live` holds the lowercase ids still there). */
+export function withoutGoneSidebarApps(
+  items: readonly StoredSidebarItem[],
+  live: ReadonlySet<string>,
+): StoredSidebarItem[] {
+  const keep = (item: StoredSidebarItem) =>
+    item.type !== "app" || typeof item.appId !== "string" || live.has(item.appId.toLowerCase());
+  return items
+    .filter(keep)
+    .map((item) =>
+      item.type === "group" && Array.isArray(item.items)
+        ? { ...item, items: (item.items as StoredSidebarItem[]).filter(keep) }
+        : item,
+    );
+}
+
 /** Apply changes to the workspace default. Throws SidebarLayoutChangeError. */
 export function applyWorkspaceSidebarChanges(
   layout: StoredSidebarLayout,
@@ -612,8 +712,9 @@ export function applyWorkspaceSidebarChanges(
         items = [];
         break;
       case "add": {
-        const item = assignIds(change.item, collectIds(items), randomId);
-        if (change.groupId === undefined) insertAt(items, item, change.index);
+        const item = assignIds(change.item, collectIds(items), randomId, "workspace");
+        if (change.groupId === undefined)
+          insertAt(items, item, positionIndex(levelIds(items), change));
         else {
           if (item.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
           const group = items.find(
@@ -621,7 +722,7 @@ export function applyWorkspaceSidebarChanges(
           );
           if (!group) throw new SidebarLayoutChangeError(`No group "${change.groupId}"`);
           const children = Array.isArray(group.items) ? (group.items as StoredSidebarItem[]) : [];
-          insertAt(children, item, change.index);
+          insertAt(children, item, positionIndex(levelIds(children), change));
           group.items = children;
         }
         break;
@@ -646,13 +747,13 @@ export function applyWorkspaceSidebarChanges(
         const [item] = found.level.splice(found.index, 1);
         const targetGroupId =
           change.groupId === undefined ? (found.parent?.id ?? null) : change.groupId;
-        if (targetGroupId === null) insertAt(items, item!, change.index);
+        if (targetGroupId === null) insertAt(items, item!, positionIndex(levelIds(items), change));
         else {
           if (item!.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
           const group = items.find((entry) => entry.id === targetGroupId && entry.type === "group");
           if (!group) throw new SidebarLayoutChangeError(`No group "${targetGroupId}"`);
           const children = Array.isArray(group.items) ? (group.items as StoredSidebarItem[]) : [];
-          insertAt(children, item!, change.index);
+          insertAt(children, item!, positionIndex(levelIds(children), change));
           group.items = children;
         }
         break;
@@ -698,15 +799,15 @@ export function applyPersonalSidebarChanges(
     }
     return null;
   };
-  const levelIds = (key: string): string[] => {
+  const mergedLevelIds = (key: string): string[] => {
     const merged = mergeSidebarLayout(workspace, next).items;
     if (key === SIDEBAR_ROOT_KEY) return merged.map((item) => item.id);
     const group = merged.find((item) => item.id === key);
     return group?.type === "group" ? group.items.map((child) => child.id) : [];
   };
-  const place = (levelKey: string, id: string, index: number | undefined) => {
-    const ids = levelIds(levelKey).filter((entry) => entry !== id);
-    insertAt(ids, id, index);
+  const place = (levelKey: string, id: string, position: Position) => {
+    const ids = mergedLevelIds(levelKey).filter((entry) => entry !== id);
+    insertAt(ids, id, positionIndex(ids, position));
     next.order[levelKey] = ids;
   };
   for (const change of changes) {
@@ -717,11 +818,15 @@ export function applyPersonalSidebarChanges(
       case "add": {
         const taken = collectIds(workspace.items);
         for (const entry of next.added) collectIds([entry.item], taken);
-        const item = assignIds(change.item, taken, randomId);
+        const item = assignIds(change.item, taken, randomId, "personal");
         const groupId = change.groupId ?? null;
         if (groupId !== null) {
           if (item.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
           if (!groupExists(groupId)) throw new SidebarLayoutChangeError(`No group "${groupId}"`);
+          if (mergedLevelIds(groupId).length >= SIDEBAR_GROUP_MAX_ITEMS)
+            throw new SidebarLayoutChangeError(
+              `A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`,
+            );
           const own = next.added.find(
             (entry) => entry.item.id === groupId && entry.item.type === "group",
           );
@@ -733,7 +838,12 @@ export function applyPersonalSidebarChanges(
             own.item.items = children;
           } else next.added.push({ parentId: groupId, item });
         } else next.added.push({ parentId: null, item });
-        if (change.index !== undefined) place(groupId ?? SIDEBAR_ROOT_KEY, item.id, change.index);
+        if (
+          change.index !== undefined ||
+          change.beforeId !== undefined ||
+          change.afterId !== undefined
+        )
+          place(groupId ?? SIDEBAR_ROOT_KEY, item.id, change);
         break;
       }
       case "update": {
@@ -787,7 +897,7 @@ export function applyPersonalSidebarChanges(
             throw new SidebarLayoutChangeError(`No group "${target}"`);
           next.added.push({ parentId: target === SIDEBAR_ROOT_KEY ? null : target, item: item! });
         }
-        place(target, change.itemId, change.index);
+        place(target, change.itemId, change);
         break;
       }
     }

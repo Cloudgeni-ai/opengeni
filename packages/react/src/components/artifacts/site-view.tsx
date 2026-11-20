@@ -106,6 +106,16 @@ function cachedSnapshot(client: object, key: string): Snapshot | null {
   return snapshotCaches.get(client)?.get(key) ?? null;
 }
 
+function forgetSnapshot(client: object, key: string) {
+  snapshotCaches.get(client)?.delete(key);
+}
+
+/** The Site is gone or this person may no longer open it. */
+function accessLost(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 403 || status === 404;
+}
+
 function rememberSnapshot(client: object, key: string, snapshot: Snapshot) {
   let cache = snapshotCaches.get(client);
   if (!cache) snapshotCaches.set(client, (cache = new Map()));
@@ -176,11 +186,14 @@ export function SiteView({
       } catch (nextError) {
         if (abort.signal.aborted) return;
         // A failed update keeps the version on screen; the label says so.
-        if (background) {
+        // Losing access doesn't: a copy shown from the cache goes away.
+        if (background && !accessLost(nextError)) {
           setRefresh("failed");
           setFailures((count) => count + 1);
         } else {
+          forgetSnapshot(client, `${workspaceId}/${siteId}`);
           setSnapshot(null);
+          setRefresh("idle");
           setError(nextError);
         }
       }

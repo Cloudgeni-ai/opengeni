@@ -3,7 +3,11 @@
  *
  *   <link rel="stylesheet" href="/__opengeni/ui.css">
  *
- * In Opengeni the tag is replaced by the stylesheet itself (no request, so no
+ * or, in an app built by a bundler (which would try to resolve the link),
+ *
+ *   <style>@import "/__opengeni/ui.css";</style>
+ *
+ * In Opengeni either is replaced by the stylesheet itself (no request, so no
  * unstyled first paint); a published Site's gateway and the local preview
  * serve it at that path. It defines `--og-*` tokens that follow Opengeni's
  * light or dark theme (the frame's `prefers-color-scheme`, or
@@ -47,19 +51,26 @@ export const SITE_UI_CSS = [
 
 const STYLESHEET_TAG =
   /<link\b(?=[^>]*\brel\s*=\s*(["']?)stylesheet\1)(?=[^>]*\bhref\s*=\s*(["'])\/__opengeni\/ui\.css\2)[^>]*>/gi;
+/** A `<style>` whose whole content is the import of the stylesheet. */
+const STYLESHEET_IMPORT =
+  /^<style\b[^>]*>\s*@import\s+(?:url\(\s*)?(["']?)\/__opengeni\/ui\.css\1\s*\)?\s*;?\s*<\/style\s*>$/i;
 
 /**
- * Replace the opt-in `<link rel="stylesheet" href="/__opengeni/ui.css">`
- * with the stylesheet inline. Comments and scripts stay literal.
+ * Replace the opt-in `<link rel="stylesheet" href="/__opengeni/ui.css">`, or a
+ * `<style>` holding only `@import "/__opengeni/ui.css";`, with the stylesheet
+ * inline. Comments and scripts stay literal.
  */
 export function resolveSiteUiStylesheet(html: string): string {
   if (!html.includes(SITE_UI_STYLESHEET_PATH)) return html;
+  const inline = `<style data-opengeni-ui>${SITE_UI_CSS.replace(/<\/style/gi, "<\\/style")}</style>`;
   return html.replace(
-    /<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>|<link\b[^>]*>/gi,
+    /<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>|<style\b[^>]*>[\s\S]*?<\/style\s*>|<link\b[^>]*>/gi,
     (tag) => {
+      const lower = tag.slice(0, 6).toLowerCase();
+      if (lower === "<style") return STYLESHEET_IMPORT.test(tag) ? inline : tag;
       STYLESHEET_TAG.lastIndex = 0;
-      if (!tag.toLowerCase().startsWith("<link") || !STYLESHEET_TAG.test(tag)) return tag;
-      return `<style data-opengeni-ui>${SITE_UI_CSS.replace(/<\/style/gi, "<\\/style")}</style>`;
+      if (!lower.startsWith("<link") || !STYLESHEET_TAG.test(tag)) return tag;
+      return inline;
     },
   );
 }

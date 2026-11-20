@@ -27,7 +27,6 @@ export function AppPage({
   const viewer = useConsoleSiteViewer();
   const { resolvedTheme } = useAppearance();
   const consoleToolBridge = useConsoleSiteToolBridge(workspaceId);
-  useRecordSiteOpened(client, workspaceId, appId);
   const live = useSiteLiveVersion(client, workspaceId, appId);
   const subscribeDataChanges = live.subscribeDataChanges;
   const toolBridge = useCallback<typeof consoleToolBridge>(
@@ -57,21 +56,31 @@ export function AppPage({
     [appId, navigate, workspaceId],
   );
   return (
-    <SiteView
-      client={client}
-      workspaceId={workspaceId}
-      siteId={appId}
-      toolBridge={toolBridge}
-      viewer={viewer}
-      siteLocation={siteHref}
-      onSiteLocationChange={onSiteLocationChange}
-      theme={resolvedTheme}
-      showToolbar={false}
-      versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
-      watch={live.watch}
-      archivedMessage="This App is archived."
-      loadingLabel="Opening App…"
-      instant
-    />
+    <>
+      {/* Each time the app comes back on screen counts as opening it (Recent apps). */}
+      {active ? <RecordAppOpened workspaceId={workspaceId} appId={appId} /> : null}
+      <SiteView
+        client={client}
+        workspaceId={workspaceId}
+        siteId={appId}
+        toolBridge={toolBridge}
+        viewer={viewer}
+        siteLocation={siteHref}
+        onSiteLocationChange={onSiteLocationChange}
+        theme={resolvedTheme}
+        showToolbar={false}
+        versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
+        watch={live.watch}
+        archivedMessage="This App is archived."
+        loadingLabel="Opening App…"
+        instant
+      />
+    </>
   );
+}
+
+function RecordAppOpened({ workspaceId, appId }: { workspaceId: string; appId: string }) {
+  const { client } = useAppContext();
+  useRecordSiteOpened(client, workspaceId, appId);
+  return null;
 }
