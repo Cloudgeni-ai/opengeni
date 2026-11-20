@@ -32,7 +32,10 @@ export function OrganizationConnectedAgents({
     () => ({
       list: async () => await client.listOrganizationMcpConnections(organizationId),
       update: async (id, change) =>
-        await client.updateOrganizationMcpConnection(organizationId, id, { access: change.policy }),
+        await client.updateOrganizationMcpConnection(organizationId, id, {
+          ...(change.policy ? { access: change.policy } : {}),
+          ...(change.appDataAccess ? { appDataAccess: change.appDataAccess } : {}),
+        }),
       disconnect: async (id) => await client.deleteOrganizationMcpConnection(organizationId, id),
     }),
     [client, organizationId],

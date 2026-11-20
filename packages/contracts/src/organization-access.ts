@@ -117,9 +117,27 @@ export const OrganizationAccessPolicy = /* @__PURE__ */ defineSchema(() =>
   OrganizationAccessPolicyInput.transform(normalizeOrganizationAccessPolicy),
 );
 
-/** Change what a connected agent can do. Only the person who connected it can. */
+/**
+ * Change what a connected agent can do. Only the person who connected it can.
+ * `appDataAccess`: read and write app data as a viewer (the default) or
+ * manage it. `defaultWorkspaceId`: the workspace its tools use when a call
+ * names none (null clears it).
+ */
 export const UpdateOrganizationMcpConnectionRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ access: OrganizationAccessPolicy }).strict(),
+  z
+    .object({
+      access: OrganizationAccessPolicy.optional(),
+      appDataAccess: z.enum(["viewer", "manager"]).optional(),
+      defaultWorkspaceId: primitives.uuid.nullable().optional(),
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.access !== undefined ||
+        value.appDataAccess !== undefined ||
+        value.defaultWorkspaceId !== undefined,
+      { message: "Pass access, appDataAccess or defaultWorkspaceId." },
+    ),
 );
 
 /**
