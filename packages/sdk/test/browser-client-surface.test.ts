@@ -231,6 +231,10 @@ const retiredLegacyAgentScreenMethods = [
 // person's links is offered to the agent and SDK callers, not a web screen yet.
 const chatShareLinkMethods = ["getSharedSession", "listSessionShareLinks"];
 
+// A chat's Linked items: agents add them with a tool and API callers with the
+// SDK; the web panel only lists and removes them.
+const sessionLinkApiMethods = ["addSessionLink"];
+
 // #6256 deleted the unreachable web components that called these (the Atlassian
 // source dialog, schedule Slack posting and sandbox artifact download). The
 // public SDK methods stay for existing callers.
@@ -320,6 +324,7 @@ describe("browser client runtime surface", () => {
         ...alwaysAvailableAgentSlackMethods,
         ...retiredLegacyAgentScreenMethods,
         ...chatShareLinkMethods,
+        ...sessionLinkApiMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
     );
