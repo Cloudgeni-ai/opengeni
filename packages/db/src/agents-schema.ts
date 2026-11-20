@@ -45,11 +45,11 @@ export const agents = pgTable(
      * together with `agent_slack_installs.open` until the contract step.
      */
     organizationAccess: boolean("organization_access").notNull().default(false),
-    /** Can use rules (1516): [{connector, tool, permission}]. */
+    /** Can use rules (1517): [{connector, tool, permission}]. */
     toolPermissions: jsonb("tool_permissions").$type<unknown[]>().notNull().default([]),
-    /** Skills listed on the agent page (1516): [{name}]. Display only. */
+    /** Skills listed on the agent page (1517): [{name}]. Display only. */
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
-    /** The ready-made agent it was added from (1516). */
+    /** The ready-made agent it was added from (1517). */
     templateKey: text("template_key"),
     currentRevision: integer("current_revision").notNull().default(1),
     origin: text("origin").$type<"slack_agent" | "bot_template" | "app" | "slack">().notNull(),

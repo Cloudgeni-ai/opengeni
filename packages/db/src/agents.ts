@@ -68,9 +68,9 @@ export type AgentRecord = {
    * it for the previous release, which still reads that.
    */
   organizationAccess: boolean;
-  /** Can use rules as stored (1516); read them through the contract's schema. */
+  /** Can use rules as stored (1517); read them through the contract's schema. */
   toolPermissions: unknown[];
-  /** Skills listed on its page, as stored (1516). */
+  /** Skills listed on its page, as stored (1517). */
   skills: unknown[];
   /** The ready-made agent it was added from. */
   templateKey: string | null;

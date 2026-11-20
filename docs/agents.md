@@ -501,7 +501,7 @@ stored; `first_message` stays, empty, until a later step drops it:
 ### Starts when, Can use, Learns and Skills
 
 An agent is set up from its page; these fields are on the agent (migration
-1516: `tool_permissions`, `skills`, `template_key`) and in `Agent` /
+1517: `tool_permissions`, `skills`, `template_key`) and in `Agent` /
 `AgentSummary` (`toolPermissions`, `skills`, `templateKey`, defaulting to
 empty for older servers). `PATCH` replaces `toolPermissions` or `skills` as a
 whole.
