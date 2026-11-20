@@ -797,9 +797,14 @@ export function waitState(
   state: "done" | "failed" | "needs_attention" | "running";
   event?: WaitEvent;
 } {
+  // A turn merged into a later one hands its answer to that turn.
+  const followed =
+    turnId && !events.some((event) => event.turnId === turnId && event.type === "turn.superseded")
+      ? turnId
+      : undefined;
   for (const event of [...events].reverse()) {
     // A follow-up's own turn: an earlier turn ending isn't its answer.
-    if (turnId && event.turnId && event.turnId !== turnId) continue;
+    if (followed && event.turnId && event.turnId !== followed) continue;
     // Waiting for model capacity needs nobody; it resumes on its own.
     if (event.type.includes("capacity")) return { state: "running", event };
     if (event.type === "turn.completed") return { state: "done", event };
@@ -875,7 +880,7 @@ const sessionSend = tool({
   name: "session_send",
   title: "Send to a chat",
   description:
-    "Send a follow-up message to an Opengeni chat. Returns a cursor for wait_for that skips earlier answers. Retrying with the same idempotencyKey sends it once.",
+    "Send a follow-up message to an Opengeni chat. Returns a cursor and turnId for wait_for that skip earlier answers. Retrying sends it once: the same text within the hour is a retry unless you pass a new idempotencyKey.",
   input: SessionSendInput,
   readOnly: false,
   run: async (context, args) =>
@@ -911,11 +916,20 @@ const sessionSend = tool({
         resource?.type === "session_turn" && typeof resource.id === "string"
           ? resource.id
           : undefined;
+      // An earlier call with this key already sent it: its turn may have
+      // finished before the current cursor, so wait from the start.
+      const replayed = (sent.value as { outcome?: unknown })?.outcome === "replayed";
       return json({
         sessionId: args.sessionId,
-        cursor: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0,
+        cursor: replayed ? 0 : Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0,
         ...(turnId ? { turnId } : {}),
         idempotencyKey,
+        ...(replayed
+          ? {
+              replayed: true,
+              note: "This message was already sent in the last hour, so it wasn't sent again. Pass a new idempotencyKey to send the same text again.",
+            }
+          : {}),
         receipt: sent.value,
         url: chatUrl(context, workspaceId, args.sessionId),
         next: turnId

@@ -434,15 +434,18 @@ describe("organization MCP named tools", () => {
         // Sending appends events: a retry reads a later sequence.
         lastSequence += 3;
         return firstPartyAnswer("session_queue_message", {
+          outcome: keys.length > 1 ? "replayed" : "queued",
           resource: { type: "session_turn", id: "turn-follow-up" },
         });
       },
     });
     const sent = await call("session_send", { sessionId, message: "Also add tests." });
     expect(sent.value).toMatchObject({ cursor: 10, turnId: "turn-follow-up" });
-    await call("session_send", { sessionId, message: "Also add tests." });
+    const again = await call("session_send", { sessionId, message: "Also add tests." });
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
+    // Already sent: wait from the start so its turn's end isn't missed.
+    expect(again.value).toMatchObject({ replayed: true, cursor: 0, turnId: "turn-follow-up" });
   });
 
   test("a connection over its rate limit runs nothing", async () => {
@@ -473,6 +476,16 @@ describe("organization MCP named tool helpers", () => {
         "turn-b",
       ).event?.text,
     ).toBe("new");
+    // Merged into a later turn: that turn's answer counts.
+    expect(
+      waitState(
+        [
+          { sequence: 7, type: "turn.superseded", turnId: "turn-b" },
+          { sequence: 8, type: "turn.completed", turnId: "turn-c", text: "merged" },
+        ],
+        "turn-b",
+      ).event?.text,
+    ).toBe("merged");
   });
 
   test("Skill names and approval links", () => {
