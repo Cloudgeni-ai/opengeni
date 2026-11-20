@@ -311,8 +311,9 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       /** The account owner's name, with `approvedBy: "account_owner"`, when known. */
       accountOwnerLabel: z.string().optional(),
       /**
-       * While the action waits: access its account lacks, which approving
-       * asks the provider for first (see `ToolReviewAccessNeeded`).
+       * Access the action's account lacked when it was held for review, which
+       * approving asks the provider for first (see `ToolReviewAccessNeeded`).
+       * It stays after the decision, so a review rendered again looks the same.
        */
       accessNeeded: ToolReviewAccessNeeded.optional(),
       detailsAvailable: primitives.boolean,

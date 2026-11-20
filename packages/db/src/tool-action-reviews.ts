@@ -392,6 +392,10 @@ export async function getToolActionReview(
     accountOwner !== null &&
     accountOwner !== viewerSubjectId;
   const ownerLabel = ownerOnly ? accountOwnerLabelForTurn(accountOwner!, turn) : null;
+  // Whether or not the action still waits: another person's account details
+  // never reach this viewer.
+  const viewerIsNotAccountOwner =
+    viewerSubjectId !== undefined && accountOwner !== null && accountOwner !== viewerSubjectId;
   // In a chat shared with the workspace, the owner is told the decision is
   // theirs alone; in their own chats that goes without saying.
   const approvedByViewer =
@@ -437,7 +441,7 @@ export async function getToolActionReview(
     // Only a viewer who could approve is asked for the provider's access. It
     // stays after the decision, so a surface that renders this review once
     // (a Slack message, retried under one id) shows the same content again.
-    ...(!ownerOnly && request.reviewArguments !== null && context?.accessNeeded
+    ...(!viewerIsNotAccountOwner && request.reviewArguments !== null && context?.accessNeeded
       ? { accessNeeded: context.accessNeeded }
       : {}),
     detailsAvailable: args !== null,
