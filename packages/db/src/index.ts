@@ -12727,6 +12727,42 @@ export async function removeCapabilityInstallation(
   );
 }
 
+/**
+ * Deletes a workspace's own catalog entry and its installation here, if any,
+ * in one transaction: for example a custom MCP server whose first Connect
+ * failed. Connections are separate and stay. Returns whether the entry
+ * existed.
+ */
+export async function deleteWorkspaceCatalogItem(
+  db: Database,
+  input: { accountId: string; workspaceId: string; capabilityId: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .delete(schema.capabilityInstallations)
+        .where(
+          and(
+            eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
+            eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
+          ),
+        );
+      const deleted = await scopedDb
+        .delete(schema.capabilityCatalogItems)
+        .where(
+          and(
+            eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+            eq(schema.capabilityCatalogItems.id, input.capabilityId),
+          ),
+        )
+        .returning({ id: schema.capabilityCatalogItems.id });
+      return deleted.length > 0;
+    },
+  );
+}
+
 export async function disableCapabilityInstallation(
   db: Database,
   workspaceId: string,
@@ -50570,6 +50606,13 @@ export type SandboxComputeStanding = {
    * neither it nor its acting owner (in another organization they run) has a
    * verified card: starting a box is refused. */
   cardRequired: boolean;
+  /** The card is required, but its tier's `cardTrialBoxSeconds` is not used
+   * yet: an agent turn may still start one box (see acquireLease). A failed
+   * read leaves it false. */
+  cardTrial: boolean;
+  /** The card is required, its tier sets a card trial and it is used: no
+   * new holder joins a box no turn holds either. */
+  cardTrialSpent: boolean;
 };
 
 /** Called when a standing read failed and admission fell back (fails open):
@@ -50638,6 +50681,19 @@ async function organizationBoxSecondsToday(tx: Database, accountId: string): Pro
       where account_id = ${accountId}::uuid
         and event_type = 'sandbox.warm_seconds'
         and occurred_at >= (date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')`,
+  );
+  return Number(row?.seconds ?? 0);
+}
+
+/** Metered box seconds of one organization over its whole life (the card
+ * trial budget). Needs the organization's account-only RLS context. */
+async function organizationBoxSecondsTotal(tx: Database, accountId: string): Promise<number> {
+  const [row] = await rawRows<{ seconds: string | number | null }>(
+    tx,
+    sql`select coalesce(sum(quantity), 0)::bigint as seconds
+      from usage_events
+      where account_id = ${accountId}::uuid
+        and event_type = 'sandbox.warm_seconds'`,
   );
   return Number(row?.seconds ?? 0);
 }
@@ -50785,11 +50841,14 @@ export async function resolveSandboxComputeStanding(
       bounded,
       restrictable,
       seconds: needsSeconds ? await organizationBoxSecondsToday(tx, input.accountId) : 0,
+      cardTrialBoxSeconds: limit.cardTrialBoxSeconds ?? 0,
     };
   });
   // Card verification gate (migration 1494): only a bounded organization,
   // only while the switch is on. A failed read fails open.
   let cardRequired = false;
+  let cardTrial = false;
+  let cardTrialSpent = false;
   if (own.bounded && (await readCardVerificationGate(db))) {
     try {
       cardRequired =
@@ -50798,6 +50857,19 @@ export async function resolveSandboxComputeStanding(
         )) === null;
     } catch (error) {
       reportSandboxComputeStandingFallback(input.onFallback, error, "organization");
+    }
+    // The tier's card trial: box time its agent gets before the card. A
+    // failed read grants no trial (the card is still asked for).
+    if (cardRequired && own.cardTrialBoxSeconds > 0) {
+      try {
+        const used = await withAccountRls(db, input.accountId, (tx) =>
+          organizationBoxSecondsTotal(tx, input.accountId),
+        );
+        cardTrial = used < own.cardTrialBoxSeconds;
+        cardTrialSpent = !cardTrial;
+      } catch (error) {
+        reportSandboxComputeStandingFallback(input.onFallback, error, "organization");
+      }
     }
   }
   const result: SandboxComputeStanding = {
@@ -50811,6 +50883,8 @@ export async function resolveSandboxComputeStanding(
     personBoxSecondsToday: 0,
     organizationCreatedAt: own.standing.organizationCreatedAt,
     cardRequired,
+    cardTrial,
+    cardTrialSpent,
   };
   const subjectId = input.actingSubjectId ?? null;
   if (!own.restrictable || subjectId === null || !subjectId.startsWith("user:")) return result;
@@ -50829,11 +50903,17 @@ export async function resolveSandboxComputeStanding(
     return result;
   }
   result.linkedRestricted = person.linkedRestricted;
-  if (person.linkedRestricted) result.tier = "restricted";
+  if (person.linkedRestricted) {
+    result.tier = "restricted";
+    result.cardTrial = false;
+    result.cardTrialSpent = false;
+  }
   // Another organization of the same owner inherits the card they verified
   // for sandboxes (never for Free credit: one Free grant per card and person).
   if (result.cardRequired && person.ownsOrganization && person.cardVerifiedElsewhere) {
     result.cardRequired = false;
+    result.cardTrial = false;
+    result.cardTrialSpent = false;
   }
   result.personOwnsOrganization = person.ownsOrganization;
   result.personOtherRunningBoxes = person.otherRunningBoxes;
@@ -52901,13 +52981,26 @@ async function acquireLeaseOnce(
         // boxes no turn holds. Any other turn fails with a clear message
         // instead of waiting for a slot that will not come. A Connected
         // Machine never counts.
+        // The card trial: until the tier's cardTrialBoxSeconds are used, an
+        // agent turn of an organization that still needs a card may start a
+        // box, one at a time (checked with the running-box limits below). Every
+        // other holder kind still needs the card, and every bound after the
+        // card still applies.
+        const cardTrialTurn =
+          backend !== "selfhosted" &&
+          kind === "turn" &&
+          standing?.cardRequired === true &&
+          standing.cardTrial === true;
         if (backend !== "selfhosted") {
           const refusal: SandboxOrganizationBoxLimitReason | null =
             planLimit.runningBoxesPerOrganization === 0
               ? "closed"
               : standing?.cardRequired === true &&
-                  row.liveness !== "warm" &&
-                  row.liveness !== "warming"
+                  !cardTrialTurn &&
+                  // Once the card trial is used, joining its box needs the
+                  // card too, unless a turn still holds it (below).
+                  (standing.cardTrialSpent === true ||
+                    (row.liveness !== "warm" && row.liveness !== "warming"))
                 ? "card_required"
                 : standing !== null &&
                     standing.bounded &&
@@ -53321,17 +53414,28 @@ async function acquireLeaseOnce(
           if (
             runningBoxLimit !== undefined ||
             personBoxLimit !== undefined ||
-            youngLimit !== undefined
+            youngLimit !== undefined ||
+            cardTrialTurn
           ) {
             await lockOrganizationSandboxLimit(tx, accountId);
             const counts =
-              runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0
+              !cardTrialTurn && (runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0)
                 ? null
                 : await organizationWarmSandboxCounts(tx, {
                     accountId,
                     subjectId: null,
                     excludeLeaseId: row.id,
                   });
+            // A trial box runs alone: while another box runs, the card is
+            // asked for instead of waiting for it.
+            if (cardTrialTurn && (counts === null || counts.runningBoxes > 0)) {
+              throw new SandboxOrganizationBoxLimitError(
+                workspaceId,
+                sandboxGroupId,
+                0,
+                "card_required",
+              );
+            }
             const organizationFull =
               runningBoxLimit !== undefined &&
               (runningBoxLimit === 0 ||
@@ -82156,15 +82260,21 @@ async function consumedChildAnswerSequencesTx(
         case when jsonb_typeof(turn.metadata -> ${codemodeKey}) = 'array'
           then turn.metadata -> ${codemodeKey} else '[]'::jsonb end
       ) as entry
-      join session_events answer
-        on answer.workspace_id = ${input.workspaceId}::uuid
-          and answer.session_id = case when entry ->> 'childSessionId' ~ ${UUID_TEXT_PATTERN_SQL}
-            then (entry ->> 'childSessionId')::uuid end
-          and answer.sequence = case when entry ->> 'sequence' ~ '^[0-9]{1,9}$'
-            then (entry ->> 'sequence')::integer end
+      -- Bind the validated identity before probing the event index. Without
+      -- these fences, RLS can leave the identity as a join filter after a
+      -- workspace-wide scan of completed turns.
+      join lateral (
+        select answer.payload from session_events answer
+        where answer.workspace_id = ${input.workspaceId}::uuid
+          and answer.session_id = (select case when entry ->> 'childSessionId' ~ ${UUID_TEXT_PATTERN_SQL}
+            then (entry ->> 'childSessionId')::uuid end offset 0)
+          and answer.sequence = (select case when entry ->> 'sequence' ~ '^[0-9]{1,9}$'
+            then (entry ->> 'sequence')::integer end offset 0)
           and answer.type = 'turn.completed'
           and jsonb_typeof(answer.payload -> 'output') = 'string'
           and answer.payload ->> 'output' <> ''
+        offset 0
+      ) answer on true
       -- The answer as a JSON string value, escaped once more for each layer
       -- of JSON it can sit in inside a stored tool result.
       cross join lateral (select to_json(to_json(answer.payload ->> 'output')::text)::text

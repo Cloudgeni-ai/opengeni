@@ -5030,6 +5030,21 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.connectionDetailsAreUnavailable": "Connection details are unavailable.",
   "sessionMcpCapabilityCard.connectionSetupCouldNotFinish":
     "Connection setup could not finish. Try again.",
+  /** The service refused setup because it accepts sign-ins only from apps it has approved. */
+  "sessionMcpCapabilityCard.serviceAllowsApprovedAppsOnly":
+    "This service only accepts sign-ins from apps it has approved. Ask the provider to allow {product}.",
+  /** The service doesn't let apps register themselves; this app must be registered with it first. */
+  "sessionMcpCapabilityCard.serviceNeedsAppRegistered":
+    "This service doesn't let apps register themselves. {product} must be registered with it first.",
+  /** The service refused the access the sign-in asked for. */
+  "sessionMcpCapabilityCard.serviceRefusedTheAccess":
+    "This service didn't accept the access {product} asked for.",
+  /** The service failed or was down while setting up the connection. */
+  "sessionMcpCapabilityCard.serviceCouldNotFinishSignIn":
+    "This service couldn't finish the sign-in. Try again later.",
+  /** Setup failed with the service's own reason, which has no plainer wording here. */
+  "sessionMcpCapabilityCard.serviceSaid":
+    "Connection setup could not finish. The service said: {reason}",
   "sessionMcpCapabilityCard.connectName": "Connect {name}",
   "sessionMcpCapabilityCard.connectsYourOwnAccountOnly":
     "Connects your own account. Only work you start can use it.",

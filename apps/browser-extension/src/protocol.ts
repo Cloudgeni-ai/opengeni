@@ -5,7 +5,15 @@ import {
 } from "./site-permissions";
 
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const NATIVE_HOST_NAME = "ai.opengeni.browser" as const;
+const NATIVE_HOST_NAME = "ai.opengeni.browser";
+declare const __EXTENSION_BRANDED__: boolean | undefined;
+
+/** Branded builds use the ID assigned by Chrome, including store-assigned IDs. */
+export function nativeHostName(extensionId: string): string {
+  return typeof __EXTENSION_BRANDED__ !== "undefined" && __EXTENSION_BRANDED__
+    ? `${NATIVE_HOST_NAME}.${extensionId}`
+    : NATIVE_HOST_NAME;
+}
 
 export type AttachedTab = {
   id: string;

@@ -562,6 +562,7 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
             &spec.binary_path,
             &home()?,
             &browser_bridge::extension_ids_from_env(),
+            None,
         )
         .map_err(|error| error.to_string())?;
         for manifest in manifests {
@@ -883,7 +884,7 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }?;
     if install_scope == ServiceScope::User {
-        browser_bridge::remove_native_host_manifests(&home()?)
+        browser_bridge::remove_native_host_manifests_for(&binary_path()?, &home()?)
             .map_err(|error| error.to_string())?;
     }
     Ok(())

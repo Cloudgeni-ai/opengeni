@@ -2,13 +2,13 @@ import { BRAND } from "./brand";
 import { HANDSHAKE_TIMEOUT_ERROR, agentStatus } from "./agent-status";
 import {
   BRIDGE_PROTOCOL_VERSION,
-  NATIVE_HOST_NAME,
   attachedTab,
   browserProduct,
   extensionArchitecture,
   extensionPlatform,
   isAgentUnavailable,
   isAllowedDebuggerMethod,
+  nativeHostName,
   parseAgentUnavailable,
   parseExtensionCommand,
   parseExtensionReady,
@@ -428,7 +428,7 @@ async function connect(): Promise<void> {
   const generation = crypto.randomUUID();
   let port: chrome.runtime.Port | null = null;
   try {
-    port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    port = chrome.runtime.connectNative(nativeHostName(chrome.runtime.id));
     const connectingPort = port;
     nativePort = port;
     connectionGeneration = generation;

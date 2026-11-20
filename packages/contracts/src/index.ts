@@ -15891,8 +15891,10 @@ export const CapabilityCatalogItem = /* @__PURE__ */ defineSchema(() =>
     /**
      * Whether the viewer may remove this custom MCP server from the workspace
      * (`DELETE …/capabilities/:id/installation`): integration admins remove
-     * any, a member only one they turned on, while it is on. Set by the
-     * workspace catalog list; older servers omit it.
+     * any, a member only one they turned on, while it is on. One that is not
+     * on, such as a server that never connected, is deleted by integration
+     * admins (`DELETE …/capabilities/:id`). Set by the workspace catalog list;
+     * older servers omit it.
      */
     canRemove: primitives.boolean.optional(),
   }),

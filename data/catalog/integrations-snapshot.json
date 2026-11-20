@@ -3,8 +3,8 @@
   "source": "integrations.sh",
   "cleanedAt": "2026-08-17T11:18:21.937Z",
   "cleaning": {
-    "inputRows": 1335,
-    "outputRows": 646,
+    "inputRows": 1336,
+    "outputRows": 647,
     "skippedRows": 687,
     "quarantinedRows": 4,
     "duplicateDomainNameRows": 109,
@@ -13,9 +13,9 @@
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 646,
+    "kept": 647,
     "dropped": 143,
-    "real": 646,
+    "real": 647,
     "unverified": 111,
     "googleapisDropped": 2
   },
@@ -13281,6 +13281,35 @@
       "tier": "verified",
       "provenance": "detected",
       "logoSourceUrl": "https://integrations.sh/logo/supermetrics.com",
+      "probe": {
+        "status": "real",
+        "reason": "auth_challenge",
+        "httpStatus": 401
+      }
+    },
+    {
+      "domain": "superoffice.com",
+      "name": "SuperOffice CRM",
+      "description": "Read and update companies, contacts, sales, projects, appointments and tickets in SuperOffice CRM Online.",
+      "category": "sales",
+      "official": true,
+      "mcpUrl": "https://mcp.superoffice.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "superoffice_mcp_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and sign in to SuperOffice in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591) with PKCE, but accepts only redirect addresses SuperOffice has approved.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoSourceUrl": "https://integrations.sh/logo/superoffice.com",
+      "documentationUrl": "https://docs.superoffice.com/en/ai/learn/mcp",
       "probe": {
         "status": "real",
         "reason": "auth_challenge",

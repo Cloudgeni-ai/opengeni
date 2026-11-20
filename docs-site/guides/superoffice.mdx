@@ -1,0 +1,35 @@
+---
+title: "SuperOffice CRM"
+description: "Connect Opengeni to SuperOffice CRM Online through SuperOffice's hosted MCP server."
+icon: "address-book"
+---
+
+The SuperOffice CRM connection lets agents read and update companies,
+contacts, sales, projects, appointments and tickets in SuperOffice CRM Online.
+It uses SuperOffice's own MCP server, `https://mcp.superoffice.com/mcp`, and
+each person signs in with their own SuperOffice user, so agents see only what
+that user can see.
+
+## Connect
+
+1. Open **Capabilities**, find **SuperOffice CRM** and press **Connect**, or
+   ask an agent in chat to connect SuperOffice.
+2. Sign in to SuperOffice and approve access.
+
+Reading needs a CRM Suite Plus license; updating needs CRM Suite Super.
+
+## Approvals
+
+Every read runs without asking. The six update tools (`update_company`,
+`update_person`, `update_sale`, `update_project`, `update_appointment` and
+`update_ticket`) ask first. Change this under the connection's **Tool
+permissions**.
+
+## If Connect fails
+
+The connect dialog shows the reason SuperOffice gave. "This service only
+accepts sign-ins from apps it has approved" means SuperOffice has not allowed
+Opengeni's sign-in address for your environment; ask SuperOffice support to
+allow Opengeni.
+
+See SuperOffice's [MCP documentation](https://docs.superoffice.com/en/ai/learn/mcp).

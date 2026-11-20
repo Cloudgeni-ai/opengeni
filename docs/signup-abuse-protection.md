@@ -499,6 +499,19 @@ its owner verified before it:
 - receives Free monthly credit (`free_plan_credit_eligible` and the
   subscription maintenance inventory).
 
+Card trial: before the card, an agent turn may still start a box until the
+organization has used its tier's `cardTrialBoxSeconds` of metered box time
+over its whole life (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`; default 600 for
+`free`, `new` and `none`, none for `restricted`; 0 turns it off). So a new
+person can see one task run before adding a card. Only one trial box runs at
+a time (a second chat is asked for the card), terminals, processes,
+Browser/ComputerSessions and viewers still need the card to start a box, and
+every other bound still applies. Once the trial time is used, nothing new
+joins a box no turn holds, and the reaper drains such boxes
+(`compute_card_required`); an in-flight turn finishes, as with a spent day.
+The trial covers sandbox time only: model calls still need credit, a
+connected subscription, or Free credit (which needs the card).
+
 Chat without a box keeps working. Paid, Enterprise and host-provisioned
 organizations, and organizations that bought credit, are never gated. It
 builds on the free compute bounds (fleet cap, daily box time, young

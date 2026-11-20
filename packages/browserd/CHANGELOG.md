@@ -1,5 +1,15 @@
 # @opengeni/browserd
 
+## 0.4.53
+
+### Patch Changes
+
+- fc3db5a: Computer sessions on Windows no longer list the CUA worker's own cursor overlay as a window. Windows names the worker `cua-driver.exe`, so the overlay filter missed it, and opening a computer could pick the overlay for its first screenshot, which CUA refuses because it never targets its own process.
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/contracts@6.34.0
+  - @opengeni/interaction@6.34.0
+
 ## 0.4.52
 
 ### Patch Changes

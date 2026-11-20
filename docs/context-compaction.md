@@ -647,6 +647,11 @@ tokens after each compaction instead of about 20,000.
 Turn-scoped operational notices are retained verbatim only for the turn running
 the compaction, or when one is the newest input; older notices are left to the
 checkpoint, because each applies only to its own turn.
+Preparing another stream in the same turn reuses the last durable notice when
+its text is unchanged. A checkpoint also retains only one copy of each run of
+unchanged notices from that turn, so copies written by older workers do not
+crowd out other history. An actual change still appears in order, and ordinary
+requests never remove or rewrite prior notices.
 Existing budget-driven omission and text truncation still apply. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.

@@ -7,8 +7,8 @@
  * answers, so a reader sees a stray search query and a provider name in every
  * source link. These helpers remove exactly those parameters for display and
  * delivery. They act only on a URL that carries the provider's `utm_source`
- * value, and keep every other parameter (including other `utm_*` ones), the
- * fragment and the original encoding byte for byte.
+ * value by default, and keep every other parameter (including other `utm_*`
+ * ones), the fragment and the original encoding byte for byte.
  *
  * Use them where an answer is shown or delivered, never on stored history or
  * on text sent to a model: an earlier model request must keep its bytes.
@@ -26,40 +26,64 @@ const SEARCH_QUERY_KEYS = new Set(["_t_q"]);
  * `utm_source` comes back unchanged, as does anything that is not a URL.
  */
 export function withoutProviderTracking(url: string): string {
+  return cleanTrackingUrl(url, false);
+}
+
+function cleanTrackingUrl(url: string, stripAllUtm: boolean): string {
   const queryAt = url.indexOf("?");
   if (queryAt < 0) return url;
   const hashAt = url.indexOf("#");
   if (hashAt >= 0 && hashAt < queryAt) return url;
   const end = hashAt < 0 ? url.length : hashAt;
-  const parts = url.slice(queryAt + 1, end).split("&");
-  if (!parts.some(isProviderSource)) return url;
-  const kept = parts.filter(
-    (part) => part.length > 0 && !isProviderSource(part) && !SEARCH_QUERY_KEYS.has(keyOf(part)),
-  );
-  const query = kept.length > 0 ? `?${kept.join("&")}` : "";
-  return `${url.slice(0, queryAt)}${query}${url.slice(end)}`;
+  // Keep each parameter with its original separator. Markdown may spell one
+  // as `&amp;`; do not re-encode the other keys/values when removing a parameter.
+  const parts = url.slice(queryAt + 1, end).split(/(?=&)/u);
+  const separator = stripAllUtm ? /^&(?:amp;)?/u : /^&/u;
+  const parameter = (part: string) => part.replace(separator, "");
+  const hasProviderSource = parts.some((part) => isProviderSource(parameter(part)));
+  if (!hasProviderSource && !stripAllUtm) return url;
+  const kept = parts.filter((part) => {
+    const param = parameter(part);
+    const key = keyOf(param);
+    if (stripAllUtm && key.toLowerCase().startsWith("utm_")) return false;
+    return !hasProviderSource || (!isProviderSource(param) && !SEARCH_QUERY_KEYS.has(key));
+  });
+  if (kept.length === parts.length) return url;
+  const [first, ...rest] = kept.filter((part) => parameter(part).length > 0);
+  const query = first === undefined ? "" : parameter(first) + rest.join("");
+  return `${url.slice(0, queryAt)}${query ? `?${query}` : ""}${url.slice(end)}`;
 }
 
 /**
  * The text with hosted-search tracking removed from every http(s) URL in it,
  * in Markdown links, autolinks and bare URLs alike. Fenced and inline code keep
  * their contents exactly. Text with nothing to remove comes back unchanged.
+ * Timelines can also opt into removing every `utm_*` key from displayed links.
  */
-export function withoutProviderTrackingInText(text: string): string {
-  if (!text.includes("utm_source=")) return text;
+export function withoutProviderTrackingInText(
+  text: string,
+  mode: "provider" | "all-utm" = "provider",
+): string {
+  const stripAllUtm = mode === "all-utm";
+  const needle = stripAllUtm ? "?" : "utm_source=";
+  if (!text.includes(needle)) return text;
   return splitMarkdownCode(text)
-    .map((segment) => (segment.code ? segment.text : cleanProse(segment.text)))
+    .map((segment) =>
+      segment.code || !segment.text.includes(needle)
+        ? segment.text
+        : cleanProse(segment.text, stripAllUtm),
+    )
     .join("");
 }
 
 /** A run that may be a URL; its trailing punctuation is trimmed below. */
-const URL_CANDIDATE = /https?:\/\/[^\s<>"'`[\]{}|\\^]+/giu;
+const HTTP_URL_CANDIDATE = /https?:\/\/[^\s<>"'`[\]{}|\\^]+/giu;
+const CHAT_URL_CANDIDATE = /(?:https?:\/\/|(?<![\w@.])www\.)[^\s<>"'`[\]{}|\\^]+/giu;
 
-function cleanProse(prose: string): string {
-  if (!prose.includes("utm_source=")) return prose;
-  return prose.replace(URL_CANDIDATE, (candidate) => {
+function cleanProse(prose: string, stripAllUtm: boolean): string {
+  return prose.replace(stripAllUtm ? CHAT_URL_CANDIDATE : HTTP_URL_CANDIDATE, (candidate) => {
     const url = withoutTrailingPunctuation(candidate);
-    return withoutProviderTracking(url) + candidate.slice(url.length);
+    return cleanTrackingUrl(url, stripAllUtm) + candidate.slice(url.length);
   });
 }
 

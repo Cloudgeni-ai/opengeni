@@ -1,5 +1,29 @@
 # @opengeni/runtime
 
+## 6.34.0
+
+### Patch Changes
+
+- 8f1d49b: Keep unchanged operational notices from accumulating when a turn resumes after compaction, and stop duplicate notices from displacing conversation history at the next checkpoint.
+- Updated dependencies [71c05a3]
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/config@6.34.0
+  - @opengeni/contracts@6.34.0
+  - @opengeni/sdk@6.34.0
+  - @opengeni/capabilities@6.34.0
+  - @opengeni/codemode@6.34.0
+  - @opengeni/codex@6.34.0
+  - @opengeni/decisions@6.34.0
+  - @opengeni/interaction@6.34.0
+  - @opengeni/observability@6.34.0
+  - @opengeni/tool-gateway@6.34.0
+  - @opengeni/vaults@6.34.0
+  - @opengeni/jev@6.34.0
+  - @opengeni/agent-proto@6.34.0
+  - @opengeni/network@6.34.0
+  - @opengeni/xai-subscription@6.34.0
+
 ## 6.33.0
 
 ### Minor Changes

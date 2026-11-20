@@ -1944,6 +1944,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "deleteCustomMcpServer",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/capabilities/:capabilityId",
+    "request": [],
+    "response": [],
+    "permission": "connections:write"
+  },
+  {
     "id": "deleteDocument",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",

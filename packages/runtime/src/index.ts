@@ -1379,6 +1379,8 @@ export type AgentSegmentInput =
       text?: string;
       /** Ephemeral platform context: system role, never conversation history. */
       internalContext?: string;
+      /** Last durable operational notice of this turn, supplied by history assembly. */
+      lastOperationalNotice?: string;
       // Canonical conversation truth. When omitted, this is a fresh first
       // message; ordinary messages never deserialize an SDK RunState.
       historyItems?: AgentInputItem[] | null;
@@ -12021,16 +12023,15 @@ export async function prepareRunInput(
       .filter((part): part is string => part !== undefined)
       .join("\n\n");
     if (internalContext) {
-      trailingMessages.push({
-        type: "message",
-        role: "system",
-        content:
-          TURN_OPERATIONAL_NOTICE_PREFIX +
-          "This status applies to the execution turn where this notice first appears. " +
-          "On later turns it is historical context, not current availability or authorization. " +
-          "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
-          internalContext,
-      } as AgentInputItem);
+      const content =
+        TURN_OPERATIONAL_NOTICE_PREFIX +
+        "This status applies to the execution turn where this notice first appears. " +
+        "On later turns it is historical context, not current availability or authorization. " +
+        "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
+        internalContext;
+      if (content !== input.lastOperationalNotice) {
+        trailingMessages.push({ type: "message", role: "system", content } as AgentInputItem);
+      }
     }
     if (input.text?.trim()) {
       trailingMessages.push({

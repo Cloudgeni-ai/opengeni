@@ -197,6 +197,19 @@ describe("shared capability connection lifecycle", () => {
     }
     expect(removeCapabilityInstallation).toHaveBeenCalledTimes(1);
   });
+  test("deletes a custom server that is not on instead of removing an installation", async () => {
+    const removeCapabilityInstallation = mock(async () => ({ removed: {} }));
+    const deleteCustomMcpServer = mock(async () => {});
+    const neverConnected = { ...item, enabled: false, canRemove: true };
+    const h = harness({ removeCapabilityInstallation, deleteCustomMcpServer });
+    await performCapabilityAction(
+      { ...h.options, item: neverConnected },
+      { type: "remove_server", item: neverConnected },
+    );
+    expect(deleteCustomMcpServer).toHaveBeenCalledWith("workspace", "test-key");
+    expect(removeCapabilityInstallation).not.toHaveBeenCalled();
+    expect(h.options.refresh).toHaveBeenCalledTimes(1);
+  });
 
   describe("per-account connector management", () => {
     const gmail = CapabilityCatalogItem.parse({

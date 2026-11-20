@@ -68,6 +68,7 @@ import {
   disableCapabilityInstallation,
   listCapabilityInstallationInstallers,
   removeCapabilityInstallation,
+  deleteWorkspaceCatalogItem,
   enableCapabilityInstallation,
   encryptEnvironmentValue,
   getCapabilityCatalogItem,
@@ -1820,8 +1821,11 @@ export async function customMcpServerRemovability(input: {
 }): Promise<(item: CapabilityCatalogItem) => boolean> {
   const installers = await listCapabilityInstallationInstallers(input.db, input.workspaceId);
   return (item) => {
+    if (!isWorkspaceCustomMcpServer(item, input.workspaceId)) return false;
     const installation = installers.get(item.id);
-    if (!installation || !isWorkspaceCustomMcpServer(item, input.workspaceId)) return false;
+    // Never set up here (its first Connect failed, say): only its entry is
+    // left, and whoever may remove a server an admin added removes it.
+    if (!installation) return input.canRemove(null);
     if (input.admin) return true;
     return installation.status === "active" && input.canRemove(installation.installedBySubjectId);
   };
@@ -1844,6 +1848,47 @@ export async function removeCustomMcpServer(input: {
   subjectId: string;
   memberRemoval?: boolean;
 }): Promise<CapabilityInstallation> {
+  const item = await requireRemovableCustomMcpServer(input);
+  const removed = await removeCapabilityInstallation(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    capabilityId: item.id,
+    subjectId: input.subjectId,
+    ...(input.memberRemoval ? { memberRemoval: true } : {}),
+  });
+  if (!removed) throw new HTTPException(409, { message: "capability is not currently enabled" });
+  return removed;
+}
+
+/**
+ * Deletes a custom MCP server added in this workspace: its catalog entry and,
+ * if it was set up here, its installation. This is how a server that never
+ * connected (its first Connect failed, say), which has no installation to
+ * remove, leaves the workspace. Connected accounts are kept. Integration
+ * admins only; the route checks that.
+ */
+export async function deleteCustomMcpServer(input: {
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  settings: Settings;
+  capabilityId: string;
+}): Promise<void> {
+  const item = await requireRemovableCustomMcpServer(input);
+  const deleted = await deleteWorkspaceCatalogItem(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    capabilityId: item.id,
+  });
+  if (!deleted) throw new HTTPException(404, { message: "capability not found" });
+}
+
+async function requireRemovableCustomMcpServer(input: {
+  db: Database;
+  workspaceId: string;
+  settings: Settings;
+  capabilityId: string;
+}): Promise<CapabilityCatalogItem> {
   const item = await requireCatalogItem(
     input.db,
     input.workspaceId,
@@ -1863,15 +1908,7 @@ export async function removeCustomMcpServer(input: {
     throw new HTTPException(409, {
       message: "Your organization serves this server here; turn it off instead",
     });
-  const removed = await removeCapabilityInstallation(input.db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    capabilityId: item.id,
-    subjectId: input.subjectId,
-    ...(input.memberRemoval ? { memberRemoval: true } : {}),
-  });
-  if (!removed) throw new HTTPException(409, { message: "capability is not currently enabled" });
-  return removed;
+  return item;
 }
 
 export async function settingsWithEnabledCapabilityMcpServers(
