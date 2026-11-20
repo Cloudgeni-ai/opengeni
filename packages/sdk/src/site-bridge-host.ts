@@ -19,6 +19,9 @@
 import type { SiteViewer } from "@opengeni/contracts";
 import {
   OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
+  OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD,
+  OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD,
+  OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD,
   OPENGENI_SITE_BRIDGE_EVENT,
   OPENGENI_SITE_BRIDGE_LOCATION_METHOD,
   OPENGENI_SITE_BRIDGE_NAVIGATE_METHOD,
@@ -46,6 +49,7 @@ import {
   type OpenGeniSiteToolCatalog,
 } from "./site";
 import { isSiteHttpRequest, serveSiteHttp, type SiteHttpRequest } from "./site-http";
+import { siteConnectionStatus, type OpenGeniSiteConnectionStatus } from "./site-connect-card";
 import { SITE_TOOL_TYPED_ANSWERS, siteToolFailureMessage } from "./site-tool-failure-message";
 import type {
   ToolGatewayCallRequest,
@@ -56,10 +60,18 @@ import type {
   ToolGatewayResolveRequest,
   ToolGatewayResolvedTool,
   ToolGatewaySiteReadinessResponse,
+  ToolGatewaySiteSetupItem,
   ToolGatewayTarget,
 } from "./types";
 
 export type { SiteHttpRequest } from "./site-http";
+export {
+  siteConnectCardDismissals,
+  siteConnectCardLabel,
+  siteConnectionStatus,
+  type OpenGeniSiteConnectionNeed,
+  type OpenGeniSiteConnectionStatus,
+} from "./site-connect-card";
 export type { OpenGeniSiteDataChange } from "./site";
 export {
   isOpenGeniReservedSitePath,
@@ -120,6 +132,21 @@ export type SiteBridgeToolHandlers = {
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayCallResponse>;
   declarations?: (options: { signal: AbortSignal }) => Promise<ToolGatewayDeclarationsResponse>;
+  /**
+   * The platform's connect card (advertised as `connections: 1`). The host
+   * draws the card itself; these answer the App's `site.connections.*`.
+   */
+  connections?: SiteBridgeConnectionHandlers;
+};
+
+/** A host's connect card, as the App's `site.connections` reaches it. */
+export type SiteBridgeConnectionHandlers = {
+  /** The card's items for this viewer; null when nothing can be connected here (a guest). */
+  items: (options: { signal: AbortSignal }) => Promise<readonly ToolGatewaySiteSetupItem[] | null>;
+  /** Run one item's single action with the host's own connect UI; resolves whether it finished. */
+  connect: (item: ToolGatewaySiteSetupItem, options: { signal: AbortSignal }) => Promise<boolean>;
+  /** Show the card again even after the viewer closed it; resolves whether one is shown. */
+  show?: (options: { signal: AbortSignal }) => Promise<boolean> | boolean;
 };
 
 /** Viewer identity and sign-in, answered by the host itself (advertised as `viewer: 1`). */
@@ -161,7 +188,10 @@ export type SiteBridgeRequestValue =
   | SiteViewer
   | OpenGeniSiteSignInResult
   | OpenGeniSiteLocationValue
-  | { watching: boolean };
+  | { watching: boolean }
+  | OpenGeniSiteConnectionStatus
+  | { connected: boolean }
+  | { shown: boolean };
 
 /** Capabilities the host advertises when a Site connects; Sites never ask for more. */
 export function siteBridgeReadyMessage(
@@ -180,6 +210,7 @@ export function siteBridgeReadyMessage(
       : {}),
     ...(viewer ? { viewer: 1 as const } : {}),
     ...(location ? { location: 1 as const } : {}),
+    ...(bridge?.connections ? { connections: 1 as const } : {}),
   };
 }
 
@@ -549,6 +580,23 @@ export async function handleSiteBridgeRequest(
         "Navigate only to this Site's own pages (not /_og or /__opengeni); open other addresses with a link or window.open",
       );
     return await location.navigate(to, { replace: message.payload.replace === true });
+  }
+  if (message.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD) {
+    const connections = bridge?.connections;
+    // Only the projection crosses: no ids or addresses reach Site code.
+    return siteConnectionStatus(connections ? await connections.items({ signal }) : null);
+  }
+  if (message.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD) {
+    const connections = bridge?.connections;
+    const items = connections ? await connections.items({ signal }) : null;
+    const key = message.payload.key;
+    const item = items?.find((candidate) => key === undefined || candidate.key === key);
+    if (!connections || !item) return { connected: false };
+    return { connected: (await connections.connect(item, { signal })) === true };
+  }
+  if (message.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD) {
+    const show = bridge?.connections?.show;
+    return { shown: show ? (await show({ signal })) === true : false };
   }
   if (!bridge) throw new Error("Site tool bridge is unavailable");
   if (message.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD) {
