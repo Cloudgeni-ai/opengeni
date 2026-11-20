@@ -82156,15 +82156,21 @@ async function consumedChildAnswerSequencesTx(
         case when jsonb_typeof(turn.metadata -> ${codemodeKey}) = 'array'
           then turn.metadata -> ${codemodeKey} else '[]'::jsonb end
       ) as entry
-      join session_events answer
-        on answer.workspace_id = ${input.workspaceId}::uuid
-          and answer.session_id = case when entry ->> 'childSessionId' ~ ${UUID_TEXT_PATTERN_SQL}
-            then (entry ->> 'childSessionId')::uuid end
-          and answer.sequence = case when entry ->> 'sequence' ~ '^[0-9]{1,9}$'
-            then (entry ->> 'sequence')::integer end
+      -- Bind the validated identity before probing the event index. Without
+      -- these fences, RLS can leave the identity as a join filter after a
+      -- workspace-wide scan of completed turns.
+      join lateral (
+        select answer.payload from session_events answer
+        where answer.workspace_id = ${input.workspaceId}::uuid
+          and answer.session_id = (select case when entry ->> 'childSessionId' ~ ${UUID_TEXT_PATTERN_SQL}
+            then (entry ->> 'childSessionId')::uuid end offset 0)
+          and answer.sequence = (select case when entry ->> 'sequence' ~ '^[0-9]{1,9}$'
+            then (entry ->> 'sequence')::integer end offset 0)
           and answer.type = 'turn.completed'
           and jsonb_typeof(answer.payload -> 'output') = 'string'
           and answer.payload ->> 'output' <> ''
+        offset 0
+      ) answer on true
       -- The answer as a JSON string value, escaped once more for each layer
       -- of JSON it can sit in inside a stored tool result.
       cross join lateral (select to_json(to_json(answer.payload ->> 'output')::text)::text
