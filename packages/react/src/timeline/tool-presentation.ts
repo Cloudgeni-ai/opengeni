@@ -1000,6 +1000,8 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Projects, other chats and helpers
   checkProjects: "folder",
   organizeProjects: "folder",
+  checkSidebar: "folder",
+  updateSidebar: "folder",
   checkChats: "sessions",
   chooseChat: "sessions",
   checkProgress: "progress",

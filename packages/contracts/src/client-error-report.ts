@@ -314,6 +314,8 @@ export const CLIENT_PAGES = [
   "automations",
   "bot-templates",
   "artifacts",
+  "apps",
+  "sidebar",
   "settings",
   "organization",
   "insights",
