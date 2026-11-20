@@ -193,3 +193,71 @@ export function describeCompactionProviderRejection(
   if (rejection.param) parts.push(`param ${rejection.param}`);
   return parts.join(", ");
 }
+
+const COMPACTION_TRIGGER_LABEL = (
+  t: OpenGeniText,
+): Record<NonNullable<ContextCompactionItem["trigger"]>, string> => ({
+  auto: t("messageTimeline.auto"),
+  operator: t("messageTimeline.manual"),
+  proactive: t("messageTimeline.auto"),
+  overflow: t("messageTimeline.overflow"),
+});
+
+/**
+ * Everything a compaction landmark says: its headline (and what triggered
+ * it), the line under it, the diagnostics behind Details, and whether it is a
+ * failure. The web and native rows draw exactly this.
+ */
+export function compactionPresentation(t: OpenGeniText, item: ContextCompactionItem) {
+  // Switching a Codex chat to another model rebuilds its context once; say
+  // that plainly instead of describing an ordinary compaction.
+  const modelSwitch = item.implementation === "portable_model_switch";
+  // The chat's model could not summarize, so older messages were trimmed.
+  const trimmed = isTrimmedCompaction(item);
+  const trigger =
+    item.trigger && item.phase !== "started" && !modelSwitch
+      ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
+      : null;
+  const before =
+    item.estimatedTokensBefore != null
+      ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
+      : null;
+  const after =
+    item.estimatedTokensAfter != null
+      ? Math.round(item.estimatedTokensAfter).toLocaleString(t.locale)
+      : null;
+  const title =
+    item.phase === "started"
+      ? modelSwitch
+        ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
+        : t("messageTimeline.compactingConversationHistory")
+      : item.phase === "compacted"
+        ? trimmed
+          ? COMPACTION_TRIMMED_TITLE(t)
+          : modelSwitch
+            ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
+            : before && after
+              ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+              : t("messageTimeline.conversationHistoryCompacted")
+        : compactionSkipTitle(t, item.skipReason);
+  const subtitle = trimmed
+    ? COMPACTION_TRIMMED_SUBTITLE(t)
+    : item.phase === "compacted" && !modelSwitch
+      ? t("messageTimeline.chatHistoryAboveIsUnchanged")
+      : item.phase === "skipped"
+        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
+        : null;
+  // Provider identifiers are diagnostics: one short line up front, the rest on demand.
+  const details = compactionFailureDetails(t, item);
+  const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
+  return {
+    title,
+    trigger,
+    subtitle,
+    details,
+    failed,
+    started: item.phase === "started",
+    // Longer copy wraps, centred, instead of truncating.
+    wraps: failed || trimmed,
+  };
+}

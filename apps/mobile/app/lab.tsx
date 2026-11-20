@@ -7,11 +7,25 @@ import { InteractiveAnswerProvider } from "@opengeni/react/interactive-answer-mo
 import {
   AnnotationsChip,
   AnnotationsSheet,
+  HumanInputCard,
   MessageTimeline,
+  useNativeInChatConnect,
   useNativeTimelineTheme,
   type AnnotationReveal,
 } from "@opengeni/react-native/timeline";
-import type { DraftTimelineAnnotation } from "@opengeni/sdk";
+import {
+  personalMachineUseIntent,
+  type MachineMoveChat,
+} from "@opengeni/react/machine-request-model";
+import { buildTimeline } from "@opengeni/react/session";
+import type {
+  ChatClient,
+  DraftTimelineAnnotation,
+  MachineView,
+  OpenGeniClient,
+  SessionEvent,
+  SessionHumanInputRequest,
+} from "@opengeni/sdk";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import { useAccount } from "@/account";
@@ -26,6 +40,129 @@ import { AppThemeProvider } from "@/theme";
 type Params = { scenario?: LabScenarioId; scheme?: "light" | "dark"; chrome?: string };
 
 const labSend = async () => true;
+
+/** A private chat that can take a Send, with the owner's machine consent. */
+const labChat = (): MachineMoveChat => ({
+  blocked: null,
+  awaitingHuman: false,
+  personalMachineIntent: personalMachineUseIntent(
+    { visibility: "private", authorityEpoch: 1 },
+    "always",
+  ),
+  extras: {},
+});
+
+/** Questions an agent is waiting on in the scenario, as the session reads them. */
+function pendingQuestions(events: readonly SessionEvent[]): SessionHumanInputRequest[] {
+  const answered = new Set(
+    events
+      .filter((event) => event.type === "session.humanInput.resolved")
+      .map((event) => (event.payload as { requestId?: string }).requestId),
+  );
+  return events.flatMap((event) => {
+    if (event.type !== "session.humanInput.requested") return [];
+    const request = (event.payload as { request: Partial<SessionHumanInputRequest> }).request;
+    if (!request.id || answered.has(request.id)) return [];
+    return [
+      {
+        workspaceId: event.workspaceId,
+        sessionId: event.sessionId,
+        turnId: event.turnId ?? "",
+        turnGeneration: 1,
+        creationAttemptId: "lab",
+        toolCallId: `${request.id}-call`,
+        status: "pending",
+        response: null,
+        respondedBy: null,
+        respondedAt: null,
+        expiresAt: null,
+        createdAt: event.occurredAt,
+        updatedAt: event.occurredAt,
+        allowSkip: false,
+        questions: [],
+        ...request,
+      } as SessionHumanInputRequest,
+    ];
+  });
+}
+
+const labMachine = (overrides: Partial<MachineView>): MachineView =>
+  ({
+    enrollmentId: `enrollment-${overrides.sandboxId}`,
+    scope: "user",
+    generation: 1,
+    kind: "selfhosted",
+    state: "online",
+    active: false,
+    isSessionGroup: false,
+    workspaceGeneration: null,
+    archiveGeneration: null,
+    archiveComplete: false,
+    os: "linux",
+    arch: "x64",
+    hasDisplay: false,
+    allowScreenControl: false,
+    sharedSessionCount: 0,
+    lastSeenAt: null,
+    runtime: null,
+    operationPolicy: null,
+    metrics: null,
+    ...overrides,
+  }) as MachineView;
+
+/**
+ * The calls a conversation's cards make, answered in memory: the person's
+ * grant and catalog, and their machines (one the agent asked for, one off),
+ * so the lab shows each card as a person would meet it.
+ */
+function createLabClient(): ChatClient<OpenGeniClient> {
+  let machines: MachineView[] = [
+    labMachine({ sandboxId: "lab-machine-server", name: "Build server" }),
+    labMachine({
+      sandboxId: "lab-machine-laptop",
+      name: "Studio MacBook",
+      state: "offline",
+      hasDisplay: true,
+      os: "darwin",
+      arch: "arm64",
+    }),
+  ];
+  const client = {
+    getClientConfig: async () => ({ chatConnections: true }),
+    getAccessContext: async () => ({
+      workspaceGrants: [
+        {
+          workspaceId: "lab-workspace",
+          permissions: [
+            "sessions:read",
+            "sessions:control",
+            "connections:write",
+            "enrollments:read",
+          ],
+        },
+      ],
+    }),
+    listCapabilities: async () => ({ items: [] }),
+    listMachines: async () => ({
+      activeSandboxId: machines.find((machine) => machine.active)?.sandboxId ?? null,
+      activeEpoch: 1,
+      machines,
+    }),
+    swapActiveSandbox: async (
+      _workspaceId: string,
+      _sessionId: string,
+      request: { target: string },
+    ) => {
+      machines = machines.map((machine) => ({
+        ...machine,
+        active: machine.sandboxId === request.target,
+      }));
+      return { swapped: true, activeSandboxId: request.target, activeEpoch: 2 };
+    },
+    sendMessage: async () => ({ payload: { routing: "started" } }),
+  };
+  return client as unknown as ChatClient<OpenGeniClient>;
+}
 
 export default function ReferenceLab() {
   const params = useLocalSearchParams<Params>();
@@ -54,6 +191,22 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
   );
   const scenarioId = params.scenario ?? "working";
   const scenario = scenarios.find((entry) => entry.id === scenarioId) ?? scenarios[0]!;
+  // One in-memory client for the lab's cards; reopen the lab to start over.
+  const [labClient] = useState(createLabClient);
+  const items = useMemo(() => buildTimeline(t, scenario.events), [t, scenario.events]);
+  const renderAuthNeeded = useNativeInChatConnect({
+    client: labClient,
+    workspaceId: "lab-workspace",
+    sessionId: scenario.events[0]?.sessionId ?? "lab",
+    items,
+    options: {
+      browser: { openAuthSession: async () => undefined },
+      returnUrl: "https://example.com/connected",
+      shareConversation: () => undefined,
+    },
+    chat: labChat,
+  });
+  const questions = useMemo(() => pendingQuestions(scenario.events), [scenario.events]);
   const showChrome = params.chrome !== "0";
   // Add note on selected text, held locally: the composer's draft annotations.
   const [annotations, setAnnotations] = useState<DraftTimelineAnnotation[]>([]);
@@ -110,6 +263,16 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
           draftAnnotations={annotations}
           onDraftAnnotationSelect={selectAnnotation}
           annotationRevealRef={reveal}
+          renderAuthNeeded={renderAuthNeeded}
+          trailing={
+            questions.length > 0 ? (
+              <HumanInputCard
+                requests={questions}
+                renderMarkdown={renderMarkdown}
+                onSubmit={() => undefined}
+              />
+            ) : undefined
+          }
         />
       </InteractiveAnswerProvider>
       {annotations.length > 0 ? (

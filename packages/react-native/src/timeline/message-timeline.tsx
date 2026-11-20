@@ -63,6 +63,7 @@ import {
 import {
   ActivityIndicator,
   Keyboard,
+  Linking,
   Pressable,
   ScrollView,
   Text,
@@ -79,6 +80,15 @@ import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./act
 import { Icon } from "./icon";
 import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
 import { NativeAuthNeededRow } from "./in-chat-connect";
+import {
+  NativeAllowanceExhaustedRow,
+  NativeCompactionRow,
+  NativeGoalRow,
+  NativeLearningRefusalRow,
+  NativeMachineInputBatchRow,
+  NativeSessionUsageLimitRow,
+  NativeWorkerCompletionRow,
+} from "./landmarks";
 import { humanInputAnswerLines } from "./secret-field-model";
 import { answerReadingOffset } from "./reading-position";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -1144,51 +1154,25 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
       );
     }
     case "context-compaction":
-      return <SeparatorRow text="context compacted" />;
+      return <NativeCompactionRow item={item} />;
     case "notice":
       return <NoticeRow item={item} />;
     case "goal":
-      return item.text ? (
-        <SeparatorRow text={`goal ${item.action} · ${item.text}`} />
-      ) : (
-        <SeparatorRow text={`goal ${item.action}`} />
-      );
+      return <NativeGoalRow item={item} />;
     case "worker-completion":
-      return (
-        <View
-          style={{
-            borderLeftWidth: 2,
-            borderLeftColor: theme.colors.border,
-            paddingLeft: 12,
-            gap: 4,
-          }}
-        >
-          <Text
-            style={{ ...fontStyle(theme, 500), fontSize: theme.size.base, color: theme.colors.fg }}
-          >
-            {t("native.timeline.messageTimeline.workerReportedBack")}
-          </Text>
-          <Text
-            numberOfLines={3}
-            style={{
-              ...fontStyle(theme),
-              fontSize: theme.size.sm,
-              lineHeight: 18,
-              color: theme.colors["fg-muted"],
-            }}
-          >
-            {item.text}
-          </Text>
-        </View>
-      );
+      return <NativeWorkerCompletionRow item={item} />;
     case "auth-needed":
       // An agent's connect request becomes a card the person can finish
       // here; anything else (a lapsed account, unavailable tools) is a row.
       return context.renderAuthNeeded?.(item) ?? <NativeAuthNeededRow item={item} />;
     case "machine-input-batch":
       // An automation that acted here says what happened in one line; other
-      // machine updates stay out of the native chat.
-      return isAutomationRunBatch(item.members) ? <AutomationRunRow item={item} /> : null;
+      // updates (agents' messages and results, waits ending) open as named rows.
+      return isAutomationRunBatch(item.members) ? (
+        <AutomationRunRow item={item} />
+      ) : (
+        <NativeMachineInputBatchRow item={item} />
+      );
     default:
       return null;
   }
@@ -1249,6 +1233,10 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
   const t = useOpenGeniText();
   const c = theme.colors;
   const [open, setOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  if (item.allowance) return <NativeAllowanceExhaustedRow refusal={item.allowance} />;
+  if (item.sessionUsageLimit) return <NativeSessionUsageLimitRow stop={item.sessionUsageLimit} />;
+  if (item.learningRefusal) return <NativeLearningRefusalRow refusal={item.learningRefusal} />;
   // An agent's own wait is ordinary progress, not a warning: a quiet line that
   // discloses the reason, as on web. So is an attempt a Retry reopened: the
   // turn's outcome carries the failure that still matters.
@@ -1325,9 +1313,65 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
           <Icon name="triangle-alert" size={16} color={accent} />
         )}
       </View>
-      <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
-        {noticeDisplayText(t, item)}
-      </Text>
+      <View style={{ flex: 1, minWidth: 0, gap: 8 }}>
+        <Text style={{ ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: accent }}>
+          {noticeDisplayText(t, item)}
+        </Text>
+        {item.details ? (
+          <View style={{ gap: 6 }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ expanded: detailsOpen }}
+              onPress={() => setDetailsOpen((value) => !value)}
+              hitSlop={8}
+              style={{ flexDirection: "row", alignItems: "center", gap: 4 }}
+            >
+              <View style={{ transform: [{ rotate: detailsOpen ? "90deg" : "0deg" }] }}>
+                <Icon name="chevron-right" size={12} color={accent} />
+              </View>
+              <Text style={{ ...fontStyle(theme, 500), fontSize: theme.size.sm, color: accent }}>
+                {item.details.label}
+              </Text>
+            </Pressable>
+            {detailsOpen ? (
+              <Text
+                selectable
+                style={{
+                  ...fontStyle(theme, 400, "mono"),
+                  borderRadius: theme.radius.sm,
+                  backgroundColor: withAlpha(c.fg, 0.05),
+                  padding: 8,
+                  fontSize: theme.size.xs,
+                  lineHeight: 16,
+                  color: c["fg-muted"],
+                }}
+              >
+                {typeof item.details.value === "string"
+                  ? item.details.value
+                  : JSON.stringify(item.details.value, null, 2)}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+      </View>
+      {item.action ? (
+        <Pressable
+          accessibilityRole="link"
+          onPress={() => void Linking.openURL(item.action!.url).catch(() => undefined)}
+          hitSlop={6}
+          style={{
+            borderRadius: theme.radius.sm,
+            borderWidth: 1,
+            borderColor: withAlpha(accent, 0.25),
+            paddingHorizontal: 8,
+            paddingVertical: 4,
+          }}
+        >
+          <Text style={{ ...fontStyle(theme, 500), fontSize: theme.size.sm, color: accent }}>
+            {item.action.label}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }

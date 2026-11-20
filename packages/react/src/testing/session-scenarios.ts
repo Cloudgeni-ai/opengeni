@@ -15,7 +15,10 @@ export type LabScenarioId =
   | "math"
   | "links"
   | "options"
-  | "writing-options";
+  | "writing-options"
+  | "updates"
+  | "connect"
+  | "questions";
 
 export interface LabScenario {
   id: LabScenarioId;
@@ -550,5 +553,308 @@ export function labScenarios(): LabScenario[] {
     links(),
     options(),
     writingOptions(),
+    updates(),
+    connect(),
+    questions(),
   ];
+}
+
+const LAB_WORKER_A = "6f1c2a9e-3b7d-4e21-9a55-0c8d1e2f3a41";
+const LAB_WORKER_B = "9d0e7b64-12aa-4c3f-8e19-5b6a7c8d9e02";
+
+/**
+ * The landmarks and updates a long agent chat collects: goals, compaction,
+ * waits, worker reports and other agents' updates, as recorded events.
+ */
+function updates(): LabScenario {
+  const r = recorder("lab-updates");
+  const a = "turn-updates-1";
+  r.push("user.message", { text: "Research the three vendors and keep going until it's done." }, a);
+  r.push(
+    "goal.set",
+    {
+      actor: "user",
+      text: "Compare the three payroll vendors on price, EU data location and API quality.",
+    },
+    a,
+    300,
+  );
+  r.push("turn.started", {}, a, 400);
+  r.push(
+    "session.context.compaction.started",
+    { trigger: "auto", estimatedTokensBefore: 182_400 },
+    a,
+    1_000,
+  );
+  r.push(
+    "session.context.compacted",
+    { trigger: "auto", estimatedTokensBefore: 182_400, estimatedTokensAfter: 21_300 },
+    a,
+    6_000,
+  );
+  r.push(
+    "agent.message.completed",
+    { text: "I've asked two workers to research the vendors in parallel." },
+    a,
+    1_500,
+  );
+  r.push(
+    "session.wait.started",
+    {
+      actor: "agent",
+      reason: "Waiting for the two research workers to report back.",
+      deadlineAt: "2026-10-03T10:00:00Z",
+    },
+    a,
+    300,
+  );
+  r.push("turn.completed", { output: "" }, a, 200);
+  const b = "turn-updates-2";
+  r.push(
+    "system.update.delivered",
+    {
+      count: 3,
+      members: [
+        {
+          id: "upd-1",
+          kind: "child_terminal_result",
+          classification: "success",
+          sourceId: LAB_WORKER_A,
+          summary: "A worker session you spawned has finished its work and gone idle.",
+        },
+        {
+          id: "upd-2",
+          kind: "agent_message",
+          classification: "info",
+          sourceId: LAB_WORKER_B,
+          summary:
+            "Halfway through: Vendor C's API docs are behind a sales call, so I'm using their public SDK instead.",
+        },
+        {
+          id: "upd-3",
+          kind: "session_wait_timeout",
+          classification: "info",
+          sourceId: "wait-1",
+          summary: "Your wait reached its deadline.",
+        },
+      ],
+    },
+    b,
+    60_000,
+  );
+  r.push("turn.started", {}, b, 300);
+  r.push(
+    "user.message",
+    {
+      text: "Vendor A and B are both EU-hosted; A is cheaper per seat, B has the better API.",
+      childCompletion: {
+        childSessionId: LAB_WORKER_A,
+        status: "idle",
+        goal: {
+          status: "complete",
+          text: "Research Vendor A and Vendor B: pricing per seat, where data is stored, and API quality.",
+          evidence: "Read both pricing pages and DPAs on 3 Oct; called both sandbox APIs.",
+        },
+      },
+    },
+    b,
+    500,
+  );
+  r.push(
+    "session.context.compaction.skipped",
+    {
+      trigger: "auto",
+      reason: "summarization_failed",
+      estimatedTokensBefore: 190_100,
+      providerStatus: 400,
+      providerErrorType: "invalid_request_error",
+    },
+    b,
+    2_000,
+  );
+  r.push(
+    "session.context.compaction.started",
+    { trigger: "operator", implementation: "portable_model_switch" },
+    b,
+    2_000,
+  );
+  r.push(
+    "session.context.compacted",
+    { trigger: "operator", implementation: "portable_model_switch" },
+    b,
+    4_000,
+  );
+  r.push("goal.paused", { actor: "user", text: "Compare the three payroll vendors." }, b, 1_000);
+  r.push("goal.resumed", { actor: "user", text: "Compare the three payroll vendors." }, b, 30_000);
+  const text = "All three are compared below. **Vendor B** is the best fit for the API work.";
+  r.push("agent.message.completed", { text }, b, 2_000);
+  r.push("goal.completed", { actor: "user", text: "Compare the three payroll vendors." }, b, 300);
+  r.push("turn.completed", { output: text }, b, 200);
+  return { id: "updates", title: "Updates", events: r.events, running: false };
+}
+
+/** Agents' requests to connect something: a computer, a Chrome, an account. */
+function connect(): LabScenario {
+  const r = recorder("lab-connect");
+  const t = "turn-connect";
+  r.push("user.message", { text: "Grab the meeting recording from my server and file it." }, t);
+  r.push("turn.started", {}, t, 400);
+  const machine = {
+    id: "api:connected-machine",
+    kind: "api",
+    name: "Connected Machine",
+    action: "connect",
+    source: "built_in",
+    rationale: "Let your agents use your computer in this workspace.",
+    requiredVariables: [],
+  };
+  r.push(
+    "tool.auth_needed",
+    {
+      reason: "missing_connection",
+      serverId: "opengeni",
+      toolName: "run_on",
+      capability: machine,
+      providerDomain: "opengeni.ai",
+      requestedSandboxId: "lab-machine-server",
+    },
+    t,
+    1_500,
+  );
+  r.push(
+    "agent.message.completed",
+    { text: "I need to use your server for this. Allow it above and I'll continue." },
+    t,
+    500,
+  );
+  r.push(
+    "tool.auth_needed",
+    {
+      reason: "missing_connection",
+      serverId: "opengeni",
+      toolName: "capability_authorization_request",
+      capability: { ...machine, rationale: "Lets the agent work on files on your computer." },
+      providerDomain: "opengeni.ai",
+    },
+    t,
+    1_500,
+  );
+  r.push(
+    "tool.auth_needed",
+    {
+      reason: "missing_connection",
+      serverId: "opengeni",
+      toolName: "capability_authorization_request",
+      capability: { ...machine, rationale: "Lets the agent use your signed-in Chrome." },
+      providerDomain: "opengeni.ai",
+      purpose: "chrome",
+    },
+    t,
+    1_500,
+  );
+  r.push(
+    "tool.auth_needed",
+    {
+      reason: "missing_connection",
+      serverId: "opengeni",
+      toolName: "capability_authorization_request",
+      capability: {
+        id: "plugin:marketplace/example/calendar",
+        kind: "plugin",
+        name: "Example Calendar",
+        action: "enable",
+        source: "public_registry",
+        rationale: "Lets the agent add the meeting to your calendar.",
+        requiredVariables: [],
+      },
+      providerDomain: "calendar.example.com",
+    },
+    t,
+    1_500,
+  );
+  r.push(
+    "tool.auth_needed",
+    {
+      reason: "refresh_failed",
+      serverId: "mcp_tracker",
+      toolName: "list_issues",
+      providerDomain: "tracker.example.com",
+      connectionId: "lab-connection-1",
+    },
+    t,
+    1_500,
+  );
+  const text = "Waiting for access to your server.";
+  r.push("agent.message.completed", { text }, t, 500);
+  r.push("turn.completed", { output: text }, t, 200);
+  return { id: "connect", title: "Connect requests", events: r.events, running: false };
+}
+
+/** Every kind of question an agent can ask, waiting for the answers. */
+function questions(): LabScenario {
+  const r = recorder("lab-questions");
+  const t = "turn-questions";
+  r.push("user.message", { text: "Set up the staging deploy for me." }, t);
+  r.push("turn.started", {}, t, 400);
+  r.push(
+    "session.humanInput.requested",
+    {
+      request: {
+        id: "hi-questions",
+        allowSkip: false,
+        questions: [
+          {
+            id: "go",
+            kind: "single_select",
+            prompt: "Deploy the current main to staging now?",
+            required: true,
+            confirm: true,
+            allowOther: false,
+            options: [
+              { id: "deploy", label: "Deploy" },
+              { id: "wait", label: "Not now" },
+            ],
+          },
+          {
+            id: "checks",
+            kind: "multi_select",
+            prompt: "Which checks should run after it's up?",
+            required: true,
+            allowOther: true,
+            options: [
+              { id: "smoke", label: "Smoke tests", description: "About 2 minutes" },
+              { id: "e2e", label: "End-to-end", description: "About 15 minutes" },
+              { id: "load", label: "Load test" },
+            ],
+          },
+          {
+            id: "note",
+            kind: "text",
+            prompt: "Anything the release note should mention?",
+            required: false,
+            allowOther: false,
+            options: [],
+          },
+          {
+            id: "token",
+            kind: "secret",
+            prompt: "Paste the staging deploy token.",
+            required: true,
+            allowOther: false,
+            options: [],
+            secret: {
+              item: "Staging deploy token",
+              field: "credential",
+              fieldKind: "concealed",
+              itemType: "api_key",
+              saveTo: "workspace",
+            },
+          },
+        ],
+      },
+    },
+    t,
+    1_200,
+  );
+  return { id: "questions", title: "Questions", events: r.events, running: true };
 }
