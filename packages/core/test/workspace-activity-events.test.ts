@@ -101,11 +101,7 @@ describe("activity facts as events", () => {
       summary: "Chat failed: Weekly report",
       actor: { kind: "opengeni", name: "Nightly report" },
       chainDepth: 2,
-      data: {
-        automationId: "task-1",
-        automationRunId: "run-1",
-        startedByYou: true,
-      },
+      data: { automationId: "task-1", automationRunId: "run-1", startedByYou: true },
     });
     // Opengeni's own notices carry no turn.
     expect(workspaceActivityEvent(fact({ turnId: null }), ada).actor.kind).toBe("opengeni");
@@ -130,12 +126,7 @@ describe("activity facts as events", () => {
       chatTitle: null,
       subjectLabel: null,
       url: null,
-      data: {
-        scope: "workspace",
-        threshold: 0.8,
-        usedCredits: 80,
-        limitCredits: 100,
-      },
+      data: { scope: "workspace", threshold: 0.8, usedCredits: 80, limitCredits: 100 },
     });
     expect(workspaceActivityEvent(usage, ada)).toMatchObject({
       subject: null,
@@ -144,12 +135,7 @@ describe("activity facts as events", () => {
       chainDepth: 0,
       data: { scope: "workspace", threshold: 0.8, forYou: false },
     });
-    const own = {
-      ...usage,
-      type: "usage.exhausted",
-      subjectId: bob,
-      data: { scope: "member" },
-    };
+    const own = { ...usage, type: "usage.exhausted", subjectId: bob, data: { scope: "member" } };
     expect(workspaceActivityEvent(own, bob)).toMatchObject({
       summary: "Usage used up your limit",
       data: { forYou: true },
