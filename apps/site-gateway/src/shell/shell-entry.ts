@@ -8,6 +8,11 @@
  * Site frame never reloads), and Back/Forward are passed on to the Site.
  * Requests outside the allowlist never leave the page.
  *
+ * It shows the platform's connect card (`#og-connect`) to signed-in
+ * workspace members who still have to connect a tool the App declares: each
+ * button opens the App in Opengeni with that connect dialog open, since this
+ * page has no Opengeni frame. It answers the App's `site.connections.*`.
+ *
  * It also keeps one live connection (`/_og/live`) and passes its data hints
  * to the Site as `data_changed` events, and sends small batched speed
  * beacons (`/_og/timing`): app load, first data and each bridge call.
@@ -25,6 +30,8 @@ import {
 } from "@opengeni/contracts";
 import {
   SiteBridgeHost,
+  siteConnectCardDismissals,
+  siteConnectCardLabel,
   type OpenGeniSiteDataChange,
   openGeniSiteLocationHref,
   openGeniSitePath,
@@ -34,6 +41,7 @@ import {
   type SiteBridgeViewerHandlers,
   type SiteHttpRequest,
 } from "@opengeni/sdk/site-bridge-host";
+import type { ToolGatewaySiteSetupItem, ToolGatewaySiteSetupResponse } from "@opengeni/sdk";
 import {
   SITE_GATEWAY_HUMAN_PATH,
   SITE_HUMAN_CHECK_REQUIRED,
@@ -276,6 +284,110 @@ function timedSiteHttp(request: SiteHttpRequest, signal: AbortSignal): Promise<R
   );
 }
 
+/**
+ * The connect card: what this member still has to connect for the App's
+ * declared tools, one button each (opening the App in Opengeni), and a close
+ * button that hides those items on this address until something new is
+ * missing. Nothing for guests and people outside the workspace: the API
+ * answers them with a refusal, and the card stays empty.
+ */
+function createConnectCard(onReturn: () => void) {
+  const dismissals = siteConnectCardDismissals(location.host);
+  let items: ToolGatewaySiteSetupItem[] | null = null;
+  let loading: Promise<ToolGatewaySiteSetupItem[] | null> | null = null;
+  let forced = false;
+  let awaitingReturn = false;
+  const load = (signal?: AbortSignal): Promise<ToolGatewaySiteSetupItem[] | null> =>
+    (loading ??= (async () => {
+      try {
+        const known = await currentViewer(signal ?? new AbortController().signal).catch(() => null);
+        if (known && known.kind !== "member") return (items = null);
+        const response = await timedTool<ToolGatewaySiteSetupResponse>(
+          "setup",
+          {},
+          signal ?? new AbortController().signal,
+        );
+        // Only items this page can act on: each opens the App in Opengeni.
+        items = response.items.filter((item) => typeof item.openUrl === "string");
+      } catch {
+        items = null;
+      }
+      return items;
+    })().finally(() => {
+      loading = null;
+    }));
+  const render = () => {
+    document.getElementById("og-connect")?.remove();
+    const visible = items ? (forced ? items : dismissals.visible(items)) : [];
+    if (visible.length === 0) return false;
+    const card = document.createElement("div");
+    card.id = "og-connect";
+    card.setAttribute("role", "region");
+    card.setAttribute("aria-label", "Connect tools for this app");
+    const list = document.createElement("div");
+    for (const item of visible) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = siteConnectCardLabel(item);
+      if (item.account) button.title = item.account;
+      button.addEventListener("click", () => {
+        open(item);
+      });
+      list.append(button);
+    }
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "og-connect-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", () => {
+      dismissals.dismiss(visible.map((item) => item.key));
+      forced = false;
+      render();
+    });
+    card.append(list, close);
+    document.body.append(card);
+    return true;
+  };
+  const open = (item: ToolGatewaySiteSetupItem): boolean => {
+    if (!item.openUrl) return false;
+    awaitingReturn = true;
+    window.open(item.openUrl, "_blank", "noopener");
+    return true;
+  };
+  // Back from connecting in Opengeni: read again and tell the App.
+  const back = () => {
+    if (!awaitingReturn || document.visibilityState === "hidden") return;
+    awaitingReturn = false;
+    void load().then(() => {
+      render();
+      onReturn();
+    });
+  };
+  window.addEventListener("focus", back);
+  document.addEventListener("visibilitychange", back);
+  return {
+    start: () => void load().then(render),
+    handlers: {
+      items: ({ signal }) => (items && !loading ? Promise.resolve(items) : load(signal)),
+      // Opengeni finishes the connect in its own tab; the App hears the change on return.
+      connect: async (item) => {
+        open(item);
+        return false;
+      },
+      show: async ({ signal }) => {
+        dismissals.reset();
+        forced = true;
+        await load(signal);
+        return render();
+      },
+    } satisfies NonNullable<SiteBridgeToolHandlers["connections"]>,
+  };
+}
+
+let notifyConnectionsChanged = () => {};
+const connectCard = createConnectCard(() => notifyConnectionsChanged());
+
 const tools: SiteBridgeToolHandlers = {
   catalog: ({ signal }) => timedTool("catalog", {}, signal),
   declarations: ({ signal }) => timedTool("declarations", {}, signal),
@@ -288,6 +400,7 @@ const tools: SiteBridgeToolHandlers = {
   dataChanges: true,
   // Only Sites that follow data changes open the live connection.
   watchDataChanges: () => live?.start(),
+  connections: connectCard.handlers,
 };
 
 /**
@@ -498,4 +611,6 @@ if (frame) {
     if (document.visibilityState === "hidden") flushTimings();
   });
   live = createLive((change) => host.notifyDataChanged(change));
+  notifyConnectionsChanged = () => host.notifyToolReadiness();
+  connectCard.start();
 }
