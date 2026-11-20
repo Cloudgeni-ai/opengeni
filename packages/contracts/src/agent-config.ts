@@ -628,6 +628,31 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
 export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIES;
 
 /**
+ * Which base runtime tools every request of a session carries, frozen per
+ * session (`sessions.first_request_tools_revision`, migration 1513) so a
+ * running session's tool block never changes. Revision 0, every session that
+ * existed before it, keeps `list_models` and `privacy_facts` in every request.
+ * From revision 1 those rarely used tools are found through tool search by
+ * name like any deferred tool, but only on a turn that has the search router
+ * for other tools anyway: they never bring the router on their own.
+ */
+export const CURRENT_FIRST_REQUEST_TOOLS_REVISION = 1;
+export const RARELY_USED_RUNTIME_TOOL_NAMES = [
+  "list_models",
+  "privacy_facts",
+] as const satisfies readonly AgentFunctionToolName[];
+
+/** True when a session of this revision finds the rarely used runtime tools through search. */
+export function rarelyUsedRuntimeToolsSearchable(firstRequestToolsRevision: number): boolean {
+  return firstRequestToolsRevision >= 1;
+}
+
+/** True for a rarely used runtime tool (see RARELY_USED_RUNTIME_TOOL_NAMES). */
+export function isRarelyUsedRuntimeToolName(name: string): boolean {
+  return (RARELY_USED_RUNTIME_TOOL_NAMES as readonly string[]).includes(name);
+}
+
+/**
  * Value-free snapshot of the adapters actually selected for one runtime build.
  * Undefined means attachment has not been resolved, not that media is absent.
  * Subscription pool readiness is not evidence for either adapter.

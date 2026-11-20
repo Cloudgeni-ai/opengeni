@@ -66,6 +66,9 @@ const COPIED = [
   // The fork's first request repeats the source's history, so it keeps the
   // source's search-record form (docs/web-search.md).
   "search_records_as_input",
+  // Likewise its tool block: the fork's requests carry the source's
+  // first-request tools (migration 1513).
+  "first_request_tools_revision",
   // The agent a chat was started for and the revision in its prompt
   // (migration 1244, docs/agents.md): a fork is a chat with the same agent.
   "agent_id",
@@ -399,6 +402,7 @@ async function configuredSource(org: Org) {
   await shared.admin`update sessions set keep_live = true, title = 'Release plan',
     title_source = 'user', description = 'Owns the release checklist',
     search_records_as_input = true,
+    first_request_tools_revision = 1,
     agent_id = ${crypto.randomUUID()}, agent_prompt_revision = 1,
     avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
     where id = ${session.id}`;
@@ -519,6 +523,7 @@ describe("a fork is the same agent as its source", () => {
       "instructions",
       "max_nested_agent_depth_override",
       "search_records_as_input",
+      "first_request_tools_revision",
       "agent_id",
       "agent_prompt_revision",
     ]) {

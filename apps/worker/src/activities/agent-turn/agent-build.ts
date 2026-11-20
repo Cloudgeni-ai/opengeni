@@ -202,6 +202,8 @@ export type BuildTurnAgentDeps = {
   toolRouterInHistory: boolean;
   /** False when nothing this attempt attaches is deferred (see turnToolRouterExpected). */
   toolRouterExpected: boolean;
+  /** The session's frozen first-request tools revision (settleSessionFirstRequestToolsRevision). */
+  firstRequestToolsRevision: number;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -270,6 +272,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     promptToolAvailability,
     toolRouterInHistory,
     toolRouterExpected,
+    firstRequestToolsRevision,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -921,6 +924,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               ...(toolRouterExpected ? {} : { toolRouterExpected: false }),
             }
           : {}),
+        ...(firstRequestToolsRevision > 0 ? { firstRequestToolsRevision } : {}),
         ...(agentPrompt?.instructions ? { agentInstructions: agentPrompt.instructions } : {}),
         ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
         ...(session.agent && promptToolAvailability

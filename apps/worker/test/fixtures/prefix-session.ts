@@ -574,6 +574,10 @@ export function prefixChat(wire: Wire) {
         : []),
       spyOn(db, "persistAttemptToolCatalog").mockImplementation(async (_db, catalog) => catalog),
       spyOn(db, "cancelQueuedCodemodeOperationsForAttempt").mockResolvedValue(0),
+      // A new chat pins its tool revision before the first model request.
+      spyOn(db, "settleSessionFirstRequestToolsRevision").mockResolvedValue(
+        contracts.CURRENT_FIRST_REQUEST_TOOLS_REVISION,
+      ),
     ];
     const runtime = {
       // Model the first-party API's token-scoped tools/list, as the
