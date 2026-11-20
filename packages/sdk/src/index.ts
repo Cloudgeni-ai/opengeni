@@ -1,4 +1,12 @@
 export type {
+  AppPackage,
+  AppPackageExportRequest,
+  AppPackageExportResponse,
+  AppPackageInstallRequest,
+  AppPackageInstallResponse,
+  AppPackageProblem,
+} from "@opengeni/contracts";
+export type {
   ModelDecisionRequest,
   ModelDecisionResponse,
   DecisionQuestion,

@@ -5,6 +5,12 @@ import type {
   ModelDecisionResponse,
 } from "@opengeni/contracts";
 import type {
+  AppPackageExportRequest,
+  AppPackageExportResponse,
+  AppPackageInstallRequest,
+  AppPackageInstallResponse,
+} from "@opengeni/contracts";
+import type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
   ListBillingCreditNotificationsResponse,
@@ -10259,6 +10265,37 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/duplicate`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** One package file of an app's current version (docs/app-packages.md). */
+  async exportAppPackage(
+    workspaceId: string,
+    appId: string,
+    request: AppPackageExportRequest = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageExportResponse> {
+    return await this.requestJson<AppPackageExportResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(appId)}/package`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Installs a package file as a new app in this workspace (docs/app-packages.md). */
+  async installAppPackage(
+    workspaceId: string,
+    request: AppPackageInstallRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageInstallResponse> {
+    return await this.requestJson<AppPackageInstallResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-packages/install`,
       request,
       undefined,
       options,
