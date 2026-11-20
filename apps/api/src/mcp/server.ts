@@ -114,6 +114,7 @@ import {
   SessionCreateConnectionSelectionUnavailableError,
   beginRigChangeVerificationAttempt,
   getSession,
+  getSessionAgentMemoryState,
   getScheduledTaskRevisionAuthoritySubject,
   getSessionGoal,
   getSessionMcpMonitoringSummary,
@@ -7033,17 +7034,30 @@ function registerWorkspaceOrchestrationTools(
           // Delegation by name: the child is a chat with that agent.
           let delegated: { agentId: string; instructions?: string } | null = null;
           if (agentName !== undefined) {
+            // The child inherits the calling chat's privacy; its Memory
+            // guidance must match what the knowledge tools will allow.
+            const caller =
+              callerSessionId !== null
+                ? ((
+                    await getSessionAgentMemoryState(deps.db, {
+                      workspaceId: grant.workspaceId,
+                      sessionId: callerSessionId,
+                    })
+                  )?.chat ?? null)
+                : null;
             const resolved = await resolveDelegationAgent(
               deps,
               grant,
               grant.workspaceId,
               agentName,
+              caller,
             );
             if (!resolved.ok) return agentDelegationFailureResult(resolved.code, resolved.message);
             const instructions = delegatedChatInstructions(resolved.agent, {
               instructions: request.instructions,
-              ownerSubjectId: grant.subjectId ?? null,
-              private: false,
+              ownerSubjectId: caller?.ownerSubjectId ?? grant.subjectId ?? null,
+              private: caller?.private ?? false,
+              memoryOff: request.memoryScope === "off" || (caller?.memoryOff ?? false),
             });
             delegated = {
               agentId: resolved.agent.id,

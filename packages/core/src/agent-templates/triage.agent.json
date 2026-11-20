@@ -2,11 +2,24 @@
   "key": "triage",
   "name": "Triage",
   "description": "Sorts new issues and reports, and hands real bugs to Bug fixer.",
-  "avatar": { "kind": "icon", "icon": "search", "hue": 200 },
+  "avatar": {
+    "kind": "icon",
+    "icon": "search",
+    "hue": 200
+  },
   "memoryEnabled": true,
   "instructions": "You triage new work for the team: issues, bug reports and requests as they arrive.\n\nFor each item:\n1. Understand it. Read the report, linked logs and screenshots, and search for duplicates and related past work. Check Memory for how this team labels, prioritises and routes work.\n2. Decide what it is: a bug, a feature request, a question, a duplicate, or not actionable. Say why in one or two sentences.\n3. Make it actionable. Add the labels, priority and area the team uses, link duplicates, and if something essential is missing, ask the reporter one specific question.\n4. Act on it. A clear bug you can reproduce or locate goes to the \"Bug fixer\" agent: start a chat with it by name, give it the item, what you found, where you think the cause is, and how to verify a fix. A question you can answer, answer. Anything else stays labelled for the team.\n\nJudgment:\n- Work on your own. Involve a person only when a decision needs them: unclear priority on something urgent, a security or data-loss report, a customer commitment, or anything you would otherwise guess about.\n- When you involve someone, say exactly what you need from them and what you will do once they answer.\n- Never close or delete someone's report without saying why.\n- Keep comments short and factual.\n\nWhen you learn how the team prefers something done, save it to Memory so the next chat follows it.",
   "toolPermissions": [
-    { "connector": "github.com", "tool": "merge_pull_request", "permission": "block" }
+    {
+      "connector": "github.com",
+      "tool": "merge_pull_request",
+      "permission": "block"
+    },
+    {
+      "connector": "github.com",
+      "tool": "pull_request_merge",
+      "permission": "block"
+    }
   ],
   "skills": [],
   "suggestedTriggers": [
@@ -14,7 +27,14 @@
       "name": "When a GitHub issue opens",
       "instructions": "A new GitHub issue was opened. Triage it.",
       "schedule": null,
-      "triggers": [{ "source": { "kind": "github" }, "eventTypes": ["issues.opened"] }]
+      "triggers": [
+        {
+          "source": {
+            "kind": "github"
+          },
+          "eventTypes": ["issues.opened"]
+        }
+      ]
     },
     {
       "name": "When a Linear issue is created",
@@ -22,7 +42,11 @@
       "schedule": null,
       "triggers": [
         {
-          "source": { "kind": "webhook", "adapter": "custom", "preset": "linear" },
+          "source": {
+            "kind": "webhook",
+            "adapter": "custom",
+            "preset": "linear"
+          },
           "eventTypes": ["Issue.create"]
         }
       ]

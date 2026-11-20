@@ -8770,7 +8770,6 @@ export class OpenGeniClient {
     return response.agent;
   }
 
-  /** Deletes the agent. Its chats stay and continue as ordinary chats. */
   /** Ready-made agents people can add ("Add an agent"). */
   async listAgentTemplates(workspaceId: string): Promise<AgentTemplate[]> {
     const response = await this.requestJson<ListAgentTemplatesResponse>(
@@ -8794,6 +8793,7 @@ export class OpenGeniClient {
     return response.agent;
   }
 
+  /** Deletes the agent. Its chats stay and continue as ordinary chats. */
   async deleteAgent(workspaceId: string, agentId: string): Promise<DeleteAgentResponse> {
     return await this.requestJson<DeleteAgentResponse>(
       "DELETE",

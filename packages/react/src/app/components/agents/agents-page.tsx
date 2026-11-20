@@ -295,18 +295,31 @@ function AgentGallery({
 }) {
   const { client } = useAppContext();
   const [templates, setTemplates] = useState<AgentTemplate[] | null>(null);
+  // Ready-made agents anyone here already added, whatever the list's filter.
+  const [addedHere, setAddedHere] = useState<ReadonlySet<string>>(new Set());
   const [adding, setAdding] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    client.listAgentTemplates(workspaceId).then(
-      (list) => live && setTemplates(list),
+    Promise.all([
+      client.listAgentTemplates(workspaceId),
+      client.listAgents(workspaceId).catch(() => []),
+    ]).then(
+      ([list, agents]) => {
+        if (!live) return;
+        setAddedHere(
+          new Set(agents.flatMap((agent) => (agent.templateKey ? [agent.templateKey] : []))),
+        );
+        setTemplates(list);
+      },
       () => live && setTemplates([]),
     );
     return () => {
       live = false;
     };
   }, [client, workspaceId]);
-  const offered = (templates ?? []).filter((template) => !added.has(template.key));
+  const offered = (templates ?? []).filter(
+    (template) => !added.has(template.key) && !addedHere.has(template.key),
+  );
   if (offered.length === 0) return null;
   const add = async (template: AgentTemplate) => {
     setAdding(template.key);

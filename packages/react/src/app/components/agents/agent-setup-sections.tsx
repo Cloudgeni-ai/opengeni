@@ -207,12 +207,14 @@ function ConnectorCanUse({
   workspaceId,
   item,
   rules,
+  saving,
   onChange,
 }: {
   agent: Agent;
   workspaceId: string;
   item: CapabilityCatalogItem;
   rules: readonly AgentToolPermissionRule[];
+  saving: boolean;
   onChange: (rules: AgentToolPermissionRule[]) => void;
 }) {
   const { client } = useAppContext();
@@ -229,7 +231,7 @@ function ConnectorCanUse({
       () => setTools([]),
     );
   }, [client, item.id, open, tools, workspaceId]);
-  const disabled = !agent.viewer.canEdit;
+  const disabled = !agent.viewer.canEdit || saving;
   return (
     <SettingRow
       data-agent-can-use={connector}
@@ -303,13 +305,23 @@ export function AgentCanUse({
       live = false;
     };
   }, [client, workspaceId]);
-  const save = (rules: AgentToolPermissionRule[]) =>
-    client
-      .updateAgent(workspaceId, agent.id, {
-        expectedVersion: agent.version,
-        toolPermissions: rules,
-      })
-      .then(onSaved, (error: unknown) => saveError("Couldn't change what it can use", error));
+  // One change at a time: each saves at the version the last one returned.
+  const [saving, setSaving] = useState(false);
+  const save = async (rules: AgentToolPermissionRule[]) => {
+    setSaving(true);
+    try {
+      onSaved(
+        await client.updateAgent(workspaceId, agent.id, {
+          expectedVersion: agent.version,
+          toolPermissions: rules,
+        }),
+      );
+    } catch (error) {
+      saveError("Couldn't change what it can use", error);
+    } finally {
+      setSaving(false);
+    }
+  };
   // Rules for connections not listed here (another person's, or not set up
   // yet, such as a ready-made agent's suggestion) still show and can go.
   const listed = useMemo(() => new Set((items ?? []).map(agentConnectorKey)), [items]);
@@ -329,6 +341,7 @@ export function AgentCanUse({
           workspaceId={workspaceId}
           item={item}
           rules={agent.toolPermissions}
+          saving={saving}
           onChange={(rules) => void save(rules)}
         />
       ))}
@@ -341,7 +354,7 @@ export function AgentCanUse({
             <PermissionSelect
               label={`${rule.connector}: ${rule.tool}`}
               value={rule.permission}
-              disabled={!agent.viewer.canEdit}
+              disabled={!agent.viewer.canEdit || saving}
               resetLabel="Remove"
               onChange={(permission) =>
                 void save(
@@ -399,7 +412,9 @@ function MemoryEntryRow({
       const receipt = await client.saveKnowledgeEntry(workspaceId, {
         operationId: crypto.randomUUID(),
         entryId: entry.id,
-        expectedVersion: full.version,
+        // The version read when editing started: a change made since is
+        // reported, never overwritten.
+        expectedVersion: version,
         entry: {
           title: full.revision.entry.title,
           kind: full.revision.entry.kind,
@@ -538,27 +553,48 @@ export function AgentSkills({
 }) {
   const { client } = useAppContext();
   const navigate = useNavigate();
-  const [names, setNames] = useState<string[] | null>(null);
+  const [names, setNames] = useState<{ key: string; title: string }[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!adding || names !== null) return;
     // The workspace's own and installed Skills; Opengeni's built-in ones are not listed.
     client.listWorkspaceSkills(workspaceId, { limit: 200 }).then(
-      (list) => setNames(list.skills.map((skill) => skill.stableKey)),
+      (list) =>
+        setNames(
+          list.skills.map((skill) => ({
+            key: skill.stableKey,
+            title: skill.title ?? skill.stableKey,
+          })),
+        ),
       () => setNames([]),
     );
   }, [adding, client, names, workspaceId]);
-  const save = (skills: { name: string }[]) =>
-    client
-      .updateAgent(workspaceId, agent.id, { expectedVersion: agent.version, skills })
-      .then(onSaved, (error: unknown) => saveError("Couldn't change its Skills", error));
+  const save = async (skills: { name: string }[]) => {
+    setSaving(true);
+    try {
+      onSaved(
+        await client.updateAgent(workspaceId, agent.id, { expectedVersion: agent.version, skills }),
+      );
+    } catch (error) {
+      saveError("Couldn't change its Skills", error);
+    } finally {
+      setSaving(false);
+    }
+  };
   const listed = new Set(agent.skills.map((skill) => skill.name));
   return (
     <DetailSection
       title="Skills"
       action={
         agent.viewer.canEdit && !adding ? (
-          <Button type="button" variant="outline" size="sm" onClick={() => setAdding(true)}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={saving}
+            onClick={() => setAdding(true)}
+          >
             <PlusIcon />
             Add
           </Button>
@@ -566,7 +602,9 @@ export function AgentSkills({
       }
     >
       {agent.skills.length === 0 && !adding ? (
-        <p className="m-0 text-sm text-fg-muted">Every Skill in the workspace is available.</p>
+        <p className="m-0 text-sm text-fg-muted">
+          Every Skill in the workspace is available. Add the ones it relies on.
+        </p>
       ) : null}
       {agent.skills.length > 0 ? (
         <ul className="m-0 flex list-none flex-wrap gap-2 p-0">
@@ -590,6 +628,7 @@ export function AgentSkills({
                   variant="ghost"
                   size="icon-sm"
                   aria-label={`Remove ${skill.name}`}
+                  disabled={saving}
                   onClick={() =>
                     void save(agent.skills.filter((entry) => entry.name !== skill.name))
                   }
@@ -609,8 +648,8 @@ export function AgentSkills({
           value=""
           placeholder={names === null ? "Loading…" : "Choose a Skill"}
           options={(names ?? [])
-            .filter((name) => !listed.has(name))
-            .map((name) => ({ value: name, label: name }))}
+            .filter((skill) => !listed.has(skill.key))
+            .map((skill) => ({ value: skill.key, label: skill.title }))}
           onValueChange={(name) => {
             setAdding(false);
             if (name) void save([...agent.skills, { name }]);

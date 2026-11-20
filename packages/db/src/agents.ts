@@ -1416,30 +1416,44 @@ function nearestSessionAgentIdSql(workspaceId: string, sessionId: string): SQL {
 }
 
 /**
- * The agent whose Can use rules govern a chat's tool calls: its own, or the
- * nearest chat above it with one. Null for an ordinary chat or when that
- * agent was deleted.
+ * Every agent up a chat's chain (its own, then each chat above it with one),
+ * nearest first. Can use applies the strictest of their rules, so handing
+ * work to another agent never drops a restriction set on the caller.
  */
-export async function getEffectiveSessionAgent(
+export async function getSessionAgentChain(
   db: Database,
   input: { workspaceId: string; sessionId: string },
-): Promise<AgentRecord | null> {
-  const row = await withWorkspaceRls(db, input.workspaceId, async (tx) => {
-    const [found] = await rawRows<{ account_id: string; agent_id: string | null }>(
+): Promise<AgentRecord[]> {
+  const rows = await withWorkspaceRls(db, input.workspaceId, async (tx) =>
+    rawRows<{ account_id: string; agent_id: string }>(
       tx,
-      sql`select s.account_id::text as account_id,
-          ${nearestSessionAgentIdSql(input.workspaceId, input.sessionId)}::text as agent_id
-        from sessions s
-        where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
-    );
-    return found ?? null;
-  });
-  if (!row?.agent_id || !AGENT_ID_PATTERN.test(row.agent_id)) return null;
-  return await getAgent(
-    db,
-    { accountId: row.account_id, workspaceId: input.workspaceId },
-    row.agent_id,
+      sql`with recursive chain(id, parent_id, account_id, agent_id, depth) as (
+          select s.id, s.parent_session_id, s.account_id, ${sessionAgentIdSql(sql.raw("s"))}, 0
+          from sessions s
+          where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid
+          union all
+          select p.id, p.parent_session_id, p.account_id, ${sessionAgentIdSql(sql.raw("p"))}, c.depth + 1
+          from chain c
+          join sessions p on p.workspace_id = ${input.workspaceId}::uuid and p.id = c.parent_id
+          where c.depth < 16
+        )
+        select account_id::text as account_id, agent_id::text as agent_id
+        from chain where agent_id is not null order by depth`,
+    ),
   );
+  const agents: AgentRecord[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.agent_id) || !AGENT_ID_PATTERN.test(row.agent_id)) continue;
+    seen.add(row.agent_id);
+    const agent = await getAgent(
+      db,
+      { accountId: row.account_id, workspaceId: input.workspaceId },
+      row.agent_id,
+    );
+    if (agent) agents.push(agent);
+  }
+  return agents;
 }
 
 /**

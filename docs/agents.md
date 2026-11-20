@@ -527,18 +527,24 @@ whole.
   stricter: **Ask first** and **Block** raise the decision the connection's
   own tool permissions give (`minimumDecision` on the connector action
   ledger), and **Allow** follows the connection. They apply to every call
-  that goes through the connector action policy: native connectors (GitHub),
-  MCP servers, gateway (Codemode) calls and Codex Apps, which now goes
-  through the same approvals with a default of Allow. A blocked tool is
-  refused with a reason, not hidden. The chat's agent is its own, or the
-  nearest chat above it with one, so an agent's workers follow its Can use
-  and a delegated chat follows its own agent's. In an unattended run Ask
-  first refuses the call, as approvals do there.
+  that goes through the connector action policy: native connectors,
+  Opengeni's own GitHub tools (`github_app`, `github_personal`, which a
+  `github.com` rule names), MCP servers, gateway (Codemode) calls and Codex
+  Apps, which now goes through the same approvals with a default of Allow. A
+  blocked tool is refused with a reason, not hidden. A chat follows its own
+  agent and every agent above it, taking the strictest choice: an agent's
+  workers follow its Can use, and a delegated chat follows both its own
+  agent's and the caller's, so handing work over never drops a restriction.
+  In an unattended run Ask first refuses the call, as approvals do there. The
+  page lists the workspace's enabled connections; rules for connections not
+  listed (such as a ready-made agent's GitHub rules) still show and can be
+  changed or removed.
 - **Learns**: **Remember across chats** plus the entries of the agent's
   Memory collection, each editable and removable (Knowledge entry save and
   archive).
-- **Skills**: a short list by name, linked to each Skill. Display only:
-  Skills stay available to every chat.
+- **Skills**: a short list of the Skills it relies on, by name, linked to
+  each Skill. It is a note for the people setting the agent up: every Skill
+  stays available to every chat, so there are no per-Skill switches.
 
 Not in self-hosted deployments without these pieces: Codex Apps rules need
 the Codex Apps deployment flag, Slack lines need the Opengeni Slack app, and
@@ -555,7 +561,8 @@ adds one as an ordinary agent with `templateKey` set (SDK
 Triage, Bug fixer and PR reviewer, general for any software team, with
 Instructions written for autonomy with judgment (pick up work, fix it, and
 involve a person only when a decision needs one), suggested Can use rules
-(none merges a pull request) and suggested triggers. Suggested triggers are
+(each blocks merging a pull request, through a GitHub connection or
+Opengeni's own GitHub tools) and suggested triggers. Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`)
 so the person picks the repository or source and saves. Ready-made agents
@@ -568,9 +575,12 @@ An agent hands work to another agent of the same workspace by name or id:
 `resolveDelegationAgent` in `apps/api/src/agent-delegation.ts`, which an
 outside agent's `delegate` tool reuses). The child is bound to that agent
 (Instructions, Memory guidance, Can use) and its final answer returns to the
-caller like any worker's. Who can use the agent is checked for the person the
-calling chat acts for: an Only me agent only for its owner in Only me chats,
-and from an open Slack chat only agents anyone in the organization can use.
+caller like any worker's. The child keeps the calling chat's privacy, and
+its Memory guidance matches it. Who can use the agent is checked for the
+person the calling chat acts for: an Only me agent only for its owner in Only
+me chats (a shared chat considers shared agents only), and from an open Slack
+chat only agents anyone in the organization can use. The caller's Can use
+still applies in the child (see Can use above).
 A name two agents share is refused with `agent_name_ambiguous` and their ids;
 an unknown one with `agent_not_found`. Delegated chats keep the nested agent
 depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer".

@@ -14,11 +14,15 @@ describe("ready-made agents", () => {
     for (const template of agentTemplates()) {
       expect(template.instructions.length).toBeGreaterThan(200);
       expect(template.suggestedTriggers.length).toBeGreaterThan(0);
-      expect(
-        template.toolPermissions.some(
-          (rule) => rule.tool === "merge_pull_request" && rule.permission === "block",
-        ),
-      ).toBe(true);
+      // Both an outside GitHub connection's merge tool and Opengeni's own.
+      for (const tool of ["merge_pull_request", "pull_request_merge"]) {
+        expect(
+          template.toolPermissions.some(
+            (rule) =>
+              rule.connector === "github.com" && rule.tool === tool && rule.permission === "block",
+          ),
+        ).toBe(true);
+      }
     }
   });
 

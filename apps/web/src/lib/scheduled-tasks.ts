@@ -339,6 +339,8 @@ export function formStateFromScheduledTask(
     ...(task.agentConfig.agent?.capabilities !== undefined
       ? { agentCapabilities: task.agentConfig.agent.capabilities }
       : {}),
+    // The agent each run starts a chat with; continuing a chat drops it.
+    ...(task.agentConfig.agentId ? { agentId: task.agentConfig.agentId } : {}),
   };
 }
 
@@ -482,6 +484,7 @@ export function agentConfigFromFormState(
     slackBotConnectionId: _bot,
     slackBotChannelId: _channel,
     agent: _agent,
+    agentId: _agentId,
     // Pins travel as their own request field, never inside the config.
     pinnedAccounts: _pins,
     pinnedAccountsRequired: _pinsRequired,
@@ -491,6 +494,7 @@ export function agentConfigFromFormState(
     pinnedAccounts: undefined,
     pinnedAccountsRequired: undefined,
     toolPolicy: undefined,
+    agentId: undefined,
     ...existingTask?.agentConfig,
   };
   const agent =

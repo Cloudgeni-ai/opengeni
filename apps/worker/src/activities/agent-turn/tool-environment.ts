@@ -36,7 +36,7 @@ import {
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
-  getEffectiveSessionAgent,
+  getSessionAgentChain,
   readPreparedBotMessage,
   resolveAttemptConnectorToolDecision,
   getSessionChainRoot,
@@ -869,24 +869,22 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
-  // The agent this chat runs as (its own, or the nearest chat above it with
-  // one): its Can use rules raise every connector call's decision, whatever
-  // the connection type. Read once per attempt; a top-level chat without an
-  // agent has none to read.
-  const canUseAgent =
+  // The agents this chat runs under (its own, and each chat above it with
+  // one): the strictest of their Can use rules raises every connector call's
+  // decision, whatever the connection type. Read once per attempt; a
+  // top-level chat without an agent has none to read.
+  const canUseAgents =
     session.agentId || session.rootSessionId !== session.id
-      ? await getEffectiveSessionAgent(db, {
+      ? await getSessionAgentChain(db, {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
         })
-      : null;
-  const agentCanUse = canUseAgent
-    ? agentCanUseFor({
-        rules: agentToolPermissionsOf(canUseAgent),
-        bindings: turn.mcpAccountBindings,
-        servers: canonicalRunSettings.mcpServers,
-      })
-    : null;
+      : [];
+  const agentCanUse = agentCanUseFor({
+    ruleSets: canUseAgents.map((agent) => agentToolPermissionsOf(agent)),
+    bindings: turn.mcpAccountBindings,
+    servers: canonicalRunSettings.mcpServers,
+  });
   const appActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
     {
       preview: async (call) =>

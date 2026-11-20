@@ -29,22 +29,29 @@ export type DelegationAgentOutcome =
   | { ok: true; agent: AgentRecord }
   | { ok: false; code: AgentErrorCode; message: string };
 
+/** The calling chat's privacy, which the delegated chat inherits. */
+export type DelegationCallerChat = { private: boolean; ownerSubjectId: string | null };
+
 /**
  * The agent a delegation names, as the person the grant acts for may use it.
  * An open Slack chat acts for someone outside the workspace: only agents
- * anyone in the organization can use are reachable from it.
+ * anyone in the organization can use are reachable from it. A shared calling
+ * chat makes a shared child, which can't run an Only me agent, so only shared
+ * agents are considered (and an ambiguous name never lists Only me ones).
  */
 export async function resolveDelegationAgent(
   deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
   workspaceId: string,
   ref: string,
+  caller?: DelegationCallerChat | null,
 ): Promise<DelegationAgentOutcome> {
   const openUse = isOpenSlackAgentSubject(grant.subjectId);
+  const sharedChild = caller ? !caller.private : false;
   const outcome = await resolveWorkspaceAgentRef(
     deps.db,
     { accountId: grant.accountId, workspaceId },
-    { ref, viewerSubjectId: openUse ? null : (grant.subjectId ?? null) },
+    { ref, viewerSubjectId: openUse || sharedChild ? null : (grant.subjectId ?? null) },
   );
   if (outcome.kind === "ambiguous") {
     return {
@@ -70,14 +77,19 @@ export async function resolveDelegationAgent(
  */
 export function delegatedChatInstructions(
   agent: AgentRecord,
-  input: { instructions: string | undefined; ownerSubjectId: string | null; private: boolean },
+  input: {
+    instructions: string | undefined;
+    ownerSubjectId: string | null;
+    private: boolean;
+    memoryOff?: boolean;
+  },
 ): string | undefined {
   if (!agent.memoryEnabled) return input.instructions;
   const guidance = agentMemoryGuidance(
     agentMemoryAccess(agent, {
       private: input.private,
       ownerSubjectId: input.ownerSubjectId,
-      memoryOff: false,
+      memoryOff: input.memoryOff ?? false,
     }),
   );
   if (!guidance) return input.instructions;

@@ -1002,6 +1002,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createAgentFromTemplate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
+    "request": [
+      "CreateAgentFromTemplateRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "createApiKey",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/api-keys",
@@ -2871,13 +2883,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "GET",
     "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/agent-templates",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/agent-templates",
     "request": [],
     "response": []
   },
@@ -5495,6 +5500,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAgentTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-templates",
+    "request": [],
+    "response": [
+      "AgentTemplate",
+      "ListAgentTemplatesResponse"
+    ]
+  },
+  {
     "id": "listAgentTopology",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-topology",
@@ -7637,15 +7652,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "secretFields": [
       "response.userCode"
     ]
-  },
-  {
-    "id": "POST /v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
-    "request": [
-      "CreateAgentFromTemplateRequest"
-    ],
-    "response": []
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/chat/completions",

@@ -7,7 +7,8 @@ missing access. There is no additional host, embedder or organization policy flo
 The one floor is an agent's Can use ([agents](agents.md)): in that agent's
 chats, its Ask first or Block raises the resolved decision (`minimumDecision`
 on the connector action ledger) and never lowers it; its Allow follows the
-connection's choice.
+connection's choice. A chat under several agents (one delegated to another)
+takes the strictest of their choices.
 
 ## Ownership and compatibility
 

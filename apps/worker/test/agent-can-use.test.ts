@@ -13,13 +13,13 @@ const call = {
 
 describe("agent Can use", () => {
   test("no rules means no floor", () => {
-    expect(agentCanUseFor({ rules: [], bindings: [], servers: [] })).toBeNull();
+    expect(agentCanUseFor({ ruleSets: [[]], bindings: [], servers: [] })).toBeNull();
     expect(withAgentCanUse(null, call)).toBe(call);
   });
 
   test("a gateway route resolves to its provider domain", () => {
     const canUse = agentCanUseFor({
-      rules: [{ connector: "gmail.com", tool: "send_email", permission: "ask" }],
+      ruleSets: [[{ connector: "gmail.com", tool: "send_email", permission: "ask" }]],
       bindings: [
         {
           serverId: "route-gmail-1",
@@ -35,7 +35,7 @@ describe("agent Can use", () => {
 
   test("a configured server's domain comes from its connection", () => {
     const canUse = agentCanUseFor({
-      rules: [{ connector: "linear.app", tool: "*", permission: "block" }],
+      ruleSets: [[{ connector: "linear.app", tool: "*", permission: "block" }]],
       bindings: null,
       servers: [{ id: "linear", connectionRef: { providerDomain: "linear.app" } }],
     })!;
@@ -49,13 +49,13 @@ describe("agent Can use", () => {
 
   test("Allow follows the connection and Block is never weakened", () => {
     const allow = agentCanUseFor({
-      rules: [{ connector: "*", tool: "*", permission: "allow" }],
+      ruleSets: [[{ connector: "*", tool: "*", permission: "allow" }]],
       bindings: [],
       servers: [],
     })!;
     expect(withAgentCanUse(allow, call)).toBe(call);
     const ask = agentCanUseFor({
-      rules: [{ connector: "*", tool: "*", permission: "ask" }],
+      ruleSets: [[{ connector: "*", tool: "*", permission: "ask" }]],
       bindings: [],
       servers: [],
     })!;
@@ -66,7 +66,7 @@ describe("agent Can use", () => {
 
   test("a call without a connection gets one to record the decision on", () => {
     const canUse = agentCanUseFor({
-      rules: [{ connector: "*", tool: "*", permission: "block" }],
+      ruleSets: [[{ connector: "*", tool: "*", permission: "block" }]],
       bindings: [],
       servers: [],
     })!;
@@ -76,5 +76,36 @@ describe("agent Can use", () => {
     });
     expect(result.connectionId).toBe("agent-can-use:route-gmail-1");
     expect(result.minimumDecision).toBe("block");
+  });
+
+  test("a github.com rule covers Opengeni's own GitHub tools", () => {
+    const canUse = agentCanUseFor({
+      ruleSets: [[{ connector: "github.com", tool: "pull_request_merge", permission: "block" }]],
+      bindings: [],
+      servers: [],
+    })!;
+    for (const serverId of ["github_app", "github_personal"]) {
+      expect(agentCanUseDecision(canUse, { serverId, toolName: "pull_request_merge" })).toBe(
+        "block",
+      );
+    }
+  });
+
+  test("delegating never drops the caller's restrictions: the strictest agent wins", () => {
+    const canUse = agentCanUseFor({
+      ruleSets: [
+        // The delegated agent allows sending and asks for nothing else.
+        [{ connector: "slack.com", tool: "send_message", permission: "allow" }],
+        // The calling agent blocks all of Slack.
+        [{ connector: "slack.com", tool: "*", permission: "block" }],
+      ],
+      bindings: [
+        { serverId: "route-slack", canonicalServerId: "slack", providerDomain: "slack.com" },
+      ],
+      servers: [],
+    })!;
+    expect(agentCanUseDecision(canUse, { serverId: "route-slack", toolName: "send_message" })).toBe(
+      "block",
+    );
   });
 });
