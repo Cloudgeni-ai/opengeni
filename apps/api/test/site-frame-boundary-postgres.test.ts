@@ -1413,7 +1413,7 @@ test("a conversation started in the console's Site view begins knowing its Site;
     versionId: site.versionId,
     revision: 1,
   });
-  expect(expected).toContain(`Site id ${site.siteId}`);
+  expect(expected).toContain(`App id ${site.siteId}`);
   expect(await initialContext(await f.startSession(siteView))).toBe(expected);
   // Site code (the bridge always marks its requests) and ordinary chats get none.
   expect(await initialContext(await f.startSession(site.frame("frame-a")))).toBeNull();

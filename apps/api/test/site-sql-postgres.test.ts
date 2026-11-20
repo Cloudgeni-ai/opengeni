@@ -1130,7 +1130,7 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
   expect(
     Object.keys(
       (bare as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
-    ).filter((name) => name.startsWith("site_sql_")),
+    ).filter((name) => name.startsWith("app_sql_")),
   ).toEqual([]);
 }, 120_000);
 

@@ -879,7 +879,7 @@ test("a public Site on a login-only deployment carries a sign-in notice in its p
   expect(opened.json.warnings).toEqual([
     expect.objectContaining({
       code: "public_sign_in_required",
-      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      message: "On this deployment, public apps still ask visitors to sign in to Opengeni.",
       fix: null,
     }),
   ]);
@@ -1656,7 +1656,7 @@ test("published page tools: a saved Allow makes a recommended-Ask connection too
       });
     const asked = await invokeAsked();
     expect(asked.status, JSON.stringify(asked.json)).toBe(409);
-    expect(asked.json.error.message).toBe("Open this Site in Opengeni to confirm this action.");
+    expect(asked.json.error.message).toBe("Open this app in Opengeni to confirm this action.");
     expect(asked.json.error.details.code).toBe("site_tool_consent_requires_opengeni");
     expect(f.provider.calls).toHaveLength(2);
     // Another person's allowance, or one for another connection, changes nothing.
@@ -3093,7 +3093,7 @@ test("abuse reports and flagged scans reach the platform, at most once an hour p
     {
       kind: "site_abuse_notice",
       to: "abuse@example.test",
-      subject: `[Opengeni Sites] An abuse report: ${site.host}`,
+      subject: `[Opengeni apps] An abuse report: ${site.host}`,
     },
   ]);
 }, 60_000);
@@ -4082,7 +4082,7 @@ test("an assistant the workspace can't pay for is unavailable to outsiders, not 
   };
   const unavailable = (refused: { status: number; json: any }, reason: string) => {
     expect(refused.status, JSON.stringify(refused.json)).toBe(403);
-    expect(refused.json.error.message).toBe("This Site's assistant isn't available right now");
+    expect(refused.json.error.message).toBe("This app's assistant isn't available right now");
     expect(refused.json.error.details).toMatchObject({
       code: "not_available_for_viewer",
       feature: "agent",

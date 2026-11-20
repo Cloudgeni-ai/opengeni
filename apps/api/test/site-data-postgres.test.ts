@@ -1000,12 +1000,12 @@ test("an agent defines and feeds a collection the way a schedule would", async (
     expect(own.isError, JSON.stringify(own.value)).toBe(false);
     expect(own.value.count).toBe(4);
     const listed = (await mcp.listTools()).tools;
-    const upload = listed.find((tool) => tool.name === "site_files_upload")!;
+    const upload = listed.find((tool) => tool.name === "app_files_upload")!;
     expect(JSON.stringify(upload.inputSchema)).toContain(
-      "only the uploader and the Site's managers",
+      "only the uploader and the app's managers",
     );
     expect(
-      (listed.find((tool) => tool.name === "site_data_query")!.inputSchema as any).properties.scope,
+      (listed.find((tool) => tool.name === "app_data_query")!.inputSchema as any).properties.scope,
     ).toBeDefined();
     const described = await callTool("site_data_describe", { siteId: created.id });
     expect(described.value.collections[0]).toMatchObject({ name: "companies", recordCount: 4 });

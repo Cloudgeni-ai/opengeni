@@ -628,12 +628,12 @@ test("an agent changes who can see its person's Site, as they can from the Site 
     const hidden = await others.share(id, "workspace");
     expect(hidden).toEqual({
       isError: true,
-      text: "No file or Site you can open has this artifactId.",
+      text: "No file or app you can open has this artifactId.",
     });
     const team = await f.publish("Team page");
     const notOwner = await others.share(team.artifact.id, "private");
     expect(notOwner.isError).toBe(true);
-    expect(notOwner.text).toContain("Only the person who owns this Site");
+    expect(notOwner.text).toContain("Only the person who owns this app");
     expect((await personless.share(team.artifact.id, "private")).isError).toBe(true);
     expect(await f.listIds(f.other)).toEqual([team.artifact.id]);
   } finally {
