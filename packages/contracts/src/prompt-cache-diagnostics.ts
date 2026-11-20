@@ -48,6 +48,11 @@ export type PromptCacheObservation = {
 };
 
 export const PROMPT_CACHE_WARM_MISS_CLASSES = [
+  /**
+   * Long enough since the previous call that the cache may have expired, so
+   * nothing the request changed can be blamed for the miss.
+   */
+  "idle_gap",
   /** The history was replaced (compaction or truncation); a miss is expected. */
   "context_replaced",
   "tools_changed",
@@ -55,7 +60,9 @@ export const PROMPT_CACHE_WARM_MISS_CLASSES = [
   /**
    * The tools or system prompt changed between two deployments: a release
    * that edits model-facing text costs each live session one cold prefix.
-   * The same change within one deployment is tools_changed or system_changed.
+   * A call from a build that recorded no release counts as another
+   * deployment. The same change within one deployment is tools_changed or
+   * system_changed.
    */
   "release_changed",
   /** An item the previous request already sent changed. */
@@ -67,8 +74,6 @@ export const PROMPT_CACHE_WARM_MISS_CLASSES = [
    */
   "thinking_dropped",
   "account_changed",
-  /** Long enough since the previous call that the cache may have expired. */
-  "idle_gap",
   /**
    * A request fingerprint is missing on either call, so a changed prefix
    * cannot be ruled out. A share of these means the diagnostics are blind.
@@ -107,9 +112,14 @@ export type PromptCacheCallSample = {
   observation: PromptCacheObservation | null;
 };
 
-/** Calls further apart than this may have lost the cache to its TTL. */
+/**
+ * Calls further apart than this may have lost the cache to its TTL: the
+ * 5-minute lifetime Opengeni requests by default and OpenAI's in-memory
+ * retention. A deployment that opts Claude into the 1-hour TTL reports a
+ * prefix change after a longer pause as idle_gap, never as a false defect.
+ */
 export const PROMPT_CACHE_IDLE_GAP_MS = 5 * 60_000;
-/** A prompt this much smaller than the previous one had its history replaced. */
+/** A prompt this much smaller (in tokens or items) than the previous one had its history replaced. */
 const CONTEXT_REPLACED_RATIO = 0.6;
 
 function nonNegativeInteger(value: unknown): value is number {
@@ -215,8 +225,10 @@ export function firstDivergentHistoryCheckpoint(
  * the same model in the same session made warm. Returns null when there is no
  * baseline or the call read what a warm cache should serve.
  *
- * Causes the request itself proves (tools, system, history) win over effects
- * (newly dropped thinking) and circumstances (account, time).
+ * Time is checked first: past the cache lifetime the prefix would have expired
+ * anyway, so nothing the request changed cost the miss. Within it, causes the
+ * request itself proves (tools, system, history) win over effects (newly
+ * dropped thinking) and circumstances (account).
  */
 export function classifyPromptCacheWarmMiss(
   previous: PromptCacheCallSample | null,
@@ -231,17 +243,23 @@ export function classifyPromptCacheWarmMiss(
     previousSourceKey: previous.sourceKey,
     gapMs: Math.max(0, current.occurredAt.getTime() - previous.occurredAt.getTime()),
   };
-  if (current.inputTokens < previous.inputTokens * CONTEXT_REPLACED_RATIO)
-    return { class: "context_replaced", ...base };
+  if (base.gapMs > PROMPT_CACHE_IDLE_GAP_MS) return { class: "idle_gap", ...base };
   const before = previous.observation?.request;
   const after = current.observation?.request;
+  // Compaction keeps the tools, the system prompt and a summary, so a large
+  // fixed prefix can keep the prompt above the token ratio; the request's item
+  // count still falls sharply. A system change that compaction brings with it
+  // costs nothing beyond the history it replaced.
+  if (
+    current.inputTokens < previous.inputTokens * CONTEXT_REPLACED_RATIO ||
+    (before && after && after.items < before.items * CONTEXT_REPLACED_RATIO)
+  )
+    return { class: "context_replaced", ...base };
   if (before && after) {
-    const previousRelease = previous.observation?.release;
-    const currentRelease = current.observation?.release;
-    const released =
-      previousRelease !== undefined &&
-      currentRelease !== undefined &&
-      previousRelease !== currentRelease;
+    // Every build that fingerprints a request also records its release, so a
+    // release on only one side means the other call came from an older build:
+    // a deployment boundary. Neither side recording one proves nothing.
+    const released = previous.observation?.release !== current.observation?.release;
     if (before.tools !== after.tools)
       return { class: released ? "release_changed" : "tools_changed", ...base };
     if (before.system !== after.system)
@@ -258,7 +276,6 @@ export function classifyPromptCacheWarmMiss(
     previous.connectionId !== current.connectionId
   )
     return { class: "account_changed", ...base };
-  if (base.gapMs > PROMPT_CACHE_IDLE_GAP_MS) return { class: "idle_gap", ...base };
   if (!before || !after) return { class: "unobserved", ...base };
   return { class: "unexplained", ...base };
 }

@@ -26,6 +26,10 @@ export type AsUserOptions = {
    * Removing a user stays an explicit revoke.
    */
   membership?: ExternalActorStatedMembership;
+  /** Name Console shows for the user, for example "Ada Lovelace". The latest sent wins. */
+  displayName?: string;
+  /** Email Console shows for the user, as given (not verified). The latest sent wins. */
+  email?: string;
 };
 
 function statedMembership(
@@ -41,6 +45,25 @@ function statedMembership(
   )
     throw new Error("Invalid membership: permissions must be a non-empty list of permission names");
   return { permissions: [...new Set(permissions as ExternalActorStatedMembership["permissions"])] };
+}
+
+/**
+ * Display details sent with the user: each a non-blank string, cut to a size
+ * the external actor header always fits. The server bounds and stores them;
+ * a value it cannot use is dropped, never an error.
+ */
+function endUserProfile(options: { displayName?: unknown; email?: unknown }): {
+  displayName?: string;
+  email?: string;
+} {
+  const text = (value: unknown, max: number) =>
+    typeof value === "string" && value.trim().length > 0 ? value.trim().slice(0, max) : undefined;
+  const displayName = text(options.displayName, 512);
+  const email = text(options.email, 512);
+  return {
+    ...(displayName === undefined ? {} : { displayName }),
+    ...(email === undefined ? {} : { email }),
+  };
 }
 
 function hasStaticHeader(options: OpenGeniClientOptions, names: string[]): boolean {
@@ -249,10 +272,17 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
    * each workspace-scoped request states the user's permissions there and the
    * API applies them under the key's member-management authority; without it
    * the stored membership applies. The API verifies key and membership
-   * authority on each request. */
+   * authority on each request. `displayName` and `email` are display details
+   * Console shows for the user (the latest sent wins; omit to keep them);
+   * they never change who the user is. */
   asUser(
     externalId: string,
-    options: { source?: string; membership?: ExternalActorStatedMembership } = {},
+    options: {
+      source?: string;
+      membership?: ExternalActorStatedMembership;
+      displayName?: string;
+      email?: string;
+    } = {},
   ): this {
     if (typeof window !== "undefined")
       throw new Error("asUser is a server-side API; keep organization keys on your backend");
@@ -278,10 +308,11 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
     const client = new Client({ ...this.options });
     client.sessionResponse = this.sessionResponse;
+    const profile = endUserProfile(options);
     client.externalActorHeader = encodeURIComponent(
       JSON.stringify({
         mode: "external",
-        identity: { externalId, source },
+        identity: { externalId, source, ...profile },
         ...(membership ? { membership } : {}),
       }),
     );
@@ -322,7 +353,13 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
    * A stale, expired or revoked link is rejected by the server on every request. */
   asLinkedUser(
     externalId: string,
-    options: { source?: string; linkId: string; expectedLinkRevision: number },
+    options: {
+      source?: string;
+      linkId: string;
+      expectedLinkRevision: number;
+      displayName?: string;
+      email?: string;
+    },
   ): this {
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.linkId) ||
@@ -330,10 +367,11 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
       options.expectedLinkRevision < 1
     )
       throw new Error("A confirmed identity link and its exact revision are required");
-    const client = this.asUser(
-      externalId,
-      options.source === undefined ? {} : { source: options.source },
-    );
+    const client = this.asUser(externalId, {
+      ...(options.source === undefined ? {} : { source: options.source }),
+      ...(options.displayName === undefined ? {} : { displayName: options.displayName }),
+      ...(options.email === undefined ? {} : { email: options.email }),
+    });
     const identity = JSON.parse(decodeURIComponent(client.externalActorHeader!)).identity;
     client.externalActorHeader = encodeURIComponent(
       JSON.stringify({
@@ -548,11 +586,29 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
    * needed for the default path: an `asUser` request through a key with
    * `members:manage` adds a missing member with conversation permissions on
    * first use. Change an existing member with `updateExternalWorkspaceMember`.
+   * `identity.displayName` and `identity.email` are display details Console
+   * shows (the latest sent wins).
    */
   async addExternalWorkspaceMember(
     workspaceId: string,
     request: {
       identity: { externalId: string; source?: string };
+      permissions: AddWorkspaceMemberRequest["permissions"];
+      operationId?: string;
+    },
+  ): Promise<import("@opengeni/contracts/external-identities").ExternalIdentity>;
+  async addExternalWorkspaceMember(
+    workspaceId: string,
+    request: {
+      identity: { externalId: string; source?: string; displayName?: string; email?: string };
+      permissions: AddWorkspaceMemberRequest["permissions"];
+      operationId?: string;
+    },
+  ): Promise<import("@opengeni/contracts/external-identities").ExternalIdentity>;
+  async addExternalWorkspaceMember(
+    workspaceId: string,
+    request: {
+      identity: { externalId: string; source?: string; displayName?: string; email?: string };
       permissions: AddWorkspaceMemberRequest["permissions"];
       operationId?: string;
     },

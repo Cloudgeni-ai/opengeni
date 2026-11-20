@@ -1,11 +1,18 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { MEANINGFUL_SESSION_EVENT_TYPES } from "../src/session-meaningful-events";
-import { toPostgresLosslessJson } from "../src/lossless-json";
+import {
+  LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+  toPostgresLosslessJson,
+} from "../src/lossless-json";
+import * as schema from "../src/schema";
 import {
   acknowledgeConsumedChildEvents,
   appendSessionEvents,
+  appendSessionHistoryItems,
   reconcileHistoricalChildReadAcknowledgments,
   removeWorkspaceMember,
   addSessionSystemUpdateWithSourceMutation,
@@ -37,6 +44,8 @@ import {
   mutateSessionControlInTransaction,
   recordSessionGoalProgressWithEvent,
   recoverSessionWorkFailedBeforeAttemptClaim,
+  recordConsumedChildAnswers,
+  registerDbBinding,
   sessionSystemUpdateOutboxKindPayload,
   setSessionAttention,
   settleSessionIdleWithParentOutbox,
@@ -282,13 +291,13 @@ const settleFailed = (grant: Grant, started: Started) => settle(grant, started, 
  * lifecycle row and turn the ones aimed at `targetSessionId` into pending
  * machine input on that parent.
  */
-async function deliverOutboxTo(targetSessionId: string): Promise<number> {
-  const rows = await claimPendingSessionSystemUpdateOutbox(client.db, 1_000);
+async function deliverOutboxTo(targetSessionId: string, db = client.db): Promise<number> {
+  const rows = await claimPendingSessionSystemUpdateOutbox(db, 1_000);
   let delivered = 0;
   for (const row of rows) {
     if (row.targetSessionId !== targetSessionId) continue;
     await addSessionSystemUpdateWithSourceMutation(
-      client.db,
+      db,
       {
         accountId: row.accountId,
         workspaceId: row.workspaceId,
@@ -441,6 +450,113 @@ async function recordHistoricalResult(
 }
 
 describe("child read acknowledgment on parent consumption", () => {
+  test("Code Mode whole-answer acknowledgment probes only the recorded child event under a generic plan", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "Parent" });
+    const child = await startSession(grant, { parent, message: "Child" });
+    const output = 'A verified answer with a "quote".';
+    await settle(grant, child, "completed", output);
+    const [answer] = await shared.admin<{ sequence: number }[]>`
+      select sequence from session_events where session_id = ${child.session.id}
+        and type = 'turn.completed'`;
+    const identity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: parent.session.id,
+      turnId: parent.turn.id,
+    };
+    expect(
+      await recordConsumedChildAnswers(client.db, {
+        ...identity,
+        attemptId: parent.attemptId,
+        executionGeneration: parent.turn.executionGeneration,
+        via: "codemode",
+        children: [{ sessionId: child.session.id, sequences: [answer!.sequence] }],
+      }),
+    ).toEqual({ recorded: 1 });
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...identity,
+        expectedAttemptId: parent.attemptId,
+        expectedExecutionGeneration: parent.turn.executionGeneration,
+        items: [
+          {
+            position: 1,
+            item: {
+              type: "function_call_result",
+              callId: "read-child",
+              output: JSON.stringify({ output }),
+            },
+          },
+        ],
+      }),
+    ).toBeTrue();
+    await shared.admin`
+      insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, occurred_at)
+      select ${grant.accountId}, ${grant.workspaceId}, ${child.session.id}, n + cursor.last_sequence,
+        'turn.completed', jsonb_build_object('output', 'unrelated answer ' || n), now()
+      from generate_series(1, 5000) fixture(n)
+      cross join session_event_cursors cursor where cursor.session_id = ${child.session.id}`;
+    await shared.admin`analyze session_events`;
+    const connection = postgres(shared.appUrl, {
+      max: 1,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    const lookups: string[] = [];
+    const generic = drizzle(connection, {
+      schema,
+      logger: {
+        logQuery(query) {
+          if (query.startsWith("with turn as (") && query.includes("session_events answer")) {
+            lookups.push(query);
+          }
+        },
+      },
+    });
+    registerDbBinding(generic, { rlsStrategy: "force" });
+    try {
+      await generic.execute(sql`set plan_cache_mode = force_generic_plan`);
+      const [mode] = await generic.execute<{ plan_cache_mode: string }>(sql`show plan_cache_mode`);
+      expect(mode?.plan_cache_mode).toBe("force_generic_plan");
+      const settled = await applySessionTurnSettlement(generic, grant.workspaceId, {
+        ...identity,
+        attemptId: parent.attemptId,
+        triggerEventId: parent.turn.triggerEventId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { output: "Parent is done" } }],
+      });
+      expect(settled.action).toBe("settled");
+      expect(await deliverOutboxTo(parent.session.id, generic)).toBe(1);
+      const [update] = await shared.admin<{ state: string }[]>`
+        select state from session_system_updates where session_id = ${parent.session.id}
+          and kind = 'child_terminal_result' and source_id = ${child.session.id}`;
+      expect(update?.state).toBe("superseded");
+      expect(lookups).toHaveLength(1);
+      type Plan = {
+        Alias?: string;
+        "Relation Name"?: string;
+        "Index Cond"?: string;
+        Plans?: Plan[];
+      };
+      const [explain] = await withWorkspaceSessionActivityRls(generic, grant.workspaceId, (tx) =>
+        tx.execute<{ "QUERY PLAN": { Plan: Plan }[] }>(
+          sql.raw(`explain (generic_plan, format json) ${lookups[0]}`),
+        ),
+      );
+      function findAnswer(plan: Plan): Plan | undefined {
+        if (plan.Alias === "answer" && plan["Relation Name"] === "session_events") return plan;
+        return plan.Plans?.map(findAnswer).find(Boolean);
+      }
+      const answerPlan = findAnswer(explain!["QUERY PLAN"][0]!.Plan);
+      expect(answerPlan?.["Index Cond"]).toMatch(/session_id\s*=/);
+      expect(answerPlan?.["Index Cond"]).toMatch(/sequence\s*=/);
+    } finally {
+      await connection.end();
+    }
+  });
+
   test.each([
     ["NUL", "Answer\u0000tail"],
     ["lone surrogate", "Answer\ud800tail"],

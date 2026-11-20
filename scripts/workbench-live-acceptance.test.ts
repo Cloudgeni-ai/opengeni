@@ -7,6 +7,8 @@ import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import { englishMessages } from "../packages/react/src/messages/en";
 import {
+  assertCancelledPredecessorEvent,
+  type CancelledPredecessorFence,
   createTerminalOutputProbe,
   axeManualContrastSelector,
   findUndersizedTouchTargets,
@@ -1021,6 +1023,61 @@ describe("workbench live acceptance preflight", () => {
       "started before physical quiescence",
     );
     expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
+  });
+
+  test("Pause audit exempts only the control plane's paused_recovery_settled status", () => {
+    const attemptId = "11111111-1111-4111-8111-111111111111";
+    const turnId = "22222222-2222-4222-8222-222222222222";
+    const fences = (control: "Pause" | "Steer" = "Pause") =>
+      new Map<string, CancelledPredecessorFence>([
+        [attemptId, { control, controlRequestedSequence: 1_700, physicallyStoppedSequence: 1_713 }],
+      ]);
+    // Mirrors production: written in the same commit as attempt_quiesced (1713).
+    const settlement = {
+      sequence: 1_714,
+      type: "session.status.changed" as const,
+      payload: { status: "idle", reason: "paused_recovery_settled" },
+      clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
+      turnId,
+      turnAttemptId: attemptId,
+      turnAssociation: null,
+    };
+    const pause = fences();
+    expect(() => assertCancelledPredecessorEvent(settlement, pause)).not.toThrow();
+
+    // Only once per fenced attempt.
+    expect(() =>
+      assertCancelledPredecessorEvent({ ...settlement, sequence: 1_715 }, pause),
+    ).toThrow("after Pause physical cancellation");
+
+    const forbidden = [
+      { ...settlement, payload: { status: "running" } },
+      { ...settlement, payload: { status: "idle", reason: "completed" } },
+      { ...settlement, clientEventId: null },
+      { ...settlement, clientEventId: "opengeni:paused-recovery-settled:other" },
+      { ...settlement, turnAssociation: "current" as const },
+      { ...settlement, type: "agent.message.delta" as const },
+    ];
+    for (const event of forbidden) {
+      expect(() => assertCancelledPredecessorEvent(event, fences())).toThrow(
+        "after Pause physical cancellation",
+      );
+    }
+    expect(() => assertCancelledPredecessorEvent(settlement, fences("Steer"))).toThrow(
+      "after Steer physical cancellation",
+    );
+    expect(() =>
+      assertCancelledPredecessorEvent(
+        { ...settlement, type: "workspace.revision.captured" as const },
+        fences(),
+      ),
+    ).toThrow("committed forbidden");
+    expect(() =>
+      assertCancelledPredecessorEvent(
+        { ...settlement, turnAssociation: "late_rejected" as const, payload: {} },
+        fences(),
+      ),
+    ).not.toThrow();
   });
 
   test("liveness polling bounds and retries a transient transport failure", async () => {

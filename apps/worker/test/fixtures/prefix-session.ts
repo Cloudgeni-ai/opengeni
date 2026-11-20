@@ -427,7 +427,8 @@ function goalSnapshot(state: SessionState["goal"]): SessionGoalSnapshot {
   };
 }
 
-function agentConfig(): ResolvedAgentConfig {
+/** The configured agent every fixture chat runs as. */
+export function agentConfig(): ResolvedAgentConfig {
   return {
     version: 1,
     from: "all",
@@ -573,6 +574,10 @@ export function prefixChat(wire: Wire) {
         : []),
       spyOn(db, "persistAttemptToolCatalog").mockImplementation(async (_db, catalog) => catalog),
       spyOn(db, "cancelQueuedCodemodeOperationsForAttempt").mockResolvedValue(0),
+      // A new chat pins its tool revision before the first model request.
+      spyOn(db, "settleSessionFirstRequestToolsRevision").mockResolvedValue(
+        contracts.CURRENT_FIRST_REQUEST_TOOLS_REVISION,
+      ),
     ];
     const runtime = {
       // Model the first-party API's token-scoped tools/list, as the
@@ -680,6 +685,15 @@ export function prefixChat(wire: Wire) {
         bus: { subscribeRequests: () => () => {} } as PrepareTurnToolRuntimeDeps["bus"],
         runtime: runtime as OpenGeniRuntime,
         objectStorage: null,
+        toolResultStore: {
+          // This fixture never produces oversized results. Keep the real tool
+          // registration path without relying on object storage.
+          setReaders: () => {},
+          readBytes: async () => {
+            throw new Error("prefix fixture does not read stored tool results");
+          },
+          inlineMaxBytes: () => 100_000,
+        } as unknown as PrepareTurnToolRuntimeDeps["toolResultStore"],
         observability,
         media: {} as BuildTurnAgentDeps["media"],
         turn: turnRow,

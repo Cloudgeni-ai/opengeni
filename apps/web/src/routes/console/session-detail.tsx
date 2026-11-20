@@ -19,7 +19,7 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
 
 import {
   ConsoleLoadError,
-  endUserLabel,
+  EndUserName,
   formatCount,
   formatDuration,
   formatMicros,
@@ -58,7 +58,7 @@ export async function loadConsoleTranscript(
 type DetailState = { key: string; promise: Promise<ConsoleSessionDetail> };
 
 export function ConsoleSessionRoute() {
-  const { client, organizationId, search } = useConsole();
+  const { client, organizationId, search, access } = useConsole();
   const navigate = useNavigate();
   const { workspaceId = "", sessionId = "" } = useParams({ strict: false }) as {
     workspaceId?: string;
@@ -148,11 +148,13 @@ export function ConsoleSessionRoute() {
             icon={<LockIcon />}
             title="Session review is off"
             action={
-              <Button variant="outline" asChild>
-                <Link to="/console/settings" search={search}>
-                  Data and privacy
-                </Link>
-              </Button>
+              access !== "full" ? undefined : (
+                <Button variant="outline" asChild>
+                  <Link to="/console/settings" search={search}>
+                    Data and privacy
+                  </Link>
+                </Button>
+              )
             }
           />
         ) : (
@@ -198,8 +200,12 @@ export function ConsoleSessionRoute() {
       <DetailPageBody
         aside={
           <DetailAside>
-            <DetailAsideItem label="Workspace">{session.workspaceName}</DetailAsideItem>
-            <DetailAsideItem label="End user">{endUserLabel(session.endUser)}</DetailAsideItem>
+            <DetailAsideItem label="Workspace">
+              <span className="break-words">{session.workspaceName}</span>
+            </DetailAsideItem>
+            <DetailAsideItem label="End user">
+              <EndUserName endUser={session.endUser} copyable />
+            </DetailAsideItem>
             {model ? (
               <DetailAsideItem label="Model">
                 {current.reasoningEffort ? `${model} · ${current.reasoningEffort}` : model}

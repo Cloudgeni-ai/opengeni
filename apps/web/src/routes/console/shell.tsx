@@ -1,6 +1,8 @@
 // The Opengeni Console frame: a 240px rail (organization, then Overview,
 // Build and Organization pages), a header bar and one content column. No chat
-// rail: Console is for the organization's owners and admins.
+// rail: Console is for the organization's owners and admins, and members an
+// owner or admin gave a Console role (docs/opengeni-console.md, "Roles").
+// Viewers and Editors see Overview, Sessions, Agents and Tool servers.
 import { Link, Outlet, useNavigate, useRouterState, useSearch } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
@@ -14,6 +16,7 @@ import {
   LogOutIcon,
   MenuIcon,
   MessagesSquareIcon,
+  PlugIcon,
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
@@ -45,7 +48,14 @@ import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger"
 import { NavGroup, NavItem } from "@opengeni/react/ui/settings-nav";
 import { Sheet, SheetContent, SheetTitle } from "@opengeni/react/ui/sheet";
 
+import {
+  consoleAccessCovers,
+  consoleRoleLabel,
+  useConsoleAccessByOrganization,
+  type ConsoleAccessLevel,
+} from "@/lib/console-access";
 import { CONSOLE_PATH, onConsoleHost, type ConsoleSearch } from "@/lib/console-route";
+import { useOrgAgentsFlag } from "@/lib/organization-agents";
 import {
   ConsoleContext,
   ConsoleForbidden,
@@ -57,13 +67,22 @@ type ConsoleDestination =
   | "/console"
   | "/console/sessions"
   | "/console/agents"
+  | "/console/tool-servers"
   | "/console/workspaces"
   | "/console/api-keys"
   | "/console/members"
   | "/console/usage"
   | "/console/settings";
 
-type NavEntry = { to: ConsoleDestination; label: string; icon: ReactNode };
+type NavEntry = {
+  to: ConsoleDestination;
+  label: string;
+  icon: ReactNode;
+  /** Shown only for organizations with Console agents. */
+  orgAgents?: true;
+  /** Owners and admins only (Console access `full`). */
+  fullOnly?: true;
+};
 
 const NAV: { group: string | null; items: NavEntry[] }[] = [
   { group: null, items: [{ to: "/console", label: "Overview", icon: <LayoutDashboardIcon /> }] },
@@ -71,20 +90,47 @@ const NAV: { group: string | null; items: NavEntry[] }[] = [
     group: "Build",
     items: [
       { to: "/console/sessions", label: "Sessions", icon: <MessagesSquareIcon /> },
-      { to: "/console/agents", label: "Agents", icon: <BotIcon /> },
+      { to: "/console/agents", label: "Agents", icon: <BotIcon />, orgAgents: true },
+      { to: "/console/tool-servers", label: "Tool servers", icon: <PlugIcon />, orgAgents: true },
       { to: "/console/workspaces", label: "Workspaces", icon: <Building2Icon /> },
-      { to: "/console/api-keys", label: "API keys", icon: <KeyRoundIcon /> },
+      { to: "/console/api-keys", label: "API keys", icon: <KeyRoundIcon />, fullOnly: true },
     ],
   },
   {
     group: "Organization",
     items: [
-      { to: "/console/members", label: "Members", icon: <UsersIcon /> },
-      { to: "/console/usage", label: "Usage and billing", icon: <CreditCardIcon /> },
-      { to: "/console/settings", label: "Settings", icon: <SettingsIcon /> },
+      { to: "/console/members", label: "Members", icon: <UsersIcon />, fullOnly: true },
+      {
+        to: "/console/usage",
+        label: "Usage and billing",
+        icon: <CreditCardIcon />,
+        fullOnly: true,
+      },
+      { to: "/console/settings", label: "Settings", icon: <SettingsIcon />, fullOnly: true },
     ],
   },
 ];
+
+/**
+ * Console's nav: Agents and Tool servers only for organizations with Console
+ * agents; API keys and the Organization pages only for owners and
+ * admins.
+ */
+export function consoleNavSections(agentsOn: boolean, access: ConsoleAccessLevel = "full") {
+  return NAV.map((section) => ({
+    ...section,
+    items: section.items.filter(
+      (item) => (!item.orgAgents || agentsOn) && (!item.fullOnly || access === "full"),
+    ),
+  })).filter((section) => section.items.length > 0);
+}
+
+/** Whether a Console page is for owners and admins only. */
+export function consoleDestinationFullOnly(destination: ConsoleDestination): boolean {
+  return NAV.some((section) =>
+    section.items.some((item) => item.to === destination && item.fullOnly === true),
+  );
+}
 
 /** The nav entry a path belongs to: its longest matching prefix. */
 export function consoleNavDestination(pathname: string): ConsoleDestination {
@@ -167,13 +213,29 @@ export function ConsoleShellRoute() {
   const rememberedAccountId =
     context.workspaces.find((workspace) => workspace.id === rememberedWorkspaceId)?.accountId ??
     null;
+  const accessByOrg = useConsoleAccessByOrganization(context.client, orgs);
   const administered = orgs.filter((org) => org.canAdminister);
+  // Organizations whose Console this person can open: administered ones
+  // first, then those where they have a Console role.
+  const withConsole = [
+    ...administered,
+    ...orgs.filter(
+      (org) => !org.canAdminister && (accessByOrg?.[org.accountId] ?? "none") !== "none",
+    ),
+  ];
   const organization =
     orgs.find((org) => org.accountId === requestedOrg) ??
-    administered.find((org) => org.accountId === rememberedAccountId) ??
-    administered[0] ??
+    withConsole.find((org) => org.accountId === rememberedAccountId) ??
+    withConsole[0] ??
     orgs[0] ??
     null;
+  const access: ConsoleAccessLevel | null = organization
+    ? organization.canAdminister
+      ? "full"
+      : (accessByOrg?.[organization.accountId] ?? null)
+    : "none";
+
+  const agentsFlag = useOrgAgentsFlag(context.client, organization?.accountId ?? null);
 
   const value = useMemo<ConsoleContextValue | null>(
     () =>
@@ -188,13 +250,16 @@ export function ConsoleShellRoute() {
               organization.accountId,
               rememberedWorkspaceId,
             ),
+            access: access && access !== "none" ? access : "viewer",
           }
         : null,
-    [context.client, context.workspaces, organization, rememberedWorkspaceId],
+    [access, context.client, context.workspaces, organization, rememberedWorkspaceId],
   );
 
   const active = consoleNavDestination(pathname);
-  const switchable = administered.length > 0 ? administered : orgs;
+  const agentsOn = agentsFlag === true;
+  const nav = consoleNavSections(agentsOn, access ?? "none");
+  const switchable = withConsole.length > 0 ? withConsole : orgs;
   const displayName =
     context.authSession?.user.name ||
     context.authSession?.user.email ||
@@ -241,7 +306,7 @@ export function ConsoleShellRoute() {
                 <DropdownMenuCheck checked={org.accountId === organization.accountId} />
               </DropdownMenuItem>
             ))}
-            {value ? (
+            {value && access === "full" ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
@@ -255,7 +320,7 @@ export function ConsoleShellRoute() {
         </DropdownMenu>
       ) : null}
       <nav aria-label="Console" className="mt-3 flex w-full flex-col gap-3 overflow-y-auto">
-        {NAV.map((section) => (
+        {nav.map((section) => (
           <NavGroup key={section.group ?? "main"} label={section.group ?? undefined}>
             {section.items.map((item) => (
               <NavItem
@@ -278,7 +343,15 @@ export function ConsoleShellRoute() {
       <div className="mt-auto w-full border-t border-border py-2">
         <ConsoleAccountMenu
           label={displayName}
-          role={role === "owner" ? "Owner" : role === "admin" ? "Admin" : null}
+          role={
+            role === "owner"
+              ? "Owner"
+              : role === "admin"
+                ? "Admin"
+                : access === "viewer" || access === "editor"
+                  ? consoleRoleLabel(access)
+                  : null
+          }
         />
       </div>
     </div>
@@ -341,10 +414,16 @@ export function ConsoleShellRoute() {
             aria-label="Console page"
             className="mx-auto w-full max-w-[1000px] px-4 pt-8 pb-16 md:px-8"
           >
-            {value && organization?.canAdminister ? (
-              <ConsoleContext.Provider value={value}>
-                <Outlet />
-              </ConsoleContext.Provider>
+            {value && access === null ? null : value &&
+              access &&
+              consoleAccessCovers(access, "viewer") ? (
+              !consoleAccessCovers(access, "full") && consoleDestinationFullOnly(active) ? (
+                <ConsoleForbidden ownersAndAdmins />
+              ) : (
+                <ConsoleContext.Provider value={value}>
+                  <Outlet />
+                </ConsoleContext.Provider>
+              )
             ) : (
               <ConsoleForbidden />
             )}

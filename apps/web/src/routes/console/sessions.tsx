@@ -16,7 +16,8 @@ import type { ConsoleSessionsSearch } from "@/lib/console-route";
 import {
   ConsoleLoadError,
   ConsolePage,
-  endUserLabel,
+  EndUserName,
+  WorkspaceName,
   formatCount,
   formatMicros,
   isReviewOff,
@@ -86,7 +87,7 @@ export function sessionTitle(
 }
 
 export function ConsoleSessionsRoute() {
-  const { client, organizationId, search } = useConsole();
+  const { client, organizationId, search, access } = useConsole();
   const navigate = useNavigate();
   const { workspace: workspaceFilter } = useSearch({ strict: false }) as ConsoleSessionsSearch;
   const [query, setQuery] = useState("");
@@ -196,20 +197,31 @@ export function ConsoleSessionsRoute() {
           variant="page"
           icon={<LockIcon />}
           title="Session review is off"
-          description="Turn it on to read your end users' sessions."
+          description={
+            access === "full"
+              ? "Turn it on to read your end users' sessions."
+              : "An owner or admin can turn it on."
+          }
           action={
-            <Button variant="outline" asChild>
-              <Link to="/console/settings" search={search}>
-                Data and privacy
-              </Link>
-            </Button>
+            access !== "full" ? undefined : (
+              <Button variant="outline" asChild>
+                <Link to="/console/settings" search={search}>
+                  Data and privacy
+                </Link>
+              </Button>
+            )
           }
         />
       </ConsolePage>
     );
   }
 
-  const searchable = state.reviewLevel === "full";
+  // People and workspace names are searchable at every review level; questions only with full review.
+  const searchable = state.reviewLevel !== null;
+  const searchPlaceholder =
+    state.reviewLevel === "full"
+      ? "Search questions, people and workspaces"
+      : "Search people and workspaces";
   const filtered = Boolean(workspaceFilter || debounced);
   const workspaceOptions = [
     { value: ALL, label: "All workspaces" },
@@ -225,7 +237,7 @@ export function ConsoleSessionsRoute() {
             <ToolbarSearch
               value={query}
               onValueChange={setQuery}
-              placeholder="Search questions and titles"
+              placeholder={searchPlaceholder}
               aria-label="Search sessions"
               wrapperClassName="min-w-56 flex-1"
             />
@@ -269,8 +281,8 @@ export function ConsoleSessionsRoute() {
             label="Sessions"
             nameLabel="Session"
             columns={[
-              { id: "workspace", label: "Workspace", width: 112 },
-              { id: "user", label: "End user", width: 104 },
+              { id: "workspace", label: "Workspace", width: 160 },
+              { id: "user", label: "End user", width: 176 },
               { id: "feedback", label: "Feedback", width: 60 },
               { id: "turns", label: "Turns", width: 44, align: "end" },
               { id: "cost", label: "Cost", width: 64, align: "end", leadsWhenFolded: true },
@@ -283,8 +295,8 @@ export function ConsoleSessionsRoute() {
                 title={sessionTitle(session)}
                 status={sessionStatus(session.status)}
                 cells={{
-                  workspace: session.workspaceName,
-                  user: endUserLabel(session.endUser),
+                  workspace: <WorkspaceName name={session.workspaceName} />,
+                  user: <EndUserName endUser={session.endUser} />,
                   feedback: (
                     <FeedbackCounts
                       positive={session.feedback.positive}

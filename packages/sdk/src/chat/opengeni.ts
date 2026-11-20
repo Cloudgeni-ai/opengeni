@@ -232,7 +232,13 @@ export class OpenGeni {
       );
     }
     const client = options.user
-      ? this.client.asUser(options.user, { source: this.source })
+      ? this.client.asUser(options.user, {
+          source: this.source,
+          ...(options.userProfile?.displayName
+            ? { displayName: options.userProfile.displayName }
+            : {}),
+          ...(options.userProfile?.email ? { email: options.userProfile.email } : {}),
+        })
       : this.client;
     const workspaceId =
       options.chats === "isolated"
@@ -262,13 +268,19 @@ export class OpenGeni {
         visibility: create.visibility ?? defaults.visibility,
         agentAccess: create.agentAccess ?? agentAccess,
         memoryScope: create.memoryScope ?? memoryScope,
-        agent: {
-          capabilities: create.agent?.capabilities ?? options.agent?.capabilities,
-          identity:
-            create.agent?.identity !== undefined ? create.agent.identity : options.agent?.identity,
-          instructions: create.agent?.instructions ?? options.agent?.instructions,
-          renderer: create.agent?.renderer ?? options.agent?.renderer ?? "markdown",
-        },
+        // An organization agent (a key or `{ ref }`) is sent as given.
+        agent:
+          typeof create.agent === "string" || (create.agent && "ref" in create.agent)
+            ? create.agent
+            : {
+                capabilities: create.agent?.capabilities ?? options.agent?.capabilities,
+                identity:
+                  create.agent?.identity !== undefined
+                    ? create.agent.identity
+                    : options.agent?.identity,
+                instructions: create.agent?.instructions ?? options.agent?.instructions,
+                renderer: create.agent?.renderer ?? options.agent?.renderer ?? "markdown",
+              },
         ...(context !== undefined ? { modelContext: context } : {}),
         ...messagePolicy(send),
         initialMessage: text,

@@ -61,6 +61,9 @@ const PERMISSION_ACTIONS: Readonly<Record<Permission, string>> = {
   "rigs:manage": "manage rigs",
   "artifacts:read": "open artifacts",
   "artifacts:publish": "publish artifacts",
+  "agents:read": "view Console agents",
+  "agents:manage": "manage Console agents",
+  "tool_credentials:write": "store end users' tool logins",
 };
 
 /** The plain sentence for a missing permission. */

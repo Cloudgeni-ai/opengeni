@@ -1,6 +1,6 @@
 {
   "name": "opengeni",
-  "version": "6.30.1",
+  "version": "6.33.0",
   "description": "Command-line interface for Opengeni.",
   "license": "Apache-2.0",
   "repository": {
@@ -13,7 +13,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "schemas"
   ],
   "type": "module",
   "sideEffects": false,
@@ -35,6 +36,10 @@
     "test": "bun test",
     "build": "bun build.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "dependencies": {
+    "@opengeni/contracts": "workspace:*",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

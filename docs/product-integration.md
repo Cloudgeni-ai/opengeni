@@ -376,6 +376,20 @@ workspace default or `"all"`. Sessions created before agent settings keep
 `agent: null` and their exact tools and prompt. See [Agent configuration](design/agent-configuration.md)
 for the design and enforcement details.
 
+### Console agents
+
+An organization can define its agents once instead of sending the full
+configuration on every create: in Console, or as YAML files in Git deployed
+with `npx opengeni agents deploy` (Console agents, off by default per
+organization). Name one with `agent: "<key>"` or `agent: { ref, ... }`; the
+other fields change settings for that chat only, and `instructions` are added
+after the agent's. A create that names no organization agent behaves exactly
+as above. With the session proxy, name it in `createSession`; the proxy drops
+an organization agent sent by the browser. Server-side administration and code
+deploys: `@opengeni/sdk/organization-agents`. See
+[agents.md, "Console agents"](agents.md#console-agents) and
+`docs-site/integrate/agents-as-code.mdx`.
+
 ### Choose who shares chats
 
 Every session lives in the customer's workspace, so all of them share that

@@ -72,6 +72,10 @@ import type {
 } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-chat-connect";
+import {
+  personalMachineUseIntent,
+  type MachineMoveChat,
+} from "@opengeni/react/machine-request-model";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
@@ -349,12 +353,44 @@ function SessionScreenBody({
     pendingPrompt,
     historyReady: controller.initialHistoryReady ?? !controller.initialLoading,
   });
+  // What a composer Send would carry now, for a card that moves the chat onto
+  // a machine: read when the person chooses, never captured earlier.
+  const sendState = useRef({ controller, queue, humanInput, t });
+  sendState.current = { controller, queue, humanInput, t };
+  const machineChat = useCallback((): MachineMoveChat => {
+    const {
+      controller: current,
+      queue: currentQueue,
+      humanInput: input,
+      t: text,
+    } = sendState.current;
+    const session = current.session.session;
+    const archived = Boolean(session?.archived || session?.retention?.archive);
+    const effective = currentQueue.effectiveControl ?? session?.effectiveControl;
+    return {
+      blocked: archived
+        ? text("native.timeline.machineRequest.blockedArchived")
+        : current.sessionStatus === "cancelled"
+          ? text("native.timeline.machineRequest.blockedEnded")
+          : null,
+      awaitingHuman: input.requests.length > 0 && current.sessionStatus === "requires_action",
+      // Moving the chat onto the person's own machine turns it on in this workspace.
+      personalMachineIntent: personalMachineUseIntent(session?.tenancy, "always"),
+      extras: effective?.controlEtag ? { controlEtag: effective.controlEtag } : {},
+    };
+  }, []);
+  const chatMoved = useCallback(async () => {
+    const { controller: current, queue: currentQueue } = sendState.current;
+    await Promise.all([current.session.refresh(), currentQueue.refresh()]).catch(() => undefined);
+  }, []);
   const stockAuthNeeded = useNativeInChatConnect({
     client,
     workspaceId: controller.workspaceId,
     sessionId: controller.sessionId,
     items,
     options: inChatConnect,
+    chat: machineChat,
+    onChatMoved: chatMoved,
   });
   const hostAuthNeeded = timelineProps.renderAuthNeeded;
   const renderAuthNeeded = useCallback(

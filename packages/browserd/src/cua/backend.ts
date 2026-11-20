@@ -1158,8 +1158,9 @@ export class CuaComputerBackend implements ComputerBackend {
       (window) =>
         // Another CUA worker's cursor overlay (another computer session, or
         // another agent on this desktop) spans the screen above every app. It
-        // is never a window a person or an agent works in.
-        window.app_name !== CUA_WORKER_APP &&
+        // is never a window a person or an agent works in, and CUA refuses to
+        // read or act on its own process.
+        !isCuaWorkerApp(window.app_name) &&
         // macOS keeps windows ordered out that no person ever sees, on no
         // Space at all: a headless browser's page windows (the browser from
         // browser_open among them), a closed popover kept for reuse.
@@ -3100,6 +3101,12 @@ function checkedState(node: InteractionSemanticNodeValue): boolean | "mixed" | u
 }
 /** The app name CUA's worker process lists its own overlay windows under. */
 const CUA_WORKER_APP = "cua-driver";
+
+/** Whether a listed window belongs to a CUA worker. Windows lists apps by
+ * their executable's file name, "cua-driver.exe". */
+function isCuaWorkerApp(appName: string | null | undefined): boolean {
+  return appName?.replace(/\.exe$/i, "").toLowerCase() === CUA_WORKER_APP;
+}
 
 /** A Linux process's parent from /proc, or null when it cannot be read. */
 function procParentPid(pid: number): number | null {

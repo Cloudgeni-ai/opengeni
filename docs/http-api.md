@@ -35,7 +35,8 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   creation, plus explicit invitation revoke
 - `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
 - `GET|PATCH /v1/organizations/:id/retention-policy`
-- `/v1/organizations/:id/console/*` for organization owners and admins:
+- `/v1/organizations/:id/console/*` for organization owners and admins, and
+  members by Console role (`GET access`, `GET|PUT member-roles`):
   summary, workspaces (managed by product or team), reviewable sessions with
   audited transcript reads, review level settings, audit log and API key
   usage; never available to API keys (see [`opengeni-console.md`](opengeni-console.md)).
@@ -48,6 +49,27 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `GET|POST /v1/organizations/:id/personal-api-keys` and
   `DELETE /v1/organizations/:id/personal-api-keys/:apiKeyId` (keys that act as
   the person who created them; see [`credentials.md`](credentials.md))
+- `/v1/organizations/:id/agents/*` for Console agents (organization agents),
+  for organization keys holding `agents:read` / `agents:manage` and the
+  organization's owners and admins: agents and their versions (`GET|POST`,
+  `GET|PATCH /:agentId`, `PUT /:agentId/draft`, `GET /:agentId/versions[/:version]`,
+  `POST /:agentId/publish`, `GET /:agentId/publish-operations`,
+  `GET /:agentId/movable-chats` (`agents:manage`), `POST /:agentId/archive`, owner-only
+  `POST /:agentId/management`), code deploys (`GET /by-key/:key`,
+  `PUT /by-key/:key/apply`), tool servers (`/tool-servers[/:key[/tools]]`),
+  chats and usage per agent (`GET /:agentId/sessions|usage`, also
+  `sessions:read`), the Console test workspace (`POST /test-workspace`) and
+  test chats (`POST /:agentId/test-chats`, `idempotencyKey` to start once;
+  the tester's own chat through `GET /:agentId/test-chats/:sessionId[/events]`
+  and `POST /:agentId/test-chats/:sessionId/messages|approvals/:approvalId|control`).
+  Tool server writes and
+  publishing with `moveRunningChats` need a key for all workspaces. See
+  [`agents.md` § Console agents](agents.md#console-agents)
+- `PUT|GET|DELETE /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`
+  (an end user's stored login for an organization tool server; `PUT`/`DELETE`
+  need `tool_credentials:write`, `GET` returns metadata only and needs
+  `agents:read`) and `GET /v1/workspaces/:workspaceId/organization-agents`
+  (published organization agents chats in the workspace can name)
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`

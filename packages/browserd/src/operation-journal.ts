@@ -2,6 +2,7 @@ import { chmod, lstat, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { InteractionOperationState } from "@opengeni/contracts";
 import { Database } from "bun:sqlite";
+import { openSqliteFile } from "./sqlite-file";
 
 const DEFAULT_MAX_ENTRIES = 10_000;
 const DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024;
@@ -111,11 +112,11 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       if (!metadata.isFile() || metadata.isSymbolicLink()) {
         throw new Error("operation journal must be an existing regular file");
       }
-      const database = new Database(path, { readonly: true, strict: true });
+      const database = openSqliteFile(path, { readonly: true, strict: true });
       return new SqliteInteractionOperationJournal({ ...options, path }, database);
     }
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const database = new Database(path, { create: true, readwrite: true, strict: true });
+    const database = openSqliteFile(path, { create: true, readwrite: true, strict: true });
     try {
       database.exec("PRAGMA journal_mode = WAL");
       database.exec("PRAGMA synchronous = FULL");

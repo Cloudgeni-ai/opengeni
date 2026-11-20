@@ -1,4 +1,8 @@
-import { ServiceTurnInitiatorContext, type AccessGrant } from "@opengeni/contracts";
+import {
+  isConsoleTestChatSubject,
+  ServiceTurnInitiatorContext,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 
 /** Validated provenance only. The API key remains the authenticated principal. */
@@ -16,6 +20,13 @@ export function serviceInitiatorFromHeaders(
   if (name === null || !/^[a-z0-9][a-z0-9:._-]{0,63}$/.test(name)) {
     throw new HTTPException(422, {
       message: "x-opengeni-service-initiator must match ^[a-z0-9][a-z0-9:._-]{0,63}$",
+    });
+  }
+  // Console test chats' principals are the server's own: a caller naming one
+  // could plant a chat that reads as a tester's test chat.
+  if (isConsoleTestChatSubject(name)) {
+    throw new HTTPException(422, {
+      message: "x-opengeni-service-initiator must not use the reserved console-test: prefix",
     });
   }
   let context: Record<string, string | number | boolean> = {};

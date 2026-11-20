@@ -82,7 +82,7 @@
 
 # Central model-facing tool schema and tool result shaping.
 /packages/runtime/src/interaction-tool-json-schema.ts @jorgensandhaug
-/packages/runtime/src/tool-result-spill.ts @jorgensandhaug
+/packages/runtime/src/model-tool-result-store.ts @jorgensandhaug
 
 # This gate itself.
 /.github/CODEOWNERS @jorgensandhaug

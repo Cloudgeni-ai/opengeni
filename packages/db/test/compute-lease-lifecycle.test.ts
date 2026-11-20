@@ -825,6 +825,122 @@ describe("the stopped sandbox of archived chats on other backends", () => {
     const after = await listColdSandboxesOfArchivedChats(db, { after: ids, limit: 1000 });
     expect(after.some((entry) => entry.sandboxGroupId === ids.sandboxGroupId)).toBe(false);
   }, 60_000);
+
+  /**
+   * A background command the chat ran in the sandbox: the workspace write that
+   * started it, its retained process and its command record, in `state`.
+   */
+  async function ranCommand(ids: Ids, sessionId: string, state: "active" | "lost") {
+    const processId = crypto.randomUUID();
+    const admissionId = crypto.randomUUID();
+    const actorId = crypto.randomUUID();
+    await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`;
+      const [lease] = await tx<{ id: string; lease_epoch: number }[]>`
+        select id, lease_epoch from sandbox_leases
+        where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+      const route = {
+        account_id: ids.accountId,
+        workspace_id: ids.workspaceId,
+        session_id: sessionId,
+        lease_id: lease!.id,
+        sandbox_group_id: ids.sandboxGroupId,
+        lease_epoch: lease!.lease_epoch,
+        provider_backend: "modal",
+        provider_instance_id: "sb-old",
+        route_kind: "active",
+        route_epoch: 0,
+      };
+      await tx`insert into sandbox_workspace_mutation_admissions ${tx({
+        ...route,
+        id: admissionId,
+        actor_kind: "direct",
+        actor_id: actorId,
+        holder_kind: "direct",
+        holder_id: `direct:${actorId}`,
+        workspace_generation: 1,
+        operation: "terminalExec",
+        // A process that ended without settling its write leaves it rejected.
+        provider_outcome: state === "active" ? "retained" : "rejected",
+        settled_at: state === "active" ? null : new Date(),
+      })}`;
+      if (state === "active") {
+        await tx`insert into sandbox_lease_holders ${tx({
+          account_id: ids.accountId,
+          workspace_id: ids.workspaceId,
+          lease_id: lease!.id,
+          kind: "process",
+          holder_id: `process:${processId}`,
+          subject_id: sessionId,
+        })}`;
+      }
+      await tx`insert into sandbox_retained_processes ${tx({
+        ...route,
+        id: processId,
+        parent_admission_id: admissionId,
+        holder_id: `process:${processId}`,
+        owner_actor_kind: "direct",
+        owner_actor_id: actorId,
+        provider_session_id: 1,
+        state,
+        settled_at: state === "active" ? null : new Date(),
+        ...(state === "active" ? {} : { settlement_reason: "provider_instance_lost" }),
+      })}`;
+      await tx`insert into session_background_commands ${tx({
+        id: processId,
+        account_id: ids.accountId,
+        workspace_id: ids.workspaceId,
+        session_id: sessionId,
+        provider: "managed",
+        retained_process_id: processId,
+        ...(state === "active"
+          ? { state: "running" }
+          : { state: "lost", settled_at: new Date(), settlement_reason: "provider_instance_lost" }),
+      })}`;
+    });
+    return processId;
+  }
+
+  test("is forgotten with the records of commands that finished in it", async () => {
+    if (!available) return;
+    const { session, ids } = await stopped();
+    const processId = await ranCommand(ids, session.id, "lost");
+    await archive(ids.workspaceId, session.id);
+    expect(await listed(ids)).toBe(true);
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(true);
+    expect(await leaseCount(ids)).toBe(0);
+    const [left] = await admin<{ processes: number; commands: number }[]>`
+      select
+        (select count(*)::int from sandbox_retained_processes where id = ${processId}) as processes,
+        (select count(*)::int from session_background_commands where id = ${processId}) as commands`;
+    expect(left).toEqual({ processes: 0, commands: 0 });
+  }, 60_000);
+
+  test("stays while a command still runs in it", async () => {
+    if (!available) return;
+    const { session, ids } = await stopped();
+    await ranCommand(ids, session.id, "active");
+    await archive(ids.workspaceId, session.id);
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(false);
+    expect(await leaseCount(ids)).toBe(1);
+  }, 60_000);
+
+  test("deleting the chat takes the records of commands that finished in it", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await stopped();
+    const processId = await ranCommand(ids, session.id, "lost");
+    expect(
+      await deleteSessionTreeIfQuiescent(db, {
+        workspaceId: ids.workspaceId,
+        subjectId: grant.subjectId,
+        sessionId: session.id,
+      }),
+    ).toMatchObject({ status: "deleted" });
+    expect(await leaseCount(ids)).toBe(0);
+    const [left] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sandbox_retained_processes where id = ${processId}`;
+    expect(left!.count).toBe(0);
+  }, 60_000);
 });
 
 describe("compute warm time follows the sandbox's sleep", () => {

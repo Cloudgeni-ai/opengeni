@@ -1,5 +1,42 @@
 # @opengeni/agent-host
 
+## 6.33.0
+
+### Patch Changes
+
+- Updated dependencies [03d58fd]
+  - @opengeni/sdk@6.33.0
+
+## 6.32.0
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+  - @opengeni/sdk@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/sdk@6.31.1
+
+## 6.31.0
+
+### Patch Changes
+
+- Updated dependencies [cafa73f]
+- Updated dependencies [993bd7b]
+- Updated dependencies [46d677b]
+  - @opengeni/sdk@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

@@ -40,6 +40,7 @@ import {
   type InboxItemRow,
   type InboxNoticeRow,
 } from "@opengeni/db";
+import { withoutProviderCitationHandles } from "@opengeni/contracts/provider-citation-handles";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { parseRequestBody } from "../http/request-body";
@@ -123,15 +124,25 @@ export async function itemsWithUnavailableSession(
   return unavailable;
 }
 
-/** An inbox row as the person sees it. */
+/**
+ * An inbox row as the person sees it. A reply or notification an agent wrote
+ * after a web search loses citation handles that name no openable page; the
+ * stored row, which agents read through their notification tools, keeps the
+ * exact text.
+ */
 export function presentInboxItem(
   row: InboxItemRow,
   sessionTitle: string | null,
   sessionAvailable: boolean,
 ): InboxItem {
+  const shown = {
+    ...row,
+    title: withoutProviderCitationHandles(row.title),
+    body: withoutProviderCitationHandles(row.body),
+  };
   return sessionAvailable
-    ? { ...row, sessionTitle, sessionAvailable: true }
-    : { ...row, sessionTitle: null, eventSequence: null, sessionAvailable: false };
+    ? { ...shown, sessionTitle, sessionAvailable: true }
+    : { ...shown, sessionTitle: null, eventSequence: null, sessionAvailable: false };
 }
 
 /**

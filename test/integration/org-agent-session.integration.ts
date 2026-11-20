@@ -1,0 +1,308 @@
+// Organization (Console) agents end to end: real PostgreSQL and NATS, the API
+// served over HTTP, an organization API key, and the worker's real turn
+// activity with a scripted model. A chat named by key, by `{ ref }` with its
+// own instructions, with `agentOverrides`, and the Console test chat route all
+// create through the ordinary session create and run a turn whose system
+// prompt carries the agent's Instructions (then the chat's own).
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import postgres from "postgres";
+import type { Settings } from "@opengeni/config";
+import { sha256Hex } from "@opengeni/contracts/values";
+import { createApiKey, createDb, createWorkspace, listSessionEvents } from "@opengeni/db";
+import { createNatsEventBus, type EventBus } from "@opengeni/events";
+import { createObservability } from "@opengeni/observability";
+import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { startTestMcpServer, type TestMcpServer } from "@opengeni/testing/mcp";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
+import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
+import { organizationApiKeyPermissions } from "../../apps/api/src/routes/api-keys";
+
+const noopWorkflowClient: SessionWorkflowClient = {
+  signalUserMessage: async () => undefined,
+  wakeSessionWorkflow: async () => undefined,
+  requestSessionWorkflowWakeDispatch: async () => undefined,
+  signalApprovalDecision: async () => undefined,
+  signalSessionControl: async () => undefined,
+  syncScheduledTask: async () => undefined,
+  deleteScheduledTaskSchedule: async () => undefined,
+  triggerScheduledTask: async () => undefined,
+};
+
+/** Tool servers must use https; the test's local MCP server stands in for it (see below). */
+const TOOL_SERVER_URL = "https://tools.org-agents-e2e.test/mcp";
+
+describe("organization agents end to end", () => {
+  let services: TestServices;
+  let dbClient: ReturnType<typeof createDb>;
+  let admin: ReturnType<typeof postgres>;
+  let bus: EventBus;
+  let settings: Settings;
+  let server: ReturnType<typeof Bun.serve>;
+  let accountId: string;
+  let workspaceId: string;
+  let authorization: string;
+  let mcp: TestMcpServer;
+  /** Server-side failures, shown with a failed assertion. */
+  const serverErrors: unknown[] = [];
+
+  beforeAll(async () => {
+    services = await startTestServices({ temporal: false });
+    await services.migrate();
+    // The API and worker use the restricted runtime role, as deployed (RLS applies).
+    dbClient = createDb(services.runtimeDatabaseUrl);
+    admin = postgres(services.databaseUrl, { max: 2 });
+    bus = await createNatsEventBus(services.natsUrl);
+    const [account] = await admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('Org agents e2e') returning id`;
+    accountId = account!.id;
+    workspaceId = (await createWorkspace(dbClient.db, { accountId, name: "Managed tenant" })).id;
+    await admin`insert into organization_managed_workspaces (account_id, workspace_id, source)
+      values (${accountId}, ${workspaceId}, 'console')`;
+    const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(dbClient.db, {
+      accountId,
+      workspaceId: null,
+      name: "Organization key",
+      prefix: token.slice(0, 14),
+      keyHash: await sha256Hex(token),
+      permissions: organizationApiKeyPermissions,
+      credentialKind: "organization",
+    });
+    authorization = `Bearer ${token}`;
+    settings = testSettings({
+      databaseUrl: services.runtimeDatabaseUrl,
+      natsUrl: services.natsUrl,
+      productAccessMode: "managed",
+      delegationSecret: "org-agents-e2e-delegation",
+      sandboxBackend: "none",
+      environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+    });
+    settings.orgAgentsAccountIds = [accountId];
+    const observability = createObservability(settings, { component: "api" });
+    const logError = observability.error.bind(observability);
+    observability.error = (message, attributes) => {
+      serverErrors.push({ message, ...attributes });
+      logError(message, attributes);
+    };
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus,
+      workflowClient: noopWorkflowClient,
+      observability,
+    });
+    server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    mcp = startTestMcpServer();
+  }, 180_000);
+
+  afterAll(async () => {
+    mcp?.close();
+    server?.stop(true);
+    await bus?.close();
+    await dbClient?.close();
+    await admin?.end();
+    await services?.down();
+  }, 120_000);
+
+  async function call(method: string, path: string, body?: unknown) {
+    const response = await fetch(`http://127.0.0.1:${server.port}${path}`, {
+      method,
+      headers: { authorization, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    return { status: response.status, body: (text ? JSON.parse(text) : {}) as Record<string, any> };
+  }
+  const agents = () => `/v1/organizations/${accountId}/agents`;
+  const sessions = () => `/v1/workspaces/${workspaceId}/sessions`;
+
+  /** Runs the chat's next turn in the worker; returns the system prompt the model got. */
+  async function runTurn(chatWorkspaceId: string, sessionId: string): Promise<string> {
+    const model = new ScriptedModel([{ outputText: "Done." }]);
+    const runtime = createProductionAgentRuntime({ model });
+    runtime.generateSessionTitle = async () => ({ title: null, usage: null });
+    const activities = createWorkerActivities({ settings, db: dbClient.db, bus, runtime });
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId,
+      workspaceId: chatWorkspaceId,
+      sessionId,
+      trigger: { kind: "next" },
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(result.status).toBe("idle");
+    const events = await listSessionEvents(dbClient.db, chatWorkspaceId, sessionId, 0, 200);
+    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
+    expect(model.calls).toBe(1);
+    return String((model.requests[0] as { systemInstructions?: unknown }).systemInstructions);
+  }
+
+  async function publishedAgent(key: string, instructions: string) {
+    const created = await call("POST", agents(), {
+      key,
+      name: key,
+      instructions,
+      config: { model: "scripted-model" },
+    });
+    expect(created.status).toBe(201);
+    const agentId = created.body.agent.id as string;
+    const published = await call("POST", `${agents()}/${agentId}/publish`, {
+      version: 1,
+      expectedVersion: created.body.agent.rowVersion,
+    });
+    expect(published.status).toBe(200);
+    return { agentId, rowVersion: published.body.agent.rowVersion as number };
+  }
+
+  test("agent as a key: the turn runs with the agent's Instructions", async () => {
+    const { agentId } = await publishedAgent("support", "Always greet the customer by name.");
+    const created = await call("POST", sessions(), { initialMessage: "Hello", agent: "support" });
+    expect([created.status, created.body.orgAgent]).toEqual([
+      202,
+      { id: agentId, key: "support", name: "support", version: 1, overrides: null },
+    ]);
+    const prompt = await runTurn(workspaceId, created.body.id);
+    expect(prompt).toContain("Always greet the customer by name.");
+  }, 180_000);
+
+  test("agent as { ref } with the chat's instructions after the agent's", async () => {
+    await publishedAgent("billing", "Explain invoices plainly.");
+    const created = await call("POST", sessions(), {
+      initialMessage: "Hello",
+      agent: { ref: "billing", instructions: "Answer in French." },
+    });
+    expect(created.status).toBe(202);
+    const prompt = await runTurn(workspaceId, created.body.id);
+    const agentAt = prompt.indexOf("Explain invoices plainly.");
+    const chatAt = prompt.indexOf("Answer in French.");
+    expect(agentAt).toBeGreaterThan(-1);
+    expect(chatAt).toBeGreaterThan(agentAt);
+  }, 180_000);
+
+  test("agentOverrides: reject refuses a changed setting; allow records it", async () => {
+    await publishedAgent("strict", "Stay on topic.");
+    const refused = await call("POST", sessions(), {
+      initialMessage: "Hello",
+      agent: "strict",
+      model: "gpt-5.6-luna",
+      agentOverrides: "reject",
+    });
+    expect([refused.status, refused.body.code, refused.body.details?.code]).toEqual([
+      422,
+      "SESSION_CREATE_REJECTED",
+      "agent_override_rejected",
+    ]);
+    const allowed = await call("POST", sessions(), {
+      initialMessage: "Hello",
+      agent: { ref: "strict" },
+      model: "gpt-5.6-luna",
+      agentOverrides: "allow",
+    });
+    expect(allowed.status).toBe(202);
+    expect(allowed.body.orgAgent.overrides).toEqual({
+      model: { agent: "scripted-model", chat: "gpt-5.6-luna" },
+    });
+    const unchanged = await call("POST", sessions(), {
+      initialMessage: "Hello",
+      agent: { ref: "strict" },
+      agentOverrides: "reject",
+    });
+    expect(unchanged.status).toBe(202);
+    expect(await runTurn(workspaceId, unchanged.body.id)).toContain("Stay on topic.");
+  }, 180_000);
+
+  test("a Console test chat runs the draft in the test workspace", async () => {
+    const { agentId, rowVersion } = await publishedAgent("drafted", "Published rules.");
+    const draft = await call("PUT", `${agents()}/${agentId}/draft`, {
+      name: "drafted",
+      instructions: "Draft rules.",
+      expectedVersion: rowVersion,
+    });
+    expect(draft.status).toBe(201);
+    const chat = await call("POST", `${agents()}/${agentId}/test-chats`, {
+      version: 2,
+      message: "Try it",
+    });
+    expect({ status: chat.status, errors: chat.status === 201 ? [] : serverErrors }).toEqual({
+      status: 201,
+      errors: [],
+    });
+    const prompt = await runTurn(chat.body.workspaceId, chat.body.sessionId);
+    expect(prompt).toContain("Draft rules.");
+    expect(prompt).not.toContain("Published rules.");
+  }, 180_000);
+
+  test("the agent's tool server asks first; the chat resumes after the decision", async () => {
+    await admin`insert into organization_tool_servers (account_id, server_key, name, url, auth_mode)
+      values (${accountId}, 'crm', 'CRM', ${TOOL_SERVER_URL}, 'none')`;
+    const created = await call("POST", agents(), {
+      key: "crm-agent",
+      name: "CRM agent",
+      instructions: "Look things up in the CRM.",
+      config: {
+        model: "scripted-model",
+        toolServers: [{ server: "crm", tools: { mode: "all" }, approval: { ask: true } }],
+      },
+    });
+    expect(created.status).toBe(201);
+    expect(
+      (
+        await call("POST", `${agents()}/${created.body.agent.id}/publish`, {
+          version: 1,
+          expectedVersion: created.body.agent.rowVersion,
+        })
+      ).status,
+    ).toBe(200);
+    const chat = await call("POST", sessions(), { initialMessage: "search", agent: "crm-agent" });
+    expect(chat.status).toBe(202);
+    const sessionId = chat.body.id as string;
+    const [chatServer] = await admin<{ server_id: string; url: string }[]>`
+      select server_id, url from session_mcp_servers where session_id = ${sessionId}`;
+    expect(chatServer).toMatchObject({ server_id: "crm", url: TOOL_SERVER_URL });
+    // The local MCP server speaks plain HTTP on loopback: point this chat's copy
+    // of the server at it (a `none` server needs no login either way).
+    await admin`update session_mcp_servers set url = ${mcp.url}
+      where session_id = ${sessionId} and server_id = 'crm'`;
+
+    const model = new ScriptedModel([
+      {
+        id: "org-approval-1",
+        output: [functionCall("crm__search_documents", { query: "renewals" }, "call-org-1")],
+      },
+      { id: "org-approval-2", outputText: "Found it." },
+    ]);
+    const runtime = createProductionAgentRuntime({ model });
+    runtime.generateSessionTitle = async () => ({ title: null, usage: null });
+    const turn = (trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string }) =>
+      createWorkerActivities({ settings, db: dbClient.db, bus, runtime }).runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId,
+        workspaceId,
+        sessionId,
+        trigger,
+        workflowId: `session-${sessionId}-${trigger.kind}`,
+        workflowRunId: crypto.randomUUID(),
+      });
+    expect((await turn({ kind: "next" })).status).toBe("requires_action");
+    expect(mcp.calls).toEqual([]);
+    const decided = await call("POST", `${sessions()}/${sessionId}/events`, {
+      type: "user.approvalDecision",
+      payload: { approvalId: "call-org-1", decision: "approve" },
+    });
+    expect(decided.status).toBeLessThan(300);
+    const [decision] = await admin<{ id: string }[]>`
+      select id from session_events where session_id = ${sessionId}
+        and type = 'user.approvalDecision' order by sequence desc limit 1`;
+    // The resumed turn attaches pending updates through the worker's second
+    // claim site, which declares the organization agent protocol too.
+    expect((await turn({ kind: "approval", triggerEventId: decision!.id })).status).toBe("idle");
+    expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "renewals" } }]);
+    const [attempts] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_turn_attempts where session_id = ${sessionId}`;
+    expect(attempts!.count).toBeGreaterThanOrEqual(2);
+  }, 180_000);
+});

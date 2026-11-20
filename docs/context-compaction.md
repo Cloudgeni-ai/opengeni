@@ -319,11 +319,18 @@ See `packages/runtime/src/anthropic-request-size.ts`,
 
 ## Model-facing tool output
 
-Every resolved model carries a textual tool-output policy. The Codex catalog's
-10,000-token policy is the default; Opengeni applies Codex's exact 1.2x JSON
-serialization allowance, UTF-8-safe head/tail truncation, and explicit
-`…N tokens truncated…` marker. Structured textual parts share one sequential
-budget while images, files, and encrypted content remain structured.
+Every resolved model carries a textual tool-output policy: how much text one
+tool result shows inline, 25,000 approximate tokens (100,000 UTF-8 bytes) by
+default. A newly produced result over it is stored whole and the model gets a
+view with the call that reads the rest (see
+[run lifecycle](run-lifecycle.md), "Tool results are lossless"), so this
+truncation is only the safety net behind that store. It applies Codex's exact
+1.2x JSON serialization allowance, UTF-8-safe head/tail truncation, and
+explicit `…N tokens truncated…` marker. Structured textual parts share one
+sequential budget while images, files, and encrypted content remain
+structured. Codex models never go below the 10,000-token policy the default
+used to be, so the bound only grows and history bounded under the earlier
+policy replays unchanged.
 
 The same pure normalizer runs at both canonical boundaries: before new
 `session_history_items` rows are written and again at the final live model-input
@@ -464,6 +471,16 @@ the start of every later request:
   layout. Compaction re-adds only the latest layout item after governance.
   Before this, every machine swap rewrote the end of the system prompt and
   every later request of the session re-read its whole history uncached.
+- The kind of compute works the same way. A configured agent's system prompt
+  describes the deployment's own kind of compute (`promptSandboxBackend`), not
+  the machine the turn runs on, so moving between a managed sandbox and a
+  Connected Machine keeps it byte-identical; only having compute at all still
+  follows the turn. When a session of a managed-sandbox deployment is on a
+  Connected Machine, its layout item adds the `# Connected Machine` section and
+  says which managed-sandbox guidance does not apply there. Before this, each
+  move between the two rewrote the file-link rules, the Connected Machine
+  section and the Git section, and on Claude routes the changed system prompt
+  also dropped every earlier signed thinking block.
 - An agent's Instructions are the exception that is allowed in the system
   prompt, because every chat of one agent shares them: chats bound to an agent
   revision (`sessions.agent_prompt_revision`) carry that revision as their own
@@ -499,14 +516,22 @@ the system prompt or tools, and the next request is a full write.
 counts 1, 2, 4, … and the full count). `model_call_facts.prompt_cache_diagnostics`
 stores that fingerprint, Claude's dropped signed-thinking counts by reason,
 and, when a call reads much less cache than the previous call of the same model
-in the session, a warm-miss class: `context_replaced`, `tools_changed`,
-`system_changed`, `release_changed`, `history_rewritten` (with the first
-diverging checkpoint), `thinking_dropped`, `account_changed`, `idle_gap`,
-`unobserved` or `unexplained`. The worker checks them in that order. Each
-fingerprint records the deployment revision that built the request, so a tools
-or system change between two deployments is `release_changed` (a release that
-edits model-facing text costs each live session one cold prefix) and the same
-change within one deployment is `tools_changed` or `system_changed`.
+in the session, a warm-miss class: `idle_gap`, `context_replaced`,
+`tools_changed`, `system_changed`, `release_changed`, `history_rewritten` (with
+the first diverging checkpoint), `thinking_dropped`, `account_changed`,
+`unobserved` or `unexplained`. The worker checks them in that order. Time comes
+first: more than 5 minutes after the previous call (the cache lifetime Opengeni
+requests by default) the prefix may have expired anyway, so no request change
+is blamed. `context_replaced` needs the prompt to fall below 60% of the
+previous one in tokens or in items: compaction keeps the tools, the system
+prompt and a summary, so a large fixed prefix can hold the token count up while
+the item count collapses. Each fingerprint records the deployment revision that built the
+request, so a tools or system change between two deployments is
+`release_changed` (a release that edits model-facing text costs each live
+session one cold prefix) and the same change within one deployment is
+`tools_changed` or `system_changed`. A call whose fingerprint has no revision
+came from a build older than revision recording, so it also counts as another
+deployment.
 `thinking_dropped` needs Claude to drop more signed thinking than it dropped
 for the previous call: a long conversation can drop the same old blocks on
 every request, which leaves the prompt unchanged, so a steady drop count falls

@@ -6,7 +6,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { PrefixedMcpServer, prefixedMcpToolName, prepareAgentTools } from "../src";
 import { projectCommandReadToolResultForModel } from "../src/command-read-model-projection";
 import { unwrapSdkMcpResultProjection } from "../src/mcp-result-custom-data";
-import { projectAttemptToolResultForCaller } from "../src/tool-result-spill";
+import { projectAttemptToolResultForCaller } from "../src/model-tool-result-store";
 
 const READ: AttemptToolIdentity = { serverId: "opengeni", toolName: "command_read" };
 const WAIT: AttemptToolIdentity = { serverId: "opengeni", toolName: "command_wait" };

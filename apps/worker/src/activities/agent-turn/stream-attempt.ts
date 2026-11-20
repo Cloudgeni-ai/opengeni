@@ -137,7 +137,6 @@ import {
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { githubGatewayApproval, githubGatewayContinuationNote } from "../github-gateway-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
-import { ToolResultSpill } from "./tool-result-spill";
 import type { WorkspaceMutationOptions } from "./sandbox-runtime";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -299,7 +298,6 @@ export type TurnStreamAttemptDeps = {
   historySink: ReturnType<typeof createTurnHistorySink>;
   checkpointBeforeProviderDispatch: () => Promise<void>;
   media: ReturnType<typeof createTurnMediaArtifacts>;
-  toolResultSpill: ToolResultSpill;
   claimedResult: ClaimedResult;
   flushRuntimeBatcher: () => Promise<void>;
   finalizeTurnOpStreamOps: (toolCallIds?: readonly string[]) => Promise<void>;
@@ -492,7 +490,6 @@ export async function runTurnStreamAttempt(
     historySink,
     checkpointBeforeProviderDispatch,
     media,
-    toolResultSpill,
     claimedResult,
     flushRuntimeBatcher,
     finalizeTurnOpStreamOps,
@@ -1475,7 +1472,6 @@ export async function runTurnStreamAttempt(
                   for (const receipt of media.generatedImageReceiptsCreatedThisTurn.values()) {
                     await media.materializeGeneratedImageInOwnedSdkSession(receipt, sandboxSession);
                   }
-                  await toolResultSpill.materializeDeferred();
                 },
               }
             : {}),

@@ -1,5 +1,69 @@
 # @opengeni/codex
 
+## 6.33.0
+
+### Minor Changes
+
+- a204fd7: Tool results no longer lose data. One result now shows the model up to 25,000 tokens (100,000 bytes) of text by default, up from 10,000 tokens (about 48 KB), the same as Claude Code's default MCP output limit. A larger result is stored whole as a workspace File and the model sees its start (shell output: its head and tail), the total size and the exact `tool_result_read {"resultId","offset"}` call that reads the rest from durable storage, with or without a sandbox. This replaces both the head/tail cut that dropped the middle of results between about 48 KB and 1 MiB and the separate over-1 MiB spill. `tool_result_read` is never in a first-request tool list: the model loads it by exact name through tool search, so no session's tool list changes. Only newly produced results change; history already sent replays byte for byte.
+
+### Patch Changes
+
+- d6b29a4: A Responses WebSocket response that contains a hosted web search, file search or code interpreter call no longer starts a continuation chain. The backend keeps those calls' results with the response it holds but leaves them out of the output item, so a continued chain caches the results while every later full request of the chat (a remote compaction checkpoint, a new connection) replays the item without them and misses the prompt cache from the first such call onwards. The next request now replays the call once, which misses only from that call, and every later request and checkpoint matches the cache again. `SERVER_HELD_RESULT_ITEM_TYPES` and `holdsServerOnlyResults` in `@opengeni/network/responses-replay` define the types.
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+- Updated dependencies [d6b29a4]
+  - @opengeni/contracts@6.33.0
+  - @opengeni/network@6.33.0
+
+## 6.32.0
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/network@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.31.1
+- @opengeni/network@6.31.1
+
+## 6.31.0
+
+### Patch Changes
+
+- 8e1f06d: A request on a Responses WebSocket now continues the previous response after any item type, including hosted web searches, image generation, file search, code interpreter, computer, shell, apply_patch and MCP calls, instead of resending the whole input. The continuation check used to recognize only a fixed list of types, so every response containing another type ended the chain, and the backend's different rendering of the full input missed the prompt cache from the first differing item. One shared function (`replayedResponsesItem` in `@opengeni/network/responses-replay`) now defines what replay strips, a provider id and an output-only status. The Codex request normalizer applies it on replay, and the continuation check applies it to both sides before comparing. A real difference in content, action, arguments or a required status still sends the full request. The replay-status list moves to the same module; `@opengeni/codex` re-exports it unchanged.
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+- Updated dependencies [8e1f06d]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/network@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

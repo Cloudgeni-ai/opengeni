@@ -23,11 +23,17 @@ const settings = testSettings({ openaiModel: "gpt-6-astra", lazyToolSearchEnable
 
 // The workspace's EU-only setting: off unless a test says otherwise.
 let euOnly: ReturnType<typeof spyOn<typeof db, "isWorkspaceEuOnly">>;
+// The sessions whose first-request tools revision searches for list_models and
+// privacy_facts: none (every session existing before migration 1513) unless a
+// test says otherwise.
+let rarelyUsed: ReturnType<typeof spyOn<typeof db, "sessionsWithSearchableRarelyUsedTools">>;
 beforeEach(() => {
   euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
+  rarelyUsed = spyOn(db, "sessionsWithSearchableRarelyUsedTools").mockResolvedValue(new Set());
 });
 afterEach(() => {
   euOnly.mockRestore();
+  rarelyUsed.mockRestore();
 });
 
 function session(capabilities: AgentCapabilities = "all", overrides: Partial<Session> = {}) {
@@ -835,6 +841,39 @@ describe("server effectiveTools environment projection", () => {
       }),
     ).effectiveTools!.tools;
     expect(eager.find((tool) => tool.name === "opengeni__goal_set")?.visibility).toBe("upfront");
+  });
+
+  test("list_models and privacy_facts follow the session's first-request tools revision", async () => {
+    const row = session();
+    const visibility = (env: SessionEffectiveToolsContext) => {
+      const tools = projected(row, env).effectiveTools!.tools;
+      return ["list_models", "privacy_facts"].map(
+        (name) => tools.find((tool) => tool.name === name)?.visibility,
+      );
+    };
+    // An existing session (revision 0) keeps them in every request.
+    expect(visibility(context())).toEqual(["upfront", "upfront"]);
+    // A new session finds them through search while the router is present.
+    const searchable = new Set([row.id]);
+    expect(visibility(context({ rarelyUsedToolsSearchableSessionIds: searchable }))).toEqual([
+      "search",
+      "search",
+    ]);
+    // Without the router they stay up front: they never bring it on their own.
+    expect(
+      visibility(
+        context({
+          settings: { ...settings, lazyToolSearchEnabled: false },
+          rarelyUsedToolsSearchableSessionIds: searchable,
+        }),
+      ),
+    ).toEqual(["upfront", "upfront"]);
+    // The page context reads the revision for the page's configured sessions.
+    rarelyUsed.mockResolvedValue(searchable);
+    await withPageContext([row], settings, (env) => {
+      expect(env.rarelyUsedToolsSearchableSessionIds).toEqual(searchable);
+    });
+    expect(rarelyUsed.mock.calls.at(-1)?.slice(1)).toEqual([row.workspaceId, [row.id]]);
   });
 
   test("no router for none without deferred enabled MCPs or retained router", () => {

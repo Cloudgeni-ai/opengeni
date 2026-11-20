@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { FetchLike } from "./index";
-import { replayedResponsesItem } from "./responses-replay";
+import { holdsServerOnlyResults, replayedResponsesItem } from "./responses-replay";
 
 // Capture the module's bootstrap context, not a chat request. Socket I/O and
 // idle timers outlive turns and must not pin the opener's execution context.
@@ -471,10 +471,11 @@ function fingerprint(value: unknown): string {
  * the same normalization the Codex request normalizer applies on replay, so an
  * item of any type that differs only in what replay strips (its provider id,
  * its output-only status) continues the chain. Without this, every response
- * with an item the check did not know (a hosted web search, image generation,
- * an MCP call) ended the chain, and the next request resent the full input,
- * which the backend renders differently from the chain it holds, so that
- * request missed the prompt cache from the first differing item onwards.
+ * with an item the check did not know (image generation, an MCP call) ended
+ * the chain, and the next request resent the full input for no reason.
+ * Hosted calls whose results the backend keeps out of the item (see
+ * {@link holdsServerOnlyResults}) are the exception: their response never
+ * starts a chain, whatever the replay.
  *
  * Everything replay keeps still compares exactly: content, arguments, actions,
  * results, phase and a status the Responses input schema requires, so a real
@@ -1301,6 +1302,12 @@ export function responsesTransport(
               cachedTokens: usage!.input_tokens_details!.cached_tokens!,
             };
           }
+          const outputItems =
+            Array.isArray(response?.output) && response.output.length > 0
+              ? response.output
+              : [...output.entries()]
+                  .sort(([left], [right]) => left - right)
+                  .map(([, item]) => item);
           if (
             fullInput &&
             inputKeys &&
@@ -1311,17 +1318,15 @@ export function responsesTransport(
             typeof response.id === "string" &&
             response.id &&
             (response.status === undefined || response.status === "completed") &&
-            response.error == null
+            response.error == null &&
+            // The backend holds results replay cannot send back: the next
+            // request replays them once, so later full requests match it.
+            !outputItems.some(holdsServerOnlyResults)
           ) {
             active.chain = {
               shape: requestShape(payload),
               input: inputKeys,
-              output: (Array.isArray(response.output) && response.output.length > 0
-                ? response.output
-                : [...output.entries()]
-                    .sort(([left], [right]) => left - right)
-                    .map(([, item]) => item)
-              ).map(modelVisibleItem),
+              output: outputItems.map(modelVisibleItem),
               responseId: response.id,
             };
           }

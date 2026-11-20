@@ -1,6 +1,7 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { Database } from "bun:sqlite";
+import { openSqliteFile } from "./sqlite-file";
 import {
   parseBrowserProfileArtifactReceipt,
   type BrowserProfileArtifactReceipt,
@@ -67,7 +68,7 @@ export class SqliteBrowserStateTransferJournal {
   }): Promise<SqliteBrowserStateTransferJournal> {
     const path = resolve(options.path);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const database = new Database(path, {
+    const database = openSqliteFile(path, {
       create: true,
       readwrite: true,
       strict: true,

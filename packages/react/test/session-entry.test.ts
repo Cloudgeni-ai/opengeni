@@ -68,6 +68,8 @@ describe("session-only entry", () => {
       "@opengeni/contracts/mcp-elicitation-model",
       // A quiet automation run's NO_REPLY answer stays out of the chat: a dependency-free leaf.
       "@opengeni/contracts/no-reply",
+      // Web-search citation handles that name no page stay out of the chat: a dependency-free leaf.
+      "@opengeni/contracts/provider-citation-handles",
       // The archive's stop reason, so an archive never reads as cancelled: a
       // dependency-free contracts leaf shared with the server.
       "@opengeni/contracts/session-history",
@@ -231,7 +233,9 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/stored-file-preview.ts"))).toBe(true);
     // Pure host wording for tool actions: history names a decided action the host's way.
     expect(reactSources.some((id) => id.endsWith("/src/tool-action-wording.ts"))).toBe(true);
-    expect(reactSources.length).toBe(66);
+    // Plain copy for a refused machine move, shared with the native machine card.
+    expect(reactSources.some((id) => id.endsWith("/src/machine-swap-copy.ts"))).toBe(true);
+    expect(reactSources.length).toBe(67);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

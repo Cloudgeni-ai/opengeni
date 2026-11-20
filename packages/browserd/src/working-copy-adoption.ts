@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openSqliteFile } from "./sqlite-file";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -652,7 +652,7 @@ export async function withWorkingDirectoryLock<T>(
   body: () => Promise<T>,
 ): Promise<T | typeof ADOPTION_IN_FLIGHT> {
   await mkdir(paths.recordsDirectory, { recursive: true, mode: 0o700 });
-  const database = new Database(join(paths.recordsDirectory, "lock.sqlite"), {
+  const database = openSqliteFile(join(paths.recordsDirectory, "lock.sqlite"), {
     create: true,
     readwrite: true,
   });
@@ -1310,7 +1310,7 @@ export async function assertWorkingCopyJournalsIntact(directory: string): Promis
     }
     let result: string | undefined;
     try {
-      const database = new Database(path, { readwrite: true, create: false, strict: true });
+      const database = openSqliteFile(path, { readwrite: true, create: false, strict: true });
       try {
         result = (database.query("PRAGMA integrity_check").get() as { integrity_check?: string })
           ?.integrity_check;

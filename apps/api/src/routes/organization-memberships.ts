@@ -118,6 +118,7 @@ import {
   isAgentActingAsPerson,
   organizationSettingsPermission,
 } from "../http/acting-person";
+import { consoleRolesEnabled, requireConsoleAccess } from "./console-roles";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { hasRecentManagedSignIn } from "./managed-sign-in-methods";
 import {
@@ -1098,6 +1099,30 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     // "Free compute bounds").
     await assertOrganizationNotSuspended(deps.db, { accountId: organizationId, subjectId });
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
+    // A Console role on an invitation is set by an owner or admin signed in
+    // as themselves (docs/opengeni-console.md, "Roles"), for a member.
+    const consoleRole =
+      payload.consoleRole === undefined || payload.consoleRole === "none"
+        ? null
+        : payload.consoleRole;
+    if (consoleRole) {
+      // Console roles exist only where Console agents are on for the organization.
+      if (!consoleRolesEnabled(deps, organizationId)) {
+        throw new ApiHttpError(422, {
+          code: "validation_failed",
+          message: "Console roles are not available for this organization",
+          details: { code: "console_roles_unavailable" },
+        });
+      }
+      await requireConsoleAccess(context, deps, organizationId, "full");
+      if (payload.role !== "member") {
+        throw new ApiHttpError(422, {
+          code: "validation_failed",
+          message: "Owners and admins always have full Console access",
+          details: { code: "console_role_not_applicable" },
+        });
+      }
+    }
     // `.invalid` addresses (RFC 2606) reach no one, and one is the stored
     // placeholder of an account without an email address.
     if (payload.email.trim().toLowerCase().endsWith(".invalid")) {
@@ -1124,6 +1149,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           initialWorkspaceIds: payload.initialWorkspaceIds,
           role: payload.role,
           expiresAt: payload.expiresAt,
+          ...(consoleRole ? { consoleRole } : {}),
         }),
       );
       await deliverOrganizationUserSetup(deps, {

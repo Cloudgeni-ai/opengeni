@@ -1,5 +1,4 @@
 import {
-  PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION,
   type OpenGeniApiError,
   type PersonalResourceAttachmentIntent,
   type Rig,
@@ -11,6 +10,10 @@ import {
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
+import {
+  buildPersonalResourceAttachmentIntent,
+  personalMachineUseIntent,
+} from "../../machine-request-model";
 import type { AuthSession } from "../types";
 import type { ManagedSelfContext } from "./managed-self-context";
 
@@ -212,58 +215,7 @@ export function personalSelection(
   };
 }
 
-export function buildPersonalResourceAttachmentIntent(input: {
-  mode: PersonalAttachmentMode | null;
-  visibility: "private" | "workspace";
-  acknowledged: boolean;
-  expectedAuthorityEpoch?: number | undefined;
-  resourceCount: number;
-}): PersonalResourceAttachmentIntent | undefined {
-  if (
-    input.resourceCount === 0 ||
-    input.mode === null ||
-    (input.visibility === "workspace" && !input.acknowledged)
-  ) {
-    return undefined;
-  }
-  return {
-    mode: input.mode,
-    ...(input.expectedAuthorityEpoch !== undefined
-      ? { expectedAuthorityEpoch: input.expectedAuthorityEpoch }
-      : {}),
-    workspaceSharedAcknowledged: input.visibility === "workspace" && input.acknowledged,
-    sharedOutputWarningVersion: PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION,
-  };
-}
-
-/**
- * The owner's consent for their own Connected Machine in this chat. Moving the
- * chat onto the machine is that consent, so the message that tells the agent
- * where it runs carries it. It names no resource: the server derives the
- * machine from the chat's active pointer and checks the owner and the chat's
- * authority epoch. Without it a chat moved mid-session has no grant for the
- * machine, and every turn after the move is refused at admission.
- *
- * `always` is for an explicit move: the person choosing their own machine for
- * a chat turns it on for their own work in this workspace, so their other
- * chats here don't ask again. Ordinary sends only renew it for this chat.
- */
-export function personalMachineUseIntent(
-  tenancy:
-    | Pick<NonNullable<Session["tenancy"]>, "visibility" | "authorityEpoch">
-    | null
-    | undefined,
-  mode: "session" | "always" = "session",
-): PersonalResourceAttachmentIntent | undefined {
-  if (!tenancy) return undefined;
-  return buildPersonalResourceAttachmentIntent({
-    mode,
-    visibility: tenancy.visibility === "workspace" ? "workspace" : "private",
-    acknowledged: true,
-    expectedAuthorityEpoch: tenancy.authorityEpoch,
-    resourceCount: 1,
-  });
-}
+export { buildPersonalResourceAttachmentIntent, personalMachineUseIntent };
 
 /**
  * Reconcile the Rig restored from a durable new-session draft against the
