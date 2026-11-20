@@ -3819,10 +3819,7 @@ export const englishMessages = {
   "native.timeline.imageViewer.share": "Share",
   "native.timeline.inChatConnect.close": "Close",
   "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
-  "native.timeline.landmarks.details": "Details",
   "native.timeline.landmarks.earlier": "+{count} earlier",
-  "native.timeline.landmarks.openAgentSession": "Open agent session",
-  "native.timeline.landmarks.openName": "Open {name}",
   "native.timeline.machineRequest.allow": "Allow",
   "native.timeline.machineRequest.allowing": "Allowing…",
   "native.timeline.machineRequest.askedAgain":
@@ -3838,7 +3835,6 @@ export const englishMessages = {
     "This chat is archived. Continue in a new chat to use a machine.",
   "native.timeline.machineRequest.blockedEnded":
     "This chat has ended. Start a new chat to use a machine.",
-  "native.timeline.machineRequest.cantChange": "You can't change where this chat runs.",
   "native.timeline.machineRequest.change": "Change",
   "native.timeline.machineRequest.chooseWhere": "Choose where this chat runs.",
   "native.timeline.machineRequest.connectAnother":
@@ -4017,7 +4013,6 @@ export const englishMessages = {
   "native.timeline.messageTimeline.agentAsked": "Agent asked",
   "native.timeline.messageTimeline.loadEarlierMessages": "Load earlier messages",
   "native.timeline.messageTimeline.retry": "Retry",
-  "native.timeline.messageTimeline.workerReportedBack": "Worker reported back",
   "native.timeline.modelPicker.done": "Done",
   "native.timeline.previews.close": "Close",
   "native.timeline.previews.fullScreen": "Full screen",
