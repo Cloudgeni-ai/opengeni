@@ -6591,6 +6591,30 @@ export function browserTabDiagnosisError(error: unknown): unknown {
 }
 
 /** Keep a definite read timeout useful without publishing driver diagnostics. */
+/**
+ * Opening or navigating a tab to a website whose server never answered is the
+ * website's failure, not an outage: the controller stopped the load and the
+ * request is safe to repeat. Its 504 carries a fixed, code-written text with
+ * no page or host detail, so it is published instead of the generic
+ * "temporarily unavailable — retry" every 5xx becomes.
+ */
+export function browserNavigationNotAnsweredError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof BrowserControlRequestError) || error.error.code !== "timeout") return null;
+  const seconds =
+    /^browser could not load the requested URL: its server did not respond within (\d{1,4}) seconds$/u.exec(
+      error.error.message,
+    )?.[1];
+  if (!seconds) return null;
+  const failure = new ApiHttpError(504, {
+    code: "upstream_unavailable",
+    message: `The page did not load: the website did not answer within ${seconds} seconds. Try again, or check the address.`,
+    retryable: true,
+    outcomeUnknown: false,
+  });
+  failure.cause = error;
+  return failure;
+}
+
 export function browserScreenshotError(error: unknown): unknown {
   // The controller refuses at once while a JavaScript dialog blocks the page.
   if (
@@ -7301,6 +7325,8 @@ export function browserRouteError(
   if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
+  const navigationNotAnswered = browserNavigationNotAnsweredError(error);
+  if (navigationNotAnswered) return navigationNotAnswered;
   const connectedMachineError = interactionControlApiError(error, "browser", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
