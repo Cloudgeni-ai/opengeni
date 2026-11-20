@@ -436,7 +436,9 @@ version's `requestedTools`.
   (`{ siteArtifactId, siteVersionId }`, `workspace:read`) in the console, and
   `POST /v1/site-runtime/tools/setup` (`{}`) for a published App. Both answer
   `ToolGatewaySiteSetupResponse` `{ version: 1, items }`; each item has a
-  stable `key` (`<action>:<connector>:<account>`), `action` (`connect` or
+  stable `key` (`<action>:<digest>`, the digest of the connector's catalog
+  capability and the account's connection, so connectors that share a name
+  stay apart and Site code sees no ids), `action` (`connect` or
   `reconnect`), `connector`, `capabilityId`, `connectionId`, `account`,
   `shared`, the declared `tools` waiting on it, and `openUrl` (published
   hosts only). It runs the same readiness as `tools/readiness` over every
@@ -457,8 +459,12 @@ version's `requestedTools`.
   published page has no Opengeni frame to sign in through, so the button opens
   `openUrl`, the App in the Opengeni console with `?connect=<key>`, in a new
   tab, which opens that dialog at once; returning to the App refreshes the
-  card and its tool readiness. `openUrl` uses `OPENGENI_WEB_BASE_URL`
-  (falling back to the public base URL).
+  card and its tool readiness. `openUrl` uses `OPENGENI_WEB_BASE_URL`,
+  falling back to `OPENGENI_PUBLIC_BASE_URL` as other console links do; set
+  `OPENGENI_WEB_BASE_URL` when the console is served from another origin
+  than the API, or the link opens the API's address. The console opens the
+  dialog once its connect dialogs are ready and drops a key the card no
+  longer lists.
 - **From the App.** `site.connections` in `@opengeni/sdk/site`:
   `status()` resolves `{ supported, ready, needed }` (each need with `key`,
   `action`, `connector`, `account`, `label` and `tools`; no ids or

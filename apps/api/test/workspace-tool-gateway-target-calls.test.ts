@@ -204,6 +204,7 @@ const {
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
   resolveWorkspaceToolManifest,
+  siteToolSetupKey,
 } = await import("../src/workspace-tool-target");
 const { declareSiteToolsForEveryViewer, readSiteToolAccountInventory } =
   await import("../src/site-tool-routing");
@@ -2546,7 +2547,15 @@ describe("Site tool readiness and typed failures", () => {
         // In the console the dialog opens in place.
         openUrl: null,
       });
-      expect(connect!.key).toBe(`connect:${connect!.connector}:`);
+      expect(connect!.key).toBe(
+        siteToolSetupKey({
+          action: "connect",
+          capabilityId: "capability-grafana",
+          connectionId: null,
+        }),
+      );
+      // The key names no connector, account or id.
+      expect(connect!.key).toMatch(/^connect:[0-9a-f]{24}$/u);
       // Two declared tools on the same connector are one item.
       const second = { serverId: "grafana", toolName: "list_dashboards" };
       const merged = await setup(
@@ -2571,7 +2580,11 @@ describe("Site tool readiness and typed failures", () => {
         action: "reconnect",
         connectionId: f.personal.id,
         account: "ada@example.test",
-        key: `reconnect:${reconnect!.connector}:ada@example.test`,
+        key: siteToolSetupKey({
+          action: "reconnect",
+          capabilityId: "capability-grafana",
+          connectionId: f.personal.id,
+        }),
       });
       // Nothing the catalog can connect from here: nothing to click, no item.
       expect(await setup({ ...withCapability(null), readReconnect: async () => [] })).toEqual([]);
@@ -2591,6 +2604,21 @@ describe("Site tool readiness and typed failures", () => {
     } finally {
       f.close();
     }
+  });
+
+  test("connect card keys keep connectors and accounts apart even when their names match", () => {
+    const key = (capabilityId: string | null, connectionId: string | null = null) =>
+      siteToolSetupKey({ action: "connect", capabilityId, connectionId });
+    // Two connectors both shown as "Mail" are two items.
+    expect(key("capability-mail-a")).not.toBe(key("capability-mail-b"));
+    // Two accounts on one connector are two items; the same one is stable.
+    expect(key("capability-mail-a", "connection-1")).not.toBe(
+      key("capability-mail-a", "connection-2"),
+    );
+    expect(key("capability-mail-a", "connection-1")).toBe(key("capability-mail-a", "connection-1"));
+    expect(
+      siteToolSetupKey({ action: "reconnect", capabilityId: "c", connectionId: "x" }),
+    ).not.toBe(siteToolSetupKey({ action: "connect", capabilityId: "c", connectionId: "x" }));
   });
 
   test("an undeclared target is unavailable; a replaced Site version is refused", async () => {
