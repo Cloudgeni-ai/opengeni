@@ -2692,12 +2692,15 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * search results where it can; any tag left over, for example in an answer
  * stored before that, would otherwise show as raw markup. Code keeps them.
  *
- * Source links lose the tracking a hosted web search tags onto them
- * (`utm_source=openai` and the `_t_q` search query); the page's own
- * parameters stay. Stored history keeps the links as the model wrote them.
+ * Displayed links omit UTM tracking as well as the hosted-search query on
+ * recognized provider links. This is shared by web/native rendering and copy;
+ * stored history keeps the links as the model wrote them.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return withoutProviderTrackingInText(rewriteClaudeCiteTags(withoutProviderCitationHandles(text)));
+  return withoutProviderTrackingInText(
+    rewriteClaudeCiteTags(withoutProviderCitationHandles(text)),
+    "all-utm",
+  );
 }
 
 /**
