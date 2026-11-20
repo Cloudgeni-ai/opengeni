@@ -319,11 +319,18 @@ See `packages/runtime/src/anthropic-request-size.ts`,
 
 ## Model-facing tool output
 
-Every resolved model carries a textual tool-output policy. The Codex catalog's
-10,000-token policy is the default; Opengeni applies Codex's exact 1.2x JSON
-serialization allowance, UTF-8-safe head/tail truncation, and explicit
-`…N tokens truncated…` marker. Structured textual parts share one sequential
-budget while images, files, and encrypted content remain structured.
+Every resolved model carries a textual tool-output policy: how much text one
+tool result shows inline, 25,000 approximate tokens (100,000 UTF-8 bytes) by
+default. A newly produced result over it is stored whole and the model gets a
+view with the call that reads the rest (see
+[run lifecycle](run-lifecycle.md), "Tool results are lossless"), so this
+truncation is only the safety net behind that store. It applies Codex's exact
+1.2x JSON serialization allowance, UTF-8-safe head/tail truncation, and
+explicit `…N tokens truncated…` marker. Structured textual parts share one
+sequential budget while images, files, and encrypted content remain
+structured. Codex models never go below the 10,000-token policy the default
+used to be, so the bound only grows and history bounded under the earlier
+policy replays unchanged.
 
 The same pure normalizer runs at both canonical boundaries: before new
 `session_history_items` rows are written and again at the final live model-input
@@ -464,6 +471,16 @@ the start of every later request:
   layout. Compaction re-adds only the latest layout item after governance.
   Before this, every machine swap rewrote the end of the system prompt and
   every later request of the session re-read its whole history uncached.
+- The kind of compute works the same way. A configured agent's system prompt
+  describes the deployment's own kind of compute (`promptSandboxBackend`), not
+  the machine the turn runs on, so moving between a managed sandbox and a
+  Connected Machine keeps it byte-identical; only having compute at all still
+  follows the turn. When a session of a managed-sandbox deployment is on a
+  Connected Machine, its layout item adds the `# Connected Machine` section and
+  says which managed-sandbox guidance does not apply there. Before this, each
+  move between the two rewrote the file-link rules, the Connected Machine
+  section and the Git section, and on Claude routes the changed system prompt
+  also dropped every earlier signed thinking block.
 - An agent's Instructions are the exception that is allowed in the system
   prompt, because every chat of one agent shares them: chats bound to an agent
   revision (`sessions.agent_prompt_revision`) carry that revision as their own

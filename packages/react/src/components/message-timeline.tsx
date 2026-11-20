@@ -33,14 +33,7 @@ import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timelin
 import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
-import {
-  COMPACTION_TRIMMED_SUBTITLE,
-  COMPACTION_TRIMMED_TITLE,
-  compactionFailureDetails,
-  compactionSkipSubtitle,
-  compactionSkipTitle,
-  isTrimmedCompaction,
-} from "../timeline/compaction-copy";
+import { compactionPresentation } from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -204,7 +197,13 @@ import {
   useAgentIdentity,
   type ResolveSessionTitle,
 } from "../timeline/agent-identity";
-import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
+import type { AgentTitleParts } from "../timeline/platform-activity-presentation";
+import {
+  goalLandmarkText,
+  groupMachineInputMembers,
+  workerCompletionPresentation,
+  workerCompletionSections,
+} from "../timeline/landmark-model";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { sessionStatusItemDisplayStatus } from "../session-status-model";
 import {
@@ -4417,63 +4416,12 @@ export function TimelineRow({
   }
 }
 
-const COMPACTION_TRIGGER_LABEL = (
-  t: OpenGeniText,
-): Record<NonNullable<ContextCompactionItem["trigger"]>, string> => ({
-  auto: t("messageTimeline.auto"),
-  operator: t("messageTimeline.manual"),
-  proactive: t("messageTimeline.auto"),
-  overflow: t("messageTimeline.overflow"),
-});
-
 function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const detailsId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
-  // Switching a Codex chat to another model rebuilds its context once; say
-  // that plainly instead of describing an ordinary compaction.
-  const modelSwitch = item.implementation === "portable_model_switch";
-  // The chat's model could not summarize, so older messages were trimmed.
-  const trimmed = isTrimmedCompaction(item);
-  const trigger =
-    item.trigger && item.phase !== "started" && !modelSwitch
-      ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
-      : null;
-  const before =
-    item.estimatedTokensBefore != null
-      ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
-      : null;
-  const after =
-    item.estimatedTokensAfter != null
-      ? Math.round(item.estimatedTokensAfter).toLocaleString(t.locale)
-      : null;
-  const title =
-    item.phase === "started"
-      ? modelSwitch
-        ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
-        : t("messageTimeline.compactingConversationHistory")
-      : item.phase === "compacted"
-        ? trimmed
-          ? COMPACTION_TRIMMED_TITLE(t)
-          : modelSwitch
-            ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
-            : before && after
-              ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
-              : t("messageTimeline.conversationHistoryCompacted")
-        : compactionSkipTitle(t, item.skipReason);
-  const subtitle = trimmed
-    ? COMPACTION_TRIMMED_SUBTITLE(t)
-    : item.phase === "compacted" && !modelSwitch
-      ? t("messageTimeline.chatHistoryAboveIsUnchanged")
-      : item.phase === "skipped"
-        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
-        : null;
-  // Provider identifiers are diagnostics: one short line up front, the rest on demand.
-  const details = compactionFailureDetails(t, item);
-  const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
-  // Longer copy wraps, centred, instead of truncating.
-  const wraps = failed || trimmed;
+  const { title, trigger, subtitle, details, failed, wraps } = compactionPresentation(t, item);
   const pill = failed
     ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
     : item.phase === "started"
@@ -4983,48 +4931,16 @@ function workerCompletionMeta(
   item: WorkerCompletionItem,
   name: string | null,
 ): WorkerCompletionMeta {
-  if (item.childStatus === "failed") {
-    return {
-      title: namedAgentTitle(
-        name,
-        (agent) => t("messageTimeline.nameFailed", { name: agent }),
-        t("messageTimeline.workerFailed"),
-      ),
-      icon: XCircleIcon,
-      failed: true,
-    };
-  }
-  if (item.goalStatus === "paused") {
-    return {
-      title: namedAgentTitle(
-        name,
-        (agent) => t("messageTimeline.namePaused", { name: agent }),
-        t("messageTimeline.workerPaused"),
-      ),
-      icon: PauseCircleIcon,
-      failed: false,
-    };
-  }
-  if (item.goalStatus === "completed") {
-    return {
-      title: namedAgentTitle(
-        name,
-        (agent) => t("messageTimeline.nameCompletedItsGoal", { name: agent }),
-        t("messageTimeline.workerCompleted"),
-      ),
-      icon: CheckCircle2Icon,
-      failed: false,
-    };
-  }
-  return {
-    title: namedAgentTitle(
-      name,
-      (agent) => t("messageTimeline.resultFromName", { name: agent }),
-      t("messageTimeline.workerReportedBack"),
-    ),
-    icon: BotIcon,
-    failed: false,
-  };
+  const { title, outcome } = workerCompletionPresentation(t, item, name);
+  const icon =
+    outcome === "failed"
+      ? XCircleIcon
+      : outcome === "paused"
+        ? PauseCircleIcon
+        : outcome === "completed"
+          ? CheckCircle2Icon
+          : BotIcon;
+  return { title, icon, failed: outcome === "failed" };
 }
 
 function WorkerCompletionRow({
@@ -5039,26 +4955,7 @@ function WorkerCompletionRow({
   const identity = useAgentIdentity();
   const meta = workerCompletionMeta(t, item, identity.titleFor(item.childSessionId));
   const Icon = meta.icon;
-  // "Paused because" only when the outcome actually IS a pause — completion
-  // payloads can carry a leftover pausedReason/rationale from earlier in the
-  // worker's life, and a completed row must not show a pause section.
-  const showPausedReason =
-    item.childStatus !== "failed" && item.goalStatus === "paused" && !!item.pausedReason?.trim();
-  const details: { label: string; value: string; muted?: boolean }[] = [
-    ...(item.text.trim() ? [{ label: t("messageTimeline.report"), value: item.text.trim() }] : []),
-    ...(item.evidence?.trim()
-      ? [{ label: t("messageTimeline.evidence"), value: item.evidence.trim(), muted: true }]
-      : []),
-    ...(showPausedReason
-      ? [
-          {
-            label: t("messageTimeline.pausedBecause"),
-            value: item.pausedReason!.trim(),
-            muted: true,
-          },
-        ]
-      : []),
-  ];
+  const details = workerCompletionSections(t, item);
   return (
     <div className={cn(enter && "animate-og-enter", "min-w-0")}>
       <AgentRow
@@ -5183,7 +5080,7 @@ function goalMeta(t: OpenGeniText, action: GoalItem["action"]): GoalMeta {
 function GoalRow({ item }: { item: GoalItem }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const { label, pill, icon: Icon } = goalMeta(t, item.action);
+  const { pill, icon: Icon } = goalMeta(t, item.action);
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <span
@@ -5193,10 +5090,7 @@ function GoalRow({ item }: { item: GoalItem }) {
         )}
       >
         <Icon className="size-3.5 shrink-0" />
-        <span className="truncate">
-          {label}
-          {item.text ? `: ${truncate(item.text, 90)}` : ""}
-        </span>
+        <span className="truncate">{goalLandmarkText(t, item)}</span>
       </span>
     </div>
   );
@@ -5324,40 +5218,6 @@ function AutomationRunRow({ item }: { item: MachineInputBatchItem }) {
       </p>
     </div>
   );
-}
-
-type MachineInputMemberGroup =
-  | { kind: "agent"; members: MachineInputBatchItem["members"] }
-  | { kind: "other"; member: MachineInputBatchItem["members"][number] };
-
-/**
- * Agent members get named rows; repeated progress notes from one agent fold
- * into its single row (latest note shown, earlier ones behind the disclosure).
- */
-function groupMachineInputMembers(
-  members: MachineInputBatchItem["members"],
-): MachineInputMemberGroup[] {
-  const groups: MachineInputMemberGroup[] = [];
-  const progressBySource = new Map<string, MachineInputBatchItem["members"]>();
-  for (const member of members) {
-    if (!isAgentMember(member)) {
-      groups.push({ kind: "other", member });
-      continue;
-    }
-    if (member.kind === "child_progress") {
-      const existing = progressBySource.get(member.sourceId);
-      if (existing) {
-        existing.push(member);
-        continue;
-      }
-      const bucket = [member];
-      progressBySource.set(member.sourceId, bucket);
-      groups.push({ kind: "agent", members: bucket });
-      continue;
-    }
-    groups.push({ kind: "agent", members: [member] });
-  }
-  return groups;
 }
 
 function agentMemberIcon(member: MachineInputBatchItem["members"][number]): ReactNode {

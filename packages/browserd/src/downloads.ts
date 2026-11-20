@@ -11,6 +11,7 @@ import {
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
 } from "@opengeni/contracts";
 import { Database } from "bun:sqlite";
+import { openSqliteFile } from "./sqlite-file";
 
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_SESSION_BYTES = 10 * 1024 * 1024 * 1024;
@@ -193,7 +194,7 @@ export class BrowserDownloadStore {
     await chmod(rootDirectory, 0o700);
     await chmod(filesDirectory, 0o700);
     await chmod(storedDirectory, 0o700);
-    const database = new Database(join(rootDirectory, "downloads.sqlite"), {
+    const database = openSqliteFile(join(rootDirectory, "downloads.sqlite"), {
       create: true,
       readwrite: true,
       strict: true,

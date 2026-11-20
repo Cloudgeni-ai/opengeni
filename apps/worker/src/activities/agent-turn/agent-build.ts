@@ -26,6 +26,7 @@ import {
   CommandCompletionDelivery,
   type ConnectorActionPolicyHooks,
   modelToolTextBudgetBytes,
+  type ModelToolResultStore,
   type RepositorySkillsIndex,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
@@ -143,6 +144,8 @@ export type BuildTurnAgentDeps = {
   sandboxState: SandboxRuntimeState;
   providerTurn: ProviderTurnState;
   media: ReturnType<typeof createTurnMediaArtifacts>;
+  /** Keeps tool results larger than the model may see inline; see tool-result-store.ts. */
+  toolResultStore: ModelToolResultStore;
   leases: ReturnType<typeof createTurnCredentialLeases>;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
@@ -199,6 +202,8 @@ export type BuildTurnAgentDeps = {
   toolRouterInHistory: boolean;
   /** False when nothing this attempt attaches is deferred (see turnToolRouterExpected). */
   toolRouterExpected: boolean;
+  /** The session's frozen first-request tools revision (settleSessionFirstRequestToolsRevision). */
+  firstRequestToolsRevision: number;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -223,6 +228,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     sandboxState,
     providerTurn,
     media,
+    toolResultStore,
     leases,
     turn,
     session,
@@ -266,6 +272,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     promptToolAvailability,
     toolRouterInHistory,
     toolRouterExpected,
+    firstRequestToolsRevision,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -751,6 +758,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     layout: workspaceFilesystemLayout(eventing.modelRunSettings, runtimeResources, {
       ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
+      ...(session.agent ? { renderer: session.agent.renderer } : {}),
       ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
         ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
         : {}),
@@ -908,6 +916,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
+        modelToolResultStore: toolResultStore,
         ...(session.agent
           ? {
               agentConfig: session.agent,
@@ -915,6 +924,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               ...(toolRouterExpected ? {} : { toolRouterExpected: false }),
             }
           : {}),
+        ...(firstRequestToolsRevision > 0 ? { firstRequestToolsRevision } : {}),
         ...(agentPrompt?.instructions ? { agentInstructions: agentPrompt.instructions } : {}),
         ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
         ...(session.agent && promptToolAvailability

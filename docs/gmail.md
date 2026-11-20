@@ -66,11 +66,11 @@ not exposed because it requires the broader full-mail scope.
 
 ## Model-visible results
 
-Codemode, the spill file and every programmatic caller receive the exact
+Codemode and every programmatic caller receive the exact
 results described on this page. A model call receives a compact copy from the
 bridge's `projectModelToolResult` hook
 (`packages/runtime/src/gmail-model-projection.ts`), applied at the per-caller
-seam before the 1 MiB model limit:
+seam before the model's inline-size check:
 
 - `search_messages`, `search_threads`, `get_thread` and `list_drafts` return
   one card per message: `id`, `threadId` (and `draftId`/`messageId` for

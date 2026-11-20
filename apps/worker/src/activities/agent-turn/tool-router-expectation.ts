@@ -1,6 +1,11 @@
 import { CODEX_APPS_MCP_SERVER_ID } from "@opengeni/codex";
 import { HARNESS_CONTROL_FIRST_PARTY_TOOLS, isAlwaysVisibleBaseToolName } from "@opengeni/runtime";
-import type { FirstPartyMcpToolName, ResolvedAgentConfig, ToolRef } from "@opengeni/contracts";
+import {
+  isRarelyUsedRuntimeToolName,
+  type FirstPartyMcpToolName,
+  type ResolvedAgentConfig,
+  type ToolRef,
+} from "@opengeni/contracts";
 
 const HARNESS_CONTROL: ReadonlySet<string> = new Set(HARNESS_CONTROL_FIRST_PARTY_TOOLS);
 const INTERACTION_ENTRY_MODEL_NAMES: ReadonlySet<string> = new Set([
@@ -59,6 +64,9 @@ export function turnToolRouterExpected(input: {
   }
   for (const name of input.functionToolNames) {
     if (isAlwaysVisibleBaseToolName(name) || independent.has(name)) continue;
+    // list_models and privacy_facts are searchable only when something else
+    // brings the router, so they never decide it.
+    if (isRarelyUsedRuntimeToolName(name)) continue;
     if (INTERACTION_ENTRY_MODEL_NAMES.has(name)) continue;
     return true;
   }

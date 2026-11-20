@@ -9,8 +9,12 @@ plainly what is unknown.
 
 ## The tool
 
-`privacy_facts` is an always-visible local function with strict empty
-arguments, owned by the `runtime` class (no agent configuration turns it off).
+`privacy_facts` is a local function with strict empty arguments, owned by the
+`runtime` class (no agent configuration turns it off). Sessions created after
+migration 1513 find it through tool search by exact name when the turn has the
+search router for other tools; older sessions, and turns without the router,
+carry it in every request (see the first-request set in
+[architecture](architecture.md)).
 It is built in `apps/worker/src/activities/agent-turn/privacy-facts.ts` and
 returns one text block for the turn's chat model:
 

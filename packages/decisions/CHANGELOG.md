@@ -1,5 +1,15 @@
 # @opengeni/decisions
 
+## 6.33.0
+
+### Patch Changes
+
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+  - @opengeni/contracts@6.33.0
+
 ## 6.32.0
 
 ### Patch Changes

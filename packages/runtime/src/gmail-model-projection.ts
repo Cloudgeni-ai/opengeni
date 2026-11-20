@@ -1,5 +1,5 @@
 import type { AttemptToolResult as AttemptToolResultValue } from "@opengeni/contracts";
-import { modelToolTextBudgetBytes } from "./tool-result-spill";
+import { modelToolTextBudgetBytes } from "./model-tool-result-store";
 
 type JsonRecord = Record<string, unknown>;
 

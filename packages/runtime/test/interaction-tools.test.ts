@@ -36,7 +36,6 @@ import {
 } from "../src/interaction-tools";
 import { computerObservationText } from "../src/computer-model-text";
 import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "../src/mcp-network";
-import { modelToolResultFits } from "../src/tool-result-spill";
 
 const accountId = randomUUID();
 const workspaceId = randomUUID();
@@ -1180,7 +1179,6 @@ describe("interaction attempt tools", () => {
     const model = await discover("model");
     expect(model.isError).not.toBe(true);
     expect(mcpSerializedSizeBytes(model)).toBeLessThanOrEqual(768 * 1024);
-    expect(modelToolResultFits(model)).toBe(true);
     const selected = model.structuredContent as {
       browsers: BrowserSession[];
       computers: ComputerSession[];

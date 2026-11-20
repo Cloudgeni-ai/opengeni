@@ -1,5 +1,25 @@
 # @opengeni/db
 
+## 6.33.0
+
+### Patch Changes
+
+- 3091618: New sessions find `list_models` and `privacy_facts` through tool search instead of carrying them in every model request, saving about 1.2 KB (roughly 240 tokens) per request whenever the turn has the search router. Each session records which tools its requests carry in `sessions.first_request_tools_revision` (migration 1513) once, before its first model request, so existing sessions keep exactly the tools they already send. `BuildAgentOptions.firstRequestToolsRevision` selects the behaviour; omitting it keeps both tools in every request.
+- Updated dependencies [176ccd5]
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+- Updated dependencies [d6b29a4]
+  - @opengeni/config@6.33.0
+  - @opengeni/contracts@6.33.0
+  - @opengeni/codex@6.33.0
+  - @opengeni/network@6.33.0
+  - @opengeni/codemode@6.33.0
+  - @opengeni/observability@6.33.0
+  - @opengeni/xai-subscription@6.33.0
+  - @opengeni/subscriptions@6.33.0
+
 ## 6.32.0
 
 ### Minor Changes

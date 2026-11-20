@@ -8,7 +8,6 @@ import {
   type SkillReadKind,
   type SkillUseSource,
 } from "@opengeni/contracts";
-import { modelToolResultFits } from "@opengeni/runtime";
 import {
   listSkillPaths,
   PORTABLE_SKILL_MAX_FILES,
@@ -371,11 +370,12 @@ function withSkillUse(
       inIndex: telemetry.indexedSkillIds()?.has(origin.id) ?? false,
       searchedThisTurn: telemetry.searched(origin.id),
     });
-    const annotated: AttemptToolResult = {
+    // `_meta` never reaches the model; a read too large to show whole keeps it
+    // beside the stored-result receipt.
+    return {
       ...read.result,
       _meta: { ...read.result._meta, [SKILL_USE_META_KEY]: use as JsonValue },
     };
-    return modelToolResultFits(annotated) ? annotated : read.result;
   } catch {
     return read.result;
   }

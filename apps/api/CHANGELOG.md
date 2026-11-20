@@ -1,5 +1,46 @@
 # @opengeni/api-router
 
+## 6.33.0
+
+### Patch Changes
+
+- d58967a: When a connector isn't turned on in a workspace but the person already has their one own login for it, `capability_catalog_search` and `capability_authorization_request` now say so (`reason: "not_enabled"`) and that the card uses that login here without a new sign-in, instead of describing a first connection.
+- 0d394ec: Web-search citation handles no longer show on any surface that displays an answer. OpenAI models that search the web through a Codex or ChatGPT subscription write citations as private-use handles (U+E200 `cite` U+E202 `turn0search3` U+E201). The responses carry nothing that maps a handle to a page, so people saw `citeturn0search3` in the text. The chat timeline and Slack already removed them. Now the notification inbox (web, desktop banners and mobile, through the inbox API), phone push text, Teams replies, shared chat links and a worker's report in its manager's chat remove them too. Stored history and anything sent to a model keep the exact text. `@opengeni/contracts/provider-citation-handles` exports `withoutProviderCitationHandles` for other surfaces, such as products that render the raw chat stream.
+- Updated dependencies [176ccd5]
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [eb58354]
+- Updated dependencies [a204fd7]
+- Updated dependencies [617fa38]
+- Updated dependencies [316a815]
+- Updated dependencies [d6b29a4]
+  - @opengeni/runtime@6.33.0
+  - @opengeni/config@6.33.0
+  - @opengeni/contracts@6.33.0
+  - @opengeni/core@6.33.0
+  - @opengeni/db@6.33.0
+  - @opengeni/codex@6.33.0
+  - @opengeni/tool-gateway@6.33.0
+  - @opengeni/network@6.33.0
+  - @opengeni/documents@6.33.0
+  - @opengeni/github@6.33.0
+  - @opengeni/storage@6.33.0
+  - @opengeni/artifact-tool@6.33.0
+  - @opengeni/capabilities@6.33.0
+  - @opengeni/codemode@6.33.0
+  - @opengeni/decisions@6.33.0
+  - @opengeni/events@6.33.0
+  - @opengeni/interaction@6.33.0
+  - @opengeni/observability@6.33.0
+  - @opengeni/vaults@6.33.0
+  - @opengeni/vaults-bitwarden@6.33.0
+  - @opengeni/vaults-keeper@6.33.0
+  - @opengeni/vaults-onepassword@6.33.0
+  - @opengeni/vaults-protonpass@6.33.0
+  - @opengeni/xai-subscription@6.33.0
+  - @opengeni/agent-proto@6.33.0
+
 ## 6.32.0
 
 ### Minor Changes

@@ -76,18 +76,30 @@ describe("GitHub identity per mounted repository", () => {
     ]);
   });
 
-  test("only managed sandboxes carry identities; none keeps resources unchanged", () => {
+  test("a managed-sandbox deployment carries identities on any machine; none keeps resources unchanged", () => {
     const settings = testSettings({ sandboxBackend: "docker" });
     expect(
       agentPromptResourcesFor(settings, [personalRepo, appRepo] as never, {
         personalGitHubLogin: "octocat",
       }).repositoryIdentities,
     ).toHaveLength(2);
+    // Moving to a Connected Machine keeps the system prompt (and its
+    // identities); the machine's layout item says repositories are not mounted.
     expect(
       agentPromptResourcesFor(settings, [personalRepo] as never, {
         activeSandboxBackend: "selfhosted",
         personalGitHubLogin: "octocat",
       }).repositoryIdentities,
+    ).toHaveLength(1);
+    expect(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "selfhosted" }),
+        [personalRepo] as never,
+        {
+          activeSandboxBackend: "selfhosted",
+          personalGitHubLogin: "octocat",
+        },
+      ).repositoryIdentities,
     ).toBeUndefined();
     expect(agentPromptResourcesFor(settings, [gitlabRepo] as never, {})).not.toHaveProperty(
       "repositoryIdentities",

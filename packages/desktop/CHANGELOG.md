@@ -1,5 +1,13 @@
 # @opengeni/desktop
 
+## 6.33.0
+
+### Patch Changes
+
+- Updated dependencies [03d58fd]
+  - @opengeni/sdk@6.33.0
+  - @opengeni/agent-host@6.33.0
+
 ## 6.32.0
 
 ### Patch Changes

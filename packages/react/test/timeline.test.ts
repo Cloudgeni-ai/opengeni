@@ -789,6 +789,28 @@ describe("buildTimeline", () => {
     expect(completion.text).toBe("Worker finished");
   });
 
+  test("a worker's report and evidence show without web-search citation handles", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("user.message", {
+        text: "The permit is required. \uE200cite\uE202turn559410search0\uE201",
+        childCompletion: {
+          childSessionId: "22222222-3333-4444-9555-666666666672",
+          status: "idle",
+          goal: {
+            status: "completed",
+            text: "Check the permit",
+            evidence: "Read the rules citeturn1search2",
+            pausedReason: "none",
+          },
+        },
+      }),
+    ]);
+    const completion = items[0] as WorkerCompletionItem;
+    expect(completion.text).toBe("The permit is required.");
+    expect(completion.evidence).toBe("Read the rules");
+  });
+
   test("leaves malformed childCompletion payloads as plain user messages", () => {
     reset();
     const items = buildTimeline(englishText, [

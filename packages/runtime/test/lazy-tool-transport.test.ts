@@ -1713,6 +1713,109 @@ describe("generic lazy tool dispatch", () => {
     ).toContain("skill_save");
   });
 
+  test("list_models and privacy_facts are searchable for a revision-1 session with the router", async () => {
+    const build = (searchableRarelyUsedTools: boolean, routerExpected = true) => {
+      const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
+      const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
+      const models = tool({
+        name: "list_models",
+        description: "List the models this workspace can select right now",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        strict: true,
+        execute: () => "gpt-test\nCurrent: gpt-test",
+      }) as unknown as Tool;
+      const privacy = firstPartyTool("privacy_facts", "Facts about privacy and data handling");
+      const agent = new Agent({
+        name: "rarely-used",
+        instructions: "Use tools.",
+        model: "scripted",
+        tools: [exec, skillSave, models, privacy],
+      });
+      const runtime = installLazyToolRuntime(
+        agent,
+        "generic_dispatch",
+        new Set(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        routerExpected,
+        undefined,
+        searchableRarelyUsedTools,
+      );
+      return { agent, runtime };
+    };
+    const firstRequestNames = async (built: ReturnType<typeof build>) => {
+      const visible = await built.agent.getAllTools(undefined as never);
+      const inner = new CapturingModel();
+      const wrapped = await new LazyToolModelProvider(providerFor(inner), built.runtime).getModel(
+        "test",
+      );
+      await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+      return inner.requests[0]!.tools.map((candidate) => candidate.name);
+    };
+
+    // Revision 0 (every existing session): unchanged, both in every request.
+    const existing = build(false);
+    expect(await firstRequestNames(existing)).toEqual([
+      "exec_command",
+      "list_models",
+      "privacy_facts",
+      "tool_search",
+      "tool_invoke",
+      "tool_list",
+    ]);
+    expect(existing.runtime.isDeferredFunctionTool("list_models")).toBe(false);
+
+    // Revision 1 (new sessions): off the first request, loaded by exact name.
+    const fresh = build(true);
+    expect(await firstRequestNames(fresh)).toEqual([
+      "exec_command",
+      "tool_search",
+      "tool_invoke",
+      "tool_list",
+    ]);
+    for (const name of ["list_models", "privacy_facts"])
+      expect(fresh.runtime.isDeferredFunctionTool(name)).toBe(true);
+    const loaded = JSON.parse(
+      (await fresh.runtime.prepareSearch({ query: "", names: ["list_models", "privacy_facts"] }))
+        .output,
+    ) as { tools: Array<{ name: string }>; unavailable: string[]; alreadyAvailable?: string };
+    expect(loaded.tools.map((entry) => entry.name).sort()).toEqual([
+      "list_models",
+      "privacy_facts",
+    ]);
+    expect(loaded.unavailable).toEqual([]);
+    expect(loaded).not.toHaveProperty("alreadyAvailable");
+    // A capability search finds it too.
+    expect(
+      fresh.runtime.search({ query: "list the models this workspace can select" })[0]?.name,
+    ).toBe("list_models");
+    // The loaded tool is the real, callable one.
+    const resolved = await fresh.runtime.resolveAuthorizedFunctionTool("list_models");
+    if (!resolved || resolved.type !== "function") throw new Error("list_models not callable");
+    expect(String(await resolved.invoke({} as never, "{}", undefined as never))).toBe(
+      "gpt-test\nCurrent: gpt-test",
+    );
+
+    // Without the router for other tools they stay in the request: they never
+    // bring the router on their own.
+    const noRouter = build(true, false);
+    expect(noRouter.runtime.isDeferredFunctionTool("list_models")).toBe(false);
+    expect(noRouter.runtime.isDeferredFunctionTool("privacy_facts")).toBe(false);
+  });
+
   test("a search for a tool every request carries says it is already in the tool list", async () => {
     const human = firstPartyTool(
       "request_human_input",

@@ -3701,7 +3701,8 @@ function personalComputersNote(computers: readonly PersonalComputer[]): string {
 
 /** The most bytes a model caller's discovery result serializes to: its
  * structured records, its compact text (as escaped JSON) and the note, well
- * below the 1 MiB model-visible limit, so it is never spilled to a file. */
+ * below the 1 MiB transport bound on one result; text past the model's inline
+ * size is stored whole and read by offset (model-tool-result-store.ts). */
 const DISCOVERY_MODEL_RESULT_BUDGET_BYTES = 768 * 1024;
 /** Room kept for the content envelope and the note naming what was left out. */
 const DISCOVERY_MODEL_ENVELOPE_BYTES = 1024;

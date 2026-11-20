@@ -176,6 +176,10 @@ type MutableModalSandboxSession = {
   // Pinned Agents Extensions 0.14.3: the adapter's own file read, the one its
   // viewImage and readFile use after path validation.
   readSandboxFile?: (path: string) => Promise<Uint8Array>;
+  // Pinned Agents Extensions 0.14.3: the apply_patch host, and the path
+  // validator its editor and pathExists call through `remotePathResolver`.
+  createEditor?: (runAs?: string) => unknown;
+  resolveRemotePath?: (path?: string, options?: unknown) => Promise<string>;
   persistWorkspace?: (options?: ModalWorkspaceCaptureOptions) => Promise<Uint8Array>;
   writeStdin?: (args: {
     sessionId: number;
@@ -296,6 +300,40 @@ function installModalShellPathViewImage(session: MutableModalSandboxSession): vo
     }
     const path = posix.resolve(root, args.path.trim());
     return imageOutputFromBytes(args.path, await session.readSandboxFile(path));
+  };
+}
+
+/**
+ * `apply_patch` writes wherever the agent's own shell can write in the box, as
+ * it does on Connected Machine and compute sandboxes. The adapter's editor
+ * confines every path to the manifest root (or a manifest path grant, which
+ * Modal create refuses), so a scratch script under `/tmp`, where the agent's
+ * instructions put throwaway work, was refused with "escapes the workspace
+ * root" although the same box's shell writes it. The editor here is the
+ * adapter's own, built over a view of the session whose path resolver
+ * resolves the way the shell does (absolute as given, relative from the
+ * workspace root, the shell's working directory); its reads, writes, deletes
+ * and existence probe stay the adapter's, inside the box as the shell's user.
+ * That also drops the validator's remote command, one round trip per path. A
+ * `runAs` editor keeps the adapter's user-scoped path.
+ */
+function installModalShellPathEditor(session: MutableModalSandboxSession): void {
+  const createEditor = session.createEditor;
+  if (typeof createEditor !== "function" || typeof session.resolveRemotePath !== "function") {
+    return;
+  }
+  session.createEditor = (runAs) => {
+    const root = session.state?.manifest?.root;
+    if (runAs || !root?.startsWith("/")) return createEditor.call(session, runAs);
+    const resolveLikeShell = async (path?: string): Promise<string> =>
+      posix.resolve(root, (path ?? "").trim());
+    // Everything else, including the live provider sandbox that a snapshot
+    // hydration replaces, is read through the prototype from the session.
+    const shellPathView = Object.create(session, {
+      remotePathResolver: { value: resolveLikeShell },
+      resolveRemotePath: { value: resolveLikeShell },
+    }) as MutableModalSandboxSession;
+    return createEditor.call(shellPathView, runAs);
   };
 }
 
@@ -716,6 +754,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalSynchronousCommandCollection(mutable, () => mutable.sandbox);
   installModalListDirCompatibility(mutable);
   installModalShellPathViewImage(mutable);
+  installModalShellPathEditor(mutable);
   if (
     mutable.modal?.cpClient &&
     mutable.modal.version &&

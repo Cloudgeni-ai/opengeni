@@ -1,5 +1,35 @@
 # @opengeni/core
 
+## 6.33.0
+
+### Patch Changes
+
+- 3091618: New sessions find `list_models` and `privacy_facts` through tool search instead of carrying them in every model request, saving about 1.2 KB (roughly 240 tokens) per request whenever the turn has the search router. Each session records which tools its requests carry in `sessions.first_request_tools_revision` (migration 1513) once, before its first model request, so existing sessions keep exactly the tools they already send. `BuildAgentOptions.firstRequestToolsRevision` selects the behaviour; omitting it keeps both tools in every request.
+- 0d394ec: Web-search citation handles no longer show on any surface that displays an answer. OpenAI models that search the web through a Codex or ChatGPT subscription write citations as private-use handles (U+E200 `cite` U+E202 `turn0search3` U+E201). The responses carry nothing that maps a handle to a page, so people saw `citeturn0search3` in the text. The chat timeline and Slack already removed them. Now the notification inbox (web, desktop banners and mobile, through the inbox API), phone push text, Teams replies, shared chat links and a worker's report in its manager's chat remove them too. Stored history and anything sent to a model keep the exact text. `@opengeni/contracts/provider-citation-handles` exports `withoutProviderCitationHandles` for other surfaces, such as products that render the raw chat stream.
+- Updated dependencies [176ccd5]
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [eb58354]
+- Updated dependencies [a204fd7]
+- Updated dependencies [617fa38]
+- Updated dependencies [316a815]
+- Updated dependencies [d6b29a4]
+  - @opengeni/runtime@6.33.0
+  - @opengeni/config@6.33.0
+  - @opengeni/contracts@6.33.0
+  - @opengeni/db@6.33.0
+  - @opengeni/codex@6.33.0
+  - @opengeni/tool-gateway@6.33.0
+  - @opengeni/network@6.33.0
+  - @opengeni/documents@6.33.0
+  - @opengeni/storage@6.33.0
+  - @opengeni/capabilities@6.33.0
+  - @opengeni/events@6.33.0
+  - @opengeni/observability@6.33.0
+  - @opengeni/vaults@6.33.0
+  - @opengeni/xai-subscription@6.33.0
+
 ## 6.32.0
 
 ### Minor Changes

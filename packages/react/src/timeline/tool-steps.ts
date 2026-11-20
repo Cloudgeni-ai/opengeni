@@ -77,6 +77,7 @@ export const TOOL_STEP_IDS = [
   "readPage",
   "readPosts",
   "readSlack",
+  "readToolOutput",
   "recordBrowser",
   "removeComputer",
   "removeGuide",
@@ -298,6 +299,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   // Tools and connections
   tool_search: "findTools",
   tool_list: "findTools",
+  tool_result_read: "readToolOutput",
   capability_catalog_search: "findTools",
   tool_invoke: "useTool",
   capability_authorization_request: "requestAccess",

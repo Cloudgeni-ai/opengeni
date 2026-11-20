@@ -100,6 +100,26 @@ describe("file attachments and the cached instruction prefix", () => {
     expect(Object.keys(withFile.runtimeManifest.entries)).toContain(`.opengeni/files/${FILE_ID}`);
   });
 
+  test("the layout of a turn with a file needs no file entry where storage cannot be mounted", () => {
+    // Azure Blob on a native bucket-mount backend, and AWS S3 or GCS anywhere,
+    // reach the sandbox only by the turn's pre-signed download. The layout
+    // lists no files, so a turn with an attachment still gets its layout.
+    for (const storage of [
+      testSettings({
+        sandboxBackend: "modal",
+        objectStorageBackend: "azure-blob",
+        objectStorageAzureConnectionString:
+          "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+      }),
+      testSettings({ sandboxBackend: "docker", objectStorageBackend: "aws-s3" }),
+      testSettings({ sandboxBackend: "modal", objectStorageBackend: "gcs" }),
+    ]) {
+      const withoutFile = workspaceFilesystemLayout(storage, [REPOSITORY]);
+      expect(withoutFile).toContain("repos/");
+      expect(workspaceFilesystemLayout(storage, [REPOSITORY, FILE])).toBe(withoutFile);
+    }
+  });
+
   test("moving the session to another machine keeps the instructions; only the layout changes", async () => {
     const managed = await sentInstructions([REPOSITORY]);
     const linux = await sentInstructions([REPOSITORY], undefined, {
@@ -120,8 +140,25 @@ describe("file attachments and the cached instruction prefix", () => {
     expect(linux.runtimeManifest.root).toBe("/home/user");
 
     expect(workspaceFilesystemLayout(settings, [REPOSITORY])).toStartWith("/workspace");
+    // The system prompt describes the deployment's managed sandboxes, so the
+    // layout of a Connected Machine says what working there means.
+    const onMachine = workspaceFilesystemLayout(settings, [REPOSITORY], {
+      activeSandboxBackend: "selfhosted",
+      sandboxWorkspaceRoot: "/home/user",
+    });
+    expect(onMachine).toStartWith("/home/user\n\n# Connected Machine\n\n");
+    expect(onMachine).toContain("Guidance about managed sandboxes does not apply on this machine");
+    expect(onMachine).not.toContain("sandbox:/home/u/proj");
     expect(
       workspaceFilesystemLayout(settings, [REPOSITORY], {
+        activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/home/user",
+        renderer: "opengeni",
+      }),
+    ).toContain("sandbox:/home/u/proj/app.py:12");
+    // A deployment whose own compute is Connected Machines says it in the prompt.
+    expect(
+      workspaceFilesystemLayout({ ...settings, sandboxBackend: "selfhosted" }, [REPOSITORY], {
         activeSandboxBackend: "selfhosted",
         sandboxWorkspaceRoot: "/home/user",
       }),

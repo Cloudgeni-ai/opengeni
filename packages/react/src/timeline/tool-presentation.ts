@@ -988,6 +988,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   openBrowser: "browser",
   useBrowser: "browser",
   readPage: "browser",
+  readToolOutput: "file",
   lookAtPage: "browser",
   workInBrowser: "browser",
   download: "download",

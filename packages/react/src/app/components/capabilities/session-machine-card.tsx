@@ -34,6 +34,7 @@ import { userErrorText } from "../../../ui/api-error";
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
 import { useDesktopThisComputer } from "../desktop/this-computer";
 import { isPersonalMachine, moveChatToMachine } from "../../lib/move-chat-to-machine";
+import { machineStateLabel } from "../../../machine-request-model";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { useWorkspaceMachines } from "../../lib/use-workspace-machines";
 import { thisComputerReady, thisComputerNeedsPermissions } from "../../../this-computer";
@@ -72,19 +73,7 @@ export type SessionMachineCapabilityCardProps = {
 };
 
 function stateLabel(machine: MachineView): string {
-  switch (machine.state) {
-    case "online":
-    case "consent_required":
-      return "Online";
-    case "display_unavailable":
-      return "Online · no display";
-    case "reconnecting":
-      return "Reconnecting";
-    case "enrolling":
-      return "Connecting";
-    default:
-      return "Offline";
-  }
+  return machineStateLabel(t, machine.state);
 }
 
 /** Focus moves only when the person is not working somewhere else. */

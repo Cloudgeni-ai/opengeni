@@ -5593,6 +5593,11 @@ export const sessions = pgTable(
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
+    // Migration 1513: which base runtime tools every request carries
+    // (CURRENT_FIRST_REQUEST_TOOLS_REVISION in @opengeni/contracts). Every
+    // older row is 0. A new row starts NULL and its first turn attempt sets it
+    // once, before any model request; forks copy their source's value.
+    firstRequestToolsRevision: integer("first_request_tools_revision"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Top-level xid, assigned by a BEFORE trigger in the original row write.

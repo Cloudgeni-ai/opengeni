@@ -1,5 +1,20 @@
 # @opengeni/sdk
 
+## 6.33.0
+
+### Minor Changes
+
+- 03d58fd: People who manage a Claude account can use one of its limit resets. `POST /v1/workspaces/:workspaceId/claude/accounts/:accountId/limit-resets/claim` (and the organization route) takes `{ grantId, requestId }`, claims the grant with Claude and returns Claude's answer with the usage read right after it (`ClaimClaudeLimitResetResponse`). When the answer is `retryable`, retry with the same `requestId`: Claude settles each request id once, so a retry never uses a second reset. The SDK adds `claimClaudeSubscriptionAccountLimitReset` and `claimOrganizationClaudeSubscriptionAccountLimitReset`. The account page shows a "Use reset" button on each grant that can be used now, behind a confirmation. Agents can use the same action, only when the person asked for it.
+
+### Patch Changes
+
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+  - @opengeni/contracts@6.33.0
+  - @opengeni/connect@6.33.0
+
 ## 6.32.0
 
 ### Minor Changes

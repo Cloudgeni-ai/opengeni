@@ -821,6 +821,19 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/limit-resets/claim",
+      "sdk": [
+        "OpenGeniClient.claimOrganizationClaudeSubscriptionAccountLimitReset"
+      ],
+      "request": [
+        "ClaimClaudeLimitResetRequest"
+      ],
+      "response": [
+        "ClaimClaudeLimitResetResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/usage",
       "sdk": [
@@ -3800,6 +3813,19 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/limit-resets/claim",
+      "sdk": [
+        "OpenGeniClient.claimClaudeSubscriptionAccountLimitReset"
+      ],
+      "request": [
+        "ClaimClaudeLimitResetRequest"
+      ],
+      "response": [
+        "ClaimClaudeLimitResetResponse"
+      ]
     },
     {
       "method": "GET",
@@ -14838,6 +14864,26 @@
         "$.endpointUrl": "string?"
       }
     },
+    "ClaimClaudeLimitResetRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.grantId": "string!",
+        "$.requestId": "string!"
+      }
+    },
+    "ClaimClaudeLimitResetResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.claim": "ref(ClaudeLimitResetClaim)!",
+        "$.usage": "ref(ClaudeSubscriptionUsage)!"
+      }
+    },
     "ClaudeExtraUsage": {
       "io": [
         "output"
@@ -14851,6 +14897,30 @@
         "$.state": "enum! null=[\"\\\"disabled\\\"\",\"\\\"enabled\\\"\",\"\\\"not_configured\\\"\"]",
         "$.usedCredits": "number! null",
         "$.utilization": "number! null"
+      }
+    },
+    "ClaudeLimitResetClaim": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.cleared": "array!",
+        "$.cleared[]": "string",
+        "$.cooldownUntil": "string! null",
+        "$.reason": "string! null",
+        "$.resetsLeft": "integer! null",
+        "$.result": "ref(ClaudeLimitResetClaimResult)!",
+        "$.retryable": "boolean!",
+        "$.weeklyResetsAt": "string! null"
+      }
+    },
+    "ClaudeLimitResetClaimResult": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"already_used\\\"\",\"\\\"auth_error\\\"\",\"\\\"cooldown\\\"\",\"\\\"error\\\"\",\"\\\"ineligible\\\"\",\"\\\"not_limited\\\"\",\"\\\"rate_limited\\\"\",\"\\\"reset\\\"\",\"\\\"unavailable\\\"\"]"
       }
     },
     "ClaudeLimitResetGrant": {
@@ -37229,6 +37299,8 @@
       "ChatSession": "type",
       "ChatSessionLineageResponse": "type",
       "ChatSessionListResponse": "type",
+      "ClaimClaudeLimitResetRequest": "type",
+      "ClaimClaudeLimitResetResponse": "type",
       "ClaudeExtraUsage": "type",
       "ClaudeLimitResetClaim": "type",
       "ClaudeLimitResetClaimResult": "type",
@@ -42243,6 +42315,21 @@
       "useInteractiveAnswerState": "value",
       "visibleInteractiveItems": "value"
     },
+    "@opengeni/react/machine-request-model": {
+      "buildPersonalResourceAttachmentIntent": "value",
+      "isMachineComputeSelectable": "value",
+      "isPersonalMachine": "value",
+      "MachineMoveChat": "type",
+      "machineRequestName": "value",
+      "machineRequestState": "value",
+      "MachineRequestState": "type",
+      "machineStateLabel": "value",
+      "machineUseMessage": "value",
+      "moveChatToMachine": "value",
+      "MoveChatToMachineResult": "type",
+      "personalMachineUseIntent": "value",
+      "swapFailureMessage": "value"
+    },
     "@opengeni/react/machines": {
       "CONNECTION_STATUS_META": "value",
       "ConnectionDot": "value",
@@ -43165,8 +43252,14 @@
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
       "activityHasUnloadedSteps": "value",
+      "agentMemberSessionId": "value",
+      "agentMemberText": "value",
+      "agentMemberTitle": "value",
       "AgentTitleParts": "type",
       "agentWorkHumanInputSummary": "value",
+      "allowanceLabels": "value",
+      "AllowanceLabels": "type",
+      "allowanceResetSentence": "value",
       "ANNOTATION_MAX_NOTE_LENGTH": "value",
       "ANNOTATION_MAX_QUOTE_BYTES": "value",
       "ANNOTATION_SOURCE_CONTEXT_BYTES": "value",
@@ -43189,14 +43282,22 @@
       "builtInToolStepLabel": "value",
       "BuiltInTurnSummaryFacetId": "type",
       "callStepPhase": "value",
+      "cleanMachineInputSummary": "value",
       "clusterIsSettled": "value",
       "commandStepTitle": "value",
       "compactedLandmarkCount": "value",
+      "COMPACTION_TRIMMED_SUBTITLE": "value",
+      "COMPACTION_TRIMMED_TITLE": "value",
+      "compactionFailureDetails": "value",
+      "compactionPresentation": "value",
+      "compactionSkipSubtitle": "value",
+      "compactionSkipTitle": "value",
       "connectorLogo": "value",
       "connectorLogoIndex": "value",
       "ConnectorLogoSource": "type",
       "createTurnSummaryContext": "value",
       "CredentialContext": "type",
+      "DEFAULT_SESSION_USAGE_LIMIT_LABELS": "value",
       "defaultHumanInputFormMessages": "value",
       "durationBetween": "value",
       "emptyDraft": "value",
@@ -43212,16 +43313,29 @@
       "genericToolPresentation": "value",
       "GENIE_PREPARING_PHRASES": "value",
       "GENIE_WAITING_PHRASES": "value",
+      "goalLandmarkLabel": "value",
+      "goalLandmarkText": "value",
+      "goalLandmarkTone": "value",
+      "GoalLandmarkTone": "type",
+      "groupMachineInputMembers": "value",
       "humanInputAgentMayDecide": "value",
       "HumanInputAnswerDraft": "type",
       "HumanInputFormMessages": "type",
       "humanInputHeading": "value",
       "initialDrafts": "value",
       "isActionableHumanInputRequest": "value",
+      "isAgentMember": "value",
       "isAgentWorkHumanInput": "value",
       "isApplyPatch": "value",
       "isAutomationRunBatch": "value",
       "isPreparingWork": "value",
+      "isTrimmedCompaction": "value",
+      "learningRefusalBody": "value",
+      "learningRefusalTitle": "value",
+      "MACHINE_INPUT_META": "value",
+      "machineInputBatchLabel": "value",
+      "MachineInputMemberGroup": "type",
+      "machineInputSummaryIsUseful": "value",
       "matchingQuoteInSource": "value",
       "mcpToolLeaf": "value",
       "mergeHumanInputFormMessages": "value",
@@ -43249,6 +43363,7 @@
       "QuestionNavPrompt": "type",
       "questionNavTarget": "value",
       "rawTypeOf": "value",
+      "readableMachineInputSource": "value",
       "readableWorkDefaultOpen": "value",
       "readableWorkIsEmpty": "value",
       "ReadableWorkOptions": "type",
@@ -43333,6 +43448,9 @@
       "webSearchPresentation": "value",
       "WebSearchResult": "type",
       "withComputePreview": "value",
+      "WorkerCompletionOutcome": "type",
+      "workerCompletionPresentation": "value",
+      "workerCompletionSections": "value",
       "workerRowTitle": "value",
       "workerRowTitleParts": "value",
       "writeStdinPresentation": "value"
@@ -44387,6 +44505,8 @@
       "checkMcpTrustedIssuer",
       "checkOrganizationConnectorAutoConnect",
       "checkSiteHostname",
+      "claimClaudeSubscriptionAccountLimitReset",
+      "claimOrganizationClaudeSubscriptionAccountLimitReset",
       "clearCodexAppsAccount",
       "clearSessionContext",
       "closeBrowserTarget",
@@ -45246,6 +45366,8 @@
       "checkMcpTrustedIssuer",
       "checkOrganizationConnectorAutoConnect",
       "checkSiteHostname",
+      "claimClaudeSubscriptionAccountLimitReset",
+      "claimOrganizationClaudeSubscriptionAccountLimitReset",
       "clearCodexAppsAccount",
       "clearSessionContext",
       "closeBrowserTarget",
@@ -46103,6 +46225,8 @@
       "checkMcpTrustedIssuer",
       "checkOrganizationConnectorAutoConnect",
       "checkSiteHostname",
+      "claimClaudeSubscriptionAccountLimitReset",
+      "claimOrganizationClaudeSubscriptionAccountLimitReset",
       "clearCodexAppsAccount",
       "clearSessionContext",
       "clearWorkspaceAllowance",
@@ -47651,6 +47775,12 @@
       ],
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50566,6 +50696,12 @@
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -53208,6 +53344,12 @@
       ],
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -56017,6 +56159,12 @@
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -58645,6 +58793,12 @@
       ],
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

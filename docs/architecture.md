@@ -1839,10 +1839,15 @@ errors or a failure of every catalog entry. See [startup decisions and measureme
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists, never switches models),
-[`privacy_facts`](privacy-facts.md) (privacy and data-handling facts), optional
-[`code_search`](code-search.md), and optional provider
-[`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
+`request_human_input`, optional [`code_search`](code-search.md), and optional
+provider [`web_search`/`web_fetch`](web-search.md). `list_models` (lists, never
+switches models) and [`privacy_facts`](privacy-facts.md) (privacy and
+data-handling facts) follow the session's frozen first-request tools revision
+(`sessions.first_request_tools_revision`, migration 1513): sessions from before
+it keep both in every request; newer sessions find them through tool search by
+exact name whenever the turn has the search router for other tools, and keep
+them in the request when it does not, so they never bring the router on their
+own. Authorized first-party harness control
 tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
 `opengeni__wait_for_input`) are also always visible; the `opengeni` server then
 joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
