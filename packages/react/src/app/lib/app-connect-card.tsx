@@ -79,7 +79,7 @@ export function AppConnectCardView({
         className,
       )}
     >
-      <ul className="flex min-w-0 flex-1 flex-col gap-1">
+      <ul className="flex min-w-0 flex-col gap-1">
         {items.map((item) => (
           <li key={item.key} className="min-w-0">
             <Button

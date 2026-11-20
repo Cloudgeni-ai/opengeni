@@ -253,7 +253,7 @@ export function SiteViewRoute({
   );
   const connectCard =
     artifact?.status === "active" ? (
-      <div className="pointer-events-none absolute right-3 bottom-3 z-20 flex justify-end">
+      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex justify-end">
         <AppConnectCard
           workspaceId={workspaceId}
           siteId={siteId}
