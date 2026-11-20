@@ -28,8 +28,14 @@ import { createApp } from "../src/app";
 
 const FIXTURE = new URL("./fixtures/session-create-golden.json", import.meta.url);
 const RECORD = process.env.OPENGENI_GOLDEN_RECORD === "1";
-/** Session columns added by organization agents (migration 1505): NULL on every other chat. */
-const ADDED_SESSION_COLUMNS = ["agent_overrides", "agent_prompt_version", "agent_version"];
+/** Columns added since recording that must stay NULL for a plain create. */
+const ADDED_SESSION_COLUMNS = [
+  "agent_overrides",
+  "agent_prompt_version",
+  "agent_version",
+  // Migration 1513 sets existing chats to 0, but new chats pin their revision on the first attempt.
+  "first_request_tools_revision",
+];
 /** Values that differ between any two runs (transaction ids, hashes of ids). */
 const VOLATILE_KEYS = new Set(["activity_xid", "activity_revision_pending_xid", "controlEtag"]);
 const DELEGATION_SECRET = "session-create-golden-secret";
@@ -312,7 +318,7 @@ describe("a create without an organization agent is unchanged", () => {
     expect(Object.keys(actual).sort()).toEqual(Object.keys(expected).sort());
     for (const [name, recorded] of Object.entries(expected)) {
       const current = actual[name]!;
-      // Only the organization-agent columns may be new, and they are NULL here.
+      // Only the listed columns may be new, and they must all be NULL here.
       const added = Object.keys(current.sessionRow)
         .filter((column) => !(column in recorded.sessionRow))
         .sort();
