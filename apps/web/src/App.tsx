@@ -182,6 +182,10 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "IntegrationsReturnRoute",
 );
+const LazySidebarCustomizeRoute = lazyRouteComponent(
+  () => import("@/routes/sidebar-customize"),
+  "SidebarCustomizeRoute",
+);
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyTeamsConnectRoute = lazyRouteComponent(
   () => import("@/routes/teams-connect"),
@@ -1232,6 +1236,22 @@ const workspaceSiteViewRoute = createRoute({
   validateSearch: siteViewSearch,
   component: SiteViewPage,
 });
+// An app opened from the sidebar, as a page: its own address after `apps/<id>/`
+// (its query and fragment, rarely, in `?at=`). The app itself is drawn by
+// `AppPages` in the rail shell, which keeps the last few open.
+const workspaceAppPageRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "apps/$appId/$",
+  validateSearch: (search: Record<string, unknown>): { at?: string } =>
+    typeof search.at === "string" && /^[?#]/u.test(search.at) ? { at: search.at } : {},
+  component: AppPageOutlet,
+});
+// The sidebar's links and groups: your own, and the workspace default for admins.
+const workspaceSidebarRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "sidebar",
+  component: SidebarCustomize,
+});
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
@@ -1447,6 +1467,8 @@ const routeTree = rootRoute.addChildren([
     workspaceRetainedArtifactRoute,
     workspaceArtifactDetailRoute,
     workspaceSiteViewRoute,
+    workspaceAppPageRoute,
+    workspaceSidebarRoute,
     workspaceEditableArtifactRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
@@ -1930,6 +1952,15 @@ function SiteViewPage() {
       artifactsReturn={siteViewArtifactsReturn(search)}
     />
   );
+}
+
+function AppPageOutlet() {
+  return null;
+}
+
+function SidebarCustomize() {
+  const { workspaceId } = workspaceSidebarRoute.useParams();
+  return <LazySidebarCustomizeRoute workspaceId={workspaceId} />;
 }
 
 function EditableArtifact() {

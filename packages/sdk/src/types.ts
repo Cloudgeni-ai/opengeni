@@ -4556,6 +4556,8 @@ export type FirstPartyMcpToolName =
   | "project_reorder"
   | "project_delete"
   | "session_set_project"
+  | "sidebar_layout_get"
+  | "sidebar_layout_update"
   | "admin_actions_search"
   | "admin_action_describe"
   | "admin_action_call"

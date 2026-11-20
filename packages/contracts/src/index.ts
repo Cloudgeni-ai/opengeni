@@ -70,6 +70,7 @@ import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./site-publishing";
 export * from "./site-sql";
+export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
 export * from "./claude-subscription-oauth";
@@ -1153,6 +1154,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "sidebar_layout_get",
+  "sidebar_layout_update",
   "admin_actions_search",
   "admin_action_describe",
   "admin_action_call",

@@ -84,7 +84,8 @@ const LazySessionTenancyRouteControl = lazy(() =>
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
 export function RailBody() {
   const rail = useRail();
-  const { switcher, mobileWorkspacePanel, railFooter } = useContext(SessionShellSlotsContext);
+  const { switcher, mobileWorkspacePanel, railFooter, layout } =
+    useContext(SessionShellSlotsContext);
   const [mobileSection, setMobileSection] = useState<"sessions" | "workspace">("sessions");
   const sessionsTabRef = useRef<HTMLButtonElement>(null);
   const workspaceTabRef = useRef<HTMLButtonElement>(null);
@@ -173,6 +174,7 @@ export function RailBody() {
                   className="mt-2 flex shrink-0 flex-col"
                 >
                   <PrimaryNav />
+                  {layout}
                   <SessionList />
                 </div>
               ) : (
@@ -191,6 +193,7 @@ export function RailBody() {
               {/* Sessions are the primary object. Workspace administration remains
               secondary on desktop and becomes its own screen on phones. */}
               <PrimaryNav />
+              {rail.collapsed ? null : layout}
               <div className="mt-2 flex shrink-0 flex-col">
                 {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
               </div>

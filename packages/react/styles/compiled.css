@@ -3898,6 +3898,9 @@
       background-color: color-mix(in oklab, var(--color-brand) 6%, transparent);
     }
   }
+:where(.og-root).bg-canvas,:where(.og-root) .bg-canvas {
+    background-color: var(--color-canvas);
+  }
 :where(.og-root).bg-canvas\/75,:where(.og-root) .bg-canvas\/75 {
     background-color: var(--color-canvas);
     @supports (color: color-mix(in lab, red, red)) {
