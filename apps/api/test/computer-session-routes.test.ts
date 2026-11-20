@@ -116,6 +116,19 @@ describe("ComputerSession route discipline", () => {
     }
   });
 
+  test("restarts a parked chat sandbox with the object storage holding its archive", async () => {
+    // The first computer or browser call after a chat's own sandbox parked
+    // starts it again from its workspace archive, which lives in object storage.
+    for (const route of ["computer-sessions.ts", "browser-sessions.ts"]) {
+      const source = await readFile(new URL(`../src/routes/${route}`, import.meta.url), "utf8");
+      const services = source.slice(
+        source.indexOf("const channelServices = {"),
+        source.indexOf("};", source.indexOf("const channelServices = {")),
+      );
+      expect(services).toContain("objectStorage: deps.objectStorage");
+    }
+  });
+
   test("admits every active operation through the exact durable controller and lease fence", async () => {
     const source = await readFile(routeUrl, "utf8");
     const active = source.slice(source.indexOf("async function withActiveComputerController"));
