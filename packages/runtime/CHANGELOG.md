@@ -1,5 +1,41 @@
 # @opengeni/runtime
 
+## 6.32.0
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/sdk@6.32.0
+  - @opengeni/observability@6.32.0
+  - @opengeni/capabilities@6.32.0
+  - @opengeni/codemode@6.32.0
+  - @opengeni/codex@6.32.0
+  - @opengeni/config@6.32.0
+  - @opengeni/decisions@6.32.0
+  - @opengeni/interaction@6.32.0
+  - @opengeni/tool-gateway@6.32.0
+  - @opengeni/vaults@6.32.0
+  - @opengeni/jev@6.32.0
+  - @opengeni/agent-proto@6.32.0
+  - @opengeni/network@6.32.0
+  - @opengeni/xai-subscription@6.32.0
+
 ## 6.31.1
 
 ### Patch Changes
