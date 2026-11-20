@@ -523,9 +523,15 @@ the first diverging checkpoint), `thinking_dropped`, `account_changed`,
 first: more than 5 minutes after the previous call (the cache lifetime Opengeni
 requests by default) the prefix may have expired anyway, so no request change
 is blamed. `context_replaced` needs the prompt to fall below 60% of the
-previous one in tokens or in items: compaction keeps the tools, the system
-prompt and a summary, so a large fixed prefix can hold the token count up while
-the item count collapses. Each fingerprint records the deployment revision that built the
+previous one in tokens or in items, or the history's first item to change:
+compaction keeps the tools, the system prompt and a summary, so a large fixed
+prefix can hold the token count up while the item count collapses, and a
+compacted history starts anew, while every in-place change keeps its first
+item. The first-item test also covers a call whose baseline was the compaction
+request itself, which is shorter than the history built from it. On Claude a
+compacted history's leading system items join the system prompt, so the system
+digest changes with it; that costs nothing beyond the replaced history and is
+not `system_changed`. Each fingerprint records the deployment revision that built the
 request, so a tools or system change between two deployments is
 `release_changed` (a release that edits model-facing text costs each live
 session one cold prefix) and the same change within one deployment is
