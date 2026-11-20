@@ -441,6 +441,54 @@ export async function declareSiteToolsForEveryViewer(
 }
 
 /**
+ * One declared tool as it means anything outside this workspace and person:
+ * its connector-level identity (`{ serverId: <connector>, toolName }`) when it
+ * is an account route, else itself. An account route of the reader's own maps
+ * through their bindings; another member's through the single connector
+ * identity the same declarations pair with it for that tool. A route nothing
+ * explains stays as it is. Route ids are never parsed.
+ */
+export function connectorToolIdentity(
+  inventory: Pick<SiteToolAccountInventory, "canonical" | "plain" | "accounts">,
+  declared: readonly ToolGatewayIdentity[],
+  identity: ToolGatewayIdentity,
+): ToolGatewayIdentity {
+  const own = inventory.accounts.find((account) => account.serverId === identity.serverId);
+  if (own) return { serverId: own.canonicalServerId, toolName: identity.toolName };
+  if (inventory.canonical.has(identity.serverId) || inventory.plain.has(identity.serverId))
+    return identity;
+  const paired = declared.filter(
+    (item) =>
+      item.toolName === identity.toolName &&
+      item.serverId !== identity.serverId &&
+      inventory.canonical.has(item.serverId),
+  );
+  return paired.length === 1 ? paired[0]! : identity;
+}
+
+/**
+ * Declared tools with every account route replaced by its connector-level
+ * identity (`connectorToolIdentity`), without duplicates: what a copy in
+ * another workspace should declare, so each of its viewers uses their own
+ * account. Used by App packages; reusable wherever a tool leaves its workspace.
+ */
+export function connectorToolIdentities(
+  inventory: Pick<SiteToolAccountInventory, "canonical" | "plain" | "accounts">,
+  declared: readonly ToolGatewayIdentity[],
+): ToolGatewayIdentity[] {
+  const seen = new Set<string>();
+  const result: ToolGatewayIdentity[] = [];
+  for (const item of declared) {
+    const mapped = connectorToolIdentity(inventory, declared, item);
+    const key = JSON.stringify([mapped.serverId, mapped.toolName]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(mapped);
+  }
+  return result;
+}
+
+/**
  * The viewer's choices for one Site call: every own account that may run the
  * declared tool (with the one the Site asked for selected), or how to connect
  * one. An account is offered only when routing it would itself be authorized.

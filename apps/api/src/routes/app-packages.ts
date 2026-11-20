@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { AppPackageExportRequest, AppPackageInstallRequest } from "@opengeni/contracts";
 import {
   requireAccessGrant,
@@ -8,7 +7,12 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { appPackageHttpError, exportAppPackage, installAppPackage } from "../app-packages/service";
+import {
+  appInstallOperationKey,
+  appPackageHttpError,
+  exportAppPackage,
+  installAppPackage,
+} from "../app-packages/service";
 import { parseRequestBody } from "../http/request-body";
 
 const AppId = z.string().uuid();
@@ -66,10 +70,14 @@ export function registerAppPackageRoutes(app: Hono, deps: ApiRouteDeps): void {
         visibility: request.visibility,
         demoData: request.demoData,
         provenance: {
-          // Its own namespace: the key cannot replay a create or a copy.
-          operationKey: `subject:${createHash("sha256")
-            .update(`${grant.subjectId}:app-install:${request.idempotencyKey}`)
-            .digest("hex")}`,
+          // Its own namespace: the key cannot replay a create or a copy, and
+          // a different package with the same key installs a different app.
+          operationKey: appInstallOperationKey(
+            "subject",
+            grant.subjectId,
+            request.idempotencyKey,
+            request.package,
+          ),
           actorSubjectId: grant.subjectId,
           sourceSessionId: null,
           sourceTurnId: null,

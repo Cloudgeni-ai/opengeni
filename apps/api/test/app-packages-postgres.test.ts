@@ -13,9 +13,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { APP_PACKAGE_FORMAT, type AccessGrant, type AppPackage } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
+  createConnection,
   createDb,
   createOrganizationApiKey,
+  encryptEnvironmentValue,
+  persistAttemptToolCatalog,
   createSession,
   createWorkspace,
   ensureExternalIdentity,
@@ -27,6 +31,7 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { NO_APP_SYNCS, setAppSyncHooks } from "../src/app-packages/syncs";
+import { APP_PACKAGE_SYNC_HOOKS } from "../src/app-sync/package-hooks";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { siteSqlTransport } from "../src/site-sql/service";
 
@@ -475,7 +480,11 @@ test("demo data is included only when the author asks, and installs unless decli
   ]);
   const all = await f.exportApp(appId, { demoData: true });
   expect(all.status, all.text).toBe(200);
-  expect(Object.keys(all.json.package.demoData.records).sort()).toEqual(["notes", "tasks"]);
+  // Each person's own notes belong to them, not to the app: left out and said so.
+  expect(Object.keys(all.json.package.demoData.records).sort()).toEqual(["tasks"]);
+  expect(all.json.notExported).toContainEqual(
+    expect.objectContaining({ part: "demo_data", name: "notes" }),
+  );
   expect(Object.keys(all.json.package.demoData.sqlRows)).toEqual(["items"]);
 
   const withDemo = await f.install({ package: pkg });
@@ -663,8 +672,152 @@ test("agents export and install apps with app_export and app_install", async () 
   expect(foreign.value.error.code).toBe("not_found");
 }, 120_000);
 
-/** An agent attempt acting for `who` in a workspace, with the app package tools. */
-async function agentTools(f: Fixture, workspaceId: string, who: Who) {
+/** A connector whose tools run on each person's own account. */
+const TRACKER: Partial<Settings> = {
+  ...SQL_SETTINGS,
+  mcpServers: [
+    {
+      id: "tracker",
+      url: "https://tracker.test/mcp",
+      cacheToolsList: false,
+      allowedTools: ["list_items", "create_item"],
+      connectionRef: {
+        providerDomain: "tracker.test",
+        kind: "api_key",
+        subjectScope: "subject",
+        accountSelection: "all_eligible",
+      },
+    },
+  ] as Settings["mcpServers"],
+};
+
+test("packages carry connector tools, and agents keep the ones their chat has", async () => {
+  const f = await fixture(TRACKER);
+  // As a published version stores them: the author's own account route,
+  // paired with its connector, and tools declared for the connector itself.
+  const declared = [
+    { serverId: "account-author0001", toolName: "list_items" },
+    { serverId: "tracker", toolName: "list_items" },
+    { serverId: "tracker", toolName: "create_item" },
+    { serverId: "example-crm", toolName: "contacts_list" },
+  ];
+  const created = await f.call(
+    f.author,
+    "POST",
+    `/v1/workspaces/${f.source.id}/published-artifacts`,
+    {
+      title: "Tracker board",
+      html: "<!doctype html><h1>Tracker</h1>",
+      requestedTools: declared,
+      idempotencyKey: crypto.randomUUID(),
+    },
+  );
+  expect(created.status, created.text).toBe(201);
+  const exported = await f.exportApp(created.json.artifact.id);
+  expect(exported.status, exported.text).toBe(200);
+  const pkg = exported.json.package as AppPackage;
+  // No account of the author's leaves the workspace.
+  expect(pkg.tools).toEqual([
+    { serverId: "tracker", toolName: "list_items" },
+    { serverId: "tracker", toolName: "create_item" },
+    { serverId: "example-crm", toolName: "contacts_list" },
+  ]);
+
+  // From the Apps page every tool is kept; each viewer connects their own.
+  const page = await f.install({ package: pkg });
+  expect(page.status, page.text).toBe(201);
+  expect(page.json.installed.tools).toBe(3);
+  expect(page.json.notInstalled).toEqual([]);
+
+  // This chat has the installer's own tracker account for list_items only.
+  const agent = await agentTools(f, f.target.id, f.installer, [
+    { serverId: "account-installer01", canonicalServerId: "tracker", toolName: "list_items" },
+  ]);
+  const installed = await agent.callTool("app_install", {
+    package: pkg,
+    idempotencyKey: "tracker-board",
+  });
+  expect(installed.isError, JSON.stringify(installed.value)).toBe(false);
+  expect(installed.value.installed.tools, JSON.stringify(installed.value.notInstalled)).toBe(1);
+  expect(installed.value.notInstalled).toEqual([
+    expect.objectContaining({ part: "tools", name: "create_item" }),
+    expect.objectContaining({ part: "tools", name: "contacts_list" }),
+  ]);
+  const version = await f.call(f.installer, "GET", f.appBase(f.target.id, installed.value.app.id));
+  expect(version.status, version.text).toBe(200);
+  expect(JSON.stringify(version.json)).toContain('"serverId":"tracker"');
+  expect(JSON.stringify(version.json)).not.toContain("account-author0001");
+
+  // A replay returns the same app and reports the same, nothing more.
+  const replay = await agent.callTool("app_install", {
+    package: pkg,
+    idempotencyKey: "tracker-board",
+  });
+  expect(replay.value.replayed).toBe(true);
+  expect(replay.value.app.id).toBe(installed.value.app.id);
+  expect(replay.value.notInstalled).toEqual(installed.value.notInstalled);
+}, 120_000);
+
+test("the same key with a different package installs a different app", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f, { sql: false });
+  const pkg = (await f.exportApp(appId)).json.package as AppPackage;
+  const first = await f.install({ package: pkg, idempotencyKey: "same-key" });
+  expect(first.status, first.text).toBe(201);
+  const replay = await f.install({ package: pkg, idempotencyKey: "same-key" });
+  expect(replay.status, replay.text).toBe(200);
+  expect(replay.json.app.id).toBe(first.json.app.id);
+  expect(replay.json.notInstalled).toEqual([]);
+  const other = await f.install({
+    package: { ...pkg, data: { collections: [{ name: "extra", accessMode: "shared" }] } },
+    idempotencyKey: "same-key",
+  });
+  expect(other.status, other.text).toBe(201);
+  expect(other.json.app.id).not.toBe(first.json.app.id);
+  // The first app is unchanged.
+  const firstData = await described(f, first.json.app.id);
+  expect(firstData.data.collections.map((c: any) => c.name).sort()).toEqual(["notes", "tasks"]);
+}, 120_000);
+
+test("installing syncs needs permission to manage automations", async () => {
+  const f = await fixture();
+  setAppSyncHooks(APP_PACKAGE_SYNC_HOOKS);
+  const appId = await buildBoard(f, { sql: false });
+  const pkg = (await f.exportApp(appId)).json.package as AppPackage;
+  pkg.syncs = [
+    {
+      name: "Import contacts",
+      collection: "tasks",
+      mode: "shared",
+      tool: { serverId: "tracker", toolName: "list_items" },
+      schedule: { type: "interval", everySeconds: 3600 },
+    },
+  ];
+  // The installer can publish apps but not manage automations.
+  const installed = await f.install({ package: pkg });
+  expect(installed.status, installed.text).toBe(201);
+  expect(installed.json.installed.syncs).toEqual([]);
+  expect(installed.json.notInstalled).toEqual([
+    {
+      part: "sync",
+      name: "Import contacts",
+      reason: "Adding syncs needs permission to manage automations in this workspace",
+    },
+  ]);
+}, 120_000);
+
+/**
+ * An agent attempt acting for `who` in a workspace, with the app package
+ * tools. `accountTools` gives its chat account routes (`account-…`) of a
+ * connector: a verified tool catalog with those tools and the turn's frozen
+ * account bindings that name the connector behind each route.
+ */
+async function agentTools(
+  f: Fixture,
+  workspaceId: string,
+  who: Who,
+  accountTools: Array<{ serverId: string; canonicalServerId: string; toolName: string }> = [],
+) {
   const tools = ["app_export", "app_install"];
   const session = await createSession(db.db, {
     accountId: f.accountId,
@@ -678,16 +831,56 @@ async function agentTools(f: Fixture, workspaceId: string, who: Who) {
     latencyMode: "standard" as const,
     sandboxBackend: "none" as const,
   });
-  const [turn] = await shared.admin<{ id: string }[]>`
+  // An account route's connector is frozen on the turn when it is accepted.
+  let bindings: unknown[] | null = null;
+  if (accountTools.length > 0) {
+    const connection = await createConnection(db.db, {
+      accountId: f.accountId,
+      workspaceId,
+      providerDomain: "tracker.test",
+      kind: "api_key",
+      createdBySubjectId: who.subjectId,
+      credentialEncrypted: encryptEnvironmentValue(Buffer.alloc(32, 17), "fixture-only"),
+    });
+    const connectionId = connection.id;
+    const ref = {
+      connectionId,
+      subjectScope: "workspace",
+      providerDomain: "tracker.test",
+      kind: "api_key",
+    };
+    bindings = [...new Set(accountTools.map((tool) => tool.serverId))].map((serverId) => ({
+      serverId,
+      canonicalServerId: accountTools.find((tool) => tool.serverId === serverId)!.canonicalServerId,
+      connectionId,
+      originWorkspaceId: workspaceId,
+      subjectScope: "workspace",
+      ownerSubjectId: null,
+      accountLabel: "team@tracker.test",
+      providerDomain: "tracker.test",
+      kind: "api_key",
+      connectionRef: ref,
+      ...(connection.connectionAuthorityGeneration
+        ? { connectionAuthorityGeneration: connection.connectionAuthorityGeneration }
+        : {}),
+    }));
+  }
+  const [turn] = await shared.admin.begin(async (tx) => {
+    // The bindings fence reads their connection in this account's scope.
+    await tx`SELECT set_config('opengeni.account_id', ${f.accountId}, true)`;
+    return await tx<{ id: string }[]>`
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context,
+      mcp_account_bindings
     ) VALUES (
       ${f.accountId}, ${workspaceId}, ${session.id}, gen_random_uuid(),
       ${`app-package-wf-${crypto.randomUUID()}`}, 'running', 0, 'Move my board',
-      'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${who.subjectId}, '{"accepted":true}'::jsonb
+      'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${who.subjectId}, '{"accepted":true}'::jsonb,
+      ${bindings ? tx.json(bindings as never) : null}
     ) RETURNING id`;
+  });
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (tx) => {
     await tx`UPDATE sessions SET active_turn_id = ${turn!.id},
@@ -703,6 +896,31 @@ async function agentTools(f: Fixture, workspaceId: string, who: Who) {
         'running', 'app-package-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
       )`;
   });
+  if (accountTools.length > 0)
+    await persistAttemptToolCatalog(
+      db.db,
+      createAttemptToolEnvironment({
+        scope: {
+          accountId: f.accountId,
+          workspaceId,
+          sessionId: session.id,
+          turnId: turn!.id,
+          attemptId,
+          executionGeneration: 1,
+        },
+        generation: 1,
+        createdAt: new Date(),
+        definitions: accountTools.map((tool) => ({
+          identity: { serverId: tool.serverId, toolName: tool.toolName },
+          modelName: `${tool.serverId}__${tool.toolName}`.replace(/[^A-Za-z0-9_]/gu, "_"),
+          description: `Run ${tool.toolName}`,
+          inputSchema: { type: "object", additionalProperties: true },
+          source: "mcp" as const,
+          approval: "none" as const,
+          execute: async () => ({ content: [] }),
+        })),
+      }).catalog,
+    );
   const grant: AccessGrant = {
     accountId: f.accountId,
     workspaceId,
