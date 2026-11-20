@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "636f24b57f904fa23d87a81b6c3b1ea8f3f421fc9fa026c6c7508f2592f6aac8"
+      "sha256": "73a98b52303a10636aaff60081ed5cb7150989132b98e790788836e2bc8639d2"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -264,6 +264,12 @@
       "job": "cua-windows",
       "step": "Install",
       "sha256": "6b53200cb717e5db732d2f6094f04af1cddc07e651f9f39df6961dd57ae9b831"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Open controller databases at long Windows paths",
+      "sha256": "44bfa6cdc9a7cecbb3a0a8384622e3e47295f146ba0a09b5cc4075604b167495"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
