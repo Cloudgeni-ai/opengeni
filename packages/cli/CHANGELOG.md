@@ -1,5 +1,7 @@
 # opengeni
 
+## 6.31.1
+
 ## 6.31.0
 
 ### Patch Changes
