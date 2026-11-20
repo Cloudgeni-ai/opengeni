@@ -115,6 +115,24 @@ export function SlackChannelRoutingDialogBody({
     choices.some((candidate) => candidate.id === agent.targetWorkspaceId),
   );
   const hasAgents = agentChoices.length > 0;
+  const workspaceOptions = choices.map((candidate) => (
+    <option key={candidate.id} value={candidate.id}>
+      {candidate.name}
+    </option>
+  ));
+  /**
+   * A closed select shows only the chosen name, and an agent and a workspace
+   * can share one, so it says which kind it is. Undefined keeps the native text.
+   */
+  function closedLabel(value: string): string | undefined {
+    if (!hasAgents) return undefined;
+    if (value.startsWith(AGENT_PREFIX)) {
+      const agent = agentChoices.find((entry) => entry.id === value.slice(AGENT_PREFIX.length));
+      return agent ? `${agent.name} · agent` : undefined;
+    }
+    const candidate = choices.find((entry) => entry.id === value);
+    return candidate ? `${candidate.name} · workspace` : undefined;
+  }
 
   /** The workspace and agent a select value stands for. */
   function parseValue(value: string): {
@@ -295,20 +313,25 @@ export function SlackChannelRoutingDialogBody({
                   <Select
                     aria-label={hasAgents ? `Who answers in ${channelName}` : undefined}
                     value={draft[channel.id] ?? ASK_ONCE}
+                    displayValue={closedLabel(draft[channel.id] ?? ASK_ONCE)}
                     disabled={!canManage || saving}
                     onChange={(event) => setDraft({ ...draft, [channel.id]: event.target.value })}
                   >
                     <option value={ASK_ONCE}>Ask me</option>
-                    {agentChoices.map((agent) => (
-                      <option key={agent.id} value={`${AGENT_PREFIX}${agent.id}`}>
-                        {agent.name}
-                      </option>
-                    ))}
-                    {choices.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {hasAgents ? `Opengeni in ${candidate.name}` : candidate.name}
-                      </option>
-                    ))}
+                    {hasAgents ? (
+                      <>
+                        <optgroup label="Agents">
+                          {agentChoices.map((agent) => (
+                            <option key={agent.id} value={`${AGENT_PREFIX}${agent.id}`}>
+                              {agent.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Workspaces">{workspaceOptions}</optgroup>
+                      </>
+                    ) : (
+                      workspaceOptions
+                    )}
                     {(() => {
                       // Only ever the current value of a route set before a
                       // channel could no longer point at a personal workspace.

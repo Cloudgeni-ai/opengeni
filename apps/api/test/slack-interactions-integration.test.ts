@@ -13137,58 +13137,85 @@ describe("Slack agents", () => {
     expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
   }, 90_000);
 
-  test("the channel picker labels agents and workspaces as separate groups", async () => {
+  test("the channel picker offers agents and workspaces as separate menu groups", async () => {
     if (!available) return;
-    const { value } = await agentFixture();
+    const { value, analytics } = await agentFixture();
     await mention(value, "C_WHO_ANSWERS", "1765000003.000100", "what changed this week?");
 
     const card = value.slack.posts.find((post) => post.text.startsWith("Who should answer"));
     expect(card).toBeDefined();
-    type CardBlock = {
+    type Menu = {
       type: string;
+      option_groups?: Array<{
+        label: { text: string };
+        options: Array<{ text: { text: string }; value: string }>;
+      }>;
       text?: { text: string };
-      elements?: Array<{ type: string; text?: { text: string } | string; image_url?: string }>;
     };
-    const blocks = card!.blocks as CardBlock[];
-    const rows = blocks.map((block) =>
-      block.type === "section"
-        ? block.text!.text
-        : block.type === "actions"
-          ? block.elements!.map((element) => (element.text as { text: string }).text).join(",")
-          : block.type === "context"
-            ? block
-                .elements!.flatMap((element) =>
-                  element.type === "image" ? ["[icon]"] : [element.text as string],
-                )
-                .join(" ")
-            : block.type,
-    );
+    const blocks = card!.blocks as Array<{ type: string; elements?: Menu[] }>;
+    const row = blocks.find((block) => block.type === "actions")!.elements!;
+    expect(row.map((element) => element.type)).toEqual(["static_select", "button"]);
+    expect(row[1]!.text!.text).toBe("Not now");
+    const groups = row[0]!.option_groups!.map((group) => [
+      group.label.text,
+      group.options.map((option) => option.text.text),
+    ]);
     const names = await shared!.admin<{ name: string }[]>`
       select name from workspaces
       where id in (${value.owner.workspaceId}, ${value.routed!.workspaceId})`;
-    expect(rows[0]).toBe("Who should answer in <#C_WHO_ANSWERS>?");
-    expect(rows.slice(1, 6)).toEqual([
-      "*Agents*",
-      "[icon] *Analytics*  Answers revenue questions.",
-      "Choose",
-      "[icon] *Ops Desk*  Handles incidents.",
-      "Choose",
-    ]);
-    expect(rows[6]).toBe("*Workspaces*");
-    expect(rows.slice(7, 9).sort()).toEqual(names.map((row) => row.name).sort());
-    expect(rows.slice(9, 11)).toEqual(["divider", "Not now"]);
-    // The avatar is the same public picture the agent posts with.
-    const icon = blocks[2]!.elements![0]!.image_url!;
-    expect(icon.startsWith("https://app.example.test/v1/public/session-avatars/")).toBe(true);
+    // The fixture agents' avatar is the 📊 emoji.
+    expect(groups[0]).toEqual(["Agents", ["📊 Analytics", "📊 Ops Desk"]]);
+    expect(groups[1]![0]).toBe("Workspaces");
+    expect([...(groups[1]![1] as string[])].sort()).toEqual(names.map((r) => r.name).sort());
     expect(JSON.stringify(card!.blocks)).not.toContain("Opengeni in ");
+
     // Asking again while the card is open re-posts through the same operation
     // and puts no second card up.
     const cards = value.slack.posts.length;
     await mention(value, "C_WHO_ANSWERS", "1765000003.000200", "and another thing");
     expect(value.slack.posts).toHaveLength(cards);
-    // Nothing starts while the question is open.
     expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
     expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+
+    // Picking the agent in the menu starts its chat and remembers it.
+    const chosen = row[0]!.option_groups![0]!.options[0]!.value;
+    const response = await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/interactions",
+        new URLSearchParams({
+          payload: JSON.stringify({
+            type: "block_actions",
+            team: { id: value.teamId },
+            user: { id: value.ownerSlackUserId },
+            channel: { id: card!.channel },
+            message: { ts: card!.timestamp },
+            actions: [
+              {
+                type: "static_select",
+                action_id: "opengeni.route.select",
+                block_id: "opengeni-route-choice",
+                action_ts: "1765000003.000300",
+                selected_option: {
+                  text: { type: "plain_text", text: "📊 Analytics" },
+                  value: chosen,
+                },
+              },
+            ],
+          }),
+        }).toString(),
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    expect(response.status).toBe(200);
+    await drainAll(value.deps);
+    const [chat] = await agentInteractions(value.routed!.workspaceId);
+    expect(chat).toMatchObject({ slack_agent_id: analytics.id });
+    const stored = await getSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      { connectionId: value.connectionId, slackChannelId: "C_WHO_ANSWERS" },
+    );
+    expect(stored?.slackAgentId).toBe(analytics.id);
   }, 90_000);
 
   test("with no agents, routing reads a +name as ordinary text", async () => {

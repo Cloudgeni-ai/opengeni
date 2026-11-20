@@ -341,6 +341,35 @@ describe("Slack shared-image authorization", () => {
 });
 
 describe("Slack event classification and safe projection", () => {
+  test("reads a menu choice's handle from its selected option", () => {
+    const menuChoice = (selected: unknown) => ({
+      type: "block_actions",
+      team: { id: "T_ACTION" },
+      user: { id: "U_ACTION" },
+      channel: { id: "C_ACTION" },
+      message: { ts: "1710000000.000001" },
+      actions: [
+        {
+          type: "static_select",
+          action_id: "opengeni.route.select",
+          action_ts: "1710000000.000002",
+          selected_option: selected,
+        },
+      ],
+    });
+    expect(
+      normalizedBlockActionInteraction(
+        menuChoice({
+          text: { type: "plain_text", text: "Data" },
+          value: "9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da",
+        }),
+      ).text,
+    ).toBe("opengeni.route.select:9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da");
+    expect(() => normalizedBlockActionInteraction(menuChoice(null))).toThrow(
+      "invalid Slack block action",
+    );
+  });
+
   test("normalizes exactly one opaque Opengeni block action", () => {
     const normalized = normalizedBlockActionInteraction({
       type: "block_actions",

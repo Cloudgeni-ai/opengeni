@@ -1,21 +1,13 @@
 /**
  * The "Who should answer in #channel?" card for an installation with Slack
- * agents. Pure Block Kit, no I/O.
+ * agents, and how it is posted.
  *
  * Agents and workspaces are different kinds of answer: an agent is a named
- * assistant, a workspace is Opengeni itself working there. The card labels the
- * two groups so nobody has to guess which button is which, and shows each
- * agent with its avatar and description.
+ * assistant, a workspace is Opengeni itself working there. The card offers
+ * them in one menu with an Agents group and a Workspaces group, so nobody has
+ * to guess which is which, and "Not now" beside it.
  */
-import { escapeSlackMrkdwn } from "./slack-app-home";
 import { SlackBotOperationConflictError, type SlackMessageBlock } from "./slack-bot";
-
-/** What the card shows about an agent beyond its name. */
-export type SlackRouteChoiceAgentDetails = {
-  /** A public picture of the agent's avatar, or null to show none. */
-  iconUrl: string | null;
-  description: string;
-};
 
 /** One stored option, as the card renders it. */
 export type SlackRouteChoiceCardOption = {
@@ -33,22 +25,14 @@ export type SlackRouteChoiceCardInput = {
   cancelValue: string;
   /** The Opengeni workspace link for the footer, when known. */
   settingsUrl: string | null;
-  /** Avatar and description by Slack agent id; an agent without them shows its name only. */
-  agentDetails?: ReadonlyMap<string, SlackRouteChoiceAgentDetails>;
+  /** An agent's avatar emoji by Slack agent id, shown before its name. */
+  agentEmoji?: ReadonlyMap<string, string>;
 };
 
-/** A description longer than this is cut, so a row stays one or two lines. */
-const AGENT_DESCRIPTION_MAX_CHARS = 120;
-
-function shortDescription(text: string): string {
-  const chars = [...text.replace(/\s+/gu, " ").trim()];
-  return chars.length <= AGENT_DESCRIPTION_MAX_CHARS
-    ? chars.join("")
-    : `${chars.slice(0, AGENT_DESCRIPTION_MAX_CHARS - 1).join("")}…`;
-}
-
-export const SLACK_ROUTE_SELECT_ACTION_ID = "opengeni.route.select";
-export const SLACK_ROUTE_CANCEL_ACTION_ID = "opengeni.route.cancel";
+const SELECT_ACTION_ID = "opengeni.route.select";
+const CANCEL_ACTION_ID = "opengeni.route.cancel";
+/** Slack's limit on a menu option's text, in characters. */
+const OPTION_TEXT_MAX_CHARS = 75;
 
 export function slackRouteChoiceQuestion(channel: string): string {
   return `Who should answer in ${channel}?`;
@@ -57,7 +41,7 @@ export function slackRouteChoiceQuestion(channel: string): string {
 function optionButton(option: SlackRouteChoiceCardOption, text: string) {
   return {
     type: "button" as const,
-    action_id: SLACK_ROUTE_SELECT_ACTION_ID,
+    action_id: SELECT_ACTION_ID,
     value: option.id,
     text: { type: "plain_text" as const, text },
   };
@@ -66,7 +50,7 @@ function optionButton(option: SlackRouteChoiceCardOption, text: string) {
 function cancelButton(value: string) {
   return {
     type: "button" as const,
-    action_id: SLACK_ROUTE_CANCEL_ACTION_ID,
+    action_id: CANCEL_ACTION_ID,
     value,
     text: { type: "plain_text" as const, text: "Not now" },
   };
@@ -86,93 +70,73 @@ function footer(input: SlackRouteChoiceCardInput): SlackMessageBlock {
   };
 }
 
-/**
- * One agent: its avatar, name and description on a quiet line, then its button.
- * Without details it is just a button with its name.
- */
-function agentRows(
-  option: SlackRouteChoiceCardOption,
-  details: SlackRouteChoiceAgentDetails | undefined,
-): SlackMessageBlock[] {
-  const description = details ? shortDescription(details.description) : "";
-  if (!details || (!details.iconUrl && !description)) {
-    return [
-      {
-        type: "actions",
-        block_id: `opengeni-route-choice-${option.id}`,
-        elements: [optionButton(option, option.candidateLabel)],
-      },
-    ];
-  }
-  const name = `*${escapeSlackMrkdwn(option.candidateLabel)}*`;
-  return [
-    {
-      type: "context",
-      elements: [
-        ...(details.iconUrl
-          ? [
-              {
-                type: "image" as const,
-                image_url: details.iconUrl,
-                alt_text: option.candidateLabel,
-              },
-            ]
-          : []),
-        {
-          type: "mrkdwn" as const,
-          text: description ? `${name}  ${escapeSlackMrkdwn(description)}` : name,
-        },
-      ],
-    },
-    {
-      type: "actions",
-      block_id: `opengeni-route-choice-${option.id}`,
-      elements: [optionButton(option, "Choose")],
-    },
-  ];
+/** A menu option's text: the name, after the agent's emoji when it still fits. */
+function optionText(label: string, emoji: string | undefined): string {
+  const withEmoji = emoji ? `${emoji} ${label}` : label;
+  if ([...withEmoji].length <= OPTION_TEXT_MAX_CHARS) return withEmoji;
+  const chars = [...label];
+  return chars.length <= OPTION_TEXT_MAX_CHARS
+    ? label
+    : `${chars.slice(0, OPTION_TEXT_MAX_CHARS - 1).join("")}…`;
 }
 
 /**
- * The card: the question, then "Agents" and "Workspaces" each above its own
- * options, then "Not now" on its own below a divider, then where to change the
- * answer. An empty group is left out. Options come from the stored snapshot,
- * so a replay posts the same bytes unless an agent's avatar or description
- * changed in between.
+ * The card: the question, then one menu (Agents, then Workspaces; an empty
+ * group is left out) with "Not now" beside it, then where to change the
+ * answer. Picking an option sends its stored option id, exactly as the old
+ * buttons did. Options come from the stored snapshot, so a replay posts the
+ * same bytes unless an agent's emoji changed in between.
  */
 export function slackRouteChoiceWithAgentsBlocks(
   input: SlackRouteChoiceCardInput,
 ): SlackMessageBlock[] {
-  const agents = input.options.filter((option) => option.candidateSlackAgentId !== null);
-  const workspaces = input.options.filter((option) => option.candidateSlackAgentId === null);
-  const label = (text: string): SlackMessageBlock => ({
-    type: "section",
-    text: { type: "mrkdwn", text: `*${text}*` },
-  });
-  return [
-    { type: "section", text: { type: "mrkdwn", text: slackRouteChoiceQuestion(input.channel) } },
-    ...(agents.length > 0
-      ? [
-          label("Agents"),
-          ...agents.flatMap((option) =>
-            agentRows(option, input.agentDetails?.get(option.candidateSlackAgentId!)),
-          ),
-        ]
-      : []),
-    ...(workspaces.length > 0
-      ? [
-          label("Workspaces"),
+  const group = (label: string, options: readonly SlackRouteChoiceCardOption[]) =>
+    options.length === 0
+      ? []
+      : [
           {
-            type: "actions" as const,
-            block_id: "opengeni-route-choice-workspaces",
-            elements: workspaces.map((option) => optionButton(option, option.candidateLabel)),
+            label: { type: "plain_text" as const, text: label },
+            options: options.map((option) => ({
+              text: {
+                type: "plain_text" as const,
+                text: optionText(
+                  option.candidateLabel,
+                  option.candidateSlackAgentId
+                    ? input.agentEmoji?.get(option.candidateSlackAgentId)
+                    : undefined,
+                ),
+                emoji: true,
+              },
+              value: option.id,
+            })),
           },
-        ]
-      : []),
-    { type: "divider" },
+        ];
+  return [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: slackRouteChoiceQuestion(input.channel) },
+    },
     {
       type: "actions",
-      block_id: "opengeni-route-choice-cancel",
-      elements: [cancelButton(input.cancelValue)],
+      block_id: "opengeni-route-choice",
+      elements: [
+        {
+          type: "static_select",
+          action_id: SELECT_ACTION_ID,
+          placeholder: { type: "plain_text", text: "Choose who answers" },
+          option_groups: [
+            ...group(
+              "Agents",
+              input.options.filter((option) => option.candidateSlackAgentId !== null),
+            ),
+            ...group(
+              "Workspaces",
+              input.options.filter((option) => option.candidateSlackAgentId === null),
+            ),
+          ],
+        },
+        cancelButton(input.cancelValue),
+      ],
     },
     footer(input),
   ];

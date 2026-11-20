@@ -2761,8 +2761,7 @@ async function askSlackRouteChoice(
 
 /**
  * The picker in a channel of an installation with Slack agents: "Who should
- * answer in #channel?", with the agents (avatar and description) and then the
- * workspaces, each group under its own label.
+ * answer in #channel?", one menu with an Agents group and a Workspaces group.
  * Same prompt row, same ledger and the same re-authorization on the answer.
  */
 async function askSlackRouteChoiceWithAgents(
@@ -2814,21 +2813,10 @@ async function askSlackRouteChoiceWithAgents(
     options: opened.prompt.options,
     cancelValue: opened.prompt.options[0]?.id ?? opened.prompt.id,
     settingsUrl: slackWorkspaceUrl(deps, home.workspaceId),
-    agentDetails: new Map(
-      agentRecords.map((agent) => [
-        agent.id,
-        {
-          iconUrl:
-            deps.settings.publicBaseUrl && deps.settings.slackSigningSecret
-              ? sessionAvatarImageUrl(
-                  deps.settings.publicBaseUrl,
-                  deps.settings.slackSigningSecret,
-                  { workspaceId: agent.targetWorkspaceId, avatar: agent.avatar },
-                )
-              : null,
-          description: agent.description,
-        },
-      ]),
+    agentEmoji: new Map(
+      agentRecords.flatMap((agent) =>
+        agent.avatar.kind === "emoji" ? [[agent.id, agent.avatar.emoji] as const] : [],
+      ),
     ),
     boundLabel: boundedSlackRouteLabel,
     alreadyPosted: async () =>
@@ -8439,7 +8427,12 @@ export function normalizedBlockActionInteraction(
   const threadTs = boundedString(message?.thread_ts, 64);
   const actionTs = boundedString(action?.action_ts, 64) ?? boundedString(payload.action_ts, 64);
   const actionId = boundedString(action?.action_id, 128);
-  const handleId = boundedString(action?.value, 64);
+  // A button carries its handle as `value`; a menu, as its selected option's.
+  const handleId =
+    boundedString(action?.value, 64) ??
+    (action?.type === "static_select"
+      ? boundedString(record(action.selected_option)?.value, 64)
+      : null);
   if (
     !teamId ||
     !userId ||
