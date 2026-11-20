@@ -1498,6 +1498,22 @@ export async function validatedScheduledTaskUpdate(
     ownerSubjectId: input.existing.ownerSubjectId,
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
+  // The agent each run starts a chat with, checked against the automation as
+  // it will be after this edit (its agent, run mode and who can see it).
+  const nextAgentId = (update.agentConfig ?? input.existing.agentConfig).agentId;
+  if (
+    nextAgentId !== input.existing.agentConfig.agentId ||
+    runMode !== input.existing.runMode ||
+    visibility !== current
+  ) {
+    await validateScheduledTaskAgent(input.db, {
+      grant: input.grant,
+      agentId: nextAgentId,
+      runMode,
+      ownerSubjectId: input.existing.ownerSubjectId ?? input.grant.subjectId ?? null,
+      privateTask: visibility === "user_private",
+    });
+  }
   const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
   const withEvents = await withScheduledTaskEventsUpdate(input, audited);
   return visibility === current ? withEvents : { ...withEvents, visibility };
@@ -1922,18 +1938,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     throw new HTTPException(422, {
       message: "Updated scheduled message and attachments exceed the supported occurrence payload",
     });
-  if (
-    nextAgentConfig.agentId !== input.existing.agentConfig.agentId ||
-    nextRunMode !== input.existing.runMode
-  ) {
-    await validateScheduledTaskAgent(input.db, {
-      grant: input.grant,
-      agentId: nextAgentConfig.agentId,
-      runMode: nextRunMode,
-      ownerSubjectId: input.existing.ownerSubjectId ?? input.grant.subjectId ?? null,
-      privateTask: input.existing.visibility === "private",
-    });
-  }
   await validateScheduledTaskSlackChannel({
     grant: input.grant,
     authorization: input.authorization,
@@ -2831,7 +2835,9 @@ async function validateScheduledTaskAgent(
   },
 ): Promise<void> {
   if (!input.agentId) return;
-  if (input.runMode === "existing_session") {
+  // Each run starts a new chat with the agent, so a change of agent applies
+  // from the next run; a kept chat would stay with the agent it began with.
+  if (input.runMode !== "new_session_per_run") {
     throw new HTTPException(422, {
       message: "An automation with an agent starts its own chats. Choose a new chat for each run.",
     });

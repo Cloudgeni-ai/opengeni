@@ -653,9 +653,10 @@ access to the agent. Every trigger type the catalog offers works, including
 types added later, because the trigger is the automation's own: nothing is
 agent-specific in intake or delivery. The runs keep every automation limit:
 the chain limit on event-started chats, the storm guard (`maxRunsPerHour`)
-and usage limits. Saving checks the agent is one the owner can use and that
-the task starts its own chats (an `existing_session` task with an agent is
-refused). The automation form takes `?agent=<id>` (and `?agentTrigger=<n>`
+and usage limits. Saving checks the agent is one the owner can use, for the
+automation as it will be after the edit (agent, run mode and visibility),
+and that each run starts a new chat (an `existing_session` or
+`reusable_session` task with an agent is refused). The automation form takes `?agent=<id>` (and `?agentTrigger=<n>`
 for a ready-made agent's suggestion) and binds the new automation to the
 agent. A ready-made agent's suggested triggers are never created on their
 own: each waits until the person picks its source and saves.

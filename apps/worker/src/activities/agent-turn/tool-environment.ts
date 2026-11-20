@@ -116,7 +116,7 @@ import {
   nangoBackendsFor,
   postConnectionNeedsReauthNotice,
   connectedCommandOutputLook,
-  agentToolPermissionsOf,
+  agentToolPermissionsForEnforcement,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
@@ -142,6 +142,7 @@ import {
   type ResourceRef,
   type Permission,
   type ToolAuthNeededPayload,
+  sessionSlackAgent,
 } from "@opengeni/contracts";
 
 import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
@@ -872,16 +873,18 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // The agents this chat runs under (its own, and each chat above it with
   // one): the strictest of their Can use rules raises every connector call's
   // decision, whatever the connection type. Read once per attempt; a
-  // top-level chat without an agent has none to read.
+  // top-level chat without an agent (its own, or a Slack agent's) has none.
   const canUseAgents =
-    session.agentId || session.rootSessionId !== session.id
+    session.agentId ||
+    session.rootSessionId !== session.id ||
+    sessionSlackAgent(session.metadata) !== null
       ? await getSessionAgentChain(db, {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
         })
       : [];
   const agentCanUse = agentCanUseFor({
-    ruleSets: canUseAgents.map((agent) => agentToolPermissionsOf(agent)),
+    ruleSets: canUseAgents.map((agent) => agentToolPermissionsForEnforcement(agent)),
     bindings: turn.mcpAccountBindings,
     servers: canonicalRunSettings.mcpServers,
   });

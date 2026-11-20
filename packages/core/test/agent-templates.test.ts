@@ -39,3 +39,21 @@ describe("ready-made agents", () => {
     expect(agentTemplateByKey("missing")).toBeUndefined();
   });
 });
+
+describe("Can use enforcement", () => {
+  test("a rule with a permission this release can't read asks first", async () => {
+    const { agentToolPermissionsForEnforcement } = await import("../src/index");
+    expect(
+      agentToolPermissionsForEnforcement({
+        toolPermissions: [
+          { connector: "gmail.com", tool: "send_email", permission: "later-value" },
+          { connector: "linear.app", tool: "*", permission: "block" },
+          { nonsense: true },
+        ],
+      }),
+    ).toEqual([
+      { connector: "gmail.com", tool: "send_email", permission: "ask" },
+      { connector: "linear.app", tool: "*", permission: "block" },
+    ]);
+  });
+});

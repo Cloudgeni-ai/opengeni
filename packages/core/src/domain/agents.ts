@@ -170,6 +170,23 @@ export function agentToolPermissionsOf(agent: Pick<AgentRecord, "toolPermissions
   });
 }
 
+/**
+ * The rules a chat enforces. A rule this release can't read fully (for
+ * example a permission a later release added) still names its connector and
+ * tool, so it asks first rather than being ignored.
+ */
+export function agentToolPermissionsForEnforcement(agent: Pick<AgentRecord, "toolPermissions">) {
+  return agent.toolPermissions.flatMap((rule) => {
+    const parsed = AgentToolPermissionRule.safeParse(rule);
+    if (parsed.success) return [parsed.data];
+    const fallback = AgentToolPermissionRule.safeParse({
+      ...(rule && typeof rule === "object" ? rule : {}),
+      permission: "ask",
+    });
+    return fallback.success ? [fallback.data] : [];
+  });
+}
+
 function agentSkillsOf(agent: Pick<AgentRecord, "skills">) {
   return agent.skills.flatMap((skill) => {
     const parsed = AgentSkillRef.safeParse(skill);

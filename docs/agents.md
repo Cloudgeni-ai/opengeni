@@ -511,8 +511,10 @@ whole.
   Instructions, Memory and Can use), created as the task with the task
   owner's access to the agent (`agent.subjectId` on session create), so Only
   me agents work in their owner's Only me automations. Saving checks the
-  agent is one the owner can use and that the task starts its own chats
-  (`existing_session` is refused). Any trigger type in the catalog works,
+  agent is one the owner can use, against the automation's agent, run mode
+  and visibility after the edit, and that each run starts a new chat
+  (`existing_session` and `reusable_session` are refused, so a change of
+  agent applies from the next run). Any trigger type in the catalog works,
   including types added later, because the trigger is the automation's own.
   Event runs keep the automation limits: the chain limit, the storm guard
   (`maxRunsPerHour`) and usage limits. The page lists the automations with
@@ -535,7 +537,10 @@ whole.
   agent and every agent above it, taking the strictest choice: an agent's
   workers follow its Can use, and a delegated chat follows both its own
   agent's and the caller's, so handing work over never drops a restriction.
-  In an unattended run Ask first refuses the call, as approvals do there. The
+  In an unattended run Ask first refuses the call, as approvals do there.
+  Codex Apps calls carry no provider domain: rules name them by the
+  `codex_apps` server id or `*`. A rule a release can't fully read (such as
+  a permission added later) asks first rather than being ignored. The
   page lists the workspace's enabled connections; rules for connections not
   listed (such as a ready-made agent's GitHub rules) still show and can be
   changed or removed.
