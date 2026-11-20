@@ -2,6 +2,7 @@
 "@opengeni/codex": minor
 "@opengeni/config": minor
 "@opengeni/contracts": minor
+"@opengeni/react": patch
 "@opengeni/runtime": minor
 "@opengeni/tool-gateway": patch
 "@opengeni/worker-bundle": minor

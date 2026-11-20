@@ -680,6 +680,15 @@ export function prefixChat(wire: Wire) {
         bus: { subscribeRequests: () => () => {} } as PrepareTurnToolRuntimeDeps["bus"],
         runtime: runtime as OpenGeniRuntime,
         objectStorage: null,
+        toolResultStore: {
+          // This fixture never produces oversized results. Keep the real tool
+          // registration path without relying on object storage.
+          setReaders: () => {},
+          readBytes: async () => {
+            throw new Error("prefix fixture does not read stored tool results");
+          },
+          inlineMaxBytes: () => 100_000,
+        } as unknown as PrepareTurnToolRuntimeDeps["toolResultStore"],
         observability,
         media: {} as BuildTurnAgentDeps["media"],
         turn: turnRow,

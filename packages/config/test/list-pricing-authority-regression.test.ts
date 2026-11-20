@@ -57,10 +57,21 @@ describe("comparison pricing preserves base debit and accepted-policy authority"
     expect(() =>
       assertTurnExecutionPolicyMatchesConfigV1(settings, acceptedAtBase, input),
     ).not.toThrow();
-    // The automatic-compaction trigger later left the definition digest; the
-    // base-accepted digest above remains runnable through that compatibility.
+    // The automatic-compaction trigger left the digest, then the inline tool
+    // output default grew. Both earlier definitions remain runnable.
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        settings,
+        {
+          ...current,
+          definitionVersion:
+            "sha256:125837cb452d74f95ffec5e367b426477f43e5f97e23bbb8a90c92291b7a731d",
+        },
+        input,
+      ),
+    ).not.toThrow();
     expect(current.definitionVersion).toBe(
-      "sha256:125837cb452d74f95ffec5e367b426477f43e5f97e23bbb8a90c92291b7a731d",
+      "sha256:a1517aaf768458b4553746ff8f8652ed17af15729a43f21fcf883f27a51b56c5",
     );
     expect(configuredModels(settings)[0]?.pricing).toBeUndefined();
     expect(() =>

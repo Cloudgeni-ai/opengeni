@@ -370,6 +370,23 @@ describe("accepted execution policy hosted web-search enablement", () => {
     expect(verified.model.hostedWebSearch).toBe(false);
   });
 
+  test("preserves the frozen tool set across the inline output default rollout", () => {
+    const accepted = resolveTurnExecutionPolicyV1(
+      registrySettings(disabled, {}, { toolOutputTruncationTokens: 10_000 }),
+      input,
+    );
+    const current = registrySettings(enabled, {}, { toolOutputTruncationTokens: 25_000 });
+    const verified = assertTurnExecutionPolicyMatchesConfigV1(current, accepted, input);
+    const currentModel = configuredModels(current).find((model) => model.id === input.modelId)!;
+    expect(verified.model).toMatchObject({
+      hostedWebSearch: false,
+      executionLimits: { toolOutputTruncationTokens: 25_000 },
+    });
+    expect(
+      configuredModelForAcceptedTurnExecutionPolicy(currentModel, verified.provider, accepted),
+    ).toEqual(verified.model);
+  });
+
   test("turning web search off still fails closed", () => {
     const accepted = resolveTurnExecutionPolicyV1(registrySettings(enabled), input);
     for (const webSearch of [webSearchOff, { upstream: "supported", runnable: false } as const]) {
