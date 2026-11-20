@@ -1891,6 +1891,7 @@ function SiteViewPage() {
       startNew={search.new === true}
       page={search.page}
       artifactsReturn={siteViewArtifactsReturn(search)}
+      connect={search.connect}
     />
   );
 }

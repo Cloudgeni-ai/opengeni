@@ -103,6 +103,7 @@ import {
   type SiteChatPanelLayout,
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
+import { AppConnectCard } from "../lib/app-connect-card";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
@@ -169,6 +170,7 @@ export function SiteViewRoute({
   startNew = false,
   page,
   artifactsReturn,
+  connect,
   embedded = false,
 }: {
   workspaceId: string;
@@ -189,6 +191,8 @@ export function SiteViewRoute({
    * with a Back to it, and the Site's own moves keep it.
    */
   artifactsReturn?: SiteViewArtifactsReturn | undefined;
+  /** Open this connect card item's dialog once (`?connect=`, from a published App). */
+  connect?: string | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
@@ -232,6 +236,33 @@ export function SiteViewRoute({
     [consoleToolBridge, siteId, subscribeDataChanges],
   );
   const artifact = live.detail?.artifact;
+  // The connect card's `?connect=` is used once, then dropped from the address.
+  const connectHandled = useCallback(
+    () =>
+      void navigate({
+        to: SITE_ROUTE,
+        params: { workspaceId, siteId },
+        search: {
+          ...back,
+          ...(conversation ? { conversation } : {}),
+          ...(page ? { page } : {}),
+        },
+        replace: true,
+      }),
+    [back, conversation, navigate, page, siteId, workspaceId],
+  );
+  const connectCard =
+    artifact?.status === "active" ? (
+      <div className="pointer-events-none absolute right-3 bottom-3 z-20 flex justify-end">
+        <AppConnectCard
+          workspaceId={workspaceId}
+          siteId={siteId}
+          versionId={artifact.currentVersion?.id ?? null}
+          connectKey={connect}
+          onConnectKeyHandled={connectHandled}
+        />
+      </div>
+    ) : null;
   // The publish form, open for this Site; another Site starts without it.
   const siteKey = `${workspaceId}/${siteId}`;
   const [publishingFor, setPublishingFor] = useState<string | null>(null);
@@ -288,9 +319,10 @@ export function SiteViewRoute({
   if (embedded) {
     return (
       <div
-        className="flex h-full min-h-0 min-w-0 flex-col"
+        className="relative flex h-full min-h-0 min-w-0 flex-col"
         data-workspace-scroll-owner="self-managed"
       >
+        {connectCard}
         <SiteView
           client={client}
           workspaceId={workspaceId}
@@ -427,6 +459,7 @@ export function SiteViewRoute({
             />
           </div>
         )}
+        {publishing ? null : connectCard}
         <ChatFileDropCover relay={relay} enabled={!layout.collapsed} />
       </div>
       <ChatFileDropRelayProvider relay={relay}>
