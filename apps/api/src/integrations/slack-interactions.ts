@@ -7677,8 +7677,6 @@ async function deliverSlackSessionEvents(
   };
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
-  // The turn whose end settled this pass, so a wake waiting for a later turn keeps it open.
-  let terminalTurnId: string | null = null;
   // At most one stop notice per delivery pass: a single cancel can sweep up
   // the running turn and every queued one.
   let stopNoticeHandled = false;
@@ -7887,7 +7885,6 @@ async function deliverSlackSessionEvents(
             ),
         );
         terminal = "completed";
-        terminalTurnId = event.turnId ?? null;
         continue;
       }
       if (safePayloadText(event.payload, "segmentLimit") === "budget_exhausted") {
@@ -7906,7 +7903,6 @@ async function deliverSlackSessionEvents(
             ),
         );
         terminal = "failed";
-        terminalTurnId = event.turnId ?? null;
         continue;
       }
       // A completed turn is not necessarily a completed task. Input waits and
@@ -7939,7 +7935,6 @@ async function deliverSlackSessionEvents(
         // message drops its button exactly as after a posted result, and
         // nothing is posted.
         terminal = "completed";
-        terminalTurnId = event.turnId ?? null;
         continue;
       }
       const output = payloadOutput;
@@ -8061,7 +8056,6 @@ async function deliverSlackSessionEvents(
         });
       });
       terminal = "completed";
-      terminalTurnId = event.turnId ?? null;
     } else if (event.type === "turn.failed") {
       await withSlackPreviousContinuationCopy(
         slackChannelIsDirectMessage(interaction.slackChannelId),
@@ -8075,10 +8069,8 @@ async function deliverSlackSessionEvents(
           ),
       );
       terminal = "failed";
-      terminalTurnId = event.turnId ?? null;
     } else if (event.type === "turn.cancelled") {
       terminal = "cancelled";
-      terminalTurnId = event.turnId ?? null;
       if (stopNoticeHandled || !(await slackStopNoticeWarranted(deps, interaction, event))) {
         continue;
       }
@@ -8107,7 +8099,8 @@ async function deliverSlackSessionEvents(
       ...interaction,
       claimHolderId,
       sequence: lastSequence,
-      terminalTurnId,
+      // A wake marked meanwhile for a later turn keeps the thread open.
+      settledTurn: true,
       state: terminal,
     });
   } else {

@@ -717,23 +717,25 @@ describe("Slack interaction migration and durable database boundary", () => {
     // A later mark wins over an earlier one.
     await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 1 });
     expect((await row())?.delivery_reopen_after_sequence).toBe(2);
-    const settle = async (terminalTurnId?: string) => {
+    const settle = async (settledTurn?: true) => {
       await admin`
-        update slack_interactions set delivery_claim_holder_id = ${holder}
+        update slack_interactions
+        set delivery_claim_holder_id = ${holder},
+          delivery_claim_expires_at = now() + interval '1 minute'
         where id = ${interaction.id}`;
       expect(
         await closeSlackInteractionDelivery(db, {
           ...interaction,
           claimHolderId: holder,
           sequence: 10,
-          ...(terminalTurnId !== undefined ? { terminalTurnId } : {}),
+          ...(settledTurn ? { settledTurn } : {}),
           state: "completed",
         }),
       ).toBe(true);
       return await row();
     };
     // A mark whose wake isn't a pending update (here: none) closes as usual.
-    expect(await settle(crypto.randomUUID())).toEqual({
+    expect(await settle(true)).toEqual({
       terminal_delivery_state: "completed",
       last_delivered_session_event_sequence: 10,
       delivery_reopen_after_sequence: null,
@@ -754,7 +756,8 @@ describe("Slack interaction migration and durable database boundary", () => {
     });
     await admin`
       update slack_interactions
-      set session_id = ${session.id}, terminal_delivery_state = 'open'
+      set session_id = ${session.id}, session_reservation_id = ${session.id},
+        terminal_delivery_state = 'open'
       where id = ${interaction.id}`;
     const wake = await addSessionSystemUpdate(db, {
       accountId: target.accountId,
@@ -780,7 +783,7 @@ describe("Slack interaction migration and durable database boundary", () => {
         afterSequence: wakeEvent!.sequence - 1,
       }),
     ).toBe("marked");
-    expect(await settle(crypto.randomUUID())).toEqual({
+    expect(await settle(true)).toEqual({
       terminal_delivery_state: "open",
       last_delivered_session_event_sequence: Math.max(10, wakeEvent!.sequence - 1),
       delivery_reopen_after_sequence: null,
@@ -800,7 +803,7 @@ describe("Slack interaction migration and durable database boundary", () => {
     });
     await admin`
       update session_system_updates set state = 'cancelled' where id = ${wake.update.id}`;
-    expect((await settle(crypto.randomUUID()))?.terminal_delivery_state).toBe("completed");
+    expect((await settle(true))?.terminal_delivery_state).toBe("completed");
   }, 60_000);
 
   test("a chat's links and waits change with one public event each", async () => {

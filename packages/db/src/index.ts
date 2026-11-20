@@ -17035,8 +17035,8 @@ export async function reopenSlackInteractionDelivery(
  * started in Slack, with `afterSequence` just before the wake's
  * `system.update.pending` event. A delivery that is still open (an earlier
  * answer is still being delivered) is marked instead: when a pass settles a
- * turn, it stays open while the wake still waits for a turn or went to a later
- * one, and closes as usual when that turn took the wake in itself (see
+ * turn, it stays open while the wake still waits for a turn or went to a turn
+ * that has not ended yet, and closes as usual once the wake's turn ended (see
  * closeSlackInteractionDelivery). Returns "reopened", "marked", or null when
  * the delivery is gone.
  */
@@ -17180,19 +17180,20 @@ export async function closeSlackInteractionDelivery(
     state: Exclude<SlackInteraction["terminalDeliveryState"], "open">;
     errorCode?: string | null;
     /**
-     * The turn whose end this pass settled. If a wake was marked meanwhile
-     * (see reopenSlackInteractionDeliveryAfter) and is still waiting for a
-     * turn, or went to a later turn, the delivery stays open for the woken
-     * answer, skipping to the wake. A wake this turn took in itself closes as
-     * usual. Omitted (a failed delivery): always closes.
+     * The pass settled a turn (its terminal event is at or before `sequence`).
+     * If a wake was marked meanwhile (see reopenSlackInteractionDeliveryAfter)
+     * and its update is still pending, or went to a turn that has not ended
+     * by `sequence`, the delivery stays open for the woken answer, skipping to
+     * the wake. A wake whose turn already ended here closes as usual. Omitted
+     * (a failed delivery): always closes.
      */
-    terminalTurnId?: string | null;
+    settledTurn?: boolean;
   },
 ): Promise<boolean> {
   // Qualified by hand: inside UPDATE ... SET the outer row's columns must not
   // resolve to the subquery's same-named ones.
   const reopen =
-    input.terminalTurnId === undefined
+    input.settledTurn !== true
       ? sql`false`
       : sql`("slack_interactions"."delivery_reopen_after_sequence" is not null and exists (
           select 1 from session_events wake
@@ -17206,7 +17207,15 @@ export async function closeSlackInteractionDelivery(
             and wake.type = 'system.update.pending'
             and (wake_update.state = 'pending'
               or (wake_update.state = 'delivered'
-                and wake_update.delivered_turn_id is distinct from ${input.terminalTurnId ?? null}::uuid))
+                and wake_update.delivered_turn_id is not null
+                and not exists (
+                  select 1 from session_events done
+                  where done.workspace_id = wake.workspace_id
+                    and done.session_id = wake.session_id
+                    and done.turn_id = wake_update.delivered_turn_id
+                    and done.type in ('turn.completed', 'turn.failed', 'turn.cancelled')
+                    and done.sequence <= ${Math.trunc(input.sequence)}
+                )))
         ))`;
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
