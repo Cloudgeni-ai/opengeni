@@ -4436,7 +4436,9 @@ export function buildOpenGeniAgent(
             root: options.sandboxWorkspaceRoot!,
             includeResourceEntries: false,
           }
-        : undefined,
+        : // File mounts are for the box this turn runs on, which is also the
+          // backend its pre-signed downloads were decided for.
+          { sandboxBackend: options.activeSandboxBackend ?? settings.sandboxBackend },
     ),
     instructionManifest: (manifest: Manifest) =>
       manifestWithoutFileResourceEntries(manifest, resources),
@@ -14101,7 +14103,15 @@ export function buildManifest(
   resources: ResourceRef[],
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
-  options: { root?: string; includeResourceEntries?: boolean } = {},
+  options: {
+    root?: string;
+    includeResourceEntries?: boolean;
+    /**
+     * The backend whose box applies this manifest. File mounts follow it,
+     * like the turn's pre-signed downloads; defaults to settings.sandboxBackend.
+     */
+    sandboxBackend?: Settings["sandboxBackend"];
+  } = {},
 ): Manifest {
   assertUniqueResourceMountPaths(resources);
   const entries: Record<string, any> = {};
@@ -14130,7 +14140,11 @@ export function buildManifest(
       const download = downloadsByFileId.get(resource.fileId);
       entries[mountPath] = download
         ? sandboxDownloadDirectory(download, mountPath)
-        : objectStorageFileMount(settings, `files/${resource.fileId}/original`);
+        : objectStorageFileMount(
+            settings,
+            options.sandboxBackend ?? settings.sandboxBackend,
+            `files/${resource.fileId}/original`,
+          );
     }
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
@@ -14279,13 +14293,16 @@ function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: stri
   return dir();
 }
 
-function objectStorageFileMount(settings: Settings, prefix: string): any {
+function objectStorageFileMount(
+  settings: Settings,
+  sandboxBackend: Settings["sandboxBackend"],
+  prefix: string,
+): any {
   // Descriptor-driven: a native bucket-mount backend (modal) mounts via the
   // provider's own bucket-mount strategy and cannot mount Azure Blob entries —
   // it needs pre-signed downloads instead. Reading the descriptor (not a
   // hard-coded backend name) keeps this honest as providers are added.
-  const nativeBucketMount =
-    CAPABILITY_DESCRIPTORS[settings.sandboxBackend].bucketMount === "native";
+  const nativeBucketMount = CAPABILITY_DESCRIPTORS[sandboxBackend].bucketMount === "native";
   if (settings.objectStorageBackend === "azure-blob") {
     if (nativeBucketMount) {
       throw new Error(
