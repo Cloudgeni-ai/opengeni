@@ -22,9 +22,14 @@ in the automation's run history with its status, error and a `syncSummary`
   `startAppSyncPump`, every 5 seconds on each replica) claims queued runs with
   a lease, calls the tool through the ordinary workspace tool gateway as the
   person the run is for, and writes through the ordinary Site Data write path.
-  A run claimed more than three times (crashed replicas) settles failed.
-- Overlap policy is `skip`; a paused or deleted sync's queued runs settle
-  `skipped`. A manual run (`app_sync_run`) works while paused.
+  The run renews its 5-minute lease after every tool call and every person, so
+  a long personal sync is never claimed twice. A run claimed more than three
+  times (crashed replicas) settles failed.
+- Overlap policy is `skip`, applied by the executor (the worker's hand-off
+  finishes at once): claims of one sync are serialized, and a run claimed
+  while another run of the same sync holds a live lease settles `skipped`. A
+  paused or deleted sync's queued runs settle `skipped`. A manual run
+  (`app_sync_run`) works while paused.
 - Event-triggered runs need nothing extra: an event occurrence fires the same
   workflow and dispatch. Syncs have no owner column on the task, so only
   workspace event sources can trigger them.
@@ -35,15 +40,28 @@ in the automation's run history with its status, error and a `syncSummary`
   saved it, on their connection, and writes shared records of a `shared`,
   `shared_read` or `append_only` collection with the principal
   `schedule:<taskId>`. The owner must still manage the App; otherwise the run
-  fails and asks a manager to save the sync again.
+  fails and asks a manager to save the sync again. When another manager saves
+  it, they become the owner and the sync moves to their own account of the
+  same connector.
 - **Personal** (`mode: "personal"`) runs once for each person who opted in
   (`app_sync_subscriptions`, at most 200 per run), as that person, on their own
-  account of the same connector (the tool is routed like an App tool for that
-  viewer), and writes only their own records (`user:<subjectId>`) of a
-  `per_viewer` collection; `privateRecords: true` also hides them from the
-  App's managers. One person's failure doesn't stop the others; the run fails
+  account of the same connector, never a workspace-shared account (a person
+  with only the shared one gets a readable error asking them to connect their
+  own), and writes only their own records (`user:<subjectId>`) of a
+  `per_viewer` collection. `privateRecords: true` is not required, so an App
+  can let its managers see everyone's synced records; set it to hide them from
+  managers too. One person's failure doesn't stop the others; the run fails
   with "N of M people failed" and each person's last run is kept on their
   subscription.
+- People opt in to one tool, arguments, collection and mode. Changing any of
+  them clears every opt-in, so a manager can't make subscribers' accounts run
+  something else; people opt in again. Renaming or rescheduling keeps them.
+- **Which account.** A sync stores the tool as saved (often the saver's account
+  route), its connector-level identity (`connectorTool`) and the pairing in
+  `declaredTools`. Each run calls the saved route when it is the running
+  person's own account, else that person's own account of the connector
+  (`resolveAppSyncTool`, built on `connectorToolIdentity` in
+  `site-tool-routing.ts`). A tool without accounts runs as itself.
 
 ### Reading records
 
@@ -62,11 +80,17 @@ in batches of 100 `put` operations.
   and "ask first" fails the run with a readable error, since nobody can approve
   an unattended run. A tool that needs a connection the person lacks fails
   with "Connect … first".
-- Writes use the person's live access to the App (a lost audience or archived
-  App stops the sync), count in the App's manager write window, are metered
+- Writes use the person's live access to the App: a lost audience stops the
+  sync, and an archived App fails its runs with a readable error until it is
+  restored. They count in the App's manager write window, are metered
   like other Site Data writes (`site_data.write`, `site_data.write_bytes`) and
-  record the run's automation chain depth on the caller, so the event chain
-  limit applies to changes a sync makes. Tool calls are metered by the tool
+  record the run's automation chain depth and ids on the caller, so the event
+  chain limit applies to changes a sync makes.
+- `app_sync_run` from an automation's agent continues that automation's chain:
+  the run's depth is the automation run's depth plus one, and an automation
+  already at the limit (`OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH`, 3) is refused.
+  An automation woken by a sync's changes therefore can't keep re-running the
+  sync: the chain stops at depth 3. Tool calls are metered by the tool
   gateway as today. No session usage limit applies because no session runs.
 - Interval schedules run at most every 5 minutes.
 
@@ -104,11 +128,13 @@ Errors use the Site Data error envelope.
 
 - `listAppSyncDefinitions(deps, scope, siteId)`: the Site's syncs as plain
   `AppSyncDefinition`s (name, collection, mode, tool, arguments, recordsPath,
-  key, fields, schedule and event triggers; no ids, owners or accounts).
+  key, fields, schedule and event triggers; no ids, owners or accounts). The
+  tool is the connector-level identity, never the author's account route.
   Trigger `sourceId`s name sources in the exporting workspace, so install
   (`apps/api/src/app-sync/package-hooks.ts`) drops them and keeps the schedule.
 - `createAppSyncFromDefinition(deps, grant, siteId, definition)`: creates the
-  sync **paused**, owned by the installer. The installer confirms the account
+  sync **paused**, owned by the installer and pinned to their own account of
+  the connector. The installer confirms the account
   by resuming it (`PATCH … {status: "active"}` or `app_sync_save`).
 
 ## Storage
@@ -117,7 +143,10 @@ Migration `1516_app_data_sync.sql` (rolling): `app_sync` in both action
 checks, `scheduled_task_runs.sync_summary`, and two FORCE RLS tables,
 `app_sync_subscriptions` (opt-ins with each person's last run) and
 `app_sync_queue` (run ids waiting for the executor; the executor lists due
-ids across workspaces, then claims each under its workspace's RLS).
+ids across workspaces, then claims each under its workspace's RLS). The
+cross-workspace listing is visible only to a connection with no workspace or
+account context set. Each queue row carries the run's chain depth, so a run
+started by an automation keeps counting toward the chain limit.
 
 ## Self-hosting
 

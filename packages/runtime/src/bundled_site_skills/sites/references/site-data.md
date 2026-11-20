@@ -147,7 +147,8 @@ so it is cheaper, faster and gives the same result every run. Steps:
 `mode: "shared"` (default) runs on the saving person's connection and fills
 data everyone shares. `mode: "personal"` fills only each opted-in person's own
 records from their own account; people opt in with `app_sync_opt_in` (only
-when they ask). Tools that ask for approval first can't run unattended, so
+when they ask). Changing a personal sync's tool, arguments, collection or mode
+clears the opt-ins, so people opt in again. Tools that ask for approval first can't run unattended, so
 their runs fail with a readable error. In the page, `await site.data.syncs()`
 returns each sync's `lastRun` (`at`, `status`, `error`) and, for personal
 syncs, whether the viewer `optedIn`: show "Updated 5 minutes ago" or the error
