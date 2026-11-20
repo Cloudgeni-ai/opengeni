@@ -553,9 +553,10 @@ whole.
 
 Not in self-hosted deployments without these pieces: Codex Apps rules need
 the Codex Apps deployment flag, and Slack lines need the Opengeni Slack app.
-`git` and `gh` through Your GitHub follow Can use too: a `github.com` or
-`github_personal` rule applies to the GitHub action each request maps to
-(for example `pull_request_merge` for `gh pr merge`).
+Writes through `git` and `gh` with Your GitHub follow Can use too: a
+`github.com` or `github_personal` rule applies to the GitHub action each
+write maps to (for example `pull_request_merge` for `gh pr merge`). Reads
+such as `git clone` or `gh pr view` aren't checked against Can use.
 
 ### Ready-made agents
 

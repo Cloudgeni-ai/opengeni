@@ -116,7 +116,7 @@ import {
   nangoBackendsFor,
   postConnectionNeedsReauthNotice,
   connectedCommandOutputLook,
-  agentToolPermissionsForEnforcement,
+  agentToolPermissionSetsForEnforcement,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
@@ -884,7 +884,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         })
       : [];
   const agentCanUse = agentCanUseFor({
-    ruleSets: canUseAgents.map((agent) => agentToolPermissionsForEnforcement(agent)),
+    ruleSets: canUseAgents.flatMap((agent) => agentToolPermissionSetsForEnforcement(agent)),
     bindings: turn.mcpAccountBindings,
     servers: canonicalRunSettings.mcpServers,
   });

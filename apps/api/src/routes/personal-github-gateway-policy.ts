@@ -12,7 +12,7 @@ import {
 } from "@opengeni/db";
 import {
   GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
-  agentToolPermissionsForEnforcement,
+  agentToolPermissionSetsForEnforcement,
   githubSensitiveRequestDecision,
 } from "@opengeni/core";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
@@ -191,13 +191,15 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
   return async (identity, input) => {
     const ledgerIdentity = connectorIdentity(identity);
     // The chat's agents (its own and each above it) apply their Can use here
-    // too, so `gh pr merge` follows the same Block as the merge tool.
+    // too, so `gh pr merge` follows the same Block as the merge tool. Read
+    // per request (the worker reads them once per attempt), so an edit can
+    // reach `gh` a turn sooner; either way it only makes calls stricter.
     const agentRuleSets = (
       await getSessionAgentChain(db, {
         workspaceId: identity.claims.workspaceId,
         sessionId: identity.claims.sessionId,
       })
-    ).map((agent) => agentToolPermissionsForEnforcement(agent));
+    ).flatMap((agent) => agentToolPermissionSetsForEnforcement(agent));
     const floored = withAgentGatewayFloor(agentRuleSets, (lookup) =>
       resolveAttemptConnectorToolDecision(db, ledgerIdentity, {
         connectionId: identity.claims.connectionId,

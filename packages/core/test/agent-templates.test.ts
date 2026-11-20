@@ -42,9 +42,9 @@ describe("ready-made agents", () => {
 
 describe("Can use enforcement", () => {
   test("a rule with a permission this release can't read asks first", async () => {
-    const { agentToolPermissionsForEnforcement } = await import("../src/index");
+    const { agentToolPermissionSetsForEnforcement } = await import("../src/index");
     expect(
-      agentToolPermissionsForEnforcement({
+      agentToolPermissionSetsForEnforcement({
         toolPermissions: [
           { connector: "gmail.com", tool: "send_email", permission: "later-value" },
           { connector: "linear.app", tool: "*", permission: "block" },
@@ -53,10 +53,29 @@ describe("Can use enforcement", () => {
         ],
       }),
     ).toEqual([
-      { connector: "gmail.com", tool: "send_email", permission: "ask" },
-      { connector: "linear.app", tool: "*", permission: "block" },
-      { connector: "slack.com", tool: "*", permission: "ask" },
-      { connector: "*", tool: "*", permission: "ask" },
+      [{ connector: "linear.app", tool: "*", permission: "block" }],
+      [
+        { connector: "gmail.com", tool: "send_email", permission: "ask" },
+        { connector: "slack.com", tool: "*", permission: "ask" },
+        { connector: "*", tool: "*", permission: "ask" },
+      ],
     ]);
+  });
+
+  test("an unreadable rule never outranks a readable Block", async () => {
+    const { agentToolPermissionSetsForEnforcement } = await import("../src/index");
+    const { agentToolPermissionFor } = await import("@opengeni/contracts");
+    const sets = agentToolPermissionSetsForEnforcement({
+      toolPermissions: [
+        { connector: "github.com", tool: "*", permission: "block" },
+        { connector: "github_personal", tool: ["a"], permission: "block" },
+      ],
+    });
+    const target = {
+      serverId: "github_personal",
+      providerDomain: "github.com",
+      toolName: "pull_request_merge",
+    };
+    expect(sets.map((rules) => agentToolPermissionFor(rules, target))).toEqual(["block", "ask"]);
   });
 });

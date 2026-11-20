@@ -171,27 +171,41 @@ export function agentToolPermissionsOf(agent: Pick<AgentRecord, "toolPermissions
 }
 
 /**
- * The rules a chat enforces. A rule this release can't read fully (for
- * example a permission a later release added) still names its connector and
- * tool, so it asks first rather than being ignored.
+ * The rule sets a chat enforces for one agent, each applied on its own with
+ * the strictest decision across sets winning. A rule this release can't read
+ * fully (for example a permission a later release added) still asks first
+ * rather than being ignored: it keeps its connector and tool when readable,
+ * else covers every tool of its connector, or of every connector. Those
+ * fallbacks form a separate set, so they can only make a call stricter and
+ * never outrank a readable Block.
  */
-export function agentToolPermissionsForEnforcement(agent: Pick<AgentRecord, "toolPermissions">) {
-  return agent.toolPermissions.flatMap((rule) => {
+export function agentToolPermissionSetsForEnforcement(
+  agent: Pick<AgentRecord, "toolPermissions">,
+): AgentToolPermissionRule[][] {
+  const readable: AgentToolPermissionRule[] = [];
+  const fallbacks: AgentToolPermissionRule[] = [];
+  for (const rule of agent.toolPermissions) {
     const parsed = AgentToolPermissionRule.safeParse(rule);
-    if (parsed.success) return [parsed.data];
+    if (parsed.success) {
+      readable.push(parsed.data);
+      continue;
+    }
     const raw = rule && typeof rule === "object" ? (rule as Record<string, unknown>) : {};
     const fallback = AgentToolPermissionRule.safeParse({ ...raw, permission: "ask" });
-    if (fallback.success) return [fallback.data];
-    // Its connector or tool can't be read either: ask for every tool of the
-    // connector it still names, or of every connector.
+    if (fallback.success) {
+      fallbacks.push(fallback.data);
+      continue;
+    }
     const connector = AgentToolPermissionRule.safeParse({
       connector: raw.connector,
       tool: "*",
       permission: "ask",
     });
-    const askAll: AgentToolPermissionRule = { connector: "*", tool: "*", permission: "ask" };
-    return [connector.success ? connector.data : askAll];
-  });
+    fallbacks.push(
+      connector.success ? connector.data : { connector: "*", tool: "*", permission: "ask" },
+    );
+  }
+  return fallbacks.length > 0 ? [readable, fallbacks] : [readable];
 }
 
 function agentSkillsOf(agent: Pick<AgentRecord, "skills">) {
