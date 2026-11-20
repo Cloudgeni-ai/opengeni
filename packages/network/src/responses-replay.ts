@@ -49,6 +49,41 @@ export function preservesReplayStatus(type: unknown): type is ReplayStatusItemTy
 }
 
 /**
+ * Hosted calls whose results the backend keeps with the response it holds but
+ * leaves out of the output item: a web search's pages, a file search's
+ * chunks and a code interpreter's outputs (the latter two unless a request
+ * asks for them with `include`). A request that continues such a response
+ * gives the model those results; a request that replays the item cannot send
+ * them back, so the backend renders it differently from the response it holds.
+ *
+ * Continuing the chain past such an item therefore defers the prompt-cache
+ * miss rather than avoiding it: the cache then holds the results, and every
+ * later full request of the chat (a compaction checkpoint, a new connection)
+ * misses from the first such item onwards, for as long as the history keeps
+ * it. Ending the chain instead makes the next request replay it once, which
+ * misses only from that item, and every later full request then matches.
+ */
+export const SERVER_HELD_RESULT_ITEM_TYPES = [
+  "web_search_call",
+  "file_search_call",
+  "code_interpreter_call",
+] as const;
+
+const SERVER_HELD_RESULT_ITEM_TYPE_SET: ReadonlySet<unknown> = new Set(
+  SERVER_HELD_RESULT_ITEM_TYPES,
+);
+
+/** True when replaying the item cannot reproduce what the backend holds for it. */
+export function holdsServerOnlyResults(item: unknown): boolean {
+  return (
+    !!item &&
+    typeof item === "object" &&
+    !Array.isArray(item) &&
+    SERVER_HELD_RESULT_ITEM_TYPE_SET.has((item as Record<string, unknown>).type)
+  );
+}
+
+/**
  * One item as replay sends it back: without its provider `id` (every type),
  * without its output-only `status` (every type not in
  * {@link REPLAY_STATUS_ITEM_TYPES}; a required status is kept as it is, never

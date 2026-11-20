@@ -20,7 +20,9 @@ import {
   type ResponsesTransportDiagnostic,
 } from "@opengeni/network/responses-websocket";
 import {
+  holdsServerOnlyResults,
   REPLAY_STATUS_ITEM_TYPES,
+  SERVER_HELD_RESULT_ITEM_TYPES,
   preservesReplayStatus,
   replayedResponsesItem,
 } from "@opengeni/network/responses-replay";
@@ -1194,6 +1196,16 @@ describe("continuing the previous response on a connection", () => {
   }
 
   for (const { item, change } of streamedItems) {
+    if (holdsServerOnlyResults(item)) {
+      test(`a response with a ${item.type} never starts a chain`, async () => {
+        // The backend holds results the replayed item cannot carry. The next
+        // request replays the item once, so later full requests match it.
+        const { sent, transport } = await replayAfter(item, item);
+        expect(sent).not.toHaveProperty("previous_response_id");
+        expect(transport).toBe("websocket; connection=reused; input=full");
+      });
+      continue;
+    }
     test(`a replayed ${item.type} continues the response`, async () => {
       // The SDK sends the item back as stored; replay strips what it strips.
       const { sent, transport } = await replayAfter(item, item);
@@ -1216,6 +1228,9 @@ describe("continuing the previous response on a connection", () => {
   }
 
   test("the continuation check mirrors everything the Codex normalizer strips", () => {
+    // Every hosted call with server-held results is covered above.
+    for (const type of SERVER_HELD_RESULT_ITEM_TYPES)
+      expect(streamedItems.some(({ item }) => item.type === type)).toBe(true);
     // Every item type the normalizer may see, including one it has never seen.
     const items = [
       ...streamedItems.map(({ item }) => item),
@@ -1235,6 +1250,35 @@ describe("continuing the previous response on a connection", () => {
       // again (as the continuation check does) never changes it further.
       expect(replayedResponsesItem(replayed)).toEqual(replayed);
     }
+  });
+
+  test("after a hosted web search the chain resumes from the request that replayed it", async () => {
+    const { transport, sockets } = harness();
+    const search = streamedItems.find(({ item }) => item.type === "web_search_call")!.item;
+    const first = transport(URL, request(normalized([user])));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: search });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+
+    // The replay sends the search without its results once...
+    const { pending, sent } = await sendNext(transport, socket, normalized([user, search, next]));
+    expect(sent).not.toHaveProperty("previous_response_id");
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: preamble });
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    await (await pending).text();
+
+    // ...and the request after it continues that replay.
+    const after = { type: "message", role: "user", content: "after" };
+    const { pending: third, sent: thirdSent } = await sendNext(
+      transport,
+      socket,
+      normalized([user, search, next, preamble, after]),
+    );
+    expect(thirdSent.previous_response_id).toBe("resp_2");
+    expect(thirdSent.input).toEqual([after]);
+    socket.emit({ type: "response.completed", response: { id: "resp_3" } });
+    await (await third).text();
   });
 
   test("a replayed tool search with different arguments sends the full input", async () => {
