@@ -192,6 +192,17 @@ test.skipIf(!promtool)(
             values: node === "node-b" ? "0+0x1 2+0x12" : "0+0x13",
           },
           {
+            // Exec probes failing against containers that are starting or
+            // stopping across back-to-back rollouts recur for longer than the
+            // `for`, but exec_sync alone is not runtime trouble and never pages.
+            series: series("kubelet_runtime_operations_errors_total", {
+              job: "kubelet",
+              instance: `${node}:10250`,
+              operation_type: "exec_sync",
+            }),
+            values: "0+3x13",
+          },
+          {
             series: series("kube_node_status_condition", {
               node,
               condition: "Ready",
