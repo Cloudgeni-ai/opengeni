@@ -307,6 +307,7 @@ export function registerComputerSessionRoutes(
     db: deps.db,
     settings: deps.settings,
     bus: deps.bus,
+    objectStorage: deps.objectStorage,
     observability: deps.observability,
   };
 
