@@ -4961,11 +4961,11 @@ export const englishMessages = {
   "sessionCommandsPanel.stopping": "Stopping…",
   "sessionCommandsPanel.stopRequestedStatusUnavailable": "Stop requested · status unavailable",
   "sessionConnectionRequest.couldnTLoadConnectionDetails":
-    "Couldn't load connection details. Retry to check the current integration.",
+    "Couldn't load connection details. Retry to check the current connected tool.",
   "sessionConnectionRequest.loadingConnectionDetails": "Loading connection details…",
   "sessionConnectionRequest.retry": "Retry",
   "sessionConnectionRequest.thisRequestCouldNotBe":
-    "This request could not be matched to one available OAuth integration. Review its connection settings before continuing.",
+    "This request could not be matched to one available OAuth connected tool. Review its connection settings before continuing.",
   "sessionConversation.archivedConversationReadOnly": "Archived conversation · Read only",
   "sessionConversation.loadingPreview": "Loading preview…",
   "sessionConversation.retry": "Retry",
@@ -5096,11 +5096,11 @@ export const englishMessages = {
     "Sign-in was cancelled. You can try connecting again.",
   "sessionMcpCapabilityCard.stopWaiting": "Stop waiting",
   "sessionMcpCapabilityCard.theAuthorizedAccountDoesNot":
-    "The authorized account does not match this integration. Review its connection settings.",
+    "The authorized account does not match this connected tool. Review its connection settings.",
   "sessionMcpCapabilityCard.theConnectionOwnershipChangedReview":
     "The connection ownership changed. Review the current account before continuing.",
   "sessionMcpCapabilityCard.theCurrentCatalogHasNo":
-    "The current catalog has no authorization endpoint for this integration.",
+    "The current catalog has no authorization endpoint for this connected tool.",
   "sessionMcpCapabilityCard.thisAccountNeedsReconnectionBefore":
     "This account needs reconnection before it can be used here.",
   "sessionMcpCapabilityCard.thisConnectionBelongsToYou":
@@ -5112,7 +5112,7 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.thisIntegrationSSelectedAccount":
     "This connected tool's selected account changed during setup. Review it before continuing.",
   "sessionMcpCapabilityCard.thisRecommendationIsNotAn":
-    "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
+    "This recommendation is not an available OAuth MCP connected tool. Review the current connection catalog.",
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
   "sessionMcpCapabilityCard.useMyNameHere": "Use my {name} here",

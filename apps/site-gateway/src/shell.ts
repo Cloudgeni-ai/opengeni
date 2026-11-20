@@ -56,7 +56,7 @@ export function shellHtml(init: {
   /** Set while a member previews the Site as a visitor: shows the banner with Exit preview. */
   preview?: { viewAs: SiteViewAs; exitHref: string } | null;
 }): string {
-  const title = escapeHtml(init.title || "Site");
+  const title = escapeHtml(init.title || "App");
   const preview = init.preview
     ? `<span id="og-preview">Viewing as ${VIEW_AS_LABEL[init.preview.viewAs]} · <a href="${escapeHtml(
         init.preview.exitHref,

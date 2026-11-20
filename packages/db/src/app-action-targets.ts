@@ -602,8 +602,8 @@ const organizationMcpConnectionLookup: Lookup = async (where) => {
   });
   return row
     ? {
-        kind: "connected app",
-        name: row.clientName?.trim() || "Unnamed app",
+        kind: "connected agent",
+        name: row.clientName?.trim() || "Unnamed agent",
         facts: facts(
           ["Connected", targetMoment(row.connectedAt)],
           ["Last used", targetDay(row.lastUsedAt) ?? "Never"],
@@ -634,7 +634,7 @@ const siteLookup = workspaceRow(
         .limit(1)
     )[0],
   (row) => ({
-    kind: "Site",
+    kind: "app",
     name: row.title?.trim() || row.slug,
     facts: facts(["Last changed", targetMoment(row.updatedAt)]),
   }),

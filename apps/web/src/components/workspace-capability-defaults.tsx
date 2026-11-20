@@ -224,8 +224,8 @@ export function WorkspaceCapabilityDefaultsView({
                 ? "This workspace has custom tool defaults. Deployment restrictions and required approvals still apply."
                 : "Tools are available by default. New sessions follow deployment defaults, including future updates."
               : inheritConnectors
-                ? "New sessions include available connected tools, including connected tools connected later."
-                : "New sessions use a fixed selection. Connecting another connected tool does not add it to this selection."}
+                ? "New sessions include available connected tools, including ones connected later."
+                : "New sessions use a fixed selection. Connecting another tool does not add it to this selection."}
           </p>
           <p className="mt-1 text-xs text-fg-muted">
             Changes apply to new sessions only. Deployment restrictions always apply.

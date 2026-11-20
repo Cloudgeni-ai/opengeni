@@ -1257,7 +1257,9 @@ export class PolicyMcpServer extends FirstPartyMcpServer {
     // Hidden aliases (FIRST_PARTY_MCP_TOOL_ALIASES): a call by a tool's former
     // name runs the registered tool under its current name. Lookups by name
     // resolve the alias; listing enumerates only registered names, so
-    // tools/list never shows one.
+    // tools/list never shows one. `_registeredTools` is the MCP SDK's private
+    // table: apps/api/test/first-party-tool-aliases.test.ts fails if an SDK
+    // upgrade changes it.
     const tools = this as unknown as { _registeredTools: Record<string, RegisteredTool> };
     tools._registeredTools = new Proxy(tools._registeredTools, {
       get(target, property, receiver) {

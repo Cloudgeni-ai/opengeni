@@ -92,7 +92,7 @@ export async function changeSiteAudienceForAgent(
       workspace,
       visibility: artifact.visibility,
       ownerSubjectId: artifact.ownerSubjectId ?? null,
-      noun: "Site",
+      noun: "app",
     }),
   };
 }

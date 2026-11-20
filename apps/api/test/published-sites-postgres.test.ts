@@ -3468,9 +3468,9 @@ test("version HTML is this Site's immutable bytes, without cookies; scanning is 
 }, 60_000);
 
 const SITE_PUBLICATION_TOOLS = [
-  "site_publication_get",
-  "site_publication_update",
-  "site_hostname_check",
+  "app_publication_get",
+  "app_publication_update",
+  "app_hostname_check",
 ];
 
 const SITE_ARTIFACT_TOOLS = [
@@ -4263,10 +4263,7 @@ test("published members inherit normal compute while guests retain their service
       expect(row!.first_party_mcp_tools).toContain("sessions_list");
     } else {
       expect(row!.sandbox_backend).toBe("none");
-      expect([...row!.first_party_mcp_tools].sort()).toEqual([
-        "site_data_query",
-        "site_data_write",
-      ]);
+      expect([...row!.first_party_mcp_tools].sort()).toEqual(["app_data_query", "app_data_write"]);
     }
   }
 });
@@ -4358,7 +4355,7 @@ test("legacy Site continuations restore only viewer-bound data tools and no sand
     const sent = await send();
     expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
     const after = await snapshot();
-    expect(after.first_party_mcp_tools).toEqual(["site_data_query", "site_data_write"]);
+    expect(after.first_party_mcp_tools).toEqual(["app_data_query", "app_data_write"]);
     expect(after.first_party_mcp_permissions).toEqual(["artifacts:read", "artifacts:publish"]);
     expect(after.tools).toEqual([{ kind: "mcp", id: "opengeni" }]);
     expect(after.tool_policy).toEqual({
@@ -4419,8 +4416,9 @@ test("legacy Site continuations restore only viewer-bound data tools and no sand
     try {
       const tools = await client.listTools();
       expect(
-        tools.tools.map((tool) => tool.name).filter((name) => name.startsWith("site_")),
-      ).toEqual(["site_data_query", "site_data_write"]);
+        tools.tools.map((tool) => tool.name).filter((name) => name.startsWith("app_")),
+      ).toEqual(["app_data_query", "app_data_write"]);
+      // The calls below use the former name, a hidden alias of app_data_query.
       const own = await client.callTool({
         name: "site_data_query",
         arguments: { siteId: site.id, collection: "board" },

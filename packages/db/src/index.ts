@@ -24757,7 +24757,7 @@ export class ChannelNotFoundError extends Error {
  * (1161), so nothing in it is ever visible to anyone else.
  */
 export class ChannelAudienceMismatchError extends Error {
-  constructor(kind: "chat" | "Site") {
+  constructor(kind: "chat" | "app") {
     super(`An Only me project holds only your own Only me ${kind}s.`);
     this.name = "ChannelAudienceMismatchError";
   }
@@ -25240,7 +25240,7 @@ export async function moveSiteToProject(
         // An Only me project takes only its owner's Only me Site, and the
         // conversations that move with a row must fit it too.
         if (channel.visibility === "user_private") {
-          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("Site");
+          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("app");
           const misfits =
             input.sessionIds.length === 0
               ? []

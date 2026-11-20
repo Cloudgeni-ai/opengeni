@@ -590,7 +590,7 @@ test("an agent changes who can see its person's Site, as they can from the Site 
       title: "Mockup",
       access: {
         visibility: "workspace",
-        whoCanOpen: "Everyone in the workspace “Team workspace” can open this Site.",
+        whoCanOpen: "Everyone in the workspace “Team workspace” can open this app.",
       },
     });
     expect(await f.listIds(f.other)).toEqual([id]);

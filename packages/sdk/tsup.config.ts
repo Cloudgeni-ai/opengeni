@@ -82,6 +82,7 @@ export default defineConfig({
     "@opengeni/contracts/session-history",
     "@opengeni/contracts/browser-response-headers",
     "@opengeni/contracts/site-session-http",
+    "@opengeni/contracts/first-party-tool-aliases",
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",
     "@opengeni/contracts/model-display",

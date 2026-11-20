@@ -186,6 +186,10 @@
       "types": "./src/site-session-http.ts",
       "default": "./src/site-session-http.ts"
     },
+    "./first-party-tool-aliases": {
+      "types": "./src/first-party-tool-aliases.ts",
+      "default": "./src/first-party-tool-aliases.ts"
+    },
     "./organization-model-usage": {
       "types": "./src/organization-model-usage.ts",
       "default": "./src/organization-model-usage.ts"

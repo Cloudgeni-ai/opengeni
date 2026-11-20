@@ -181,6 +181,10 @@ mock.module("../src/mcp/server", () => ({
         },
       ],
     }));
+    // A renamed first-party tool: Sites declared it as site_data_query.
+    probe.registerTool("app_data_query", { description: "Answer as the app tool." }, async () => ({
+      content: [{ type: "text" as const, text: "app_data_query ran" }],
+    }));
     return probe;
   },
 }));
@@ -632,6 +636,63 @@ describe("portable known-tool calls", () => {
       );
       expect(JSON.stringify(response.result)).toContain("unrelated_0");
       expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("a Site version declaring a former first-party name reaches the current tool", async () => {
+    const f = createFixture({ firstParty: true });
+    try {
+      const site = { siteArtifactId: artifactId, siteVersionId: versionId };
+      const options = () =>
+        targetOptions({
+          readSiteVersion: siteVersion([{ serverId: "opengeni", toolName: "site_data_query" }]),
+        });
+      const current = { serverId: "opengeni", toolName: "app_data_query" };
+      for (const target of [
+        { identity: { serverId: "opengeni", toolName: "site_data_query" } },
+        { identity: current },
+        { path: ["opengeni", "site_data_query"] },
+        { path: ["opengeni", "app_data_query"] },
+      ]) {
+        const resolved = await resolveWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target, ...site },
+          options(),
+        );
+        expect(resolved.entry.identity).toEqual(current);
+        const response = await invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target, operationId: crypto.randomUUID(), arguments: {}, ...site },
+          options(),
+        );
+        expect(JSON.stringify(response.result)).toContain("app_data_query ran");
+      }
+      const checked: unknown[] = [];
+      const manifest = await resolveWorkspaceToolManifest(
+        f.deps,
+        targetAuthorization(),
+        { identities: [{ serverId: "opengeni", toolName: "site_data_query" }], ...site },
+        targetOptions({
+          authorizeSite: async (_db, _grant, context) => void checked.push(context.identity),
+        }),
+      );
+      // Admission and every later fence check see only the current name.
+      expect(checked.length).toBeGreaterThan(0);
+      for (const identity of checked) expect(identity).toEqual(current);
+      expect(manifest.tools.map((tool) => tool.entry.identity)).toEqual([current]);
+      // A tool the version never declared stays refused under either name.
+      await expectHttpStatus(
+        resolveWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target: { identity: { serverId: "opengeni", toolName: "sessions_list" } }, ...site },
+          options(),
+        ),
+        403,
+      );
     } finally {
       f.close();
     }

@@ -7,6 +7,7 @@ import {
   siteFrameOperation,
   siteRequestHeaders,
 } from "@opengeni/contracts/site-session-http";
+import { currentFirstPartyToolIdentity } from "@opengeni/contracts/first-party-tool-aliases";
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
@@ -399,8 +400,14 @@ export type CreateSiteToolBridgeOptions = {
  * frame: it mints a frame id, so a frame without a published Site reaches only
  * the sessions it started. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
-  const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
-  const allowedTools = new Set(input.requestedTools?.map((identity) => identity.toolName));
+  // A version declaring a first-party tool by its former name (site_*) is
+  // answered by the current tool (app_*): both names count as declared.
+  const declaredTools = input.requestedTools?.flatMap((identity) => [
+    identity,
+    currentFirstPartyToolIdentity(identity),
+  ]);
+  const allowed = declaredTools ? new Set(declaredTools.map(identityKey)) : null;
+  const allowedTools = new Set(declaredTools?.map((identity) => identity.toolName));
   const frameId = crypto.randomUUID();
   const targeted =
     input.workspaceTools.$targetProtocol === 1 &&
@@ -422,9 +429,10 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     }
   };
   const resolve = async (
-    request: ToolGatewayResolveRequest,
+    requested: ToolGatewayResolveRequest,
     { signal }: { signal: AbortSignal },
   ) => {
+    const request = { ...requested, target: currentTarget(requested.target) };
     if (
       allowed &&
       "identity" in request.target &&
@@ -588,7 +596,11 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     }
     return await invokeOnce(routed, signal, approvalToken);
   };
-  const invoke = async (request: ToolGatewayInvokeRequest, { signal }: { signal: AbortSignal }) => {
+  const invoke = async (
+    requested: ToolGatewayInvokeRequest,
+    { signal }: { signal: AbortSignal },
+  ) => {
+    const request = { ...requested, target: currentTarget(requested.target) };
     if (
       allowed &&
       "identity" in request.target &&
@@ -611,7 +623,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     async (refresh, signal) => {
       if (targeted && input.requestedTools) {
         const manifest = await input.workspaceTools.$manifest!(
-          { identities: [...input.requestedTools], ...context },
+          { identities: input.requestedTools.map(currentFirstPartyToolIdentity), ...context },
           { signal },
         );
         signal.throwIfAborted();
@@ -720,7 +732,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         }
       : {}),
     catalog: async ({ signal }) => await loadCatalog({ signal }),
-    call: async (request, { signal }) => {
+    call: async (requested, { signal }) => {
+      const request = { ...requested, identity: currentFirstPartyToolIdentity(requested.identity) };
       if (allowed && !allowed.has(identityKey(request.identity))) throw undeclaredTool();
       if (targeted && input.requestedTools) {
         const tool = manifests
@@ -1018,6 +1031,13 @@ function staleRetryVetoed(error: unknown): boolean {
       ("retryable" in error && error.retryable === false))
   );
 }
+/** A target naming a first-party tool by its former name, with the current name. */
+function currentTarget<T extends ToolGatewayResolveRequest["target"]>(target: T): T {
+  return "identity" in target
+    ? { ...target, identity: currentFirstPartyToolIdentity(target.identity) }
+    : target;
+}
+
 function identityKey(identity: ToolGatewayIdentity): string {
   return `${identity.serverId}\u0000${identity.toolName}`;
 }

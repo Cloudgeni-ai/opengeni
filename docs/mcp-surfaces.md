@@ -735,7 +735,13 @@ references call tools by name, so an alias keeps working everywhere a name is
 resolved, and is never listed or selected by default. The first-party MCP
 server runs a `tools/call` by alias as the current tool, and `tools/list`
 shows only current names. The workspace tool gateway, site tool allowlists
-and approvals normalize an alias identity to the current one. Codemode paths
+and approvals normalize an alias identity to the current one. An app version
+that declares a former name keeps working on every bridge path: per-tool
+resolve, invoke and manifest, published hostnames, the browser SDK's
+declared-tool check (`@opengeni/contracts/first-party-tool-aliases`, bundled
+into the SDK) and "Always allow" choices saved under the former name.
+`session_create`'s explicit `firstPartyMcpTools` takes current names only.
+Codemode paths
 (`opengeni.site_data_query`), `tool_search` names, Skill `tools:` lists and
 `tool_list` prefixes find the current tool. A model call by an alias, bare or
 `opengeni__`-prefixed and also through `tool_invoke`, runs the current tool

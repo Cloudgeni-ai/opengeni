@@ -9,6 +9,10 @@ import {
 import * as z4 from "zod/v4";
 
 import { PolicyMcpServer } from "../src/mcp/server";
+import {
+  requireWorkspaceSiteToolAuthorization,
+  workspaceToolGatewayDefinitionFilter,
+} from "../src/workspace-tool-gateway";
 
 const grant: AccessGrant = {
   accountId: crypto.randomUUID(),
@@ -48,5 +52,52 @@ describe("first-party tool aliases on the MCP server", () => {
     }
     const unknown = await client.callTool({ name: "site_no_such_tool", arguments: {} });
     expect(unknown.isError).toBe(true);
+  });
+});
+
+describe("first-party tool aliases in gateway allowlists", () => {
+  test("an identity frozen under a former name keeps the current tool", () => {
+    const definition = (toolName: string) =>
+      ({ identity: { serverId: "opengeni", toolName }, approval: "policy" }) as Parameters<
+        ReturnType<typeof workspaceToolGatewayDefinitionFilter>
+      >[0];
+    const keep = workspaceToolGatewayDefinitionFilter({}, [
+      { serverId: "opengeni", toolName: "site_data_query" },
+    ]);
+    expect(keep(definition("app_data_query"))).toBe(true);
+    expect(keep(definition("app_data_write"))).toBe(false);
+    // A deployment allowlist written with a former name allows the current tool.
+    const deployment = workspaceToolGatewayDefinitionFilter({
+      allowedFirstPartyMcpTools: ["site_data_query"],
+    });
+    expect(deployment(definition("app_data_query"))).toBe(true);
+    expect(deployment(definition("app_data_write"))).toBe(false);
+  });
+});
+
+describe("first-party tool aliases in Site declarations", () => {
+  test("either name of a declared tool is authorized; an undeclared tool is not", async () => {
+    const versionDeclaring = (toolName: string) =>
+      (async (_db: unknown, _grant: unknown, _artifactId: string, id: string) => ({
+        status: "active",
+        version: { id, requestedTools: [{ serverId: "opengeni", toolName }] },
+      })) as unknown as Parameters<typeof requireWorkspaceSiteToolAuthorization>[3];
+    const check = (declared: string, called: string) =>
+      requireWorkspaceSiteToolAuthorization(
+        null as never,
+        grant,
+        {
+          siteArtifactId: "site",
+          siteVersionId: "version",
+          identity: { serverId: "opengeni", toolName: called },
+        },
+        versionDeclaring(declared),
+      );
+    for (const declared of ["site_data_query", "app_data_query"])
+      for (const called of ["site_data_query", "app_data_query"])
+        await expect(check(declared, called)).resolves.toBeUndefined();
+    await expect(check("site_data_query", "app_data_write")).rejects.toMatchObject({
+      status: 403,
+    });
   });
 });

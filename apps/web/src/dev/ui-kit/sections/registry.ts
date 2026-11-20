@@ -1114,7 +1114,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     title: "Organization connectors",
     purpose:
       "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
-    usedOn: "Organization settings > connected tools",
+    usedOn: "Organization settings > Connected tools",
     load: () => import("./page-org-connectors"),
   },
   {

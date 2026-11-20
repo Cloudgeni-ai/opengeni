@@ -262,9 +262,13 @@ export async function prepareWorkspaceToolGateway(
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
   if (isPublishedSiteToolAuthorization(authorization)) {
     const site = publishedSiteToolAuthority(authorization);
-    const same = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) =>
-      left.serverId === right.serverId && left.toolName === right.toolName;
-    // Declared before a first-party rename: the alias stands for the current tool.
+    // A former first-party name (site_*) stands for the current tool (app_*),
+    // whether the page declared it, targets it or lists it.
+    const same = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) => {
+      const a = currentFirstPartyToolIdentity(left);
+      const b = currentFirstPartyToolIdentity(right);
+      return a.serverId === b.serverId && a.toolName === b.toolName;
+    };
     const allowed = site.requestedTools
       .map(currentFirstPartyToolIdentity)
       .filter(
@@ -286,15 +290,7 @@ export async function prepareWorkspaceToolGateway(
     // Targeted preparation replaces its allowlist with the target. It must be
     // an exact declared identity first; paths are resolved by the Site adapter.
     const target = options.target;
-    if (
-      target &&
-      (!("identity" in target) ||
-        !allowed.some(
-          (item) =>
-            item.serverId === target.identity.serverId &&
-            item.toolName === target.identity.toolName,
-        ))
-    )
+    if (target && (!("identity" in target) || !allowed.some((item) => same(item, target.identity))))
       throw new HTTPException(403, { message: "site_tool_not_authorized" });
     await site.reauthorize();
     const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
@@ -1323,8 +1319,13 @@ export function workspaceToolGatewayDefinitionFilter(
     const current = firstPartyMcpToolAliasTarget(name);
     if (current !== undefined) allowedFirstPartyTools.add(current);
   }
+  // An identity frozen under a former first-party name keeps the current tool.
   const frozenIdentityKeys = allowedIdentities
-    ? new Set(allowedIdentities.map(workspaceToolGatewayIdentityKey))
+    ? new Set(
+        allowedIdentities.map((identity) =>
+          workspaceToolGatewayIdentityKey(currentFirstPartyToolIdentity(identity)),
+        ),
+      )
     : null;
   return (definition) => {
     if (

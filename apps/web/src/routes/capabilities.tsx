@@ -2254,8 +2254,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                           </Button>
                         }
                       >
-                        Existing connections can still be managed. Try again to see which new
-                        Connected tools you can connect.
+                        Existing connections can still be managed. Try again to see which new tools
+                        you can connect.
                       </Notice>
                     ) : null}
                     {loading && items.length === 0 ? (
