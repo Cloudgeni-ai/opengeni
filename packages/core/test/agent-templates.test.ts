@@ -48,12 +48,15 @@ describe("Can use enforcement", () => {
         toolPermissions: [
           { connector: "gmail.com", tool: "send_email", permission: "later-value" },
           { connector: "linear.app", tool: "*", permission: "block" },
+          { connector: "slack.com", tool: ["a", "b"], permission: "block" },
           { nonsense: true },
         ],
       }),
     ).toEqual([
       { connector: "gmail.com", tool: "send_email", permission: "ask" },
       { connector: "linear.app", tool: "*", permission: "block" },
+      { connector: "slack.com", tool: "*", permission: "ask" },
+      { connector: "*", tool: "*", permission: "ask" },
     ]);
   });
 });

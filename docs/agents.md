@@ -501,7 +501,7 @@ stored; `first_message` stays, empty, until a later step drops it:
 ### Starts when, Can use, Learns and Skills
 
 An agent is set up from its page; these fields are on the agent (migration
-1515: `tool_permissions`, `skills`, `template_key`) and in `Agent` /
+1516: `tool_permissions`, `skills`, `template_key`) and in `Agent` /
 `AgentSummary` (`toolPermissions`, `skills`, `templateKey`, defaulting to
 empty for older servers). `PATCH` replaces `toolPermissions` or `skills` as a
 whole.
@@ -552,9 +552,10 @@ whole.
   stays available to every chat, so there are no per-Skill switches.
 
 Not in self-hosted deployments without these pieces: Codex Apps rules need
-the Codex Apps deployment flag, Slack lines need the Opengeni Slack app, and
-GitHub's command-line gateway (`git`/`gh` through Your GitHub) follows the
-person's GitHub action settings rather than an agent's Can use.
+the Codex Apps deployment flag, and Slack lines need the Opengeni Slack app.
+`git` and `gh` through Your GitHub follow Can use too: a `github.com` or
+`github_personal` rule applies to the GitHub action each request maps to
+(for example `pull_request_merge` for `gh pr merge`).
 
 ### Ready-made agents
 

@@ -1408,8 +1408,10 @@ function AgentScheduleForm({
                   value: "existing_session",
                   label: "Use an existing chat",
                   description: "Continue a conversation with its current settings.",
-                  disabled: !access.canTargetSessions,
-                  disabledReason: "You need permission to open chats in this workspace.",
+                  disabled: Boolean(draft.agentId) || !access.canTargetSessions,
+                  disabledReason: draft.agentId
+                    ? "An agent's automation starts a new chat each run."
+                    : "You need permission to open chats in this workspace.",
                 },
                 {
                   value: "reusable_session",
@@ -1417,6 +1419,8 @@ function AgentScheduleForm({
                     ? "Use this automation's chat"
                     : "Create a chat for this automation",
                   description: "Keep the results together in one conversation.",
+                  disabled: Boolean(draft.agentId),
+                  disabledReason: "An agent's automation starts a new chat each run.",
                 },
                 {
                   value: "new_session_per_run",

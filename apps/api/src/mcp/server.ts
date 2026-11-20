@@ -7057,6 +7057,7 @@ function registerWorkspaceOrchestrationTools(
               instructions: request.instructions,
               ownerSubjectId: caller?.ownerSubjectId ?? grant.subjectId ?? null,
               private: caller?.private ?? false,
+              slackDm: caller?.slackDm ?? false,
               memoryOff: request.memoryScope === "off" || (caller?.memoryOff ?? false),
             });
             delegated = {

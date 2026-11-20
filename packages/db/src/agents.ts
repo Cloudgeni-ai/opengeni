@@ -68,9 +68,9 @@ export type AgentRecord = {
    * it for the previous release, which still reads that.
    */
   organizationAccess: boolean;
-  /** Can use rules as stored (1515); read them through the contract's schema. */
+  /** Can use rules as stored (1516); read them through the contract's schema. */
   toolPermissions: unknown[];
-  /** Skills listed on its page, as stored (1515). */
+  /** Skills listed on its page, as stored (1516). */
   skills: unknown[];
   /** The ready-made agent it was added from. */
   templateKey: string | null;
@@ -1366,7 +1366,12 @@ const AGENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 export async function resolveWorkspaceAgentRef(
   db: Database,
   home: AgentHome,
-  input: { ref: string; viewerSubjectId: string | null },
+  input: {
+    ref: string;
+    viewerSubjectId: string | null;
+    /** Only agents anyone in the organization can use (an open Slack chat). */
+    organizationAccessOnly?: boolean;
+  },
 ): Promise<ResolveAgentRefOutcome> {
   const ref = input.ref.trim();
   if (ref.length === 0) return { kind: "not_found" };
@@ -1377,6 +1382,11 @@ export async function resolveWorkspaceAgentRef(
         where a.account_id = ${home.accountId}::uuid
           and a.workspace_id = ${home.workspaceId}::uuid
           and ${viewerFilter(input.viewerSubjectId)}
+          and ${
+            input.organizationAccessOnly === true
+              ? sql`a.visibility <> 'private' and a.organization_access = true`
+              : sql`true`
+          }
           and ${
             AGENT_ID_PATTERN.test(ref)
               ? sql`(a.id = ${ref}::uuid or a.name_key = lower(btrim(${ref})))`
@@ -1495,6 +1505,8 @@ export async function getSessionAgentMemoryState(
   agent: AgentRecord | null;
   chat: {
     private: boolean;
+    /** The session row itself is Only me (a Slack DM's row is shared). */
+    onlyMe: boolean;
     ownerSubjectId: string | null;
     memoryOff: boolean;
     slackDm: boolean;
@@ -1529,6 +1541,7 @@ export async function getSessionAgentMemoryState(
   const onlyMe = row.visibility === "user_private";
   const chat = {
     private: onlyMe || row.dm_owner !== null,
+    onlyMe,
     ownerSubjectId: onlyMe ? row.owner_subject_id : (row.dm_owner ?? row.owner_subject_id),
     memoryOff: row.memory_scope === "off",
     // Its saves land in workspace scope: neither Only me nor Memory scope user.

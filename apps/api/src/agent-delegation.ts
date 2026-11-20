@@ -29,8 +29,17 @@ export type DelegationAgentOutcome =
   | { ok: true; agent: AgentRecord }
   | { ok: false; code: AgentErrorCode; message: string };
 
-/** The calling chat's privacy, which the delegated chat inherits. */
-export type DelegationCallerChat = { private: boolean; ownerSubjectId: string | null };
+/**
+ * The calling chat's privacy. The delegated chat inherits the session row's
+ * visibility (`onlyMe`); `private` also covers a Slack DM, for Memory.
+ */
+export type DelegationCallerChat = {
+  private: boolean;
+  onlyMe?: boolean;
+  /** A Slack DM: its saves land in workspace Knowledge, not Memory. */
+  slackDm?: boolean;
+  ownerSubjectId: string | null;
+};
 
 /**
  * The agent a delegation names, as the person the grant acts for may use it.
@@ -47,11 +56,17 @@ export async function resolveDelegationAgent(
   caller?: DelegationCallerChat | null,
 ): Promise<DelegationAgentOutcome> {
   const openUse = isOpenSlackAgentSubject(grant.subjectId);
-  const sharedChild = caller ? !caller.private : false;
+  const sharedChild = caller ? !(caller.onlyMe ?? caller.private) : false;
   const outcome = await resolveWorkspaceAgentRef(
     deps.db,
     { accountId: grant.accountId, workspaceId },
-    { ref, viewerSubjectId: openUse || sharedChild ? null : (grant.subjectId ?? null) },
+    {
+      ref,
+      viewerSubjectId: openUse || sharedChild ? null : (grant.subjectId ?? null),
+      // Filtered before the ambiguity check, so an outsider never sees ids
+      // of agents they can't use.
+      ...(openUse ? { organizationAccessOnly: true } : {}),
+    },
   );
   if (outcome.kind === "ambiguous") {
     return {
@@ -81,6 +96,7 @@ export function delegatedChatInstructions(
     instructions: string | undefined;
     ownerSubjectId: string | null;
     private: boolean;
+    slackDm?: boolean;
     memoryOff?: boolean;
   },
 ): string | undefined {
@@ -90,6 +106,7 @@ export function delegatedChatInstructions(
       private: input.private,
       ownerSubjectId: input.ownerSubjectId,
       memoryOff: input.memoryOff ?? false,
+      slackDm: input.slackDm ?? false,
     }),
   );
   if (!guidance) return input.instructions;

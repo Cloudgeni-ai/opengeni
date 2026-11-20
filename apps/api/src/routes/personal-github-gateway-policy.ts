@@ -1,9 +1,10 @@
-import { UNATTENDED_APPROVAL_REFUSAL_TEXT } from "@opengeni/contracts";
-import type { ToolReviewContext } from "@opengeni/contracts";
+import { UNATTENDED_APPROVAL_REFUSAL_TEXT, agentToolPermissionFor } from "@opengeni/contracts";
+import type { AgentToolPermissionRuleInput, ToolReviewContext } from "@opengeni/contracts";
 import {
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   type ConnectorActionAttemptIdentity,
+  getSessionAgentChain,
   githubGatewayApprovalForRequest,
   resolveAttemptConnectorToolDecision,
   type Database,
@@ -11,6 +12,7 @@ import {
 } from "@opengeni/db";
 import {
   GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
+  agentToolPermissionsForEnforcement,
   githubSensitiveRequestDecision,
 } from "@opengeni/core";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
@@ -66,6 +68,54 @@ export type GatewayCompleter = (
 ) => Promise<void>;
 
 const DECISION_RANK = { allow: 0, ask: 1, block: 2 } as const;
+
+/** The provider domain a Can use rule may name for `gh` and Git requests. */
+const PERSONAL_GITHUB_PROVIDER_DOMAIN = "github.com";
+
+/**
+ * The strictest Can use choice of a chat's agents for one gateway tool, or
+ * null when none names it. Rules match the `github_personal` server id or
+ * `github.com`, the same as the agent's built-in GitHub tools.
+ */
+export function agentGatewayFloor(
+  ruleSets: readonly (readonly AgentToolPermissionRuleInput[])[],
+  toolName: string,
+): "allow" | "ask" | "block" | null {
+  let strictest: "allow" | "ask" | "block" | null = null;
+  for (const rules of ruleSets) {
+    const decision = agentToolPermissionFor(rules, {
+      serverId: PERSONAL_GITHUB_POLICY_SERVER_ID,
+      providerDomain: PERSONAL_GITHUB_PROVIDER_DOMAIN,
+      toolName,
+    });
+    if (decision && (strictest === null || DECISION_RANK[decision] > DECISION_RANK[strictest])) {
+      strictest = decision;
+    }
+  }
+  return strictest;
+}
+
+/**
+ * A policy lookup raised to the agents' Can use floor: Allow or no rule
+ * leaves the person's decision unchanged; Ask and Block only make it stricter.
+ * `agentBlocked` records whether an agent rule caused a Block.
+ */
+export function withAgentGatewayFloor(
+  ruleSets: readonly (readonly AgentToolPermissionRuleInput[])[],
+  lookup: GatewayPolicyLookup,
+): { lookup: GatewayPolicyLookup; agentBlocked: () => boolean } {
+  let agentBlocked = false;
+  return {
+    agentBlocked: () => agentBlocked,
+    lookup: async (input) => {
+      const decision = await lookup(input);
+      const floor = agentGatewayFloor(ruleSets, input.toolName);
+      if (!floor || DECISION_RANK[floor] <= DECISION_RANK[decision]) return decision;
+      if (floor === "block") agentBlocked = true;
+      return floor;
+    },
+  };
+}
 
 function connectorIdentity(identity: GatewayDecisionIdentity): ConnectorActionAttemptIdentity {
   const { claims } = identity;
@@ -140,21 +190,33 @@ export async function strictestGatewayPolicy(
 export function databaseGatewayDecider(db: Database): GatewayDecider {
   return async (identity, input) => {
     const ledgerIdentity = connectorIdentity(identity);
+    // The chat's agents (its own and each above it) apply their Can use here
+    // too, so `gh pr merge` follows the same Block as the merge tool.
+    const agentRuleSets = (
+      await getSessionAgentChain(db, {
+        workspaceId: identity.claims.workspaceId,
+        sessionId: identity.claims.sessionId,
+      })
+    ).map((agent) => agentToolPermissionsForEnforcement(agent));
+    const floored = withAgentGatewayFloor(agentRuleSets, (lookup) =>
+      resolveAttemptConnectorToolDecision(db, ledgerIdentity, {
+        connectionId: identity.claims.connectionId,
+        serverId: PERSONAL_GITHUB_POLICY_SERVER_ID,
+        ...lookup,
+      }),
+    );
     const { decision: strictest, toolName: decidingTool } = await strictestGatewayPolicy(
       input.action,
-      (lookup) =>
-        resolveAttemptConnectorToolDecision(db, ledgerIdentity, {
-          connectionId: identity.claims.connectionId,
-          serverId: PERSONAL_GITHUB_POLICY_SERVER_ID,
-          ...lookup,
-        }),
+      floored.lookup,
     );
     if (strictest === "block") {
       return {
         kind: "refuse",
         status: 403,
         waiting: false,
-        message: `Blocked by the person's GitHub action settings: ${input.title}.`,
+        message: floored.agentBlocked()
+          ? `Blocked by this agent's Can use: ${input.title}. Do not retry it.`
+          : `Blocked by the person's GitHub action settings: ${input.title}.`,
       };
     }
     if (strictest === "allow") return { kind: "allow" };

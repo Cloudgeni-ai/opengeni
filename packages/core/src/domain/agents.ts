@@ -179,11 +179,18 @@ export function agentToolPermissionsForEnforcement(agent: Pick<AgentRecord, "too
   return agent.toolPermissions.flatMap((rule) => {
     const parsed = AgentToolPermissionRule.safeParse(rule);
     if (parsed.success) return [parsed.data];
-    const fallback = AgentToolPermissionRule.safeParse({
-      ...(rule && typeof rule === "object" ? rule : {}),
+    const raw = rule && typeof rule === "object" ? (rule as Record<string, unknown>) : {};
+    const fallback = AgentToolPermissionRule.safeParse({ ...raw, permission: "ask" });
+    if (fallback.success) return [fallback.data];
+    // Its connector or tool can't be read either: ask for every tool of the
+    // connector it still names, or of every connector.
+    const connector = AgentToolPermissionRule.safeParse({
+      connector: raw.connector,
+      tool: "*",
       permission: "ask",
     });
-    return fallback.success ? [fallback.data] : [];
+    const askAll: AgentToolPermissionRule = { connector: "*", tool: "*", permission: "ask" };
+    return [connector.success ? connector.data : askAll];
   });
 }
 
