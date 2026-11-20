@@ -1,5 +1,23 @@
 # @opengeni/config
 
+## 6.33.0
+
+### Minor Changes
+
+- a204fd7: Tool results no longer lose data. One result now shows the model up to 25,000 tokens (100,000 bytes) of text by default, up from 10,000 tokens (about 48 KB), the same as Claude Code's default MCP output limit. A larger result is stored whole as a workspace File and the model sees its start (shell output: its head and tail), the total size and the exact `tool_result_read {"resultId","offset"}` call that reads the rest from durable storage, with or without a sandbox. This replaces both the head/tail cut that dropped the middle of results between about 48 KB and 1 MiB and the separate over-1 MiB spill. `tool_result_read` is never in a first-request tool list: the model loads it by exact name through tool search, so no session's tool list changes. Only newly produced results change; history already sent replays byte for byte.
+
+### Patch Changes
+
+- 176ccd5: `buildOpenGeniAgent` now mounts attached files for its `activeSandboxBackend` instead of the deployment's default sandbox backend, matching where their downloads go. Before, a caller passing an active backend that differs from the default could get a mount its box cannot use (for example an error with a Modal default and Azure Blob storage). Tests now start a turn with an attachment on every sandbox backend with every object storage backend.
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+- Updated dependencies [d6b29a4]
+  - @opengeni/contracts@6.33.0
+  - @opengeni/codex@6.33.0
+  - @opengeni/xai-subscription@6.33.0
+
 ## 6.32.0
 
 ### Patch Changes

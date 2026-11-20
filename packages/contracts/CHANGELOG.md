@@ -1,5 +1,17 @@
 # @opengeni/contracts
 
+## 6.33.0
+
+### Minor Changes
+
+- 03d58fd: People who manage a Claude account can use one of its limit resets. `POST /v1/workspaces/:workspaceId/claude/accounts/:accountId/limit-resets/claim` (and the organization route) takes `{ grantId, requestId }`, claims the grant with Claude and returns Claude's answer with the usage read right after it (`ClaimClaudeLimitResetResponse`). When the answer is `retryable`, retry with the same `requestId`: Claude settles each request id once, so a retry never uses a second reset. The SDK adds `claimClaudeSubscriptionAccountLimitReset` and `claimOrganizationClaudeSubscriptionAccountLimitReset`. The account page shows a "Use reset" button on each grant that can be used now, behind a confirmation. Agents can use the same action, only when the person asked for it.
+- 0d394ec: Web-search citation handles no longer show on any surface that displays an answer. OpenAI models that search the web through a Codex or ChatGPT subscription write citations as private-use handles (U+E200 `cite` U+E202 `turn0search3` U+E201). The responses carry nothing that maps a handle to a page, so people saw `citeturn0search3` in the text. The chat timeline and Slack already removed them. Now the notification inbox (web, desktop banners and mobile, through the inbox API), phone push text, Teams replies, shared chat links and a worker's report in its manager's chat remove them too. Stored history and anything sent to a model keep the exact text. `@opengeni/contracts/provider-citation-handles` exports `withoutProviderCitationHandles` for other surfaces, such as products that render the raw chat stream.
+- a204fd7: Tool results no longer lose data. One result now shows the model up to 25,000 tokens (100,000 bytes) of text by default, up from 10,000 tokens (about 48 KB), the same as Claude Code's default MCP output limit. A larger result is stored whole as a workspace File and the model sees its start (shell output: its head and tail), the total size and the exact `tool_result_read {"resultId","offset"}` call that reads the rest from durable storage, with or without a sandbox. This replaces both the head/tail cut that dropped the middle of results between about 48 KB and 1 MiB and the separate over-1 MiB spill. `tool_result_read` is never in a first-request tool list: the model loads it by exact name through tool search, so no session's tool list changes. Only newly produced results change; history already sent replays byte for byte.
+
+### Patch Changes
+
+- 3091618: New sessions find `list_models` and `privacy_facts` through tool search instead of carrying them in every model request, saving about 1.2 KB (roughly 240 tokens) per request whenever the turn has the search router. Each session records which tools its requests carry in `sessions.first_request_tools_revision` (migration 1513) once, before its first model request, so existing sessions keep exactly the tools they already send. `BuildAgentOptions.firstRequestToolsRevision` selects the behaviour; omitting it keeps both tools in every request.
+
 ## 6.32.0
 
 ### Minor Changes

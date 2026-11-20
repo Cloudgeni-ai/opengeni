@@ -1,5 +1,19 @@
 # @opengeni/react-native
 
+## 6.33.0
+
+### Patch Changes
+
+- 13dd766: The mobile chat now shows the cards the web chat shows for long agent work. When the agent asks to use a machine you already connected, the card names it and offers Allow (or another machine), instead of only a link to open the chat on that computer. Goal changes, failed or skipped compaction, worker results, grouped machine updates and usage-limit notices get their own rows rather than plain dividers or nothing. The wording and grouping come from shared models that the web chat now uses too.
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+- Updated dependencies [13dd766]
+  - @opengeni/contracts@6.33.0
+  - @opengeni/sdk@6.33.0
+  - @opengeni/react@6.33.0
+
 ## 6.32.0
 
 ### Patch Changes

@@ -1,5 +1,17 @@
 # @opengeni/browserd
 
+## 0.4.52
+
+### Patch Changes
+
+- 74590b8: Open the browser controller's SQLite files in the Windows extended-length form, so a controller root whose database paths reach 260 characters no longer fails with "unable to open database file".
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+  - @opengeni/contracts@6.33.0
+  - @opengeni/interaction@6.33.0
+
 ## 0.4.51
 
 ### Patch Changes

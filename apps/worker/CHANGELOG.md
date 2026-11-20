@@ -1,5 +1,53 @@
 # @opengeni/worker-bundle
 
+## 6.33.0
+
+### Minor Changes
+
+- a204fd7: Tool results no longer lose data. One result now shows the model up to 25,000 tokens (100,000 bytes) of text by default, up from 10,000 tokens (about 48 KB), the same as Claude Code's default MCP output limit. A larger result is stored whole as a workspace File and the model sees its start (shell output: its head and tail), the total size and the exact `tool_result_read {"resultId","offset"}` call that reads the rest from durable storage, with or without a sandbox. This replaces both the head/tail cut that dropped the middle of results between about 48 KB and 1 MiB and the separate over-1 MiB spill. `tool_result_read` is never in a first-request tool list: the model loads it by exact name through tool search, so no session's tool list changes. Only newly produced results change; history already sent replays byte for byte.
+
+### Patch Changes
+
+- 176ccd5: `buildOpenGeniAgent` now mounts attached files for its `activeSandboxBackend` instead of the deployment's default sandbox backend, matching where their downloads go. Before, a caller passing an active backend that differs from the default could get a mount its box cannot use (for example an error with a Modal default and Azure Blob storage). Tests now start a turn with an attachment on every sandbox backend with every object storage backend.
+- eb58354: A turn with an attached file no longer fails before it starts when file storage can't be mounted into the sandbox (Azure Blob on Modal, or AWS S3 or GCS). The workspace layout the agent reads was built with a mount entry for each file, which needs the pre-signed download the file is actually delivered by. The layout lists no files, so it now leaves them out, and the file arrives by its pre-signed download as before.
+- 316a815: Moving a configured agent's session between a managed sandbox and a Connected Machine no longer rewrites its system prompt. The prompt describes the deployment's own kind of compute; a session on a Connected Machine of a managed-sandbox deployment gets the Connected Machine guidance in its workspace filesystem layout item, which is appended only when the layout changes.
+- Updated dependencies [176ccd5]
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [eb58354]
+- Updated dependencies [a204fd7]
+- Updated dependencies [617fa38]
+- Updated dependencies [316a815]
+- Updated dependencies [d6b29a4]
+  - @opengeni/runtime@6.33.0
+  - @opengeni/config@6.33.0
+  - @opengeni/contracts@6.33.0
+  - @opengeni/sdk@6.33.0
+  - @opengeni/core@6.33.0
+  - @opengeni/db@6.33.0
+  - @opengeni/codex@6.33.0
+  - @opengeni/tool-gateway@6.33.0
+  - @opengeni/network@6.33.0
+  - @opengeni/documents@6.33.0
+  - @opengeni/github@6.33.0
+  - @opengeni/storage@6.33.0
+  - @opengeni/capabilities@6.33.0
+  - @opengeni/codemode@6.33.0
+  - @opengeni/decisions@6.33.0
+  - @opengeni/events@6.33.0
+  - @opengeni/interaction@6.33.0
+  - @opengeni/observability@6.33.0
+  - @opengeni/vaults@6.33.0
+  - @opengeni/vaults-bitwarden@6.33.0
+  - @opengeni/vaults-keeper@6.33.0
+  - @opengeni/vaults-onepassword@6.33.0
+  - @opengeni/vaults-protonpass@6.33.0
+  - @opengeni/xai-subscription@6.33.0
+  - @opengeni/jev@6.33.0
+  - @opengeni/agent-proto@6.33.0
+  - @opengeni/subscriptions@6.33.0
+
 ## 6.32.0
 
 ### Minor Changes
