@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -47,7 +47,7 @@ this conversation or this computer: give it a self-contained brief.
   the new cursor until \`done\` is true, then relay \`finalAnswer\`.
   \`needs_attention\` means the user must answer in the chat: give them the url.
   Stopping your wait doesn't stop the chat; \`session_pause\` does.
-- **Follow up**: \`session_send\`, then \`wait_for\` from its cursor.
+- **Follow up**: \`session_send\`, then \`wait_for\` with its cursor and turnId.
 - **Apps**: \`apps_list\`, \`app_describe\`, \`app_query\`, \`app_write\`.
 - **Tools**: \`tools_search\`, then \`tool_call\`. If it returns
   \`needsApproval\`, show the user \`approvalUrl\`; after they approve, call again
@@ -56,7 +56,7 @@ this conversation or this computer: give it a self-contained brief.
   the workspace's), \`knowledge_search\`, \`knowledge_get\`, \`knowledge_save\`.
 - Several workspaces: pass \`workspaceId\`, or \`workspace_use\` once.
 
-Retrying a call with the same input never starts work twice. Never put
+Retrying a call with the same input doesn't start the work twice. Never put
 secrets in a message. If a tool reports the connection isn't signed in, ask
 the user to sign in to the \`opengeni\` MCP server in this agent.
 `;
@@ -88,7 +88,10 @@ export const nodeConnectDeps = (
   },
   write: (path, content) => {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, content);
+    // Whole or not at all: an agent's config is never left half written.
+    const temporary = `${path}.opengeni-${process.pid}.tmp`;
+    writeFileSync(temporary, content);
+    renameSync(temporary, path);
   },
   run: (command, args) => {
     const result = spawnSync(command, [...args], {
@@ -134,15 +137,50 @@ export function detectClients(deps: ConnectDeps): ConnectClient[] {
   return found;
 }
 
-/** Add or replace one server in a JSON config's server map, keeping everything else. */
+/** JSON with line and block comments and trailing commas, as editors allow. */
+function parseJsonc(text: string): unknown {
+  let out = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (char === '"') {
+      const end = /"(?:[^"\\]|\\.)*"/y;
+      end.lastIndex = index;
+      const match = end.exec(text);
+      if (!match) throw new Error("it has an unterminated string");
+      out += match[0];
+      index += match[0].length - 1;
+    } else if (char === "/" && text[index + 1] === "/") {
+      while (index < text.length && text[index] !== "\n") index += 1;
+      out += "\n";
+    } else if (char === "/" && text[index + 1] === "*") {
+      const close = text.indexOf("*/", index + 2);
+      index = close === -1 ? text.length : close + 1;
+    } else out += char;
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/gu, "$1"));
+}
+
+/**
+ * Add one server to a JSON config's server map, keeping everything else. A
+ * different `opengeni` entry is the person's to change (a conflict), and a
+ * file with comments is left for them to edit (`manual`), so nothing they
+ * wrote is lost.
+ */
 export function withJsonServer(
   existing: string | null,
   mapKey: "mcpServers" | "servers",
   server: Record<string, unknown>,
-): { content: string; changed: boolean } {
+): { content: string; changed: boolean; conflict?: boolean; manual?: boolean } {
   let config: Record<string, unknown> = {};
+  let commented = false;
   if (existing && existing.trim()) {
-    const parsed: unknown = JSON.parse(existing);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(existing);
+    } catch {
+      parsed = parseJsonc(existing);
+      commented = true;
+    }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       throw new Error("it isn't a JSON object");
     config = parsed as Record<string, unknown>;
@@ -151,8 +189,14 @@ export function withJsonServer(
     config[mapKey] && typeof config[mapKey] === "object" && !Array.isArray(config[mapKey])
       ? (config[mapKey] as Record<string, unknown>)
       : {};
-  if (JSON.stringify(servers.opengeni) === JSON.stringify(server))
-    return { content: existing ?? "", changed: false };
+  const current = servers.opengeni as Record<string, unknown> | undefined;
+  if (current !== undefined) {
+    const same = Object.entries(server).every(
+      ([key, value]) => JSON.stringify(current?.[key]) === JSON.stringify(value),
+    );
+    return { content: existing ?? "", changed: false, conflict: !same };
+  }
+  if (commented) return { content: existing ?? "", changed: false, manual: true };
   config[mapKey] = { ...servers, opengeni: server };
   return { content: `${JSON.stringify(config, null, 2)}\n`, changed: true };
 }
@@ -164,6 +208,15 @@ export function withCodexServer(
 ): { content: string; changed: boolean; conflict: boolean } {
   const text = existing ?? "";
   const header = /^\[mcp_servers\.opengeni\]\s*$/mu;
+  // Other ways TOML can name the same server: a quoted table, dotted keys,
+  // or an inline table. Never add a second one; report it instead.
+  const otherForms = [
+    /^\s*\[\s*mcp_servers\s*\.\s*["']opengeni["']\s*\]/mu,
+    /^\s*mcp_servers\s*\.\s*["']?opengeni["']?\s*[.=]/mu,
+    /^\s*\[\s*mcp_servers\s*\][^[]*^\s*["']?opengeni["']?\s*[.=]/msu,
+  ];
+  if (!header.test(text) && otherForms.some((form) => form.test(text)))
+    return { content: text, changed: false, conflict: !text.includes(JSON.stringify(url)) };
   if (header.test(text)) {
     const section = text.split(header)[1]!.split(/^\[/mu)[0]!;
     const same = section.includes(`url = ${JSON.stringify(url)}`);
@@ -175,6 +228,27 @@ export function withCodexServer(
     changed: true,
     conflict: false,
   };
+}
+
+/** A JSON config this command must not rewrite, as the step that says what to do. */
+function jsonBlocked(
+  step: (status: ConnectStep["status"], detail: string) => ConnectStep,
+  path: string,
+  next: { conflict?: boolean; manual?: boolean },
+  entry: string,
+  mapKey: string,
+): ConnectStep | null {
+  if (next.conflict)
+    return step(
+      "manual",
+      `${path} already has an opengeni server with other settings. Change it to ${entry}.`,
+    );
+  if (next.manual)
+    return step(
+      "manual",
+      `${path} has comments, so it was left as is. Add ${entry} under "${mapKey}".`,
+    );
+  return null;
 }
 
 function writeSkill(deps: ConnectDeps, directory: string): boolean {
@@ -207,9 +281,12 @@ export function connectClient(
           "manual",
           `Claude Code's command isn't on PATH. Run: claude mcp add --transport http --scope user opengeni ${url}`,
         );
-      if (listed.status !== 0 || !listed.output.includes(url)) {
-        if (listed.status === 0)
-          deps.run("claude", ["mcp", "remove", "--scope", "user", "opengeni"]);
+      if (listed.status === 0 && !listed.output.includes(url))
+        return step(
+          "manual",
+          `Claude Code already has an opengeni server with another URL. Remove it (claude mcp remove opengeni) and run connect again, or point it at ${url}.`,
+        );
+      if (listed.status !== 0) {
         const added = deps.run("claude", [
           "mcp",
           "add",
@@ -247,6 +324,14 @@ export function connectClient(
     } else if (client === "cursor") {
       const path = join(deps.home, ".cursor", "mcp.json");
       const next = withJsonServer(deps.read(path), "mcpServers", { url });
+      const blocked = jsonBlocked(
+        step,
+        path,
+        next,
+        `"opengeni": { "url": "${url}" }`,
+        "mcpServers",
+      );
+      if (blocked) return blocked;
       if (next.changed) {
         deps.write(path, next.content);
         configured = "configured";
@@ -259,6 +344,14 @@ export function connectClient(
         type: "http",
         url,
       });
+      const blocked = jsonBlocked(
+        step,
+        path,
+        next,
+        `"opengeni": { "type": "http", "url": "${url}" }`,
+        "servers",
+      );
+      if (blocked) return blocked;
       if (next.changed) {
         deps.write(path, next.content);
         configured = "configured";

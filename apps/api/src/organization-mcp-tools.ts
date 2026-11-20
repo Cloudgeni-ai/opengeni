@@ -101,6 +101,12 @@ export const WaitForInput = z
       .default(0)
       .describe("The cursor from delegate, session_send or the last wait_for; 0 for everything."),
     maxWaitSeconds: z.number().int().min(1).max(WAIT_MAX_SECONDS).default(WAIT_MAX_SECONDS),
+    turnId: z
+      .string()
+      .min(1)
+      .max(128)
+      .optional()
+      .describe("The turnId from session_send: done only when that turn finishes."),
     workspaceId: workspaceIdInput(),
   })
   .strict();
@@ -702,7 +708,9 @@ const delegate = tool({
               resources,
               rigId ?? null,
               args.title ?? null,
-              visibility,
+              // What was asked, not the looked-up default, so a retry whose
+              // lookup failed still finds the first chat.
+              args.visibility ?? "default",
             ]),
           )
           .digest("hex")}`;
@@ -728,6 +736,13 @@ const delegate = tool({
         } catch {
           details = { error: text };
         }
+        // retrySafe: repeating with this key never starts a second chat.
+        // retryable: whether repeating could help (the route's own verdict).
+        const status = created.status;
+        const retryable =
+          typeof details.retryable === "boolean"
+            ? details.retryable
+            : status === undefined || status >= 500 || status === 409 || status === 429;
         return {
           content: [
             {
@@ -736,6 +751,7 @@ const delegate = tool({
                 ...details,
                 idempotencyKey,
                 retrySafe: true,
+                retryable,
               }),
             },
           ],
@@ -765,6 +781,8 @@ const delegate = tool({
 type WaitEvent = {
   sequence: number;
   type: string;
+  turnId?: string | null;
+  contentComplete?: boolean;
   status?: string;
   text?: string | null;
   failure?: unknown;
@@ -772,11 +790,18 @@ type WaitEvent = {
 };
 
 /** What a completion wait's events mean for the person waiting. */
-export function waitState(events: readonly WaitEvent[]): {
+export function waitState(
+  events: readonly WaitEvent[],
+  turnId?: string,
+): {
   state: "done" | "failed" | "needs_attention" | "running";
   event?: WaitEvent;
 } {
   for (const event of [...events].reverse()) {
+    // A follow-up's own turn: an earlier turn ending isn't its answer.
+    if (turnId && event.turnId && event.turnId !== turnId) continue;
+    // Waiting for model capacity needs nobody; it resumes on its own.
+    if (event.type.includes("capacity")) return { state: "running", event };
     if (event.type === "turn.completed") return { state: "done", event };
     if (
       event.type === "turn.failed" ||
@@ -792,7 +817,7 @@ export function waitState(events: readonly WaitEvent[]): {
 const waitFor = tool({
   name: "wait_for",
   title: "Wait for a chat",
-  description: `Wait up to ${WAIT_MAX_SECONDS} seconds for a delegated chat. done is true when its turn finished with a final answer (finalAnswer). Otherwise call again with the returned cursor. needs_attention means the person has to answer or approve something in the chat (url).`,
+  description: `Wait up to ${WAIT_MAX_SECONDS} seconds for a delegated chat. done is true when its turn finished with a final answer (finalAnswer). Otherwise call again with the returned cursor. needs_attention means the person has to answer or approve something in the chat (url). After session_send, pass its turnId.`,
   input: WaitForInput,
   readOnly: true,
   run: async (context, args) =>
@@ -814,13 +839,21 @@ const waitFor = tool({
       };
       const target = value.changed?.find((each) => each.sessionId === args.sessionId);
       const events = target?.events ?? [];
-      const { state, event } = waitState(events);
+      const { state, event } = waitState(events, args.turnId);
       return json({
         sessionId: args.sessionId,
         state,
         done: state === "done",
         ...(state === "done" && (event?.text || event?.result !== undefined)
           ? { finalAnswer: event.text || event.result }
+          : {}),
+        ...(state === "done" && !(event?.text || event?.result !== undefined)
+          ? { note: "The turn finished without a written answer; session_events has its results." }
+          : {}),
+        ...(state === "done" && event?.contentComplete === false
+          ? {
+              note: "finalAnswer is shortened; read the full answer with session_events (view results).",
+            }
           : {}),
         ...(state !== "done" && state !== "running" && event
           ? {
@@ -854,12 +887,14 @@ const sessionSend = tool({
       const cursor = Number((before.value as { lastSequence?: unknown })?.lastSequence ?? 0);
       const idempotencyKey =
         args.idempotencyKey ??
+        // Not the cursor: sending appends events, so a retry after a lost
+        // answer would read a new one and send the message twice.
         stableUuid(
           "mcp-session-send",
           callerKey(context),
           workspaceId,
           args.sessionId,
-          String(cursor),
+          String(Math.floor(Date.now() / DELEGATE_RETRY_WINDOW_MS)),
           args.mode,
           args.message,
         );
@@ -870,13 +905,22 @@ const sessionSend = tool({
         { sessionId: args.sessionId, text: args.message, idempotencyKey },
       );
       if (!sent.ok) return sent.result;
+      // The turn this message runs in, so wait_for skips a turn already running.
+      const resource = (sent.value as { resource?: { type?: unknown; id?: unknown } })?.resource;
+      const turnId =
+        resource?.type === "session_turn" && typeof resource.id === "string"
+          ? resource.id
+          : undefined;
       return json({
         sessionId: args.sessionId,
         cursor: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0,
+        ...(turnId ? { turnId } : {}),
         idempotencyKey,
         receipt: sent.value,
         url: chatUrl(context, workspaceId, args.sessionId),
-        next: "Call wait_for with this sessionId and cursor until done is true.",
+        next: turnId
+          ? "Call wait_for with this sessionId, cursor and turnId until done is true."
+          : "Call wait_for with this sessionId and cursor until done is true.",
       });
     }),
 });
@@ -914,18 +958,12 @@ function passthrough(
   });
 }
 
-const controlKey =
-  (operation: string) => (args: Record<string, unknown>, context: OrganizationActionContext) => ({
-    ...args,
-    idempotencyKey:
-      (args.idempotencyKey as string | undefined) ??
-      stableUuid(
-        `mcp-${operation}`,
-        callerKey(context),
-        String(args.sessionId),
-        String(Math.floor(Date.now() / 60_000)),
-      ),
-  });
+// Pausing or resuming twice ends in the same state, so each call gets its own
+// key: a derived one would turn pause, resume, pause into a replayed pause.
+const controlKey = (_operation: string) => (args: Record<string, unknown>) => ({
+  ...args,
+  idempotencyKey: (args.idempotencyKey as string | undefined) ?? crypto.randomUUID(),
+});
 
 const sessionsList = passthrough(
   "sessions_list",
@@ -1356,9 +1394,9 @@ const skillsSync = tool({
         const skillId =
           current?.id ??
           stableUuid("mcp-skill", workspaceId, callerKey(context), args.scope, stableKey);
-        const expectedRevisionId = current
-          ? (current.activeRevisionId ?? current.revisionId)
-          : null;
+        // The exact head the lifecycle checks: its active revision (null while
+        // only a pending one exists) and scope version; a new Skill starts at 1.
+        const expectedRevisionId = current ? current.activeRevisionId : null;
         const operationId = stableUuid(
           "mcp-skill-save",
           workspaceId,
@@ -1373,7 +1411,7 @@ const skillsSync = tool({
             operationId,
             skillId,
             expectedRevisionId,
-            expectedScopeVersion: current?.scopeVersion ?? 0,
+            expectedScopeVersion: current ? current.scopeVersion : 1,
             scope: args.scope,
             stableKey,
             files: upload.files,

@@ -398,10 +398,12 @@ describe("organization MCP named tools", () => {
       "invalid",
     ]);
     expect(saves).toHaveLength(1);
+    // A new Skill's head starts at scope version 1, with no active revision.
     expect(saves[0]).toMatchObject({
       scope: "user",
       stableKey: "new-skill",
       expectedRevisionId: null,
+      expectedScopeVersion: 1,
     });
     // A retry saves with the same operation and Skill ids, so it replays.
     await call("skills_sync", {
@@ -422,6 +424,27 @@ describe("organization MCP named tools", () => {
     );
   });
 
+  test("session_send keeps its key when the chat moved on, and returns the turn to wait for", async () => {
+    let lastSequence = 10;
+    const keys: string[] = [];
+    const { call } = await connect({
+      "tool session_get": () => firstPartyAnswer("session_get", { lastSequence }),
+      "tool session_queue_message": (_request, body) => {
+        keys.push((body as { arguments: { idempotencyKey: string } }).arguments.idempotencyKey);
+        // Sending appends events: a retry reads a later sequence.
+        lastSequence += 3;
+        return firstPartyAnswer("session_queue_message", {
+          resource: { type: "session_turn", id: "turn-follow-up" },
+        });
+      },
+    });
+    const sent = await call("session_send", { sessionId, message: "Also add tests." });
+    expect(sent.value).toMatchObject({ cursor: 10, turnId: "turn-follow-up" });
+    await call("session_send", { sessionId, message: "Also add tests." });
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
   test("a connection over its rate limit runs nothing", async () => {
     const { call, seen } = await connect({}, { admit: () => 7 });
     const refused = await call("workspaces_list", {});
@@ -438,6 +461,18 @@ describe("organization MCP named tool helpers", () => {
     expect(waitState([{ sequence: 1, type: "session.humanInput.requested" }]).state).toBe(
       "needs_attention",
     );
+    // Waiting for capacity needs nobody.
+    expect(waitState([{ sequence: 1, type: "turn.capacity_waiting" }]).state).toBe("running");
+    // A follow-up's own turn: the turn that was running when it was sent
+    // finishing isn't its answer.
+    const earlier = { sequence: 4, type: "turn.completed", turnId: "turn-a", text: "old" };
+    expect(waitState([earlier], "turn-b").state).toBe("running");
+    expect(
+      waitState(
+        [earlier, { sequence: 6, type: "turn.completed", turnId: "turn-b", text: "new" }],
+        "turn-b",
+      ).event?.text,
+    ).toBe("new");
   });
 
   test("Skill names and approval links", () => {

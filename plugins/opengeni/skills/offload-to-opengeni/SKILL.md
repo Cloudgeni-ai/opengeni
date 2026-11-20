@@ -97,7 +97,7 @@ it by name.
 
 Call `delegate` with the brief as `message`, a short `title`, and the
 `repository` and `branch` from step 2. Add `agent` or `sandboxEnvironment`
-only when the user named one. Retrying `delegate` with the same input never
+only when the user named one. Retrying `delegate` with the same input doesn't
 starts a second chat; errors say whether a retry is safe.
 
 Do not ask for a model or reasoning effort unless the user asked for a
@@ -123,7 +123,7 @@ will follow up.
 ## 6. Follow up
 
 - Send corrections or the next step with `session_send`, then `wait_for`
-  from its cursor. The chat keeps its context and sandbox; prefer it over
+  with its `cursor` and `turnId`. The chat keeps its context and sandbox; prefer it over
   starting a new chat for related work.
 - `session_pause` stops work resumably; `session_resume` continues it.
 - `sessions_list` finds earlier chats.

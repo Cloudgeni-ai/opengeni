@@ -31,7 +31,7 @@ Options: `--client claude,codex,cursor,vscode` (or `all`) sets up those even whe
 - **Skills and Knowledge**: `skills_sync` uploads your local Skills (to your own Skills by default, following your Agent learning setting) or pulls the workspace's; `knowledge_search`, `knowledge_get` and `knowledge_save`.
 - **Everything else**: `opengeni_actions_search`, `opengeni_action_describe` and `opengeni_action_call` reach every Opengeni API action.
 
-With several workspaces, the agent asks once and calls `workspace_use`; later calls use that workspace. Retrying a call never starts the same work twice.
+With several workspaces, the agent asks once and calls `workspace_use`; later calls use that workspace. Retrying a call with the same input doesn't start the same work twice.
 
 ## Self-hosted
 

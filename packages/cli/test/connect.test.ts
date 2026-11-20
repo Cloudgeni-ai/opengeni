@@ -122,5 +122,23 @@ describe("opengeni connect", () => {
       `model = "x"\n\n[mcp_servers.opengeni]\nurl = "${URL}"\n`,
     );
     expect(() => withJsonServer("[1]", "servers", {})).toThrow();
+    // Never rewrites what the person wrote: comments, or another opengeni entry.
+    const commented = `{\n  // mine\n  "servers": { "other": { "url": "x" } },\n}\n`;
+    expect(withJsonServer(commented, "servers", { url: URL })).toMatchObject({
+      changed: false,
+      manual: true,
+    });
+    expect(
+      withJsonServer(`{"mcpServers":{"opengeni":{"url":"https://other/v1/mcp"}}}`, "mcpServers", {
+        url: URL,
+      }),
+    ).toMatchObject({ changed: false, conflict: true });
+    expect(
+      withCodexServer(`[mcp_servers."opengeni"]\nurl = "https://other/v1/mcp"\n`, URL),
+    ).toMatchObject({ changed: false, conflict: true });
+    expect(withCodexServer(`[mcp_servers]\nopengeni = { url = "${URL}" }\n`, URL)).toMatchObject({
+      changed: false,
+      conflict: false,
+    });
   });
 });

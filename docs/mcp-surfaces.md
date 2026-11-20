@@ -147,8 +147,8 @@ connection's access setting; none adds authority.
 | Tool | What it does |
 | --- | --- |
 | `delegate` | Starts a chat: `message`, optional `agent` (id or name), `repository` (`owner/name`, or a URL), `branch`, `sandboxEnvironment` (id or name), `title`, `visibility`, `idempotencyKey`, `workspaceId`. Returns `sessionId`, `url` and a `cursor` |
-| `wait_for` | Waits up to 50 s (`maxWaitSeconds`, default 50) for a chat after `cursor`. `state` is `done` (the turn finished with a final answer, returned as `finalAnswer`), `needs_attention` (a person must answer in the chat), `failed` or `running`; call again with the returned `cursor` |
-| `session_send` | Queues a follow-up, or changes the running turn with `mode: "steer"`; returns the `cursor` to wait from |
+| `wait_for` | Waits up to 50 s (`maxWaitSeconds`, default 50) for a chat after `cursor`. `state` is `done` (the turn finished with a final answer, returned as `finalAnswer`), `needs_attention` (a person must answer in the chat), `failed` or `running` (also while it waits for model capacity); call again with the returned `cursor`. Pass `turnId` from `session_send` so a turn already running when you sent doesn't count |
+| `session_send` | Queues a follow-up, or changes the running turn with `mode: "steer"`; returns the `cursor` and, when known, the `turnId` to wait for |
 | `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Find, read and control chats |
 | `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; `workspace_use` sets the connection's default workspace |
 | `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change app data ([App data](site-data.md)); `app_query` runs a named query when given `sqlQuery` |
@@ -165,9 +165,12 @@ connection's access setting; none adds authority.
   and no default, the error lists them.
 - **Retries.** `delegate`, `session_send`, `knowledge_save` and
   `skills_sync` derive their idempotency key from the caller, workspace and
-  input when the agent sends none, so retrying the same call within an hour
-  never starts the same work twice. Errors say whether a retry is safe
-  (`retrySafe`) and carry the key.
+  input when the agent sends none, so retrying the same call in the same
+  clock hour doesn't start the same work twice (the returned
+  `idempotencyKey` makes it exact across hours; a new key sends the same
+  text again on purpose). `tool_call` repeats safely with the same
+  `operationId`. Errors carry the key, `retrySafe` (repeating with it
+  doesn't duplicate work) and `retryable` (whether repeating could help).
 - **Visibility.** A delegated chat uses the person's default chat visibility;
   Only me falls back to the workspace when the workspace doesn't allow it.
   Stopping a local wait only stops tracking; `session_pause` stops the chat.
@@ -202,7 +205,8 @@ connection's access setting; none adds authority.
   isn't supported; the agent reads the folders locally.
 - **Rate limits.** Each connection (or personal key) may make 120 calls in a
   burst refilling at 2 per second, and 20 `delegate` calls refilling at one
-  per 30 seconds. Over the limit a call returns an error saying how many seconds to wait;
+  per 30 seconds (chats started through the generic action tools count only
+  toward the first). Over the limit a call returns an error saying how many seconds to wait;
   nothing ran, so the retry is safe. The limits are per API process.
 - **Not yet.** MCP Tasks (long-running calls) and MCP event notifications are
   not supported; use `wait_for`.
