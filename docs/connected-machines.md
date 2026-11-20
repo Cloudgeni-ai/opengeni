@@ -499,6 +499,11 @@ sets the default value of
 `HKCU\Software\Google\Chrome\NativeMessagingHosts\ai.opengeni.browser` (and the
 matching keys for Chromium, Edge and Brave when those browsers are present) to
 that path. Removal deletes only keys that still name this agent's manifest.
+For an app-hosted agent, installation also records its config directory for
+the executable named in the manifest. The native host uses that directory even
+though Chrome does not inherit the desktop app's environment. Standalone service
+installs keep their normal config discovery. The host name is still shared, so
+this does not create a separate browser registration for each extension brand.
 When the extension cannot reach the agent, its popup says why: no agent is set
 up on this computer, the agent is too old for the extension, or it is not
 running.
