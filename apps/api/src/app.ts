@@ -146,6 +146,9 @@ import {
   withSubscriptionAccountAdministrators,
   ambientBillingOrigin,
   withBillingOriginOverride,
+  getOrganizationMcpConnectionSettings,
+  updateOrganizationMcpConnectionSettings,
+  type OrganizationMcpConnectionSettings,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -324,6 +327,8 @@ import {
   resolveOrganizationMcpOAuthAccess,
 } from "./mcp-oauth";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
+import { claimsStoredApproval } from "./mcp/stored-approval-claim";
+import { createConnectionRateLimiter } from "./mcp/connection-rate-limit";
 import type { ActionAuditProvenance } from "./http/disconnect-audit-actor";
 import {
   CodemodeAuthorityError,
@@ -1980,6 +1985,15 @@ export function createAppComposition(
     );
   });
 
+  // Per connection: calls in general, and new delegated chats.
+  const organizationMcpCallLimiter = createConnectionRateLimiter({
+    capacity: 120,
+    refillPerSecond: 2,
+  });
+  const organizationMcpDelegateLimiter = createConnectionRateLimiter({
+    capacity: 20,
+    refillPerSecond: 1 / 30,
+  });
   // The organization MCP server: every public action, as a person who signed
   // in (capped by their connection's access setting) or as an organization
   // API key. Each action runs the real route in this process.
@@ -2001,6 +2015,17 @@ export function createAppComposition(
     let caller: OrganizationMcpCaller;
     let auditProvenance: ActionAuditProvenance | undefined;
     let organizationKeyAccountId: string | null = null;
+    let connectionSettings:
+      | {
+          id: string;
+          accountId: string;
+          subjectId: string;
+          settings: OrganizationMcpConnectionSettings;
+        }
+      | undefined;
+    // Who the per-connection rate limit counts: the connection, the person's
+    // key, or the organization key.
+    let rateKey: string;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
       const personalKey = connection
@@ -2020,6 +2045,17 @@ export function createAppComposition(
           via: "organization_mcp",
           organizationMcpConnectionId: connection.refreshFamilyId,
         };
+        connectionSettings = {
+          id: connection.refreshFamilyId,
+          accountId: connection.accountId,
+          subjectId: connection.subjectId,
+          settings: await getOrganizationMcpConnectionSettings(routeDeps.db, {
+            accountId: connection.accountId,
+            connectionId: connection.refreshFamilyId,
+            subjectId: connection.subjectId,
+          }),
+        };
+        rateKey = `connection:${connection.refreshFamilyId}`;
       } else if (personalKey) {
         // A personal API key: the person who created it, with its access.
         // Each action rechecks their live access, exactly as for sign-in.
@@ -2039,6 +2075,7 @@ export function createAppComposition(
           principalKind: "personal_api_key",
           via: "organization_mcp",
         };
+        rateKey = `person:${personalKey.organizationId}:${personalKey.subjectId}`;
       } else {
         const context = await requireAccessContext(c, routeDeps);
         const authorization = c.req.header("authorization");
@@ -2055,6 +2092,7 @@ export function createAppComposition(
           authorization,
           accessKey: c.req.header("x-opengeni-access-key") ?? null,
         };
+        rateKey = `key:${organizationKeyAccountId}:${context.subjectId}`;
       }
     } catch (error) {
       if (error instanceof HTTPException && error.status === 401) challenge();
@@ -2093,6 +2131,37 @@ export function createAppComposition(
       origin: new URL(c.req.url).origin,
       publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       // Sign-in, personal and organization keys over MCP are API use.
+      // A coding agent on someone's computer (a connection or a personal key)
+      // reads app data as a viewer unless its connection may manage it, and
+      // reaches only members-only apps.
+      ...(caller.kind === "person"
+        ? {
+            outsideAgent: {
+              appData: connectionSettings?.settings.appDataAccess ?? "viewer",
+            },
+          }
+        : {}),
+      ...(connectionSettings
+        ? {
+            connection: {
+              id: connectionSettings.id,
+              settings: connectionSettings.settings,
+              setDefaultWorkspace: async (workspaceId: string) => {
+                await updateOrganizationMcpConnectionSettings(routeDeps.db, {
+                  accountId: connectionSettings!.accountId,
+                  connectionId: connectionSettings!.id,
+                  subjectId: connectionSettings!.subjectId,
+                  defaultWorkspaceId: workspaceId,
+                });
+              },
+            },
+          }
+        : {}),
+      admit: (toolName) =>
+        Math.max(
+          organizationMcpCallLimiter.admit(rateKey),
+          toolName === "delegate" ? organizationMcpDelegateLimiter.admit(rateKey) : 0,
+        ),
       dispatch: async (request) => {
         stampRequestBillingOrigin(
           request,
@@ -2405,6 +2474,9 @@ export function createAppComposition(
       let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
+        ...(operation === "invoke" && claimsStoredApproval(c.req.raw)
+          ? { claimStoredApproval: true }
+          : {}),
         reauthorize: freshToolCaller(c, workspaceId, authorization),
         onFence: (created: TargetAuthorityFence) => {
           fence = created;

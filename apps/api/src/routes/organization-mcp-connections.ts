@@ -1,8 +1,10 @@
 import { UpdateOrganizationMcpConnectionRequest, type AccessContext } from "@opengeni/contracts";
 import {
   getManagedUserProfilesByIds,
+  getOrganizationMcpConnectionSettings,
   getWorkspace,
   listOrganizationMcpConnections,
+  updateOrganizationMcpConnectionSettings,
   revokeOrganizationMcpConnection,
   updateOrganizationMcpConnectionAccess,
   type OrganizationMcpConnection,
@@ -63,33 +65,65 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         message: "Only the person who connected this agent can change what it can do.",
       });
     }
-    if (connection.autoConnect) {
-      throw new HTTPException(409, {
-        message:
-          "This agent connected automatically. An admin changes what it can do in Auto-connect.",
-      });
-    }
     const parsed = parseRequestBody(
       UpdateOrganizationMcpConnectionRequest,
       await c.req.json().catch(() => null),
       { status: 400, message: "invalid access setting" },
     );
     const access = parsed.access;
-    if (access.workspaceScope.kind === "selected") {
-      for (const workspaceId of access.workspaceScope.workspaceIds) {
-        const workspace = await getWorkspace(deps.db, workspaceId);
-        if (workspace?.accountId !== organizationId) {
-          throw new HTTPException(400, {
-            message: "a selected workspace is not in this organization",
-          });
-        }
+    if (access && connection.autoConnect) {
+      throw new HTTPException(409, {
+        message:
+          "This agent connected automatically. An admin changes what it can do in Auto-connect.",
+      });
+    }
+    // Letting a connected agent manage app data is the person's choice, made
+    // in the browser: an agent never widens its own reach.
+    if (parsed.appDataAccess === "manager" && isAgentActingAsPerson(c)) {
+      throw new HTTPException(403, {
+        message: "Let a connected agent manage app data in the Opengeni app in your browser.",
+      });
+    }
+    const workspaceIds = [
+      ...(access?.workspaceScope.kind === "selected" ? access.workspaceScope.workspaceIds : []),
+      ...(parsed.defaultWorkspaceId ? [parsed.defaultWorkspaceId] : []),
+    ];
+    for (const workspaceId of workspaceIds) {
+      const workspace = await getWorkspace(deps.db, workspaceId);
+      if (workspace?.accountId !== organizationId) {
+        throw new HTTPException(400, {
+          message: "a selected workspace is not in this organization",
+        });
       }
     }
-    await updateOrganizationMcpConnectionAccess(deps.db, {
-      accountId: organizationId,
-      connectionId: connection.id,
-      organizationAccess: access,
-    });
+    const scope = (access ?? connection.organizationAccess).workspaceScope;
+    if (
+      parsed.defaultWorkspaceId &&
+      scope.kind === "selected" &&
+      !scope.workspaceIds.includes(parsed.defaultWorkspaceId)
+    ) {
+      throw new HTTPException(400, {
+        message: "the default workspace must be one this agent can reach",
+      });
+    }
+    if (access) {
+      await updateOrganizationMcpConnectionAccess(deps.db, {
+        accountId: organizationId,
+        connectionId: connection.id,
+        organizationAccess: access,
+      });
+    }
+    if (parsed.appDataAccess !== undefined || parsed.defaultWorkspaceId !== undefined) {
+      await updateOrganizationMcpConnectionSettings(deps.db, {
+        accountId: organizationId,
+        connectionId: connection.id,
+        subjectId: connection.subjectId,
+        ...(parsed.appDataAccess !== undefined ? { appDataAccess: parsed.appDataAccess } : {}),
+        ...(parsed.defaultWorkspaceId !== undefined
+          ? { defaultWorkspaceId: parsed.defaultWorkspaceId }
+          : {}),
+      });
+    }
     const [updated] = await projectConnections(
       deps,
       await listOrganizationMcpConnections(deps.db, {
@@ -178,6 +212,15 @@ async function requireConnection(
 }
 
 async function projectConnections(deps: ApiRouteDeps, connections: OrganizationMcpConnection[]) {
+  const settings = await Promise.all(
+    connections.map((connection) =>
+      getOrganizationMcpConnectionSettings(deps.db, {
+        accountId: connection.accountId,
+        connectionId: connection.id,
+        subjectId: connection.subjectId,
+      }),
+    ),
+  );
   const userIds = connections
     .map((connection) => connection.subjectId)
     .filter((subjectId) => subjectId.startsWith("user:"))
@@ -188,7 +231,7 @@ async function projectConnections(deps: ApiRouteDeps, connections: OrganizationM
       profile,
     ]),
   );
-  return connections.map((connection) => {
+  return connections.map((connection, index) => {
     const profile = profiles.get(connection.subjectId);
     return {
       id: connection.id,
@@ -200,6 +243,8 @@ async function projectConnections(deps: ApiRouteDeps, connections: OrganizationM
         name: profile?.name?.trim() || profile?.email || "Someone",
       },
       policy: connection.organizationAccess,
+      appDataAccess: settings[index]!.appDataAccess,
+      defaultWorkspaceId: settings[index]!.defaultWorkspaceId,
       autoConnect: connection.autoConnect
         ? {
             trustedIssuerId: connection.autoConnect.trustedIssuerId,

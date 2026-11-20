@@ -98,6 +98,8 @@ const workspaceRouteContracts = {
     scrollSource: "components/settings/settings-sidebar.tsx",
   },
   workspaceAccountRoute: { kind: "redirect" },
+  // The tool approval page is a standalone consent frame that scrolls itself.
+  workspaceToolApprovalRoute: { kind: "self-managed", source: "routes/tool-approval.tsx" },
 } satisfies Record<string, ScrollContract>;
 
 async function source(path: string): Promise<string> {

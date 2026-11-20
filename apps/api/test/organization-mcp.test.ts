@@ -366,8 +366,14 @@ describe("organization MCP server", () => {
         const id = ACTION_CATALOG.find(
           (entry) => entry.method === "GET" && entry.path === path,
         )!.id;
-        const found = (await call("opengeni_actions_search", { query: "insights", limit: 50 }))
-          .value as { actions: Array<{ id: string; method: string; path: string }> };
+        const found = (
+          await call("opengeni_actions_search", {
+            query: "insights",
+            limit: 50,
+          })
+        ).value as {
+          actions: Array<{ id: string; method: string; path: string }>;
+        };
         expect(found.actions).toContainEqual({ id, method: "GET", path });
         const parameter = path.includes(":accountId") ? "accountId" : "workspaceId";
         const value = parameter === "accountId" ? organizationId : workspaceId;
@@ -446,7 +452,7 @@ describe("organization MCP server", () => {
   test("lists find, describe and run, and finds actions by words", async () => {
     const { client, call } = await connect(person(full));
     const tools = await client.listTools();
-    expect(tools.tools.map((tool) => tool.name)).toEqual([
+    expect(tools.tools.map((tool) => tool.name).slice(-3)).toEqual([
       "opengeni_actions_search",
       "opengeni_action_describe",
       "opengeni_action_call",
@@ -478,7 +484,11 @@ describe("organization MCP server", () => {
     const { call } = await connect(person(full));
     const describeAction = async (id: string) =>
       (await call("opengeni_action_describe", { id })).value as {
-        input: Array<{ name: string; in: string; schema: Record<string, any> | null }>;
+        input: Array<{
+          name: string;
+          in: string;
+          schema: Record<string, any> | null;
+        }>;
       };
     const update = await describeAction("PATCH /v1/workspaces/:workspaceId/vaults/:vaultId");
     expect(update.input[0]).toMatchObject({ name: "UpdateVaultRequest", in: "body" });
@@ -1014,7 +1024,10 @@ describe("organization MCP action inputs", () => {
     try {
       for (const id of ["sendEvent", "saveWorkspaceSkill"]) {
         const described = (await call("opengeni_action_describe", { id })).value as {
-          input: Array<{ in: string; schema: { properties?: Record<string, unknown> } | null }>;
+          input: Array<{
+            in: string;
+            schema: { properties?: Record<string, unknown> } | null;
+          }>;
         };
         expect(described.input).toHaveLength(1);
         expect(described.input[0]!.in).toBe("body");
@@ -1022,7 +1035,9 @@ describe("organization MCP action inputs", () => {
       }
       const skill = (await call("opengeni_action_describe", { id: "saveWorkspaceSkill" }))
         .value as {
-        input: Array<{ schema: { required?: string[]; properties: Record<string, unknown> } }>;
+        input: Array<{
+          schema: { required?: string[]; properties: Record<string, unknown> };
+        }>;
       };
       expect(skill.input[0]!.schema.required).toContain("stableKey");
       expect(Object.keys(skill.input[0]!.schema.properties)).toContain("scope");
@@ -1052,7 +1067,11 @@ describe("organization MCP large responses", () => {
       ).value as {
         status: number;
         body: Array<{ id: string }>;
-        truncated: { returnedItems: number; totalItems: number; returnedBytes: number };
+        truncated: {
+          returnedItems: number;
+          totalItems: number;
+          returnedBytes: number;
+        };
         hint: string;
       };
       const count = result.truncated.returnedItems;
