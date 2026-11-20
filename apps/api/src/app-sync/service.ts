@@ -399,8 +399,13 @@ async function toolForPerson(
   try {
     inventory = await readInventory(deps, grant);
   } catch {
-    // Without the inventory the gateway still decides what the call may use.
-    return action.tool;
+    // Without the inventory the gateway still decides what a shared sync's
+    // call may use. A personal sync must run on the person's own account,
+    // which can't be confirmed, so their run fails instead.
+    if (action.mode === "shared") return action.tool;
+    throw forbidden(
+      "Couldn't check your connected accounts for this sync. It will try again next run.",
+    );
   }
   const route = resolveAppSyncTool(inventory, action, action.mode);
   if (route.kind === "route") return route.identity;
@@ -491,9 +496,10 @@ async function syncAccess(
       principal,
       actor: `schedule:${task.id}`,
       framed: false,
+      // The run's depth carries on to change events so a loop stops at the
+      // chain limit. The run itself stays off them: a sync runs no model, so
+      // its writes aren't Opengeni's own and triggers hear them by default.
       chainDepth: context.chainDepth,
-      automationId: task.id,
-      ...(context.runId ? { automationRunId: context.runId } : {}),
     },
   };
 }

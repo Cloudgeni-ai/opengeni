@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { ScheduledTaskAgentConfig, type AccessGrant } from "@opengeni/contracts";
-import type { ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import {
+  eventMatchesTrigger,
+  workspaceActivityEvent,
+  type ObjectStorageDependency,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import { APP_PACKAGE_SYNC_HOOKS } from "../src/app-sync/package-hooks";
 import {
   claimAppSyncRun,
@@ -673,11 +678,50 @@ test("an automation woken by a sync's changes can't loop through app_sync_run pa
     };
   };
   const newestEventDepth = async () => {
-    const [row] = await shared.admin<{ chain_depth: number; automation_id: string | null }[]>`
-      select chain_depth, automation_id from workspace_activity_events
+    const [row] = await shared.admin<
+      {
+        id: string;
+        chain_depth: number;
+        automation_id: string | null;
+        automation_run_id: string | null;
+        subject_id: string | null;
+        data: Record<string, unknown>;
+      }[]
+    >`
+      select id, chain_depth, automation_id, automation_run_id, subject_id, data
+      from workspace_activity_events
       where workspace_id = ${f.workspace.id} and type = 'app.record.added'
       order by created_at desc, id desc limit 1`;
-    expect(row?.automation_id).toBe(syncId);
+    // A sync runs no model, so its writes aren't Opengeni's own: a trigger
+    // with default settings still hears them.
+    expect(row?.automation_run_id).toBeNull();
+    const event = workspaceActivityEvent(
+      {
+        id: row!.id,
+        type: "app.record.added",
+        occurredAt: new Date().toISOString(),
+        sessionId: null,
+        turnId: null,
+        subjectId: row!.subject_id,
+        automationId: row!.automation_id,
+        automationRunId: row!.automation_run_id,
+        chainDepth: Number(row!.chain_depth),
+        data: row!.data,
+        chatTitle: null,
+        automationName: null,
+        subjectLabel: null,
+        url: null,
+        appId: f.siteId,
+      },
+      null,
+    );
+    expect(
+      eventMatchesTrigger(event, {
+        eventTypes: ["app.record.added"],
+        conditions: [],
+        includeOwnEvents: false,
+      }),
+    ).toBe(true);
     return Number(row!.chain_depth);
   };
 
