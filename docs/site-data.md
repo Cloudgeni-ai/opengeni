@@ -169,6 +169,14 @@ rendered like other "This workspace" events: summary `Record added in
 `data.appTitle`, `data.writtenByYou`, and the fields above. Filter on
 `data.appId` and `data.collection` to listen to one collection.
 
+A [data sync](app-sync.md) writes through the same path, so its changes send
+these events with the sync run's chain depth. They are not marked as
+Opengeni's own (a sync runs no model), so a trigger hears them without
+"include Opengeni's own events".
+
+Self-hosted: record events work wherever Site Data does. `app.sql.changed`
+needs Site SQL, which runs only on the hosted Cloudflare gateway.
+
 ## Access rules
 
 All rules are enforced in the API (`apps/api/src/site-data/service.ts`); the

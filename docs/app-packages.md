@@ -70,15 +70,20 @@ accounts; nothing from the author's connections is packaged.
 
 ## Syncs
 
-Packages carry syncs as plain definitions. `apps/api/src/app-packages/syncs.ts`
-holds the hook the data sync feature plugs into with `setAppSyncHooks`:
+Packages carry syncs ([App data sync](app-sync.md)) as plain definitions.
+`apps/api/src/app-packages/syncs.ts` holds the hook, and
+`apps/api/src/app-sync/package-hooks.ts` plugs data sync into it at API
+startup:
 
-- `list({ deps, grant, appId })`: the app's sync definitions, for export.
-- `createPaused({ deps, grant, appId, syncs, installKey })`: create them on the
-  new app, paused until the installer confirms the account; returns `created`
-  names and `notCreated` reasons.
-
-The default exports none and reports each packaged sync as not installed.
+- Export lists the app's syncs: name, collection, shared or personal, tool,
+  fixed arguments, key, kept fields, schedule and event triggers.
+- Install creates each one on the new app **paused**, owned by the installer,
+  who confirms the account it runs on by turning it on. Event triggers name
+  sources in the exporting workspace, so an installed sync keeps only its
+  schedule; add triggers after install. A replayed install finds syncs the
+  app already has by name instead of creating them twice. A definition the
+  deployment can't read, or one that fails to save, is listed in
+  `notInstalled`.
 
 ## Agent tools
 
@@ -103,7 +108,6 @@ opens. An app's "…" menu has **Export app** (no data) for its managers.
 - `app_export` needs object storage to hand the file to the agent; stored
   packages are not swept automatically. The HTTP export returns the package
   directly.
-- Syncs install only where data sync is deployed; otherwise they are reported.
 - Not packaged anywhere: Site files (`site_files`), records past the demo
   limits, SQL blob values, publication settings, sharing and tool allowances.
 - No upgrades of an installed app from a newer package.

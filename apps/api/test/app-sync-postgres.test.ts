@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import { APP_PACKAGE_SYNC_HOOKS } from "../src/app-sync/package-hooks";
 import {
   createDb,
   createOrganizationApiKey,
@@ -490,4 +491,25 @@ test("queued runs from the worker execute; syncs export and install paused", asy
   expect(removed.status, JSON.stringify(removed.json)).toBe(200);
   const listed = await f.request(f.owner, "GET", `/${f.siteId}/syncs`);
   expect(listed.json.syncs.map((sync: { id: string }) => sync.id)).toEqual([installed.id]);
+
+  // App packages carry syncs through the same definitions. A replayed
+  // install finds the sync by name instead of creating it twice, and a
+  // definition this deployment can't read is reported, not fatal.
+  const exported = await APP_PACKAGE_SYNC_HOOKS.list({
+    deps: f.deps,
+    grant: f.owner.grant,
+    appId: f.siteId,
+  });
+  expect(exported).toEqual([expect.objectContaining({ name: "Orders" })]);
+  const replayed = await APP_PACKAGE_SYNC_HOOKS.createPaused({
+    deps: f.deps,
+    grant: f.owner.grant,
+    appId: f.siteId,
+    syncs: [...exported, { name: "Broken" }],
+    installKey: crypto.randomUUID(),
+  });
+  expect(replayed.created).toEqual(["Orders"]);
+  expect(replayed.notCreated).toEqual([expect.objectContaining({ name: "Broken" })]);
+  const after = await f.request(f.owner, "GET", `/${f.siteId}/syncs`);
+  expect(after.json.syncs).toHaveLength(1);
 });

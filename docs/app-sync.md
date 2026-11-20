@@ -99,13 +99,14 @@ Errors use the Site Data error envelope.
 
 ## Export and install
 
-For App packages, `apps/api/src/app-sync/service.ts` exports:
+[App packages](app-packages.md) use two functions from
+`apps/api/src/app-sync/service.ts`:
 
 - `listAppSyncDefinitions(deps, scope, siteId)`: the Site's syncs as plain
   `AppSyncDefinition`s (name, collection, mode, tool, arguments, recordsPath,
   key, fields, schedule and event triggers; no ids, owners or accounts).
-  Trigger `sourceId`s name sources in the exporting workspace; the installer
-  maps or drops them.
+  Trigger `sourceId`s name sources in the exporting workspace, so install
+  (`apps/api/src/app-sync/package-hooks.ts`) drops them and keeps the schedule.
 - `createAppSyncFromDefinition(deps, grant, siteId, definition)`: creates the
   sync **paused**, owned by the installer. The installer confirms the account
   by resuming it (`PATCH … {status: "active"}` or `app_sync_save`).
