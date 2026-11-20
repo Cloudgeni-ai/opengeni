@@ -1,4 +1,5 @@
 import { sessionDisplayStatus, type SessionDisplayStatus } from "../../timeline-model";
+import { awaitsConnection } from "./needs-you";
 import type { RailSession as Session } from "./session-list-entry";
 
 export const DEFAULT_VISIBLE_TREE_LEVELS = 3;
@@ -80,6 +81,7 @@ export function sessionStateLabel(session: Session): string {
     : sessionStatusLabel(sessionDisplayStatus(session));
   const attentionOrTerminal =
     session.status === "requires_action" ||
+    awaitsConnection(session) ||
     session.status === "failed" ||
     session.status === "cancelled";
 

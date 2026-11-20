@@ -828,6 +828,8 @@ import {
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   SessionNotificationPostedPayload,
+  ToolAuthNeededPayload,
+  connectionCardNotice,
   SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
@@ -37038,6 +37040,7 @@ export async function sessionTreeStatsForSessions(
           active_turn_id,
           input_wait_until,
           input_wait_turn_id,
+          awaiting_connection_since,
           last_sequence,
           effective_pause_revision,
           depth
@@ -37049,6 +37052,7 @@ export async function sessionTreeStatsForSessions(
             root.active_turn_id,
             root.input_wait_until,
             root.input_wait_turn_id,
+            root.awaiting_connection_since,
             root_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -37078,6 +37082,7 @@ export async function sessionTreeStatsForSessions(
             child.active_turn_id,
             child.input_wait_until,
             child.input_wait_turn_id,
+            child.awaiting_connection_since,
             child_cursor.last_meaningful_sequence,
             greatest(
               case
@@ -37112,7 +37117,8 @@ export async function sessionTreeStatsForSessions(
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
           select id, parent_session_id, status, active_turn_id, input_wait_until,
-            input_wait_turn_id, last_sequence, effective_pause_revision, depth
+            input_wait_turn_id, awaiting_connection_since, last_sequence,
+            effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
@@ -37188,7 +37194,9 @@ export async function sessionTreeStatsForSessions(
                 order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
               )
           )::int as "waitingDescendants",
-          count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
+          count(*) filter (
+            where ${sessionNeedsPersonSql(sql`status`, sql`awaiting_connection_since`)}
+          )::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
           count(*) filter (
             where effective_pause_revision is not null
@@ -37207,17 +37215,22 @@ export async function sessionTreeStatsForSessions(
           )::int as "unreadFailedDescendants",
           count(*) filter (where unread and not failure_handled)::int as "unreadDescendants",
           count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
-          -- Oldest still-open requires_action turn among the counted attention
-          -- descendants. The correlated lookup runs only for rows passing the
-          -- FILTER and walks session_turns_workspace_queue_idx
-          -- (workspace_id, session_id, status, position).
-          min((
-            select min(waiting_turn.updated_at)
-            from ${schema.sessionTurns} waiting_turn
-            where waiting_turn.workspace_id = ${workspaceId}
-              and waiting_turn.session_id = counted.id
-              and waiting_turn.status = 'requires_action'
-          )) filter (where status = 'requires_action') as "attentionSince",
+          -- Oldest still-open requires_action turn, or connection card wait,
+          -- among the counted attention descendants. The correlated lookup
+          -- runs only for rows passing the FILTER and walks
+          -- session_turns_workspace_queue_idx (workspace_id, session_id, status, position).
+          least(
+            min((
+              select min(waiting_turn.updated_at)
+              from ${schema.sessionTurns} waiting_turn
+              where waiting_turn.workspace_id = ${workspaceId}
+                and waiting_turn.session_id = counted.id
+                and waiting_turn.status = 'requires_action'
+            )) filter (where status = 'requires_action'),
+            min(awaiting_connection_since) filter (
+              where ${sessionAwaitsConnectionSql(sql`status`, sql`awaiting_connection_since`)}
+            )
+          ) as "attentionSince",
           (
             -- The lookahead row proves more descendants than the budget.
             exists (
@@ -37397,23 +37410,40 @@ function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefine
 function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): SQL {
   return sql`(
     ${schema.sessions.status} in ('requires_action', 'failed')
+    or ${sessionAwaitsConnectionSql(schema.sessions.status, schema.sessions.awaitingConnectionSince)}
     or (
       ${schema.sessions.parentSessionId} is null
       and ${sessionRelatedListScope(scope)}
       and exists (
-        with recursive attention_tree(id, status) as (
-          select child.id, child.status from ${schema.sessions} child
+        with recursive attention_tree(id, status, awaiting_connection_since) as (
+          select child.id, child.status, child.awaiting_connection_since
+          from ${schema.sessions} child
           where child.workspace_id = ${schema.sessions.workspaceId}
             and child.parent_session_id = ${schema.sessions.id}
           union
-          select child.id, child.status from attention_tree parent
+          select child.id, child.status, child.awaiting_connection_since from attention_tree parent
           join ${schema.sessions} child on child.parent_session_id = parent.id
           where child.workspace_id = ${schema.sessions.workspaceId}
         )
-        select 1 from attention_tree where status = 'requires_action'
+        select 1 from attention_tree
+        where ${sessionNeedsPersonSql(sql`status`, sql`awaiting_connection_since`)}
       )
     )
   )`;
+}
+
+/**
+ * An idle session whose agent waits on a connection card (connect, reconnect
+ * or more access) needs the person, as an approval does. Its status stays
+ * idle: nothing runs and new messages are admitted as usual.
+ */
+function sessionAwaitsConnectionSql(status: SQLWrapper, awaitingSince: SQLWrapper): SQL {
+  return sql`(${status} = 'idle' and ${awaitingSince} is not null)`;
+}
+
+/** Waits on the person: an approval or question, or a connection card. */
+function sessionNeedsPersonSql(status: SQLWrapper, awaitingSince: SQLWrapper): SQL {
+  return sql`(${status} = 'requires_action' or ${sessionAwaitsConnectionSql(status, awaitingSince)})`;
 }
 
 /**
@@ -37542,6 +37572,7 @@ async function sessionListTotalsInScope(
         ${schema.sessions.activeTurnId} as active_turn_id,
         ${schema.sessions.inputWaitUntil} as input_wait_until,
         ${schema.sessions.inputWaitTurnId} as input_wait_turn_id,
+        ${schema.sessions.awaitingConnectionSince} as awaiting_connection_since,
         ${schema.sessions.siteId} as site_id,
         ${schema.sessions.siteAccessRootId} is not null as site_conversation,
         ${schema.sessions.updatedAt} as updated_at,
@@ -37563,7 +37594,8 @@ async function sessionListTotalsInScope(
       -- Retain each child's RLS check and materialize once, so depth cannot
       -- multiply base-table or personal-state scans.
       select child.id, child.parent_session_id, child.account_id, child.status, child.active_turn_id,
-        child.input_wait_until, child.input_wait_turn_id, child.subtree_run_override_revision,
+        child.input_wait_until, child.input_wait_turn_id, child.awaiting_connection_since,
+        child.subtree_run_override_revision,
         child.direct_control_state, child.direct_pause_revision,
         coalesce(personal.pinned, false) as pinned,
         coalesce(case when personal.manually_unread_through is not null then -1
@@ -37576,10 +37608,11 @@ async function sessionListTotalsInScope(
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, parent_session_id, account_id, status, active_turn_id,
-        input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
-        acknowledged_sequence, actively_working) as (
+        input_wait_until, input_wait_turn_id, awaiting_connection_since, pause_revision,
+        pinned_path, related, acknowledged_sequence, actively_working) as (
       select root.id, root.channel_id, root.id, null::uuid, root.account_id, root.status,
         root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
+        root.awaiting_connection_since,
         greatest(
           case when control.workspace_state = 'paused' and
             (root.subtree_run_override_revision is null or
@@ -37594,6 +37627,7 @@ async function sessionListTotalsInScope(
       select parent.root_id, parent.channel_id, child.id, child.parent_session_id,
         child.account_id, child.status,
         child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
+        child.awaiting_connection_since,
         greatest(
           case when child.subtree_run_override_revision is null or
               child.subtree_run_override_revision <= parent.pause_revision
@@ -37606,11 +37640,14 @@ async function sessionListTotalsInScope(
         on child.parent_session_id = parent.id
       where parent.related
     ), attention_roots as (
-      select root_id, bool_or(status = 'requires_action') as attention
+      select root_id,
+        bool_or(${sessionNeedsPersonSql(sql`status`, sql`awaiting_connection_since`)}) as attention
       from nodes group by root_id
     ), root_attention as materialized (
       select root.id, not root.archived and (
-        root.status in ('requires_action', 'failed') or coalesce(attention.attention, false)
+        root.status in ('requires_action', 'failed')
+        or ${sessionAwaitsConnectionSql(sql`root.status`, sql`root.awaiting_connection_since`)}
+        or coalesce(attention.attention, false)
       ) as needs_you
       from roots root left join attention_roots attention on attention.root_id = root.id
     ), measured as (
@@ -37632,7 +37669,10 @@ async function sessionListTotalsInScope(
           select min(turn.updated_at) from ${schema.sessionTurns} turn
           where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
             and turn.status = 'requires_action'
-        ) end as attention_since,
+        ) when ${sessionAwaitsConnectionSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
+          then nodes.awaiting_connection_since end as attention_since,
+        ${sessionNeedsPersonSql(sql`nodes.status`, sql`nodes.awaiting_connection_since`)}
+          as needs_person,
         nodes.status = 'idle' and nodes.active_turn_id is null
           and nodes.input_wait_until is not null
           and nodes.input_wait_turn_id = (
@@ -37671,7 +37711,7 @@ async function sessionListTotalsInScope(
         }
     ), grouped as (
       select channel_id as "channelId", count(*)::int as total,
-        count(*) filter (where status = 'requires_action')::int as attention,
+        count(*) filter (where needs_person)::int as attention,
         min(attention_since) as "attentionSince",
         count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
@@ -37805,7 +37845,7 @@ async function sessionListTotalsInScope(
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
-        count(*) filter (where node.status = 'requires_action')::int as attention,
+        count(*) filter (where node.needs_person)::int as attention,
         min(node.attention_since) as "attentionSince",
         count(*) filter (where node.status = 'failed' and node.unread
           and not node.failure_handled)::int as failed,
@@ -98950,6 +98990,23 @@ export async function appendSessionEventsForTurnAttempt(
 }
 
 /**
+ * A connection card's events with the notice that tells the person they are
+ * needed (`connectionCardNotice`), after the card so the card stays first.
+ */
+export function withConnectionCardNotice<T extends { type: string; payload?: unknown }>(
+  events: readonly T[],
+): Array<T | { type: "session.notification.posted"; payload: SessionNotificationPostedPayload }> {
+  return events.flatMap((event) => {
+    if (event.type !== "tool.auth_needed") return [event];
+    const parsed = ToolAuthNeededPayload.safeParse(event.payload);
+    const notice = parsed.success ? connectionCardNotice(parsed.data) : null;
+    return notice
+      ? [event, { type: "session.notification.posted" as const, payload: notice }]
+      : [event];
+  });
+}
+
+/**
  * Append a capability card for the calling turn unless that turn already shows
  * a current card for the same capability (and, for a card that names the
  * machine it asks for, the same machine, and for a card with a purpose such as
@@ -98997,7 +99054,8 @@ export async function appendTurnCapabilityCardOnce(
     turnId,
     executionGeneration,
     attemptId,
-    [input],
+    // The card needs the person: its notice reaches the inbox and the phone.
+    withConnectionCardNotice([input]),
     {
       rowProjection: "event",
       mutate: async (tx) => {
@@ -100660,6 +100718,10 @@ function mapSessionFields(
     ...attention,
     ...sessionRowArchive(row),
     ...archive,
+    // Only while a connection card waits, so other sessions keep their bytes.
+    ...(row.awaitingConnectionSince
+      ? { awaitingConnectionSince: new Date(row.awaitingConnectionSince).toISOString() }
+      : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

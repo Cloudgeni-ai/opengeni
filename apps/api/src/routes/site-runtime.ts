@@ -441,6 +441,7 @@ const SITE_SESSION_FIELDS = [
   "inputWait",
   "activelyWorking",
   "requiresActionSince",
+  "awaitingConnectionSince",
   "createdAt",
   "updatedAt",
 ] as const;

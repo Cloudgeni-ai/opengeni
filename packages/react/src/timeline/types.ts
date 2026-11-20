@@ -695,9 +695,16 @@ export type AuthNeededItem = {
   purpose?: "chrome" | undefined;
   /**
    * A later Connected Machine card in this chat asks for the same thing, so
-   * this one is shown as a short note instead of a second full card.
+   * this one is shown as a short note instead of a second full card. A
+   * repeated request for more access to the same account shows only its
+   * latest card.
    */
   askedAgainLater?: boolean | undefined;
+  /**
+   * The person finished this card: the chat recorded that setup from it
+   * finished, so the card shows that instead of offering its action again.
+   */
+  setupFinished?: boolean | undefined;
   occurredAt: string;
 };
 

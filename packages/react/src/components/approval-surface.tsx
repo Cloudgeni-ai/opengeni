@@ -11,6 +11,7 @@ import { dequal } from "dequal";
 import { ChevronLeftIcon, ChevronRightIcon, LoaderCircleIcon, ShieldCheckIcon } from "lucide-react";
 import { OpenGeniApiError, toolReviewDetails, type ToolActionReview } from "@opengeni/sdk";
 import type { PendingApproval } from "../approvals";
+import { accessNeededWording } from "../auth-needed-presentation";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import {
@@ -35,6 +36,9 @@ import type {
   McpElicitationAnswer,
   McpElicitationContent,
 } from "@opengeni/contracts/mcp-elicitation-model";
+
+/** Access an action's account lacks, which approving asks its provider for first. */
+export type ToolReviewAccessNeeded = NonNullable<ToolActionReview["accessNeeded"]>;
 
 export type ApprovalSurfaceMessages = {
   title: string;
@@ -79,6 +83,23 @@ export type ApprovalSurfaceProps = {
     | ((approval: PendingApproval) => Promise<ToolActionReview | null | undefined>)
     | undefined;
   loadDetails?: ToolReviewDetailsLoader | undefined;
+  /**
+   * The action's account lacks access it needs (`review.accessNeeded`):
+   * approving first asks the provider for it. Called synchronously in the
+   * Approve click, so a host can open the provider's window there. Resolve
+   * `true` to approve this one call now, `false` to leave it waiting (the
+   * person didn't allow it, or the host continues the setup elsewhere).
+   * Throw to leave it waiting and show why. `signal` aborts when the person
+   * presses Approve again or Reject meanwhile, e.g. after closing the
+   * provider's window. Without it, Approve says the access is still missing.
+   */
+  onAllowAccess?:
+    | ((
+        access: ToolReviewAccessNeeded,
+        approval: PendingApproval,
+        signal: AbortSignal,
+      ) => Promise<boolean>)
+    | undefined;
   onViewDetails?: ((review: ToolActionReview, path: string) => void) | undefined;
   selectedApprovalId?: string | null | undefined;
   onSelectedApprovalChange?: ((id: string) => void) | undefined;
@@ -129,6 +150,19 @@ function reviewOutcome(
 }
 
 /**
+ * Whether access a review asked for was since allowed on the same account. A
+ * review is read once, so after the first consent the other waiting actions
+ * on that account no longer ask the provider again.
+ */
+export function accessAlreadyAllowed(
+  access: ToolReviewAccessNeeded,
+  allowed: Readonly<Record<string, readonly string[]>>,
+): boolean {
+  const scopes = allowed[access.connectionId];
+  return scopes !== undefined && access.scopes.every((scope) => scopes.includes(scope));
+}
+
+/**
  * Which bulk decisions include an approval: exactly the buttons its own card
  * offers without asking for anything more. `outcome` is undefined while its
  * review is still being read, which includes it in neither.
@@ -136,6 +170,8 @@ function reviewOutcome(
 export function bulkApprovalDecisions(
   approval: PendingApproval,
   review: { loader: boolean; outcome?: ReviewOutcome | undefined },
+  /** Access the person already allowed here since the review was read. */
+  accessAllowed: (access: ToolReviewAccessNeeded) => boolean = () => false,
 ): { approve: boolean; reject: boolean } {
   // A server's question is answered on its own card; it can only be declined in bulk.
   if (approval.elicitation) return { approve: false, reject: true };
@@ -148,7 +184,10 @@ export function bulkApprovalDecisions(
   const saved = outcome.review;
   if (saved.status !== "pending") return { approve: false, reject: false };
   return {
-    approve: saved.availableActions.includes("approve"),
+    // Access its account lacks is asked for on the action's own card.
+    approve:
+      saved.availableActions.includes("approve") &&
+      (!saved.accessNeeded || accessAllowed(saved.accessNeeded)),
     reject: saved.availableActions.includes("reject"),
   };
 }
@@ -166,6 +205,7 @@ export function ApprovalSurface({
   renderApproval,
   loadReview,
   loadDetails,
+  onAllowAccess,
   onViewDetails,
   selectedApprovalId,
   onSelectedApprovalChange,
@@ -177,8 +217,16 @@ export function ApprovalSurface({
   const [pending, setPending] = useState<{
     id: string;
     decision: "approve" | "reject";
+    /** Waiting for the provider's consent page before approving. */
+    consent?: string | undefined;
   } | null>(null);
   const pendingRef = useRef<string | null>(null);
+  /** The open consent wait, which a new decision on the same action ends. */
+  const consentRef = useRef<{ id: string; controller: AbortController } | null>(null);
+  /** Scopes allowed here per account, so one consent covers every waiting action. */
+  const [allowedAccess, setAllowedAccess] = useState<Record<string, readonly string[]>>({});
+  const accessAllowed = (access: ToolReviewAccessNeeded) =>
+    accessAlreadyAllowed(access, allowedAccess);
   const [decisionError, setDecisionError] = useState<{ cause: unknown } | null>(null);
   const [localSelectedId, setLocalSelectedId] = useState<string | null>(null);
   const selectedId = selectedApprovalId === undefined ? localSelectedId : selectedApprovalId;
@@ -339,10 +387,16 @@ export function ApprovalSurface({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      consentRef.current?.controller.abort();
     };
   }, []);
   useEffect(() => {
     if (pending && !approvals.some((approval) => approval.id === pending.id)) {
+      // Decided elsewhere or gone: stop waiting on its provider window.
+      if (consentRef.current?.id === pending.id) {
+        consentRef.current.controller.abort();
+        consentRef.current = null;
+      }
       pendingRef.current = null;
       setPending(null);
       // Hand focus to the next card without moving the view: a reader at the
@@ -366,18 +420,64 @@ export function ApprovalSurface({
     approval: PendingApproval,
     decision: "approve" | "reject",
     answer?: McpElicitationAnswer,
+    access?: { needed: ToolReviewAccessNeeded; consent: string },
   ) => {
-    if (responding || pendingRef.current || bulkRef.current || decidedBy(approval)) return;
+    if (responding || bulkRef.current || decidedBy(approval)) return;
+    // Pressing again while the provider's window is open stops waiting for it
+    // (the person may have closed it): Reject declines, Approve asks again.
+    const waitingConsent = consentRef.current;
+    if (waitingConsent?.id === approval.id) {
+      consentRef.current = null;
+      waitingConsent.controller.abort();
+      pendingRef.current = null;
+    }
+    if (pendingRef.current) return;
     pendingRef.current = approval.id;
-    setPending({ id: approval.id, decision });
+    const consentFirst =
+      decision === "approve" && access && onAllowAccess && !accessAllowed(access.needed)
+        ? access
+        : undefined;
+    const consent = consentFirst
+      ? { id: approval.id, controller: new AbortController() }
+      : undefined;
+    if (consent) consentRef.current = consent;
+    setPending({ id: approval.id, decision, consent: consentFirst?.consent });
     setDecisionError(null);
     try {
+      // Synchronously in the click: the host may open the provider's window.
+      if (consentFirst && consent) {
+        const allowed = await onAllowAccess!(
+          consentFirst.needed,
+          approval,
+          consent.controller.signal,
+        );
+        // A newer press took over; it owns the card's state now.
+        if (consent.controller.signal.aborted || consentRef.current !== consent) return;
+        consentRef.current = null;
+        if (!allowed) {
+          if (pendingRef.current === approval.id) {
+            pendingRef.current = null;
+            setPending(null);
+          }
+          return;
+        }
+        const granted = consentFirst.needed;
+        setAllowedAccess((current) => ({
+          ...current,
+          [granted.connectionId]: [
+            ...new Set([...(current[granted.connectionId] ?? []), ...granted.scopes]),
+          ],
+        }));
+        setPending({ id: approval.id, decision });
+      }
       await (decision === "approve"
         ? answer
           ? onApprove(approval, answer)
           : onApprove(approval)
         : onReject(approval));
     } catch (cause) {
+      if (consent?.controller.signal.aborted) return;
+      if (consent && consentRef.current === consent) consentRef.current = null;
       if (pendingRef.current === approval.id) {
         pendingRef.current = null;
         setPending(null);
@@ -396,10 +496,11 @@ export function ApprovalSurface({
       read && read.loader === loadReview && dequal(read.approval, approval)
         ? read.outcome
         : undefined;
-    const decisions = bulkApprovalDecisions(approval, {
-      loader: Boolean(loadReview),
-      outcome,
-    });
+    const decisions = bulkApprovalDecisions(
+      approval,
+      { loader: Boolean(loadReview), outcome },
+      accessAllowed,
+    );
     if (decisions.approve) bulkEligible.approve.push(approval);
     if (decisions.reject) bulkEligible.reject.push(approval);
   }
@@ -586,8 +687,16 @@ export function ApprovalSurface({
             custom={renderApproval?.(approval)}
             onViewDetails={onViewDetails}
             submitting={pending?.id === approval.id ? pending.decision : decidedBy(approval)}
-            disabled={bulkBusy || decidedBy(approval) !== null}
-            onApprove={() => void decide(approval, "approve")}
+            consentPending={pending?.id === approval.id ? pending.consent : undefined}
+            allowsAccess={Boolean(onAllowAccess)}
+            accessAllowed={accessAllowed}
+            disabled={
+              // Waiting on the provider's window leaves this card's own
+              // buttons pressable, so the person can stop that wait.
+              (bulkBusy && !(pending?.id === approval.id && pending.consent)) ||
+              decidedBy(approval) !== null
+            }
+            onApprove={(access) => void decide(approval, "approve", undefined, access)}
             onAnswer={(content) =>
               approval.elicitation
                 ? void decide(approval, "approve", {
@@ -641,6 +750,9 @@ function ApprovalRequest({
   custom,
   onViewDetails,
   onAnswer,
+  consentPending,
+  allowsAccess,
+  accessAllowed,
   ...actions
 }: {
   approval: PendingApproval;
@@ -650,8 +762,14 @@ function ApprovalRequest({
   custom: ReactNode;
   onViewDetails: ApprovalSurfaceProps["onViewDetails"];
   submitting: "approve" | "reject" | null;
+  /** The provider whose consent page is open before approving. */
+  consentPending: string | undefined;
+  /** Approving can ask the provider for access the account lacks. */
+  allowsAccess: boolean;
+  /** Access already allowed here, which this card no longer asks for. */
+  accessAllowed: (access: ToolReviewAccessNeeded) => boolean;
   disabled: boolean;
-  onApprove: () => void;
+  onApprove: (access?: { needed: ToolReviewAccessNeeded; consent: string }) => void;
   onAnswer: (content: McpElicitationContent) => void;
   onReject: () => void;
 }) {
@@ -892,6 +1010,10 @@ function ApprovalRequest({
     );
   const saved = loaded ?? fallback;
   const review = answer ? { ...saved, approveLabel: answer.approve } : saved;
+  const access =
+    review.accessNeeded && !accessAllowed(review.accessNeeded)
+      ? { needed: review.accessNeeded, ...accessNeededWording(t, review.accessNeeded) }
+      : undefined;
   if (detailPath !== null)
     return (
       <ToolActionReviewDetails
@@ -952,6 +1074,18 @@ function ApprovalRequest({
       <ToolActionReviewCard
         review={review}
         {...actions}
+        onApprove={() =>
+          actions.onApprove(
+            access && allowsAccess ? { needed: access.needed, consent: access.consent } : undefined,
+          )
+        }
+        notice={access ? (allowsAccess ? access.line : access.missingLine) : undefined}
+        interruptible={Boolean(consentPending)}
+        approvingLabel={
+          consentPending
+            ? t("messageTimeline.waitingForConsent", { consent: consentPending })
+            : undefined
+        }
         pendingLabel={messages.title}
         rejectLabel={answer?.reject ?? messages.reject}
         onViewDetails={

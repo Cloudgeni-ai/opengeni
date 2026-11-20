@@ -2273,6 +2273,12 @@ export type Session = {
    */
   requiresActionSince?: string | null | undefined;
   /**
+   * When the agent started waiting on a still-open connection card (connect,
+   * reconnect or more access) in this chat; null or absent when none is open.
+   * While the session is idle it needs the person, as an approval does.
+   */
+  awaitingConnectionSince?: string | null | undefined;
+  /**
    * Set while the runtime refuses to start this session's next turn (status
    * `requires_action`, but nothing is asked of a person). Accepted work is
    * kept; Resume or a new Send/Steer rechecks admission. Absent on older servers.
@@ -2337,6 +2343,7 @@ export type SessionListEntry = Pick<
   | "archiveVersion"
   | "treeStats"
   | "requiresActionSince"
+  | "awaitingConnectionSince"
   | "admissionBlock"
   | "createdAt"
   | "updatedAt"

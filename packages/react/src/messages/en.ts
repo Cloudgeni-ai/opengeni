@@ -10,6 +10,13 @@ export const englishMessages = {
    */
   "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
+  /** Under an action whose account lacks access; {access} as "organize your Gmail". */
+  "approvalSurface.consentAsksFirst":
+    "{consent} will ask you to allow {product} to {access} (one time).",
+  "approvalSurface.consentAsksFirstMoreAccess":
+    "{consent} will ask you to allow {product} more access to {provider} (one time).",
+  "approvalSurface.accessStillMissing":
+    "{provider} hasn't given {product} access for this yet; you'll be asked to allow it.",
   "approvalSurface.approveAction": "Approve action",
   /** Approves every waiting action the person may approve, one decision each. */
   "approvalSurface.approveAll": "Approve all {length}",
@@ -3292,9 +3299,23 @@ export const englishMessages = {
   "meetings.transcript.valueMatch": "{value}% match",
   "meetings.transcript.whoIsDisplayname": "Who is {displayName}?",
   "meetings.transcript.yesItSDisplayname": "Yes, it's {displayName}",
-  "messageTimeline.accessDraftAndSendEmail": "draft and send email",
+  /** A step-up card: the provider's permission doesn't change what runs without asking. */
+  "messageTimeline.accessApprovalSettingsStillDecide":
+    "Your approval settings still decide what runs without asking.",
   "messageTimeline.accessJoin": " and ",
-  "messageTimeline.accessOrganizeMailbox": "organize your mailbox",
+  /** A step-up card for access the app has no plain words for. */
+  "messageTimeline.accessOneMoreKindOfAction":
+    "{consent} will ask you for one more kind of access.",
+  /** What organizing a mailbox includes, under the step-up card's title. */
+  "messageTimeline.accessOrganizeMailboxIncludes":
+    "This includes marking mail as read, labeling and archiving it.",
+  /** Completes "Allow {product} to …" on a step-up card. */
+  "messageTimeline.accessOrganizeProvider": "organize your {provider}",
+  /** Completes "Allow {product} to …" on a step-up card. */
+  "messageTimeline.accessWriteAndSendFromProvider": "write and send email from your {provider}",
+  /** What writing and sending email includes, under the step-up card's title. */
+  "messageTimeline.accessWriteAndSendIncludes":
+    "This includes writing drafts and sending mail as you.",
   "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
   "messageTimeline.agentCarriesOnAfterAllowing":
@@ -3302,7 +3323,13 @@ export const englishMessages = {
   "messageTimeline.agentDecided": "Agent decided",
   "messageTimeline.agentDecidedSummary": "Agent decided: {summary}",
   "messageTimeline.agentSkipped": "Agent skipped",
-  "messageTimeline.allowAccess": "Allow",
+  /** A step-up card's button: it opens the consent page of {consent} ("Google"). */
+  "messageTimeline.allowInConsent": "Allow in {consent}",
+  "messageTimeline.allowProductMoreProviderAccess": "Allow {product} more access to {provider}",
+  /** A step-up card's title; {access} names the action ("organize your Gmail"). */
+  "messageTimeline.allowProductTo": "Allow {product} to {access}",
+  /** A step-up card once the person allowed it. */
+  "messageTimeline.allowed": "Allowed",
   "messageTimeline.answered": "Answered",
   "messageTimeline.answeredSummary": "Answered: {summary}",
   "messageTimeline.asked": "Asked",
@@ -3313,6 +3340,7 @@ export const englishMessages = {
   "messageTimeline.codexApps": "Codex Apps",
   "messageTimeline.compactingConversationHistory": "Compacting conversation history…",
   "messageTimeline.connect": "Connect",
+  "messageTimeline.connected": "Connected",
   "messageTimeline.connecting": "connecting",
   "messageTimeline.connectProvider": "Connect {provider}",
   "messageTimeline.continuingTowardTheGoal": "Continuing toward the goal",
@@ -3332,7 +3360,6 @@ export const englishMessages = {
   "messageTimeline.expired": "Expired",
   "messageTimeline.fromSource": "from {source}",
   "messageTimeline.generatedVideo": "Generated video",
-  "messageTimeline.giveProviderMoreAccess": "Give {provider} more access",
   "messageTimeline.goalCleared": "Goal cleared",
   "messageTimeline.goalCompleted": "Goal completed",
   "messageTimeline.goalHeld": "Goal held",
@@ -3343,8 +3370,6 @@ export const englishMessages = {
   "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
   "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
-  "messageTimeline.itNeedsPermissionTo":
-    "It needs your permission to {access}. Everything it can already do stays the same.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
   "messageTimeline.itsConnectionNeedsAttention": "Its connection needs attention.",
   "messageTimeline.connectedAccountLacksThisAccess":
@@ -3379,6 +3404,7 @@ export const englishMessages = {
   "messageTimeline.received": "Received",
   "messageTimeline.receivedClocktime": "Received {clockTime}",
   "messageTimeline.reconnect": "Reconnect",
+  "messageTimeline.reconnected": "Reconnected",
   "messageTimeline.reconnecting": "reconnecting",
   "messageTimeline.remove": "Remove",
   "messageTimeline.report": "Report",
@@ -3412,6 +3438,8 @@ export const englishMessages = {
   "messageTimeline.videoGenerationFailed": "Video generation failed",
   "messageTimeline.voiceHandoff": "Voice handoff",
   "messageTimeline.voiceRequest": "Voice request",
+  /** A step-up card's button while the consent page of {consent} ("Google") is open. */
+  "messageTimeline.waitingForConsent": "Waiting for {consent}…",
   "messageTimeline.workerCompleted": "Worker completed",
   "messageTimeline.workerFailed": "Worker failed",
   "messageTimeline.workerPaused": "Worker paused",

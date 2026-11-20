@@ -38,6 +38,12 @@ import {
 } from "../lib/session-composer-readiness";
 import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
+import { reserveBrowserConnectNavigation } from "@opengeni/connect/browser-navigation";
+import type {
+  AuthNeededRecoveryHandler,
+  AuthNeededRecoveryOptions,
+  AuthNeededRecoveryResult,
+} from "../../components/auth-needed-row";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
 import { useMessageSenderRenderer } from "../components/session/message-senders";
 import {
@@ -334,6 +340,11 @@ import {
 import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
 import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
 import { findConnectRecoveryTarget } from "../lib/connect-recovery-account";
+import type { CardStepUpOutcome } from "../lib/connection-step-up";
+import type {
+  ApprovalSurfaceProps,
+  ToolReviewAccessNeeded,
+} from "../../components/approval-surface";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -364,6 +375,9 @@ import { useUiEventTarget } from "../lib/ui-events";
 import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
 import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
+import { pendingConnectionCard } from "../../timeline/pending-connection-card";
+import { authNeededPresentation } from "../../auth-needed-presentation";
+import { AuthNeededRow } from "../../components/auth-needed-row";
 
 const InlineChatArtifact = lazy(() =>
   import("../components/artifacts/retained-file-preview").then((module) => ({
@@ -1179,7 +1193,7 @@ export function SessionRoute({
     personalGitHubConnection !== null &&
     personalGitHubConnection.status !== "active" &&
     personalGitHubConnection.status !== "revoked";
-  const onReconnect = useCallback(
+  const reconnectViaSetup = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
         if (!item.authorizationUrl) {
@@ -1227,6 +1241,9 @@ export function SessionRoute({
               : {}),
             displayName: account.label,
             returnUrl: page.href(),
+            // Sign-in runs in a popup: it ends on a page that closes it,
+            // never on a second copy of this chat.
+            finishInPopup: true,
             idempotencyKey: crypto.randomUUID(),
           };
           reconnectCardConnections.current.set(request, item.connectionId);
@@ -1345,6 +1362,128 @@ export function SessionRoute({
       workspaceId,
       reconnectTransport,
     ],
+  );
+  // A connected account that needs more access (an OAuth step-up) goes
+  // straight from its card to the provider's consent page: no setup dialog
+  // in between, and the card follows it until the account is updated.
+  // Anything the card can't finish in one step falls back to the dialog.
+  // Ask a connected account's provider for more access in the window the
+  // person's click opens. Not async before the window: it must open in the
+  // click itself, or the browser blocks it. Null when no window can open.
+  const stepUpConnection = useCallback(
+    (
+      connectionId: string,
+      scopes: readonly string[],
+      options: { signal?: AbortSignal | undefined; continueAfterSetup?: () => Promise<unknown> },
+    ): Promise<CardStepUpOutcome> | null => {
+      let reserved: ReturnType<typeof reserveBrowserConnectNavigation>;
+      try {
+        if (typeof window === "undefined") return null;
+        reserved = reserveBrowserConnectNavigation(window);
+      } catch {
+        return null;
+      }
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        reserved.close();
+      };
+      return (async () => {
+        try {
+          const [{ findConnectRecoveryAccount }, { stepUpFromCard }] = await Promise.all([
+            import("@opengeni/connect"),
+            import("../lib/connection-step-up"),
+          ]);
+          return await stepUpFromCard({
+            connectionId,
+            scopes,
+            window: { navigation: reserved.navigation, close },
+            transport: reconnectTransport,
+            findTarget: () =>
+              findConnectRecoveryTarget({
+                workspaceId,
+                connectionId,
+                accounts: (id) => reconnectTransport.accounts(id),
+                ownAccounts: () =>
+                  context.client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
+                find: findConnectRecoveryAccount,
+              }),
+            returnUrl: page.href(),
+            ...(options.continueAfterSetup
+              ? { continueAfterSetup: options.continueAfterSetup }
+              : {}),
+            signal: options.signal,
+          });
+        } finally {
+          close();
+        }
+      })();
+    },
+    [context.client, page, reconnectTransport, workspaceId],
+  );
+  const onReconnect = useCallback(
+    async (
+      item: AuthNeededItem,
+      options?: AuthNeededRecoveryOptions,
+    ): Promise<AuthNeededRecoveryResult | undefined> => {
+      const connectionId = item.connectionId;
+      const running =
+        item.authoritySource !== "host" &&
+        item.reason === "insufficient_scope" &&
+        connectionId &&
+        item.scopes.length > 0 &&
+        !item.capability &&
+        !item.setupRequest
+          ? stepUpConnection(connectionId, item.scopes, {
+              signal: options?.signal,
+              continueAfterSetup: () =>
+                context.client.continueAfterCapabilitySetup(workspaceId, sessionId, {
+                  connectionId,
+                }),
+            })
+          : null;
+      const outcome = running ? await running : null;
+      if (outcome?.status === "allowed") return { outcome: "done" };
+      if (outcome?.status === "resume_in_dialog" && connectionId) {
+        // The dialog resumes this same attempt (same account and access).
+        reconnectCardConnections.current.set(outcome.request, connectionId);
+        setReconnectRequest(outcome.request);
+        return undefined;
+      }
+      await reconnectViaSetup(item);
+      return undefined;
+    },
+    [context.client, reconnectViaSetup, sessionId, stepUpConnection, workspaceId],
+  );
+  // Approving an action whose account lacks access asks the provider for it
+  // first, in the same click; the approval then covers only that one call.
+  // When no consent ran, the action stays waiting and says why: approving a
+  // call that is sure to fail would use up the decision.
+  const allowAccessForApproval = useCallback(
+    async (
+      access: ToolReviewAccessNeeded,
+      _approval?: unknown,
+      signal?: AbortSignal,
+    ): Promise<boolean> => {
+      const running = stepUpConnection(access.connectionId, access.scopes, { signal });
+      if (!running) {
+        toast.error(t("connectWindowHost.allowPopups"));
+        return false;
+      }
+      const outcome = await running;
+      if (outcome.status === "resume_in_dialog") {
+        // The person finishes it there, then approves.
+        setReconnectRequest(outcome.request);
+        return false;
+      }
+      if (outcome.status === "not_handled") {
+        toast.error(t("connectSetup.setupCouldNotContinueTryAgain"));
+        return false;
+      }
+      return true;
+    },
+    [stepUpConnection],
   );
 
   // The workspace shell already needs the capability catalog for session tool
@@ -1617,6 +1756,7 @@ export function SessionRoute({
       onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
+      onAllowAccess={allowAccessForApproval}
       onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
@@ -2264,7 +2404,9 @@ function SessionChatPane(props: {
   onRestoreArchived?: (() => Promise<boolean>) | undefined;
   onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
-  onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  onReconnect: AuthNeededRecoveryHandler;
+  /** Asks a provider for access an action's account lacks, before approving it. */
+  onAllowAccess: NonNullable<ApprovalSurfaceProps["onAllowAccess"]>;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
   onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
@@ -3582,6 +3724,27 @@ function SessionChatPane(props: {
     hasNewer: props.hasNewer,
     queue: props.queue.snapshot,
   });
+  // The connection card the agent ended waiting on stays in view above the
+  // composer, where approvals are, until it is done or the person writes.
+  const pinnedConnectionCard = useMemo(
+    () =>
+      props.session.status === "idle" && !props.hasNewer
+        ? pendingConnectionCard(
+            timelineWithStartup,
+            (item) =>
+              !authNeededPresentation(t, item).unavailable &&
+              (item.authoritySource !== "host" || Boolean(item.authorizationUrl)),
+          )
+        : null,
+    [props.hasNewer, props.session.status, timelineWithStartup],
+  );
+  const timelineItems = useMemo(
+    () =>
+      pinnedConnectionCard
+        ? timelineWithStartup.filter((item) => item !== pinnedConnectionCard)
+        : timelineWithStartup,
+    [pinnedConnectionCard, timelineWithStartup],
+  );
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     sessionDisplayStatus(props.session),
     readOnlyArchive === null &&
@@ -4333,6 +4496,17 @@ function SessionChatPane(props: {
                               {failureRecovery}
                               {/* The pause's other approvals stay up while a decision
                         resumes the turn: deciding them never waits for it. */}
+                              {pinnedConnectionCard ? (
+                                <div className="pb-1" data-pinned-connection-card="">
+                                  {renderAuthNeeded(pinnedConnectionCard) ?? (
+                                    <AuthNeededRow
+                                      item={pinnedConnectionCard}
+                                      onReconnect={props.onReconnect}
+                                      resolveProviderLogo={props.resolveProviderLogo}
+                                    />
+                                  )}
+                                </div>
+                              ) : null}
                               {props.approvals.length > 0 &&
                                 approvalsDecidable(props.session.status) && (
                                   <ApprovalSurface
@@ -4341,6 +4515,7 @@ function SessionChatPane(props: {
                                     onSelectedApprovalChange={setSelectedApprovalId}
                                     loadReview={loadToolReview}
                                     onViewDetails={viewToolReviewDetails}
+                                    onAllowAccess={props.onAllowAccess}
                                     onApprove={(approval, answer) =>
                                       decideApproval(approval.id, "approve", answer)
                                     }
@@ -4387,7 +4562,7 @@ function SessionChatPane(props: {
                           turnSummary={{ rolling: true }}
                           key={props.session.id}
                           className="h-full"
-                          items={timelineWithStartup}
+                          items={timelineItems}
                           searchTarget={activeSearchTarget}
                           focusSequence={momentSequence}
                           events={props.events}
@@ -4608,6 +4783,7 @@ function SessionChatPane(props: {
                       onResolved={props.onDescendantResolved}
                       onResumingChange={onSubSessionResumingChange}
                       refreshSignal={props.descendantRefreshSignal}
+                      onAllowAccess={props.onAllowAccess}
                       loadSkillReview={loadSkillReview}
                       allowedSaveTo={secretSaveTargets(
                         context.accessContext,

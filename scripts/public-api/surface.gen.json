@@ -18007,6 +18007,7 @@
         "$.attentionVersion": "integer!",
         "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.avatar": "ref(SessionAvatar)! null",
+        "$.awaitingConnectionSince": "string? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -29163,6 +29164,7 @@
         "$.attentionVersion": "integer!",
         "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.avatar": "ref(SessionAvatar)! null",
+        "$.awaitingConnectionSince": "string? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.bundledSkillIds": "unknown?",
         "$.channelId": "string! null",
@@ -29844,6 +29846,7 @@
         "$.attentionVersion": "integer!",
         "$.automationWait": "ref(SessionAutomationWaitSummary)? null",
         "$.avatar": "ref(SessionAvatar)! null",
+        "$.awaitingConnectionSince": "string? null",
         "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
         "$.channelId": "string! null",
         "$.createdAt": "string!",
@@ -32454,6 +32457,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.accessNeeded": "ref(ToolReviewAccessNeeded)?",
         "$.accountLabel": "string?",
         "$.accountOwnerLabel": "string?",
         "$.actionDigest": "string!",
@@ -33201,6 +33205,18 @@
         "$.id": "string!",
         "$.kind": "const!=[\"\\\"mcp\\\"\"]",
         "$.optional": "boolean?"
+      }
+    },
+    "ToolReviewAccessNeeded": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectionId": "string!",
+        "$.providerDomain": "string!",
+        "$.scopes": "array!",
+        "$.scopes[]": "string"
       }
     },
     "ToolReviewDetailsPage": {
@@ -40706,6 +40722,9 @@
       "asVaultClient": "value",
       "attachSessionCapability": "value",
       "AuthNeededItem": "type",
+      "AuthNeededRecoveryHandler": "type",
+      "AuthNeededRecoveryOptions": "type",
+      "AuthNeededRecoveryResult": "type",
       "automationRunOutcomesOnly": "value",
       "availabilityReasonLabel": "value",
       "billingClassForModel": "value",
@@ -41260,6 +41279,7 @@
       "ToolRegistryEntry": "type",
       "ToolRenderer": "type",
       "ToolRendererProps": "type",
+      "ToolReviewAccessNeeded": "type",
       "ToolReviewDetailsLoader": "type",
       "ToolReviewHistoryProvider": "value",
       "Tooltip": "value",
