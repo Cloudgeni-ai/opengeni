@@ -3706,28 +3706,33 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("another CUA worker's overlay is not a target", async () => {
-    const fixture = new Fixture();
-    const original = fixture.callTool.bind(fixture);
-    fixture.callTool = async (name, argumentsJson) => {
-      const response = await original(name, argumentsJson);
-      if (name !== "list_windows") return response;
-      const data = JSON.parse(response.structuredJson!);
-      data.windows.unshift({
-        pid: 77,
-        window_id: 9,
-        title: "",
-        app_name: "cua-driver",
-        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
-      });
-      response.structuredJson = JSON.stringify(data);
-      return response;
-    };
-    const backend = await CuaComputerBackend.open(fixture);
-    try {
-      expect((await backend.targets()).map((target) => target.id)).toEqual(["cua:window:42:1"]);
-    } finally {
-      await backend.close();
+  test("a CUA worker's overlay is not a target", async () => {
+    // Windows lists the worker by its executable, and CUA refuses to read it.
+    for (const [platform, fixture, appName] of [
+      ["macos", new Fixture(), "cua-driver"],
+      ["windows", new WindowsFixture(), "cua-driver.exe"],
+    ] as const) {
+      const original = fixture.callTool.bind(fixture);
+      fixture.callTool = async (name, argumentsJson) => {
+        const response = await original(name, argumentsJson);
+        if (name !== "list_windows") return response;
+        const data = JSON.parse(response.structuredJson!);
+        data.windows.unshift({
+          pid: 77,
+          window_id: 9,
+          title: "Cua.AgentCursorOverlay.default",
+          app_name: appName,
+          bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        });
+        response.structuredJson = JSON.stringify(data);
+        return response;
+      };
+      const backend = await CuaComputerBackend.open(fixture, platform);
+      try {
+        expect((await backend.targets()).map((target) => target.id)).toEqual(["cua:window:42:1"]);
+      } finally {
+        await backend.close();
+      }
     }
   });
 
