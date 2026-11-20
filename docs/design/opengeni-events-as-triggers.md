@@ -61,10 +61,10 @@ limit on chains of automations that wake each other.
 | `usage.exhausted` | A usage limit was used up | Yes |
 | `usage.period_reset` | A new usage period started | Yes |
 | `recording.*` | Meeting recording facts | Yes, as today |
-| `app.record.added` / `app.record.changed` / `app.record.removed` | A record was added to, changed in or removed from an App's collection | Yes (migration 1515) |
-| `app.sql.changed` | An App's SQL database was written to | Yes (migration 1515) |
+| `app.record.added` / `app.record.changed` / `app.record.removed` | A record was added to, changed in or removed from an App's collection | Yes (migration 1516) |
+| `app.sql.changed` | An App's SQL database was written to | Yes (migration 1516) |
 
-### App data changes (migration 1515)
+### App data changes (migration 1516)
 
 App writes add facts to the same table, written by the API in the write's
 transaction (Site Data) or right after the App's database commits (Site

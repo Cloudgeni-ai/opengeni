@@ -139,7 +139,7 @@ Errors use the Site Data error envelope.
 
 ## Storage
 
-Migration `1516_app_data_sync.sql` (rolling): `app_sync` in both action
+Migration `1517_app_data_sync.sql` (rolling): `app_sync` in both action
 checks, `scheduled_task_runs.sync_summary`, and two FORCE RLS tables,
 `app_sync_subscriptions` (opt-ins with each person's last run) and
 `app_sync_queue` (run ids waiting for the executor; the executor lists due

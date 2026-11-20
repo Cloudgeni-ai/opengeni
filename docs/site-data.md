@@ -124,7 +124,7 @@ atomic with Postgres, so no hint is published).
 ### App change events for automations and webhooks
 
 Automations and workspace webhooks hear about App data changes through the
-same vocabulary as Opengeni's other events (migration `1515`,
+same vocabulary as Opengeni's other events (migration `1516`,
 `packages/db/src/app-activity-events.ts`):
 
 - `app.record.added`, `app.record.changed`, `app.record.removed`: one fact per

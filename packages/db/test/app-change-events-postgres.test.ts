@@ -1,4 +1,4 @@
-// Migration 1515: App data changes as activity facts and workspace webhook
+// Migration 1516: App data changes as activity facts and workspace webhook
 // deliveries. Facts are written only while someone listens, unchanged writes
 // record nothing, row security narrows per-person records to who may read
 // them, and webhook payloads leave out record contents they may not see.
@@ -37,7 +37,7 @@ let client: DbClient;
 let appSql: postgres.Sql;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("migration-1515-app-change-events");
+  const acquired = await acquireSharedTestDatabase("migration-1516-app-change-events");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });

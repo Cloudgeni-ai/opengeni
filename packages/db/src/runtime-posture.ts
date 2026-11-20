@@ -2652,7 +2652,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
-  // 1516_app_data_sync: App data sync executor queue and personal opt-ins.
+  // 1517_app_data_sync: App data sync executor queue and personal opt-ins.
   "app_sync_queue",
   "app_sync_subscriptions",
   "audit_events",
