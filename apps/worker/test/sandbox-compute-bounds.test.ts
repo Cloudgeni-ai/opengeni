@@ -176,6 +176,32 @@ describe("free compute bounds: reaper decisions", () => {
     ).toEqual([]);
   });
 
+  test("a used card trial drains active boxes no turn holds; a remaining one keeps them", () => {
+    const active = lease({ lastActiveAt: observedAt });
+    expect(
+      planComputeBoundsDrains(
+        [active],
+        new Map([["org-a", { limit: free, boxSecondsToday: 0, cardBlocked: true }]]),
+        { idleDrainMs: 1_800_000 },
+      ).map((decision) => decision.reason),
+    ).toEqual(["compute_card_required"]);
+    expect(
+      planComputeBoundsDrains(
+        [active],
+        new Map([["org-a", { limit: free, boxSecondsToday: 0, cardBlocked: false }]]),
+        { idleDrainMs: 1_800_000 },
+      ),
+    ).toEqual([]);
+    // A compute box keeps its state outside a drain: only a closed tier ends it.
+    expect(
+      planComputeBoundsDrains(
+        [lease({ backend: "compute" })],
+        new Map([["org-a", { limit: free, boxSecondsToday: 0, cardBlocked: true }]]),
+        { idleDrainMs: 1_800_000 },
+      ),
+    ).toEqual([]);
+  });
+
   test("an idle box drains whatever holds it, unless its sessions have open work", () => {
     const idle = new Date(observedAt.getTime() - 1_800_000);
     const organizations = new Map([["org-a", { limit: free, boxSecondsToday: 0 }]]);
