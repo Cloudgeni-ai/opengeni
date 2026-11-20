@@ -13109,6 +13109,8 @@ export const scheduledTaskRuns = pgTable(
     actionKind: text("action_kind").notNull().default("agent_turn"),
     knowledgeSyncRunId: uuid("knowledge_sync_run_id"),
     knowledgeSummary: jsonb("knowledge_summary").$type<Record<string, unknown>>(),
+    // App data sync runs: what the run read and wrote (1516).
+    syncSummary: jsonb("sync_summary").$type<Record<string, unknown>>(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     // Stable Temporal producer identity. Activity replay/re-dispatch returns
     // the exact run instead of allocating a second schedule source row.

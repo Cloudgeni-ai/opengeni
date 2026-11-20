@@ -136,6 +136,20 @@ export type {
   WorkspaceAutomationTemplate,
 } from "@opengeni/contracts";
 export type {
+  AppSync,
+  AppSyncCreateRequest,
+  AppSyncDefinition,
+  AppSyncLastRun,
+  AppSyncListResponse,
+  AppSyncMode,
+  AppSyncRunResponse,
+  AppSyncRunSummary,
+  AppSyncStatus,
+  AppSyncStatusResponse,
+  AppSyncSubscriptionResponse,
+  AppSyncUpdateRequest,
+} from "@opengeni/contracts";
+export type {
   SiteDataAccessMode,
   SiteDataCollectionDefinitionRequest,
   SiteDataCollectionResponse,

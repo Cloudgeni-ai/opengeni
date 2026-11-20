@@ -277,6 +277,9 @@ Operations:
   - Guests read and open the Site's `shared` files (list and short-lived
     download URLs, within the same per-visitor and per-address request
     limits). They never upload or delete files, and never see `private` files.
+  - `GET /data/syncs` (`site.data.syncs()`) returns each App data sync's last
+    run and, for personal syncs, the viewer's own last run and opt-in
+    ([app-sync.md](app-sync.md)).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable

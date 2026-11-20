@@ -398,6 +398,10 @@ use the schedule's. Site-origin agents use the same native role as console agent
 
 
 
+**Syncs.** An App data sync keeps a collection filled from a connected tool on
+a schedule without a model run; the page reads each sync's last run with
+`site.data.syncs()` (`GET /data/syncs`). See [app-sync.md](app-sync.md).
+
 **Web.** The Site page's Data tab (`packages/react/src/app/components/artifacts/site-data.tsx`)
 is shown to likely managers and trusts the API's answer: collections with
 access, records and size against the quota, a paged record table, a record's

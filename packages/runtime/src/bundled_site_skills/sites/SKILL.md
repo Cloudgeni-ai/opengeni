@@ -233,7 +233,8 @@ server, a tunnel, or a Connected Machine for workspace AI access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. Saved data needs no server either:
 Site Data gives every published Site persistent collections and files,
-and scheduled tasks feed them through agent tools. A separate server is only
+and a data sync (`app_sync_save`) refills them from a connected tool with no
+model run (`references/site-data.md`). A separate server is only
 relevant for a genuinely external need: a third-party API that requires a
 secret the viewer's browser must not hold, relational queries or volumes Site
 Data cannot serve, or live server-side compute. If the request seems to need
