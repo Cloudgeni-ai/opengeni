@@ -224,6 +224,20 @@ export type {
   ArtifactLinkResolution,
 } from "./artifact-catalog";
 export type {
+  NewSidebarItem,
+  ResolvedSidebarAppLink,
+  ResolvedSidebarChild,
+  ResolvedSidebarExternalLink,
+  ResolvedSidebarGroup,
+  ResolvedSidebarItem,
+  ResolvedSidebarLiveList,
+  SidebarItemOrigin,
+  SidebarLayoutChange,
+  SidebarLayoutResponse,
+  SidebarLiveListKind,
+  UpdateSidebarLayoutRequest,
+} from "./sidebar-layout";
+export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,

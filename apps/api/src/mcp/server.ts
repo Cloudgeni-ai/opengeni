@@ -14,6 +14,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
+import { registerSidebarLayoutTools } from "./sidebar-layout-tools";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
@@ -1839,6 +1840,7 @@ export function buildOpenGeniMcpServer(
   );
 
   registerProjectTools(server, deps, grant, can, json);
+  if (can("workspace:read")) registerSidebarLayoutTools(server, deps, grant, json);
   if (sessionId !== null && can("workspace:read")) {
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
   }

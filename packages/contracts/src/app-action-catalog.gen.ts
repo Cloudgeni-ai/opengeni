@@ -3245,6 +3245,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/sidebar-layout",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [],
+    "response": [],
+    "permission": "workspace:read"
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/slack-task-policy",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/slack-task-policy",
@@ -7401,6 +7409,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "PATCH /v1/workspaces/:workspaceId/sidebar-layout",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [
+      "UpdateSidebarLayoutRequest"
+    ],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId",

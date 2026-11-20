@@ -159,6 +159,25 @@ await site.navigate("/admin?tab=2"); // { replace: true } adds no history entry
 - In a local preview the page is the top-level document, so `site.location`
   is the preview server's address: serve `index.html` for every page path.
 
+## Opengeni look
+
+An App opened from the sidebar is a page of Opengeni: it fills the main area,
+its address (above) is the page URL, and it stays open when the person goes
+elsewhere. Make it feel native:
+
+- Follow `prefers-color-scheme`; inside Opengeni it is Opengeni's light or dark
+  theme and switches without a reload. Don't hard-code a white page.
+- For an App that should look like Opengeni (dashboards, tools, admin pages),
+  add `<link rel="stylesheet" href="/__opengeni/ui.css">` and use its `--og-*`
+  tokens (`--og-canvas`, `--og-surface`, `--og-border`, `--og-fg`,
+  `--og-fg-muted`, `--og-accent`, ...) and classes: `og-app` on `<body>`,
+  `og-page`, `og-title`, `og-heading`, `og-card`, `og-button`
+  (`og-button-primary`), `og-input`, `og-badge`, `og-table`. It styles only what
+  you mark, so a user's own design stays theirs. In a Bun + React app put the
+  same tag in `index.html`.
+- Links to a page (`/releases`) work from the sidebar too: add one with
+  `sidebar_layout_update` (an `app` item with the App's id and `path`).
+
 ## Authoring, preview, and viewer access
 
 Your authoring session's tools let you build, inspect, and publish the Site;

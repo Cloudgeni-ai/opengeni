@@ -2441,6 +2441,7 @@ export const FORCE_RLS_TABLES = [
   "session_work_claims",
   "session_workflow_wake_outbox",
   "sessions",
+  "sidebar_layouts",
   "site_abuse_reports",
   "site_auth_codes",
   "site_auth_connections",
@@ -2830,6 +2831,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_turns",
   "session_workflow_wake_outbox",
   "sessions",
+  // 1515: sidebar layouts (workspace default and personal changes).
+  "sidebar_layouts",
   "site_abuse_reports",
   "site_auth_codes",
   "site_data_changes",

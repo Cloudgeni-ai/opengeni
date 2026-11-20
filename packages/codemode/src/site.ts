@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { generateToolDeclarations, digestToolGatewayDefinition } from "@opengeni/tool-gateway";
 import { ToolGatewayResolveRequest, ToolGatewayInvokeRequest } from "@opengeni/contracts";
 import { SITE_BROWSER_RUNTIME, SITE_CLIENT_SCRIPT_PATH } from "@opengeni/sdk/site-document";
+import { SITE_UI_CSS, SITE_UI_STYLESHEET_PATH } from "@opengeni/sdk/site-ui";
 
 import { CodemodeClient, CodemodeTransportError } from "./index";
 import { environmentCodemodeClient, type CodemodeClientProvider } from "./environment";
@@ -36,6 +37,16 @@ export function createCodemodeSiteRequestHandler(
   return async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
+      if (pathname === SITE_UI_STYLESHEET_PATH) {
+        if (request.method !== "GET" && request.method !== "HEAD")
+          return new Response("Method not allowed", {
+            status: 405,
+            headers: { allow: "GET, HEAD" },
+          });
+        return new Response(request.method === "HEAD" ? null : SITE_UI_CSS, {
+          headers: { "content-type": "text/css; charset=utf-8", "cache-control": "no-cache" },
+        });
+      }
       if (pathname === SITE_CLIENT_SCRIPT_PATH) {
         if (request.method !== "GET" && request.method !== "HEAD")
           return new Response("Method not allowed", {
