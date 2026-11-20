@@ -100,6 +100,26 @@ describe("file attachments and the cached instruction prefix", () => {
     expect(Object.keys(withFile.runtimeManifest.entries)).toContain(`.opengeni/files/${FILE_ID}`);
   });
 
+  test("the layout of a turn with a file needs no file entry where storage cannot be mounted", () => {
+    // Azure Blob on a native bucket-mount backend, and AWS S3 or GCS anywhere,
+    // reach the sandbox only by the turn's pre-signed download. The layout
+    // lists no files, so a turn with an attachment still gets its layout.
+    for (const storage of [
+      testSettings({
+        sandboxBackend: "modal",
+        objectStorageBackend: "azure-blob",
+        objectStorageAzureConnectionString:
+          "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+      }),
+      testSettings({ sandboxBackend: "docker", objectStorageBackend: "aws-s3" }),
+      testSettings({ sandboxBackend: "modal", objectStorageBackend: "gcs" }),
+    ]) {
+      const withoutFile = workspaceFilesystemLayout(storage, [REPOSITORY]);
+      expect(withoutFile).toContain("repos/");
+      expect(workspaceFilesystemLayout(storage, [REPOSITORY, FILE])).toBe(withoutFile);
+    }
+  });
+
   test("moving the session to another machine keeps the instructions; only the layout changes", async () => {
     const managed = await sentInstructions([REPOSITORY]);
     const linux = await sentInstructions([REPOSITORY], undefined, {

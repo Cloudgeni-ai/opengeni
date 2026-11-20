@@ -14133,16 +14133,21 @@ export function workspaceFilesystemLayout(
 ): string | null {
   if (settings.sandboxBackend === "none") return null;
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) return null;
+  // The layout never lists file resources, so they are left out before the
+  // manifest is built: a file entry needs the turn's pre-signed download where
+  // the storage cannot be mounted (Azure Blob on a native bucket-mount backend,
+  // AWS S3, GCS), and the layout has none to give.
+  const layoutResources = resources.filter((resource) => resource.kind !== "file");
   const manifest = buildManifest(
     settings,
-    resources,
+    layoutResources,
     {},
     [],
     options.activeSandboxBackend === "selfhosted"
       ? { root: options.sandboxWorkspaceRoot!, includeResourceEntries: false }
       : {},
   );
-  return renderManifestDescription(manifestWithoutFileResourceEntries(manifest, resources), {
+  return renderManifestDescription(manifestWithoutFileResourceEntries(manifest, layoutResources), {
     depth: 3,
   }).text;
 }
