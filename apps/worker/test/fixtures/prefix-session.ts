@@ -427,7 +427,8 @@ function goalSnapshot(state: SessionState["goal"]): SessionGoalSnapshot {
   };
 }
 
-function agentConfig(): ResolvedAgentConfig {
+/** The configured agent every fixture chat runs as. */
+export function agentConfig(): ResolvedAgentConfig {
   return {
     version: 1,
     from: "all",

@@ -751,6 +751,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     layout: workspaceFilesystemLayout(eventing.modelRunSettings, runtimeResources, {
       ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
+      ...(session.agent ? { renderer: session.agent.renderer } : {}),
       ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
         ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
         : {}),

@@ -718,10 +718,19 @@ describe("modular composer: prompt-cache stability", () => {
       gitCredentials: true,
       commandCompletionDelivery: true,
     });
+    // The kind of compute is the deployment's: moving the session to a
+    // Connected Machine leaves the facts (and the system prompt) unchanged.
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {
         activeSandboxBackend: "selfhosted",
       }),
+    ).toEqual(agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}));
+    expect(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "selfhosted" }),
+        [{ kind: "repository", uri: "x" }] as never,
+        { activeSandboxBackend: "selfhosted" },
+      ),
     ).toEqual({
       managedSandbox: false,
       connectedMachine: true,
@@ -729,6 +738,10 @@ describe("modular composer: prompt-cache stability", () => {
       gitCredentials: false,
       commandCompletionDelivery: true,
     });
+    // Compute itself still follows the turn.
+    expect(
+      agentPromptResourcesFor(settings, [], { activeSandboxBackend: "none" }).managedSandbox,
+    ).toBe(false);
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}),
     ).toEqual(

@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import {
   INITIAL_STATE,
   WIRES,
+  agentConfig,
   prefixChat,
   type CapturedRequest,
   type SessionState,
@@ -229,11 +230,17 @@ for (const wire of WIRES) {
 // live-chat fixture), each with its own backend and workspace root, on the
 // Claude and Responses wire adapters.
 describe.each([
-  ["anthropic", claudeModel],
-  ["responses", responsesModel],
+  ["anthropic", claudeModel, "plain chat"],
+  ["responses", responsesModel, "plain chat"],
+  ["anthropic", claudeModel, "configured agent"],
+  ["responses", responsesModel, "configured agent"],
 ] as const)(
-  "%s: a request repeats the previous request's prefix when the chat's machine changes",
-  (name, wire) => {
+  "%s, %s: a request repeats the previous request's prefix when the chat's machine changes",
+  (wireName, wire, agentKind) => {
+    const name = `${wireName}, ${agentKind}`;
+    // A configured agent composes its system prompt from modules that read
+    // the turn's resources; a plain chat uses the static operational text.
+    const agent = agentKind === "configured agent" ? { agentConfig: agentConfig() } : {};
     // Each side is where a turn runs: its sandbox backend and workspace root.
     // A managed sandbox and a Connected Machine render different resources.
     const managed = { backend: "docker", root: "/workspace" } as const;
@@ -271,6 +278,7 @@ describe.each([
           ) => ({
             box,
             build: {
+              ...agent,
               activeSandboxBackend: side.backend,
               sandboxWorkspaceRoot: box.session.state.manifest!.root!,
             },

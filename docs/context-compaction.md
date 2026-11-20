@@ -464,6 +464,16 @@ the start of every later request:
   layout. Compaction re-adds only the latest layout item after governance.
   Before this, every machine swap rewrote the end of the system prompt and
   every later request of the session re-read its whole history uncached.
+- The kind of compute works the same way. A configured agent's system prompt
+  describes the deployment's own kind of compute (`promptSandboxBackend`), not
+  the machine the turn runs on, so moving between a managed sandbox and a
+  Connected Machine keeps it byte-identical; only having compute at all still
+  follows the turn. When a session of a managed-sandbox deployment is on a
+  Connected Machine, its layout item adds the `# Connected Machine` section and
+  says which managed-sandbox guidance does not apply there. Before this, each
+  move between the two rewrote the file-link rules, the Connected Machine
+  section and the Git section, and on Claude routes the changed system prompt
+  also dropped every earlier signed thinking block.
 - An agent's Instructions are the exception that is allowed in the system
   prompt, because every chat of one agent shares them: chats bound to an agent
   revision (`sessions.agent_prompt_revision`) carry that revision as their own
