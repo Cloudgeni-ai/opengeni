@@ -696,34 +696,50 @@ describe("Slack interaction migration and durable database boundary", () => {
     });
     // An open delivery is marked instead, and the cursor never moves back.
     expect(
-      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 2 }),
+      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 11 }),
     ).toBe("marked");
-    // The pass that was running then settles back to open for the woken answer.
-    await admin`
-      update slack_interactions set delivery_claim_holder_id = '00000000-0000-4000-8000-0000000000a1'
-      where id = ${interaction.id}`;
-    expect(
-      await closeSlackInteractionDelivery(db, {
-        ...interaction,
-        claimHolderId: "00000000-0000-4000-8000-0000000000a1",
-        sequence: 12,
-        state: "completed",
-      }),
-    ).toBe(true);
-    const [settled] = await admin<
-      {
-        terminal_delivery_state: string;
-        last_delivered_session_event_sequence: number;
-        delivery_reopen_requested_at: Date | null;
-      }[]
-    >`
-      select terminal_delivery_state, last_delivered_session_event_sequence,
-        delivery_reopen_requested_at
-      from slack_interactions where id = ${interaction.id}`;
-    expect(settled).toEqual({
+    const holder = "00000000-0000-4000-8000-0000000000a1";
+    const settle = async (sequence: number, terminalSequence: number) => {
+      await admin`
+        update slack_interactions set delivery_claim_holder_id = ${holder}
+        where id = ${interaction.id}`;
+      expect(
+        await closeSlackInteractionDelivery(db, {
+          ...interaction,
+          claimHolderId: holder,
+          sequence,
+          terminalSequence,
+          state: "completed",
+        }),
+      ).toBe(true);
+      const [row] = await admin<
+        {
+          terminal_delivery_state: string;
+          last_delivered_session_event_sequence: number;
+          delivery_reopen_after_sequence: number | null;
+        }[]
+      >`
+        select terminal_delivery_state, last_delivered_session_event_sequence,
+          delivery_reopen_after_sequence
+        from slack_interactions where id = ${interaction.id}`;
+      return row;
+    };
+    // The pass settles the earlier run (before the wake): it stays open for
+    // the woken answer, skipping to the wake.
+    expect(await settle(10, 10)).toEqual({
       terminal_delivery_state: "open",
-      last_delivered_session_event_sequence: 12,
-      delivery_reopen_requested_at: null,
+      last_delivered_session_event_sequence: 11,
+      delivery_reopen_after_sequence: null,
+    });
+    // One page that holds the earlier run and the whole woken run settles
+    // after the wake: it closes as usual.
+    expect(
+      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 13 }),
+    ).toBe("marked");
+    expect(await settle(20, 19)).toEqual({
+      terminal_delivery_state: "completed",
+      last_delivered_session_event_sequence: 20,
+      delivery_reopen_after_sequence: null,
     });
   }, 60_000);
 

@@ -17032,24 +17032,27 @@ export async function reopenSlackInteractionDelivery(
  * Reopen a settled Slack thread delivery so the chat's next answer posts in
  * the thread again, skipping everything up to `afterSequence` (what the chat
  * did elsewhere meanwhile). Used when a one-time automation wakes a chat that
- * started in Slack. A delivery that is still open (a pass is posting an
- * earlier answer) is marked instead, and settles back to open when that pass
- * ends. Returns "reopened", "marked", or null when the delivery is gone.
+ * started in Slack. A delivery that is still open (an earlier answer is still
+ * being delivered) is marked with `afterSequence` instead: a pass that settles
+ * a run ending at or before it stays open for the woken answer, and one that
+ * settles a later run (the woken one) closes as usual. Returns "reopened",
+ * "marked", or null when the delivery is gone.
  */
 export async function reopenSlackInteractionDeliveryAfter(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & { afterSequence: number },
 ): Promise<"reopened" | "marked" | null> {
+  const afterSequence = Math.max(0, Math.trunc(input.afterSequence));
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.slackInteractions)
       .set({
         terminalDeliveryState: "open",
-        deliveryReopenRequestedAt: null,
+        deliveryReopenAfterSequence: null,
         deliveryAttemptCount: 0,
         deliveryRetryAt: null,
         deliveryLastErrorCode: null,
-        lastDeliveredSessionEventSequence: sql`greatest(${schema.slackInteractions.lastDeliveredSessionEventSequence}, ${Math.max(0, Math.trunc(input.afterSequence))})`,
+        lastDeliveredSessionEventSequence: sql`greatest(${schema.slackInteractions.lastDeliveredSessionEventSequence}, ${afterSequence})`,
         updatedAt: sql`now()`,
       })
       .where(
@@ -17062,7 +17065,10 @@ export async function reopenSlackInteractionDeliveryAfter(
     if (rows.length === 1) return "reopened";
     const marked = await scopedDb
       .update(schema.slackInteractions)
-      .set({ deliveryReopenRequestedAt: sql`now()`, updatedAt: sql`now()` })
+      .set({
+        deliveryReopenAfterSequence: sql`greatest(coalesce(${schema.slackInteractions.deliveryReopenAfterSequence}, 0), ${afterSequence})`,
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(schema.slackInteractions.id, input.id),
@@ -17168,16 +17174,26 @@ export async function closeSlackInteractionDelivery(
     sequence: number;
     state: Exclude<SlackInteraction["terminalDeliveryState"], "open">;
     errorCode?: string | null;
+    /**
+     * The event that settled the run. A wake marked after it (see
+     * reopenSlackInteractionDeliveryAfter) keeps the delivery open, skipping
+     * to the wake. Omitted (a failed delivery): always closes.
+     */
+    terminalSequence?: number;
   },
 ): Promise<boolean> {
+  const reopen =
+    input.terminalSequence === undefined
+      ? sql`false`
+      : sql`(${schema.slackInteractions.deliveryReopenAfterSequence} is not null and ${Math.trunc(input.terminalSequence)} <= ${schema.slackInteractions.deliveryReopenAfterSequence})`;
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.slackInteractions)
       .set({
-        lastDeliveredSessionEventSequence: input.sequence,
-        // A wake asked to reopen while this pass ran: stay open for its answer.
-        terminalDeliveryState: sql`case when ${schema.slackInteractions.deliveryReopenRequestedAt} is null then ${input.state}::text else 'open' end`,
-        deliveryReopenRequestedAt: null,
+        lastDeliveredSessionEventSequence: sql`case when ${reopen} then greatest(${input.sequence}, ${schema.slackInteractions.deliveryReopenAfterSequence}) else ${input.sequence} end`,
+        // A wake asked to reopen after the run this pass settled: stay open for its answer.
+        terminalDeliveryState: sql`case when ${reopen} then 'open' else ${input.state}::text end`,
+        deliveryReopenAfterSequence: null,
         deliveryClaimHolderId: null,
         deliveryClaimExpiresAt: null,
         deliveryRetryAt: null,

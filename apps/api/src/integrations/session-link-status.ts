@@ -27,6 +27,7 @@ const STATUS_TTL_MS = 30_000;
 const FRESH_MIN_INTERVAL_MS = 5_000;
 const TOKEN_REUSE_MARGIN_MS = 60_000;
 const REPOSITORY_TTL_MS = 10 * 60_000;
+const NOT_FOUND_TTL_MS = 30_000;
 const GITHUB_TIMEOUT_MS = 6_000;
 const MAX_CONCURRENT = 4;
 const CACHE_MAX = 2_000;
@@ -190,7 +191,9 @@ export async function resolveWorkspaceGitHubRepository(
   if (!installation) return null;
   const key = `${installation.installationId}:${owner.toLowerCase()}/${repo.toLowerCase()}`;
   let cached = repositoryCache.get(key);
-  if (!cached || Date.now() - cached.at > REPOSITORY_TTL_MS) {
+  // A repository not found is re-checked soon: the App may be installed on it next.
+  const ttl = cached?.repository ? REPOSITORY_TTL_MS : NOT_FOUND_TTL_MS;
+  if (!cached || Date.now() - cached.at > ttl) {
     const found = await io.lookupRepository(deps.settings, {
       installationId: installation.installationId,
       owner,

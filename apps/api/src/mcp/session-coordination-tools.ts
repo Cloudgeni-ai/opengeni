@@ -88,7 +88,7 @@ export function sessionLinkWakeRequest(
     };
   }
   return {
-    name: `When ${repository} publishes a release`.slice(0, 120),
+    name: `When ${repository} publishes a release after #${ref.number}`.slice(0, 120),
     prompt: `${repository} published a release after ${label} (${link.url}). Check whether the release includes the work, report back where this work started, such as the Slack thread or the person who asked, then finish any follow-up the chat planned.`,
     eventType: "release.published",
     conditions: [{ field: "data.repository.full_name", op: "equals", value: repository }],
@@ -208,6 +208,11 @@ export function registerSessionCoordinationTools(
           if (wakeWhen === "merged" && target.state === "merged") {
             throw new ToolArgumentError(
               "This pull request is already merged; report back now instead of waiting.",
+            );
+          }
+          if (wakeWhen === "merged" && target.state === "closed") {
+            throw new ToolArgumentError(
+              "This pull request was closed without merging, so it won't merge; tell the person instead of waiting.",
             );
           }
           automation = await wake(sessionLinkWakeRequest(result.link, wakeWhen, target.fullName));

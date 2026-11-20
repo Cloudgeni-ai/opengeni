@@ -2624,6 +2624,7 @@ export function buildOpenGeniMcpServer(
         ).find(
           (task) =>
             task.targetSessionId === sessionId &&
+            task.status === "active" &&
             task.name === wake.name &&
             task.events?.once === true &&
             task.events.completedAt === null,

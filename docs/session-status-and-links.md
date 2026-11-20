@@ -88,8 +88,8 @@ path as `scheduled_tasks_create` (see
 conditions on the repository (GitHub's own spelling of `owner/name`), the pull
 request number and `merged = true`. Merges made through Opengeni's own GitHub
 App count too. Asking again for the same wake reuses the pending automation,
-and a pull request that is already merged gets no wake (`wakeNotSet` says to
-report back now).
+and a pull request that is already merged or closed gets no wake
+(`wakeNotSet` says to report back now).
 
 When the event arrives the chat wakes with a short prompt asking it to report
 back where the work started and finish any planned follow-up. If the chat
@@ -97,7 +97,7 @@ started in a Slack thread, a one-time event automation's wake (such as these)
 reopens the thread delivery from the wake, so the woken answer posts back in
 that thread (only the woken run's messages, not what happened in the chat
 meanwhile). If the thread is still delivering an earlier answer, it stays
-open afterwards for the woken one. Recurring event automations into the chat
+open after that answer for the woken one, then settles as usual. Recurring event automations into the chat
 leave the thread alone.
 
 `wakeWhen` needs automations with event triggers in the chat (otherwise the
