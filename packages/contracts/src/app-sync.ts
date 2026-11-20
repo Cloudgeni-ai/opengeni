@@ -91,6 +91,13 @@ export const AppSyncAction = /* @__PURE__ */ defineSchema(() =>
        * own account (see site-tool-routing.ts).
        */
       declaredTools: z.array(ToolGatewayIdentity).max(8),
+      /**
+       * The connector-level identity of `tool` (its canonical connector when
+       * `tool` is one person's account route). Exports carry it, and each run
+       * resolves it to the running person's own account. Absent on syncs
+       * saved before it existed; derived from `declaredTools` then.
+       */
+      connectorTool: ToolGatewayIdentity.nullable().optional(),
       arguments: AppSyncArguments,
       recordsPath: AppSyncPath.nullable(),
       key: AppSyncPath,

@@ -12897,6 +12897,7 @@
         "$.arguments": "object!",
         "$.arguments{}": "unknown",
         "$.collection": "string!",
+        "$.connectorTool": "ref(AttemptToolIdentity)? null",
         "$.declaredTools": "array!",
         "$.declaredTools[]": "ref(AttemptToolIdentity)",
         "$.fields": "array! null",

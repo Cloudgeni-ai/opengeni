@@ -12,9 +12,10 @@
 --   3. app_sync_subscriptions: the people who opted in to a personal sync,
 --      with each person's own last run (time, status, error, counts).
 --   4. app_sync_queue: sync runs waiting for the API to execute them. Rows
---      hold only ids. The API's executor finds due rows across workspaces
---      through a read-only policy and then claims, reads and writes
---      everything else under that workspace's ordinary row-level security.
+--      hold only ids, a lease and a chain depth. The API's executor finds due
+--      rows across workspaces through a read-only policy that applies only
+--      outside any workspace or account context, and then claims, reads and
+--      writes everything else under that workspace's row-level security.
 --
 -- Rolling: the previous release never writes `app_sync`, never reads the new
 -- column or tables, and its readers of the checked columns are unaffected.
@@ -99,14 +100,18 @@ CREATE TABLE app_sync_queue (
   queued_at timestamptz NOT NULL DEFAULT now(),
   lease_until timestamptz,
   attempts integer NOT NULL DEFAULT 0,
+  -- The automation chain depth of a run an automation's agent started.
+  chain_depth smallint NOT NULL DEFAULT 1,
   CONSTRAINT app_sync_queue_pkey PRIMARY KEY (run_id),
   CONSTRAINT app_sync_queue_attempts_check CHECK (attempts >= 0),
+  CONSTRAINT app_sync_queue_chain_depth_check CHECK (chain_depth >= 0),
   CONSTRAINT app_sync_queue_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT app_sync_queue_run_fk FOREIGN KEY (run_id)
     REFERENCES scheduled_task_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX app_sync_queue_due_idx ON app_sync_queue (queued_at);
+CREATE INDEX app_sync_queue_task_idx ON app_sync_queue (task_id);
 COMMENT ON TABLE app_sync_queue IS 'App data sync runs waiting for the API executor (ids only).';
 
 ALTER TABLE app_sync_subscriptions ENABLE ROW LEVEL SECURITY;
@@ -120,9 +125,13 @@ ALTER TABLE app_sync_queue FORCE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON app_sync_queue
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
--- The executor lists due runs across workspaces. Rows carry only ids; every
--- claim and write still needs the workspace's own row-level security.
-CREATE POLICY executor_read ON app_sync_queue FOR SELECT USING (true);
+-- The executor lists due runs across workspaces outside any workspace
+-- context. A query inside a workspace or account context sees only that
+-- workspace's rows; every claim and write needs the workspace's own context.
+CREATE POLICY executor_read ON app_sync_queue FOR SELECT USING (
+  opengeni_private.current_workspace_id() IS NULL
+  AND opengeni_private.current_account_id() IS NULL
+);
 
 REVOKE ALL ON TABLE app_sync_subscriptions FROM PUBLIC;
 REVOKE ALL ON TABLE app_sync_queue FROM PUBLIC;

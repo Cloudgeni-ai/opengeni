@@ -17,6 +17,9 @@ import { rawRows, withWorkspaceRls, type Database } from "./database";
 
 type Scope = { accountId: string; workspaceId: string };
 
+/** How long a claimed run is held before another executor may take it over; runs renew it. */
+export const APP_SYNC_LEASE_SECONDS = 300;
+
 const iso = (value: unknown): string =>
   value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
 
@@ -103,14 +106,20 @@ export async function latestAppSyncRuns(
   return result;
 }
 
-/** Queue a sync run for the executor; queuing the same run again does nothing. */
+/**
+ * Queue a sync run for the executor; queuing the same run again does nothing.
+ * `chainDepth` is the run's automation chain depth when an automation's agent
+ * started it (its run's depth plus one); scheduled and event runs keep the
+ * depth recorded on the run itself.
+ */
 export async function enqueueAppSyncRun(
   db: Database,
-  input: Scope & { taskId: string; runId: string },
+  input: Scope & { taskId: string; runId: string; chainDepth?: number },
 ): Promise<void> {
+  const depth = Math.max(1, Math.min(32767, Math.trunc(input.chainDepth ?? 1)));
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
-    await tx.execute(sql`insert into app_sync_queue (run_id, account_id, workspace_id, task_id)
-      values (${input.runId}::uuid, ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid)
+    await tx.execute(sql`insert into app_sync_queue (run_id, account_id, workspace_id, task_id, chain_depth)
+      values (${input.runId}::uuid, ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid, ${depth})
       on conflict (run_id) do nothing`);
   });
 }
@@ -141,26 +150,44 @@ export type ClaimedAppSyncRun = {
   attempts: number;
   chainDepth: number;
   triggerType: string;
+  /** Another run of the same sync holds a live lease: this one must not run (overlap `skip`). */
+  overlapping: boolean;
 };
 
 /**
  * Lease one queued run and mark it running. Null when another executor holds
- * it, it already finished, or it is no longer queued.
+ * it, it already finished, or it is no longer queued. Claims of the same sync
+ * are serialized, so of two runs of one sync only the first runs; the other
+ * comes back `overlapping` while the first's lease is live.
  */
 export async function claimAppSyncRun(
   db: Database,
   input: { workspaceId: string; runId: string; leaseSeconds?: number },
 ): Promise<ClaimedAppSyncRun | null> {
-  const leaseSeconds = Math.max(10, Math.trunc(input.leaseSeconds ?? 300));
+  const leaseSeconds = Math.max(10, Math.trunc(input.leaseSeconds ?? APP_SYNC_LEASE_SECONDS));
   return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
-    const [claimed] = await rawRows<{ task_id: string; account_id: string; attempts: number }>(
+    const [queued] = await rawRows<{ task_id: string }>(
+      tx,
+      sql`select task_id from app_sync_queue
+          where run_id = ${input.runId}::uuid and workspace_id = ${input.workspaceId}::uuid`,
+    );
+    if (!queued) return null;
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`app-sync:${queued.task_id}`}, 0))`,
+    );
+    const [claimed] = await rawRows<{
+      task_id: string;
+      account_id: string;
+      attempts: number;
+      chain_depth: number | string;
+    }>(
       tx,
       sql`update app_sync_queue
           set lease_until = now() + make_interval(secs => ${leaseSeconds}), attempts = attempts + 1
           where run_id = ${input.runId}::uuid
             and workspace_id = ${input.workspaceId}::uuid
             and (lease_until is null or lease_until < now())
-          returning task_id, account_id, attempts`,
+          returning task_id, account_id, attempts, chain_depth`,
     );
     if (!claimed) return null;
     const [run] = await rawRows<{
@@ -176,18 +203,56 @@ export async function claimAppSyncRun(
       await tx.execute(sql`delete from app_sync_queue where run_id = ${input.runId}::uuid`);
       return null;
     }
+    const [other] = await rawRows<{ run_id: string }>(
+      tx,
+      sql`select run_id from app_sync_queue
+          where workspace_id = ${input.workspaceId}::uuid and task_id = ${claimed.task_id}::uuid
+            and run_id <> ${input.runId}::uuid and lease_until > now()
+          limit 1`,
+    );
+    const chainDepth = Math.max(
+      1,
+      Number(run.chain_depth ?? 1) || 1,
+      Number(claimed.chain_depth ?? 1) || 1,
+    );
     if (run.status === "queued")
       await tx.execute(sql`update scheduled_task_runs set status = 'dispatched', updated_at = now()
         where workspace_id = ${input.workspaceId}::uuid and id = ${input.runId}::uuid and status = 'queued'`);
+    if (chainDepth > (Number(run.chain_depth ?? 1) || 1))
+      // The run history shows the depth too; the queue's copy is what counts.
+      await tx
+        .transaction(async (savepoint) => {
+          await savepoint.execute(sql`update scheduled_task_runs set chain_depth = ${chainDepth}
+            where workspace_id = ${input.workspaceId}::uuid and id = ${input.runId}::uuid`);
+        })
+        .catch(() => undefined);
     return {
       runId: input.runId,
       taskId: claimed.task_id,
       accountId: claimed.account_id,
       workspaceId: input.workspaceId,
       attempts: Number(claimed.attempts),
-      chainDepth: Math.max(0, Number(run.chain_depth ?? 0) || 0),
+      chainDepth,
       triggerType: run.trigger_type,
+      overlapping: other !== undefined,
     };
+  });
+}
+
+/** Extend a running sync's lease, so a long run is not claimed again. False when it is gone. */
+export async function renewAppSyncLease(
+  db: Database,
+  input: { workspaceId: string; runId: string; leaseSeconds?: number },
+): Promise<boolean> {
+  const leaseSeconds = Math.max(10, Math.trunc(input.leaseSeconds ?? APP_SYNC_LEASE_SECONDS));
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const rows = await rawRows<{ run_id: string }>(
+      tx,
+      sql`update app_sync_queue set lease_until = now() + make_interval(secs => ${leaseSeconds})
+          where workspace_id = ${input.workspaceId}::uuid and run_id = ${input.runId}::uuid
+          returning run_id`,
+    );
+    return rows.length > 0;
   });
 }
 
@@ -272,6 +337,23 @@ export async function setAppSyncSubscription(
           and subject_id = ${input.subjectId}`);
   });
   return input.optedIn;
+}
+
+/** Remove everyone's opt-in to a sync (its tool or target changed); returns how many. */
+export async function clearAppSyncSubscriptions(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (tx) => {
+    const rows = await rawRows<{ subject_id: string }>(
+      tx,
+      sql`delete from app_sync_subscriptions
+          where workspace_id = ${workspaceId}::uuid and task_id = ${taskId}::uuid
+          returning subject_id`,
+    );
+    return rows.length;
+  });
 }
 
 /** Everyone opted in to one sync, oldest first. */
