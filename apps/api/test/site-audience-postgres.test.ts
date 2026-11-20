@@ -297,7 +297,7 @@ test("an Only me Site is hidden from other members and admins until its owner sh
   );
   expect(pin.status).toBe(404);
   await expect(resolveSiteSessionOrigin(db.db, f.other.grant, siteId, versionId)).rejects.toThrow(
-    "Site origin not found",
+    "App origin not found",
   );
   expect(await resolveSiteSessionOrigin(db.db, f.owner.grant, siteId, versionId)).toMatchObject({
     siteId,
@@ -580,7 +580,7 @@ test("an agent changes who can see its person's Site, as they can from the Site 
   const id = site.artifact.id;
   const agent = await agentFilePublish(f, f.owner.subjectId);
   try {
-    expect(agent.description).toContain("an existing file or Site");
+    expect(agent.description).toContain("an existing file or app");
     // Shared at the same link: no second Site.
     const opened = await agent.share(id, "workspace");
     expect(opened.isError, opened.text).toBe(false);

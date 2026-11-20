@@ -746,16 +746,16 @@ test("files upload, list, download and delete with shared and private scope", as
 });
 
 const SITE_DATA_TOOLS = [
-  "site_data_describe",
-  "site_data_define_collection",
-  "site_data_query",
-  "site_data_write",
-  "site_data_import",
-  "site_data_export",
-  "site_data_reset",
-  "site_files_list",
-  "site_files_upload",
-  "site_files_delete",
+  "app_data_describe",
+  "app_data_define_collection",
+  "app_data_query",
+  "app_data_write",
+  "app_data_import",
+  "app_data_export",
+  "app_data_reset",
+  "app_files_list",
+  "app_files_upload",
+  "app_files_delete",
 ];
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;

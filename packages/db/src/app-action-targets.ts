@@ -609,11 +609,11 @@ const organizationMcpConnectionLookup: Lookup = async (where) => {
           ["Last used", targetDay(row.lastUsedAt) ?? "Never"],
         ),
       }
-    : missing("connected app");
+    : missing("connected agent");
 };
 
 const siteLookup = workspaceRow(
-  "Site",
+  "app",
   "artifacts:read",
   async (db, workspaceId, id, where) =>
     (
