@@ -596,8 +596,8 @@ the owner explicitly narrows them.
 `session_links_add` with `wakeWhen` creates a one-time event automation on the
 current chat for a linked GitHub pull request's merge or its repository's next
 release, through the ordinary `scheduled_tasks_create` path (no second engine).
-A wake of a chat that started in Slack reopens the thread delivery from the
-wake. See [../session-status-and-links.md](../session-status-and-links.md).
+A one-time event automation's wake of a chat that started in Slack reopens
+the thread delivery from the wake; recurring ones don't. See [../session-status-and-links.md](../session-status-and-links.md).
 
 ## Surfaces
 

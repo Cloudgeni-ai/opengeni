@@ -342,6 +342,8 @@ import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
 import {
   SessionLinkList as SessionLinkListSchema,
+  SessionLink as SessionLinkSchema,
+  SESSION_LINKS_MAX,
   SessionWaitingOn as SessionWaitingOnSchema,
   type SessionLink,
   type SessionWaitingOn,
@@ -17029,18 +17031,21 @@ export async function reopenSlackInteractionDelivery(
 /**
  * Reopen a settled Slack thread delivery so the chat's next answer posts in
  * the thread again, skipping everything up to `afterSequence` (what the chat
- * did elsewhere meanwhile). An open delivery is left alone. Used when an
- * automation wakes a chat that started in Slack. Returns whether it reopened.
+ * did elsewhere meanwhile). Used when a one-time automation wakes a chat that
+ * started in Slack. A delivery that is still open (a pass is posting an
+ * earlier answer) is marked instead, and settles back to open when that pass
+ * ends. Returns "reopened", "marked", or null when the delivery is gone.
  */
 export async function reopenSlackInteractionDeliveryAfter(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & { afterSequence: number },
-): Promise<boolean> {
+): Promise<"reopened" | "marked" | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.slackInteractions)
       .set({
         terminalDeliveryState: "open",
+        deliveryReopenRequestedAt: null,
         deliveryAttemptCount: 0,
         deliveryRetryAt: null,
         deliveryLastErrorCode: null,
@@ -17054,7 +17059,18 @@ export async function reopenSlackInteractionDeliveryAfter(
         ),
       )
       .returning({ id: schema.slackInteractions.id });
-    return rows.length === 1;
+    if (rows.length === 1) return "reopened";
+    const marked = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ deliveryReopenRequestedAt: sql`now()`, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.terminalDeliveryState, "open"),
+        ),
+      )
+      .returning({ id: schema.slackInteractions.id });
+    return marked.length === 1 ? "marked" : null;
   });
 }
 
@@ -17159,7 +17175,9 @@ export async function closeSlackInteractionDelivery(
       .update(schema.slackInteractions)
       .set({
         lastDeliveredSessionEventSequence: input.sequence,
-        terminalDeliveryState: input.state,
+        // A wake asked to reopen while this pass ran: stay open for its answer.
+        terminalDeliveryState: sql`case when ${schema.slackInteractions.deliveryReopenRequestedAt} is null then ${input.state}::text else 'open' end`,
+        deliveryReopenRequestedAt: null,
         deliveryClaimHolderId: null,
         deliveryClaimExpiresAt: null,
         deliveryRetryAt: null,
@@ -36697,31 +36715,43 @@ async function withCurrentSessionWaitingOn<Row extends SessionRow>(
       );
     for (const match of matches) if (match.turnId) latestTurnBySession.set(match.id, match.turnId);
   }
-  return rows.map((row) => {
-    if (row.status === "requires_action" && row.activeTurnId) {
-      return {
-        ...row,
-        currentWaitingOn: {
-          source: "input" as const,
-          person: null,
-          subjectId: initiators.get(row.activeTurnId) ?? null,
-          reason: null,
-          since: row.updatedAt.toISOString(),
-        },
-      };
-    }
-    const stored = row.waitingOn;
-    if (
-      stored?.turnId &&
-      row.status === "idle" &&
-      !row.activeTurnId &&
-      latestTurnBySession.get(row.id) === stored.turnId
-    ) {
-      const { turnId: _turnId, ...waitingOn } = stored;
-      return { ...row, currentWaitingOn: waitingOn };
-    }
-    return { ...row, currentWaitingOn: null };
-  });
+  return rows.map((row) => ({
+    ...row,
+    currentWaitingOn: currentSessionWaitingOn(row, {
+      initiatorSubjectId: row.activeTurnId ? (initiators.get(row.activeTurnId) ?? null) : null,
+      latestTurnId: latestTurnBySession.get(row.id) ?? null,
+    }),
+  }));
+}
+
+/**
+ * Who one chat waits on, from its row and two facts read for it: the subject
+ * its active turn works for and its latest turn. Exported for tests.
+ */
+export function currentSessionWaitingOn(
+  row: Pick<SessionRow, "status" | "activeTurnId" | "waitingOn" | "updatedAt">,
+  facts: { initiatorSubjectId: string | null; latestTurnId: string | null },
+): SessionWaitingOn | null {
+  if (row.status === "requires_action" && row.activeTurnId) {
+    return {
+      source: "input",
+      person: null,
+      subjectId: facts.initiatorSubjectId,
+      reason: null,
+      since: row.updatedAt.toISOString(),
+    };
+  }
+  const stored = row.waitingOn;
+  if (
+    stored?.turnId &&
+    row.status === "idle" &&
+    !row.activeTurnId &&
+    facts.latestTurnId === stored.turnId
+  ) {
+    const { turnId: _turnId, ...waitingOn } = stored;
+    return waitingOn;
+  }
+  return null;
 }
 
 async function withCurrentSessionInputWaitOnly<Row extends SessionRow>(
@@ -78808,7 +78838,15 @@ export async function updateSessionProfileWithEvent(
 /** A stored link list, or empty when absent or unreadable. */
 export function storedSessionLinks(value: unknown): SessionLink[] {
   const parsed = SessionLinkListSchema.safeParse(value ?? []);
-  return parsed.success ? parsed.data : [];
+  if (parsed.success) return parsed.data;
+  // Keep every valid link: one bad entry must not empty the list on the next write.
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((entry) => {
+      const link = SessionLinkSchema.safeParse(entry);
+      return link.success ? [link.data] : [];
+    })
+    .slice(0, SESSION_LINKS_MAX);
 }
 
 /** The chat's Linked items, in the caller's RLS scope. Null when the chat is not visible. */

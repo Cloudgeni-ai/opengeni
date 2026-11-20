@@ -18,6 +18,7 @@ import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-
 import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { listEventSources as listSessionLinkEventSources } from "@opengeni/db";
+import { sessionLinkGitHubWakeTarget } from "../integrations/session-link-status";
 import {
   registerSessionCoordinationTools,
   type SessionLinkWake,
@@ -1644,6 +1645,7 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       wake: () => sessionLinkWake,
+      wakeTarget: (link) => sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link),
       json,
     });
   }
@@ -2616,6 +2618,19 @@ export function buildOpenGeniMcpServer(
     // one-time GitHub event trigger into this chat.
     if (eventTriggers && sessionId !== null) {
       sessionLinkWake = async (wake) => {
+        // Asking again for the same wake reuses the pending automation.
+        const pending = (
+          await listScheduledTasks(deps.db, grant.workspaceId, 100, 0, sessionId)
+        ).find(
+          (task) =>
+            task.targetSessionId === sessionId &&
+            task.name === wake.name &&
+            task.events?.once === true &&
+            task.events.completedAt === null,
+        );
+        if (pending) {
+          return { automationId: pending.id, name: pending.name, once: true, existing: true };
+        }
         const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
         const source = (
           await listSessionLinkEventSources(deps.db, grant.workspaceId, viewer.subjectId)
@@ -2667,11 +2682,24 @@ export function buildOpenGeniMcpServer(
           eventSourceFetch: deps.eventSourceFetch,
           githubPersonalFetch: deps.githubPersonalFetch,
         });
-        await syncCreatedScheduledTask({
-          db: deps.db,
-          workflowClient: deps.workflowClient,
-          task,
-        });
+        try {
+          await syncCreatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          // The automation is saved; its schedule sync is retried. Don't create it again.
+          return {
+            automationId: task.id,
+            name: task.name,
+            once: true,
+            partialFailure: { stage: "schedule_sync", retryable: true },
+          };
+        }
         return { automationId: task.id, name: task.name, once: true };
       };
     }

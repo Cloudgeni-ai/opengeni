@@ -71,6 +71,15 @@ describe("merge wake", () => {
     ).toBe(true);
   });
 
+  test("a link typed in another case still matches GitHub's spelling", () => {
+    const typed = sessionLinkWakeRequest(
+      link("https://github.com/ACME/Api/pull/7"),
+      "merged",
+      "acme/api",
+    );
+    expect(eventMatchesTrigger(pullRequestClosed(7, true), trigger(typed))).toBe(true);
+  });
+
   test("asks the agent to report back where the work started", () => {
     expect(request.prompt).toContain("acme/api#7");
     expect(request.prompt).toContain("Report back where this work started");

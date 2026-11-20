@@ -3696,6 +3696,9 @@ export const slackInteractions = pgTable(
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
       .notNull()
       .default("open"),
+    // A wake asked to reopen the delivery while a pass was still running; that
+    // pass settles back to open instead of terminal.
+    deliveryReopenRequestedAt: timestamp("delivery_reopen_requested_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

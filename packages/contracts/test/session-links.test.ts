@@ -21,10 +21,10 @@ describe("classifySessionLinkUrl", () => {
   });
 
   test("Linear issues and Slack threads are recognised by shape", () => {
-    expect(classifySessionLinkUrl("https://linear.app/team/issue/ope-1060/title")).toMatchObject({
+    expect(classifySessionLinkUrl("https://linear.app/team/issue/eng-42/title")).toMatchObject({
       kind: "issue",
       provider: "linear",
-      ref: "OPE-1060",
+      ref: "ENG-42",
     });
     expect(
       classifySessionLinkUrl("https://acme.slack.com/archives/C123/p1700000000123456"),
@@ -46,8 +46,18 @@ describe("classifySessionLinkUrl", () => {
       repo: "api",
       number: 7,
     });
-    expect(parseGitHubLinkRef("OPE-1")).toBeNull();
+    expect(parseGitHubLinkRef("ENG-1")).toBeNull();
     expect(parseGitHubLinkRef(null)).toBeNull();
+  });
+
+  test("a URL too long to name a real item stays a plain link", () => {
+    const url = `https://github.com/acme/${"r".repeat(400)}/pull/7`;
+    expect(classifySessionLinkUrl(url)).toEqual({
+      url,
+      kind: "link",
+      provider: "github",
+      ref: null,
+    });
   });
 
   test("a wait names a person or none", () => {

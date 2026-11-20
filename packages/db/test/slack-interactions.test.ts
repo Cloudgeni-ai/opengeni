@@ -24,6 +24,7 @@ import {
   listSessionsForSubject,
   getSessionLinks,
   reopenSlackInteractionDeliveryAfter,
+  closeSlackInteractionDelivery,
   updateSessionCoordinationWithEvent,
   renewSlackAppHomeRefreshClaim,
   releaseSlackAppHomeRefresh,
@@ -683,7 +684,7 @@ describe("Slack interaction migration and durable database boundary", () => {
       where id = ${interaction.id}`;
     expect(
       await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 9 }),
-    ).toBe(true);
+    ).toBe("reopened");
     const [reopened] = await admin<
       { terminal_delivery_state: string; last_delivered_session_event_sequence: number }[]
     >`
@@ -693,10 +694,37 @@ describe("Slack interaction migration and durable database boundary", () => {
       terminal_delivery_state: "open",
       last_delivered_session_event_sequence: 9,
     });
-    // An open delivery is left alone, and the cursor never moves back.
+    // An open delivery is marked instead, and the cursor never moves back.
     expect(
       await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 2 }),
-    ).toBe(false);
+    ).toBe("marked");
+    // The pass that was running then settles back to open for the woken answer.
+    await admin`
+      update slack_interactions set delivery_claim_holder_id = '00000000-0000-4000-8000-0000000000a1'
+      where id = ${interaction.id}`;
+    expect(
+      await closeSlackInteractionDelivery(db, {
+        ...interaction,
+        claimHolderId: "00000000-0000-4000-8000-0000000000a1",
+        sequence: 12,
+        state: "completed",
+      }),
+    ).toBe(true);
+    const [settled] = await admin<
+      {
+        terminal_delivery_state: string;
+        last_delivered_session_event_sequence: number;
+        delivery_reopen_requested_at: Date | null;
+      }[]
+    >`
+      select terminal_delivery_state, last_delivered_session_event_sequence,
+        delivery_reopen_requested_at
+      from slack_interactions where id = ${interaction.id}`;
+    expect(settled).toEqual({
+      terminal_delivery_state: "open",
+      last_delivered_session_event_sequence: 12,
+      delivery_reopen_requested_at: null,
+    });
   }, 60_000);
 
   test("a chat's links and waits change with one public event each", async () => {

@@ -2369,12 +2369,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const result = await retryScheduledTaskAdmission(() =>
         activities.dispatchScheduledTaskRun(input),
       );
-      // An event woke an existing chat that started in a Slack thread: its
-      // answer goes back to that thread. Best effort; see
-      // docs/session-status-and-links.md.
+      // A one-time event automation (such as a Linked panel wake) woke an
+      // existing chat that started in a Slack thread: its answer goes back to
+      // that thread. Recurring automations into the chat don't. Best effort;
+      // see docs/session-status-and-links.md.
       if (input.triggerType === "event" && result.action === "signal") {
         const { db, observability } = await services();
-        await reopenSlackThreadForEventWake(db, result).catch((error: unknown) =>
+        await reopenSlackThreadForOneTimeWake(db, {
+          ...result,
+          taskId: input.taskId,
+        }).catch((error: unknown) =>
           observability.warn("Reopening the Slack thread for an event wake failed", {
             sessionId: result.sessionId,
             error: error instanceof Error ? error.message : String(error),
@@ -2387,21 +2391,30 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
 }
 
 /**
- * Reopen the Slack thread delivery of a chat an event just woke, from just
- * before the wake's message, so only the woken run's answer posts there.
+ * Reopen the Slack thread delivery of a chat a one-time event automation just
+ * woke, from just before the wake's message, so only the woken run's answer
+ * posts there. Recurring automations into the chat leave the thread alone.
  */
-export async function reopenSlackThreadForEventWake(
+export async function reopenSlackThreadForOneTimeWake(
   db: Database,
-  wake: { accountId: string; workspaceId: string; sessionId: string; triggerEventId: string },
-): Promise<boolean> {
+  wake: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    triggerEventId: string;
+    taskId: string;
+  },
+): Promise<"reopened" | "marked" | null> {
+  const task = await getScheduledTask(db, wake.workspaceId, wake.taskId);
+  if (!task?.events?.once) return null;
   const interaction = await getSlackInteractionForSession(db, {
     accountId: wake.accountId,
     workspaceId: wake.workspaceId,
     sessionId: wake.sessionId,
   });
-  if (!interaction) return false;
+  if (!interaction) return null;
   const trigger = await getSessionEvent(db, wake.workspaceId, wake.triggerEventId);
-  if (!trigger || trigger.sessionId !== wake.sessionId) return false;
+  if (!trigger || trigger.sessionId !== wake.sessionId) return null;
   return await reopenSlackInteractionDeliveryAfter(db, {
     id: interaction.id,
     accountId: interaction.accountId,

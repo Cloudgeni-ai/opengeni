@@ -1930,14 +1930,22 @@ function SessionDockPanel(props: SessionDockProps) {
     () => openPullRequestFromLinks(linkState.links),
     [linkState.links],
   );
+  // One request at a time: a double click must not ask twice.
+  const openPullRequestPending = useRef(false);
   const openPullRequest = useCallback(() => {
+    if (openPullRequestPending.current) return;
+    openPullRequestPending.current = true;
     void context.client
       .sendMessage(props.workspaceId, props.sessionId, {
         text: OPEN_PULL_REQUEST_MESSAGE,
         clientEventId: crypto.randomUUID(),
       })
-      .catch((failure: unknown) => toast.error(userErrorText(failure, "Try again.")));
+      .catch((failure: unknown) => toast.error(userErrorText(failure, "Try again.")))
+      .finally(() => {
+        openPullRequestPending.current = false;
+      });
   }, [context.client, props.workspaceId, props.sessionId]);
+  const sessionArchived = props.session ? sessionReadOnlyArchive(props.session) !== null : false;
   const trailingTabs: WorkspaceTab[] = [
     {
       id: "linked",
@@ -1952,7 +1960,9 @@ function SessionDockPanel(props: SessionDockProps) {
             ),
           }
         : {}),
-      content: <SessionLinkedPanel state={linkState} canEdit={canControlSession} />,
+      content: (
+        <SessionLinkedPanel state={linkState} canEdit={canControlSession && !sessionArchived} />
+      ),
     },
     {
       id: "artifacts",
@@ -2083,7 +2093,7 @@ function SessionDockPanel(props: SessionDockProps) {
       openTabRequest={currentTabRequest}
       trailingTabs={trailingTabs}
       pullRequest={linkedPullRequest}
-      {...(canControlSession && props.session && sessionReadOnlyArchive(props.session) === null
+      {...(canControlSession && props.session && !sessionArchived
         ? { onOpenPullRequest: openPullRequest }
         : {})}
       collapsed={props.dockCollapsed}

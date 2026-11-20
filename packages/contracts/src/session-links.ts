@@ -7,9 +7,9 @@ import { defineSchema } from "./define-schema";
  * A chat's links are the things it works on (issues, pull requests, Slack
  * threads, App records, any URL), shown in its Linked panel. The agent adds
  * them with `session_links_add`; a pull request the chat opens through the
- * GitHub tools is added automatically. Each link's live status is read as
- * the viewer through their own connection, so the stored link holds only
- * what identifies it.
+ * GitHub tools is added automatically. Each link's live status is read when
+ * the list is shown (GitHub through the workspace's GitHub App), so the stored
+ * link holds only what identifies it.
  *
  * `waitingOn` names the person a chat waits on: the agent says so with
  * `set_waiting_on`, and an open question or approval waits on the person the
@@ -22,6 +22,7 @@ import { defineSchema } from "./define-schema";
 export const SESSION_LINKS_MAX = 30;
 export const SESSION_LINK_URL_MAX_LENGTH = 2048;
 export const SESSION_LINK_TITLE_MAX_LENGTH = 200;
+export const SESSION_LINK_REF_MAX_LENGTH = 300;
 export const SESSION_WAITING_ON_PERSON_MAX_LENGTH = 120;
 export const SESSION_WAITING_ON_REASON_MAX_LENGTH = 280;
 
@@ -53,7 +54,7 @@ export const SessionLink = /* @__PURE__ */ defineSchema(() =>
     title: z.string().max(SESSION_LINK_TITLE_MAX_LENGTH).nullable(),
     kind: SessionLinkKind,
     provider: SessionLinkProvider,
-    ref: z.string().max(300).nullable(),
+    ref: z.string().max(SESSION_LINK_REF_MAX_LENGTH).nullable(),
     addedBy: SessionLinkAddedBy,
     addedAt: z.string().datetime({ offset: true }),
   }),
@@ -65,8 +66,9 @@ export const SessionLinkList = /* @__PURE__ */ defineSchema(() =>
 );
 
 /**
- * A link's live state as one viewer can read it. `unknown` when the viewer has
- * no connection that can read it (the panel then shows the title only).
+ * A link's live state. A link Opengeni cannot read has no status at all
+ * (`status: null`, shown by title); `unknown` is reserved for a reader that
+ * can reach the item but not tell its state.
  */
 export const SessionLinkState = /* @__PURE__ */ defineSchema(() =>
   z.enum(["open", "draft", "merged", "closed", "done", "unknown"]),
@@ -145,6 +147,15 @@ export type ClassifiedSessionLink = {
  * plain links shown by title.
  */
 export function classifySessionLinkUrl(raw: string): ClassifiedSessionLink | null {
+  const classified = classifyUnboundedSessionLinkUrl(raw);
+  // No real repository, issue key or Slack thread is this long: a plain link.
+  if (classified?.ref && classified.ref.length > SESSION_LINK_REF_MAX_LENGTH) {
+    return { url: classified.url, kind: "link", provider: classified.provider, ref: null };
+  }
+  return classified;
+}
+
+function classifyUnboundedSessionLinkUrl(raw: string): ClassifiedSessionLink | null {
   let parsed: URL;
   try {
     parsed = new URL(raw.trim());

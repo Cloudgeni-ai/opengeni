@@ -945,6 +945,8 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   setGoal: "target",
   noteProgress: "target",
   completeGoal: "target",
+  setWaitingOn: "wait",
+  updateLinks: "share",
   pauseGoal: "target",
   resumeGoal: "target",
   wait: "wait",

@@ -40,7 +40,7 @@ function chat(
       primaryBlocker: null,
       additionalBlockerCount: 0,
     },
-  } as Session;
+  } as unknown as Session;
 }
 
 const chats = [

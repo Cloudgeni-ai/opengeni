@@ -24,12 +24,12 @@ The chat header and the session list show one status:
 
 | Status | When |
 | --- | --- |
-| Working | A turn is running (or recovering). |
+| Working | A turn is running. |
 | Waiting on <person> | The chat waits on someone (below). "Waiting on you" when it is the viewer. |
 | Done | Idle with nothing pending. |
 | Failed | The last turn failed. |
 
-Queued, paused, limit and archived states keep their existing labels.
+Queued, recovering, paused, limit and archived states keep their existing labels.
 
 `Session.waitingOn` (`{ source, person, subjectId, reason, since }`, null when
 nobody is waited on) is derived on read:
@@ -63,7 +63,8 @@ pull requests, Slack threads, App records and any URL (at most 30).
 
 Each item shows its live status where the deployment can read it, re-read when
 the list changes and every minute while the chat is open (cached for 30
-seconds on the server):
+seconds on the server; an explicit refresh re-reads an item at most every 5
+seconds):
 
 | Item | Live status |
 | --- | --- |
@@ -72,9 +73,10 @@ seconds on the server):
 | Anything else | Title only. |
 
 GitHub status is read through the workspace's GitHub App installation for the
-repository's owner, and only for repositories that installation may read. An
-item the deployment cannot read shows its title only; reading never fails the
-list.
+repository's owner (not the viewer's own GitHub account), and only for
+repositories the workspace chose for that installation; that choice is checked
+on every read. An item the deployment cannot read shows its title only;
+reading never fails the list.
 
 ## Report back when a pull request merges
 
@@ -83,24 +85,32 @@ merged) or `wakeWhen: "release_published"` (its repository publishes a
 release). It creates a one-time event automation on this chat through the same
 path as `scheduled_tasks_create` (see
 [design/automations-and-events.md](design/automations-and-events.md)), with
-conditions on the repository, the pull request number and `merged = true`.
-Merges made through Opengeni's own GitHub App count too.
+conditions on the repository (GitHub's own spelling of `owner/name`), the pull
+request number and `merged = true`. Merges made through Opengeni's own GitHub
+App count too. Asking again for the same wake reuses the pending automation,
+and a pull request that is already merged gets no wake (`wakeNotSet` says to
+report back now).
 
 When the event arrives the chat wakes with a short prompt asking it to report
 back where the work started and finish any planned follow-up. If the chat
-started in a Slack thread, the thread delivery reopens from the wake, so the
-woken answer posts back in that thread (only the woken run's messages, not
-what happened in the chat meanwhile).
+started in a Slack thread, a one-time event automation's wake (such as these)
+reopens the thread delivery from the wake, so the woken answer posts back in
+that thread (only the woken run's messages, not what happened in the chat
+meanwhile). If the thread is still delivering an earlier answer, it stays
+open afterwards for the woken one. Recurring event automations into the chat
+leave the thread alone.
 
 `wakeWhen` needs automations with event triggers in the chat (otherwise the
-tool refuses it) and a GitHub event source the chat's owner can use. Without a
-source, or for a link that is not a GitHub pull request, the link is added and
-the result says why no wake was set (`wakeNotSet`).
+tool refuses it), a GitHub event source the chat's owner can use, and the
+workspace's GitHub App able to read the repository. Otherwise, or for a link
+that is not a GitHub pull request, the link is added and the result says why
+no wake was set (`wakeNotSet`). A workspace has at most one GitHub event
+source, so the wake always uses it.
 
 ## Workbench
 
 The Changes tab draws one collapsible header per file (unified or split
-diff). When the chat has an open linked pull request it shows **View on
+diff); this applies to every embedder of the workbench. When the chat has an open linked pull request it shows **View on
 GitHub**; when there are changes but no open pull request and the viewer can
 message the chat it shows **Open PR**, which asks the agent to open one with
 its own GitHub tools and permissions. Embedders control both with the
@@ -112,7 +122,7 @@ its own GitHub tools and permissions. Embedders control both with the
 - Live GitHub status and merge wakes need the GitHub App
   ([github-app.md](github-app.md)) installed on the repository's owner, and
   merge wakes need its webhooks reaching the deployment. Without it, items show
-  titles only and `wakeWhen` is refused.
+  titles only, and `wakeWhen` adds the link without a wake (`wakeNotSet`).
 - Linear issues, Slack threads and App records show their title only; their
   live status is not read yet.
 - A pull request opened outside the GitHub tools (for example with `gh` in the

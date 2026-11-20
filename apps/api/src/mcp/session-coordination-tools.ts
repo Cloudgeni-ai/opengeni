@@ -52,6 +52,8 @@ export type RegisterSessionCoordinationToolsInput = {
   authorize: () => Promise<void>;
   /** Read when a tool runs, so a wake set up later in registration is seen. */
   wake: () => SessionLinkWake | null;
+  /** The repository's canonical name and the pull request's state, or null when unreadable. */
+  wakeTarget: (link: SessionLink) => Promise<{ fullName: string; state: string | null } | null>;
   json: JsonResult;
 };
 
@@ -59,12 +61,14 @@ export type RegisterSessionCoordinationToolsInput = {
 export function sessionLinkWakeRequest(
   link: Pick<SessionLink, "url" | "ref" | "kind" | "title">,
   when: SessionLinkWakeEvent,
+  /** GitHub's own `owner/name` spelling; event conditions compare exactly. */
+  canonicalRepository?: string,
 ): Parameters<SessionLinkWake>[0] {
   const ref = classifySessionLinkUrl(link.url)?.github ?? parseGitHubLinkRef(link.ref);
   if (!ref) {
     throw new ToolArgumentError("wakeWhen works for GitHub pull request links only.");
   }
-  const repository = `${ref.owner}/${ref.repo}`;
+  const repository = canonicalRepository ?? `${ref.owner}/${ref.repo}`;
   const label = link.title
     ? `${repository}#${ref.number} (${link.title})`
     : `${repository}#${ref.number}`;
@@ -193,7 +197,20 @@ export function registerSessionCoordinationTools(
       let wakeNotSet: string | undefined;
       if (wake && wakeWhen) {
         try {
-          automation = await wake(sessionLinkWakeRequest(result.link, wakeWhen));
+          // Validates the link kind before any GitHub read.
+          sessionLinkWakeRequest(result.link, wakeWhen);
+          const target = await input.wakeTarget(result.link);
+          if (!target) {
+            throw new ToolArgumentError(
+              "The workspace's GitHub App can't read this repository, so its events can't wake this chat. A person installs the App on it in Settings.",
+            );
+          }
+          if (wakeWhen === "merged" && target.state === "merged") {
+            throw new ToolArgumentError(
+              "This pull request is already merged; report back now instead of waiting.",
+            );
+          }
+          automation = await wake(sessionLinkWakeRequest(result.link, wakeWhen, target.fullName));
         } catch (error) {
           if (!(error instanceof ToolArgumentError)) throw error;
           wakeNotSet = error.message;

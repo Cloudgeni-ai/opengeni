@@ -23,14 +23,29 @@ import {
  */
 
 const STATUS_TTL_MS = 30_000;
+/** Even an explicit refresh re-reads one link at most this often. */
+const FRESH_MIN_INTERVAL_MS = 5_000;
 const TOKEN_REUSE_MARGIN_MS = 60_000;
+const REPOSITORY_TTL_MS = 10 * 60_000;
 const GITHUB_TIMEOUT_MS = 6_000;
 const MAX_CONCURRENT = 4;
+const CACHE_MAX = 2_000;
 const GITHUB_API = "https://api.github.com";
 
 type CachedStatus = { at: number; status: SessionLinkLiveStatus | null };
+type ResolvedRepository = { installationId: number; repositoryId: number; fullName: string };
 const statusCache = new Map<string, CachedStatus>();
-const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+// Repository metadata (installation, id, canonical name) only; whether the
+// workspace may read it is re-checked on every read.
+const repositoryCache = new Map<string, { at: number; repository: ResolvedRepository | null }>();
+// Tokens per installation and repository; a concurrent read shares one mint.
+const tokenCache = new Map<string, Promise<{ token: string; expiresAt: number }>>();
+
+function boundedSet<V>(cache: Map<string, V>, key: string, value: V): void {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!);
+}
 
 export type GitHubRead = (path: string) => Promise<unknown>;
 
@@ -148,6 +163,88 @@ export async function readGitHubIssueStatus(
   return { state, label: null, title: title(issue.title), checks: null, review: null };
 }
 
+/**
+ * The repository through the workspace's GitHub App, with its canonical
+ * `owner/name`, or null when the workspace has no App installation that may
+ * read it. The workspace's installations and repository choice are checked on
+ * every call, so removing a repository or the App takes effect at once.
+ */
+export async function resolveWorkspaceGitHubRepository(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  workspaceId: string,
+  owner: string,
+  repo: string,
+  io: {
+    listInstallations: typeof listGitHubInstallationAccessForWorkspace;
+    lookupRepository: typeof getGitHubAppInstallationRepository;
+  } = {
+    listInstallations: listGitHubInstallationAccessForWorkspace,
+    lookupRepository: getGitHubAppInstallationRepository,
+  },
+): Promise<ResolvedRepository | null> {
+  if (githubAppMissingSettings(deps.settings).length > 0) return null;
+  const installations = await io.listInstallations(deps.db, workspaceId);
+  const installation = installations.find(
+    (each) => each.accountLogin?.toLowerCase() === owner.toLowerCase(),
+  );
+  if (!installation) return null;
+  const key = `${installation.installationId}:${owner.toLowerCase()}/${repo.toLowerCase()}`;
+  let cached = repositoryCache.get(key);
+  if (!cached || Date.now() - cached.at > REPOSITORY_TTL_MS) {
+    const found = await io.lookupRepository(deps.settings, {
+      installationId: installation.installationId,
+      owner,
+      name: repo,
+    });
+    cached = {
+      at: Date.now(),
+      repository: found
+        ? {
+            installationId: installation.installationId,
+            repositoryId: found.id,
+            fullName: found.fullName,
+          }
+        : null,
+    };
+    boundedSet(repositoryCache, key, cached);
+  }
+  const repository = cached.repository;
+  if (!repository) return null;
+  // Only repositories the workspace chose for its GitHub App.
+  if (
+    installation.repositoryScope !== "all" &&
+    !installation.repositoryIds.includes(repository.repositoryId)
+  ) {
+    return null;
+  }
+  return repository;
+}
+
+async function installationToken(
+  deps: Pick<ApiRouteDeps, "settings">,
+  repository: ResolvedRepository,
+): Promise<string> {
+  const key = `${repository.installationId}:${repository.repositoryId}`;
+  const cached = tokenCache.get(key);
+  if (cached) {
+    const token = await cached.catch(() => null);
+    if (token && token.expiresAt - TOKEN_REUSE_MARGIN_MS > Date.now()) return token.token;
+    if (tokenCache.get(key) === cached) tokenCache.delete(key);
+  }
+  const pending = createGitHubAppInstallationTokenWithExpiry(deps.settings, {
+    installationId: repository.installationId,
+    repositoryIds: [repository.repositoryId],
+  }).then((minted) => ({
+    token: minted.token,
+    expiresAt: minted.expiresAt ? Date.parse(minted.expiresAt) : Date.now() + 10 * 60_000,
+  }));
+  pending.catch(() => {
+    if (tokenCache.get(key) === pending) tokenCache.delete(key);
+  });
+  boundedSet(tokenCache, key, pending);
+  return (await pending).token;
+}
+
 /** A REST reader for one repository through the workspace's GitHub App, or null. */
 async function workspaceGitHubReader(
   deps: Pick<ApiRouteDeps, "db" | "settings">,
@@ -155,39 +252,9 @@ async function workspaceGitHubReader(
   owner: string,
   repo: string,
 ): Promise<GitHubRead | null> {
-  if (githubAppMissingSettings(deps.settings).length > 0) return null;
-  const key = `${workspaceId}:${owner.toLowerCase()}/${repo.toLowerCase()}`;
-  let cached = tokenCache.get(key);
-  if (!cached || cached.expiresAt - TOKEN_REUSE_MARGIN_MS < Date.now()) {
-    const installations = await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId);
-    const installation = installations.find(
-      (each) => each.accountLogin?.toLowerCase() === owner.toLowerCase(),
-    );
-    if (!installation) return null;
-    const repository = await getGitHubAppInstallationRepository(deps.settings, {
-      installationId: installation.installationId,
-      owner,
-      name: repo,
-    });
-    if (!repository) return null;
-    // Only repositories the workspace chose for its GitHub App.
-    if (
-      installation.repositoryScope !== "all" &&
-      !installation.repositoryIds.includes(repository.id)
-    ) {
-      return null;
-    }
-    const minted = await createGitHubAppInstallationTokenWithExpiry(deps.settings, {
-      installationId: installation.installationId,
-      repositoryIds: [repository.id],
-    });
-    cached = {
-      token: minted.token,
-      expiresAt: minted.expiresAt ? Date.parse(minted.expiresAt) : Date.now() + 10 * 60_000,
-    };
-    tokenCache.set(key, cached);
-  }
-  const token = cached.token;
+  const repository = await resolveWorkspaceGitHubRepository(deps, workspaceId, owner, repo);
+  if (!repository) return null;
+  const token = await installationToken(deps, repository);
   return async (path) => {
     const response = await fetch(`${GITHUB_API}${path}`, {
       headers: {
@@ -201,6 +268,38 @@ async function workspaceGitHubReader(
     if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
     return await response.json();
   };
+}
+
+/**
+ * What a merge or release wake for a GitHub link needs: the repository's
+ * canonical name (event conditions compare exactly) and, for a pull request,
+ * its current state. Null when the workspace's GitHub App cannot read it, so
+ * its events would not reach the chat either.
+ */
+export async function sessionLinkGitHubWakeTarget(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  workspaceId: string,
+  link: Pick<SessionLink, "url" | "ref" | "kind">,
+): Promise<{ fullName: string; state: SessionLinkLiveStatus["state"] | null } | null> {
+  const ref = classifySessionLinkUrl(link.url)?.github ?? parseGitHubLinkRef(link.ref);
+  if (!ref) return null;
+  const repository = await resolveWorkspaceGitHubRepository(
+    deps,
+    workspaceId,
+    ref.owner,
+    ref.repo,
+  ).catch(() => null);
+  if (!repository) return null;
+  let state: SessionLinkLiveStatus["state"] | null = null;
+  if (link.kind === "pull_request") {
+    const read = await workspaceGitHubReader(deps, workspaceId, ref.owner, ref.repo).catch(
+      () => null,
+    );
+    state = read
+      ? ((await readGitHubPullRequestStatus(read, ref).catch(() => null))?.state ?? null)
+      : null;
+  }
+  return { fullName: repository.fullName, state };
 }
 
 export type SessionLinkStatusReader = (
@@ -240,13 +339,13 @@ export async function withSessionLinkStatuses(
       const link = links[index]!;
       const key = `${workspaceId}:${link.url}`;
       const cached = statusCache.get(key);
-      if (!options.fresh && cached && Date.now() - cached.at < STATUS_TTL_MS) {
+      const maxAge = options.fresh ? FRESH_MIN_INTERVAL_MS : STATUS_TTL_MS;
+      if (cached && Date.now() - cached.at < maxAge) {
         results[index] = { ...link, status: cached.status };
         continue;
       }
       const status = await reader(workspaceId, link).catch(() => null);
-      statusCache.set(key, { at: Date.now(), status });
-      if (statusCache.size > 2_000) statusCache.delete(statusCache.keys().next().value!);
+      boundedSet(statusCache, key, { at: Date.now(), status });
       results[index] = { ...link, status };
     }
   };
