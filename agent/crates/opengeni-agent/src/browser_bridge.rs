@@ -169,15 +169,12 @@ fn extension_origin() -> String {
 /// Chrome discards a host's stderr, so when the host cannot reach the agent it
 /// first tells the extension why in one `unavailable` frame on stdout. The
 /// extension shows that to the person instead of a bare disconnect.
-pub fn run_native_host() -> Result<(), BrowserBridgeError> {
+pub fn run_native_host(
+    config_dir: Result<PathBuf, BrowserBridgeError>,
+) -> Result<(), BrowserBridgeError> {
     let mut browser_output = std::io::stdout().lock();
-    let connected = crate::config::config_dir()
-        .map_err(|error| {
-            (
-                AgentUnavailableReason::AgentError,
-                BrowserBridgeError::Protocol(error.to_string()),
-            )
-        })
+    let connected = config_dir
+        .map_err(|error| (AgentUnavailableReason::AgentError, error))
         .and_then(|config_dir| connect_native_host(&config_dir));
     match connected {
         Ok(socket) => relay_native_host(socket, std::io::stdin(), browser_output),
@@ -186,6 +183,24 @@ pub fn run_native_host() -> Result<(), BrowserBridgeError> {
             Err(error)
         }
     }
+}
+
+/// Use the installer's binding before consulting the browser's environment.
+/// A standalone or older registration with no binding keeps the old lookup.
+pub fn native_host_config_dir() -> Result<PathBuf, BrowserBridgeError> {
+    if let Some(home) = native_host_home() {
+        let binary = crate::update::installed_executable().map_err(BrowserBridgeError::Protocol)?;
+        if let Some(config_dir) = read_native_host_config(binary, &home)? {
+            return Ok(config_dir);
+        }
+    }
+    crate::config::config_dir().map_err(|error| BrowserBridgeError::Protocol(error.to_string()))
+}
+
+pub fn native_host_home() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Opens the authenticated agent connection for this host, or says which
@@ -443,6 +458,8 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 /// any already-present compatible Chromium channels. The manifest points at the
 /// exact running agent binary and allows the Opengeni Browser extension plus
 /// `extra_extension_ids`, a product's own branded extensions.
+/// `config_dir` binds a desktop runtime's host to its config. A standalone
+/// service install uses its ordinary config discovery instead.
 ///
 /// On Windows the browsers find the manifest through the per-user registry, so
 /// the one manifest file is written under `%LOCALAPPDATA%` and each browser's
@@ -451,7 +468,9 @@ pub fn install_native_host_manifests(
     binary_path: &Path,
     home: &Path,
     extra_extension_ids: &[String],
+    config_dir: Option<&Path>,
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    update_native_host_config(binary_path, home, config_dir)?;
     #[cfg(windows)]
     return install_registered_native_host(
         binary_path,
@@ -461,6 +480,57 @@ pub fn install_native_host_manifests(
     );
     #[cfg(not(windows))]
     install_native_host_manifests_in(binary_path, &browser_data_home(home), extra_extension_ids)
+}
+
+/// The host only gets its executable identity and the extension origin, not the
+/// manifest's path. Key the binding by the executable so another installation
+/// cannot redirect it. Keep it outside the app bundle and independent of any
+/// browser-specific directory or XDG override.
+fn native_host_config_path(binary: &Path, home: &Path) -> PathBuf {
+    let executable = launchable_program_path(binary);
+    let key = blake3::hash(executable.as_os_str().as_encoded_bytes()).to_hex();
+    home.join(".config/opengeni/native-hosts")
+        .join(format!("{key}.json"))
+}
+
+fn update_native_host_config(
+    binary: &Path,
+    home: &Path,
+    config_dir: Option<&Path>,
+) -> Result<(), BrowserBridgeError> {
+    let path = native_host_config_path(binary, home);
+    if let Some(config_dir) = config_dir {
+        // Chrome need not start the host in the runtime's working directory.
+        let config_dir = std::path::absolute(config_dir)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write_public_atomic(&path, &serde_json::to_vec(&config_dir)?)
+    } else {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn read_native_host_config(
+    binary: &Path,
+    home: &Path,
+) -> Result<Option<PathBuf>, BrowserBridgeError> {
+    let body = match std::fs::read(native_host_config_path(binary, home)) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let config_dir: PathBuf = serde_json::from_slice(&body)?;
+    if !config_dir.is_absolute() {
+        return Err(BrowserBridgeError::Protocol(
+            "the registered native host config directory is not absolute".to_string(),
+        ));
+    }
+    Ok(Some(config_dir))
 }
 
 fn native_host_manifest_body(
@@ -2229,14 +2299,13 @@ fn write_public_atomic(destination: &Path, body: &[u8]) -> Result<(), BrowserBri
         options.mode(0o644);
     }
     let mut file = options.open(&temporary)?;
-    file.write_all(body)?;
-    file.sync_all()?;
-    #[cfg(windows)]
-    if destination.exists() {
-        std::fs::remove_file(destination)?;
+    let result = file.write_all(body).and_then(|()| file.sync_all());
+    drop(file);
+    let result = result.and_then(|()| std::fs::rename(&temporary, destination));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
-    std::fs::rename(&temporary, destination)?;
-    Ok(())
+    result.map_err(Into::into)
 }
 
 fn read_authority(path: &Path) -> Result<BridgeAuthority, BrowserBridgeError> {
@@ -3214,6 +3283,33 @@ mod tests {
         assert_eq!(ordinary_windows_path(r"\\?\Volume{0}\agent.exe"), None);
     }
 
+    #[test]
+    fn native_host_config_is_kept_per_executable_and_cleared_for_a_service_install() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path();
+        let branded = home.join("Desktop App/Runner");
+        let standalone = home.join("standalone/runner");
+        let original = home.join("original config");
+        let successor = home.join("successor config");
+
+        update_native_host_config(&branded, home, Some(&original)).expect("first install");
+        update_native_host_config(&branded, home, Some(&successor)).expect("reinstall");
+        assert_eq!(
+            read_native_host_config(&branded, home).expect("binding"),
+            Some(successor)
+        );
+        assert_eq!(
+            read_native_host_config(&standalone, home).expect("standalone"),
+            None
+        );
+
+        update_native_host_config(&branded, home, None).expect("service install");
+        assert_eq!(
+            read_native_host_config(&branded, home).expect("binding"),
+            None
+        );
+    }
+
     /// Chrome starts the host through `cmd.exe`, which cannot run a verbatim
     /// path, so a manifest written from the canonical binary path names the
     /// ordinary form, and still counts as this agent's when removing it.
@@ -3237,6 +3333,10 @@ mod tests {
         let named = body["path"].as_str().expect("path");
         assert!(!named.starts_with(r"\\?\"), "{named}");
         assert_eq!(Path::new(named).canonicalize().expect("named"), canonical);
+        assert_eq!(
+            native_host_config_path(&canonical, directory.path()),
+            native_host_config_path(Path::new(named), directory.path())
+        );
         assert_eq!(
             remove_registered_native_host_for(&canonical, &manifests_dir, &registry)
                 .expect("remove"),
@@ -3804,7 +3904,8 @@ mod tests {
         // These ignored tests run alone; the variable only steers where the
         // manifest installer writes.
         std::env::set_var("XDG_CONFIG_HOME", &xdg);
-        install_native_host_manifests(Path::new(&binary), root.path(), &[]).expect("manifest");
+        install_native_host_manifests(Path::new(&binary), root.path(), &[], Some(&config_dir))
+            .expect("manifest");
         let process = tokio::process::Command::new(
             std::env::var("CHROMIUM").unwrap_or_else(|_| "chromium".to_string()),
         )
@@ -3825,7 +3926,7 @@ mod tests {
         .arg("data:text/html,<title>user page</title>")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &xdg)
-        .env("OPENGENI_CONFIG_DIR", &config_dir)
+        .env_remove("OPENGENI_CONFIG_DIR")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

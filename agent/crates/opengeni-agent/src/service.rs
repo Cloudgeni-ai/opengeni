@@ -562,6 +562,7 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
             &spec.binary_path,
             &home()?,
             &browser_bridge::extension_ids_from_env(),
+            None,
         )
         .map_err(|error| error.to_string())?;
         for manifest in manifests {
