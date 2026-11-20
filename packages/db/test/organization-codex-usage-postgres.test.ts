@@ -396,6 +396,40 @@ describe("organization Codex usage through retained core aliases", () => {
   );
 
   test.skipIf(!real)(
+    "records the plan the rotated id_token reports, through the shared refresh writer",
+    async () => {
+      const input = await fixture("core", true);
+      const claims = (payload: Record<string, unknown>) =>
+        `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+      const quota = { modelCooldowns: { "gpt-pro-only": { until: "2999-01-01T00:00:00.000Z" } } };
+      await shared!.admin`insert into subscription_connection_quota
+        (account_id, connection_id, quota, observed_refresh_generation, revision)
+        values (${input.organizationId}, ${input.credentialId}, ${shared!.admin.json(quota)}, 1, 1)`;
+      const refresh = mock(async () => ({
+        accessToken: claims({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+        refreshToken: "plan-rotated",
+        idToken: claims({ "https://api.openai.com/auth": { chatgpt_plan_type: "free" } }),
+      }));
+      const result = await fetchOrganizationCodexUsageForAccount(
+        client!.db,
+        settings,
+        input,
+        provider(),
+        refresh,
+      );
+      expect(result.status).toBe("ok");
+      expect(refresh).toHaveBeenCalledTimes(1);
+      const [row] = await shared!.admin`select plan_type, refresh_generation::int as generation,
+        credential_format from subscription_connections where id = ${input.credentialId}`;
+      expect(row).toEqual({ plan_type: "free", generation: 2, credential_format: "v2" });
+      // A changed plan clears the model cooldowns the old plan earned.
+      const [stored] = await shared!.admin`select quota->'modelCooldowns' as cooldowns
+        from subscription_connection_quota where connection_id = ${input.credentialId}`;
+      expect(stored!.cooldowns).toEqual({});
+    },
+  );
+
+  test.skipIf(!real)(
     "rejects foreign aliases before provider I/O and reads workspace-managed organization accounts",
     async () => {
       const canonical = await fixture("core");
