@@ -819,3 +819,81 @@ function stringArray(value: unknown): string[] {
   }
   return value;
 }
+
+/**
+ * A connected agent's settings (migration 1515): the workspace its tools use
+ * when a call names none, and its app data reach. No row reads as viewer with
+ * no default workspace. Never authority by itself.
+ */
+export type OrganizationMcpConnectionSettings = {
+  defaultWorkspaceId: string | null;
+  appDataAccess: "viewer" | "manager";
+};
+
+export const DEFAULT_ORGANIZATION_MCP_CONNECTION_SETTINGS: OrganizationMcpConnectionSettings =
+  Object.freeze({ defaultWorkspaceId: null, appDataAccess: "viewer" });
+
+export async function getOrganizationMcpConnectionSettings(
+  db: Database,
+  input: { accountId: string; connectionId: string; subjectId: string },
+): Promise<OrganizationMcpConnectionSettings> {
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: null },
+    async (scoped) =>
+      await rawRows<{ default_workspace_id: string | null; app_data_access: string }>(
+        scoped,
+        sql`select default_workspace_id::text as default_workspace_id, app_data_access
+          from organization_mcp_connection_settings
+          where account_id = ${input.accountId}::uuid
+            and connection_id = ${input.connectionId}::uuid
+            and subject_id = ${input.subjectId}`,
+      ),
+  );
+  const row = rows[0];
+  if (!row) return DEFAULT_ORGANIZATION_MCP_CONNECTION_SETTINGS;
+  return {
+    defaultWorkspaceId: row.default_workspace_id,
+    appDataAccess: row.app_data_access === "manager" ? "manager" : "viewer",
+  };
+}
+
+/** Change a connected agent's settings; fields left out keep their stored value. */
+export async function updateOrganizationMcpConnectionSettings(
+  db: Database,
+  input: {
+    accountId: string;
+    connectionId: string;
+    subjectId: string;
+    defaultWorkspaceId?: string | null;
+    appDataAccess?: "viewer" | "manager";
+  },
+): Promise<OrganizationMcpConnectionSettings> {
+  const setDefault = input.defaultWorkspaceId !== undefined;
+  const setAccess = input.appDataAccess !== undefined;
+  const rows = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: null },
+    async (scoped) =>
+      await rawRows<{ default_workspace_id: string | null; app_data_access: string }>(
+        scoped,
+        sql`insert into organization_mcp_connection_settings
+            (account_id, connection_id, subject_id, default_workspace_id, app_data_access)
+          values (${input.accountId}::uuid, ${input.connectionId}::uuid, ${input.subjectId},
+            ${input.defaultWorkspaceId ?? null}::uuid, ${input.appDataAccess ?? "viewer"})
+          on conflict (account_id, connection_id) do update set
+            subject_id = excluded.subject_id,
+            default_workspace_id = case when ${setDefault}::boolean then excluded.default_workspace_id
+              else organization_mcp_connection_settings.default_workspace_id end,
+            app_data_access = case when ${setAccess}::boolean then excluded.app_data_access
+              else organization_mcp_connection_settings.app_data_access end,
+            updated_at = now()
+          returning default_workspace_id::text as default_workspace_id, app_data_access`,
+      ),
+  );
+  const row = rows[0]!;
+  return {
+    defaultWorkspaceId: row.default_workspace_id,
+    appDataAccess: row.app_data_access === "manager" ? "manager" : "viewer",
+  };
+}

@@ -539,8 +539,12 @@ describe("auto-connect on Connected apps", () => {
     try {
       expect(view.text()).toContain("Auto-connected through Claude");
       expect(view.text()).toContain("Set for everyone auto-connected through Claude.");
-      // Read-only here, though it's the viewer's own agent.
-      expect(view.container.querySelector('[role="radio"]')).toBeNull();
+      // Read-only here, though it's the viewer's own agent. Only its own App
+      // data choice, which the issuer doesn't set, stays editable.
+      const radios = [...view.container.querySelectorAll('[role="radio"]')].map(
+        (radio) => radio.textContent,
+      );
+      expect(radios).toEqual(["Viewer", "Manager"]);
       await click(button(view.container, "Change"));
       expect(view.location()).toEqual({ issuer: ISSUER_ID });
     } finally {

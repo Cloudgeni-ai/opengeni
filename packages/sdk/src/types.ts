@@ -7468,6 +7468,13 @@ export type OrganizationMcpConnection = {
   connectedBy: { subjectId: string; name: string };
   /** What it can do and where. The person's own live access still caps it. */
   policy: OrganizationAccessPolicy;
+  /**
+   * App data: "viewer" (the default) reads and writes like a viewer of each
+   * app; "manager" manages it. Only the person, in a browser, sets manager.
+   */
+  appDataAccess?: "viewer" | "manager";
+  /** The workspace its tools use when a call names none, or null. */
+  defaultWorkspaceId?: string | null;
   createdAt: string;
   lastUsedAt: string | null;
   expiresAt: string;
@@ -7492,7 +7499,9 @@ export type OrganizationMcpConnectionList = {
 };
 
 export type UpdateOrganizationMcpConnectionRequest = {
-  access: OrganizationAccessPolicy;
+  access?: OrganizationAccessPolicy;
+  appDataAccess?: "viewer" | "manager";
+  defaultWorkspaceId?: string | null;
 };
 
 // --- Personal API keys ---------------------------------------------------------------------------

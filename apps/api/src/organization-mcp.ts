@@ -15,7 +15,9 @@ import {
 import {
   stampDelegatedHumanAuthorization,
   stampWorkspacePersonAuthorization,
+  type OutsideAgentReach,
 } from "@opengeni/core";
+import type { OrganizationMcpConnectionSettings } from "@opengeni/db";
 import { z } from "zod";
 
 import {
@@ -30,6 +32,8 @@ import {
   stampActionAuditProvenance,
   type ActionAuditProvenance,
 } from "./http/disconnect-audit-actor";
+import { markStoredApprovalClaim } from "./mcp/stored-approval-claim";
+import { callNamedTool, findNamedTool, namedToolDescriptors } from "./organization-mcp-tools";
 
 /* ----------------------------------------------------------------------------
    The organization MCP server (`/v1/mcp`).
@@ -204,6 +208,23 @@ export type OrganizationActionContext = {
   publicOrigin?: string | null;
   dispatch: (request: Request) => Promise<Response>;
   signal?: AbortSignal;
+  /**
+   * The caller is a coding agent outside Opengeni (a connection or a personal
+   * key used on this server): its grants carry this app data reach, and it
+   * reaches only members-only apps. Trusted server state only.
+   */
+  outsideAgent?: OutsideAgentReach;
+  /** The connection's own settings, for a caller that signed in (not a key). */
+  connection?: {
+    id: string;
+    settings: OrganizationMcpConnectionSettings;
+    setDefaultWorkspace: (workspaceId: string) => Promise<void>;
+  };
+  /**
+   * Per-connection rate limit: seconds until the named tool may run again, or
+   * 0 to run it now. Absent means no limit (in-process callers).
+   */
+  admit?: (toolName: string) => number;
 };
 
 export function buildOrganizationMcpServer(input: OrganizationActionContext): Server {
@@ -218,14 +239,27 @@ export function buildOrganizationMcpServer(input: OrganizationActionContext): Se
     {
       capabilities: { tools: {} },
       instructions:
-        "Opengeni actions: use opengeni_actions_search to find what you need, opengeni_action_describe for its inputs, then opengeni_action_call. Most actions take a workspaceId path parameter; list workspaces first (search 'workspaces').",
+        "Opengeni runs agents in the cloud. Hand work over with delegate and follow it with wait_for (done means the chat's turn finished with a final answer); session_send adds a follow-up. Use the workspace's apps (apps_list, app_query, app_write), tools (tools_search, tool_call; approval-gated calls return a link for the person), Skills (skills_sync) and Knowledge (knowledge_search, knowledge_save). Tools use this connection's default workspace (workspace_use) when you leave workspaceId out. For anything else: opengeni_actions_search, opengeni_action_describe, then opengeni_action_call.",
     },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map((tool) => ({ ...tool, inputSchema: tool.inputSchema as never })),
+    tools: [
+      ...namedToolDescriptors(),
+      ...TOOLS.map((tool) => ({
+        ...tool,
+        inputSchema: tool.inputSchema as never,
+      })),
+    ],
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
     const args = request.params.arguments ?? {};
+    const wait = input.admit?.(request.params.name) ?? 0;
+    if (wait > 0)
+      return failure(
+        `Too many calls from this connection: try again in ${wait} seconds. Nothing was run, so retrying is safe.`,
+      );
+    const named = findNamedTool(request.params.name);
+    if (named) return await callNamedTool(input, named, args);
     switch (request.params.name) {
       case "opengeni_actions_search": {
         const parsed = SearchInput.safeParse(args);
@@ -422,6 +456,10 @@ export async function callOrganizationAction(
 export async function runOrganizationAction(
   context: OrganizationActionContext,
   input: z.infer<typeof OrganizationActionCallInput>,
+  options: {
+    /** A workspace tool call may use the person's stored approval for its operation. */
+    claimStoredApproval?: boolean;
+  } = {},
 ): Promise<
   | { response: Response; entry: ActionCatalogEntry; externalPerson?: true }
   | { refused: CallToolResult }
@@ -499,15 +537,21 @@ export async function runOrganizationAction(
         permissions: context.caller.access.permissions,
       });
     } else {
-      stampDelegatedHumanAuthorization(request, {
-        organizationId: context.caller.accountId,
-        subjectId: context.caller.subjectId,
-        permissions: context.caller.access.permissions,
-        workspaceScope: context.caller.access.workspaceScope,
-      });
+      stampDelegatedHumanAuthorization(
+        request,
+        {
+          organizationId: context.caller.accountId,
+          subjectId: context.caller.subjectId,
+          permissions: context.caller.access.permissions,
+          workspaceScope: context.caller.access.workspaceScope,
+        },
+        context.outsideAgent ? { outsideAgent: context.outsideAgent } : {},
+      );
     }
     if (context.auditProvenance) stampActionAuditProvenance(request, context.auditProvenance);
   }
+  if (options.claimStoredApproval && context.caller.kind === "person")
+    markStoredApprovalClaim(request);
   return {
     response: await context.dispatch(request),
     entry,

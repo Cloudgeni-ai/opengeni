@@ -1817,6 +1817,31 @@ describe("unified Knowledge storage", () => {
         })
       ).outcome,
     ).toBe("applied");
+    // A connected agent's upload is a person's save that follows Agent learning
+    // (migration 1515): Off refuses it, Review first leaves it pending.
+    const follow = () => ({
+      ...request,
+      learningPolicy: "follow",
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      stableKey: `follow-${crypto.randomUUID()}`,
+    });
+    await fails(applySkillLifecycle(client.db, f.human, follow()), "42501");
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 2,
+      settings: { knowledge: "automatic", instructions: "review_first", skills: "review_first" },
+    });
+    expect((await applySkillLifecycle(client.db, f.human, follow())).outcome).toBe("pending");
+    expect(
+      (
+        await applySkillLifecycle(client.db, f.human, {
+          ...follow(),
+          learningPolicy: undefined,
+        })
+      ).outcome,
+    ).toBe("applied");
   });
 
   test("one review approves linked sources before findings and supports an edited approval", async () => {

@@ -1,6 +1,7 @@
 import packageManifest from "../package.json" with { type: "json" };
 import { deployAgents, exportAgent } from "./agents";
 import { DEFAULT_OPENGENI_BASE_URL, type FetchLike } from "./api";
+import { type ConnectDeps, nodeConnectDeps, parseClients, runConnect } from "./connect";
 
 export {
   type LoadedAgentFile,
@@ -9,6 +10,14 @@ export {
   orgAgentConfigHash,
 } from "./agent-files";
 export { type DeployResult, renderAgentFile } from "./agents";
+export {
+  CONNECT_CLIENTS,
+  type ConnectClient,
+  type ConnectDeps,
+  OPENGENI_CONNECT_SKILL,
+  mcpServerUrl,
+  runConnect,
+} from "./connect";
 export { CliApiError, DEFAULT_OPENGENI_BASE_URL, type FetchLike } from "./api";
 
 /** npm package name of the Opengeni command-line interface. */
@@ -27,6 +36,8 @@ export type CliIo = {
   env?: Readonly<Record<string, string | undefined>>;
   cwd?: string;
   fetch?: FetchLike;
+  /** Filesystem and process access for `opengeni connect` (tests inject fakes). */
+  connectDeps?: ConnectDeps;
 };
 
 /** Exit codes returned by {@link runCli}. */
@@ -40,6 +51,11 @@ export const CLI_EXIT = {
 const USAGE = `Usage: opengeni <command> [options]
 
 Commands:
+  connect                    Add Opengeni to the coding agents on this computer
+                             (Claude Code, Codex, Cursor, VS Code with Copilot)
+    --client <list>          claude, codex, cursor, vscode or all (default: the ones installed)
+    --no-skill               Don't install the short opengeni skill
+    --no-sign-in             Don't start sign-in where the agent's command can
   agents deploy [dir]        Deploy agents/<key>.yaml files to an organization (default dir: agents)
     --dry-run                Show the change against the published version without saving
     --publish                Publish the deployed versions
@@ -55,7 +71,7 @@ Options:
   -v, --version              Show the installed version
 
 Environment:
-  OPENGENI_API_KEY           Organization API key with agents:manage (required)
+  OPENGENI_API_KEY           Organization API key with agents:manage (agents commands only)
 `;
 
 const processIo: CliIo = {
@@ -67,8 +83,16 @@ function isHelp(argument: string | undefined): boolean {
   return argument === "--help" || argument === "-h" || argument === "help";
 }
 
-const BOOLEAN_FLAGS = new Set(["dry-run", "publish", "move-running-chats", "json", "help"]);
-const VALUE_FLAGS = new Set(["organization", "base-url", "out"]);
+const BOOLEAN_FLAGS = new Set([
+  "dry-run",
+  "publish",
+  "move-running-chats",
+  "json",
+  "help",
+  "no-skill",
+  "no-sign-in",
+]);
+const VALUE_FLAGS = new Set(["organization", "base-url", "out", "client"]);
 
 type ParsedArgs = {
   positionals: string[];
@@ -129,6 +153,7 @@ export async function runCli(argv: readonly string[], io: CliIo = processIo): Pr
     io.stdout(`${OPENGENI_CLI_VERSION}\n`);
     return CLI_EXIT.ok;
   }
+  if (command === "connect") return runConnectCommand(argv.slice(1), io);
   if (command !== "agents") {
     io.stderr(`Unknown command: opengeni ${command}\n\n`);
     io.stderr(USAGE);
@@ -213,4 +238,38 @@ export async function runCli(argv: readonly string[], io: CliIo = processIo): Pr
     io,
   );
   return exitCode;
+}
+
+function runConnectCommand(argv: readonly string[], io: CliIo): number {
+  const args = parseArgs(argv);
+  if (args.flags.has("help")) {
+    io.stdout(USAGE);
+    return CLI_EXIT.ok;
+  }
+  const env = io.env ?? process.env;
+  for (const flag of ["dry-run", "publish", "move-running-chats", "json", "organization", "out"]) {
+    if (args.flags.has(flag)) args.errors.push(`--${flag} is not an option of connect.`);
+  }
+  if (args.positionals.length > 0) args.errors.push(`unexpected argument ${args.positionals[0]}.`);
+  const clients = parseClients(nonEmpty(args.flags.get("client")));
+  if (typeof clients === "string") args.errors.push(clients);
+  if (args.errors.length > 0) {
+    for (const error of args.errors) io.stderr(`error: ${error}\n`);
+    io.stderr("Run opengeni --help for usage.\n");
+    return CLI_EXIT.usage;
+  }
+  const baseUrl =
+    nonEmpty(args.flags.get("base-url")) ??
+    nonEmpty(env.OPENGENI_BASE_URL) ??
+    DEFAULT_OPENGENI_BASE_URL;
+  return runConnect(
+    io.connectDeps ?? nodeConnectDeps(env),
+    {
+      baseUrl,
+      clients: clients as Exclude<typeof clients, string>,
+      skill: !args.flags.has("no-skill"),
+      signIn: !args.flags.has("no-sign-in"),
+    },
+    io,
+  );
 }

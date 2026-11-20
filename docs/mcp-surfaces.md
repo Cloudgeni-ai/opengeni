@@ -6,7 +6,7 @@ page exists so you pick the right one in one read.
 
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
-| **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in or a personal API key acting as the person, capped by the connection's or key's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
+| **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Named tools for the common steps (`delegate`, `wait_for`, sessions, apps, tools, Skills, Knowledge) plus every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in or a personal API key acting as the person, capped by the connection's or key's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
 | **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing Opengeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | Opengeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval choices apply uniformly; capable clients receive durable pending handles for review | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
@@ -135,6 +135,83 @@ Full access; SDK
 disconnect them, except that only an owner disconnects an owner's (each listed
 agent carries `canDisconnect`); only the person changes what their agent can
 do. Migration `0601` is rolling.
+
+#### Named tools for connected agents
+
+Next to the three generic tools, the server lists named tools for what a
+coding agent on someone's computer usually does
+(`apps/api/src/organization-mcp-tools.ts`). Each one is a thin wrapper that
+runs the same routes as the generic tools, as the person and capped by the
+connection's access setting; none adds authority.
+
+| Tool | What it does |
+| --- | --- |
+| `delegate` | Starts a chat: `message`, optional `agent` (id or name), `repository` (`owner/name`, or a URL), `branch`, `sandboxEnvironment` (id or name), `title`, `visibility`, `idempotencyKey`, `workspaceId`. Returns `sessionId`, `url` and a `cursor` |
+| `wait_for` | Waits up to 50 s (`maxWaitSeconds`, default 50) for a chat after `cursor`. `state` is `done` (the turn finished with a final answer, returned as `finalAnswer`), `needs_attention` (a person must answer in the chat), `failed` or `running`; call again with the returned `cursor` |
+| `session_send` | Queues a follow-up, or changes the running turn with `mode: "steer"`; returns the `cursor` to wait from |
+| `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Find, read and control chats |
+| `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; `workspace_use` sets the connection's default workspace |
+| `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change app data ([App data](site-data.md)); `app_query` runs a named query when given `sqlQuery` |
+| `tools_search`, `tool_call` | Search and call the workspace's connected tools; results show which tools need approval |
+| `skills_sync`, `skills_list` | Upload local Skill folders (`direction: "upload"`) or pull the workspace's (`direction: "pull"`) |
+| `knowledge_search`, `knowledge_get`, `knowledge_save` | Search, read and save Knowledge |
+
+`sites_list`, `site_describe`, `site_query`, `site_write` and
+`session_wait_for` still work as hidden aliases; they aren't listed.
+
+- **Workspace.** A call with no `workspaceId` uses the connection's default
+  workspace (set with `workspace_use`, or `defaultWorkspaceId` on the
+  connection), else the only workspace the connection reaches. With several
+  and no default, the error lists them.
+- **Retries.** `delegate`, `session_send`, `knowledge_save` and
+  `skills_sync` derive their idempotency key from the caller, workspace and
+  input when the agent sends none, so retrying the same call within an hour
+  never starts the same work twice. Errors say whether a retry is safe
+  (`retrySafe`) and carry the key.
+- **Visibility.** A delegated chat uses the person's default chat visibility;
+  Only me falls back to the workspace when the workspace doesn't allow it.
+  Stopping a local wait only stops tracking; `session_pause` stops the chat.
+- **App data.** A connected agent is a viewer of app data by default: it
+  reads and writes what each app's collection rules let a viewer, and
+  managing collections (define, reset, import, export, settings) is refused
+  with `outside_agent_viewer` until the person sets App data to Manager for
+  that agent (Connected agents, or `appDataAccess` on
+  `PATCH /v1/organizations/:id/mcp-connections/:connectionId`; only the
+  person in the browser can choose Manager, not an agent acting for them).
+  Outside agents only reach apps whose publication is members-only or that
+  aren't published: an app anyone can open may hold text from outsiders
+  that an agent picking up work would read as instructions, so those are
+  refused with `outside_agent_members_only`. A personal API key is treated
+  like a connected agent with viewer access.
+- **Approvals.** `tool_call` on a tool that needs approval returns
+  `needsApproval`, an `approvalUrl` (`/workspaces/:id/tool-approval` in the
+  web app, showing the exact tool and arguments) and an `operationId`. After
+  the person approves there, calling `tool_call` again with the same input
+  and `operationId` runs the approved call once.
+- **Skills.** Uploads go to the person's own Skills unless `scope` is
+  `workspace` or `organization`, follow Agent learning like an agent's save (Review first
+  leaves them pending review, Off refuses them), skip unchanged Skills and
+  return one result per Skill (`created`, `updated`, `unchanged`,
+  `pending_review`, `invalid` with the YAML or frontmatter error, `conflict`,
+  `failed`). Pulling returns each Skill's files. Syncing straight from a Git
+  repository isn't supported; the agent reads the folders locally.
+- **Rate limits.** Each connection (or personal key) may make 120 calls in a
+  burst refilling at 2 per second, and 20 `delegate` calls refilling at one
+  per 30 seconds. Over the limit a call returns an error saying how many seconds to wait;
+  nothing ran, so the retry is safe. The limits are per API process.
+- **Not yet.** MCP Tasks (long-running calls) and MCP event notifications are
+  not supported; use `wait_for`.
+
+`npx opengeni connect` adds the server to Claude Code, Codex, Cursor and VS
+Code with Copilot on the computer, and installs a short `opengeni` skill
+for each ([setup guide](../docs-site/guides/connect-coding-agents.mdx)).
+Migration `1515` (rolling) adds the per-connection settings table
+`organization_mcp_connection_settings` and the Skill save that follows Agent
+learning.
+
+When self-hosted, sign-in needs `OPENGENI_PUBLIC_BASE_URL` set to the public
+origin (approval links use it too), the rate limits count per API replica,
+and `npx opengeni connect --base-url <origin>` points the agents at it.
 
 #### Auto-connect (Enterprise-Managed Authorization)
 

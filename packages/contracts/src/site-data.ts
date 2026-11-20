@@ -307,6 +307,12 @@ export type SiteDataDescribeResponse = {
     workspaceBytes: number;
   };
   limits: SiteDataLimitsResponse;
+  /**
+   * Present as "viewer" when the caller reads the app like a viewer (a
+   * connected outside agent without app management), so record counts cover
+   * the whole app but writes follow each collection's viewer rules.
+   */
+  access?: "viewer";
 };
 
 export type SiteDataFileResponse = {

@@ -192,6 +192,10 @@ const LazyConnectAgentRoute = lazyRouteComponent(
   "ConnectAgentRoute",
 );
 const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
+const LazyToolApprovalRoute = lazyRouteComponent(
+  () => import("@/routes/tool-approval"),
+  "ToolApprovalRoute",
+);
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyComputerUseRoute = lazyRouteComponent(
   () => import("@/routes/computer-use"),
@@ -884,6 +888,12 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+// A connected agent's link for approving one tool call (organization MCP tool_call).
+const workspaceToolApprovalRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "tool-approval",
+  component: ToolApproval,
+});
 const workspaceComputerUseRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "computer-use",
@@ -1388,6 +1398,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     workspaceRigsRoute,
     workspaceRigDetailRoute,
+    workspaceToolApprovalRoute,
     workspaceReadOnlyChatsRoute,
     workspaceLegacyReadOnlyChatsRoute,
     workspaceInboxRoute,
@@ -1555,6 +1566,11 @@ function Secrets() {
       owner={owner}
     />
   );
+}
+
+function ToolApproval() {
+  const { workspaceId } = workspaceToolApprovalRoute.useParams();
+  return <LazyToolApprovalRoute workspaceId={workspaceId} />;
 }
 
 function Rigs() {

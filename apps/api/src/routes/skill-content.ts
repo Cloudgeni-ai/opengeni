@@ -20,6 +20,7 @@ import {
   rejectSkill,
   removeSkill,
   listSkills,
+  outsideAgentReach,
   readSkill,
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -179,10 +180,12 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         ),
       );
       buildPortableSkillArtifact(files);
-    } catch {
+    } catch (error) {
+      // Say what is wrong, so whoever uploaded the folder can fix it.
+      const reason =
+        error instanceof Error && error.message ? ` (${error.message.slice(0, 300)})` : "";
       throw new HTTPException(400, {
-        message:
-          "Invalid Skill folder. SKILL.md requires valid YAML frontmatter with a name and description. Use unique relative text-file paths and respect the file and folder size limits.",
+        message: `Invalid Skill folder${reason}. SKILL.md requires valid YAML frontmatter with a name and description. Use unique relative text-file paths and respect the file and folder size limits.`,
       });
     }
     const receipt = await skillMutation(() =>
@@ -198,6 +201,9 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         stableKey: current?.stableKey ?? request.stableKey,
         files,
         reason: request.reason,
+        // A connected outside agent's upload follows Agent learning, like an
+        // agent's save: Review first leaves it pending for the person.
+        ...(outsideAgentReach(access.grant) ? { learningPolicy: "follow" as const } : {}),
       }),
     );
     return c.json(receipt);

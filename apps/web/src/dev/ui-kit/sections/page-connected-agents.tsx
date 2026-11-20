@@ -241,7 +241,15 @@ function fakeApi(initial: McpConnection[]): McpConnectionsApi {
   return {
     list: async () => ({ connections: rows, canManageAll: true }),
     update: async (id, change) => {
-      rows = rows.map((row) => (row.id === id ? { ...row, policy: change.policy } : row));
+      rows = rows.map((row) =>
+        row.id === id
+          ? {
+              ...row,
+              ...(change.policy ? { policy: change.policy } : {}),
+              ...(change.appDataAccess ? { appDataAccess: change.appDataAccess } : {}),
+            }
+          : row,
+      );
       return rows.find((row) => row.id === id)!;
     },
     disconnect: async (id) => {
