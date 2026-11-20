@@ -367,11 +367,11 @@ message or first-message files. The same value reaches `beforeForwardMessage`
 so an admission hook can distinguish empty creation from a text turn. Model
 choices still require the proxy's `modelSelection` option.
 
-## Links, artifacts, and Sites
+## Links, artifacts, and apps
 
 File links download by file ID, and `sandbox:` links download files from the session's sandbox for users with `files:read`.
 
-To open artifacts and Sites, either route them to your own pages with `resolveLink`, or render `SessionArtifactViewer` from `@opengeni/react/artifacts` in `onOpenArtifact` (members need `artifacts:read`).
+To open artifacts and apps, either route them to your own pages with `resolveLink`, or render `SessionArtifactViewer` from `@opengeni/react/artifacts` in `onOpenArtifact` (members need `artifacts:read`).
 
 ## Other UI shapes
 

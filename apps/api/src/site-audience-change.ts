@@ -79,7 +79,7 @@ export async function changeSiteAudienceForAgent(
   } catch (error) {
     if (error instanceof WorkspaceArtifactNotFoundError)
       throw new HTTPException(404, {
-        message: "No file or Site you can open has this artifactId.",
+        message: "No file or app you can open has this artifactId.",
       });
     throw error;
   }

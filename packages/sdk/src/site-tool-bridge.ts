@@ -111,7 +111,7 @@ function siteToolNotAvailableForViewer(error: unknown): unknown {
       return null;
     }
   })();
-  return Object.assign(new Error(decoded ?? "This tool isn't available to you on this Site."), {
+  return Object.assign(new Error(decoded ?? "This tool isn't available to you on this app."), {
     name: "SiteToolNotAvailableForViewerError",
     code: "site_tool_not_available_for_viewer",
     retryable: false,
@@ -125,7 +125,7 @@ function siteToolRefusal(message: string, code: string, retryable: boolean): Err
 }
 /** The Site calls a tool its pinned version doesn't declare. */
 const undeclaredTool = () =>
-  siteToolRefusal("This tool is not available to the Site", "site_tool_not_declared", false);
+  siteToolRefusal("This tool is not available to the app", "site_tool_not_declared", false);
 
 export type SiteToolFailure = {
   code: SiteToolFailureCode;
@@ -630,7 +630,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         ...(refresh ? { refresh } : {}),
       });
       if (current.workspaceId !== input.workspaceId)
-        throw new Error("Site catalog workspace mismatch");
+        throw new Error("App catalog workspace mismatch");
       return {
         version: current.version,
         generation: current.generation,
@@ -993,7 +993,7 @@ function legacySiteToolResult(
         message:
           "message" in error && typeof error.message === "string"
             ? error.message
-            : "Site tool execution failed",
+            : "App tool execution failed",
         retryable: false,
         outcomeUnknown: "outcomeUnknown" in error && error.outcomeUnknown === true,
         providerError: error,
@@ -1050,7 +1050,7 @@ function siteFrameBodyFieldRefusal(
         status: 403,
         code: "forbidden",
         message:
-          "A Site page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
+          "An app page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
         retryable: false,
         details: { code: "site_frame_field_forbidden", field },
       },

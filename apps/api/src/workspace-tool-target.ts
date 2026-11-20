@@ -220,7 +220,7 @@ function siteConsentError(
   if (isPublishedSiteToolAuthorization(authorization))
     return new ApiHttpError(409, {
       code: "conflict",
-      message: "Open this Site in Opengeni to confirm this action.",
+      message: "Open this app in Opengeni to confirm this action.",
       retryable: false,
       outcomeUnknown: false,
       details: { code: "site_tool_consent_requires_opengeni" },

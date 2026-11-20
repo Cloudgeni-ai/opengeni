@@ -286,8 +286,8 @@ export async function requireSitePlatformQuota(
     code: "payment_required",
     message:
       reason === "no_credits"
-        ? "This workspace has used its included Site usage for this month and has no credits left"
-        : "This workspace has used its included Site usage for this month",
+        ? "This workspace has used its included app usage for this month and has no credits left"
+        : "This workspace has used its included app usage for this month",
     retryable: false,
     outcomeUnknown: false,
     details: {
@@ -342,10 +342,10 @@ export type SitePlatformBrakedAction = "sql_write" | "publish" | "guest_agent";
 
 const BRAKE_MESSAGES: Record<SitePlatformBrakedAction, string> = {
   sql_write:
-    "New Site database writes are paused for the rest of the month. Published pages keep working.",
+    "New app database writes are paused for the rest of the month. Published pages keep working.",
   publish: "Publishing is paused for the rest of the month. Published pages keep working.",
   guest_agent:
-    "Site assistants for visitors are paused for the rest of the month. Published pages keep working.",
+    "App assistants for visitors are paused for the rest of the month. Published pages keep working.",
 };
 
 /** The 503 a braked action gets. */

@@ -535,7 +535,7 @@ export function useSlackIntegration({
   async function startPersonalOAuth() {
     if (!personalItem) {
       toast.error("Slack account connection is unavailable", {
-        description: "The official hosted Slack integration is not present in this catalog.",
+        description: "The official hosted Slack connected tool is not present in this catalog.",
       });
       return;
     }

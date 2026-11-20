@@ -43,7 +43,7 @@ const ids = (menu: { id: string }[]) => menu.map((entry) => entry.id);
 test("the type chips match the web library", () => {
   expect(ARTIFACT_KIND_FILTERS.map((each) => each.label)).toEqual([
     "All",
-    "Sites",
+    "Apps",
     "Documents",
     "Presentations",
     "Spreadsheets",
@@ -142,7 +142,7 @@ test("each card says when it was last edited", () => {
 test("the empty list speaks to the filter and search", () => {
   expect(emptyListWords("all", "").title).toBe("No artifacts yet");
   expect(emptyListWords("presentation", "").title).toBe("No presentations yet");
-  expect(emptyListWords("site", " metronor ").title).toBe("No sites match “metronor”");
+  expect(emptyListWords("site", " metronor ").title).toBe("No apps match “metronor”");
 });
 
 test("chat links open the viewer; chats and sandbox files don't", () => {

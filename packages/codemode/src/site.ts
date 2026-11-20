@@ -66,7 +66,7 @@ export function createCodemodeSiteRequestHandler(
           parsed.data.siteVersionId ||
           ("approvalToken" in parsed.data && parsed.data.approvalToken)
         )
-          return siteError(400, "invalid_request", "Invalid Site target request");
+          return siteError(400, "invalid_request", "Invalid app target request");
         const catalog = await active.catalog({ signal: request.signal });
         const target = parsed.data.target;
         const entries = catalog.entries.filter((entry) =>
@@ -146,7 +146,7 @@ export function createCodemodeSiteRequestHandler(
               interfaceName: "OpenGeniGeneratedTools",
               callOptionsType: "OpenGeniToolCallOptions",
               fallbackResultType: "ToolGatewayResult",
-              generatedBy: "@opengeni/codemode local Site preview",
+              generatedBy: "@opengeni/codemode local app preview",
               catalogDigestLabel: "Attempt catalog digest",
             },
           ),
@@ -154,10 +154,10 @@ export function createCodemodeSiteRequestHandler(
       }
       if (request.method === "POST" && pathname === `${CODEMODE_SITE_LOCAL_PATH}/calls`) {
         const body = await request.json();
-        if (!isSiteCall(body)) return siteError(400, "invalid_request", "Invalid Site tool call");
+        if (!isSiteCall(body)) return siteError(400, "invalid_request", "Invalid app tool call");
         const catalog = await active.catalog({ signal: request.signal });
         if (body.catalogDigest !== catalog.digest) {
-          return siteError(409, "catalog_stale", "The local Site tool catalog changed", true);
+          return siteError(409, "catalog_stale", "The local app tool catalog changed", true);
         }
         const operationId = body.operationId ?? randomUUID();
         const entry = catalog.entries.find(
@@ -177,7 +177,7 @@ export function createCodemodeSiteRequestHandler(
           result,
         });
       }
-      return siteError(404, "not_found", "Local Site tool endpoint not found");
+      return siteError(404, "not_found", "Local app tool endpoint not found");
     } catch (error) {
       if (error instanceof CodemodeTransportError) {
         const staleLegacyPin =
@@ -196,7 +196,7 @@ export function createCodemodeSiteRequestHandler(
       return siteError(
         500,
         "local_codemode_error",
-        error instanceof Error ? error.message : "Local Site tool request failed",
+        error instanceof Error ? error.message : "Local app tool request failed",
       );
     }
   };

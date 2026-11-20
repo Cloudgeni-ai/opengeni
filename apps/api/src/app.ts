@@ -2501,7 +2501,7 @@ export function createAppComposition(
     const body = parseRequestBody(
       ToolGatewaySiteConsentRequest,
       await c.req.json().catch(() => null),
-      { status: 400, message: "Invalid Site consent request" },
+      { status: 400, message: "Invalid app consent request" },
     );
     c.header("cache-control", "no-store");
     return c.json(
@@ -2526,7 +2526,7 @@ export function createAppComposition(
     const body = parseRequestBody(
       ToolGatewaySiteAllowancesResetRequest,
       await c.req.json().catch(() => null),
-      { status: 400, message: "Invalid Site allowances request" },
+      { status: 400, message: "Invalid app allowances request" },
     );
     c.header("cache-control", "no-store");
     return c.json(

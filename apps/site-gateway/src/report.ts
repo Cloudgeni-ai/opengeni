@@ -20,7 +20,7 @@ export async function handleReport(site: SiteContext): Promise<Response> {
   if (method === "GET" || method === "HEAD") return await reportForm(site);
   if (method !== "POST") return messagePage(site, 405, "Not allowed", "Use the report form.");
   if (!isSameOriginRequest(site.request, site.siteOrigin))
-    return messagePage(site, 403, "Not allowed", "Send the report from this Site's report page.");
+    return messagePage(site, 403, "Not allowed", "Send the report from this app's report page.");
   const type = site.request.headers.get("content-type") ?? "";
   if (!type.toLowerCase().startsWith("application/x-www-form-urlencoded"))
     return messagePage(site, 415, "Unsupported report", "Use the report form.");
@@ -67,7 +67,7 @@ export async function handleReport(site: SiteContext): Promise<Response> {
       site,
       200,
       "Report sent",
-      "Thank you. Your report was sent to the Site's owners and to the abuse team of this service. For anything urgent, email the abuse team too.",
+      "Thank you. Your report was sent to the app's owners and to the abuse team of this service. For anything urgent, email the abuse team too.",
       { href: `mailto:${site.config.abuseEmail}`, label: site.config.abuseEmail },
     );
   if (status === 429)

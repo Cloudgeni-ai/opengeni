@@ -127,7 +127,7 @@ export async function handleCallback(site: SiteContext): Promise<Response> {
   }
   if (response.status === 403) {
     await response.body?.cancel();
-    return fail(403, "No access", "Your account does not have access to this Site.");
+    return fail(403, "No access", "Your account does not have access to this app.");
   }
   if (!response.ok) {
     await response.body?.cancel();
@@ -160,7 +160,7 @@ export async function handleLogout(site: SiteContext): Promise<Response> {
   if (method === "GET" || method === "HEAD") return logoutConfirmPage(site, returnPath);
   if (method !== "POST") return messagePage(site, 405, "Not allowed", "Use the sign-out button.");
   if (!isSameOriginRequest(site.request, site.siteOrigin))
-    return messagePage(site, 403, "Not allowed", "Sign out from this Site's own page.");
+    return messagePage(site, 403, "Not allowed", "Sign out from this app's own page.");
   if (site.session) {
     try {
       const response = await fetch(

@@ -105,10 +105,10 @@ function Harness() {
     <div className="og-root min-h-screen bg-og-bg text-og-fg">
       {/* Sample Site content behind the Opengeni frame's confirmation. */}
       <main className="mx-auto max-w-2xl px-6 py-10">
-        <p className="text-og-xs text-og-fg-muted">Sample Site</p>
+        <p className="text-og-xs text-og-fg-muted">Sample app</p>
         <h1 className="mt-1 text-og-md font-semibold">Opengeni newsletter</h1>
         <p className="mt-3 text-og-sm text-og-fg-muted">
-          {decision ?? "The Site asked to send. Opengeni is asking you to confirm."}
+          {decision ?? "The app asked to send. Opengeni is asking you to confirm."}
         </p>
       </main>
       <div ref={setLayer} />

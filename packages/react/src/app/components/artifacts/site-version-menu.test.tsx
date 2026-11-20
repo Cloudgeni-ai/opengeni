@@ -185,7 +185,7 @@ test("the chip names the live version and Undo restores the one before in one cl
     versionId: "version-4",
     // Refused if someone else published meanwhile.
     expectedCurrentVersionId: "version-5",
-    reason: "Undone from the Site view by Bendik",
+    reason: "Undone from the app view by Bendik",
   });
   expect(request.idempotencyKey).toBeString();
   expect(toasts).toEqual([["success", "Version 4 is live again"]]);
@@ -211,21 +211,21 @@ test("restoring any listed version goes through the same rollback", async () => 
   await act(async () => item(container, "Version 3")!.click());
   expect((rollbacks[0] as [string, string, object])[2]).toMatchObject({
     versionId: "version-3",
-    reason: "Restored from the Site view by Bendik",
+    reason: "Restored from the app view by Bendik",
   });
 });
 
-test("when the Site changed meanwhile, it says so and shows the latest", async () => {
+test("when the app changed meanwhile, it says so and shows the latest", async () => {
   rollback = async () => {
     throw new OpenGeniApiError(409, "conflict");
   };
   const { container, onRestored } = await render(site(5, [4, 5]));
   await act(async () => item(container, "Undo last change")!.click());
-  expect(toasts).toEqual([["error", "The Site changed meanwhile"]]);
+  expect(toasts).toEqual([["error", "The app changed meanwhile"]]);
   expect(onRestored).toHaveBeenCalledTimes(1);
 });
 
-test("people who can't publish, and archived Sites, see the history without Undo or Restore", async () => {
+test("people who can't publish, and archived apps, see the history without Undo or Restore", async () => {
   for (const [detail, canPublish] of [
     [site(5, [4, 5]), false],
     [site(5, [4, 5], [], "archived"), true],

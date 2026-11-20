@@ -130,7 +130,7 @@ describe("project naming dialog", () => {
       expect(chosen).toEqual(["private"]);
 
       await render({ value: "private", onChange: () => {} });
-      expect(dialogText()).toContain("Only you see it. It holds your Only me chats and Sites.");
+      expect(dialogText()).toContain("Only you see it. It holds your Only me chats and apps.");
     } finally {
       await act(async () => root.unmount());
       container.remove();

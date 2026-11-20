@@ -88,7 +88,7 @@ describe("simplified interface navigation", () => {
   test("a destination's tooltip names the product the way the interface does", () => {
     const artifacts = PRIMARY_WORKSPACE_ITEMS.find((item) => item.label === "Artifacts")!;
     expect(itemDescription(artifacts, "Opengeni")).toBe(
-      "Sites, images, documents, and files built with Opengeni",
+      "Apps, images, documents, and files built with Opengeni",
     );
     expect(itemDescription(artifacts, "Geni")).toBe(
       "Sites, images, documents, and files built with Geni",

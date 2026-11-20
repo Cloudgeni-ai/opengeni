@@ -101,7 +101,7 @@ function LoadedChatInteractiveBlock(props: ChatInteractiveBlockProps) {
       (value.versionId !== undefined &&
         (typeof value.versionId !== "string" || !/^[0-9a-f-]{36}$/i.test(value.versionId)))
     )
-      throw new Error("Invalid Site reference");
+      throw new Error("Invalid app reference");
     return (
       <SiteEmbed
         key={`${props.workspaceId}:${value.siteId}:${value.versionId ?? "current"}`}

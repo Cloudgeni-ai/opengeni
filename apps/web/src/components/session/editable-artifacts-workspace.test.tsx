@@ -33,14 +33,14 @@ mock.module("@opengeni/react/app/routes/artifacts", () => ({
     embeddedControls?: { reloadToken: number; fullScreen: boolean };
   }) =>
     embeddedView === "settings" ? (
-      <div data-site-settings={artifactId}>Site settings panel</div>
+      <div data-site-settings={artifactId}>App settings panel</div>
     ) : (
       <div
         data-site-preview={artifactId}
         data-reload={embeddedControls?.reloadToken}
         data-full-screen={embeddedControls?.fullScreen ? "" : undefined}
       >
-        {embedded ? "Embedded Site" : "Full Site"}
+        {embedded ? "Embedded app" : "Full app"}
       </div>
     ),
 }));
@@ -93,7 +93,7 @@ async function chooseFromList(container: HTMLElement, title: string) {
 }
 
 describe("SessionEditableArtifactsWorkspace empty states", () => {
-  test("catalog discovery stays in browse mode and a kind-qualified document request cannot select a colliding Site", async () => {
+  test("catalog discovery stays in browse mode and a kind-qualified document request cannot select a colliding app", async () => {
     const id = "22222222-2222-4222-8222-222222222222";
     const selections: (string | null)[] = [];
     const catalogItems = (["site", "document"] as const).map((kind) => ({
@@ -176,7 +176,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       container.remove();
     }
   });
-  test("replaced synthetic Sites win over fallback and handled requests preserve manual selection", async () => {
+  test("replaced synthetic apps win over fallback and handled requests preserve manual selection", async () => {
     const discovered = "22222222-2222-4222-8222-222222222222";
     const first = "44444444-4444-4444-8444-444444444444";
     const second = "55555555-5555-4555-8555-555555555555";
@@ -191,7 +191,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
               data-open
               onClick={() => setRequest({ artifactId: second, requestId: request.requestId + 1 })}
             >
-              Open Site
+              Open app
             </button>
             <button data-refresh onClick={() => rerender((value) => value + 1)}>
               Refresh
@@ -205,7 +205,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
                   modality: "site",
                   catalogItem: catalogEntry(discovered, "site", "Discovered"),
                 },
-                { id: request.artifactId, title: "Linked Site", modality: "site" },
+                { id: request.artifactId, title: "Linked app", modality: "site" },
               ]}
               status="ready"
               onRetry={() => undefined}
@@ -250,7 +250,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       container.remove();
     }
   });
-  test("chat requests switch an already mounted viewer and can reopen the same Site", async () => {
+  test("chat requests switch an already mounted viewer and can reopen the same app", async () => {
     const first = "22222222-2222-4222-8222-222222222222";
     const second = "44444444-4444-4444-8444-444444444444";
     const route = createRootRoute({
@@ -265,7 +265,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
                 setRequest({ artifactId: second, requestId: (request?.requestId ?? 0) + 1 })
               }
             >
-              Open linked Site
+              Open linked app
             </button>
             <SessionEditableArtifactsWorkspace
               workspaceId="11111111-1111-4111-8111-111111111111"
@@ -323,7 +323,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       container.remove();
     }
   });
-  test("keeps a session Site in the shared preview without a full-page escape", async () => {
+  test("keeps a session app in the shared preview without a full-page escape", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -351,20 +351,20 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       expect(
         container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
       ).toBe(id);
-      expect(container.textContent).toContain("Embedded Site");
+      expect(container.textContent).toContain("Embedded app");
       expect(container.querySelector("a")).toBeNull();
       expect(container.textContent?.match(/Dashboard/g)).toHaveLength(1);
       // The Site's reload and full screen sit in the one header row.
       const preview = () => container.querySelector("[data-site-preview]")!;
       expect(preview().getAttribute("data-reload")).toBe("0");
       await act(async () =>
-        container.querySelector<HTMLButtonElement>('[aria-label="Reload Site"]')!.click(),
+        container.querySelector<HTMLButtonElement>('[aria-label="Reload app"]')!.click(),
       );
       expect(preview().getAttribute("data-reload")).toBe("1");
       expect(preview().hasAttribute("data-full-screen")).toBe(false);
       await act(async () =>
         container
-          .querySelector<HTMLButtonElement>('[aria-label="Expand Site to full window"]')!
+          .querySelector<HTMLButtonElement>('[aria-label="Expand app to full window"]')!
           .click(),
       );
       expect(preview().hasAttribute("data-full-screen")).toBe(true);
@@ -373,7 +373,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       container.remove();
     }
   });
-  test("opens a session Site's settings in place for people who manage Sites", async () => {
+  test("opens a session app's settings in place for people who manage apps", async () => {
     const workspaceId = "11111111-1111-4111-8111-111111111111";
     const id = "22222222-2222-4222-8222-222222222222";
     const render = async (permissions: string[]) => {
@@ -404,25 +404,25 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
     };
     const reader = await render(["artifacts:read"]);
     try {
-      expect(reader.container.querySelector('[aria-label="Site settings"]')).toBeNull();
+      expect(reader.container.querySelector('[aria-label="App settings"]')).toBeNull();
     } finally {
       await reader.cleanup();
     }
     const manager = await render(["artifacts:read", "artifacts:publish"]);
     try {
       const toggle = manager.container.querySelector<HTMLButtonElement>(
-        '[aria-label="Site settings"]',
+        '[aria-label="App settings"]',
       );
       expect(toggle?.getAttribute("aria-pressed")).toBe("false");
       await act(async () => toggle?.click());
       expect(manager.container.querySelector("[data-site-settings]")?.textContent).toBe(
-        "Site settings panel",
+        "App settings panel",
       );
       expect(manager.container.querySelector("[data-site-preview]")).toBeNull();
       // Still in the session: settings open in place, with no link out.
       expect(manager.container.querySelector("a")).toBeNull();
       const back = manager.container.querySelector<HTMLButtonElement>(
-        '[aria-label="Back to Site"]',
+        '[aria-label="Back to app"]',
       );
       expect(back?.getAttribute("aria-pressed")).toBe("true");
       await act(async () => back?.click());

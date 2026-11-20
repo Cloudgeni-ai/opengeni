@@ -174,7 +174,7 @@ function NewAutomation() {
           value={request}
         />
         <Text style={note}>
-          A chat finds the repositories, secrets and integrations it needs and creates the
+          A chat finds the repositories, secrets and connected tools it needs and creates the
           automation. It asks you only for what it can't find.
         </Text>
       </ScrollView>

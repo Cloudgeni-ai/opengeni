@@ -1,6 +1,6 @@
-# Build, preview and finish a Site app
+# Build, preview and finish a full app
 
-Read this for any Site app (see "Pick the path first" in SKILL.md). A simple
+Read this for any full app (see "Pick the path first" in SKILL.md). A simple
 page does not need it.
 
 ## Use normal Bun + React
@@ -39,8 +39,8 @@ exception, use the image's `ogtool` directly: it is built from the same checkout
 For a tool-using local preview, add a small Bun host which serves the HTML and
 mounts `createCodemodeSiteRequestHandler()` at
 `/__opengeni/site-tools/*`. Authentication is automatic: the Bun handler reads
-the existing Codemode environment. Do not copy credentials into Site code.
-Site code continues to call only
+the existing Codemode environment. Do not copy credentials into app code.
+app code continues to call only
 `createOpenGeniSiteClient()`; it automatically uses this same-origin endpoint
 in a top-level preview and the parent `MessagePort` when published.
 
@@ -84,7 +84,7 @@ turn; start it again after a recovery or a new turn.
 During development, open the sandbox-local URL with the available Browser tools.
 Exercise the real interactions at desktop and mobile widths, inspect console
 errors, and take a screenshot when visual quality matters. Do not declare the
-Site complete from compilation alone.
+app complete from compilation alone.
 
 ## Plain HTML that calls Opengeni
 
@@ -97,7 +97,7 @@ defer, or type="module"):
 <script>
   const site = createOpenGeniSiteClient();
   // Use the actual tool paths discovered with ogtool on site.tools.
-  // site.client is the same ordinary SDK client as in a React Site.
+  // site.client is the same ordinary SDK client as in a React app.
 </script>
 ```
 
@@ -106,7 +106,7 @@ The existing preview handler above serves this script. Serve the raw HTML with
 build is needed. In the published viewer, the host resolves the tag to its
 browser client. Both use the same SDK implementation and existing tool bridge.
 Opening the file directly supplies no tool host. There are no credentials in
-the tag or HTML. Declare requested tools and handle errors as for any Site.
+the tag or HTML. Declare requested tools and handle errors as for any app.
 
 Use the exact package pins above for the preview host. The preview runtime comes
 from that installed SDK; the published runtime comes from the viewer's deployed
@@ -119,13 +119,13 @@ Publish the original HTML containing the tag, not the served client script or
 transformed viewer document. For this path, upload `index.html` wherever the
 publishing instructions in SKILL.md use `dist/index.html`. Inline ordinary styles,
 scripts, and assets as usual; the Opengeni client tag is resolved by the host.
-An HTML-only Site can be a small widget; it does not require a full-page layout.
+An HTML-only app can be a small widget; it does not require a full-page layout.
 
 ## Pages and addresses
 
-One Site can have several pages (`/`, `/admin`, `/unsubscribe`) and links
-with query parameters. The host reports the Site's own address; Site code
-never reads `window.location`, which is the frame's, not the Site's.
+One app can have several pages (`/`, `/admin`, `/unsubscribe`) and links
+with query parameters. The host reports the app's own address; app code
+never reads `window.location`, which is the frame's, not the app's.
 
 ```ts
 import { createOpenGeniSiteClient, type OpenGeniSiteLocation } from "@opengeni/sdk/site";
@@ -143,9 +143,9 @@ await site.navigate("/admin?tab=2"); // { replace: true } adds no history entry
 ```
 
 - On the web the address is the real one (`https://<site>/unsubscribe?t=abc`),
-  kept through sign-in. In the console it is kept in the Site page's own URL.
-- Ordinary links to the Site's own pages (`<a href="/admin">`, `?tab=2`)
-  move the Site without reloading it; links to other sites, `target`,
+  kept through sign-in. In the console it is kept in the app page's own URL.
+- Ordinary links to the app's own pages (`<a href="/admin">`, `?tab=2`)
+  move the app without reloading it; links to other sites, `target`,
   `download` and `#section` links behave as usual. Pass
   `createOpenGeniSiteClient({ links: false })` to handle links yourself,
   for example with a router that listens for clicks on `window`.
@@ -154,16 +154,16 @@ await site.navigate("/admin?tab=2"); // { replace: true } adds no history entry
 - Create one client per page and keep it: each client listens for links and
   holds a connection to the host.
 - Addresses are untrusted input, never proof of who someone is: check a
-  token with an `everyone` Site SQL query (see `references/site-sql.md`), and
+  token with an `everyone` app SQL query (see `references/site-sql.md`), and
   render parameters as text.
 - In a local preview the page is the top-level document, so `site.location`
   is the preview server's address: serve `index.html` for every page path.
 
 ## Authoring, preview, and viewer access
 
-Your authoring session's tools let you build, inspect, and publish the Site;
+Your authoring session's tools let you build, inspect, and publish the app;
 they do not define what a human viewer may do in the published app. A conversation
-started inside the Site is a separate agent session with its own tool access.
+started inside the app is a separate agent session with its own tool access.
 Its own data tools recheck current audience access on every call: removing an
 invitation or narrowing the audience takes effect even if cancellation fails.
 Non-member execution is funded in increments ($0.25 by default), with the
@@ -171,10 +171,10 @@ session ceiling equal to metered spend plus reserved funding. Further work
 must fund its next increment; one provider call can overshoot before metering.
 
 For documents, spreadsheets and presentations, agents use the same native
-artifact permissions in Site and console turns. The page's declared tools
+artifact permissions in app and console turns. The page's declared tools
 govern direct page calls, not the agent's default tool catalog. Authors may
 explicitly request narrower ordinary chat settings; restrictions are not added
-merely because the chat is embedded in a Site.
+merely because the chat is embedded in an app.
 
 There are two client surfaces:
 
@@ -197,7 +197,7 @@ When a requested feature cannot be live-tested because preview authority is
 insufficient, keep the feature and test its build, UI, request construction,
 and error handling where possible. Publish if you have publishing access;
 state which live operation remains unverified and how the user can test it in
-the published Site. Do not claim it works for the viewer until verified, remove
+the published app. Do not claim it works for the viewer until verified, remove
 it merely to satisfy preview restrictions, or substitute mock success for a
 live result. Distinguish permission failures from broken code, invalid requests,
 and service errors; fix actual defects rather than treating every failure as an
@@ -210,22 +210,22 @@ access limitation. Missing publishing access itself still blocks publication.
    catalog into model context. Generate local types with
    `bun run ogtool declarations <path>` and read only the relevant declarations.
 2. Use the same catalog paths while authoring and record each exact canonical
-   identity in the Site's `requestedTools` publish field. For a connector tool
+   identity in the app's `requestedTools` publish field. For a connector tool
    that runs on a person's account (Gmail, Slack, ...), declare and call the
    connector identity (`{ serverId: "gmail", toolName: "send_message" }`), not
    your own account route: each viewer then uses their own account.
-3. Do not request tools the Site does not call. A Site using only `site.client`
+3. Do not request tools the app does not call. An app using only `site.client`
    SDK operations, with no direct `site.tools` calls, should publish
    `requestedTools: []`.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
    no tool authority and requires no separate tool approval. Execution still follows
    normal tool approval rules: in Opengeni the frame asks the viewer to confirm
-   (Send/Cancel, showing which account it runs as, "Always allow on this Site")
+   (Send/Cancel, showing which account it runs as, "Always allow on this app")
    before an approval-required call
    runs, so do not build your own confirmation for it. Handle a cancelled call
    (`site_tool_consent_declined`) and, on a published hostname,
    `site_tool_open_in_opengeni` as normal UI states. When a published
-   Site is blocked by a tool set to Ask and that blocks the person you work for,
+   app is blocked by a tool set to Ask and that blocks the person you work for,
    offer to set it to Allow in the chat with the integration's tool approval app
    action instead of describing the setting.
 5. The host intersects that set with the viewer's
@@ -244,7 +244,7 @@ access limitation. Missing publishing access itself still blocks publication.
    connect, reconnect, "Always allow" or reset). Readiness is advice: the call
    is still checked, so keep handling its errors. A host without readiness
    rejects with `readiness_unsupported`; then just call the tool.
-7. A stopped call reaches Site code as a typed `code`:
+7. A stopped call reaches app code as a typed `code`:
    `site_tool_reconnect_required`, `site_tool_grant_required` (the account must
    allow more access), `site_tool_permission_denied`,
    `site_tool_not_available_for_viewer`, `site_tool_blocked` (tool permissions
@@ -253,10 +253,10 @@ access limitation. Missing publishing access itself still blocks publication.
    true), `site_tool_outcome_unknown` (check before trying again) and
    `site_tool_unavailable`.
 
-## Completion gate (apps)
+## Completion gate (full apps)
 
-This gate applies to apps. A single-file Site is done when its saved link is in
-the reply (see "Single-file Site" in SKILL.md).
+This gate applies to full apps. A single-file app is done when its saved link is in
+the reply (see "Single-file app" in SKILL.md).
 
 - Tests and the production browser build pass.
 - The compiled runtime is one self-contained HTML document within the published
@@ -269,13 +269,13 @@ the reply (see "Single-file Site" in SKILL.md).
   viewer-only checks explicitly; those do not by themselves block publication.
 - The authenticated parent-frame wrapper exists only in the hosted product.
   Do not build a synthetic parent-frame harness in the sandbox. After local
-  validation and publication, use the returned Site link for the hosted check.
+  validation and publication, use the returned app link for the hosted check.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.
-- Site Data collections exist with the intended access modes, the page renders
+- App data collections exist with the intended access modes, the page renders
   stored values as text, and quota, conflict and access errors are handled.
-- The durable Site contains final HTML and any editable source used to build it.
-  Plain HTML-only Sites are valid; their HTML is the editable source.
+- The durable app contains final HTML and any editable source used to build it.
+  Plain HTML-only apps are valid; their HTML is the editable source.
 - The completion reply contains the working Markdown link returned from the
   durable artifact identity.

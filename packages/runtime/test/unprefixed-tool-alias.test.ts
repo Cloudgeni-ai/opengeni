@@ -29,6 +29,7 @@ const FIRST_PARTY_CATALOG = [
   "wait_for_input",
   "command_read",
   "command_wait",
+  "app_data_query",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 type ToolCallRecord = { server: string; name: string; args: unknown };
@@ -235,6 +236,56 @@ describe("bare first-party tool names at dispatch", () => {
         "Tool command_wait not found",
       );
       expect(f.calls).toEqual([]);
+    } finally {
+      await f.prepared.close();
+    }
+  });
+});
+
+// Renamed first-party tools keep their former names as hidden aliases
+// (FIRST_PARTY_MCP_TOOL_ALIASES): a call by the former name runs the current
+// tool and is recorded under the current name.
+describe("first-party tool aliases at dispatch", () => {
+  for (const transport of TRANSPORTS) {
+    for (const name of ["opengeni__site_data_query", "site_data_query"]) {
+      test(`${name} runs app_data_query (${transport})`, async () => {
+        const f = await fixture(["lookup"]);
+        try {
+          const run = await runCall(f, transport, name);
+          expect(run.resultText).toContain("opengeni:app_data_query ran");
+          expect(f.calls).toEqual([
+            { server: "opengeni", name: "app_data_query", args: { commandId: "cmd-1" } },
+          ]);
+          expect(run.historyCallName).toBe("opengeni__app_data_query");
+        } finally {
+          await f.prepared.close();
+        }
+      });
+    }
+  }
+
+  test("tool_invoke with a former name dispatches the current tool", async () => {
+    const f = await fixture(["lookup"]);
+    try {
+      const run = await runCall(f, "generic_dispatch", "tool_invoke", {
+        name: "opengeni__site_data_query",
+        arguments: { commandId: "cmd-1" },
+      });
+      expect(run.resultText).toContain("opengeni:app_data_query ran");
+      expect(f.calls.map((call) => `${call.server}:${call.name}`)).toEqual([
+        "opengeni:app_data_query",
+      ]);
+    } finally {
+      await f.prepared.close();
+    }
+  });
+
+  test("a former name runs without progressive disclosure", async () => {
+    const f = await fixture(["lookup"]);
+    try {
+      const run = await runCall(f, undefined, "opengeni__site_data_query");
+      expect(run.resultText).toContain("opengeni:app_data_query ran");
+      expect(run.historyCallName).toBe("opengeni__app_data_query");
     } finally {
       await f.prepared.close();
     }

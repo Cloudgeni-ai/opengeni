@@ -26,7 +26,7 @@ type SelectionPatch = {
 };
 
 /**
- * Settings > General > "Use connected apps automatically": new sessions start
+ * Settings > General > "Use connected tools automatically": new sessions start
  * with every connected app, including ones connected later. Off keeps today's
  * connected apps as a fixed list. Saves on change.
  */
@@ -66,13 +66,13 @@ export function ConnectedAppsDefaultRow({
       if (updated && context.ownsWorkspaceInvocation(workspaceId, invocation)) {
         toast.success(
           next
-            ? "New sessions start with your connected apps"
-            : "New sessions start with today's connected apps only",
+            ? "New sessions start with your connected tools"
+            : "New sessions start with today's connected tools only",
         );
       }
     } catch {
       if (context.ownsWorkspaceInvocation(workspaceId, invocation))
-        toast.error("Couldn't update connected apps for new sessions");
+        toast.error("Couldn't update connected tools for new sessions");
     } finally {
       setSaving(false);
     }
@@ -80,8 +80,8 @@ export function ConnectedAppsDefaultRow({
 
   return (
     <SettingRow
-      label="Use connected apps automatically"
-      description="New sessions start with every connected app, including ones connected later. Off keeps today's apps only. People can still change apps in a session."
+      label="Use connected tools automatically"
+      description="New sessions start with every connected tool, including ones connected later. Off keeps today's tools only. People can still change tools in a session."
       control={
         <Switch
           checked={inherit}
@@ -224,8 +224,8 @@ export function WorkspaceCapabilityDefaultsView({
                 ? "This workspace has custom tool defaults. Deployment restrictions and required approvals still apply."
                 : "Tools are available by default. New sessions follow deployment defaults, including future updates."
               : inheritConnectors
-                ? "New sessions include available connected tools, including integrations connected later."
-                : "New sessions use a fixed selection. Connecting another integration does not add it to this selection."}
+                ? "New sessions include available connected tools, including connected tools connected later."
+                : "New sessions use a fixed selection. Connecting another connected tool does not add it to this selection."}
           </p>
           <p className="mt-1 text-xs text-fg-muted">
             Changes apply to new sessions only. Deployment restrictions always apply.
@@ -276,7 +276,7 @@ export function WorkspaceCapabilityDefaultsView({
           <p className="text-xs text-fg-muted">
             {permissions
               ? "Saving creates a fixed selection of built-in tools for new sessions. Connector selections are preserved. Nothing changes until you save."
-              : "Connected apps are included automatically unless you choose a custom list. Nothing changes until you save."}
+              : "Connected tools are included automatically unless you choose a custom list. Nothing changes until you save."}
           </p>
           <div className="flex gap-2">
             <Button size="sm" disabled={saving} onClick={() => void save(false)}>
@@ -326,7 +326,7 @@ export function WorkspaceCapabilityDefaultsView({
         ) : (
           <div className="py-3">
             <ToolCheckbox
-              label="Use connected apps automatically"
+              label="Use connected tools automatically"
               state={inheritConnectors}
               disabled={disabled}
               onChange={() => {

@@ -30,8 +30,8 @@ const catalog: OpenGeniSiteToolCatalog = {
   ],
 };
 
-describe("Opengeni Site client", () => {
-  test("strips host-only approval and Site transport authority", () => {
+describe("Opengeni app client", () => {
+  test("strips host-only approval and app transport authority", () => {
     expect(
       sanitizeOpenGeniSiteToolCallRequest({
         operationId: "00000000-0000-4000-8000-000000000003",
@@ -207,7 +207,7 @@ describe("Opengeni Site client", () => {
     );
     await expect(
       client.tools.$approve(catalog.entries[0]!.identity, { query: "roadmap" }),
-    ).rejects.toThrow("Unsupported Site bridge request");
+    ).rejects.toThrow("Unsupported app bridge request");
 
     client.close();
     bootstrap.port1.close();

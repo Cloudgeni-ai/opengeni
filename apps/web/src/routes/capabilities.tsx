@@ -1323,7 +1323,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       const copy = capabilityErrorToast(error, "Something went wrong");
       setSheetError(
         isMissingCredentialsError(error)
-          ? "This integration needs credentials before it can be enabled."
+          ? "This connected tool needs credentials before it can be enabled."
           : copy.description,
       );
       toast.error(copy.title, { description: copy.description });
@@ -1430,7 +1430,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       params.get("reason") === "google_drive_native_retired"
     ) {
       setCallbackNotice(
-        "The previous Google Drive integration is retired. Connect Google Drive MCP and use an automation for recurring work. Your imported documents and history are kept.",
+        "The previous Google Drive connected tool is retired. Connect Google Drive MCP and use an automation for recurring work. Your imported documents and history are kept.",
       );
       clearReturnParams();
     }
@@ -1637,7 +1637,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         // Connection was created but the catalog row is gone - never leave the
         // success half-handled silently; say plainly it wasn't enabled.
         toast.success(
-          "Connected - but this integration is no longer in the catalog, so it wasn't enabled.",
+          "Connected - but this connected tool is no longer in the catalog, so it wasn't enabled.",
         );
         return false;
       }
@@ -2236,13 +2236,13 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
 
                     {nativeConnectCatalog.status === "loading" ? (
                       <p role="status" className="mt-4 text-sm text-fg-muted">
-                        Checking available integrations…
+                        Checking available connected tools…
                       </p>
                     ) : nativeConnectCatalog.status === "error" ? (
                       <Notice
                         className="mt-4"
                         tone="failed"
-                        title="Couldn't check available integrations"
+                        title="Couldn't check available connected tools"
                         action={
                           <Button
                             type="button"
@@ -2255,7 +2255,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                         }
                       >
                         Existing connections can still be managed. Try again to see which new
-                        integrations you can connect.
+                        Connected tools you can connect.
                       </Notice>
                     ) : null}
                     {loading && items.length === 0 ? (

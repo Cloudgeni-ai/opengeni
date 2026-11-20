@@ -398,7 +398,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Selection",
     title: "Setting row",
     purpose: "One setting, one row, exactly one control, aligned with its neighbours.",
-    usedOn: "General, Model account page, Organization security, Integrations",
+    usedOn: "General, Model account page, Organization security, connected tools",
     recommended: "a",
     whyRecommended: "Every control lines up, and labels stop truncating on phones.",
     alternatives: [
@@ -444,7 +444,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Selection",
     title: "Switch",
     purpose: "Immediate on/off that saves on change.",
-    usedOn: "Settings, Model accounts, Integrations, Schedules, composer menus",
+    usedOn: "Settings, Model accounts, connected tools, Schedules, composer menus",
     recommended: "a",
     whyRecommended:
       "One size, one focus ring, one disabled look, and a visible off state in both themes.",
@@ -1012,10 +1012,10 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "page-connected-agents",
     group: "Pages",
-    title: "Connected apps",
+    title: "Connected agents",
     purpose:
       "How to add the Opengeni MCP server to a coding agent, then the outside agents working in the organization over MCP: whose they are, what they can do and where.",
-    usedOn: "Organization settings > Connected apps, agent sign-in",
+    usedOn: "Organization settings > Connected agents, agent sign-in",
     load: () => import("./page-connected-agents"),
   },
   {
@@ -1114,7 +1114,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     title: "Organization connectors",
     purpose:
       "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
-    usedOn: "Organization settings > Integrations",
+    usedOn: "Organization settings > connected tools",
     load: () => import("./page-org-connectors"),
   },
   {
@@ -1156,7 +1156,7 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "page-github-integration",
     group: "Pages",
-    title: "GitHub integration",
+    title: "GitHub connected tool",
     purpose:
       "GitHub's two identities, Your GitHub and the Opengeni app, each with one action, in production components.",
     usedOn: "Capabilities > GitHub",

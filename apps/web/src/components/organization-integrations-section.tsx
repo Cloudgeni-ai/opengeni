@@ -44,7 +44,7 @@ export function OrganizationIntegrationsSection(props: Props) {
     <IntegrationPolicyEditor key={organizationAdminIdentityKey(props.identity)} {...props} />
   ) : (
     <Notice tone="muted" title="Only owners and admins can change this">
-      Ask an organization owner or admin to choose which integrations workspaces can connect.
+      Ask an organization owner or admin to choose which connected tools workspaces can connect.
     </Notice>
   );
 }
@@ -106,7 +106,7 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
       setPermissionDenied(false);
       setMessage("");
     } catch {
-      if (owns(accepted)) setError("Couldn't load integration settings. Try loading again.");
+      if (owns(accepted)) setError("Couldn't load connected tool settings. Try loading again.");
     } finally {
       if (owns(accepted)) setBusy(false);
     }
@@ -147,7 +147,7 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
       if (!owns(accepted)) return;
       accept(value);
       setPending(null);
-      setMessage("Integration settings saved.");
+      setMessage("Connected tool settings saved.");
     } catch (failure) {
       if (!owns(accepted)) return;
       const status =
@@ -221,11 +221,11 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
 
   if (!policy || !catalog) {
     return (
-      <section aria-label="Integration policy" className="min-w-0">
+      <section aria-label="Connected tool policy" className="min-w-0">
         {error ? (
           <ErrorMessage
             variant="block"
-            title="Couldn't load integration settings."
+            title="Couldn't load connected tool settings."
             announce
             action={
               <RowButton disabled={busy} onClick={() => void load()}>
@@ -236,9 +236,9 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
             Check your connection and try again.
           </ErrorMessage>
         ) : (
-          <div role="status" aria-label="Loading integration settings…">
+          <div role="status" aria-label="Loading connected tool settings…">
             <SettingRowGroup>
-              <RowList label="Integrations" busy flush>
+              <RowList label="Connected tools" busy flush>
                 <ListRowSkeleton count={3} />
               </RowList>
             </SettingRowGroup>
@@ -249,16 +249,16 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
   }
 
   return (
-    <section aria-label="Integration policy" className="min-w-0">
+    <section aria-label="Connected tool policy" className="min-w-0">
       <SectionStack>
-        <Section title="Allowed integrations">
+        <Section title="Allowed connected tools">
           <SettingRowGroup>
             <SettingRow
               label="Available to workspaces"
               description={
                 mode === "unrestricted"
                   ? "Includes custom MCP, OpenAPI and GraphQL connections. Connections that already exist keep working."
-                  : "Only the integrations switched on below. Connections that already exist keep working."
+                  : "Only the connected tools switched on below. Connections that already exist keep working."
               }
               controlWidth="auto"
               control={
@@ -272,24 +272,24 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
                     setMessage("");
                   }}
                   options={[
-                    { value: "unrestricted", label: "All integrations" },
+                    { value: "unrestricted", label: "All connected tools" },
                     { value: "restricted", label: "Only selected" },
                   ]}
                 />
               }
             />
             <SettingRow
-              label="Members can turn on integrations"
+              label="Members can turn on connected tools"
               description={
                 personalSetup === "members"
-                  ? "Members can turn on allowed integrations, add MCP servers and install plugins. Admins still choose which tools run without asking."
-                  : "Only admins can turn integrations on. Members can still connect their own accounts to integrations that are already on."
+                  ? "Members can turn on allowed connected tools, add MCP servers and install plugins. Admins still choose which tools run without asking."
+                  : "Only admins can turn connected tools on. Members can still connect their own accounts to connected tools that are already on."
               }
               control={
                 <Switch
                   checked={personalSetup === "members"}
                   disabled={locked}
-                  aria-label="Members can turn on integrations"
+                  aria-label="Members can turn on connected tools"
                   onCheckedChange={(next) => {
                     setPersonalSetup(next ? "members" : "admins");
                     setMessage("");
@@ -301,12 +301,12 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
         </Section>
         {mode === "restricted" ? (
           <Section
-            title="Selected integrations"
+            title="Selected connected tools"
             description={
               <span role="status">
                 {selected.length} selected
                 {selected.length === 0
-                  ? ". Saving will block all new integration connections."
+                  ? ". Saving will block all new connected tool connections."
                   : ""}
               </span>
             }
@@ -316,19 +316,22 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
                 <ToolbarSearch
                   value={search}
                   onValueChange={setSearch}
-                  placeholder="Search integrations"
-                  aria-label="Search integrations"
+                  placeholder="Search connected tools"
+                  aria-label="Search connected tools"
                 />
               </Toolbar>
               {options.length === 0 && unknownKeys.length === 0 ? (
                 <EmptyState
                   variant="inline"
-                  title="No integrations are available in the catalog."
+                  title="No connected tools are available in the catalog."
                 />
               ) : shown.length === 0 ? (
-                <EmptyState variant="inline" title={`No integration matches "${search.trim()}".`} />
+                <EmptyState
+                  variant="inline"
+                  title={`No connected tool matches "${search.trim()}".`}
+                />
               ) : (
-                <RowList label="Integrations" flush>
+                <RowList label="Connected tools" flush>
                   {shown.map((item) => {
                     const allowed = selected.includes(item.key);
                     return (

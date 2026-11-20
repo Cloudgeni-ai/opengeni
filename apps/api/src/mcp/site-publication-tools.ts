@@ -30,14 +30,14 @@ type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
 };
 
-const SiteIdInput = z4.string().uuid().describe("The Site (published artifact) id.");
+const SiteIdInput = z4.string().uuid().describe("The app (published artifact) id.");
 
 /** What people outside the workspace may do, stated in every publication answer. */
 export const SITE_AUDIENCE_RULES =
-  "Workspace members may use everything the Site declares, within what they may do in the workspace, and are never limited by Site limits. People outside the workspace (invited people and public visitors) get only the Site's own data: Site Data (by each collection's access mode, and its guest access for anonymous visitors), Site SQL named queries their audience allows, and the page. They never get workspace tools or subscription-billed models, and their assistant use counts toward the Site limit.";
+  "Workspace members may use everything the app declares, within what they may do in the workspace, and are never limited by app limits. People outside the workspace (invited people and public visitors) get only the app's own data: app data (by each collection's access mode, and its guest access for anonymous visitors), app SQL named queries their audience allows, and the page. They never get workspace tools or subscription-billed models, and their assistant use counts toward the app limit.";
 
 const SIGN_IN_EXPECTED =
-  "Visitors sign in before the Site opens: that sign-in page is expected on this deployment, not a broken link, so tell the person when you share the link.";
+  "Visitors sign in before the app opens: that sign-in page is expected on this deployment, not a broken link, so tell the person when you share the link.";
 
 /** A publication as the agent tools answer it: the audience rules and what to fix next. */
 export function publicationAnswer(publication: SitePublication) {
@@ -50,7 +50,7 @@ export function publicationAnswer(publication: SitePublication) {
   const steps = [
     ...(fixable
       ? [
-          "Fix these readiness warnings before sharing the Site: apply a warning's fix with site_publication_apply_fix, or change the page, collection or query yourself, then read the publication again.",
+          "Fix these readiness warnings before sharing the app: apply a warning's fix with app_publication_apply_fix, or change the page, collection or query yourself, then read the publication again.",
         ]
       : signInRequired
         ? ["Nothing to fix."]
@@ -97,10 +97,10 @@ export function registerSitePublicationTools(
     };
 
   server.registerTool(
-    "site_publication_get",
+    "app_publication_get",
     {
       description:
-        "Read how a Site is published on its own hostname: its URL, access (members, invited, public), status, embedded agent, limits, open abuse reports, usage and readiness warnings (what won't work for its audience, each with a suggestion and an optional safe fix). Returns published: false for a Site that has never been published. Only the Site's managers can use it.",
+        "Read how an app is published on its own hostname: its URL, access (members, invited, public), status, embedded agent, limits, open abuse reports, usage and readiness warnings (what won't work for its audience, each with a suggestion and an optional safe fix). Returns published: false for an app that has never been published. Only the app's managers can use it.",
       inputSchema: { siteId: SiteIdInput },
     },
     call(async ({ siteId }: { siteId: string }) => {
@@ -120,10 +120,10 @@ export function registerSitePublicationTools(
   );
 
   server.registerTool(
-    "site_publication_update",
+    "app_publication_update",
     {
       description:
-        "Publish a Site on its own hostname (https://<label>.<sites domain>/), or change its publication. The Site must be shared with the workspace. access: members (workspace members sign in), invited (members and invitedEmails), public (anyone; may be off on this deployment). status: \"unpublished\" stops serving it and keeps its hostname. Audience rules: people outside the workspace (invited and public) get only the Site's own data (Site Data, Site SQL named queries and the page), never workspace tools or subscription models; for invited or public Sites build on Site Data, Site SQL and the page, and set collection guest access and query audiences to match. The answer lists readiness warnings: fix them before sharing (site_publication_apply_fix applies a safe fix). The agent's use by people outside the workspace counts toward the Site limit ($10 a month by default); members are never limited. Changing limitProfile or giving the agent workspace tools (agent.tools, for members only) needs a workspace admin; agent.guestTools is retired and ignored. Public puts the Site on the internet; make a Site public only when the person asked for it.",
+        "Publish a Site on its own hostname (https://<label>.<sites domain>/), or change its publication. The Site must be shared with the workspace. access: members (workspace members sign in), invited (members and invitedEmails), public (anyone; may be off on this deployment). status: \"unpublished\" stops serving it and keeps its hostname. Audience rules: people outside the workspace (invited and public) get only the Site's own data (Site Data, Site SQL named queries and the page), never workspace tools or subscription models; for invited or public Sites build on Site Data, Site SQL and the page, and set collection guest access and query audiences to match. The answer lists readiness warnings: fix them before sharing (app_publication_apply_fix applies a safe fix). The agent's use by people outside the workspace counts toward the Site limit ($10 a month by default); members are never limited. Changing limitProfile or giving the agent workspace tools (agent.tools, for members only) needs a workspace admin; agent.guestTools is retired and ignored. Public puts the Site on the internet; make a Site public only when the person asked for it.",
       inputSchema: contractToolInput(
         z4.object({ siteId: SiteIdInput, ...UpsertSitePublicationRequest.shape }),
       ),
@@ -149,10 +149,10 @@ export function registerSitePublicationTools(
   );
 
   server.registerTool(
-    "site_publication_apply_fix",
+    "app_publication_apply_fix",
     {
       description:
-        "Apply the safe fix of a Site publication readiness warning (the warning's fix object): set a Site Data collection's guest access, or a Site SQL named query's audience. Everything else about the collection or query stays as it is. Returns the publication with fresh warnings. Only the Site's managers can use it.",
+        "Apply the safe fix of an app publication readiness warning (the warning's fix object): set an app data collection's guest access, or an app SQL named query's audience. Everything else about the collection or query stays as it is. Returns the publication with fresh warnings. Only the app's managers can use it.",
       inputSchema: contractToolInput(
         z4.object({ siteId: SiteIdInput, fix: SitePublishWarningFix }),
       ),
@@ -170,7 +170,7 @@ export function registerSitePublicationTools(
           404,
           "not_found",
           "site_not_published",
-          "This Site is not published",
+          "This app is not published",
         );
       try {
         await applySitePublishWarningFix(
@@ -192,14 +192,14 @@ export function registerSitePublicationTools(
   );
 
   server.registerTool(
-    "site_hostname_check",
+    "app_hostname_check",
     {
       description:
-        "Check whether a hostname label is valid and free for a Site (labels are unique across all workspaces; a released label is held for 30 days).",
+        "Check whether a hostname label is valid and free for an app (labels are unique across all workspaces; a released label is held for 30 days).",
       inputSchema: {
         label: z4.string().min(1).max(63).describe("Hostname label, e.g. team-crm."),
         siteId: SiteIdInput.optional().describe(
-          "The Site that would use it (its own label is free).",
+          "The app that would use it (its own label is free).",
         ),
       },
     },

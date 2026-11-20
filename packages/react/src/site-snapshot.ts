@@ -38,7 +38,7 @@ export async function loadSiteSnapshot(
   const detail = await client.getWorkspaceArtifact(workspaceId, siteId, requestOptions);
   options.signal?.throwIfAborted();
   if (detail.artifact.id !== siteId || detail.artifact.workspaceId !== workspaceId)
-    throw new Error("Site scope mismatch");
+    throw new Error("App scope mismatch");
   const selectedVersion = options.versionId
     ? detail.versions.find((version) => version.id === options.versionId)
     : detail.artifact.currentVersion;
@@ -62,7 +62,7 @@ export async function loadSiteSnapshot(
     !selectedVersion &&
     (detail.artifact.status === "active" || options.includeArchivedContent)
   ) {
-    if (!client.getWorkspaceArtifactContent) throw new Error("Site version unavailable");
+    if (!client.getWorkspaceArtifactContent) throw new Error("App version unavailable");
     content = await client.getWorkspaceArtifactContent(workspaceId, siteId, {
       ...requestOptions,
       versionId,
@@ -70,6 +70,6 @@ export async function loadSiteSnapshot(
   }
   options.signal?.throwIfAborted();
   if (content && (content.artifactId !== siteId || content.versionId !== versionId))
-    throw new Error("Site content mismatch");
+    throw new Error("App content mismatch");
   return { detail: clone(detail), content: content ? clone(content) : null };
 }

@@ -79,7 +79,7 @@ export async function lookupHost(
       ),
     );
   } catch {
-    throw new UpstreamError("Site host lookup failed", null);
+    throw new UpstreamError("App host lookup failed", null);
   }
   if (response.status === 404) {
     await response.body?.cancel();
@@ -97,10 +97,10 @@ export async function lookupHost(
   }
   if (!response.ok) {
     await response.body?.cancel();
-    throw new UpstreamError("Site host lookup failed", response.status);
+    throw new UpstreamError("App host lookup failed", response.status);
   }
   const record = parseRecord(await response.json().catch(() => null), hostname);
-  if (!record) throw new UpstreamError("Site host lookup returned an invalid record", 502);
+  if (!record) throw new UpstreamError("App host lookup returned an invalid record", 502);
   if (config.hostMap) ctx.waitUntil(writeBack(config, record));
   return record;
 }

@@ -50,7 +50,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/plugins",
     icon: "plug",
     label: "Capabilities",
-    description: "Plugins, Skills, and integrations",
+    description: "Plugins, Skills, and connected tools",
   },
   {
     to: "/workspaces/$workspaceId/state",
@@ -80,7 +80,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
     label: "Artifacts",
-    description: "Sites, images, documents, and files built with {product}",
+    description: "Apps, images, documents, and files built with {product}",
   },
 ];
 

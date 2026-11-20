@@ -356,7 +356,7 @@ export default function PageOrgConnectorsSection() {
     <KitSection sectionKey="page-org-connectors">
       <KitBlock
         title="Connectors"
-        description="Organization settings > Integrations. Each row says how people sign in and where it works; Off and Unavailable say why a workspace doesn't get it. A row opens the connector's page."
+        description="Organization settings > connected tools. Each row says how people sign in and where it works; Off and Unavailable say why a workspace doesn't get it. A row opens the connector's page."
       >
         <PagePreview label="Organization connectors" height={640}>
           <ConnectorsPreview initial={[...CONNECTORS, AUTO_WORKING]} />

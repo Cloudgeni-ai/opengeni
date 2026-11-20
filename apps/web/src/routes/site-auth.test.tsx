@@ -85,7 +85,7 @@ async function render(
 
 const configured = { sitesDomain: "sites.example" };
 
-test("names the Site and account, mints the code only on Continue, and goes to the callback", async () => {
+test("names the app and account, mints the code only on Continue, and goes to the callback", async () => {
   const requests: SiteAuthAuthorizeRequest[] = [];
   const page = await render(
     {
@@ -136,7 +136,7 @@ test("learns the Sites domain from the client config when it isn't passed in", a
   await page.unmount();
 });
 
-test("Cancel before the API confirmed the Site stays in Opengeni", async () => {
+test("Cancel before the API confirmed the app stays in Opengeni", async () => {
   let called = false;
   const page = await render(
     {
@@ -171,7 +171,7 @@ test("refuses a callback on another host", async () => {
   await page.unmount();
 });
 
-test("says plainly when the account can't open the Site, then goes back to it", async () => {
+test("says plainly when the account can't open the app, then goes back to it", async () => {
   let switched = 0;
   const page = await render(
     {
@@ -183,11 +183,11 @@ test("says plainly when the account can't open the Site, then goes back to it", 
   );
   await act(async () => button("Continue")!.click());
   await flush();
-  expect(page.container.textContent).toContain("You can't open this Site");
+  expect(page.container.textContent).toContain("You can't open this app");
   expect(page.container.textContent).toContain(`ada@example.test doesn't have access to ${host}`);
   await act(async () => button("Use another account")!.click());
   expect(switched).toBe(1);
-  await act(async () => button("Back to the Site")!.click());
+  await act(async () => button("Back to the app")!.click());
   await flush();
   expect(page.visited).toEqual([
     `https://${host}/_og/auth/callback?error=access_denied&state=${search.state}`,
@@ -195,7 +195,7 @@ test("says plainly when the account can't open the Site, then goes back to it", 
   await page.unmount();
 });
 
-test("an unknown Site offers no way back to it", async () => {
+test("an unknown app offers no way back to it", async () => {
   const page = await render(
     {
       authorizeSiteViewer: async () => {
@@ -206,8 +206,8 @@ test("an unknown Site offers no way back to it", async () => {
   );
   await act(async () => button("Continue")!.click());
   await flush();
-  expect(page.container.textContent).toContain("This Site isn't available");
-  expect(button("Back to the Site")).toBeUndefined();
+  expect(page.container.textContent).toContain("This app isn't available");
+  expect(button("Back to the app")).toBeUndefined();
   expect(page.visited).toEqual([]);
   await page.unmount();
 });

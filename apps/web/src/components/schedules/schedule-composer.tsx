@@ -188,7 +188,7 @@ function ConnectorsMenu({
         {on.length ? <TooltipContent className="max-w-72">{names}</TooltipContent> : null}
       </Tooltip>
       <DropdownMenuContent align="start" className="max-h-96 w-80">
-        <DropdownMenuLabel>Connected apps this automation can use</DropdownMenuLabel>
+        <DropdownMenuLabel>Connected tools this automation can use</DropdownMenuLabel>
         {rows.length === 0 ? (
           <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
             No apps are connected to this workspace yet.

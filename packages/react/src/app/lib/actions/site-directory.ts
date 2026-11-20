@@ -44,7 +44,7 @@ export function siteRecords(workspaceId: string, sources: readonly SiteSource[])
     records.push({
       id,
       workspaceId,
-      title: (typeof source.title === "string" && source.title.trim()) || "Untitled Site",
+      title: (typeof source.title === "string" && source.title.trim()) || "Untitled app",
       updatedAt: Date.parse(source.updatedAt) || 0,
     });
   }

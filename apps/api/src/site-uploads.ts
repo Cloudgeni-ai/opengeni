@@ -29,7 +29,7 @@ export async function validateSiteSource(storage: Storage, key: string, sizeByte
   const content = await retryWhileMissing(() => storage.getObjectBytes(key));
   if (!content) {
     throw new WorkspaceArtifactOperationError(
-      "Site source is not available yet. Retry publication with the same upload.",
+      "App source is not available yet. Retry publication with the same upload.",
     );
   }
   try {
@@ -95,10 +95,10 @@ export async function* readArtifactObject(
   expectedHead?: Awaited<ReturnType<NonNullable<Storage["headObject"]>>>,
 ) {
   if (!storage.headObject || !storage.getObjectRange)
-    throw new Error("Object storage cannot stream Site content");
+    throw new Error("Object storage cannot stream app content");
   const head = expectedHead ?? (await storage.headObject(key));
   if (!head || !head.VersionToken || head.ContentLength === undefined)
-    throw new Error("Site content is unavailable");
+    throw new Error("App content is unavailable");
   for (let start = 0; start < head.ContentLength; start += 1024 * 1024) {
     const endInclusive = Math.min(head.ContentLength - 1, start + 1024 * 1024 - 1);
     const part = await storage.getObjectRange({
@@ -112,7 +112,7 @@ export async function* readArtifactObject(
       part.versionToken !== head.VersionToken ||
       part.bytes.length !== endInclusive - start + 1
     )
-      throw new Error("Site object changed during transfer");
+      throw new Error("App object changed during transfer");
     yield part.bytes;
   }
 }
@@ -124,15 +124,15 @@ async function freeze(
   optional = false,
 ) {
   if (!storage.headObject || !storage.putObjectStreamIfAbsent)
-    throw new Error("Object storage cannot freeze Site uploads");
+    throw new Error("Object storage cannot freeze app uploads");
   const existing = await storage.headObject(to);
   if (existing) return existing.ContentLength!;
   const head = await storage.headObject(from);
   if (!head && optional) return null;
   if (!head || !head.ContentLength)
-    throw new WorkspaceArtifactOperationError("Upload HTML before publishing the Site");
+    throw new WorkspaceArtifactOperationError("Upload HTML before publishing the app");
   if (head.ContentLength > storage.maxSinglePutSizeBytes)
-    throw new Error("Site exceeds the storage upload limit");
+    throw new Error("App exceeds the storage upload limit");
   const decoder = new TextDecoder("utf-8", { fatal: true });
   async function* chunks() {
     for await (const part of readArtifactObject(storage, from, head)) {
@@ -153,7 +153,7 @@ async function freeze(
   const stored = await retryWhileMissing(() => storage.headObject!(to));
   if (!stored || stored.ContentLength === undefined) {
     throw new WorkspaceArtifactOperationError(
-      "Frozen Site upload is unavailable. Retry publication with the same upload.",
+      "Frozen app upload is unavailable. Retry publication with the same upload.",
     );
   }
   return stored.ContentLength;
@@ -200,7 +200,7 @@ export async function prepareWorkspaceArtifactPublication(
     row.status === "expired" ||
     (row.status === "pending" && row.expiresAt.getTime() <= Date.now())
   )
-    throw new WorkspaceArtifactOperationError("Site upload expired or unavailable");
+    throw new WorkspaceArtifactOperationError("App upload expired or unavailable");
   const paths = keys(grant.workspaceId, row.id);
   const sizeBytes = await freeze(storage, paths.html, paths.frozenHtml, "text/html; charset=utf-8");
   const sourceSizeBytes =

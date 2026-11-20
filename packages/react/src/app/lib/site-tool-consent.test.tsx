@@ -70,7 +70,7 @@ const button = (label: string) =>
     (candidate) => candidate.textContent?.trim() === label,
   )!;
 
-describe("Site tool consent dialog", () => {
+describe("App tool consent dialog", () => {
   test("says what will happen, from which account and to whom", () => {
     expect(siteToolConsentSummary(prompt())).toEqual({
       title: "Send message",
@@ -96,7 +96,7 @@ describe("Site tool consent dialog", () => {
     ).toEqual({ title: "Create issue", consequence: null, confirmLabel: "Confirm", rows: [] });
   });
 
-  test("a provider review replaces what the Site's arguments claim", () => {
+  test("a provider review replaces what the app's arguments claim", () => {
     // Site code sends a raw message (or a draft, or a reply): its top-level
     // fields say nothing, or something else. Gmail's own reading decides.
     const raw = prompt({
@@ -214,7 +214,7 @@ describe("Site tool consent dialog", () => {
       expect(text).toContain("Send message");
       expect(text).toContain("bendik@cloudgeni.ai");
       expect(text).toContain("Opengeni newsletter");
-      expect(text).toContain("Always allow on this Site from this account");
+      expect(text).toContain("Always allow on this app from this account");
       expect(text).not.toContain("never shown");
       const from = dialog()!.querySelector<HTMLSelectElement>('select[aria-label="Runs as"]')!;
       expect([...from.options].map((option) => option.textContent)).toEqual([
@@ -246,7 +246,7 @@ describe("Site tool consent dialog", () => {
       [
         { accounts: [{ identity: work, connector: "Gmail", account: "ada@work.example" }] },
         "Runs asada@work.example",
-        "Always allow on this Site from this account",
+        "Always allow on this app from this account",
       ],
       [
         {
@@ -255,9 +255,9 @@ describe("Site tool consent dialog", () => {
           ],
         },
         "Runs asops@example.test · Shared with workspace",
-        "Always allow on this Site from this account",
+        "Always allow on this app from this account",
       ],
-      [{ accounts: [], selected: null }, "Runs asYou", "Always allow on this Site"],
+      [{ accounts: [], selected: null }, "Runs asYou", "Always allow on this app"],
     ];
     for (const [overrides, runsAs, always] of cases) {
       const { view, host } = await mount();
@@ -288,7 +288,7 @@ describe("Site tool consent dialog", () => {
     }
   });
 
-  test("Cancel answers null; a Site that stops waiting withdraws the dialog", async () => {
+  test("Cancel answers null; an app that stops waiting withdraws the dialog", async () => {
     const { view, host } = await mount();
     try {
       let cancelled: SiteToolConsentDecision | undefined;
@@ -325,7 +325,7 @@ describe("Site tool consent dialog", () => {
   });
 });
 
-describe("Site tool failures in the Opengeni frame", () => {
+describe("App tool failures in the Opengeni frame", () => {
   const failure = (overrides: Partial<SiteToolFailure> = {}): SiteToolFailure => ({
     code: "site_tool_unavailable",
     system: "Microsoft Dynamics",
@@ -401,7 +401,7 @@ describe("Site tool failures in the Opengeni frame", () => {
     }
   });
 
-  test("a tool the Site can't offer this viewer asks for a republish, with one Close", async () => {
+  test("a tool the app can't offer this viewer asks for a republish, with one Close", async () => {
     const { view, host } = await mount();
     try {
       await actRun(() => {
@@ -409,13 +409,13 @@ describe("Site tool failures in the Opengeni frame", () => {
           host(),
           failure({
             code: "site_tool_not_available_for_viewer",
-            message: "This isn't available to you on this Site.",
+            message: "This isn't available to you on this app.",
             retryable: false,
           }),
         );
       });
       await opened();
-      expect(dialog()?.textContent).toContain("Ask the Site owner to publish it again.");
+      expect(dialog()?.textContent).toContain("Ask the app owner to publish it again.");
       expect([...dialog()!.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
         "Close",
       ]);
@@ -426,7 +426,7 @@ describe("Site tool failures in the Opengeni frame", () => {
     }
   });
 
-  test("a Site that stops waiting withdraws the message", async () => {
+  test("an app that stops waiting withdraws the message", async () => {
     const { view, host } = await mount();
     try {
       const controller = new AbortController();

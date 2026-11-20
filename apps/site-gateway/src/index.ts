@@ -106,7 +106,7 @@ export function unexpectedErrorResponse(request: Request, env: GatewayEnv): Resp
     },
     500,
     "Something went wrong",
-    "This Site couldn't be shown. Try again in a moment.",
+    "This app couldn't be shown. Try again in a moment.",
   );
 }
 
@@ -120,7 +120,7 @@ export async function handleRequest(
     config = gatewayConfig(env);
   } catch (error) {
     if (error instanceof GatewayConfigError) console.error(`site-gateway: ${error.message}`);
-    return plain(500, "Site gateway is not configured.\n");
+    return plain(500, "App gateway is not configured.\n");
   }
   const url = new URL(request.url);
   // The API's signed Site database route is not a Site page: it answers on
@@ -188,7 +188,7 @@ export async function handleRequest(
           pageSecurity,
           502,
           "Temporarily unavailable",
-          "This Site could not be loaded. Try again shortly.",
+          "This app could not be loaded. Try again shortly.",
         );
   }
   // Platform usage: every request served for a known Site host counts,
@@ -205,7 +205,7 @@ export async function handleRequest(
     return api
       ? jsonError(
           404,
-          { code: "site_not_found", message: "No published Site here" },
+          { code: "site_not_found", message: "No published app here" },
           { noindex: true, hsts },
         )
       : neutralPage(pageSecurity);
@@ -213,7 +213,7 @@ export async function handleRequest(
     return api
       ? jsonError(
           410,
-          { code: "site_suspended", message: "This Site has been taken down" },
+          { code: "site_suspended", message: "This app has been taken down" },
           { noindex: true, hsts },
         )
       : takedownPage(pageSecurity, config.abuseEmail);
@@ -250,7 +250,7 @@ export async function handleRequest(
     if (pathname === SITE_GATEWAY_PREFIX || pathname.startsWith(`${SITE_GATEWAY_PREFIX}/`))
       return neutralPage(site);
     if (request.method !== "GET" && request.method !== "HEAD")
-      return messagePage(site, 405, "Not allowed", "Site pages are read-only.");
+      return messagePage(site, 405, "Not allowed", "App pages are read-only.");
     return await handleShell(site);
   } catch (error) {
     if (!(error instanceof UpstreamError)) throw error;
@@ -258,7 +258,7 @@ export async function handleRequest(
       pageSecurity,
       502,
       "Temporarily unavailable",
-      "This Site could not be loaded. Try again shortly.",
+      "This app could not be loaded. Try again shortly.",
     );
   }
 }

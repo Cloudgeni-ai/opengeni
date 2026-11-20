@@ -2411,6 +2411,11 @@ resolve reference names with `resolveCatalogTool` (`@opengeni/codemode`), and
 the native client mirrors it. A definition's in-process `discloses` hook names
 tools a model call makes available (a Skill's `tools:`); the lazy transport
 freezes them on the call like an entry tool's companions.
+A renamed first-party tool keeps its former name as a hidden alias that every
+name resolver accepts and no listing shows (the `site_*` tools are now
+`app_*`); see [MCP surfaces](mcp-surfaces.md#tool-names-the-name-to-call-and-the-name-to-ask-by).
+User-facing copy calls Sites "apps" and integrations "connected tools"; code
+identifiers, routes, tables and SDK names keep `site`.
 
 First-party contract projection, opacity checks, omission preservation:
 `apps/api/src/mcp/contract-input.ts`. Union diagnostics:
@@ -2871,7 +2876,7 @@ Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
 Site Data gives each published Site persistent JSON collections and files
-(Postgres `site_data_*` tables behind the backend-neutral `SiteDataStore`,
+(Postgres `app_data_*` tables behind the backend-neutral `SiteDataStore`,
 bytes in object storage). Data belongs to the Site, not a version; collection
 access modes are enforced only in the API, Site frames reach it through the
 existing Site HTTP channel with host-pinned `current` routes only and always

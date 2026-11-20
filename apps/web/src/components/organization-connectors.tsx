@@ -266,7 +266,7 @@ export function OrganizationConnectors({
       />
     );
 
-  const back = { label: "Integrations", onClick: toList };
+  const back = { label: "Connected tools", onClick: toList };
   const connector = state.connectors?.find((each) => each.id === location.connectorId) ?? null;
   if (!connector) {
     return (
@@ -288,7 +288,7 @@ export function OrganizationConnectors({
             icon={<PlugIcon />}
             title="This connector isn't in your organization"
             description="It may have been removed."
-            action={<RowButton onClick={toList}>Back to Integrations</RowButton>}
+            action={<RowButton onClick={toList}>Back to connected tools</RowButton>}
           />
         )}
       </DetailPage>
@@ -878,7 +878,7 @@ function NewConnectorPage({
 
   return (
     <FlushFormPage
-      backLabel="Integrations"
+      backLabel="Connected tools"
       onClose={onClose}
       title="Add connector"
       description={`Workspaces in ${organizationName} that it reaches get it ready to use. A workspace's own setup of the same connector still wins there.`}
@@ -1269,7 +1269,7 @@ function ConnectorPage({
           : "Needs no account or key.";
   return (
     <DetailPage
-      back={{ label: "Integrations", onClick: onBack }}
+      back={{ label: "Connected tools", onClick: onBack }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       <DetailPageHeader

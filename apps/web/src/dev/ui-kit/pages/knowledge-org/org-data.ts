@@ -102,7 +102,7 @@ export const WORKSPACE_ROLE_OPTIONS: RoleOption<WorkspaceRole>[] = workspaceRole
   ...role,
   escalation:
     role.id === "workspace_admin"
-      ? "They'll be able to change this workspace's settings, integrations and who has access."
+      ? "They'll be able to change this workspace's settings, connected tools and who has access."
       : undefined,
 }));
 
