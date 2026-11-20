@@ -532,7 +532,14 @@ describe("mid-session update", () => {
         widened,
         DEFAULT_FIRST_PARTY_MCP_TOOLS,
       ).sort(),
-    ).toEqual(DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((tool) => tool.startsWith("goal_")).sort());
+    ).toEqual(
+      DEFAULT_FIRST_PARTY_MCP_TOOLS.filter(
+        (tool) =>
+          tool.startsWith("goal_") ||
+          tool.startsWith("session_links_") ||
+          tool === "set_waiting_on",
+      ).sort(),
+    );
   });
 
   test("omitted fields keep current values and admission is enforced", () => {

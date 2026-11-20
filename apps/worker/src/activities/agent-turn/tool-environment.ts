@@ -114,6 +114,7 @@ import {
   nangoBackendsFor,
   postConnectionNeedsReauthNotice,
   connectedCommandOutputLook,
+  addSessionLink,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
@@ -732,6 +733,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     tools: turnTools,
     resolveCredential,
     warn: (message, attributes) => observability.warn(message, attributes),
+    // A pull request the chat opens shows in its Linked panel.
+    onPullRequestCreated: async (pullRequest) => {
+      await addSessionLink(
+        { db, bus },
+        {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          url: pullRequest.url,
+          title: pullRequest.title,
+          addedBy: "automatic",
+        },
+      );
+    },
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
   // Apps authorization is the exact core designation resolved at claim.

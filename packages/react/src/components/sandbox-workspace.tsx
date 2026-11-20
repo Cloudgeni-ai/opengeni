@@ -60,7 +60,7 @@ import { useMachineChip, type MachineChip } from "../hooks/use-machine-chip";
 import { MACHINES_SESSION_POLL_MS, useMachines } from "../hooks/use-machines";
 import type { MachineView } from "../types/machines";
 import type { SandboxFilesProps } from "./sandbox-files";
-import { WorkbenchChanges } from "./workbench-changes";
+import { WorkbenchChanges, type WorkbenchPullRequest } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 import { useOpenGeniText } from "../messages/runtime";
@@ -335,6 +335,10 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride<ChatClient> & {
   requestedFileLine?: number | null | undefined;
   /** Route a guarded diff into the host's Files tab. */
   onOpenFile?: ((path: string) => void) | undefined;
+  /** The branch's pull request, when the host knows one: Changes shows "View on GitHub". */
+  pullRequest?: WorkbenchPullRequest | null | undefined;
+  /** Ask for a pull request for the changes: Changes shows "Open PR" when there is none. */
+  onOpenPullRequest?: (() => void) | undefined;
   /** Restore and report navigation inside the built-in workbench surfaces. */
   initialFilePath?: string | null | undefined;
   onFilePathChange?: ((path: string | null) => void) | undefined;
@@ -399,6 +403,8 @@ export function useSandboxWorkspaceTabs(
     requestedFileRequestId,
     requestedFileLine,
     onOpenFile,
+    pullRequest,
+    onOpenPullRequest,
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
@@ -786,6 +792,8 @@ export function useSandboxWorkspaceTabs(
                   },
                 }
               : {})}
+            pullRequest={pullRequest ?? null}
+            {...(onOpenPullRequest ? { onOpenPullRequest } : {})}
           />
         ),
       });
@@ -965,6 +973,9 @@ export function useSandboxWorkspaceTabs(
     requestedFileRequestId,
     requestedFileLine,
     onOpenFile,
+    pullRequest?.url,
+    pullRequest?.number,
+    onOpenPullRequest,
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
@@ -1071,6 +1082,10 @@ export type SandboxWorkspaceProps = ClientOverride<ChatClient> & {
   computerWebSocketFactory?: ComputerFrameWebSocketFactory | undefined;
   /** Host-owned setup page or store listing for attaching an existing Chrome profile. */
   browserExtensionSetupUrl?: string | undefined;
+  /** The branch's pull request, when the host knows one: Changes shows "View on GitHub". */
+  pullRequest?: WorkbenchPullRequest | null | undefined;
+  /** Ask for a pull request for the changes: Changes shows "Open PR" when there is none. */
+  onOpenPullRequest?: (() => void) | undefined;
   /** Controlled collapsed state for hosts with their own dock toggle. */
   collapsed?: boolean | undefined;
   onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
@@ -1116,6 +1131,8 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     browserWebSocketFactory,
     computerWebSocketFactory,
     browserExtensionSetupUrl,
+    pullRequest,
+    onOpenPullRequest,
     collapsed,
     onCollapsedChange,
     showCollapseControl,
@@ -1227,6 +1244,8 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(browserWebSocketFactory ? { browserWebSocketFactory } : {}),
     ...(computerWebSocketFactory ? { computerWebSocketFactory } : {}),
     ...(browserExtensionSetupUrl ? { browserExtensionSetupUrl } : {}),
+    ...(pullRequest ? { pullRequest } : {}),
+    ...(onOpenPullRequest ? { onOpenPullRequest } : {}),
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
@@ -1413,6 +1432,8 @@ function ChangesTabContent({
   onRetry,
   onWake,
   onOpenFile,
+  pullRequest,
+  onOpenPullRequest,
 }: {
   git: UseSandboxGitResult;
   comparison: SandboxGitComparison;
@@ -1427,6 +1448,8 @@ function ChangesTabContent({
   onRetry: () => void;
   onWake: () => void;
   onOpenFile?: ((path: string) => void) | undefined;
+  pullRequest?: WorkbenchPullRequest | null | undefined;
+  onOpenPullRequest?: (() => void) | undefined;
 }) {
   const t = useOpenGeniText();
   const diff = git.diff;
@@ -1468,6 +1491,8 @@ function ChangesTabContent({
             capturedAt={git.capturedAt}
             captureRevision={captureRevision}
             {...(onOpenFile ? { onOpenFile } : {})}
+            pullRequest={pullRequest ?? null}
+            {...(onOpenPullRequest ? { onOpenPullRequest } : {})}
           />
         </div>
       </div>

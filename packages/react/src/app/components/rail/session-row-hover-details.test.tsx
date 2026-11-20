@@ -116,7 +116,7 @@ describe("SessionRowHoverDetails", () => {
     );
     const text = host.textContent ?? "";
     expect(text).toContain("Astra strategy takeover");
-    expect(host.querySelector("[data-slot=status-badge]")?.textContent).toBe("Running");
+    expect(host.querySelector("[data-slot=status-badge]")?.textContent).toBe("Working");
     expect(text).toContain("GPT-6 Astra");
     expect(text).toContain("Max reasoning");
     expect(host.querySelector("[data-model-vendor=openai]")).not.toBeNull();
@@ -223,7 +223,7 @@ describe("SessionRowHoverDetails", () => {
       }),
     );
     const text = host.textContent ?? "";
-    expect(host.querySelector("[data-slot=status-badge]")?.textContent).toBe("Idle");
+    expect(host.querySelector("[data-slot=status-badge]")?.textContent).toBe("Done");
     expect(text).not.toContain("sub-agent");
     expect(text).not.toContain("reasoning");
     expect(text).not.toMatch(/\b0\b/);

@@ -51,7 +51,9 @@ import type {
   ApiIntegrationAuthPreview,
   ResolvedAgentConfig,
   SessionAvatar,
+  SessionLink,
   SessionToolPolicy,
+  SessionWaitingOn,
 } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
@@ -5271,6 +5273,12 @@ export const sessions = pgTable(
     // an avatar. Never part of the model's context; copied by forks.
     description: text("description"),
     avatar: jsonb("avatar").$type<SessionAvatar>(),
+    // Who the chat waits on, as the agent said (1515). `turnId` is the turn
+    // that said it: the wait shows only while that turn is the chat's latest
+    // and the chat is idle, so a reply or a new turn clears it.
+    waitingOn: jsonb("waiting_on").$type<SessionWaitingOn & { turnId: string | null }>(),
+    // The chat's Linked items (1515). NULL means none. Bounded by the contract.
+    links: jsonb("links").$type<SessionLink[]>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a

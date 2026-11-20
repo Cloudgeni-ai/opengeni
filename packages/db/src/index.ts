@@ -340,6 +340,12 @@ import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
+import {
+  SessionLinkList as SessionLinkListSchema,
+  SessionWaitingOn as SessionWaitingOnSchema,
+  type SessionLink,
+  type SessionWaitingOn,
+} from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 import {
@@ -17015,6 +17021,38 @@ export async function reopenSlackInteractionDelivery(
         updatedAt: sql`now()`,
       })
       .where(eq(schema.slackInteractions.id, input.id))
+      .returning({ id: schema.slackInteractions.id });
+    return rows.length === 1;
+  });
+}
+
+/**
+ * Reopen a settled Slack thread delivery so the chat's next answer posts in
+ * the thread again, skipping everything up to `afterSequence` (what the chat
+ * did elsewhere meanwhile). An open delivery is left alone. Used when an
+ * automation wakes a chat that started in Slack. Returns whether it reopened.
+ */
+export async function reopenSlackInteractionDeliveryAfter(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & { afterSequence: number },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        terminalDeliveryState: "open",
+        deliveryAttemptCount: 0,
+        deliveryRetryAt: null,
+        deliveryLastErrorCode: null,
+        lastDeliveredSessionEventSequence: sql`greatest(${schema.slackInteractions.lastDeliveredSessionEventSequence}, ${Math.max(0, Math.trunc(input.afterSequence))})`,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          sql`${schema.slackInteractions.terminalDeliveryState} <> 'open'`,
+        ),
+      )
       .returning({ id: schema.slackInteractions.id });
     return rows.length === 1;
   });
@@ -36385,6 +36423,8 @@ function mapSessionPin(
 
 type SessionRow = typeof schema.sessions.$inferSelect & {
   currentInputWait?: Session["inputWait"];
+  /** Who the chat waits on now; see {@link withCurrentSessionWaitingOn}. */
+  currentWaitingOn?: SessionWaitingOn | null;
   meaningfulSequence?: number;
   /** See sessionFailureHandledByParentSql. */
   failureHandled?: boolean;
@@ -36580,6 +36620,111 @@ function sessionInputWaitDecidingTurnSql(
 
 /** One bounded query in the caller's RLS scope; never infer waits from history text. */
 async function withCurrentSessionInputWait<Row extends SessionRow>(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Row[],
+): Promise<Row[]> {
+  return await withCurrentSessionWaitingOn(
+    db,
+    workspaceId,
+    await withCurrentSessionInputWaitOnly(db, workspaceId, rows),
+  );
+}
+
+/**
+ * Who each chat waits on now. An open question or approval waits on the
+ * person its turn works for; otherwise the agent's own `set_waiting_on` holds
+ * while the chat is idle and the turn that said it is still its latest, so a
+ * reply, an approval or the agent continuing clears it without a write. Two
+ * bounded queries, only for rows that could be waiting.
+ */
+async function withCurrentSessionWaitingOn<Row extends SessionRow>(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Row[],
+): Promise<Row[]> {
+  const inputTurnIds = rows
+    .filter((row) => row.status === "requires_action" && row.activeTurnId)
+    .map((row) => row.activeTurnId!);
+  const agentCandidates = rows.filter(
+    (row) => row.status === "idle" && !row.activeTurnId && row.waitingOn?.turnId,
+  );
+  if (inputTurnIds.length === 0 && agentCandidates.length === 0) {
+    return rows.map((row) => ({ ...row, currentWaitingOn: null }));
+  }
+  const initiators = new Map<string, string | null>();
+  if (inputTurnIds.length > 0) {
+    const turns = await db
+      .select({
+        id: schema.sessionTurns.id,
+        subjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          anyOf(schema.sessionTurns.id, [...new Set(inputTurnIds)]),
+        ),
+      );
+    for (const turn of turns) initiators.set(turn.id, turn.subjectId ?? null);
+  }
+  const latestTurnBySession = new Map<string, string>();
+  if (agentCandidates.length > 0) {
+    const latest = db
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, schema.sessions.id),
+        ),
+      )
+      .orderBy(desc(schema.sessionTurns.position))
+      .limit(1)
+      .as("latest_waiting_turn");
+    const matches = await db
+      .select({ id: schema.sessions.id, turnId: latest.id })
+      .from(schema.sessions)
+      .leftJoinLateral(latest, sql`true`)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          anyOf(
+            schema.sessions.id,
+            agentCandidates.map((row) => row.id),
+          ),
+        ),
+      );
+    for (const match of matches) if (match.turnId) latestTurnBySession.set(match.id, match.turnId);
+  }
+  return rows.map((row) => {
+    if (row.status === "requires_action" && row.activeTurnId) {
+      return {
+        ...row,
+        currentWaitingOn: {
+          source: "input" as const,
+          person: null,
+          subjectId: initiators.get(row.activeTurnId) ?? null,
+          reason: null,
+          since: row.updatedAt.toISOString(),
+        },
+      };
+    }
+    const stored = row.waitingOn;
+    if (
+      stored?.turnId &&
+      row.status === "idle" &&
+      !row.activeTurnId &&
+      latestTurnBySession.get(row.id) === stored.turnId
+    ) {
+      const { turnId: _turnId, ...waitingOn } = stored;
+      return { ...row, currentWaitingOn: waitingOn };
+    }
+    return { ...row, currentWaitingOn: null };
+  });
+}
+
+async function withCurrentSessionInputWaitOnly<Row extends SessionRow>(
   db: Database,
   workspaceId: string,
   rows: readonly Row[],
@@ -78660,6 +78805,139 @@ export async function updateSessionProfileWithEvent(
   );
 }
 
+/** A stored link list, or empty when absent or unreadable. */
+export function storedSessionLinks(value: unknown): SessionLink[] {
+  const parsed = SessionLinkListSchema.safeParse(value ?? []);
+  return parsed.success ? parsed.data : [];
+}
+
+/** The chat's Linked items, in the caller's RLS scope. Null when the chat is not visible. */
+export async function getSessionLinks(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionLink[] | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ links: schema.sessions.links })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row ? storedSessionLinks(row.links) : null;
+  });
+}
+
+/**
+ * Change a chat's Linked items or who it waits on, and append the matching
+ * public event under the canonical session event-write lock, like
+ * {@link updateSessionProfileWithEvent}. `change` sees the current values and
+ * returns the new ones, or null for no change (no event).
+ */
+export async function updateSessionCoordinationWithEvent(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    change: (current: {
+      links: SessionLink[];
+      waitingOn: (SessionWaitingOn & { turnId: string | null }) | null;
+    }) =>
+      | { kind: "links"; links: SessionLink[] }
+      | { kind: "waiting_on"; waitingOn: (SessionWaitingOn & { turnId: string | null }) | null }
+      | null;
+  },
+): Promise<{ updated: boolean; links: SessionLink[]; events: SessionEvent[] } | null> {
+  return await retryWorkspaceSessionEventActivityPersistence(
+    db,
+    input.workspaceId,
+    true,
+    {
+      stage: "session_coordination.update_with_event",
+      eventTypes: ["session.links.changed", "session.waiting_on.changed"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) return null;
+        const [current] = await tx
+          .select({ links: schema.sessions.links, waitingOn: schema.sessions.waitingOn })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        const links = storedSessionLinks(current?.links);
+        const storedWaiting = current?.waitingOn ?? null;
+        const waitingParsed = storedWaiting
+          ? SessionWaitingOnSchema.safeParse(storedWaiting)
+          : null;
+        const waitingOn =
+          storedWaiting && waitingParsed?.success
+            ? { ...waitingParsed.data, turnId: storedWaiting.turnId ?? null }
+            : null;
+        const next = input.change({ links, waitingOn });
+        if (!next) return { updated: false, links, events: [] };
+        const now = new Date();
+        const sequence = session.lastSequence + 1;
+        const values =
+          next.kind === "links"
+            ? { links: SessionLinkListSchema.parse(next.links) }
+            : { waitingOn: next.waitingOn };
+        await tx
+          .update(schema.sessions)
+          .set({ ...values, lastSequence: sequence, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        const payload =
+          next.kind === "links"
+            ? { links: next.links }
+            : {
+                waitingOn: next.waitingOn
+                  ? (({ turnId: _turnId, ...rest }) => rest)(next.waitingOn)
+                  : null,
+              };
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence,
+                type:
+                  next.kind === "links" ? "session.links.changed" : "session.waiting_on.changed",
+                payload,
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append session coordination event");
+        return {
+          updated: true,
+          links: next.kind === "links" ? next.links : links,
+          events: [mapEvent(event)],
+        };
+      }),
+  );
+}
+
 /** Read-only admission at a locked paused-to-active transition. */
 export type SessionGoalResumeValidation = (
   tx: Database,
@@ -100749,6 +101027,7 @@ function mapSessionFields(
     queueTailPosition: Number(row.queueTailPosition),
     effectiveControl,
     inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
+    ...(row.currentWaitingOn ? { waitingOn: row.currentWaitingOn } : {}),
     lastSequence: row.lastSequence,
     // Public adapters project these from subscription-core bindings and leases,
     // never the frozen columns of the retired allocator.

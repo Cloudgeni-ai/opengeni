@@ -203,6 +203,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "addSessionLink",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links",
+    "request": [
+      "AddSessionLinkRequest"
+    ],
+    "response": [
+      "SessionLink"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "addWorkspaceMember",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/members",
@@ -6727,6 +6739,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "artifacts:read"
   },
   {
+    "id": "listSessionLinks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links",
+    "request": [],
+    "query": [
+      "fresh"
+    ],
+    "response": [
+      "SessionLinksResponse"
+    ],
+    "permission": "sessions:read"
+  },
+  {
     "id": "listSessionPage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions",
@@ -9033,6 +9058,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "removeSessionLink",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links/:linkId",
+    "request": [],
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "removeSessionResources",

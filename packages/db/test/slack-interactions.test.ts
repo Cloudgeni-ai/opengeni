@@ -22,6 +22,9 @@ import {
   grantWorkspaceAccess,
   listPendingSlackInteractionMessageActionHandles,
   listSessionsForSubject,
+  getSessionLinks,
+  reopenSlackInteractionDeliveryAfter,
+  updateSessionCoordinationWithEvent,
   renewSlackAppHomeRefreshClaim,
   releaseSlackAppHomeRefresh,
   releaseSlackInteractionInbox,
@@ -652,6 +655,106 @@ describe("Slack interaction migration and durable database boundary", () => {
         })(),
       ).rejects.toThrow(constraint);
     }
+  }, 60_000);
+
+  test("an event wake reopens a settled thread delivery after the wake only", async () => {
+    if (!available) return;
+    const target = await workspace("event-wake");
+    const owner = "user:slack-event-wake-owner";
+    await member(target, owner);
+    const connection = await botConnection(target, "T_EVENT_WAKE", {
+      botId: "B_EVENT_WAKE",
+      botUserId: "U_EVENT_WAKE_BOT",
+    });
+    const { interaction } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_EVENT_WAKE",
+      slackChannelId: "C_EVENT_WAKE",
+      slackThreadTs: "1710000000.000030",
+      routeKey: "C_EVENT_WAKE:1710000000.000030",
+      triggeringProviderEventId: "E_EVENT_WAKE",
+      owningSubjectId: owner,
+      visibility: "workspace",
+    });
+    await admin`
+      update slack_interactions
+      set terminal_delivery_state = 'completed', last_delivered_session_event_sequence = 4
+      where id = ${interaction.id}`;
+    expect(
+      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 9 }),
+    ).toBe(true);
+    const [reopened] = await admin<
+      { terminal_delivery_state: string; last_delivered_session_event_sequence: number }[]
+    >`
+      select terminal_delivery_state, last_delivered_session_event_sequence
+      from slack_interactions where id = ${interaction.id}`;
+    expect(reopened).toEqual({
+      terminal_delivery_state: "open",
+      last_delivered_session_event_sequence: 9,
+    });
+    // An open delivery is left alone, and the cursor never moves back.
+    expect(
+      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 2 }),
+    ).toBe(false);
+  }, 60_000);
+
+  test("a chat's links and waits change with one public event each", async () => {
+    if (!available) return;
+    const target = await workspace("session-links");
+    const owner = "user:session-links-owner";
+    await member(target, owner);
+    const session = await createSession(db, {
+      ...target,
+      initialMessage: "links",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const link = {
+      id: "l1",
+      url: "https://github.com/acme/api/pull/7",
+      title: "Fix it",
+      kind: "pull_request" as const,
+      provider: "github" as const,
+      ref: "acme/api#7",
+      addedBy: "agent" as const,
+      addedAt: new Date().toISOString(),
+    };
+    const added = await updateSessionCoordinationWithEvent(db, {
+      workspaceId: target.workspaceId,
+      sessionId: session.id,
+      change: () => ({ kind: "links", links: [link] }),
+    });
+    expect(added?.updated).toBe(true);
+    expect(added?.events.map((event) => event.type)).toEqual(["session.links.changed"]);
+    expect(await getSessionLinks(db, target.workspaceId, session.id)).toEqual([link]);
+    const unchanged = await updateSessionCoordinationWithEvent(db, {
+      workspaceId: target.workspaceId,
+      sessionId: session.id,
+      change: () => null,
+    });
+    expect(unchanged?.events ?? []).toEqual([]);
+    const waiting = await updateSessionCoordinationWithEvent(db, {
+      workspaceId: target.workspaceId,
+      sessionId: session.id,
+      change: () => ({
+        kind: "waiting_on",
+        waitingOn: {
+          source: "agent",
+          person: "Kari",
+          subjectId: null,
+          reason: "Needs the staging password",
+          since: new Date().toISOString(),
+          turnId: null,
+        },
+      }),
+    });
+    expect(waiting?.events.map((event) => event.type)).toEqual(["session.waiting_on.changed"]);
   }, 60_000);
 
   test("a single-button message swaps its button in place without superseding the replacement", async () => {

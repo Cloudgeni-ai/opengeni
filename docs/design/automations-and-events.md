@@ -591,6 +591,14 @@ Runs inherit access like scheduled runs: they follow the destination chat, or
 the workspace defaults and the owner's own access for a separate agent, unless
 the owner explicitly narrows them.
 
+### Linked pull request wakes
+
+`session_links_add` with `wakeWhen` creates a one-time event automation on the
+current chat for a linked GitHub pull request's merge or its repository's next
+release, through the ordinary `scheduled_tasks_create` path (no second engine).
+A wake of a chat that started in Slack reopens the thread delivery from the
+wake. See [../session-status-and-links.md](../session-status-and-links.md).
+
 ## Surfaces
 
 - **HTTP and SDK.** Scheduled task create and update take `events:

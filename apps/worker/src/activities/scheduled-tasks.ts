@@ -67,6 +67,9 @@ import {
   type ProductUsageMetricsSink,
 } from "@opengeni/core";
 import {
+  getSessionEvent,
+  getSlackInteractionForSession,
+  reopenSlackInteractionDeliveryAfter,
   appendSessionEvents,
   addSessionSystemUpdateWithSourceMutation,
   getEventOccurrenceForScheduledTaskRun,
@@ -2362,9 +2365,49 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
     },
   };
   return {
-    dispatchScheduledTaskRun: (input: DispatchScheduledTaskRunInput) =>
-      retryScheduledTaskAdmission(() => activities.dispatchScheduledTaskRun(input)),
+    dispatchScheduledTaskRun: async (input: DispatchScheduledTaskRunInput) => {
+      const result = await retryScheduledTaskAdmission(() =>
+        activities.dispatchScheduledTaskRun(input),
+      );
+      // An event woke an existing chat that started in a Slack thread: its
+      // answer goes back to that thread. Best effort; see
+      // docs/session-status-and-links.md.
+      if (input.triggerType === "event" && result.action === "signal") {
+        const { db, observability } = await services();
+        await reopenSlackThreadForEventWake(db, result).catch((error: unknown) =>
+          observability.warn("Reopening the Slack thread for an event wake failed", {
+            sessionId: result.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+      return result;
+    },
   };
+}
+
+/**
+ * Reopen the Slack thread delivery of a chat an event just woke, from just
+ * before the wake's message, so only the woken run's answer posts there.
+ */
+export async function reopenSlackThreadForEventWake(
+  db: Database,
+  wake: { accountId: string; workspaceId: string; sessionId: string; triggerEventId: string },
+): Promise<boolean> {
+  const interaction = await getSlackInteractionForSession(db, {
+    accountId: wake.accountId,
+    workspaceId: wake.workspaceId,
+    sessionId: wake.sessionId,
+  });
+  if (!interaction) return false;
+  const trigger = await getSessionEvent(db, wake.workspaceId, wake.triggerEventId);
+  if (!trigger || trigger.sessionId !== wake.sessionId) return false;
+  return await reopenSlackInteractionDeliveryAfter(db, {
+    id: interaction.id,
+    accountId: interaction.accountId,
+    workspaceId: interaction.workspaceId,
+    afterSequence: trigger.sequence - 1,
+  });
 }
 
 class IncidentTelemetryPreflightBlockedError extends Error {

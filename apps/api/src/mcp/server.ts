@@ -17,6 +17,11 @@ import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
+import { listEventSources as listSessionLinkEventSources } from "@opengeni/db";
+import {
+  registerSessionCoordinationTools,
+  type SessionLinkWake,
+} from "./session-coordination-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
   connectableIntegrationDefinitions,
@@ -492,6 +497,7 @@ import {
   requireVisibleScheduledTask,
   scheduledTaskAccess,
   scheduledTaskViewerForGrant,
+  eventSourceAccess as sessionLinkEventSourceAccess,
   siteViewerForGrant,
   resolveNewSiteAudience,
   resolveNewProjectAudience,
@@ -1624,6 +1630,23 @@ export function buildOpenGeniMcpServer(
       json,
     });
   }
+  // Who the chat waits on and what it works on (session-coordination-tools.ts).
+  // A link's wake is set up with the schedule tools below, when this chat
+  // may create event automations.
+  let sessionLinkWake: SessionLinkWake | null = null;
+  if (sessionId !== null) {
+    registerSessionCoordinationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      wake: () => sessionLinkWake,
+      json,
+    });
+  }
   // Notifications reach the person who started this session: their inbox and,
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
@@ -2588,6 +2611,70 @@ export function buildOpenGeniMcpServer(
         );
       },
     );
+
+    // session_links_add's wakeWhen: the same create path as above, with a
+    // one-time GitHub event trigger into this chat.
+    if (eventTriggers && sessionId !== null) {
+      sessionLinkWake = async (wake) => {
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+        const source = (
+          await listSessionLinkEventSources(deps.db, grant.workspaceId, viewer.subjectId)
+        ).find(
+          (candidate) =>
+            candidate.kind === "github" &&
+            sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+        );
+        if (!source) {
+          throw new ToolArgumentError(
+            "No GitHub event source is available. A person adds it in Automations (it needs the workspace's GitHub app); the link was added without a wake.",
+          );
+        }
+        const payload = resolveScheduledTaskCreateInput(
+          {
+            name: wake.name,
+            prompt: wake.prompt,
+            events: {
+              once: true,
+              triggers: [
+                {
+                  sourceId: source.id,
+                  eventTypes: [wake.eventType],
+                  conditions: wake.conditions,
+                  // A merge or release made through Opengeni's own GitHub App
+                  // (an agent or the merge queue) still reports back.
+                  includeOwnEvents: true,
+                },
+              ],
+            },
+          },
+          sessionId,
+        );
+        await requireLimit(deps, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          action: "schedule:create",
+          quantity: 1,
+        });
+        const task = await createValidatedScheduledTask({
+          settings: deps.settings,
+          db: deps.db,
+          objectStorage: deps.objectStorage,
+          grant,
+          payload,
+          toolsProvided: false,
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
+          githubPersonalFetch: deps.githubPersonalFetch,
+        });
+        await syncCreatedScheduledTask({
+          db: deps.db,
+          workflowClient: deps.workflowClient,
+          task,
+        });
+        return { automationId: task.id, name: task.name, once: true };
+      };
+    }
 
     server.registerTool(
       "scheduled_tasks_update",

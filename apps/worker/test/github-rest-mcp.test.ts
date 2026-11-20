@@ -10,6 +10,7 @@ import { PERSONAL_GITHUB_RECONNECT_MESSAGE } from "@opengeni/contracts/personal-
 import { testSettings } from "@opengeni/testing/settings";
 import {
   buildGitHubRestMcpForTurn,
+  createdPullRequestFromResult,
   personalConnectionNeedsReconnect,
   personalReconnectOr,
 } from "../src/github-rest-mcp";
@@ -450,5 +451,32 @@ describe("personal GitHub tools when the grant needs reconnecting", () => {
         throw new Error("database unavailable");
       }),
     ).toBe(generic);
+  });
+});
+
+describe("createdPullRequestFromResult", () => {
+  test("reads the new pull request from a successful result", () => {
+    expect(
+      createdPullRequestFromResult({
+        structuredContent: {
+          data: { htmlUrl: "https://github.com/acme/api/pull/7", title: "Fix it" },
+        },
+      }),
+    ).toEqual({ url: "https://github.com/acme/api/pull/7", title: "Fix it" });
+  });
+
+  test("ignores errors and results that are not a pull request", () => {
+    expect(
+      createdPullRequestFromResult({
+        isError: true,
+        structuredContent: { data: { htmlUrl: "https://github.com/acme/api/pull/7" } },
+      }),
+    ).toBeNull();
+    expect(
+      createdPullRequestFromResult({
+        structuredContent: { data: { htmlUrl: "https://github.com/acme/api/issues/7" } },
+      }),
+    ).toBeNull();
+    expect(createdPullRequestFromResult(null)).toBeNull();
   });
 });

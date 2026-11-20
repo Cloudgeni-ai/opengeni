@@ -177,6 +177,7 @@ export * from "./domain/site-audience";
 export * from "./domain/project-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";
+export * from "./domain/session-links";
 export { UNATTENDED_REQUEST_GOAL } from "./domain/unattended-request-goal";
 export * from "./domain/session-resource-removal";
 export * from "./domain/session-repository-attach";

@@ -165,6 +165,7 @@ import { sessionAgentsSignal } from "../../session-agents-model";
 import { useNavigate, usePage, useRouterState } from "../lib/navigation";
 import {
   BugIcon,
+  LinkIcon,
   Loader2Icon,
   MenuIcon,
   MessagesSquareIcon,
@@ -247,6 +248,12 @@ import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
 } from "../components/session/editable-artifacts-workspace";
+import {
+  OPEN_PULL_REQUEST_MESSAGE,
+  openPullRequestFromLinks,
+  SessionLinkedPanel,
+  useSessionLinks,
+} from "../components/session/linked-panel";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
 import {
@@ -1909,7 +1916,44 @@ function SessionDockPanel(props: SessionDockProps) {
             : "Site",
     });
   }
+  const linkState = useSessionLinks({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    events: props.events,
+  });
+  const canControlSession = hasWorkspacePermission(
+    context.accessContext,
+    props.workspaceId,
+    "sessions:control",
+  );
+  const linkedPullRequest = useMemo(
+    () => openPullRequestFromLinks(linkState.links),
+    [linkState.links],
+  );
+  const openPullRequest = useCallback(() => {
+    void context.client
+      .sendMessage(props.workspaceId, props.sessionId, {
+        text: OPEN_PULL_REQUEST_MESSAGE,
+        clientEventId: crypto.randomUUID(),
+      })
+      .catch((failure: unknown) => toast.error(userErrorText(failure, "Try again.")));
+  }, [context.client, props.workspaceId, props.sessionId]);
   const trailingTabs: WorkspaceTab[] = [
+    {
+      id: "linked",
+      label: "Linked",
+      icon: <LinkIcon />,
+      ...(linkState.links.length > 0
+        ? {
+            badge: (
+              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
+                {linkState.links.length}
+              </span>
+            ),
+          }
+        : {}),
+      content: <SessionLinkedPanel state={linkState} canEdit={canControlSession} />,
+    },
     {
       id: "artifacts",
       label: "Artifacts",
@@ -2038,6 +2082,10 @@ function SessionDockPanel(props: SessionDockProps) {
       }
       openTabRequest={currentTabRequest}
       trailingTabs={trailingTabs}
+      pullRequest={linkedPullRequest}
+      {...(canControlSession && props.session && sessionReadOnlyArchive(props.session) === null
+        ? { onOpenPullRequest: openPullRequest }
+        : {})}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
       {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
