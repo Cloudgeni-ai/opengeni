@@ -17032,11 +17032,13 @@ export async function reopenSlackInteractionDelivery(
  * Reopen a settled Slack thread delivery so the chat's next answer posts in
  * the thread again, skipping everything up to `afterSequence` (what the chat
  * did elsewhere meanwhile). Used when a one-time automation wakes a chat that
- * started in Slack. A delivery that is still open (an earlier answer is still
- * being delivered) is marked with `afterSequence` instead: a pass that settles
- * a run ending at or before it stays open for the woken answer, and one that
- * settles a later run (the woken one) closes as usual. Returns "reopened",
- * "marked", or null when the delivery is gone.
+ * started in Slack, with `afterSequence` just before the wake's
+ * `system.update.pending` event. A delivery that is still open (an earlier
+ * answer is still being delivered) is marked instead: when a pass settles a
+ * turn, it stays open while the wake still waits for a turn or went to a later
+ * one, and closes as usual when that turn took the wake in itself (see
+ * closeSlackInteractionDelivery). Returns "reopened", "marked", or null when
+ * the delivery is gone.
  */
 export async function reopenSlackInteractionDeliveryAfter(
   db: Database,
@@ -17044,25 +17046,26 @@ export async function reopenSlackInteractionDeliveryAfter(
 ): Promise<"reopened" | "marked" | null> {
   const afterSequence = Math.max(0, Math.trunc(input.afterSequence));
   return await withRlsContext(db, input, async (scopedDb) => {
-    const rows = await scopedDb
-      .update(schema.slackInteractions)
-      .set({
-        terminalDeliveryState: "open",
-        deliveryReopenAfterSequence: null,
-        deliveryAttemptCount: 0,
-        deliveryRetryAt: null,
-        deliveryLastErrorCode: null,
-        lastDeliveredSessionEventSequence: sql`greatest(${schema.slackInteractions.lastDeliveredSessionEventSequence}, ${afterSequence})`,
-        updatedAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(schema.slackInteractions.id, input.id),
-          sql`${schema.slackInteractions.terminalDeliveryState} <> 'open'`,
-        ),
-      )
-      .returning({ id: schema.slackInteractions.id });
-    if (rows.length === 1) return "reopened";
+    const reopenSettled = async () =>
+      await scopedDb
+        .update(schema.slackInteractions)
+        .set({
+          terminalDeliveryState: "open",
+          deliveryReopenAfterSequence: null,
+          deliveryAttemptCount: 0,
+          deliveryRetryAt: null,
+          deliveryLastErrorCode: null,
+          lastDeliveredSessionEventSequence: sql`greatest(${schema.slackInteractions.lastDeliveredSessionEventSequence}, ${afterSequence})`,
+          updatedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(schema.slackInteractions.id, input.id),
+            sql`${schema.slackInteractions.terminalDeliveryState} <> 'open'`,
+          ),
+        )
+        .returning({ id: schema.slackInteractions.id });
+    if ((await reopenSettled()).length === 1) return "reopened";
     const marked = await scopedDb
       .update(schema.slackInteractions)
       .set({
@@ -17076,7 +17079,9 @@ export async function reopenSlackInteractionDeliveryAfter(
         ),
       )
       .returning({ id: schema.slackInteractions.id });
-    return marked.length === 1 ? "marked" : null;
+    if (marked.length === 1) return "marked";
+    // It settled between the two statements: reopen it now.
+    return (await reopenSettled()).length === 1 ? "reopened" : null;
   });
 }
 
@@ -17175,17 +17180,34 @@ export async function closeSlackInteractionDelivery(
     state: Exclude<SlackInteraction["terminalDeliveryState"], "open">;
     errorCode?: string | null;
     /**
-     * The event that settled the run. A wake marked after it (see
-     * reopenSlackInteractionDeliveryAfter) keeps the delivery open, skipping
-     * to the wake. Omitted (a failed delivery): always closes.
+     * The turn whose end this pass settled. If a wake was marked meanwhile
+     * (see reopenSlackInteractionDeliveryAfter) and is still waiting for a
+     * turn, or went to a later turn, the delivery stays open for the woken
+     * answer, skipping to the wake. A wake this turn took in itself closes as
+     * usual. Omitted (a failed delivery): always closes.
      */
-    terminalSequence?: number;
+    terminalTurnId?: string | null;
   },
 ): Promise<boolean> {
+  // Qualified by hand: inside UPDATE ... SET the outer row's columns must not
+  // resolve to the subquery's same-named ones.
   const reopen =
-    input.terminalSequence === undefined
+    input.terminalTurnId === undefined
       ? sql`false`
-      : sql`(${schema.slackInteractions.deliveryReopenAfterSequence} is not null and ${Math.trunc(input.terminalSequence)} <= ${schema.slackInteractions.deliveryReopenAfterSequence})`;
+      : sql`("slack_interactions"."delivery_reopen_after_sequence" is not null and exists (
+          select 1 from session_events wake
+          join session_system_updates wake_update
+            on wake_update.workspace_id = wake.workspace_id
+            and wake_update.session_id = wake.session_id
+            and wake_update.id::text = wake.payload ->> 'updateId'
+          where wake.workspace_id = "slack_interactions"."workspace_id"
+            and wake.session_id = "slack_interactions"."session_id"
+            and wake.sequence = "slack_interactions"."delivery_reopen_after_sequence" + 1
+            and wake.type = 'system.update.pending'
+            and (wake_update.state = 'pending'
+              or (wake_update.state = 'delivered'
+                and wake_update.delivered_turn_id is distinct from ${input.terminalTurnId ?? null}::uuid))
+        ))`;
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.slackInteractions)

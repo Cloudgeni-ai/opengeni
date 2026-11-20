@@ -25,6 +25,7 @@ import {
   getSessionLinks,
   reopenSlackInteractionDeliveryAfter,
   closeSlackInteractionDelivery,
+  addSessionSystemUpdate,
   updateSessionCoordinationWithEvent,
   renewSlackAppHomeRefreshClaim,
   releaseSlackAppHomeRefresh,
@@ -696,23 +697,11 @@ describe("Slack interaction migration and durable database boundary", () => {
     });
     // An open delivery is marked instead, and the cursor never moves back.
     expect(
-      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 11 }),
+      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 2 }),
     ).toBe("marked");
     const holder = "00000000-0000-4000-8000-0000000000a1";
-    const settle = async (sequence: number, terminalSequence: number) => {
-      await admin`
-        update slack_interactions set delivery_claim_holder_id = ${holder}
-        where id = ${interaction.id}`;
-      expect(
-        await closeSlackInteractionDelivery(db, {
-          ...interaction,
-          claimHolderId: holder,
-          sequence,
-          terminalSequence,
-          state: "completed",
-        }),
-      ).toBe(true);
-      const [row] = await admin<
+    const row = async () => {
+      const [current] = await admin<
         {
           terminal_delivery_state: string;
           last_delivered_session_event_sequence: number;
@@ -722,25 +711,96 @@ describe("Slack interaction migration and durable database boundary", () => {
         select terminal_delivery_state, last_delivered_session_event_sequence,
           delivery_reopen_after_sequence
         from slack_interactions where id = ${interaction.id}`;
-      return row;
+      return current;
     };
-    // The pass settles the earlier run (before the wake): it stays open for
-    // the woken answer, skipping to the wake.
-    expect(await settle(10, 10)).toEqual({
-      terminal_delivery_state: "open",
-      last_delivered_session_event_sequence: 11,
-      delivery_reopen_after_sequence: null,
-    });
-    // One page that holds the earlier run and the whole woken run settles
-    // after the wake: it closes as usual.
-    expect(
-      await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 13 }),
-    ).toBe("marked");
-    expect(await settle(20, 19)).toEqual({
+    expect((await row())?.last_delivered_session_event_sequence).toBe(9);
+    // A later mark wins over an earlier one.
+    await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 1 });
+    expect((await row())?.delivery_reopen_after_sequence).toBe(2);
+    const settle = async (terminalTurnId?: string) => {
+      await admin`
+        update slack_interactions set delivery_claim_holder_id = ${holder}
+        where id = ${interaction.id}`;
+      expect(
+        await closeSlackInteractionDelivery(db, {
+          ...interaction,
+          claimHolderId: holder,
+          sequence: 10,
+          ...(terminalTurnId !== undefined ? { terminalTurnId } : {}),
+          state: "completed",
+        }),
+      ).toBe(true);
+      return await row();
+    };
+    // A mark whose wake isn't a pending update (here: none) closes as usual.
+    expect(await settle(crypto.randomUUID())).toEqual({
       terminal_delivery_state: "completed",
-      last_delivered_session_event_sequence: 20,
+      last_delivered_session_event_sequence: 10,
       delivery_reopen_after_sequence: null,
     });
+
+    // A real wake into the chat, still waiting for a turn when the earlier
+    // turn settles: the delivery stays open for the woken answer.
+    const session = await createSession(db, {
+      ...target,
+      initialMessage: "event wake",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await admin`
+      update slack_interactions
+      set session_id = ${session.id}, terminal_delivery_state = 'open'
+      where id = ${interaction.id}`;
+    const wake = await addSessionSystemUpdate(db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      sessionId: session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: "event-wake-test",
+      dedupeKey: `event-wake-${crypto.randomUUID()}`,
+      summary: "A linked pull request merged",
+      payload: {
+        type: "agent_message",
+        text: "A linked pull request merged",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!("wakeEventId" in wake)) throw new Error("the wake was not added");
+    const [wakeEvent] = await admin<{ sequence: number }[]>`
+      select sequence from session_events where id = ${wake.wakeEventId}`;
+    expect(
+      await reopenSlackInteractionDeliveryAfter(db, {
+        ...interaction,
+        afterSequence: wakeEvent!.sequence - 1,
+      }),
+    ).toBe("marked");
+    expect(await settle(crypto.randomUUID())).toEqual({
+      terminal_delivery_state: "open",
+      last_delivered_session_event_sequence: Math.max(10, wakeEvent!.sequence - 1),
+      delivery_reopen_after_sequence: null,
+    });
+    // A failed delivery always closes, mark or not.
+    await reopenSlackInteractionDeliveryAfter(db, {
+      ...interaction,
+      afterSequence: wakeEvent!.sequence - 1,
+    });
+    expect((await settle())?.terminal_delivery_state).toBe("completed");
+    // A wake no longer pending (taken in, cancelled) closes as usual.
+    await admin`
+      update slack_interactions set terminal_delivery_state = 'open' where id = ${interaction.id}`;
+    await reopenSlackInteractionDeliveryAfter(db, {
+      ...interaction,
+      afterSequence: wakeEvent!.sequence - 1,
+    });
+    await admin`
+      update session_system_updates set state = 'cancelled' where id = ${wake.update.id}`;
+    expect((await settle(crypto.randomUUID()))?.terminal_delivery_state).toBe("completed");
   }, 60_000);
 
   test("a chat's links and waits change with one public event each", async () => {
