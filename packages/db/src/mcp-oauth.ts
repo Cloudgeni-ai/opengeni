@@ -882,16 +882,18 @@ export async function updateOrganizationMcpConnectionSettings(
           values (${input.accountId}::uuid, ${input.connectionId}::uuid, ${input.subjectId},
             ${input.defaultWorkspaceId ?? null}::uuid, ${input.appDataAccess ?? "viewer"})
           on conflict (account_id, connection_id) do update set
-            subject_id = excluded.subject_id,
             default_workspace_id = case when ${setDefault}::boolean then excluded.default_workspace_id
               else organization_mcp_connection_settings.default_workspace_id end,
             app_data_access = case when ${setAccess}::boolean then excluded.app_data_access
               else organization_mcp_connection_settings.app_data_access end,
             updated_at = now()
+          where organization_mcp_connection_settings.subject_id = excluded.subject_id
           returning default_workspace_id::text as default_workspace_id, app_data_access`,
       ),
   );
-  const row = rows[0]!;
+  const row = rows[0];
+  // The row belongs to the connection's owner; it never changes hands.
+  if (!row) throw new Error("These connection settings belong to another person.");
   return {
     defaultWorkspaceId: row.default_workspace_id,
     appDataAccess: row.app_data_access === "manager" ? "manager" : "viewer",

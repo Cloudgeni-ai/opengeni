@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { observedSdkVersion } from "./http/sdk-version";
 import {
   oauthSignupChallengeVerified,
@@ -2093,7 +2092,7 @@ export function createAppComposition(
           authorization,
           accessKey: c.req.header("x-opengeni-access-key") ?? null,
         };
-        rateKey = `key:${createHash("sha256").update(authorization).digest("hex")}`;
+        rateKey = `key:${organizationKeyAccountId}:${context.subjectId}`;
       }
     } catch (error) {
       if (error instanceof HTTPException && error.status === 401) challenge();

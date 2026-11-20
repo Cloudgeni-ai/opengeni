@@ -530,12 +530,16 @@ export async function runOrganizationAction(
   });
   if (context.caller.kind === "person") {
     if (externalWorkspace) {
-      stampWorkspacePersonAuthorization(request, {
-        organizationId: context.caller.accountId,
-        workspaceId: externalWorkspace,
-        subjectId: context.caller.subjectId,
-        permissions: context.caller.access.permissions,
-      });
+      stampWorkspacePersonAuthorization(
+        request,
+        {
+          organizationId: context.caller.accountId,
+          workspaceId: externalWorkspace,
+          subjectId: context.caller.subjectId,
+          permissions: context.caller.access.permissions,
+        },
+        context.outsideAgent ? { outsideAgent: context.outsideAgent } : {},
+      );
     } else {
       stampDelegatedHumanAuthorization(
         request,

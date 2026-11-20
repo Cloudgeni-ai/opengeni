@@ -806,7 +806,7 @@ export const OUTSIDE_AGENT_MEMBERS_ONLY_MESSAGE =
 
 /**
  * Outside agents reach only apps whose audience is the workspace's members: a
- * Site with no active publication, or one published to members.
+ * Site never published, or one published to members.
  */
 async function requireMembersOnlyAppForOutsideAgent(
   deps: SiteDataDeps,
@@ -814,7 +814,9 @@ async function requireMembersOnlyAppForOutsideAgent(
   siteId: string,
 ): Promise<void> {
   const publication = await getSitePublication(deps.db, scope, siteId);
-  if (publication && publication.status === "active" && publication.access !== "members")
+  // Whatever its status: a suspended or unpublished app still holds what
+  // visitors wrote while it was open.
+  if (publication && publication.access !== "members")
     throw new SiteDataError("forbidden", OUTSIDE_AGENT_MEMBERS_ONLY_MESSAGE, {
       code: "outside_agent_members_only",
     });

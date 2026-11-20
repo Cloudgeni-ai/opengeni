@@ -96,6 +96,16 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         });
       }
     }
+    const scope = (access ?? connection.organizationAccess).workspaceScope;
+    if (
+      parsed.defaultWorkspaceId &&
+      scope.kind === "selected" &&
+      !scope.workspaceIds.includes(parsed.defaultWorkspaceId)
+    ) {
+      throw new HTTPException(400, {
+        message: "the default workspace must be one this agent can reach",
+      });
+    }
     if (access) {
       await updateOrganizationMcpConnectionAccess(deps.db, {
         accountId: organizationId,

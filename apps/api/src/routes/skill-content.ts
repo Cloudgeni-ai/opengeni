@@ -246,6 +246,12 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
     app.post(`${base}/:skillId/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+      // Reviewing a Skill is the person's decision: a connected agent's
+      // uploads wait for it under Review first, so it can't approve them.
+      if (outsideAgentReach(access.grant))
+        throw new HTTPException(403, {
+          message: `Connected agents can't ${operation} Skills. The person reviews them in Opengeni.`,
+        });
       const skillId = skillIdentifier(c.req.param("skillId"));
       const request = parseRequestBody(
         ApplyWorkspaceSkillRevisionRequest,

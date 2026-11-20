@@ -435,12 +435,17 @@ export function stampWorkspacePersonAuthorization(
     subjectId: string;
     permissions: Permission[];
   },
+  options: { outsideAgent?: OutsideAgentReach } = {},
 ): void {
   if (input.subjectId.startsWith("user:")) {
-    stampDelegatedHumanAuthorization(request, {
-      ...input,
-      workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
-    });
+    stampDelegatedHumanAuthorization(
+      request,
+      {
+        ...input,
+        workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
+      },
+      options,
+    );
     return;
   }
   if (delegatedHumanRequests.has(request) || accessResolvedRequests.has(request))
@@ -458,6 +463,8 @@ export function stampWorkspacePersonAuthorization(
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);
   const proof = Object.freeze(parsed);
+  if (options.outsideAgent)
+    outsideAgentProofs.set(proof, Object.freeze({ appData: options.outsideAgent.appData }));
   workspaceExternalPersonProofs.add(proof);
   delegatedHumanRequests.set(request, proof);
 }
@@ -2503,7 +2510,7 @@ async function resolveDelegatedHumanAccessContext(
     if (!grant || grant.accountId !== proof.organizationId)
       throw new HTTPException(403, { message: "this person can no longer use this workspace" });
     const bounded = Object.freeze({
-      ...grant,
+      ...withOutsideAgentMetadata(grant, proof),
       permissionMode: "explicit" as const,
       permissions: Object.freeze(
         explicitPermissions(

@@ -178,23 +178,28 @@ connection's access setting; none adds authority.
   that agent (Connected agents, or `appDataAccess` on
   `PATCH /v1/organizations/:id/mcp-connections/:connectionId`; only the
   person in the browser can choose Manager, not an agent acting for them).
-  Outside agents only reach apps whose publication is members-only or that
-  aren't published: an app anyone can open may hold text from outsiders
+  Outside agents only reach apps that are published to members or were never
+  published (a suspended or unpublished public app still counts as public): an app anyone can open may hold text from outsiders
   that an agent picking up work would read as instructions, so those are
-  refused with `outside_agent_members_only`. A personal API key is treated
-  like a connected agent with viewer access.
+  refused with `outside_agent_members_only`. A personal API key on this
+  server is treated like a connected agent with viewer access; the same key
+  on the REST API acts as the person, as before.
 - **Approvals.** `tool_call` on a tool that needs approval returns
   `needsApproval`, an `approvalUrl` (`/workspaces/:id/tool-approval` in the
   web app, showing the exact tool and arguments) and an `operationId`. After
   the person approves there, calling `tool_call` again with the same input
-  and `operationId` runs the approved call once.
+  and `operationId` runs the approved call once. Connected agents can't
+  approve tool calls themselves (the approval routes refuse them), so the
+  person always decides.
 - **Skills.** Uploads go to the person's own Skills unless `scope` is
-  `workspace` or `organization`, follow Agent learning like an agent's save (Review first
-  leaves them pending review, Off refuses them), skip unchanged Skills and
-  return one result per Skill (`created`, `updated`, `unchanged`,
-  `pending_review`, `invalid` with the YAML or frontmatter error, `conflict`,
-  `failed`). Pulling returns each Skill's files. Syncing straight from a Git
-  repository isn't supported; the agent reads the folders locally.
+  `workspace` or `organization`, follow Agent learning like an agent's save
+  (Review first leaves them pending review, Off refuses them), skip
+  unchanged Skills and return one result per Skill (`created`, `updated`,
+  `unchanged`, `pending_review`, `invalid` with the YAML or frontmatter
+  error, `conflict`, `failed`). Approving, rejecting or restoring a Skill
+  revision is the person's review, so connected agents are refused those.
+  Pulling returns each Skill's files. Syncing straight from a Git repository
+  isn't supported; the agent reads the folders locally.
 - **Rate limits.** Each connection (or personal key) may make 120 calls in a
   burst refilling at 2 per second, and 20 `delegate` calls refilling at one
   per 30 seconds. Over the limit a call returns an error saying how many seconds to wait;
