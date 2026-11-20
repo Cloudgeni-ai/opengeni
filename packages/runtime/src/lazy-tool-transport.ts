@@ -61,7 +61,7 @@ import {
   streamPreemptibleModelRequest,
 } from "./model-request-capture";
 import { isRecord } from "@opengeni/contracts/values";
-import { TOOL_DISCOVERY_CARD_META_KEY } from "@opengeni/contracts";
+import { isRarelyUsedRuntimeToolName, TOOL_DISCOVERY_CARD_META_KEY } from "@opengeni/contracts";
 import {
   integrationMentionsIn,
   integrationNameWords,
@@ -134,6 +134,8 @@ function toolNameWords(name: string): string {
  * have no MCP connection to prepare, so "eager" here means schema visibility
  * only, not a first-request preparation barrier. Literal rather than
  * HUMAN_INPUT_TOOL_NAME: run-events imports this module.
+ * `list_models` and `privacy_facts` are not here: a session's frozen
+ * first-request tools revision decides theirs (see RARELY_USED_RUNTIME_TOOL_NAMES).
  */
 const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "exec_command",
@@ -146,9 +148,6 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   // Repository descriptors route to the live sandbox reader.
   "repository_skill_read",
   "request_human_input",
-  "list_models",
-  // Answers privacy and data questions from server facts, never guesses.
-  "privacy_facts",
   // Jev-backed code search. Present only when the deployment and workspace
   // enable it; hiding it behind search would spend a model round trip to find
   // the tool that exists to save round trips.
@@ -928,6 +927,8 @@ export class LazyToolRuntime {
   private activeRunContext: unknown;
   readonly controlTools: Tool[];
   private routerWasExposed: boolean;
+  /** `list_models` and `privacy_facts` are searchable rather than in every request. */
+  private readonly rarelyUsedToolsSearchable: boolean;
   private searchIndex: ToolSearchIndex | undefined;
   /** Ranks the tools every request already carries, for alreadyAvailableNotice. */
   private visibleIndex: ToolSearchIndex | undefined;
@@ -986,8 +987,17 @@ export class LazyToolRuntime {
      * absent means searches only name it.
      */
     private readonly connectCardRequest?: ConnectCardRequest,
+    /**
+     * The session's frozen first-request tools revision lets `list_models`
+     * and `privacy_facts` be found through search. They are, only while the
+     * host expects the router for other tools (pendingPreparationDefers), so
+     * they never bring the router on their own. False keeps them in every
+     * request, as before.
+     */
+    searchableRarelyUsedTools = false,
   ) {
     this.routerWasExposed = routerInHistory;
+    this.rarelyUsedToolsSearchable = searchableRarelyUsedTools && pendingPreparationDefers;
     this.controlTools =
       transport !== "generic_dispatch"
         ? [this.buildNativeSearchTool(), this.buildListTool()]
@@ -1214,6 +1224,7 @@ export class LazyToolRuntime {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
       if (ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(tool.name)) continue;
+      if (!this.rarelyUsedToolsSearchable && isRarelyUsedRuntimeToolName(tool.name)) continue;
       if (this.preparationIndependentToolNames.has(tool.name)) continue;
       // Exact first-party harness control tools (goal lifecycle, command
       // polling, wait_for_input) stay visible on every transport when the
@@ -2768,6 +2779,7 @@ export function installLazyToolRuntime(
   mcpToolReferences?: () => ReadonlyMap<string, McpToolReference>,
   pendingPreparationDefers = true,
   connectCardRequest?: ConnectCardRequest,
+  searchableRarelyUsedTools = false,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -2789,6 +2801,7 @@ export function installLazyToolRuntime(
     mcpToolReferences,
     pendingPreparationDefers,
     connectCardRequest,
+    searchableRarelyUsedTools,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

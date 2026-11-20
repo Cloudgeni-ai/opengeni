@@ -2058,6 +2058,65 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     expect(none.include).toContain("reasoning.encrypted_content");
   });
 
+  test("sends the agent's system prompt as the stable leading developer item on the Codex wire", async () => {
+    const provider: ResolvedModelProvider = {
+      id: CODEX_PROVIDER_ID,
+      label: "Subscription",
+      kind: "codex-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const bodies: Array<Record<string, any>> = [];
+    const codexClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "placeholder",
+        baseURL: CODEX_PROVIDER_BASE_URL,
+        maxRetries: 0,
+        fetch: codexSubscriptionFetch(async (_input, init) => {
+          bodies.push(JSON.parse(await requestBodyText(init?.body)) as Record<string, any>);
+          const message = responseMessage("msg_prompt", "Done");
+          return new Response(
+            [
+              { type: "response.output_item.done", output_index: 0, item: message },
+              {
+                type: "response.completed",
+                response: { id: "r1", status: "completed", output: [message], usage: null },
+              },
+            ]
+              .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+              .join(""),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }),
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      model: buildModelInstance(provider, codexClient, "gpt-6.2-sol"),
+    });
+    const instructions = await agent.getSystemPrompt(new RunContext());
+    expect(typeof instructions).toBe("string");
+    for (const message of ["first question", "second question"]) {
+      await codexRequestStorage.run(codexTestContext(), async () => {
+        const result = await new Runner({ tracingDisabled: true }).run(agent, message, {
+          maxTurns: 1,
+          stream: true,
+        });
+        for await (const _event of result) {
+          // consume
+        }
+        await result.completed;
+      });
+    }
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect("instructions" in body).toBe(false);
+      expect(body.input[0]).toEqual({ type: "message", role: "developer", content: instructions });
+      expect(body.input[1]).toMatchObject({ role: "user" });
+    }
+    expect(JSON.stringify(bodies[0]!.input[0])).toBe(JSON.stringify(bodies[1]!.input[0]));
+  });
+
   test("normalizes a SuperGrok request at the owned object stage with native hosted search", async () => {
     let capturedBody: Record<string, unknown> | null = null;
     let capturedHeaders = new Headers();

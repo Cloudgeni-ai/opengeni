@@ -9,7 +9,16 @@
  * Run this file in its own process: the registration replaces module
  * bindings for the whole process.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  mock,
+  setDefaultTimeout,
+  spyOn,
+  test,
+} from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { CLAUDE_OAUTH_TOKEN_URL, type Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
@@ -1168,6 +1177,148 @@ describe("live refresh outside a workspace pool (C2c)", () => {
     expect(upstream.calls).toHaveLength(1);
     expect(again.usage.refreshStatus).toBe("available");
     expect(again.usage.windows).toEqual(result.usage.windows);
+  });
+
+  /** A turn's response-header reading of the connection, observed at the SQL time `at`. */
+  const storeHeaderReading = async (
+    connectionId: string,
+    at: "clock_timestamp()" | "clock_timestamp() + interval '1 minute'",
+  ) =>
+    await shared.admin.unsafe(
+      `insert into subscription_connection_quota (
+        account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
+      ) select connection.account_id, connection.id, $1::text::jsonb, connection.refresh_generation, 1,
+        ${at}
+      from subscription_connections connection where connection.id = $2::uuid
+      on conflict (connection_id) do update set quota = excluded.quota,
+        revision = subscription_connection_quota.revision + 1, updated_at = excluded.updated_at`,
+      [
+        JSON.stringify({
+          windows: [{ id: "seven_day", usedPercent: 30, resetsAt: null, status: "ok" }],
+          modelCooldowns: {},
+          exhaustedUntil: null,
+          exhaustedKind: null,
+          source: "response_headers",
+        }),
+        connectionId,
+      ],
+    );
+
+  test("a turn's header reading stored while the read is in flight does not drop the reading", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "busy");
+    const upstream = liveUsage();
+    // The account serves a turn: its response headers are stored after the
+    // usage request left and before Claude's answer arrived.
+    const fetchImpl = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        await Bun.sleep(5);
+        await storeHeaderReading(connectionId, "clock_timestamp()");
+        await Bun.sleep(5);
+        return await upstream.fetchImpl(input, init);
+      },
+      { abortAndJoin: async () => {} },
+    ) as unknown as typeof fetch;
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const usage = await organizationRefresh(
+        {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+          row: await organizationRow(org, connectionId),
+        },
+        fetchImpl,
+      );
+      expect(upstream.calls).toHaveLength(1);
+      expect(usage.refreshStatus).toBe("available");
+      expect(usage.source).toBe("provider");
+      expect(usage.windows.map((window) => window.id)).toEqual(["five_hour", "seven_day_opus"]);
+      expect((await storedQuota(connectionId))?.source).toBe("usage_endpoint");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("a reading a newer stored observation supersedes is a successful check", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "superseded");
+    const upstream = liveUsage();
+    // A header reading observed after Claude's answer was received.
+    const fetchImpl = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        await storeHeaderReading(connectionId, "clock_timestamp() + interval '1 minute'");
+        return await upstream.fetchImpl(input, init);
+      },
+      { abortAndJoin: async () => {} },
+    ) as unknown as typeof fetch;
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const usage = await organizationRefresh(
+        {
+          organizationId: org.accountId,
+          subjectId: org.ownerSubjectId,
+          row: await organizationRow(org, connectionId),
+        },
+        fetchImpl,
+      );
+      expect(usage.refreshStatus).toBe("available");
+      // The newer stored reading is what the account shows.
+      expect(usage.windows.map((window) => [window.id, window.usedPercent])).toEqual([
+        ["seven_day", 30],
+      ]);
+      expect((await storedQuota(connectionId))?.source).toBe("response_headers");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("a failed live check logs why, without the token", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "logged");
+    const input = {
+      organizationId: org.accountId,
+      subjectId: org.ownerSubjectId,
+      row: await organizationRow(org, connectionId),
+    };
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const down = scriptedUsage(() => new Response("overloaded", { status: 529 }));
+      expect((await organizationRefresh(input, down.fetchImpl)).refreshStatus).toBe("unavailable");
+      const reset = Object.assign(
+        async () => {
+          throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+        },
+        { abortAndJoin: async () => {} },
+      ) as unknown as typeof fetch;
+      expect((await organizationRefresh(input, reset)).refreshStatus).toBe("unavailable");
+      // The credential refreshes while the reading is in flight.
+      const upstream = liveUsage();
+      const fenced = Object.assign(
+        async (url: string | URL | Request, init?: RequestInit) => {
+          await shared.admin`update subscription_connections
+            set refresh_generation = refresh_generation + 1 where id = ${connectionId}::uuid`;
+          return await upstream.fetchImpl(url, init);
+        },
+        { abortAndJoin: async () => {} },
+      ) as unknown as typeof fetch;
+      expect((await organizationRefresh(input, fenced)).refreshStatus).toBe("unavailable");
+      const context = { route: "organization", accountId: org.accountId, connectionId };
+      expect(warn.mock.calls.map(([message]) => message)).toEqual([
+        "[claude-usage] live usage check failed",
+        "[claude-usage] live usage check failed",
+        "[claude-usage] live usage check failed",
+      ]);
+      expect(warn.mock.calls.map(([, fields]) => ({ ...fields, durationMs: 0 }))).toEqual([
+        { ...context, reason: "http_status", httpStatus: 529, durationMs: 0 },
+        { ...context, reason: "fetch_error", error: "TypeError:ECONNRESET", durationMs: 0 },
+        { ...context, reason: "not_applied", notApplied: "credential_changed", durationMs: 0 },
+      ]);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("sk-ant");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("the organization route: an expired credential rotates under the administrator; a 401 asks for reconnect", async () => {

@@ -1,5 +1,52 @@
 # @opengeni/codex
 
+## 6.32.0
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/network@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.31.1
+- @opengeni/network@6.31.1
+
+## 6.31.0
+
+### Patch Changes
+
+- 8e1f06d: A request on a Responses WebSocket now continues the previous response after any item type, including hosted web searches, image generation, file search, code interpreter, computer, shell, apply_patch and MCP calls, instead of resending the whole input. The continuation check used to recognize only a fixed list of types, so every response containing another type ended the chain, and the backend's different rendering of the full input missed the prompt cache from the first differing item. One shared function (`replayedResponsesItem` in `@opengeni/network/responses-replay`) now defines what replay strips, a provider id and an output-only status. The Codex request normalizer applies it on replay, and the continuation check applies it to both sides before comparing. A real difference in content, action, arguments or a required status still sends the full request. The replay-status list moves to the same module; `@opengeni/codex` re-exports it unchanged.
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+- Updated dependencies [8e1f06d]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/network@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

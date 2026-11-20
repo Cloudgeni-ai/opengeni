@@ -1,5 +1,64 @@
 # @opengeni/react-native
 
+## 6.32.0
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/sdk@6.32.0
+  - @opengeni/react@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.31.1
+- @opengeni/react@6.31.1
+- @opengeni/sdk@6.31.1
+
+## 6.31.0
+
+### Patch Changes
+
+- ee2f414: The in-chat connect card on mobile now offers your own login the way the web card does. When you already have exactly one login of your own for the service and it isn't set up in this workspace yet, the card's main action is "Use my <service> here". One tap turns the connector on for each person's own account, turns your login on here if it was off, and adds it to the conversation, with no new sign-in and no "Who can use this connection?" question. "Connect an account for everyone instead" and "Connect a different account" stay as secondary choices.
+- 46d677b: When a Claude, ChatGPT or SuperGrok subscription account stops accepting its sign-in, the person who connected it now gets one inbox notice and phone notification, for example "Sign in to Claude again", with the account's email. If that person can no longer manage the account, the organization's owners and admins get it instead. The notice's "Sign in again" opens that account's own sign-in step. For Claude, the step names the email to sign in as, and the person signs in with Claude and pastes the code. The notice goes away once the account works again, and a later lapse gets a new notice.
+
+  Each account's page shows how long ago it was signed in. A Claude account signed in 25 or more days ago shows a warning with "Sign in again" before Claude stops accepting the sign-in, which tends to happen around 28 to 30 days.
+
+  `GET /v1/inbox` returns these notices in a new optional `notices` list (`InboxNotice`: shaped like a notification item, with `sessionId: null` and always a `link`). `items`, `needsYouCount` and `unreadCount` are unchanged. Subscription account listings carry an optional `signedInAt`. A phone notification about something other than a chat carries the address to open in `url`.
+
+- Updated dependencies [c2fe398]
+- Updated dependencies [f7a7736]
+- Updated dependencies [8db7a16]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/react@6.31.0
+  - @opengeni/sdk@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

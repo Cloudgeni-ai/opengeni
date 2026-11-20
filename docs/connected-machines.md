@@ -1713,7 +1713,7 @@ on menu changes the machine, not the folder. Historical attachments are not
 restaged automatically; retrieve them explicitly through Files or attach them
 to a new message when needed.
 
-While a machine still reports `/` (an older agent without a usable home), staging an attachment, spilled tool result or generated
+While a machine still reports `/` (an older agent without a usable home), staging an attachment, stored tool result copy or generated
 image into it usually still fails. When the turn's effective backend is a
 Connected Machine and its working directory is `/`, any failed staging command
 gets a reason that says the filesystem root is often not writable (read-only on
@@ -2158,10 +2158,25 @@ tools, attempt resolution and direct attaches all check where the machine works
 on every call, so a workspace it no longer works in simply stops seeing it.
 
 `PUT /v1/workspaces/:ws/machines/:enrollmentId/reach` with
-`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean, allowManagedWorkspaces?: boolean }`
 sets it (`null` means every shared workspace) and answers `{ reach }`, the same
 shape the machine list reports as `reach` for organization machines
-(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`). It needs
+(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`,
+`allowManagedWorkspaces`). `allowManagedWorkspaces` (**All product-managed
+workspaces** in the picker, migration 1512) adds every workspace the
+organization's product manages (`organization_managed_workspaces`), including
+ones it creates later, without listing them; omitted keeps the current value.
+So a client that predates the setting (an older SDK or UI) leaves it on when
+it narrows the list: switch it off explicitly to take those workspaces away.
+Every chat in a managed workspace can use the machine, including your end
+customers' chats, not only organization agent chats. Only the managed option
+reaches the Console test workspace, where Console Editors run test chats on it;
+every shared workspace or a list never does. Only an account-level context can mark or
+unmark a managed workspace (Console, or a workspace an organization API key
+creates); runtime code acting inside a workspace can't.
+[Console agents](agents.md#runs-on) that run on an organization machine need
+it, because their chats run in those workspaces.
+It needs
 `enrollments:manage`, and the caller is the organization's owner or an admin
 signed in as themselves (or a credential holding `account:admin`), the same
 rule as changing the machine. The connecting workspace is dropped

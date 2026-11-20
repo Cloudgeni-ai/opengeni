@@ -560,7 +560,11 @@ export async function processModelResponseTerminalEvent(input: {
             })
           : Promise.resolve();
       const cacheObservation = await timedUsagePhase("response_usage_cache", () =>
-        promptCacheObservation(responseUsage, promptCacheRequest),
+        promptCacheObservation(
+          responseUsage,
+          promptCacheRequest,
+          input.settings.deploymentRevision,
+        ),
       );
       const commitUsage = async (history?: SessionEventMutation<"event">) => {
         const completionEvents = input.completionEvents?.() ?? [];
@@ -911,7 +915,11 @@ export async function processCompactionModelUsageEvent(input: {
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
-          promptCache: await promptCacheObservation(input.usage, promptCacheRequest),
+          promptCache: await promptCacheObservation(
+            input.usage,
+            promptCacheRequest,
+            input.settings.deploymentRevision,
+          ),
           processingResidency: input.processingResidency,
         });
         recordAuthoritativeModelUsageMetrics({
@@ -928,15 +936,20 @@ export async function processCompactionModelUsageEvent(input: {
   return { status: "processed", sourceKey, authoritative };
 }
 
-/** What the call itself reported plus the wire fingerprint of its request. */
+/**
+ * What the call itself reported plus the wire fingerprint of its request and
+ * the deployment that built it, so a prompt a release changed is told apart
+ * from one a session changed.
+ */
 async function promptCacheObservation(
   usage: ModelResponseUsage | null,
   request: Promise<PromptCacheRequestFingerprint | null> | null,
+  release: string | null | undefined,
 ): Promise<PromptCacheObservation | null> {
   const fingerprint = request ? await request.catch(() => null) : null;
   return parsePromptCacheObservation({
     ...(usage?.thinkingBlocksDropped ? { thinkingBlocksDropped: usage.thinkingBlocksDropped } : {}),
-    ...(fingerprint ? { request: fingerprint } : {}),
+    ...(fingerprint ? { request: fingerprint, ...(release ? { release } : {}) } : {}),
   });
 }
 

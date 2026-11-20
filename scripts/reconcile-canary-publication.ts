@@ -45,6 +45,7 @@ import {
   type Origin,
   type SourcePackage,
 } from "./canary-reconciliation-inputs";
+import { npmTarballStem } from "./publishable-workspaces";
 
 export type Controller = { source: string; runId: string; attempt: string };
 export type FileReference = { file: string; bytes: number; sha256: string };
@@ -918,7 +919,7 @@ export async function reconcileAcknowledgedCanaries(
     };
     const tarUrl = locator(
       dist.tarball,
-      `/${pkg.name}/-/${pkg.name.slice("@opengeni/".length)}-${pkg.version}.tgz`,
+      `/${pkg.name}/-/${npmTarballStem(pkg.name)}-${pkg.version}.tgz`,
     );
     const attestationUrl = locator(
       object(dist.attestations).url,

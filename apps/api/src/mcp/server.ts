@@ -268,6 +268,7 @@ import {
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
+  listOwnConnectionMetadata,
   nangoBackendsFor,
   builtInIntegrationDuplicated,
   builtInIntegrationPolicyApplies,
@@ -311,6 +312,7 @@ import {
   type PersonalGitHubPerson,
 } from "./github-identity-status";
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import {
   canonicalMcpEndpointUrl,
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
@@ -1656,6 +1658,7 @@ export function buildOpenGeniMcpServer(
       deps,
       grant,
       sessionId,
+      cardTool: selectedTools === null || selectedTools.has("capability_authorization_request"),
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
@@ -5269,7 +5272,8 @@ function registerFleetTools(
           new Set(),
           false,
           new Set(),
-          new Set(),
+          // A workspace admin tool, like sandboxes_list that its result names.
+          new Set(["sandboxes_list"]),
         );
         if (setup.status === "unavailable") {
           return json({ kind: "selfhosted", status: "unavailable", message: setup.detail });
@@ -7761,6 +7765,12 @@ type CapabilitySetupProjection =
       status: "authorization_required";
       action: "connect" | "add_credentials" | "enable";
       detail: string;
+      /**
+       * `not_enabled`: the connector isn't turned on here, and the person
+       * already has their one own login for it, which its card uses here
+       * without a new sign-in. Absent for an ordinary first connection.
+       */
+      reason?: "not_enabled";
     }
   | { status: "unavailable"; action: null; detail: string };
 
@@ -7788,6 +7798,26 @@ function capabilityReconnectCandidates(
     providerDomain: item.connectionRef?.providerDomain ?? capabilityProviderDomain(item),
     mcpUrl: item.mcpUrl ?? item.endpointUrl,
   });
+}
+
+/**
+ * The accounts a reconnect card can be for, by connectionId, so the agent can
+ * choose one without another catalog search (which it may not have).
+ */
+function reconnectChoices(
+  item: Pick<CapabilityCatalogItem, "name">,
+  candidates: readonly ConnectionNeedingReconnect[],
+): string {
+  const here = candidates.filter((candidate) => candidate.addedHere);
+  if (here.length === 0)
+    return `No account of ${item.name} that stopped working can be reconnected from this workspace.`;
+  const listed = here
+    .map(
+      (candidate) =>
+        `${capabilityReconnectAccountLabel(item, candidate)} (connectionId ${candidate.connectionId})`,
+    )
+    .join("; ");
+  return `Pass the connectionId of the one to reconnect: ${listed}.`;
 }
 
 function capabilityReconnectAccountLabel(
@@ -7849,6 +7879,14 @@ function registerCapabilityDiscoveryTools(
 ): void {
   const signedTools = grant.metadata?.["firstPartyMcpTools"];
   const secretsSelected = Array.isArray(signedTools) && signedTools.includes("secret_search");
+  // The card tool comes with workspace connectors as well as with workspace
+  // administration, so an agent may have it without the admin-only catalog
+  // search: its description then names only where else capability IDs come from.
+  const catalogSelected =
+    !Array.isArray(signedTools) || signedTools.includes("capability_catalog_search");
+  const connectCardLead = catalogSelected
+    ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. "
+    : "Show a Connect card in this chat for something the person must connect for the task, by the capability ID a tool result or notice names, or one named below. ";
   const catalog = () =>
     buildCapabilityCatalog({
       db: deps.db,
@@ -7883,12 +7921,7 @@ function registerCapabilityDiscoveryTools(
   ): Promise<ConnectionNeedingReconnect[]> => {
     if (!items.some((item) => item.kind === "mcp")) return [];
     try {
-      const subjectId = exactAgentAttemptClaims(grant)
-        ? (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
-            .initiatingHumanSubjectId
-        : grant.principalKind === "service" || grant.principalKind === "api_key"
-          ? null
-          : grant.subjectId;
+      const subjectId = await actingHumanSubjectId();
       return await listConnectionsNeedingReconnect(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -7899,6 +7932,52 @@ function registerCapabilityDiscoveryTools(
       return [];
     }
   };
+  // The human this agent acts for, as their own connections see them.
+  const actingHumanSubjectId = async (): Promise<string | null | undefined> =>
+    exactAgentAttemptClaims(grant)
+      ? (await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId))
+          .initiatingHumanSubjectId
+      : grant.principalKind === "service" || grant.principalKind === "api_key"
+        ? null
+        : grant.subjectId;
+  // For each OAuth connector not turned on here, the person's one own login
+  // for its endpoint (the card's rule), by capability ID: the card offers to
+  // use it here without a new sign-in. Read only for such entries and never
+  // used to select credentials; a failed read names none.
+  const ownLoginsToUseHere = async (
+    items: readonly CapabilityCatalogItem[],
+  ): Promise<Map<string, string>> => {
+    const found = new Map<string, string>();
+    const connectors = items.filter(
+      (item) =>
+        item.kind === "mcp" &&
+        !item.enabled &&
+        item.authKind === "oauth2" &&
+        Boolean(item.mcpUrl ?? item.endpointUrl),
+    );
+    if (connectors.length === 0) return found;
+    try {
+      const subjectId = await actingHumanSubjectId();
+      if (!subjectId) return found;
+      const logins = (
+        await listOwnConnectionMetadata(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId,
+          reach: "anywhere",
+        })
+      ).filter((login) => login.kind === "oauth2" && login.status === "active");
+      for (const item of connectors) {
+        const endpoint = item.mcpUrl ?? item.endpointUrl;
+        const matching = logins.filter((login) => login.metadata.mcpUrl === endpoint);
+        if (matching.length === 1)
+          found.set(item.id, connectionAccountLabel(matching[0]!, item.name));
+      }
+    } catch {
+      return found;
+    }
+    return found;
+  };
 
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
@@ -7908,20 +7987,29 @@ function registerCapabilityDiscoveryTools(
   const projectSetups = async (
     items: CapabilityCatalogItem[],
   ): Promise<CapabilitySetupProjection[]> => {
-    const [setups, policy] = await Promise.all([
+    const [setups, policy, ownLogins] = await Promise.all([
       projectSetupsAllowed(items),
       items.some(builtInIntegrationPolicyApplies)
         ? readOrganizationIntegrationPolicyForServing(deps.db, {
             accountId: grant.accountId,
           }).catch(() => null)
         : null,
+      ownLoginsToUseHere(items),
     ]);
-    if (!policy) return setups;
     return setups.map((setup, index) => {
-      const turnedOff = builtInIntegrationTurnedOffDetail(items[index]!, policy);
-      return turnedOff && setup.status !== "ready"
-        ? { status: "unavailable", action: null, detail: turnedOff }
-        : setup;
+      const item = items[index]!;
+      const turnedOff = policy ? builtInIntegrationTurnedOffDetail(item, policy) : null;
+      if (turnedOff && setup.status !== "ready")
+        return { status: "unavailable", action: null, detail: turnedOff };
+      const account = ownLogins.get(item.id);
+      if (account && setup.status === "authorization_required" && setup.action === "connect")
+        return {
+          status: "authorization_required",
+          action: "connect",
+          reason: "not_enabled",
+          detail: `${item.name} isn't turned on in this workspace yet, but the person already has their own ${item.name} login (${account}). Its card offers to use that login here, with no new sign-in, and turns ${item.name} on here for each person's own account. If the person may not turn it on here, the card says so and a workspace admin has to turn it on.`,
+        };
+      return setup;
     });
   };
   const projectSetupsAllowed = async (
@@ -8161,10 +8249,12 @@ function registerCapabilityDiscoveryTools(
     {
       description:
         (deps.settings.githubPersonalOauthEnabled
-          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+          ? connectCardLead +
+            "Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
             browserExtension(deps.settings).name +
             " Chrome extension link; never paste an enroll token into the chat yourself."
-          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
+          : connectCardLead +
+            "Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the " +
             browserExtension(deps.settings).name +
             " Chrome extension link; never paste an enroll token into the chat yourself.") +
         (secretsSelected
@@ -8283,13 +8373,13 @@ function registerCapabilityDiscoveryTools(
         reconnect = candidates.find((candidate) => candidate.connectionId === connectionId);
         if (!reconnect)
           throw new ToolArgumentError(
-            `That connectionId is not an account of ${item.name} that stopped working. Search the catalog again for its setup.reconnect.`,
+            `That connectionId is not an account of ${item.name} that stopped working. ${reconnectChoices(item, candidates)}`,
           );
       } else if (setup.status !== "ready") {
         const here = candidates.filter((candidate) => candidate.addedHere);
         if (here.length > 1)
           throw new ToolArgumentError(
-            `Several ${item.name} accounts stopped working. Pass the connectionId of the one to reconnect, from setup.reconnect in capability_catalog_search.`,
+            `Several ${item.name} accounts stopped working. ${reconnectChoices(item, here)}`,
           );
         reconnect = here[0];
       }
@@ -8419,27 +8509,33 @@ function registerCapabilityDiscoveryTools(
               : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
+      // The connector isn't on here, and its card uses the person's own login.
+      const notEnabled =
+        setup.status === "authorization_required" && setup.reason === "not_enabled";
       return posted({
         capabilityId: item.id,
         status: "authorization_requested",
         action: setup.action,
+        ...(notEnabled ? { reason: "not_enabled" } : {}),
         eventId,
         ...shown,
         message: personCannotConnect
           ? item.kind === "plugin"
             ? `The card was posted, but this person can't install the ${item.name} plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.`
             : `The card was posted, but this person can't connect ${item.name} from here: their access doesn't allow it, and the card tells them so. Don't ask them to use the card or sign in. Tell them that whoever manages this app has to allow it first. Nothing is connected.`
-          : item.id === CONNECTED_MACHINE_CAPABILITY_ID
-            ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
-            : item.id === EXCEL_ADDIN_CAPABILITY_ID
-              ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : declaredInputs
-                ? `The card was posted. It asks the person for the ${declaredInputs.map((input) => input.label.toLowerCase()).join(" and ")}, then signs them in; nothing is connected yet.${suppliedEndpoint && "problem" in suppliedEndpoint ? ` What you passed was not filled in: ${suppliedEndpoint.problem}` : ""} ${SETUP_CARD_CONTINUES}${alsoHere}`
-                : item.surfaceType === "integration_definition"
-                  ? integrationDefinitionCardPostedMessage(item)
-                  : item.kind === "plugin"
-                    ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
-                    : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
+          : notEnabled
+            ? `The card was posted. ${item.name} isn't turned on in this workspace yet; the card offers to use the person's existing ${item.name} login here, with no new sign-in, and turns ${item.name} on here for each person's own account. Nothing is turned on yet. Don't ask them to sign in again. If the card says only an admin can turn it on, tell them a workspace admin has to turn ${item.name} on. ${SETUP_CARD_CONTINUES}`
+            : item.id === CONNECTED_MACHINE_CAPABILITY_ID
+              ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
+              : item.id === EXCEL_ADDIN_CAPABILITY_ID
+                ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
+                : declaredInputs
+                  ? `The card was posted. It asks the person for the ${declaredInputs.map((input) => input.label.toLowerCase()).join(" and ")}, then signs them in; nothing is connected yet.${suppliedEndpoint && "problem" in suppliedEndpoint ? ` What you passed was not filled in: ${suppliedEndpoint.problem}` : ""} ${SETUP_CARD_CONTINUES}${alsoHere}`
+                  : item.surfaceType === "integration_definition"
+                    ? integrationDefinitionCardPostedMessage(item)
+                    : item.kind === "plugin"
+                      ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
+                      : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8711,7 +8807,10 @@ async function capabilitySetupProjection(
       return {
         status: "ready",
         action: null,
-        detail: "Machines are connected to this workspace; sandboxes_list shows which are online.",
+        // sandboxes_list is a workspace admin tool; the card lists them too.
+        detail: selectedFirstPartyTools.has("sandboxes_list")
+          ? "Machines are connected to this workspace; sandboxes_list shows which are online."
+          : "Machines are connected to this workspace.",
       };
     }
     return {

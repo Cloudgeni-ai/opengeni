@@ -170,10 +170,7 @@ import {
   prefixedMcpToolName,
 } from "../src/mcp-model-tool-name";
 import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
-import {
-  spilledModelToolResult,
-  type SpillOversizedModelToolResult,
-} from "../src/tool-result-spill";
+import { type ModelToolResultStore } from "../src/model-tool-result-store";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
@@ -3221,7 +3218,7 @@ describe("runtime event normalization", () => {
       complete?: ConnectorActionPolicyHooks["complete"];
       sandboxBackend?: "none" | "modal";
       toolResultBytes?: number;
-      spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+      modelToolResultStore?: ModelToolResultStore;
       unattended?: boolean;
       unattendedNow?: boolean;
       approvedToolCallIds?: string[];
@@ -3311,9 +3308,7 @@ describe("runtime event normalization", () => {
           headers: { authorization: "Bearer connector-token" },
         }),
         connectorActionPolicy: hooks,
-        ...(input.spillOversizedModelToolResult
-          ? { spillOversizedModelToolResult: input.spillOversizedModelToolResult }
-          : {}),
+        ...(input.modelToolResultStore ? { modelToolResultStore: input.modelToolResultStore } : {}),
       });
       const agent = buildOpenGeniAgent(settings, [], {
         lazyToolTransport: input.lazyToolTransport,
@@ -4337,15 +4332,17 @@ describe("runtime event normalization", () => {
           connectorDecision: "ask",
           alreadyApproved: true,
           toolResultBytes: MCP_MAX_TOOL_RESULT_BYTES + 256 * 1024,
-          spillOversizedModelToolResult: async ({ operationId, serializedBytes }) => {
-            spills.push(serializedBytes);
-            return spilledModelToolResult({
-              type: "tool_result_spilled",
-              fileId: "66666666-6666-4666-8666-666666666666",
-              sandboxPath: `/workspace/tool-results/${operationId}.json`,
-              byteSize: serializedBytes,
-              mediaType: "application/json",
-            });
+          modelToolResultStore: {
+            store: async ({ text }) => {
+              spills.push(Buffer.byteLength(text, "utf8"));
+              return {
+                resultId: "66666666-6666-4666-8666-666666666666",
+                byteSize: Buffer.byteLength(text, "utf8"),
+                sandboxPath: null,
+              };
+            },
+            inlineMaxBytes: () => 100_000,
+            readers: () => ({ reader: "searchable", shell: false }),
           },
         });
         try {
@@ -4359,10 +4356,12 @@ describe("runtime event normalization", () => {
           });
           expect(result.isError).not.toBe(true);
           if (caller === "model") {
-            // The model gets the bounded spill receipt instead of a size failure.
+            // The model gets a view of the stored result instead of a size failure.
             expect(spills).toHaveLength(1);
             expect(spills[0]!).toBeGreaterThan(MCP_MAX_TOOL_RESULT_BYTES);
-            expect(result.structuredContent).toMatchObject({ type: "tool_result_spilled" });
+            expect(result._meta).toMatchObject({
+              "opengeni/toolResultStored": { type: "tool_result_stored" },
+            });
           } else {
             expect(spills).toHaveLength(0);
             expect((result.content[0] as { text: string }).text).toHaveLength(

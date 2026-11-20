@@ -769,7 +769,8 @@ First-sign-in onboarding and invitation precedence remain a separate one-shot
 path.
 
 Opengeni Console (`/console`, `apps/api/src/routes/console.ts`) gives
-organization owners and admins, never API keys or external users, read-only
+organization owners and admins, and members with a Console role (Viewer or
+Editor, `apps/api/src/routes/console-roles.ts`), never API keys or external users, read-only
 review of sessions in workspaces the product manages
 (`organization_managed_workspaces`): shared sessions and private sessions of
 `external_user:` owners, never an Opengeni account's private chat. The review
@@ -1838,10 +1839,15 @@ errors or a failure of every catalog entry. See [startup decisions and measureme
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists, never switches models),
-[`privacy_facts`](privacy-facts.md) (privacy and data-handling facts), optional
-[`code_search`](code-search.md), and optional provider
-[`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
+`request_human_input`, optional [`code_search`](code-search.md), and optional
+provider [`web_search`/`web_fetch`](web-search.md). `list_models` (lists, never
+switches models) and [`privacy_facts`](privacy-facts.md) (privacy and
+data-handling facts) follow the session's frozen first-request tools revision
+(`sessions.first_request_tools_revision`, migration 1513): sessions from before
+it keep both in every request; newer sessions find them through tool search by
+exact name whenever the turn has the search router for other tools, and keep
+them in the request when it does not, so they never bring the router on their
+own. Authorized first-party harness control
 tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
 `opengeni__wait_for_input`) are also always visible; the `opengeni` server then
 joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
@@ -2218,6 +2224,7 @@ behind a generic 500, so its session lookups run through
 | `packages/vaults-bitwarden` | `@opengeni/vaults-bitwarden` | Bitwarden and Vaultwarden vault provider over the server's client API with the account's personal API key; decrypts locally, keeps no values, loaded only by dynamic import from the API and worker |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
+| `packages/cli` | `opengeni` | `opengeni` command-line interface: `agents deploy` (YAML agent files to an organization, through `PUT .../agents/by-key/:key/apply`) and `agents export`; ships the agent file JSON Schema (`schemas/agent.schema.json`, generated from `OrgAgentFile`) |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
 | `packages/xai-subscription` | `@opengeni/xai-subscription` | SuperGrok/xAI subscription authentication and transport |
 | `packages/subscriptions` | `@opengeni/subscriptions` | Pure provider-neutral subscription policy: settings, eligibility, placement, failover order, quota model, adapter types |
@@ -2871,7 +2878,8 @@ existing Site HTTP channel with host-pinned `current` routes only and always
 with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
 
 Site SQL is the optional per-Site database next to it: one SQLite-backed
-Durable Object per Site in the Sites gateway Worker, reached only by the API
+Durable Object per Site in the Sites gateway Worker, stored in Cloudflare's EU
+jurisdiction (older databases move there on first use), reached only by the API
 through a signed internal gateway route. Postgres keeps the definitions
 (settings, migrations and named queries) so the database can be rebuilt; Site
 pages run only named queries with `:viewer` bound by the API. See
@@ -3390,6 +3398,8 @@ Topics: [`README.md`](README.md).
 | Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/agents.ts` (bot templates are agents) | [`bots.md`](bots.md) |
 | Agents (Slack agents and bot templates merged; expand/contract, legacy drop) | `packages/db/src/agents-schema.ts`, `packages/db/src/agents.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql`, `packages/db/drizzle/1380_agent_slack_install_workspace.sql` (contract), `packages/db/drizzle/1445_slack_agents_drop.sql` (legacy drop) | [`agents.md`](agents.md) |
 | Agents in the app: Agents page, agent page and form, composer agent chip, chat header chip, Slack availability | `packages/react/src/app/components/agents/`, `packages/react/src/app/lib/agents.tsx`, `packages/react/src/app/lib/composer-agent.tsx`, `packages/react/src/app/lib/session-agent.ts`, `apps/web/src/routes/agents.tsx`, `apps/web/src/components/agents/` | [`agents.md`](agents.md) |
+| Console agents (organization agents): data layer, management API, tool servers and end users' tool logins | `packages/contracts/src/organization-agents.ts`, `packages/db/src/organization-agents.ts`, `packages/db/drizzle/1505_organization_agents.sql`, `packages/core/src/domain/org-tool-servers.ts`, `apps/api/src/routes/organization-agents.ts` | [`agents.md`](agents.md#console-agents) |
+| Console agents at runtime: create, worker chats, claim gate, tool logins, publish moves | `packages/core/src/domain/org-agents.ts`, `packages/core/src/domain/org-agent-moves.ts`, `packages/db/src/organization-agent-runtime.ts`, `apps/worker/src/activities/agent-turn/org-agent-tool-logins.ts`, `apps/worker/src/activities/org-agent-publish-move.ts` | [`run-lifecycle.md`](run-lifecycle.md#organization-agents) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 | Conversation target context / cross-session receipt reads | `packages/contracts/src/session-target.ts`, `packages/db/src/session-target.ts`, `apps/api/src/mcp/server.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md); non-authoritative context, existing Send/Steer delivery |

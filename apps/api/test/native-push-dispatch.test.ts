@@ -13,6 +13,7 @@ import {
   nativePushEndsCall,
   nativePushRingsCall,
   plainNotificationText,
+  withNativePushLinkUrls,
 } from "../src/native-push-dispatch";
 import {
   nativeAppRedirectAllowed,
@@ -60,6 +61,14 @@ describe("native push presentation", () => {
         "Permit rules: https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai and [the guide](https://example.com/g?utm_source=openai)",
       ),
     ).toBe("Permit rules: https://example.com/rules/4-1 and the guide");
+  });
+
+  test("lock-screen text has no web-search citation handles", () => {
+    expect(
+      plainNotificationText(
+        "The permit is required. \uE200cite\uE202turn559410search0\uE201\n- **Due:** Friday",
+      ),
+    ).toBe("The permit is required.\n• Due: Friday");
   });
 
   test("an MCP server's question shows as the question and opens the app", () => {
@@ -174,6 +183,47 @@ describe("native push presentation", () => {
       rule: "needs_input",
     });
     expect(nativePushData({ ...payload, sequence: 42 })).toMatchObject({ sequence: 42 });
+  });
+
+  test("a notice about something other than a chat opens its link on tap", () => {
+    const path =
+      "/workspaces/22222222-2222-4222-8222-222222222222/organization?section=models&view=connect-org:claude_subscription&account=org:claude:44444444-4444-4444-8444-444444444444";
+    const notice: ClaimedNativePushDelivery["payload"] = {
+      rule: "needs_input",
+      eventType: "subscription.connection.needs_relogin",
+      workspaceId: payload.workspaceId,
+      subjectId: "user:abc",
+      title: "Sign in to Claude again",
+      subtitle: "person@example.test",
+      link: path,
+    };
+    const [linked] = withNativePushLinkUrls(
+      [{ ...delivery(), payload: notice }],
+      "https://console.example.test/",
+    );
+    expect(nativePushData(linked!.payload)).toEqual({
+      url: `https://console.example.test${path}`,
+      workspaceId: payload.workspaceId,
+      subjectId: "user:abc",
+      rule: "needs_input",
+      eventType: "subscription.connection.needs_relogin",
+    });
+    // Without a web address the push still shows; a tap opens the app.
+    const [unlinked] = withNativePushLinkUrls([{ ...delivery(), payload: notice }], undefined);
+    expect(nativePushData(unlinked!.payload)).not.toHaveProperty("url");
+    // Only a path in the web app becomes a link; a chat's push is unchanged.
+    const [elsewhere] = withNativePushLinkUrls(
+      [{ ...delivery(), payload: { ...notice, link: "//elsewhere.test/x" } }],
+      "https://console.example.test",
+    );
+    expect(nativePushData(elsewhere!.payload)).not.toHaveProperty("url");
+    expect(withNativePushLinkUrls([delivery()], "https://console.example.test")[0]).toEqual(
+      delivery(),
+    );
+    // Each notice shows on its own on Android instead of collapsing into one.
+    expect(nativeFcmMessage({ token: "fcm-token-123", payload: notice }).android.collapse_key).toBe(
+      undefined,
+    );
   });
 
   test("a call ring goes to PushKit with the call, and shows as a call on Android", () => {

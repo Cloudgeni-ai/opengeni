@@ -1,0 +1,45 @@
+# opengeni
+
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Console agents follow-ups. `CreateSessionRequest.agent` is widened to an agent configuration object, an organization agent key or id (string), or `{ ref, ... }`: code that reads it must narrow it first (`sessionAgentFieldNamesOrgAgent`). `asUser` `displayName`/`email` need a server with this release; older servers ignore them. `agents:manage` and `tool_credentials:write` are held only by full organization keys or keys that list them, never by `workspace:admin` alone (including the Developer setup preset). Organization compute reaches the Console test workspace only with `allowManagedWorkspaces` (now optional in `OrganizationComputeReach`, read as false). Agent sessions report `costMicros`. Storing a tool login for a workspace the product doesn't manage answers 422. Console audit event actions and workspace sources accept values unknown to the reader. CLI: a missing instructions `.md` file is an error, and `agents deploy --dry-run` prints the diff against the published version.
+- afb7be7: Console reads whether organization agents are on from `GET /v1/organizations/:id/console/access` (`orgAgentsEnabled`), so an organization without them makes no failing agent requests. `Session.orgAgent` carries the agent's `name`, and the chat header shows it. Console test chats no longer count toward an agent's chats, usage and cost, or appear in the Console Sessions list. CLI: `agents deploy --dry-run` reports `would create vN` or `unchanged vN`.
+- afb7be7: Marking or unmarking a product-managed workspace now needs an account-level context (migration 1512): Console, a workspace an organization API key creates and the Console test workspace still do it, but runtime code acting inside a workspace can't, since the mark decides organization machine and Sandbox Environment reach, organization agents and stored end-user logins. In the reach dialog, a machine's "All workspaces" and "All product-managed workspaces" options say they include the Console test workspace, where Editors run test chats. `WorkspaceReachFields` takes an optional `allDescription`.
+- afb7be7: Organization agent Runs on is checked where a chat finally lands: a Personal (Only me) machine is refused whether the request names it, a default would pick it or a worker would join its parent's box on it, a person's own default machine is not used for organization agent chats, and a machine the caller can't read is refused as unavailable. A version now keeps the id of the machine or Sandbox Environment its `runsOn` named when it was saved (migration 1512 adds `agent_revisions.runs_on_target`), so renaming one, or adding another with the same name, no longer moves or breaks the agent; the written name stays for display and YAML. The reach dialog's "All product-managed workspaces" option says that every end customer's chats share the machine. Clients that predate `allowManagedWorkspaces` keep it unchanged when they narrow a machine's or environment's workspaces, so turn it off in Console or with a current SDK.
+- afb7be7: Console agents can say where their chats run with `runsOn`: no computer (`none`), each chat in its own cloud sandbox, optionally from an organization Sandbox Environment (`sandbox`), or one organization machine shared by every chat (`machine`). Omitted keeps today's placement. Saving or deploying refuses machines and environments that are not the organization's (Personal machines included), chat creation checks that the machine or environment is available in the chat's workspace, and a request's own `sandboxBackend`, `targetSandboxId` or `rigId` still wins within the usual checks and is recorded as the `runsOn` override; a Personal machine is never used for an organization agent chat. Organization machines and Sandbox Environments get an "All product-managed workspaces" reach option (`allowManagedWorkspaces`) that covers every workspace the organization's product manages, including ones created later. Console's agent editor has a "Runs on" setting and the reach picker the new option; `GET /v1/organizations/:organizationId/agents/compute` and the SDK's `listOrganizationAgentCompute` list the choices. The agent file JSON Schema includes `runsOn`.
+
+### Patch Changes
+
+- afb7be7: `opengeni agents export <key>` reads the agent by key, so it works against the real API. `opengeni agents deploy` recognises an agent managed in Console (the API's `details.code`), prints the clear message, and its `--json` output reports `code: "agent_managed_in_console"` and the HTTP `status` for each failed agent.
+
+  End-user `displayName` and `email` are lenient: `null` or a non-string value is ignored instead of rejecting the request, and the latest value sent wins on every API replica.
+
+  In the SDK, `CreateSessionRequest.agent` is now `AgentConfigRequest | OrgAgentRef | OrgAgentSessionRequest`. TypeScript that reads inline fields such as `req.agent.capabilities` must narrow first; the new `isOrgAgentRef(agent)` guard does that.
+
+- afb7be7: Console agents as code: `opengeni agents deploy <dir>` deploys `agents/<key>.yaml` files to an organization (`--dry-run`, `--publish`, `--move-running-chats`, `--json`) and `opengeni agents export <key>` writes one back; the package ships the agent file JSON Schema (`schemas/agent.schema.json`). The SDK adds `@opengeni/sdk/organization-agents` (`organizationAgents()`, `defineAgent()`, end-user tool logins), accepts an organization agent in session create (`agent: "<key>"` or `{ ref, ... }`, `agentOverrides`) and reads `Session.orgAgent`. The session proxy drops an organization agent sent by the browser; name it in `createSession`.
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+
+## 6.31.1
+
+## 6.31.0
+
+### Patch Changes
+
+- 3866b75: New `opengeni` command-line package. `opengeni --version` and `opengeni --help` work; `opengeni agents deploy` is reserved and, in this version, says it is not available yet and exits with code 2.

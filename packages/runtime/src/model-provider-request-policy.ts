@@ -1,5 +1,9 @@
 import type { ConfiguredModel, ResolvedModelProvider } from "@opengeni/config";
-import { OPENGENI_GATEWAY_MODELS, gatewayRequestPolicyForUpstreamModel } from "@opengeni/config";
+import {
+  OPENGENI_GATEWAY_MODELS,
+  gatewayRequestPolicyForUpstreamModel,
+  isDirectOpenAiApiBaseUrl,
+} from "@opengeni/config";
 import {
   CODEX_REQUEST_BODY_NORMALIZED_HEADER,
   CODEX_REQUEST_CALLER_STREAM_HEADER,
@@ -28,6 +32,11 @@ import {
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
 import { geminiFunctionResponseRefPolicy } from "./gemini-function-response";
+import {
+  cacheableSystemPromptBody,
+  withCacheableSystemPrompt,
+  type SystemPromptRole,
+} from "./responses-system-prompt";
 import {
   chatReasoning,
   chatReasoningDetails,
@@ -211,6 +220,23 @@ export function isOpenAIPlatformResponsesProvider(provider: ResolvedModelProvide
   );
 }
 
+/**
+ * The role of the leading system-prompt item on a provider's Responses route:
+ * `developer` where OpenAI runs the backend (Codex, the OpenAI platform,
+ * Azure OpenAI), as OpenAI documents for standing rules, and `system` on every
+ * other route (gateways, xAI, OpenAI-compatible servers). `system` is the role
+ * xAI documents and the one every chat template renders; a template that does
+ * not know `developer` can drop the message.
+ */
+export function systemPromptRoleForProvider(provider: ResolvedModelProvider): SystemPromptRole {
+  return provider.kind === "codex-subscription" ||
+    provider.wireProfile === "azure-openai" ||
+    isOpenAIPlatformResponsesProvider(provider) ||
+    isDirectOpenAiApiBaseUrl(provider.baseUrl)
+    ? "developer"
+    : "system";
+}
+
 function azureModelRequestProjection({
   body,
 }: {
@@ -281,8 +307,8 @@ function azureModelRequestProjection({
 }
 
 /** Azure's request projection, then storeless Responses (Azure accepts `store: false`). */
-export const azureModelRequestPolicy: ModelJsonRequestPolicy = withStorelessResponses(
-  azureModelRequestProjection,
+export const azureModelRequestPolicy: ModelJsonRequestPolicy = withCacheableSystemPrompt(
+  withStorelessResponses(azureModelRequestProjection),
 );
 
 /**
@@ -458,8 +484,18 @@ export function modelRequestPolicyForProvider(
     }
     return undefined;
   };
+  const systemPromptRole = systemPromptRoleForProvider(provider);
   return (request) => {
-    const projected = chatModelRequestPolicy(request);
+    const chat = chatModelRequestPolicy(request);
+    // Every Responses route: the system prompt leads the cached prefix before
+    // any provider projection runs (Chat Completions already sends it as the
+    // first message, and Anthropic Messages renders `system` before messages).
+    const leading = cacheableSystemPromptBody(
+      request.path,
+      chat?.body ?? request.body,
+      systemPromptRole,
+    );
+    const projected = leading ? { ...chat, body: leading } : chat;
     const result =
       providerPolicy({ ...request, body: projected?.body ?? request.body }) ?? projected;
     // Upstream-model wire quirk, independent of route: Gemini reserves `$ref`

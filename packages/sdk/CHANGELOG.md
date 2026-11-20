@@ -1,5 +1,85 @@
 # @opengeni/sdk
 
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Console agents API, for organizations with Console agents turned on (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`): `/v1/organizations/:id/agents/*` manages organization agents, their versions, publishes and rollbacks, code deploys by key (`PUT /by-key/:key/apply`, idempotent by config hash, with `dryRun`), organization tool servers (shared keys stored encrypted and never returned) and the Console test workspace; `/v1/workspaces/:id/end-users/:externalUserId/tool-credentials/:toolServerKey` stores an end user's tool login write-only; `GET /v1/workspaces/:id/organization-agents` lists the published ones a workspace can use. New API key permissions `agents:read`, `agents:manage` and `tool_credentials:write` are held by full organization keys. Every write is in the Console audit log.
+- afb7be7: Console agents follow-ups. `CreateSessionRequest.agent` is widened to an agent configuration object, an organization agent key or id (string), or `{ ref, ... }`: code that reads it must narrow it first (`sessionAgentFieldNamesOrgAgent`). `asUser` `displayName`/`email` need a server with this release; older servers ignore them. `agents:manage` and `tool_credentials:write` are held only by full organization keys or keys that list them, never by `workspace:admin` alone (including the Developer setup preset). Organization compute reaches the Console test workspace only with `allowManagedWorkspaces` (now optional in `OrganizationComputeReach`, read as false). Agent sessions report `costMicros`. Storing a tool login for a workspace the product doesn't manage answers 422. Console audit event actions and workspace sources accept values unknown to the reader. CLI: a missing instructions `.md` file is an error, and `agents deploy --dry-run` prints the diff against the published version.
+- afb7be7: Console has Agents and Tool servers pages for organizations with Console agents turned on. Owners and admins create an agent, edit its Instructions, model, built-in tools, tool servers (each tool on or off, "Ask first", and what happens to tools a server adds later), workers and where it is available, save drafts, try a draft in a test chat, compare versions, publish or roll back (optionally moving running chats), and see each chat's version and what it changed. Code-managed agents open read-only with "Managed by code"; an owner can move one to Console. "Export as YAML" downloads the agent file. In the app, the Agents page lists the workspace's organization agents read-only under "Managed in Console". `AgentsPage` takes an optional `after` slot, the SDK knows the `agents:read`, `agents:manage` and `tool_credentials:write` permissions, and the permission picker shows them under Agents.
+- afb7be7: Organization agent Runs on is checked where a chat finally lands: a Personal (Only me) machine is refused whether the request names it, a default would pick it or a worker would join its parent's box on it, a person's own default machine is not used for organization agent chats, and a machine the caller can't read is refused as unavailable. A version now keeps the id of the machine or Sandbox Environment its `runsOn` named when it was saved (migration 1512 adds `agent_revisions.runs_on_target`), so renaming one, or adding another with the same name, no longer moves or breaks the agent; the written name stays for display and YAML. The reach dialog's "All product-managed workspaces" option says that every end customer's chats share the machine. Clients that predate `allowManagedWorkspaces` keep it unchanged when they narrow a machine's or environment's workspaces, so turn it off in Console or with a current SDK.
+- afb7be7: Console agents can say where their chats run with `runsOn`: no computer (`none`), each chat in its own cloud sandbox, optionally from an organization Sandbox Environment (`sandbox`), or one organization machine shared by every chat (`machine`). Omitted keeps today's placement. Saving or deploying refuses machines and environments that are not the organization's (Personal machines included), chat creation checks that the machine or environment is available in the chat's workspace, and a request's own `sandboxBackend`, `targetSandboxId` or `rigId` still wins within the usual checks and is recorded as the `runsOn` override; a Personal machine is never used for an organization agent chat. Organization machines and Sandbox Environments get an "All product-managed workspaces" reach option (`allowManagedWorkspaces`) that covers every workspace the organization's product manages, including ones created later. Console's agent editor has a "Runs on" setting and the reach picker the new option; `GET /v1/organizations/:organizationId/agents/compute` and the SDK's `listOrganizationAgentCompute` list the choices. The agent file JSON Schema includes `runsOn`.
+- afb7be7: Chats can run an organization (Console) agent. When Console agents are on for the organization, session create accepts `agent: "<key or id>"` or `agent: { ref, ... }`: the chat runs the agent's published version (a draft or `version` only in the organization's Console test workspace), its tool servers are attached as session MCP servers, and settings the request changes are recorded as `Session.orgAgent.overrides`; `agentOverrides: "reject"` refuses them with 422 `agent_override_rejected`. Inline `config` saves a version of a code-managed agent by config hash. Worker chats inherit the agent version, and its Instructions only when the version shares them. Turns resolve tool server logins from the credential provider, the end user's stored login (refreshed when it is about to expire) or the chat's own headers, never a shared key for per-user servers; a server without a login is attached as unavailable and the chat records `session.tool_server.unavailable`. A publish that moves running chats re-materializes each chat's tool servers on the new version and delivers its Instructions on the next turn. Chats that name no organization agent are unchanged.
+
+### Patch Changes
+
+- afb7be7: `opengeni agents export <key>` reads the agent by key, so it works against the real API. `opengeni agents deploy` recognises an agent managed in Console (the API's `details.code`), prints the clear message, and its `--json` output reports `code: "agent_managed_in_console"` and the HTTP `status` for each failed agent.
+
+  End-user `displayName` and `email` are lenient: `null` or a non-string value is ignored instead of rejecting the request, and the latest value sent wins on every API replica.
+
+  In the SDK, `CreateSessionRequest.agent` is now `AgentConfigRequest | OrgAgentRef | OrgAgentSessionRequest`. TypeScript that reads inline fields such as `req.agent.capabilities` must narrow first; the new `isOrgAgentRef(agent)` guard does that.
+
+- afb7be7: Console agents as code: `opengeni agents deploy <dir>` deploys `agents/<key>.yaml` files to an organization (`--dry-run`, `--publish`, `--move-running-chats`, `--json`) and `opengeni agents export <key>` writes one back; the package ships the agent file JSON Schema (`schemas/agent.schema.json`). The SDK adds `@opengeni/sdk/organization-agents` (`organizationAgents()`, `defineAgent()`, end-user tool logins), accepts an organization agent in session create (`agent: "<key>"` or `{ ref, ... }`, `agentOverrides`) and reads `Session.orgAgent`. The session proxy drops an organization agent sent by the browser; name it in `createSession`.
+- afb7be7: Console shows who your end users are: send `displayName` and `email` with the user (`asUser(id, { displayName, email })`, the session proxy's `resolve`, the chat facade's `userProfile`, or `identity` on `addExternalWorkspaceMember`). They are display details, never the identity; the latest sent wins and an omitted one keeps its value. Console lists name, email and the product's id (on hover, copyable), shows workspace names in full, and searches people and workspace names at every review level.
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/connect@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/connect@6.31.1
+- @opengeni/contracts@6.31.1
+
+## 6.31.0
+
+### Minor Changes
+
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+### Patch Changes
+
+- cafa73f: Your own connector login now has one switch per workspace. Turning it on in "Where it works" for a workspace that hasn't turned that connector on also turns the connector on there, for each person's own account. This happens in the same request, as the connect card's "Use it here" does it. Where only an admin may turn the connector on, nothing changes: the request is refused with `details.code` `own_login_connector_needs_admin`, and the row says an admin has to turn it on. Turning a login off never turns its connector off.
+
+  Each reach row carries an optional `connectorOff` flag. A login that is on where its connector isn't (for example a standing grant) reads as off, with a line saying the switch turns the connector on too. My things doesn't count such a workspace as one where the login works.
+
+  The OAuth connect card now offers your one own login first, as "Use my <service> here", without asking "Who can use this connection?". Connecting a new account for everyone stays a secondary choice.
+
+- 46d677b: When a Claude, ChatGPT or SuperGrok subscription account stops accepting its sign-in, the person who connected it now gets one inbox notice and phone notification, for example "Sign in to Claude again", with the account's email. If that person can no longer manage the account, the organization's owners and admins get it instead. The notice's "Sign in again" opens that account's own sign-in step. For Claude, the step names the email to sign in as, and the person signs in with Claude and pastes the code. The notice goes away once the account works again, and a later lapse gets a new notice.
+
+  Each account's page shows how long ago it was signed in. A Claude account signed in 25 or more days ago shows a warning with "Sign in again" before Claude stops accepting the sign-in, which tends to happen around 28 to 30 days.
+
+  `GET /v1/inbox` returns these notices in a new optional `notices` list (`InboxNotice`: shaped like a notification item, with `sessionId: null` and always a `link`). `items`, `needsYouCount` and `unreadCount` are unchanged. Subscription account listings carry an optional `signedInAt`. A phone notification about something other than a chat carries the address to open in `url`.
+
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/connect@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

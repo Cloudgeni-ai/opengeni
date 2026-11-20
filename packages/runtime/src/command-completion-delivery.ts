@@ -20,7 +20,7 @@
  * as ordinary input instead.
  */
 import type { CallModelInputFilter, Tool } from "@openai/agents";
-import { modelToolTextBudgetBytes } from "./tool-result-spill";
+import { modelToolTextBudgetBytes } from "./model-tool-result-store";
 
 /** One finished command, as its durable result describes it. */
 export type BackgroundCommandCompletion = {

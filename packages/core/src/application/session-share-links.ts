@@ -20,6 +20,9 @@ import {
   orderTimelineEvents,
   prescanTurnAnchors,
 } from "@opengeni/contracts/timeline-order";
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
+import { withoutProviderCitationHandles } from "@opengeni/contracts/provider-citation-handles";
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import {
   findLiveSessionShareLink,
   getLiveSessionShareLink,
@@ -136,6 +139,15 @@ function privateLinkWords(target: string): string {
   return /^[0-9a-f-]{16,}$/iu.test(decoded) ? "" : decoded;
 }
 
+/**
+ * An answer as the chat shows it: web-search citation handles that name no
+ * openable page go, Claude citation tags become their quoted text, and source
+ * links lose hosted-search tracking. The stored events keep the exact text.
+ */
+function sharedReplyText(text: string): string {
+  return withoutProviderTrackingInText(rewriteClaudeCiteTags(withoutProviderCitationHandles(text)));
+}
+
 export function sharedMessageText(text: string): string {
   const references = new Set<string>();
   const withoutDefinitions = text.replace(PRIVATE_REFERENCE_DEFINITION, (_match, label: string) => {
@@ -249,7 +261,8 @@ export function buildSharedSessionSnapshot(
         message: { role: "user", text, ...(sender ? { sender } : {}) },
       });
     } else if (event.type === "agent.message.completed") {
-      const text = typeof payload.text === "string" ? sharedMessageText(payload.text) : "";
+      const text =
+        typeof payload.text === "string" ? sharedMessageText(sharedReplyText(payload.text)) : "";
       if (!text) continue;
       const key = event.turnId ?? `sequence:${event.sequence}`;
       const turn = replies.get(key) ?? [];

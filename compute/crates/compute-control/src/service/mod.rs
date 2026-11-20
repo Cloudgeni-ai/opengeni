@@ -328,6 +328,7 @@ impl<S: Store> Service<S> {
             memory_mib: u64::from(config.memory_request()),
             memory_max_mib: u64::from(config.memory_mib),
             cpu_millis: u64::from(config.cpu_request()),
+            vcpus: u64::from(config.vcpus),
             disk_mib: self
                 .settings
                 .disk_mib

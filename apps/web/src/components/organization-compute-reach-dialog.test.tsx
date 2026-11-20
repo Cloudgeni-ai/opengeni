@@ -25,8 +25,12 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
     ) : null,
 }));
 
-const { OrganizationComputeReachDialog, organizationComputeReachSummary, reachNarrows } =
-  await import("./organization-compute-reach-dialog");
+const {
+  MANAGED_DESCRIPTION,
+  OrganizationComputeReachDialog,
+  organizationComputeReachSummary,
+  reachNarrows,
+} = await import("./organization-compute-reach-dialog");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -46,8 +50,14 @@ const OPS = "33333333-3333-4333-8333-333333333333";
 function reach(
   allowedWorkspaceIds: string[] | null,
   allowPersonalWorkspaces: boolean,
+  allowManagedWorkspaces?: boolean,
 ): OrganizationComputeReach {
-  return { homeWorkspaceId: HOME, allowedWorkspaceIds, allowPersonalWorkspaces };
+  return {
+    homeWorkspaceId: HOME,
+    allowedWorkspaceIds,
+    allowPersonalWorkspaces,
+    ...(allowManagedWorkspaces === undefined ? {} : { allowManagedWorkspaces }),
+  };
 }
 
 const client = {
@@ -90,6 +100,13 @@ describe("where an organization machine or rig works", () => {
     expect(organizationComputeReachSummary(reach(null, true))).toBe("All workspaces + Personal");
     expect(organizationComputeReachSummary(reach([], false))).toBe("1 workspace");
     expect(organizationComputeReachSummary(reach([DESIGN, HOME], false))).toBe("2 workspaces");
+    expect(organizationComputeReachSummary(reach([], false, true))).toBe(
+      "1 workspace + Product-managed",
+    );
+    // All workspaces never covers the Console test workspace; the switch does.
+    expect(organizationComputeReachSummary(reach(null, false, true))).toBe(
+      "All workspaces + Product-managed",
+    );
   });
 
   test("narrowing is anything that takes it away from somewhere it works now", () => {
@@ -111,6 +128,14 @@ describe("where an organization machine or rig works", () => {
     expect(
       reachNarrows(reach([DESIGN], false), { workspaceIds: [HOME], personalWorkspaces: false }),
     ).toBe(true);
+    const managed = reach([], false, true);
+    expect(reachNarrows(managed, { workspaceIds: [], personalWorkspaces: false })).toBe(false);
+    expect(reachNarrows(managed, { workspaceIds: [], personalWorkspaces: false }, false)).toBe(
+      true,
+    );
+    expect(reachNarrows(managed, { workspaceIds: null, personalWorkspaces: false }, false)).toBe(
+      true,
+    );
   });
 
   test("its home stays ticked, and saving sends the picked shared workspaces", async () => {
@@ -157,6 +182,118 @@ describe("where an organization machine or rig works", () => {
       allowPersonalWorkspaces: false,
     });
     expect(onSaved).toHaveBeenCalledWith(reach([OPS], false));
+    await act(async () => root.unmount());
+  });
+
+  test("all product-managed workspaces is a choice when the server has it", async () => {
+    const save = mock(
+      async (next: {
+        allowedWorkspaceIds: string[] | null;
+        allowPersonalWorkspaces: boolean;
+        allowManagedWorkspaces?: boolean;
+      }) =>
+        reach(next.allowedWorkspaceIds, next.allowPersonalWorkspaces, next.allowManagedWorkspaces),
+    );
+    const { root } = await render(
+      <OrganizationComputeReachDialog
+        open
+        onOpenChange={() => undefined}
+        client={client}
+        kind="rig"
+        name="Python 3.13"
+        reach={reach([], false, false)}
+        organizationId="org"
+        organizationName="Acme"
+        hereId={HOME}
+        save={save}
+      />,
+    );
+    expect(document.body.textContent).toContain(
+      "Every workspace your product manages, including new ones.",
+    );
+    const managed = Array.from(document.querySelectorAll("label")).find(
+      (label) => label.textContent === "All product-managed workspaces",
+    );
+    await act(async () => {
+      document.getElementById(managed!.htmlFor)!.click();
+    });
+    await submit();
+    expect(save).toHaveBeenCalledWith({
+      allowedWorkspaceIds: [],
+      allowPersonalWorkspaces: false,
+      allowManagedWorkspaces: true,
+    });
+    await act(async () => root.unmount());
+  });
+
+  test("a machine's product-managed choice says every end customer's chats share it", async () => {
+    const { root } = await render(
+      <OrganizationComputeReachDialog
+        open
+        onOpenChange={() => undefined}
+        client={client}
+        kind="machine"
+        name="Build box"
+        reach={reach([], false, false)}
+        organizationId="org"
+        organizationName="Acme"
+        hereId={HOME}
+        save={mock(async () => reach([], false, true))}
+      />,
+    );
+    expect(document.body.textContent).toContain("All product-managed workspaces");
+    expect(document.body.textContent).toContain(MANAGED_DESCRIPTION.machine);
+    expect(MANAGED_DESCRIPTION.machine).toContain("share this machine");
+    // Only this choice covers the Console test workspace; All workspaces never does.
+    expect(MANAGED_DESCRIPTION.machine).toContain("Console test workspace");
+    expect(document.body.textContent?.match(/Console test workspace/g)?.length).toBe(1);
+    await act(async () => root.unmount());
+  });
+
+  test("a Sandbox Environment keeps the usual All workspaces text", async () => {
+    const { root } = await render(
+      <OrganizationComputeReachDialog
+        open
+        onOpenChange={() => undefined}
+        client={client}
+        kind="rig"
+        name="Python 3.13"
+        reach={reach([], false, false)}
+        organizationId="org"
+        organizationName="Acme"
+        hereId={HOME}
+        save={mock(async () => reach([], false, false))}
+      />,
+    );
+    expect(document.body.textContent).toContain("Every shared workspace, including new ones.");
+    expect(document.body.textContent).not.toContain("Console test workspace");
+    await act(async () => root.unmount());
+  });
+
+  test("an older server's reach has no product-managed choice and saves without it", async () => {
+    // (The switch shows whenever the server reports the setting, as every
+    // current server does; see the test above.)
+    const save = mock(async () => reach([OPS], false));
+    const { root } = await render(
+      <OrganizationComputeReachDialog
+        open
+        onOpenChange={() => undefined}
+        client={client}
+        kind="machine"
+        name="Build box"
+        reach={reach([OPS], false)}
+        organizationId="org"
+        organizationName="Acme"
+        hereId={HOME}
+        save={save}
+      />,
+    );
+    expect(document.body.textContent).not.toContain("All product-managed workspaces");
+    await submit();
+    expect(save).toHaveBeenCalledWith({
+      allowedWorkspaceIds: [OPS],
+      allowPersonalWorkspaces: false,
+    });
     await act(async () => root.unmount());
   });
 });

@@ -1,5 +1,151 @@
 # @opengeni/worker-bundle
 
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Chats can run an organization (Console) agent. When Console agents are on for the organization, session create accepts `agent: "<key or id>"` or `agent: { ref, ... }`: the chat runs the agent's published version (a draft or `version` only in the organization's Console test workspace), its tool servers are attached as session MCP servers, and settings the request changes are recorded as `Session.orgAgent.overrides`; `agentOverrides: "reject"` refuses them with 422 `agent_override_rejected`. Inline `config` saves a version of a code-managed agent by config hash. Worker chats inherit the agent version, and its Instructions only when the version shares them. Turns resolve tool server logins from the credential provider, the end user's stored login (refreshed when it is about to expire) or the chat's own headers, never a shared key for per-user servers; a server without a login is attached as unavailable and the chat records `session.tool_server.unavailable`. A publish that moves running chats re-materializes each chat's tool servers on the new version and delivers its Instructions on the next turn. Chats that name no organization agent are unchanged.
+
+### Patch Changes
+
+- afb7be7: Console test chats are isolated from each other: they are created with `agentAccess: "session"` and Memory off, so one tester's agent can't read or message another tester's test chats; a test chat's own login headers run only for turns its tester's principal started; and `x-opengeni-service-initiator` refuses the server-reserved `console-test:` prefix (422).
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/db@6.32.0
+  - @opengeni/core@6.32.0
+  - @opengeni/sdk@6.32.0
+  - @opengeni/observability@6.32.0
+  - @opengeni/capabilities@6.32.0
+  - @opengeni/codemode@6.32.0
+  - @opengeni/codex@6.32.0
+  - @opengeni/config@6.32.0
+  - @opengeni/decisions@6.32.0
+  - @opengeni/documents@6.32.0
+  - @opengeni/events@6.32.0
+  - @opengeni/github@6.32.0
+  - @opengeni/interaction@6.32.0
+  - @opengeni/runtime@6.32.0
+  - @opengeni/storage@6.32.0
+  - @opengeni/tool-gateway@6.32.0
+  - @opengeni/vaults@6.32.0
+  - @opengeni/vaults-bitwarden@6.32.0
+  - @opengeni/vaults-keeper@6.32.0
+  - @opengeni/vaults-onepassword@6.32.0
+  - @opengeni/vaults-protonpass@6.32.0
+  - @opengeni/jev@6.32.0
+  - @opengeni/agent-proto@6.32.0
+  - @opengeni/network@6.32.0
+  - @opengeni/subscriptions@6.32.0
+  - @opengeni/xai-subscription@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- Updated dependencies [23f4d6c]
+  - @opengeni/db@6.31.1
+  - @opengeni/core@6.31.1
+  - @opengeni/documents@6.31.1
+  - @opengeni/events@6.31.1
+  - @opengeni/agent-proto@6.31.1
+  - @opengeni/capabilities@6.31.1
+  - @opengeni/codemode@6.31.1
+  - @opengeni/codex@6.31.1
+  - @opengeni/config@6.31.1
+  - @opengeni/contracts@6.31.1
+  - @opengeni/decisions@6.31.1
+  - @opengeni/github@6.31.1
+  - @opengeni/interaction@6.31.1
+  - @opengeni/jev@6.31.1
+  - @opengeni/network@6.31.1
+  - @opengeni/observability@6.31.1
+  - @opengeni/runtime@6.31.1
+  - @opengeni/sdk@6.31.1
+  - @opengeni/storage@6.31.1
+  - @opengeni/subscriptions@6.31.1
+  - @opengeni/tool-gateway@6.31.1
+  - @opengeni/vaults@6.31.1
+  - @opengeni/vaults-bitwarden@6.31.1
+  - @opengeni/vaults-keeper@6.31.1
+  - @opengeni/vaults-onepassword@6.31.1
+  - @opengeni/vaults-protonpass@6.31.1
+  - @opengeni/xai-subscription@6.31.1
+
+## 6.31.0
+
+### Patch Changes
+
+- e75ea20: A stopped Modal or Docker sandbox is now forgotten a day after every chat that works in it is archived, and its saved workspace (a Modal snapshot or tar archive) is deleted. 1502 grants the runtime the inventory 1404 added.
+- 9ecc26c: Agents with workspace connectors but without workspace admin can now show Connect cards (`capability_authorization_request`), for example to connect the person's own computer. Catalog search and custom MCP setup stay admin-only. Tool descriptions, notices and tool results name a setup tool only when the agent has it.
+- 047b487: A configured agent now always gets `goal_resume` and the goals sentence that names it. Before, both appeared only once the session had a goal, so a session's first goal changed the tool list and system prompt under every earlier request and the next turn re-read the whole history uncached.
+- a67e0b8: Fetch the speaker embedding model from a commit-pinned source so image builds keep the same model bytes after upstream replaced its release asset.
+- 890c910: Moving a session to another machine no longer rewrites the system prompt. The workspace root and filesystem layout reach the model as a `<opengeni_workspace_filesystem>` history item written before the turn that first sees a new layout, and `sandbox_swap` returns the new `workspaceRoot`, so the provider's prompt cache survives a swap.
+- 1f5ea5b: Prompt-cache diagnostics now fingerprint every provider transport, including the streamed request bodies of OpenAI, Azure OpenAI, Codex and xAI calls, which were never fingerprinted before. Two new warm-miss classes separate causes that `system_changed` and `unexplained` used to hide: `release_changed` (the tools or system prompt changed between two deployments) and `unobserved` (a call has no request fingerprint). The chart adds three alerts on the per-call classification: `OpenGeniPromptCachePrefixChanged`, `OpenGeniPromptCacheHistoryRewriteLossHigh` and `OpenGeniPromptCacheDiagnosticsBlind`.
+- Updated dependencies [e75ea20]
+- Updated dependencies [c2fe398]
+- Updated dependencies [a0fb1c6]
+- Updated dependencies [5fb457f]
+- Updated dependencies [d07d727]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [ea21b19]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [4fdd778]
+- Updated dependencies [46d677b]
+- Updated dependencies [0531626]
+- Updated dependencies [9ca567a]
+- Updated dependencies [8e1f06d]
+  - @opengeni/db@6.31.0
+  - @opengeni/contracts@6.31.0
+  - @opengeni/runtime@6.31.0
+  - @opengeni/core@6.31.0
+  - @opengeni/sdk@6.31.0
+  - @opengeni/config@6.31.0
+  - @opengeni/network@6.31.0
+  - @opengeni/codex@6.31.0
+  - @opengeni/documents@6.31.0
+  - @opengeni/events@6.31.0
+  - @opengeni/capabilities@6.31.0
+  - @opengeni/codemode@6.31.0
+  - @opengeni/decisions@6.31.0
+  - @opengeni/github@6.31.0
+  - @opengeni/interaction@6.31.0
+  - @opengeni/observability@6.31.0
+  - @opengeni/storage@6.31.0
+  - @opengeni/tool-gateway@6.31.0
+  - @opengeni/vaults@6.31.0
+  - @opengeni/vaults-bitwarden@6.31.0
+  - @opengeni/vaults-keeper@6.31.0
+  - @opengeni/vaults-onepassword@6.31.0
+  - @opengeni/vaults-protonpass@6.31.0
+  - @opengeni/xai-subscription@6.31.0
+  - @opengeni/jev@6.31.0
+  - @opengeni/agent-proto@6.31.0
+  - @opengeni/subscriptions@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

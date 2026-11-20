@@ -224,6 +224,7 @@ import type {
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactCurrentResponse,
+  WorkspaceArtifactLiveTicketResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -510,6 +511,8 @@ import type {
   DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -6220,6 +6223,22 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Use one limit reset grant of a Claude account. Reuse `requestId` when
+   * the answer is `retryable`: Claude settles each request id once.
+   */
+  async claimClaudeSubscriptionAccountLimitReset(
+    workspaceId: string,
+    accountId: string,
+    request: ClaimClaudeLimitResetRequest,
+  ): Promise<ClaimClaudeLimitResetResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/limit-resets/claim`,
+      request,
+    );
+  }
+
   async listOrganizationClaudeSubscriptionAccounts(
     organizationId: string,
   ): Promise<ClaudeSubscriptionAccountsResponse> {
@@ -6294,6 +6313,19 @@ export class OpenGeniClient {
       "POST",
       `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/usage/refresh`,
       {},
+    );
+  }
+
+  /** Use one limit reset grant of an organization Claude account (see the workspace variant). */
+  async claimOrganizationClaudeSubscriptionAccountLimitReset(
+    organizationId: string,
+    accountId: string,
+    request: ClaimClaudeLimitResetRequest,
+  ): Promise<ClaimClaudeLimitResetResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/limit-resets/claim`,
+      request,
     );
   }
 
@@ -10148,6 +10180,25 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactCurrentResponse>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/current`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * A ticket for an open Site view's live connection (new versions and data
+   * change hints). 404 when the deployment has no live hints; keep checking
+   * with `getWorkspaceArtifactCurrent` then.
+   */
+  async createWorkspaceArtifactLiveTicket(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactLiveTicketResponse> {
+    return await this.requestJson<WorkspaceArtifactLiveTicketResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/live`,
       undefined,
       undefined,
       options,

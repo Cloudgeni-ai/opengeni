@@ -60,6 +60,7 @@ export default defineConfig({
     "src/session-attention-model.ts",
     "src/session-avatar-model.ts",
     "src/in-chat-connect-model.ts",
+    "src/machine-request-model.ts",
     "src/approval-review-model.ts",
     "src/interactive-answer-model.ts",
     "src/testing/session-scenarios.ts",

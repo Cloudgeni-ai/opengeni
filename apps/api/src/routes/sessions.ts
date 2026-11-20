@@ -12,6 +12,7 @@ import {
   GoalResumeBlockedError,
   turnAppActionGrant,
   MissingPermissionRefusal,
+  OrgAgentSessionCreateError,
 } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
@@ -20,7 +21,7 @@ import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { SessionMessageSearchRequest } from "@opengeni/contracts";
+import { SessionMessageSearchRequest, sessionAgentFieldNamesOrgAgent } from "@opengeni/contracts";
 import {
   GitHubRepositoryUnavailableError,
   ModelPolicyRefusedError,
@@ -874,7 +875,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
-      const requestedProfile = CreateSessionRequest.parse(payload).profile;
+      const requestedProfile = CreateSessionRequest.parse(
+        withoutOrgAgentFieldsForPreflight(payload),
+      ).profile;
       // only a person present in the app or the host's server sets a
       // task usage limit; an agent acting for a person cannot, even null.
       if (
@@ -3168,7 +3171,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     "/v1/workspaces/:workspaceId/sessions/:sessionId/mcp-servers/:serverId/approval-policy",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "sessions:control",
+      );
+      const grant = authorization.grant;
       const sessionId = c.req.param("sessionId");
       const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
       const rawPayload = await c.req.json().catch(() => null);
@@ -3182,15 +3191,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "invalid MCP approval-policy request",
       });
       await assertSessionExists(db, workspaceId, sessionId);
-      return c.json(
-        await updateSessionMcpApprovalPolicy(
-          deps,
-          grant,
-          sessionId,
-          parsedServerId.data,
-          payload.requireApproval,
-        ),
-      );
+      try {
+        return c.json(
+          await updateSessionMcpApprovalPolicy(
+            deps,
+            grant,
+            sessionId,
+            parsedServerId.data,
+            payload.requireApproval,
+            authorization,
+          ),
+        );
+      } catch (error) {
+        if (error instanceof OrgAgentSessionCreateError) {
+          // An organization agent's "Ask first": `details.code` names the reason.
+          return c.json(
+            { code: "forbidden", message: error.message, details: { code: error.code } },
+            error.httpStatus,
+          );
+        }
+        throw error;
+      }
     },
   );
 
@@ -7248,6 +7269,20 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
   return Math.floor(sequence);
 }
 
+/**
+ * The create body as the route's early check reads it. An `agent` that names
+ * an organization agent (a key, an id or `{ ref }`) is not today's agent
+ * object; the core create resolves and validates it, so the early check reads
+ * the rest of the body. Every other body is returned unchanged.
+ */
+export function withoutOrgAgentFieldsForPreflight(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const request = payload as Record<string, unknown>;
+  if (!sessionAgentFieldNamesOrgAgent(request["agent"])) return payload;
+  const { agent: _orgAgent, ...rest } = request;
+  return rest;
+}
+
 /** Stable, value-free JSON errors for only the create-session boundary. */
 /** An Only me agent's chat defaults to Only me (see sessionAgentBinding). */
 async function defaultAgentChatVisibility(
@@ -7268,6 +7303,18 @@ async function defaultAgentChatVisibility(
 }
 
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof OrgAgentSessionCreateError) {
+    // An organization agent the create named, in this route's envelope:
+    // `details.code` is one of ORG_AGENT_ERROR_CODES.
+    return c.json(
+      {
+        code: error.httpStatus === 403 ? "SESSION_CREATE_FORBIDDEN" : "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { code: error.code },
+      },
+      error.httpStatus,
+    );
+  }
   if (error instanceof SessionUsageLimitHttpError) {
     // a create-time usage limit the caller may not set (agents and
     // children) or that this server does not accept yet (producer flag off).
@@ -7471,7 +7518,7 @@ function zodErrorFields(error: ZodError): string {
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
-function commandConflictResponse(c: Context, error: unknown): Response {
+export function commandConflictResponse(c: Context, error: unknown): Response {
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
   }

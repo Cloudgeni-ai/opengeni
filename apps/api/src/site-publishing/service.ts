@@ -56,6 +56,7 @@ import {
 import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
 import { ApiHttpError } from "../http/api-error";
 import { siteDataRole } from "../site-data/service";
+import { notifySiteLive } from "../site-live/service";
 import { createSiteContentScanner, type SiteContentScanner } from "./content-scanner";
 import { createSiteEdgeSync, type SiteEdgeSync } from "./edge-sync";
 import { effectiveSiteLimits, sourceSiteLimitProfile, storedSiteLimitProfileKind } from "./limits";
@@ -557,13 +558,20 @@ export async function afterSiteArtifactMutation<
     version?: { id: string } | null;
   },
 >(deps: SitePublishingDeps, result: T, options: { scan?: boolean } = {}): Promise<T> {
-  if (!result.replayed)
+  if (!result.replayed) {
     await notifySitePublicationChanged(
       deps,
       { accountId: result.artifact.accountId, workspaceId: result.artifact.workspaceId },
       result.artifact.id,
       options.scan && result.version ? { scanVersionId: result.version.id } : {},
     );
+    // Open pages and consoles showing the Site hear that a version changed
+    // (best effort; they keep a slow fallback check).
+    notifySiteLive(deps.settings, result.artifact.id, {
+      type: "version",
+      versionId: result.version?.id ?? null,
+    });
+  }
   return result;
 }
 

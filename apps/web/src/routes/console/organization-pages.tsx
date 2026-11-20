@@ -1,14 +1,13 @@
-// Agents, Members and Usage and billing. Members and billing are the app's
+// Members and Usage and billing. Members and billing are the app's
 // own organization settings pages, kept inside Console.
 import type { ConsoleRange } from "@opengeni/sdk";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { BotIcon, CreditCardIcon, UserPlusIcon, UsersIcon } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { CreditCardIcon, UserPlusIcon, UsersIcon } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { canInviteOrganizationRole } from "@opengeni/react/app/lib/organization-admin";
 import { Button } from "@opengeni/react/ui/button";
-import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { Section } from "@opengeni/react/ui/section";
@@ -20,9 +19,14 @@ import {
   formatMicros,
   rangeLabel,
   useConsole,
+  useOrgAgentsEnabled,
 } from "./console-shared";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
-import { OrganizationPeoplePage } from "@/components/organization/people-page";
+import {
+  OrganizationPeoplePage,
+  type ConsoleRolesView,
+} from "@/components/organization/people-page";
+import { consoleRolesApi, useConsoleMemberRoles } from "@/lib/console-access";
 import type { ConsoleMembersSearch, ConsoleUsageSearch } from "@/lib/console-route";
 
 import {
@@ -38,25 +42,31 @@ const CheckoutCreditsCelebration = lazy(async () => {
   return { default: module.CheckoutCreditsCelebration };
 });
 
-export function ConsoleAgentsRoute() {
-  return (
-    <ConsolePage>
-      <PageHeader title="Agents" icon={<BotIcon />} />
-      <EmptyState
-        variant="page"
-        icon={<BotIcon />}
-        title="Organization agents are coming"
-        description="For now, agents live in each workspace."
-      />
-    </ConsolePage>
-  );
-}
-
 export function ConsoleMembersRoute() {
   const navigate = useNavigate();
-  const { appWorkspaceId, search } = useConsole();
+  const { appWorkspaceId, search, client, organizationId } = useConsole();
   const { person, invitation, view } = useSearch({ strict: false }) as ConsoleMembersSearch;
   const access = useConsoleOrganizationAccess();
+  // Members' Console roles (docs/opengeni-console.md, "Roles").
+  // Only where Console agents are on for the organization.
+  const rolesOn = useOrgAgentsEnabled() === true;
+  const roles = useConsoleMemberRoles(client, organizationId, rolesOn);
+  const { refresh } = roles;
+  const consoleRoles = useMemo<ConsoleRolesView | undefined>(
+    () =>
+      !rolesOn
+        ? undefined
+        : {
+            mode: "console",
+            roles: roles.data?.roles ?? (roles.error ? [] : null),
+            setRole: async (target, role) => {
+              await consoleRolesApi(client, organizationId).setMemberRole(target, role);
+              await refresh();
+            },
+            refresh,
+          },
+    [client, organizationId, refresh, roles.data, roles.error, rolesOn],
+  );
   const subPage = Boolean(person || invitation || view);
   return (
     <ConsolePage>
@@ -87,6 +97,7 @@ export function ConsoleMembersRoute() {
           view={view}
           canManageBilling={access.canManageBilling}
           hideEndUsers
+          consoleRoles={consoleRoles}
         />
       </ConsoleOrganizationProvider>
     </ConsolePage>

@@ -1,7 +1,7 @@
-import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
+import type { ClaimClaudeLimitResetRequest, ClaudeSubscriptionAccount } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import {
   ConnectionAccessFormPage,
   useConnectionAccess,
@@ -30,7 +30,12 @@ import {
   ClaudeUsageReadout,
   useClaudeUsage,
 } from "./claude-usage";
-import { ClaudeLimitResetsSection } from "./claude-limit-resets";
+import {
+  ClaudeLimitResetDialog,
+  ClaudeLimitResetsSection,
+  ClaudeUseResetButton,
+  useClaudeLimitResetClaim,
+} from "./claude-limit-resets";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { subscriptionPlanLabel } from "@opengeni/react/app/lib/subscription-accounts";
@@ -104,7 +109,7 @@ export function ClaudeAccountUsageReadout({
   });
   if (account.status !== "active") return null;
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
-  return <ClaudeUsageReadout state={usage} plan={account.plan} />;
+  return <ClaudeUsageReadout state={usage} plan={account.plan} saved={account.usage} />;
 }
 export function ClaudeRow({
   claude,
@@ -216,6 +221,7 @@ function AccountUsage({
   account: ClaudeSubscriptionAccount;
   onReconnect?: (() => void) | undefined;
 }) {
+  const canManage = managesSubscriptionAccount(claude, account);
   const usage = useClaudeUsage({
     client: claude.client,
     scope: claude.organizationId ? "organization" : "workspace",
@@ -224,14 +230,42 @@ function AccountUsage({
     connected: true,
     credentialId: account.id,
     credentialVersion: account.version,
-    canManage: managesSubscriptionAccount(claude, account),
+    canManage,
     onCredentialChanged: () => refreshClaudeAccountMetadata(claude.client),
     accountPool: true,
   });
+  const { client, organizationId, workspaceId } = claude;
+  const claim = useCallback(
+    (request: ClaimClaudeLimitResetRequest) =>
+      organizationId
+        ? client.claimOrganizationClaudeSubscriptionAccountLimitReset(
+            organizationId,
+            account.id,
+            request,
+          )
+        : client.claimClaudeSubscriptionAccountLimitReset(workspaceId!, account.id, request),
+    [client, organizationId, workspaceId, account.id],
+  );
+  const claimState = useClaudeLimitResetClaim({ claim, beginRecord: usage.beginRecord });
   return (
     <>
-      <ClaudeUsage state={usage} plan={account.plan} onReconnect={onReconnect} />
-      <ClaudeLimitResetsSection usage={usage.value} />
+      <ClaudeUsage
+        state={usage}
+        plan={account.plan}
+        onReconnect={onReconnect}
+        saved={account.usage}
+      />
+      <ClaudeLimitResetsSection
+        usage={usage.value}
+        renderAction={
+          canManage
+            ? (grant, blocked) => (
+                <ClaudeUseResetButton grant={grant} blocked={blocked} state={claimState} />
+              )
+            : undefined
+        }
+      />
+      {canManage ? <ClaudeLimitResetDialog state={claimState} /> : null}
     </>
   );
 }
@@ -370,6 +404,7 @@ export function ClaudeConnectPage({
       }
       reconnectAccountId={reconnectAccountId}
       reconnectCredentialVersion={reconnectAccount?.version}
+      reconnectAccountEmail={reconnectAccount?.email}
       onClose={onClose}
       onConnected={onConnected}
       fields={fields}

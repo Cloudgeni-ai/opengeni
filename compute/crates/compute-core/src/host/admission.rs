@@ -31,6 +31,12 @@ pub struct Size {
     /// counted against [`crate::HostPolicy::cpu_budget`]. A sleeping
     /// sandbox reserves none.
     pub cpu: u64,
+    /// Processors its VM has. Not reserved and never refused on: an awake
+    /// VM can keep all of them busy, however little of their time it is
+    /// guaranteed, so the host tells placement how many processors its
+    /// awake VMs have ([`CpuCapacity::vcpus`]) to steer new ones to hosts
+    /// whose processors fewer of them share.
+    pub vcpus: u64,
     /// Bytes of local disk one save of its VM may write at most, booked
     /// while its VM holds state not saved yet and the host may save it
     /// unasked, or a save of it is asked for; see [`crate::DiskPolicy`].
@@ -58,6 +64,7 @@ impl Size {
             request: bytes,
             limit: bytes,
             cpu: 0,
+            vcpus: 0,
             save: bytes,
             disk: 0,
             fetch: 0,
@@ -112,6 +119,10 @@ pub struct CpuCapacity {
     /// Millicores reserved by sandboxes awake or waking, and by VMs not
     /// managed here that may run.
     pub reserved: u64,
+    /// Processors the VMs of sandboxes awake or waking, and of new ones
+    /// whose first wake is booked, have in all: more than the budget's
+    /// processors when they share them. Only told, never refused on.
+    pub vcpus: u64,
 }
 
 impl CpuCapacity {
@@ -369,19 +380,19 @@ impl Host {
     #[must_use]
     pub fn cpu_capacity(&self) -> Option<CpuCapacity> {
         let budget = self.policy.cpu_budget?;
-        let awake: u64 = self
+        let reserving = self
             .sandboxes
             .values()
             .filter(|slot| slot.reserves())
-            .map(|slot| slot.size.cpu)
-            .sum();
-        let creating: u64 = self.creating.values().map(|booked| booked.size.cpu).sum();
+            .map(|slot| slot.size)
+            .chain(self.creating.values().map(|booked| booked.size));
+        let (cpu, vcpus) = reserving.fold((0, 0), |(cpu, vcpus), size| {
+            (cpu + size.cpu, vcpus + size.vcpus)
+        });
         Some(CpuCapacity {
             budget,
-            reserved: awake
-                + creating
-                + self.unmanaged_cpu.values().sum::<u64>()
-                + self.spares.filling_cpu(),
+            reserved: cpu + self.unmanaged_cpu.values().sum::<u64>() + self.spares.filling_cpu(),
+            vcpus,
         })
     }
 

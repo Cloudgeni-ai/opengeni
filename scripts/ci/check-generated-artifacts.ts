@@ -67,6 +67,13 @@ export const GENERATED_ARTIFACT_CHECKS: readonly GeneratedArtifactCheck[] = [
     batchEnforcedBy: "packages/contracts/test/child-lifecycle-notice-protocol.test.ts",
   },
   {
+    name: "Agent file JSON Schema",
+    artifacts: ["packages/cli/schemas/agent.schema.json"],
+    check: ["bun", "scripts/generate-agent-file-schema.ts", "--check"],
+    regenerate: "bun scripts/generate-agent-file-schema.ts",
+    batchEnforcedBy: "packages/cli/test/agent-schema.test.ts",
+  },
+  {
     name: "Client Skill mirrors",
     artifacts: [
       "packages/runtime/src/bundled_default_skills/opengeni-client",

@@ -4,6 +4,8 @@ import {
   MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
   boundModelToolOutputItem,
   canonicalizePersistedHistoryItem,
+  CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+  modelToolOutputInlineMaxBytes,
   modelToolOutputSerializationBudgetTokens,
   omitOutputOnlyHistoryItemFields,
   truncateMiddleWithTokenBudget,
@@ -78,8 +80,58 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(boundModelToolOutputItem(bounded, 1)).toEqual(bounded);
   });
 
-  test("uses the live 10k policy with Codex's 1.2x serialization allowance", () => {
-    expect(modelToolOutputSerializationBudgetTokens()).toBe(12_000);
+  test("uses the 25k-token (100 KB) inline policy with Codex's 1.2x serialization allowance", () => {
+    expect(modelToolOutputInlineMaxBytes()).toBe(100_000);
+    expect(modelToolOutputSerializationBudgetTokens()).toBe(30_000);
+  });
+
+  test("a 60 KB tool result reaches the model whole under the default policy", () => {
+    const item = {
+      type: "function_call_result",
+      name: "sessions_list",
+      callId: "call-60k",
+      status: "completed",
+      output: { type: "text", text: "r".repeat(60_000) },
+    };
+    expect(canonicalizePersistedHistoryItem(item)).toEqual({
+      type: "function_call_result",
+      name: "sessions_list",
+      callId: "call-60k",
+      output: { type: "text", text: "r".repeat(60_000) },
+    });
+    expect(boundModelToolOutputItem(item)).toBe(item);
+  });
+
+  test("history bounded under the earlier 10k policy is byte-identical under the new default", () => {
+    const oldPolicy = CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS;
+    const items = [
+      // Cut under the earlier policy: carries the head/tail marker.
+      {
+        type: "function_call_result",
+        name: "skill_read",
+        callId: "call-cut",
+        output: { type: "text", text: "a\n".repeat(200_000) },
+      },
+      // Structured shell output cut under the earlier policy.
+      {
+        type: "shell_call_output",
+        callId: "call-shell",
+        output: [{ stdout: "s".repeat(90_000), stderr: "e".repeat(90_000) }],
+      },
+      // Just within the earlier policy: never cut.
+      {
+        type: "function_call_result",
+        name: "web_fetch",
+        callId: "call-fit",
+        output: "w".repeat(47_000),
+      },
+    ].map((item) => canonicalizePersistedHistoryItem(item, oldPolicy));
+    expect(JSON.stringify(items[0])).toContain("tokens truncated");
+    for (const item of items) {
+      const before = JSON.stringify(item);
+      expect(JSON.stringify(canonicalizePersistedHistoryItem(item))).toBe(before);
+      expect(JSON.stringify(boundModelToolOutputItem(item))).toBe(before);
+    }
   });
 
   test("matches Codex's head/tail token marker", () => {

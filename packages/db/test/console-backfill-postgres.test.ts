@@ -64,11 +64,29 @@ test("the backfill marks product workspaces only", async () => {
   const start = migration.indexOf("DO $opengeni_console_backfill$");
   const marker = "$opengeni_console_backfill$;";
   const end = migration.indexOf(marker, start) + marker.length;
+  // 1377 ran long before 1512 made marker writes need an account-only
+  // context (the backfill sets each workspace's context while it marks it).
+  // Replay it as it ran: without 1512's guard, which is put back after.
+  const guard = await Bun.file(
+    new URL("../drizzle/1512_organization_compute_managed_reach.sql", import.meta.url),
+  ).text();
+  const guardPolicies = [
+    ...guard.matchAll(/CREATE POLICY (account_only_\w+) ON organization_managed_workspaces[^;]*;/g),
+  ];
+  expect(guardPolicies.map((match) => match[1])).toEqual([
+    "account_only_insert",
+    "account_only_update",
+    "account_only_delete",
+  ]);
   const owner = postgres(fixture.ownerUrl, { max: 1, onnotice: () => {} });
   try {
     await owner.begin(async (tx) => {
       await tx`select set_config('search_path', ${fixture!.schema}, true)`;
+      for (const [, name] of guardPolicies) {
+        await tx.unsafe(`DROP POLICY ${name} ON organization_managed_workspaces`);
+      }
       await tx.unsafe(migration.slice(start, end));
+      for (const [statement] of guardPolicies) await tx.unsafe(statement);
     });
   } finally {
     await owner.end();

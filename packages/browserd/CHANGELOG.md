@@ -1,5 +1,54 @@
 # @opengeni/browserd
 
+## 0.4.51
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/interaction@6.32.0
+
+## 0.4.50
+
+### Patch Changes
+
+- 75bdc26: A browser closing while a CDP command or wait nobody still awaits is in flight no longer ends the browser controller, and with it every browser on the machine.
+- 24441c9: Choosing an item from a context menu of a background Mac app no longer fails with `element_outside_target_window` when the menu opened away from the app's windows. A context menu opened through accessibility can open at the pointer instead of at its element, so while the person works in another app it lands over that app, and the driver could not tie it to the window the agent named. The pinned CUA driver now treats an open menu over none of the app's windows as the target window's; a menu over another window of the app still belongs to that window.
+  - @opengeni/contracts@6.31.1
+  - @opengeni/interaction@6.31.1
+
+## 0.4.49
+
+### Patch Changes
+
+- fd0f13f: A computer-use window read that asks only for what changed since an earlier read (`since`), with structured elements (`tree_format` "elements" or "both"), no longer fails with "internal typed output mismatch … returned_element_count does not match elements". The pinned CUA driver trimmed the elements to the changed rows but kept the full read's count, so the typed output check rejected the response and the agent got an unknown outcome on a plain read. The count now follows the rows returned.
+- fd0f13f: Typing into iPhone Mirroring on macOS now arrives as the intended text. iPhone Mirroring passes each key event's key code on to the phone and ignores the text a synthetic event carries, so typed text arrived as "aaaa" and a code typed into a field left it empty. The pinned CUA driver now sends it the physical keys for each character, as it already did for Screen Sharing and the iOS Simulator.
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/interaction@6.31.0
+
 ## 0.4.48
 
 ### Patch Changes

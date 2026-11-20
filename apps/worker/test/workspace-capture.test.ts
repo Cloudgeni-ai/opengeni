@@ -39,6 +39,7 @@ import {
   readCaptureRepository,
   retainedCaptureBlobRefs,
   RESIDUE_DIRS,
+  serializeCaptureManifest,
   WHOLE_CAPTURE_GUARD_BYTES,
 } from "../src/activities/workspace-capture";
 
@@ -558,6 +559,143 @@ describe("workspace-capture — GC key-math", () => {
 });
 
 describe("workspace-capture — manifest & event serialization", () => {
+  function diffEntry(path: string, lineCount: number): WorkspaceCaptureRepo["diff"][number] {
+    return {
+      path,
+      oldPath: null,
+      status: "modified",
+      isBinary: false,
+      isImage: false,
+      additions: lineCount,
+      deletions: 0,
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 0,
+          newStart: 1,
+          newLines: lineCount,
+          header: "@@ -1,0 +1 @@",
+          lines: Array.from({ length: lineCount }, (_, index) => ({
+            type: "add" as const,
+            oldNo: null,
+            newNo: index + 1,
+            text: `line ${index} ${"x".repeat(60)}`,
+          })),
+        },
+      ],
+      truncated: false,
+    };
+  }
+
+  function manyRepoManifest(): WorkspaceCaptureManifest {
+    // A workspace of many checkouts whose branch comparison spans thousands of
+    // changed lines each: the shape that produced ~900 MB manifests.
+    const repos: WorkspaceCaptureRepo[] = Array.from({ length: 6 }, (_, index) => ({
+      root: `repo-${index}`,
+      head: "feature",
+      headOid: null,
+      detached: false,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      status: [],
+      diff: [diffEntry("small.ts", 3)],
+      branchDiff: [diffEntry("big.ts", 2_000), diffEntry("other.ts", 500)],
+    }));
+    return WorkspaceCaptureManifest.parse({
+      version: 1,
+      revision: 1,
+      capturedAt: "2026-07-08T00:00:00.000Z",
+      turnId: "turn-1",
+      leaseEpoch: 1,
+      treeIndex: {
+        name: "",
+        path: "",
+        type: "dir",
+        sizeBytes: null,
+        mtimeMs: null,
+        mode: null,
+        truncated: false,
+      },
+      treeTruncated: false,
+      repos,
+      files: [],
+      stats: {
+        repoCount: repos.length,
+        fileCount: 0,
+        additions: 18,
+        deletions: 0,
+        totalBytes: 0,
+        tooLargeCount: 0,
+        binaryCount: 0,
+        treeEntryCount: 1,
+        treeTruncated: false,
+        durationMs: 1,
+        fingerprint: "fp",
+      },
+    });
+  }
+
+  test("a manifest that fits is serialized unchanged", () => {
+    const manifest = manyRepoManifest();
+    const bytes = serializeCaptureManifest(manifest, 10 * 1024 * 1024);
+    expect(bytes).not.toBeNull();
+    expect(new TextDecoder().decode(bytes!)).toBe(JSON.stringify(manifest));
+  });
+
+  test("an oversized manifest sheds the largest branch hunks first and stays within the bound", () => {
+    const manifest = manyRepoManifest();
+    const full = new TextEncoder().encode(JSON.stringify(manifest)).byteLength;
+    const maxBytes = Math.floor(full / 3);
+    const bytes = serializeCaptureManifest(manifest, maxBytes);
+    expect(bytes).not.toBeNull();
+    expect(bytes!.byteLength).toBeLessThanOrEqual(maxBytes);
+    const bounded = WorkspaceCaptureManifest.parse(JSON.parse(new TextDecoder().decode(bytes!)));
+    // Identity, stats and every entry survive; only hunks were dropped.
+    expect(bounded.revision).toBe(manifest.revision);
+    expect(bounded.stats).toEqual(manifest.stats);
+    for (const repo of bounded.repos) {
+      expect(repo.diff[0]!.hunks).toHaveLength(1);
+      expect(repo.diff[0]!.truncated).toBe(false);
+      expect(repo.branchDiff!.map((entry) => entry.path)).toEqual(["big.ts", "other.ts"]);
+      expect(repo.branchDiff![0]!.additions).toBe(2_000);
+    }
+    const shed = bounded.repos.flatMap((repo) => repo.branchDiff!).filter((e) => e.truncated);
+    expect(shed.length).toBeGreaterThan(0);
+    for (const entry of shed) expect(entry.hunks).toEqual([]);
+    // Largest first: no smaller branch entry is shed while a larger one keeps hunks.
+    expect(
+      bounded.repos.some(
+        (repo) => repo.branchDiff![0]!.hunks.length > 0 && repo.branchDiff![1]!.truncated,
+      ),
+    ).toBe(false);
+    // The input manifest is not mutated.
+    expect(manifest.repos[0]!.branchDiff![0]!.hunks).toHaveLength(1);
+  });
+
+  test("working-tree hunks are shed only after every branch hunk", () => {
+    const manifest = manyRepoManifest();
+    const withoutBranchHunks = {
+      ...manifest,
+      repos: manifest.repos.map((repo) => ({
+        ...repo,
+        branchDiff: repo.branchDiff!.map((entry) => ({ ...entry, hunks: [], truncated: true })),
+      })),
+    };
+    const maxBytes = new TextEncoder().encode(JSON.stringify(withoutBranchHunks)).byteLength - 1;
+    const bounded = JSON.parse(
+      new TextDecoder().decode(serializeCaptureManifest(manifest, maxBytes)!),
+    ) as WorkspaceCaptureManifest;
+    expect(bounded.repos.every((repo) => repo.branchDiff!.every((entry) => entry.truncated))).toBe(
+      true,
+    );
+    expect(bounded.repos.some((repo) => repo.diff[0]!.truncated)).toBe(true);
+  });
+
+  test("a manifest that cannot fit even without hunks is refused", () => {
+    expect(serializeCaptureManifest(manyRepoManifest(), 512)).toBeNull();
+  });
+
   test("a manifest round-trips through JSON and parses under the contract", () => {
     const manifest = {
       version: 1 as const,

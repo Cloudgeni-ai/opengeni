@@ -164,7 +164,12 @@ export async function consoleContentSecuritySources(
 
   const sitesDomain = configuredSitesDomain(settings);
   const htmlFrameHost = sitesDomain ? sitesHtmlFrameHostOrigin(sitesDomain) : null;
-  if (htmlFrameHost) add(["frame-src"], htmlFrameHost);
+  if (htmlFrameHost) {
+    add(["frame-src"], htmlFrameHost);
+    // The console's live connection to a Site it shows (new versions and
+    // data change hints) is a WebSocket on the same host.
+    add(["connect-src"], htmlFrameHost.replace(/^https:/u, "wss:"));
+  }
 
   return {
     version: 1,

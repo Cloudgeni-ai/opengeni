@@ -707,6 +707,15 @@
     },
     {
       "method": "GET",
+      "path": "/v1/organizations/:organizationId/agents",
+      "sdk": [
+        "agentsPath"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/organizations/:organizationId/api-keys",
       "sdk": [
         "OpenGeniClient.listOrganizationApiKeys"
@@ -810,6 +819,19 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/limit-resets/claim",
+      "sdk": [
+        "OpenGeniClient.claimOrganizationClaudeSubscriptionAccountLimitReset"
+      ],
+      "request": [
+        "ClaimClaudeLimitResetRequest"
+      ],
+      "response": [
+        "ClaimClaudeLimitResetResponse"
+      ]
     },
     {
       "method": "GET",
@@ -3793,6 +3815,19 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/limit-resets/claim",
+      "sdk": [
+        "OpenGeniClient.claimClaudeSubscriptionAccountLimitReset"
+      ],
+      "request": [
+        "ClaimClaudeLimitResetRequest"
+      ],
+      "response": [
+        "ClaimClaudeLimitResetResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage",
       "sdk": [
@@ -5299,6 +5334,15 @@
       "path": "/v1/workspaces/:workspaceId/editable-artifacts/imports",
       "sdk": [
         "OpenGeniClient.importEditableArtifact"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+      "sdk": [
+        "credentialPath"
       ],
       "request": [],
       "response": []
@@ -7866,6 +7910,15 @@
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/html",
       "sdk": [
         "OpenGeniClient.getWorkspaceArtifactHtml"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/live",
+      "sdk": [
+        "OpenGeniClient.createWorkspaceArtifactLiveTicket"
       ],
       "request": [],
       "response": []
@@ -11570,6 +11623,7 @@
       "session.status.changed",
       "session.title_set",
       "session.tool_policy.updated",
+      "session.tool_server.unavailable",
       "session.usage_limit.updated",
       "session.variable_sets.updated",
       "session.visibility.changed",
@@ -14810,6 +14864,26 @@
         "$.endpointUrl": "string?"
       }
     },
+    "ClaimClaudeLimitResetRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.grantId": "string!",
+        "$.requestId": "string!"
+      }
+    },
+    "ClaimClaudeLimitResetResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.claim": "ref(ClaudeLimitResetClaim)!",
+        "$.usage": "ref(ClaudeSubscriptionUsage)!"
+      }
+    },
     "ClaudeExtraUsage": {
       "io": [
         "output"
@@ -14823,6 +14897,30 @@
         "$.state": "enum! null=[\"\\\"disabled\\\"\",\"\\\"enabled\\\"\",\"\\\"not_configured\\\"\"]",
         "$.usedCredits": "number! null",
         "$.utilization": "number! null"
+      }
+    },
+    "ClaudeLimitResetClaim": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.cleared": "array!",
+        "$.cleared[]": "string",
+        "$.cooldownUntil": "string! null",
+        "$.reason": "string! null",
+        "$.resetsLeft": "integer! null",
+        "$.result": "ref(ClaudeLimitResetClaimResult)!",
+        "$.retryable": "boolean!",
+        "$.weeklyResetsAt": "string! null"
+      }
+    },
+    "ClaudeLimitResetClaimResult": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"already_used\\\"\",\"\\\"auth_error\\\"\",\"\\\"cooldown\\\"\",\"\\\"error\\\"\",\"\\\"ineligible\\\"\",\"\\\"not_limited\\\"\",\"\\\"rate_limited\\\"\",\"\\\"reset\\\"\",\"\\\"unavailable\\\"\"]"
       }
     },
     "ClaudeLimitResetGrant": {
@@ -14923,6 +15021,7 @@
         "$.plan": "string! null",
         "$.reach": "ref(SubscriptionAccountReach)?",
         "$.scope": "ref(ResourceAuthorityScope)!",
+        "$.signedInAt": "string? null",
         "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
         "$.subject": "string!",
         "$.usage": "ref(ClaudeSubscriptionUsage)?",
@@ -15229,6 +15328,7 @@
         "$.mcpServers[].name": "string!",
         "$.models": "array!",
         "$.models[]": "ref(ClientModel)",
+        "$.orgAgents": "boolean?",
         "$.productAccessMode": "ref(ProductAccessMode)!",
         "$.sandboxFiles": "boolean?",
         "$.serverVersion": "string?",
@@ -16690,7 +16790,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
+        "$": "enum=[\"\\\"agent.archived\\\"\",\"\\\"agent.created\\\"\",\"\\\"agent.deployed\\\"\",\"\\\"agent.management_changed\\\"\",\"\\\"agent.published\\\"\",\"\\\"agent.sessions_viewed\\\"\",\"\\\"agent.updated\\\"\",\"\\\"agent.version_saved\\\"\",\"\\\"member.console_role_changed\\\"\",\"\\\"session.metadata_viewed\\\"\",\"\\\"session.transcript_viewed\\\"\",\"\\\"settings.review_level_changed\\\"\",\"\\\"tool_credential.deleted\\\"\",\"\\\"tool_credential.written\\\"\",\"\\\"tool_server.created\\\"\",\"\\\"tool_server.deleted\\\"\",\"\\\"tool_server.updated\\\"\",\"\\\"workspace.kind_changed\\\"\"]"
       }
     },
     "ConsoleAuditEvent": {
@@ -16699,7 +16799,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.action": "ref(ConsoleAuditAction)!",
+        "$.action": "ref(ConsoleAuditEventAction)!",
         "$.actorLabel": "string! null",
         "$.actorSubjectId": "string!",
         "$.createdAt": "string!",
@@ -16709,6 +16809,16 @@
         "$.sessionId": "string! null",
         "$.workspaceId": "string! null",
         "$.workspaceName": "string! null"
+      }
+    },
+    "ConsoleAuditEventAction": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "ref(ConsoleAuditAction)",
+        "$|1": "string"
       }
     },
     "ConsoleAuditEventListResponse": {
@@ -16728,6 +16838,8 @@
       ],
       "shape": {
         "$": "object",
+        "$.displayName": "string? null",
+        "$.email": "string? null",
         "$.externalId": "string! null",
         "$.source": "string! null",
         "$.subjectId": "string!"
@@ -16748,7 +16860,25 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\"]"
+        "$": "enum=[\"\\\"api_key\\\"\",\"\\\"backfill\\\"\",\"\\\"console\\\"\",\"\\\"console_test\\\"\"]"
+      }
+    },
+    "ConsoleManagedSourceValue": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "ref(ConsoleManagedSource)",
+        "$|1": "string"
+      }
+    },
+    "ConsoleMemberRole": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"editor\\\"\",\"\\\"none\\\"\",\"\\\"viewer\\\"\"]"
       }
     },
     "ConsoleModelSpend": {
@@ -16885,6 +17015,7 @@
         "$.countsTruncated": "boolean!",
         "$.endUsers": "integer!",
         "$.managedSessions": "integer!",
+        "$.orgAgents": "boolean?",
         "$.organizationId": "string!",
         "$.range": "ref(ConsoleRange)!",
         "$.reviewLevel": "ref(ConsoleReviewLevel)!",
@@ -16917,7 +17048,7 @@
         "$.id": "string!",
         "$.kind": "ref(ConsoleWorkspaceKind)!",
         "$.lastActivityAt": "string! null",
-        "$.managedSource": "ref(ConsoleManagedSource)! null",
+        "$.managedSource": "ref(ConsoleManagedSourceValue)! null",
         "$.name": "string!",
         "$.sessions": "integer!",
         "$.spendMicros": "integer!"
@@ -17504,6 +17635,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.consoleRole": "ref(ConsoleMemberRole)?",
         "$.email": "string!",
         "$.expiresAt": "string!",
         "$.initialWorkspaceIds": "array?",
@@ -17936,6 +18068,7 @@
         "$.nestedAgentDepth": "integer!",
         "$.nestedAgentDepthPolicySessionId": "string! null",
         "$.nestedAgentDepthPolicySource": "ref(NestedAgentDepthPolicySource)!",
+        "$.orgAgent": "ref(SessionOrgAgent)? null",
         "$.parentSessionId": "string! null",
         "$.pinVersion": "integer!",
         "$.pinned": "boolean!",
@@ -20786,10 +20919,55 @@
     },
     "InboxItemStatus": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"dismissed\\\"\",\"\\\"open\\\"\",\"\\\"resolved\\\"\",\"\\\"withdrawn\\\"\"]"
+      }
+    },
+    "InboxNotice": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.body": "string!",
+        "$.choices": "array!",
+        "$.choices[]": "object",
+        "$.choices[].id": "string!",
+        "$.choices[].label": "string!",
+        "$.createdAt": "string!",
+        "$.eventSequence": "integer? null",
+        "$.facts": "array!",
+        "$.facts[]": "object",
+        "$.facts[].label": "string!",
+        "$.facts[].value": "string!",
+        "$.id": "string!",
+        "$.kind": "const!=[\"\\\"notification\\\"\"]",
+        "$.link": "object!",
+        "$.link.label": "string!",
+        "$.link.url": "string!",
+        "$.resolvedAt": "string! null",
+        "$.sender": "object! null",
+        "$.sender.label": "string!",
+        "$.sender.subjectId": "string!",
+        "$.serverQuestion": "object! null",
+        "$.serverQuestion.kind": "enum!=[\"\\\"confirm\\\"\",\"\\\"form\\\"\"]",
+        "$.serverQuestion.round": "integer!",
+        "$.serverQuestion.server": "string!",
+        "$.sessionAvailable": "const!=[\"false\"]",
+        "$.sessionId": "null!",
+        "$.sessionTitle": "string! null",
+        "$.snoozedUntil": "string! null",
+        "$.sourceKey": "string!",
+        "$.status": "ref(InboxItemStatus)!",
+        "$.subtitle": "string!",
+        "$.title": "string!",
+        "$.unread": "boolean!",
+        "$.updatedAt": "string!",
+        "$.urgency": "ref(NotificationUrgency)!",
+        "$.workspaceId": "string!"
       }
     },
     "InboxSettings": {
@@ -22806,6 +22984,8 @@
         "$.items": "array!",
         "$.items[]": "ref(InboxItem)",
         "$.needsYouCount": "integer!",
+        "$.notices": "array?",
+        "$.notices[]": "ref(InboxNotice)",
         "$.unreadCount": "integer!"
       }
     },
@@ -24607,7 +24787,8 @@
     },
     "NotificationUrgency": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"normal\\\"\",\"\\\"time_sensitive\\\"\"]"
@@ -24720,6 +24901,16 @@
         "$": "object",
         "$.message": "string! null",
         "$.opened": "boolean!"
+      }
+    },
+    "OrgAgentOverrideChange": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.agent": "unknown!",
+        "$.chat": "unknown!"
       }
     },
     "OrganizationAccessPolicy": {
@@ -24938,6 +25129,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowManagedWorkspaces": "boolean?",
         "$.allowPersonalWorkspaces": "boolean!",
         "$.allowedWorkspaceIds": "array! null",
         "$.allowedWorkspaceIds[]": "string",
@@ -25930,7 +26122,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:personal\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:use\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
+        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"agents:manage\\\"\",\"\\\"agents:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:personal\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:use\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"tool_credentials:write\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
       }
     },
     "PersonalApiKey": {
@@ -29031,6 +29223,7 @@
         "$.nestedAgentDepth": "integer!",
         "$.nestedAgentDepthPolicySessionId": "string! null",
         "$.nestedAgentDepthPolicySource": "ref(NestedAgentDepthPolicySource)!",
+        "$.orgAgent": "ref(SessionOrgAgent)? null",
         "$.parentSessionId": "string! null",
         "$.pinVersion": "integer!",
         "$.pinned": "boolean!",
@@ -29424,7 +29617,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.agentCall.ringing\\\"\",\"\\\"session.agentCall.settled\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.profile_set\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.resources.added\\\"\",\"\\\"session.resources.removed\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"tool.discovery_card\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.agentCall.ringing\\\"\",\"\\\"session.agentCall.settled\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.profile_set\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.resources.added\\\"\",\"\\\"session.resources.removed\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.tool_server.unavailable\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"tool.discovery_card\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -30026,6 +30219,20 @@
         "$.sessionId": "string!",
         "$.snapshot": "ref(ModelContextSnapshot)! null",
         "$.turnId": "string! null"
+      }
+    },
+    "SessionOrgAgent": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "string!",
+        "$.key": "string!",
+        "$.name": "string?",
+        "$.overrides": "object! null",
+        "$.overrides{}": "ref(OrgAgentOverrideChange)",
+        "$.version": "integer!"
       }
     },
     "SessionPendingInputPreview": {
@@ -31077,6 +31284,7 @@
         "$|op=insert.collection": "string!",
         "$|op=insert.data": "object!",
         "$|op=insert.data{}": "unknown",
+        "$|op=insert.idempotencyKey": "string?",
         "$|op=insert.key": "string?",
         "$|op=insert.op": "const!=[\"\\\"insert\\\"\"]",
         "$|op=put": "object",
@@ -33608,6 +33816,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowManagedWorkspaces": "boolean?",
         "$.allowPersonalWorkspaces": "boolean!",
         "$.allowedWorkspaceIds": "array! null",
         "$.allowedWorkspaceIds[]": "string"
@@ -36864,6 +37073,7 @@
       "AgentConfigRequest": "type",
       "AgentEffectiveTools": "type",
       "AgentErrorCode": "type",
+      "agentFileToDefinition": "value",
       "AgentInstructionReceipt": "type",
       "AgentInstructionReviewItem": "type",
       "AgentInstructionReviewListResponse": "type",
@@ -36909,11 +37119,15 @@
       "ApiIntegrationUninstallPreview": "type",
       "ApiKey": "type",
       "ApiKeyConnectionCredential": "type",
+      "ApplyOrgAgentRequest": "type",
+      "ApplyOrgAgentResponse": "type",
+      "applyOrganizationAgent": "value",
       "applyUrlRotation": "value",
       "ApplyWorkspaceSkillRevisionRequest": "type",
       "APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE": "value",
       "ApproveSlackUserLinkAccessRequest": "type",
       "AppShotCapture": "type",
+      "archiveOrganizationAgent": "value",
       "ArtifactCatalogItem": "type",
       "ArtifactCatalogKind": "type",
       "ArtifactCatalogListOptions": "type",
@@ -37085,6 +37299,8 @@
       "ChatSession": "type",
       "ChatSessionLineageResponse": "type",
       "ChatSessionListResponse": "type",
+      "ClaimClaudeLimitResetRequest": "type",
+      "ClaimClaudeLimitResetResponse": "type",
       "ClaudeExtraUsage": "type",
       "ClaudeLimitResetClaim": "type",
       "ClaudeLimitResetClaimResult": "type",
@@ -37287,14 +37503,18 @@
       "CreateManagedProviderVaultRequest": "type",
       "CreateNetworkRouteRequest": "type",
       "createOpenGeniSiteClient": "value",
+      "CreateOrgAgentRequest": "type",
+      "createOrganizationAgent": "value",
       "CreateOrganizationApiKeyRequest": "type",
       "CreateOrganizationCompatibleEndpointModelRequest": "type",
       "CreateOrganizationCompatibleEndpointRequest": "type",
       "CreateOrganizationProviderCustomModelRequest": "type",
       "CreateOrganizationServiceAccountRequest": "type",
+      "createOrganizationToolServer": "value",
       "CreateOrganizationWebhookRequest": "type",
       "CreateOrganizationWebhookResponse": "type",
       "CreateOrganizationWorkspaceRequest": "type",
+      "CreateOrgToolServerRequest": "type",
       "CreatePersonalApiKeyRequest": "type",
       "CreatePersonalApiKeyResponse": "type",
       "CreatePreferenceRegistryProposalRequest": "type",
@@ -37348,12 +37568,16 @@
       "DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY": "value",
       "DefaultModelSelection": "type",
       "DefaultModelSelectionSource": "type",
+      "defineAgent": "value",
       "DeleteAgentResponse": "type",
+      "deleteEndUserToolCredential": "value",
       "DeleteOrganizationProviderCustomModelRequest": "type",
+      "deleteOrganizationToolServer": "value",
       "DeleteSessionQueueItemRequest": "type",
       "DeleteWorkspaceGatewayCustomModelRequest": "type",
       "DeleteWorkspaceOpenRouterCustomModelRequest": "type",
       "DeleteWorkspaceOpperCustomModelRequest": "type",
+      "DeployAgentOptions": "type",
       "deriveAutomaticSessionTitlePreview": "value",
       "deriveSessionDisplayTitle": "value",
       "DesktopConnectionState": "type",
@@ -37404,6 +37628,7 @@
       "encodeCodexRealtimeV3DelegationContextAppend": "value",
       "encodeCodexRealtimeV3SessionContextAppend": "value",
       "EndSessionRealtimeRequest": "type",
+      "EndUserToolCredential": "type",
       "EnrollmentCredentials": "type",
       "EnrollmentOs": "type",
       "EnrollTokenExchangeRequest": "type",
@@ -37496,8 +37721,14 @@
       "GeneratedVideoReceipt": "type",
       "GeneratePasswordOptions": "type",
       "GeneratePasswordSpec": "type",
+      "getEndUserToolCredential": "value",
       "GetMyUsageRequest": "type",
+      "getOrganizationAgent": "value",
+      "getOrganizationAgentPublishOperation": "value",
+      "getOrganizationAgentUsage": "value",
+      "getOrganizationAgentVersion": "value",
       "GetOrganizationCredentialProviderResponse": "type",
+      "getOrganizationToolServer": "value",
       "GetSessionOptions": "type",
       "GetUsageRequest": "type",
       "GetWorkspaceCaptureFileResponse": "type",
@@ -37579,6 +37810,7 @@
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InboundEvent": "type",
       "InboundEventSummary": "type",
+      "InboxEntry": "type",
       "InboxItem": "type",
       "InboxItemChoice": "type",
       "InboxItemFact": "type",
@@ -37586,6 +37818,7 @@
       "InboxItemLink": "type",
       "InboxItemSender": "type",
       "InboxItemServerQuestion": "type",
+      "InboxNotice": "type",
       "InboxSettings": "type",
       "InboxTidyPolicy": "type",
       "InferenceFeatureAvailability": "type",
@@ -37671,6 +37904,7 @@
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isOrgAgentRef": "value",
       "isPresentedSessionToolCall": "value",
       "isPresentedSessionToolName": "value",
       "isRawModelLabel": "value",
@@ -37745,12 +37979,23 @@
       "ListInstalledSkillsResponse": "type",
       "ListIntegrationDefinitionsResponse": "type",
       "ListManagedOrganizationMembershipsResponse": "type",
+      "ListOrgAgentComputeResponse": "type",
+      "ListOrgAgentSessionsResponse": "type",
+      "ListOrgAgentsResponse": "type",
+      "ListOrgAgentVersionsResponse": "type",
+      "listOrganizationAgentCompute": "value",
+      "listOrganizationAgents": "value",
+      "listOrganizationAgentSessions": "value",
+      "listOrganizationAgentVersions": "value",
       "ListOrganizationMachinesResponse": "type",
       "ListOrganizationRigsResponse": "type",
       "ListOrganizationServiceAccountsResponse": "type",
       "ListOrganizationSessionsOptions": "type",
+      "listOrganizationToolServers": "value",
+      "listOrganizationToolServerTools": "value",
       "ListOrganizationWebhookDeliveriesResponse": "type",
       "ListOrganizationWebhooksResponse": "type",
+      "ListOrgToolServersResponse": "type",
       "ListPersonalApiKeysResponse": "type",
       "ListPersonalGitHubRepositoriesOptions": "type",
       "ListPersonalGitHubRepositoriesResponse": "type",
@@ -37969,6 +38214,18 @@
       "OpenGeniWorkspaceTools": "type",
       "OpenMachinePrivacySettingsRequest": "type",
       "OpenMachinePrivacySettingsResponse": "type",
+      "OrgAgent": "type",
+      "OrgAgentComputeOption": "type",
+      "OrgAgentDefinitionInput": "type",
+      "OrgAgentFileInput": "type",
+      "OrgAgentOverridesMode": "type",
+      "OrgAgentPublishOperation": "type",
+      "OrgAgentRef": "type",
+      "OrgAgentResponse": "type",
+      "OrgAgentRunsOn": "type",
+      "OrgAgentSessionRequest": "type",
+      "OrgAgentUsageResponse": "type",
+      "OrgAgentVersion": "type",
       "OrganizationAccessPolicy": "type",
       "OrganizationAccessPreset": "type",
       "OrganizationActor": "type",
@@ -37976,6 +38233,8 @@
       "OrganizationAdministrationMemberWorkspaceAccess": "type",
       "OrganizationAdministrationOverview": "type",
       "OrganizationAgentAdminAccess": "type",
+      "organizationAgents": "value",
+      "OrganizationAgentsClient": "type",
       "OrganizationAnthropicApiKey": "type",
       "OrganizationAnthropicApiKeysResponse": "type",
       "OrganizationApiKeyAccess": "type",
@@ -38027,6 +38286,8 @@
       "OrganizationWorkspaceAccessMember": "type",
       "OrganizationWorkspaceRoleDefinition": "type",
       "OrganizationWorkspaceScope": "type",
+      "OrgToolServer": "type",
+      "OrgToolServerToolsResponse": "type",
       "OwnResource": "type",
       "OwnResourceReachKind": "type",
       "OwnResourceReachResponse": "type",
@@ -38125,9 +38386,14 @@
       "PtyWriteRequest": "type",
       "PublishBrowserRevisionRequest": "type",
       "PublishBrowserRevisionResponse": "type",
+      "PublishOrgAgentRequest": "type",
+      "PublishOrgAgentResponse": "type",
+      "publishOrganizationAgent": "value",
       "PublishSandboxFileArtifactRequest": "type",
       "PublishWorkspaceArtifactVersionRequest": "type",
       "PutAgentSlackAvailabilityRequest": "type",
+      "putEndUserToolCredential": "value",
+      "PutEndUserToolCredentialRequest": "type",
       "PutOrganizationCredentialProviderRequest": "type",
       "PutOrganizationCredentialProviderResponse": "type",
       "PutOrganizationWorkspaceMemberRequest": "type",
@@ -38232,6 +38498,8 @@
       "SaveGoogleDriveIntegrationSourceRequest": "type",
       "SaveGoogleDriveSourceRequest": "type",
       "SaveNewSessionDraftRequest": "type",
+      "SaveOrgAgentDraftRequest": "type",
+      "saveOrganizationAgentDraft": "value",
       "SaveWorkspaceSkillRequest": "type",
       "ScheduledOccurrenceEvent": "type",
       "ScheduledOccurrenceEvents": "type",
@@ -38347,6 +38615,7 @@
       "SessionMessageSearchResponse": "type",
       "SessionModelAccountChoiceResponse": "type",
       "SessionModelContextResponse": "type",
+      "SessionOrgAgent": "type",
       "SessionPendingInputPreview": "type",
       "SessionPromptRouting": "type",
       "SessionProxyContext": "type",
@@ -38399,6 +38668,8 @@
       "SessionVisibilityWork": "type",
       "SessionWorkspaceWebhookEvent": "type",
       "SetMemberAllowanceRequest": "type",
+      "SetOrgAgentManagementRequest": "type",
+      "setOrganizationAgentManagement": "value",
       "SetOrganizationCompatibleEndpointModelReasoningRequest": "type",
       "SetOrganizationCustomModelListPriceRequest": "type",
       "SetOwnResourceReachRequest": "type",
@@ -38702,6 +38973,8 @@
       "UpdateModelAccountPreferencesRequest": "type",
       "UpdateNetworkRouteRequest": "type",
       "UpdateOpenGeniSlackBotOrganizationAccess": "type",
+      "UpdateOrgAgentRequest": "type",
+      "updateOrganizationAgent": "value",
       "UpdateOrganizationAgentAdminAccessRequest": "type",
       "UpdateOrganizationAnthropicApiKeyRequest": "type",
       "UpdateOrganizationApiKeyRequest": "type",
@@ -38714,8 +38987,10 @@
       "UpdateOrganizationPrivacySettingsRequest": "type",
       "UpdateOrganizationPrivateSessionSettingsRequest": "type",
       "UpdateOrganizationServiceAccountRequest": "type",
+      "updateOrganizationToolServer": "value",
       "UpdateOrganizationWebhookRequest": "type",
       "UpdateOrganizationWorkspaceRequest": "type",
+      "UpdateOrgToolServerRequest": "type",
       "UpdateRigRequest": "type",
       "UpdateScheduledTaskRequest": "type",
       "UpdateSessionAgentRequest": "type",
@@ -38834,6 +39109,7 @@
       "WorkspaceArtifactEvent": "type",
       "WorkspaceArtifactListOptions": "type",
       "WorkspaceArtifactListResponse": "type",
+      "WorkspaceArtifactLiveTicketResponse": "type",
       "WorkspaceArtifactMutationResponse": "type",
       "WorkspaceArtifactSourceBundle": "type",
       "WorkspaceArtifactSourceFile": "type",
@@ -39810,6 +40086,67 @@
       "WorkbookRunResult": "type",
       "XLSX_CONTENT_TYPE": "value"
     },
+    "@opengeni/sdk/organization-agents": {
+      "agentFileToDefinition": "value",
+      "ApplyOrgAgentRequest": "type",
+      "ApplyOrgAgentResponse": "type",
+      "applyOrganizationAgent": "value",
+      "archiveOrganizationAgent": "value",
+      "CreateOrgAgentRequest": "type",
+      "createOrganizationAgent": "value",
+      "createOrganizationToolServer": "value",
+      "CreateOrgToolServerRequest": "type",
+      "defineAgent": "value",
+      "deleteEndUserToolCredential": "value",
+      "deleteOrganizationToolServer": "value",
+      "DeployAgentOptions": "type",
+      "EndUserToolCredential": "type",
+      "getEndUserToolCredential": "value",
+      "getOrganizationAgent": "value",
+      "getOrganizationAgentPublishOperation": "value",
+      "getOrganizationAgentUsage": "value",
+      "getOrganizationAgentVersion": "value",
+      "getOrganizationToolServer": "value",
+      "isOrgAgentRef": "value",
+      "ListOrgAgentComputeResponse": "type",
+      "ListOrgAgentSessionsResponse": "type",
+      "ListOrgAgentsResponse": "type",
+      "ListOrgAgentVersionsResponse": "type",
+      "listOrganizationAgentCompute": "value",
+      "listOrganizationAgentPublishOperations": "value",
+      "listOrganizationAgents": "value",
+      "listOrganizationAgentSessions": "value",
+      "listOrganizationAgentVersions": "value",
+      "listOrganizationToolServers": "value",
+      "listOrganizationToolServerTools": "value",
+      "ListOrgToolServersResponse": "type",
+      "OrgAgent": "type",
+      "OrgAgentComputeOption": "type",
+      "OrgAgentDefinitionInput": "type",
+      "OrgAgentFileInput": "type",
+      "OrgAgentPublishOperation": "type",
+      "OrgAgentResponse": "type",
+      "OrgAgentRunsOn": "type",
+      "OrgAgentUsageResponse": "type",
+      "OrgAgentVersion": "type",
+      "organizationAgents": "value",
+      "OrganizationAgentsClient": "type",
+      "OrgToolServer": "type",
+      "OrgToolServerToolsResponse": "type",
+      "PublishOrgAgentRequest": "type",
+      "PublishOrgAgentResponse": "type",
+      "publishOrganizationAgent": "value",
+      "putEndUserToolCredential": "value",
+      "PutEndUserToolCredentialRequest": "type",
+      "SaveOrgAgentDraftRequest": "type",
+      "saveOrganizationAgentDraft": "value",
+      "SetOrgAgentManagementRequest": "type",
+      "setOrganizationAgentManagement": "value",
+      "UpdateOrgAgentRequest": "type",
+      "updateOrganizationAgent": "value",
+      "updateOrganizationToolServer": "value",
+      "UpdateOrgToolServerRequest": "type"
+    },
     "@opengeni/sdk/organization-integration-policy": {
       "getOrganizationIntegrationCatalog": "value",
       "getOrganizationIntegrationPolicy": "value",
@@ -40049,6 +40386,7 @@
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeEventMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isOpenGeniSiteDataChange": "value",
       "isSiteCatalogStaleError": "value",
       "isSiteHttpRequest": "value",
       "OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL": "value",
@@ -40063,6 +40401,7 @@
       "OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
       "OPENGENI_SITE_BRIDGE_VIEWER_METHOD": "value",
+      "OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD": "value",
       "OPENGENI_SITE_LOCAL_CODEMODE_PATH": "value",
       "OPENGENI_SITE_LOCATION_MAX_LENGTH": "value",
       "OpenGeniSiteAi": "type",
@@ -40081,6 +40420,7 @@
       "OpenGeniSiteClient": "type",
       "OpenGeniSiteClientOptions": "type",
       "OpenGeniSiteData": "type",
+      "OpenGeniSiteDataChange": "type",
       "OpenGeniSiteDataCollection": "type",
       "OpenGeniSiteDataError": "value",
       "OpenGeniSiteDataErrorCode": "type",
@@ -40137,6 +40477,7 @@
       "injectSiteBridgeBootstrap": "value",
       "isOpenGeniReservedSitePath": "value",
       "openGeniSiteBridgePortFromBootstrap": "value",
+      "OpenGeniSiteDataChange": "type",
       "openGeniSiteLocationHref": "value",
       "openGeniSiteLocationValue": "value",
       "OpenGeniSiteLocationValue": "type",
@@ -41974,6 +42315,21 @@
       "useInteractiveAnswerState": "value",
       "visibleInteractiveItems": "value"
     },
+    "@opengeni/react/machine-request-model": {
+      "buildPersonalResourceAttachmentIntent": "value",
+      "isMachineComputeSelectable": "value",
+      "isPersonalMachine": "value",
+      "MachineMoveChat": "type",
+      "machineRequestName": "value",
+      "machineRequestState": "value",
+      "MachineRequestState": "type",
+      "machineStateLabel": "value",
+      "machineUseMessage": "value",
+      "moveChatToMachine": "value",
+      "MoveChatToMachineResult": "type",
+      "personalMachineUseIntent": "value",
+      "swapFailureMessage": "value"
+    },
     "@opengeni/react/machines": {
       "CONNECTION_STATUS_META": "value",
       "ConnectionDot": "value",
@@ -42896,8 +43252,14 @@
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
       "activityHasUnloadedSteps": "value",
+      "agentMemberSessionId": "value",
+      "agentMemberText": "value",
+      "agentMemberTitle": "value",
       "AgentTitleParts": "type",
       "agentWorkHumanInputSummary": "value",
+      "allowanceLabels": "value",
+      "AllowanceLabels": "type",
+      "allowanceResetSentence": "value",
       "ANNOTATION_MAX_NOTE_LENGTH": "value",
       "ANNOTATION_MAX_QUOTE_BYTES": "value",
       "ANNOTATION_SOURCE_CONTEXT_BYTES": "value",
@@ -42920,14 +43282,22 @@
       "builtInToolStepLabel": "value",
       "BuiltInTurnSummaryFacetId": "type",
       "callStepPhase": "value",
+      "cleanMachineInputSummary": "value",
       "clusterIsSettled": "value",
       "commandStepTitle": "value",
       "compactedLandmarkCount": "value",
+      "COMPACTION_TRIMMED_SUBTITLE": "value",
+      "COMPACTION_TRIMMED_TITLE": "value",
+      "compactionFailureDetails": "value",
+      "compactionPresentation": "value",
+      "compactionSkipSubtitle": "value",
+      "compactionSkipTitle": "value",
       "connectorLogo": "value",
       "connectorLogoIndex": "value",
       "ConnectorLogoSource": "type",
       "createTurnSummaryContext": "value",
       "CredentialContext": "type",
+      "DEFAULT_SESSION_USAGE_LIMIT_LABELS": "value",
       "defaultHumanInputFormMessages": "value",
       "durationBetween": "value",
       "emptyDraft": "value",
@@ -42943,16 +43313,29 @@
       "genericToolPresentation": "value",
       "GENIE_PREPARING_PHRASES": "value",
       "GENIE_WAITING_PHRASES": "value",
+      "goalLandmarkLabel": "value",
+      "goalLandmarkText": "value",
+      "goalLandmarkTone": "value",
+      "GoalLandmarkTone": "type",
+      "groupMachineInputMembers": "value",
       "humanInputAgentMayDecide": "value",
       "HumanInputAnswerDraft": "type",
       "HumanInputFormMessages": "type",
       "humanInputHeading": "value",
       "initialDrafts": "value",
       "isActionableHumanInputRequest": "value",
+      "isAgentMember": "value",
       "isAgentWorkHumanInput": "value",
       "isApplyPatch": "value",
       "isAutomationRunBatch": "value",
       "isPreparingWork": "value",
+      "isTrimmedCompaction": "value",
+      "learningRefusalBody": "value",
+      "learningRefusalTitle": "value",
+      "MACHINE_INPUT_META": "value",
+      "machineInputBatchLabel": "value",
+      "MachineInputMemberGroup": "type",
+      "machineInputSummaryIsUseful": "value",
       "matchingQuoteInSource": "value",
       "mcpToolLeaf": "value",
       "mergeHumanInputFormMessages": "value",
@@ -42980,6 +43363,7 @@
       "QuestionNavPrompt": "type",
       "questionNavTarget": "value",
       "rawTypeOf": "value",
+      "readableMachineInputSource": "value",
       "readableWorkDefaultOpen": "value",
       "readableWorkIsEmpty": "value",
       "ReadableWorkOptions": "type",
@@ -43064,6 +43448,9 @@
       "webSearchPresentation": "value",
       "WebSearchResult": "type",
       "withComputePreview": "value",
+      "WorkerCompletionOutcome": "type",
+      "workerCompletionPresentation": "value",
+      "workerCompletionSections": "value",
       "workerRowTitle": "value",
       "workerRowTitleParts": "value",
       "writeStdinPresentation": "value"
@@ -44118,6 +44505,8 @@
       "checkMcpTrustedIssuer",
       "checkOrganizationConnectorAutoConnect",
       "checkSiteHostname",
+      "claimClaudeSubscriptionAccountLimitReset",
+      "claimOrganizationClaudeSubscriptionAccountLimitReset",
       "clearCodexAppsAccount",
       "clearSessionContext",
       "closeBrowserTarget",
@@ -44196,6 +44585,7 @@
       "createVideoArtifactPlaybackSource",
       "createWorkspace",
       "createWorkspaceArtifact",
+      "createWorkspaceArtifactLiveTicket",
       "createWorkspaceClaudeCustomModel",
       "createWorkspaceGatewayCustomModel",
       "createWorkspaceInstructionPolicyDraft",
@@ -44976,6 +45366,8 @@
       "checkMcpTrustedIssuer",
       "checkOrganizationConnectorAutoConnect",
       "checkSiteHostname",
+      "claimClaudeSubscriptionAccountLimitReset",
+      "claimOrganizationClaudeSubscriptionAccountLimitReset",
       "clearCodexAppsAccount",
       "clearSessionContext",
       "closeBrowserTarget",
@@ -45051,6 +45443,7 @@
       "createSubscriptionPortalSession",
       "createVideoArtifactPlaybackSource",
       "createWorkspace",
+      "createWorkspaceArtifactLiveTicket",
       "createWorkspaceClaudeCustomModel",
       "createWorkspaceGatewayCustomModel",
       "createWorkspaceInstructionPolicyDraft",
@@ -45832,6 +46225,8 @@
       "checkMcpTrustedIssuer",
       "checkOrganizationConnectorAutoConnect",
       "checkSiteHostname",
+      "claimClaudeSubscriptionAccountLimitReset",
+      "claimOrganizationClaudeSubscriptionAccountLimitReset",
       "clearCodexAppsAccount",
       "clearSessionContext",
       "clearWorkspaceAllowance",
@@ -45912,6 +46307,7 @@
       "createVideoArtifactPlaybackSource",
       "createWorkspace",
       "createWorkspaceArtifact",
+      "createWorkspaceArtifactLiveTicket",
       "createWorkspaceClaudeCustomModel",
       "createWorkspaceGatewayCustomModel",
       "createWorkspaceInstructionPolicyDraft",
@@ -46781,6 +47177,7 @@
     "SiteBridgeHost": [
       "close",
       "load",
+      "notifyDataChanged",
       "notifyLocation",
       "notifyToolReadiness"
     ],
@@ -47228,6 +47625,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AddDocumentRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Document\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "addExternalWorkspaceMember": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"identity\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"externalId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"displayName\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"email\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"}},{\"computed\":false,\"key\":{\"name\":\"permissions\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"permissions\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AddWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"}},{\"computed\":false,\"key\":{\"name\":\"operationId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"ExternalIdentity\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/external-identities\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}",
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"identity\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"externalId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"}},{\"computed\":false,\"key\":{\"name\":\"permissions\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"permissions\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AddWorkspaceMemberRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"}},{\"computed\":false,\"key\":{\"name\":\"operationId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"ExternalIdentity\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/external-identities\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "addOrganizationAnthropicApiKey": [
@@ -47282,13 +47680,13 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"operationId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedVersion\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryWriteReceipt\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "asLinkedUser": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"linkId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedLinkRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"linkId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedLinkRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"displayName\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"email\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "asService": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ServiceContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "asUser": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"membership\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalActorStatedMembership\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"membership\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ExternalActorStatedMembership\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"displayName\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"email\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "attachBrowserSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSessionAttachmentRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSessionAttachment\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -47377,6 +47775,12 @@
       ],
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -47617,6 +48021,9 @@
       ],
       "createWorkspaceArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50289,6 +50696,12 @@
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -50522,6 +50935,9 @@
       ],
       "createWorkspaceArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceArtifactRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -52929,6 +53345,12 @@
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -53150,6 +53572,9 @@
       ],
       "createWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -55734,6 +56159,12 @@
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -55958,6 +56389,9 @@
       ],
       "createWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -58360,6 +58794,12 @@
       "checkSiteHostname": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteHostnameAvailability\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "claimClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "claimOrganizationClaudeSubscriptionAccountLimitReset": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ClaimClaudeLimitResetResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "clearCodexAppsAccount": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CodexAppsUpdate\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -58584,6 +59024,9 @@
       ],
       "createWorkspace": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Workspace\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createWorkspaceArtifactLiveTicket": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceArtifactLiveTicketResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "createWorkspaceClaudeCustomModel": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"anthropic\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"claude_subscription\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateWorkspaceGatewayCustomModelRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceGatewayCustomModel\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -61332,6 +61775,9 @@
       ],
       "load": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Window\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"postMessage\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Pick\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "notifyDataChanged": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniSiteDataChange\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
       ],
       "notifyLocation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniSiteLocationValue\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"

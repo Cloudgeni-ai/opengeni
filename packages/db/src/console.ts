@@ -3,8 +3,9 @@
  * level, the Console audit log, end-user labels, and the reviewable session
  * reads with their metered cost.
  *
- * Authorization lives in the API (`requireConsoleAdministrator` in
- * @opengeni/core): only organization owners and admins reach these reads.
+ * Authorization lives in the API (`requireConsoleAccess` in
+ * apps/api/src/routes/console-roles.ts): only the organization's owners, admins
+ * and members with a Console role reach these reads.
  * This module enforces what they may see, in SQL, on every read:
  *
  * - only workspaces marked in `organization_managed_workspaces`;
@@ -319,6 +320,16 @@ async function insertAudit(tx: Database, input: AuditInput): Promise<string> {
   return row!.id;
 }
 
+/** Writes one audit row in the caller's transaction (account context of the organization). */
+export async function insertConsoleAuditEvent(
+  tx: Database,
+  input: ConsoleAuditInput,
+): Promise<string> {
+  return await insertAudit(tx, input);
+}
+
+export type ConsoleAuditInput = AuditInput;
+
 export async function recordConsoleAuditEvent(db: Database, input: AuditInput): Promise<string> {
   return await withAccountRls(db, input.accountId, (tx) => insertAudit(tx, input));
 }
@@ -438,32 +449,137 @@ export async function listConsoleAuditEvents(
 // ---------------------------------------------------------------------------
 // End-user labels
 
+// Labels never change once stored, so a process may skip ones it already
+// wrote. Display details are not remembered: another replica may have stored a
+// different value since, and the latest one sent must win. Their write is a
+// conditional upsert that changes nothing when the stored value is the same.
 const rememberedLabels = new Set<string>();
 const REMEMBERED_LABELS_MAX = 20_000;
 
 /**
  * Remember the product's own id for an external user subject so Console can
- * show it. Display only; best effort, never fails the caller.
+ * show it, with the display name and email the product sent (the latest value
+ * wins; an omitted field keeps its stored value). Display only; best effort,
+ * never fails the caller.
  */
 export async function rememberEndUserLabel(
   db: Database,
-  input: { accountId: string; subjectId: string; source: string; externalId: string },
+  input: {
+    accountId: string;
+    subjectId: string;
+    source: string;
+    externalId: string;
+    /** Already normalized (`normalizeEndUserProfile`). */
+    displayName?: string | undefined;
+    email?: string | undefined;
+  },
 ): Promise<void> {
   if (!input.subjectId.startsWith("external_user:")) return;
   const key = `${input.accountId}:${input.subjectId}`;
-  if (rememberedLabels.has(key)) return;
+  const displayName = input.displayName ? input.displayName.slice(0, 256) : null;
+  const email = input.email && input.email.length <= 320 ? input.email : null;
+  const hasProfile = displayName !== null || email !== null;
+  if (rememberedLabels.has(key) && !hasProfile) return;
   try {
-    await withAccountRls(db, input.accountId, (tx) =>
-      tx.execute(sql`insert into organization_end_user_labels (account_id, subject_id, source, external_id)
-        values (${input.accountId}::uuid, ${input.subjectId}, ${input.source.slice(0, 200)},
-          ${input.externalId.slice(0, 1024)})
-        on conflict (account_id, subject_id) do nothing`),
-    );
+    await withAccountRls(db, input.accountId, async (tx) => {
+      if (!rememberedLabels.has(key))
+        await tx.execute(sql`insert into organization_end_user_labels (account_id, subject_id, source, external_id)
+          values (${input.accountId}::uuid, ${input.subjectId}, ${input.source.slice(0, 200)},
+            ${input.externalId.slice(0, 1024)})
+          on conflict (account_id, subject_id) do nothing`);
+      if (hasProfile)
+        await tx.execute(sql`insert into organization_end_user_profiles as p
+            (account_id, subject_id, display_name, email)
+          values (${input.accountId}::uuid, ${input.subjectId}, ${displayName}, ${email})
+          on conflict (account_id, subject_id) do update set
+            display_name = coalesce(excluded.display_name, p.display_name),
+            email = coalesce(excluded.email, p.email),
+            updated_at = now()
+          where (p.display_name, p.email) is distinct from
+            (coalesce(excluded.display_name, p.display_name), coalesce(excluded.email, p.email))`);
+    });
     if (rememberedLabels.size >= REMEMBERED_LABELS_MAX) rememberedLabels.clear();
     rememberedLabels.add(key);
   } catch {
     // A label is cosmetic; the next request retries.
   }
+}
+
+/** Forget what this process stored (tests). */
+export function resetRememberedEndUserLabels(): void {
+  rememberedLabels.clear();
+}
+
+export type ConsoleEndUserRow = {
+  subjectId: string;
+  externalId: string | null;
+  source: string | null;
+  displayName: string | null;
+  email: string | null;
+};
+
+/**
+ * The product's id, display name and email of each given end user subject.
+ * Runs in the caller's account context of the organization.
+ */
+export async function readConsoleEndUsers(
+  tx: Database,
+  accountId: string,
+  subjectIds: readonly string[],
+): Promise<Map<string, ConsoleEndUserRow>> {
+  const subjects = [...new Set(subjectIds)].filter((id) => id.startsWith("external_user:"));
+  const result = new Map<string, ConsoleEndUserRow>();
+  if (subjects.length === 0) return result;
+  const rows = await rawRows<{
+    subject_id: string;
+    source: string | null;
+    external_id: string | null;
+    display_name: string | null;
+    email: string | null;
+  }>(
+    tx,
+    sql`select subject.subject_id, label.source, label.external_id, profile.display_name, profile.email
+      from unnest(${pgTextArray(subjects)}::text[]) as subject(subject_id)
+      left join organization_end_user_labels label
+        on label.account_id = ${accountId}::uuid and label.subject_id = subject.subject_id
+      left join organization_end_user_profiles profile
+        on profile.account_id = ${accountId}::uuid and profile.subject_id = subject.subject_id`,
+  );
+  for (const row of rows)
+    result.set(row.subject_id, {
+      subjectId: row.subject_id,
+      externalId: row.external_id,
+      source: row.source,
+      displayName: row.display_name,
+      email: row.email,
+    });
+  return result;
+}
+
+const END_USER_SEARCH_MAX = 1000;
+
+/**
+ * End user subjects whose product id, display name or email contains `q`
+ * (case-insensitive), at most {@link END_USER_SEARCH_MAX}. Account context.
+ */
+async function searchConsoleEndUsers(
+  tx: Database,
+  accountId: string,
+  pattern: string,
+): Promise<string[]> {
+  const rows = await rawRows<{ subject_id: string }>(
+    tx,
+    sql`(select subject_id from organization_end_user_labels
+        where account_id = ${accountId}::uuid and external_id ilike ${pattern}
+        limit ${END_USER_SEARCH_MAX})
+      union
+      (select subject_id from organization_end_user_profiles
+        where account_id = ${accountId}::uuid
+          and (display_name ilike ${pattern} or email ilike ${pattern})
+        limit ${END_USER_SEARCH_MAX})
+      limit ${END_USER_SEARCH_MAX}`,
+  );
+  return rows.map((row) => row.subject_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -739,10 +855,28 @@ function searchPattern(q: string): string {
   return `%${q.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
 }
 
+/** Matches a session by its end user, or by its title or opening messages when content is shown. */
+function consoleSessionSearchSql(endUsers: readonly string[], contentPattern: string | null): SQL {
+  const parts: SQL[] = [];
+  if (endUsers.length > 0) {
+    const subjects = pgTextArray(endUsers);
+    parts.push(sql`s.owner_subject_id = any(${subjects}::text[])
+      or s.created_by_subject_id = any(${subjects}::text[])`);
+  }
+  if (contentPattern !== null)
+    parts.push(sql`s.title ilike ${contentPattern} or exists (
+      select 1 from session_events e
+      where e.workspace_id = s.workspace_id and e.session_id = s.id
+        and e.type = 'user.message' and e.payload ->> 'text' ilike ${contentPattern})`);
+  return parts.length > 0 ? sql.join(parts, sql` or `) : sql`false`;
+}
+
 /**
  * Newest-first reviewable root sessions across the given managed workspaces,
  * with their turns, ratings, metered cost and opening message. `includeContent`
- * is false for the `metadata` review level: no title, message or search.
+ * is false for the `metadata` review level: no title, message or content
+ * search. `q` matches the workspace name and the end user's id, name or email
+ * at every level, and the title and opening messages with content.
  */
 export async function listConsoleSessions(
   db: Database,
@@ -761,10 +895,24 @@ export async function listConsoleSessions(
 }> {
   const names = new Map(input.workspaces.map((workspace) => [workspace.id, workspace.name]));
   const workspaceIds = input.workspaces.map((workspace) => workspace.id);
-  const q = input.includeContent && input.q ? searchPattern(input.q) : null;
+  const query = input.q?.trim() || null;
+  const pattern = query ? searchPattern(query) : null;
+  // A workspace whose name matches shows all its sessions.
+  const namedWorkspaces = new Set(
+    query
+      ? input.workspaces
+          .filter((workspace) => workspace.name.toLowerCase().includes(query.toLowerCase()))
+          .map((workspace) => workspace.id)
+      : [],
+  );
   return await consoleScope(db, input.accountId, async (tx) => {
+    // End users are metadata: matched by id, name or email at every review level.
+    const endUsers = pattern ? await searchConsoleEndUsers(tx, input.accountId, pattern) : [];
+    const contentPattern = input.includeContent ? pattern : null;
     const candidates: SessionRow[] = [];
     for (const workspaceId of workspaceIds.slice(0, CONSOLE_MAX_WORKSPACE_READS)) {
+      const filtered = pattern !== null && !namedWorkspaces.has(workspaceId);
+      if (filtered && endUsers.length === 0 && contentPattern === null) continue;
       await scopeWorkspace(tx, workspaceId);
       const rows = await rawRows<SessionRow>(
         tx,
@@ -777,14 +925,7 @@ export async function listConsoleSessions(
                 ? sql`and (s.updated_at, s.id) < (timestamptz 'epoch' + (${input.cursor.updatedUs} || ' microseconds')::interval, ${input.cursor.id}::uuid)`
                 : sql``
             }
-            ${
-              q
-                ? sql`and (s.title ilike ${q} or exists (
-                    select 1 from session_events e
-                    where e.workspace_id = s.workspace_id and e.session_id = s.id
-                      and e.type = 'user.message' and e.payload ->> 'text' ilike ${q}))`
-                : sql``
-            }
+            ${filtered ? sql`and (${consoleSessionSearchSql(endUsers, contentPattern)})` : sql``}
           order by s.updated_at desc, s.id desc
           limit ${input.limit + 1}`,
       );
@@ -878,16 +1019,8 @@ async function summarizeSessions(
     }
   }
   await scopeWorkspace(tx, null);
-  const subjects = [...new Set(rows.map(endUserSubject).filter((value) => value !== null))];
-  const labels = new Map<string, { source: string; external_id: string }>();
-  if (subjects.length > 0) {
-    const labelRows = await rawRows<{ subject_id: string; source: string; external_id: string }>(
-      tx,
-      sql`select subject_id, source, external_id from organization_end_user_labels
-        where account_id = ${accountId}::uuid and subject_id = any(${pgTextArray(subjects)}::text[])`,
-    );
-    for (const label of labelRows) labels.set(label.subject_id, label);
-  }
+  const subjects = rows.map(endUserSubject).filter((value) => value !== null);
+  const labels = await readConsoleEndUsers(tx, accountId, subjects);
   return rows.map((row) => {
     const fact = facts.get(row.id);
     const subject = endUserSubject(row);
@@ -902,8 +1035,10 @@ async function summarizeSessions(
       endUser: subject
         ? {
             subjectId: subject,
-            externalId: label?.external_id ?? null,
+            externalId: label?.externalId ?? null,
             source: label?.source ?? null,
+            displayName: label?.displayName ?? null,
+            email: label?.email ?? null,
           }
         : null,
       status: row.status,

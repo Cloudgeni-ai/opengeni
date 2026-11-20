@@ -267,6 +267,9 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect([...session.firstPartyMcpTools].sort()).toEqual(
       [
         "call_user",
+        // Stored with the other runtime tools; the runtime family gate drops it
+        // for an agent without workspace connectors or workspace admin.
+        "capability_authorization_request",
         "command_read",
         "command_wait",
         "goal_complete",

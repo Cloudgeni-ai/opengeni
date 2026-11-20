@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEVELOPER_SETUP_API_KEY_PRESET,
   normalizePermission,
   Permission,
   signDelegatedAccessToken,
@@ -389,5 +390,31 @@ describe("missing permission refusals", () => {
       expect(message).not.toContain("missing permission");
       expect(message).not.toContain(permission);
     }
+  });
+});
+
+describe("Console agents' write permissions", () => {
+  test("only listed or a full organization key; workspace:admin alone never implies them", () => {
+    const full: Permission[] = [
+      "account:read",
+      "workspace:create",
+      "workspace:read",
+      "workspace:admin",
+      "api_keys:manage",
+    ];
+    const developerSetup: Permission[] = [...DEVELOPER_SETUP_API_KEY_PRESET.permissions];
+    for (const permission of ["agents:manage", "tool_credentials:write"] as const) {
+      expect(hasPermission(full, permission)).toBe(true);
+      // The account-scoped authority a full key carries (account-only ones dropped).
+      expect(
+        hasPermission(["workspace:read", "workspace:admin", "api_keys:manage"], permission),
+      ).toBe(true);
+      expect(hasPermission(["workspace:admin"], permission)).toBe(false);
+      expect(hasPermission(developerSetup, permission)).toBe(false);
+      expect(hasPermission([permission], permission)).toBe(true);
+      expect(hasPermission(full, permission, "explicit")).toBe(false);
+    }
+    // Reading stays implied as before.
+    expect(hasPermission(["workspace:admin"], "agents:read")).toBe(true);
   });
 });

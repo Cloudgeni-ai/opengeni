@@ -63,6 +63,7 @@ export {
 } from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
+import { connectedMachineGuidance } from "./agent-instructions/modules/machines";
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
@@ -250,6 +251,7 @@ import {
   type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
+  rarelyUsedRuntimeToolsSearchable,
   type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
@@ -284,6 +286,7 @@ import {
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
+  type AgentRenderer,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 export {
@@ -433,23 +436,29 @@ import {
   type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
+  installModelToolResultStore,
   modelToolTextBudgetBytes,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
-  type SpillOversizedModelToolResult,
-} from "./tool-result-spill";
+  type ModelToolResultStore,
+} from "./model-tool-result-store";
 export {
+  installModelToolResultStore,
   modelToolResultFits,
-  modelToolResultOverflowError,
   modelToolTextBudgetBytes,
   projectAttemptToolResultForCaller,
-  spilledModelToolResult,
+  storeOversizedFunctionToolOutput,
+  storedToolResultView,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
+  STORED_TOOL_RESULT_READER_NAME,
+  TOOL_RESULT_STORED_META_KEY,
+  type ModelToolResultStore,
   type ProjectModelToolResult,
-  type SpilledToolResultReaders,
-  type SpillOversizedModelToolResult,
-} from "./tool-result-spill";
+  type StoredToolResult,
+  type StoredToolResultKey,
+  type StoredToolResultReaders,
+} from "./model-tool-result-store";
 export {
   CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
@@ -544,6 +553,7 @@ import {
   gitRepo,
   inContainerMountStrategy,
   s3Mount,
+  renderManifestDescription,
   shell,
   type SandboxClient,
   type SandboxSessionLike,
@@ -1629,18 +1639,26 @@ function withoutInlineReasoning(text: string): string | null {
  * A response stopped by the output limit can end inside a word. Keep only
  * whole words before the shared automatic-title normalizer bounds the title.
  * SESSION_TITLE_NOT_YET (alone, possibly quoted or punctuated) is no title.
+ * A real title the model ends with a piece of it ("Files on the desktop_TITLE",
+ * "Files on the desktop NO_TITLE") keeps the title without the piece.
  */
 function normalizeGeneratedSessionTitle(
   text: string,
   stoppedAtOutputLimit: boolean,
 ): string | null {
-  const answer = withoutInlineReasoning(text);
-  if (answer === null) return null;
+  const raw = withoutInlineReasoning(text);
+  if (raw === null) return null;
+  if (raw.replace(/[^\p{L}\p{N}_]+/gu, "").toUpperCase() === SESSION_TITLE_NOT_YET) return null;
+  const answer = raw.replace(TRAILING_NOT_YET_FRAGMENT, "");
   if (answer.replace(/[^\p{L}\p{N}_]+/gu, "").toUpperCase() === SESSION_TITLE_NOT_YET) return null;
+  if (!/[\p{L}\p{N}]/u.test(answer)) return null;
   const complete =
     stoppedAtOutputLimit && !/\s$/u.test(answer) ? answer.replace(/\S+$/u, "") : answer;
   return normalizeAutomaticSessionTitle(complete);
 }
+
+/** A trailing "_TITLE", "NO_TITLE" or "_NO_TITLE" after a title, with any closing punctuation. */
+const TRAILING_NOT_YET_FRAGMENT = /[\s_]*(?:NO)?_TITLE[\s\p{P}]*$/u;
 
 /**
  * Run the compaction summarizer as one plain, tool-less, non-streaming model
@@ -2695,6 +2713,14 @@ export type BuildAgentOptions = {
    * expose it, so nothing becomes unreachable. Omitted keeps today's rule.
    */
   toolRouterExpected?: boolean;
+  /**
+   * The session's frozen first-request tools revision
+   * (`sessions.first_request_tools_revision`). From revision 1, `list_models`
+   * and `privacy_facts` are found through tool search on a turn that expects
+   * the search router anyway. Omitted is revision 0: they stay in every
+   * request, byte-identical to earlier requests.
+   */
+  firstRequestToolsRevision?: number;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -3105,6 +3131,13 @@ export type BuildAgentOptions = {
    */
   commandCompletionDelivery?: CommandCompletionDelivery | null;
   /**
+   * The attempt's store for function-tool output larger than the model's
+   * inline tool-output budget (model-tool-result-store.ts): the full text is
+   * kept and the model receives a view with the call that reads the rest.
+   * Attempt tools use the same store through `prepareAgentTools`.
+   */
+  modelToolResultStore?: ModelToolResultStore | null;
+  /**
    * Receives each sandbox setup notice appended to a tool result
    * (sandbox-setup-notices.ts), so audit views can show the tool's own output.
    */
@@ -3348,6 +3381,23 @@ function skillCatalogLayerApplies(
   return !(options.agentConfig && options.skillCatalog.length === 0);
 }
 
+/**
+ * The kind of compute the system prompt describes. While the turn has compute,
+ * this is the deployment's own sandbox backend rather than the active machine,
+ * so moving a session between a managed sandbox and a Connected Machine leaves
+ * the system prompt byte-identical (earlier requests already sent it). The
+ * workspace filesystem layout item describes the machine the session is on
+ * (`workspaceFilesystemLayout`). Whether the turn has compute at all still
+ * follows the turn.
+ */
+export function promptSandboxBackend(
+  settings: Pick<Settings, "sandboxBackend">,
+  activeSandboxBackend?: Settings["sandboxBackend"],
+): Settings["sandboxBackend"] {
+  const turn = activeSandboxBackend ?? settings.sandboxBackend;
+  return turn === "none" || settings.sandboxBackend === "none" ? turn : settings.sandboxBackend;
+}
+
 export function agentPromptResourcesFor(
   settings: Settings,
   resources: readonly ResourceRef[],
@@ -3365,7 +3415,7 @@ export function agentPromptResourcesFor(
     | "skillCatalog"
   >,
 ): AgentPromptResources {
-  const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  const backend = promptSandboxBackend(settings, options.activeSandboxBackend);
   const connectedMachine = backend === "selfhosted";
   const managedSandbox = backend !== "none" && !connectedMachine;
   const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
@@ -3478,7 +3528,10 @@ function inspectModularAgentInstructions(
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
     ...(options.agentInstructions ? { agentInstructions: options.agentInstructions } : {}),
-    ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
+    ...(gitBindingDiscoveryApplies(
+      options.gitCredentialBindings,
+      promptSandboxBackend(settings, options.activeSandboxBackend),
+    )
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
     ...(skillCatalogLayerApplies(options)
@@ -3562,7 +3615,12 @@ export function inspectPersistentAgentInstructions(
       add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
     pushAgentInstructions();
-    if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
+    if (
+      gitBindingDiscoveryApplies(
+        options.gitCredentialBindings,
+        promptSandboxBackend(settings, options.activeSandboxBackend),
+      )
+    ) {
       add({
         id: "git_bindings",
         title: "Git credential bindings",
@@ -3591,7 +3649,12 @@ export function inspectPersistentAgentInstructions(
     if (options.codeSearchAvailable) {
       add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
-    if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
+    if (
+      gitBindingDiscoveryApplies(
+        options.gitCredentialBindings,
+        promptSandboxBackend(settings, options.activeSandboxBackend),
+      )
+    ) {
       add({
         id: "git_bindings",
         title: "Git credential bindings",
@@ -4342,6 +4405,9 @@ export function buildOpenGeniAgent(
     }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     installRepeatedToolCallGuard(agent);
+    if (options.modelToolResultStore) {
+      installModelToolResultStore(agent, options.modelToolResultStore);
+    }
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
@@ -4374,6 +4440,9 @@ export function buildOpenGeniAgent(
     ),
     instructionManifest: (manifest: Manifest) =>
       manifestWithoutFileResourceEntries(manifest, resources),
+    // The layout names the active machine's root, so it reaches the model as a
+    // history item (`workspaceFilesystemLayout`), never in the system prompt.
+    filesystemInstructions: false,
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.sandboxEnvironment ? { sandboxEnvironment: options.sandboxEnvironment } : {}),
       ...(options.authorizeAttemptExecution
@@ -4511,6 +4580,9 @@ export function buildOpenGeniAgent(
   }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   installRepeatedToolCallGuard(agent);
+  if (options.modelToolResultStore) {
+    installModelToolResultStore(agent, options.modelToolResultStore);
+  }
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
@@ -4667,6 +4739,7 @@ function maybeInstallLazyToolTransport(
     },
     options.toolRouterExpected !== false,
     harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
+    rarelyUsedRuntimeToolsSearchable(options.firstRequestToolsRevision ?? 0),
   );
   const attemptTools = mcpServers.find(
     (server): server is AttemptDefinitionMcpServer => server instanceof AttemptDefinitionMcpServer,
@@ -6522,10 +6595,11 @@ export type PrepareToolsOptions = {
     resolveArguments?: ToolGatewayArgumentResolver;
   };
   /**
-   * Persist an oversized *model-visible* tool result as a workspace File and
-   * return the compact receipt. Codemode callers skip the 1 MiB cap entirely.
+   * Keeps the full text of a model-visible tool result larger than the
+   * model's inline tool-output budget, so the model receives a view and reads
+   * the rest with `tool_result_read`. Codemode callers receive exact results.
    */
-  spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+  modelToolResultStore?: ModelToolResultStore;
   /**
    * The current model's tool-output truncation policy in tokens, read for each
    * call so a mid-attempt model change is honoured. Local bridge projections
@@ -6922,7 +6996,7 @@ export async function prepareAgentTools(
   }
   const attemptToolDefinitions = wrapAttemptToolDefinitions(
     options.attemptToolDefinitions ?? [],
-    options.spillOversizedModelToolResult,
+    options.modelToolResultStore,
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
@@ -7852,7 +7926,7 @@ async function prepareAttemptToolEnvironment(
             ...definition,
             execute: wrapAttemptToolExecute(
               async (argumentsValue, context) => await definition.execute(argumentsValue, context),
-              options.spillOversizedModelToolResult,
+              options.modelToolResultStore,
               definition.identity,
               server?.hasModelToolResultProjection()
                 ? (result) =>
@@ -7863,7 +7937,7 @@ async function prepareAttemptToolEnvironment(
         }),
       ...wrapAttemptToolDefinitions(
         options.attemptToolDefinitions ?? [],
-        options.spillOversizedModelToolResult,
+        options.modelToolResultStore,
       ),
     ],
     registry,
@@ -14102,6 +14176,65 @@ export function manifestWithoutFileResourceEntries(
   if (entries.length === Object.keys(manifest.entries).length) return manifest;
   return new Manifest({ ...manifest, entries: Object.fromEntries(entries) });
 }
+
+/**
+ * The filesystem layout of a turn's active workspace as the model reads it:
+ * the instruction manifest (without file resources) rendered the way the SDK
+ * renders its filesystem section. It names the active machine's root, so it is
+ * delivered as a session history item (`ensureSessionWorkspaceFilesystem`)
+ * instead of in the system prompt, where moving the session to another machine
+ * would rewrite every cached request prefix. Null without a sandbox.
+ */
+export function workspaceFilesystemLayout(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    activeSandboxBackend?: Settings["sandboxBackend"];
+    sandboxWorkspaceRoot?: string;
+    /** The configured agent's renderer; omitted for a plain chat. */
+    renderer?: AgentRenderer;
+  } = {},
+): string | null {
+  if (settings.sandboxBackend === "none") return null;
+  if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) return null;
+  // The layout never lists file resources, so they are left out before the
+  // manifest is built: a file entry needs the turn's pre-signed download where
+  // the storage cannot be mounted (Azure Blob on a native bucket-mount backend,
+  // AWS S3, GCS), and the layout has none to give.
+  const layoutResources = resources.filter((resource) => resource.kind !== "file");
+  const manifest = buildManifest(
+    settings,
+    layoutResources,
+    {},
+    [],
+    options.activeSandboxBackend === "selfhosted"
+      ? { root: options.sandboxWorkspaceRoot!, includeResourceEntries: false }
+      : {},
+  );
+  const layout = renderManifestDescription(
+    manifestWithoutFileResourceEntries(manifest, layoutResources),
+    {
+      depth: 3,
+    },
+  ).text;
+  // The system prompt describes the deployment's own kind of compute
+  // (promptSandboxBackend). A session that moved onto a Connected Machine
+  // learns what that means here, with the layout that changes with the move.
+  if (
+    options.activeSandboxBackend !== "selfhosted" ||
+    promptSandboxBackend(settings, "selfhosted") === "selfhosted"
+  )
+    return layout;
+  return [
+    layout,
+    connectedMachineGuidance(options.renderer),
+    CONNECTED_MACHINE_NOT_MANAGED_GUIDANCE,
+  ].join("\n\n");
+}
+
+/** What the managed-sandbox guidance in the system prompt does not cover on a Connected Machine. */
+const CONNECTED_MACHINE_NOT_MANAGED_GUIDANCE =
+  "Guidance about managed sandboxes does not apply on this machine: repository resources are not mounted under repos/, no brokered Git credentials or credential bindings are installed, and git, gh and other provider CLIs use whatever this machine is already signed in to.";
 
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
   workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];

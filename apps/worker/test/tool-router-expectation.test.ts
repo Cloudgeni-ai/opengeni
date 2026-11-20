@@ -34,6 +34,12 @@ describe("turnToolRouterExpected", () => {
     expect(expected()).toBe(false);
   });
 
+  test("list_models and privacy_facts never bring the router on their own", () => {
+    expect(
+      expected({ functionToolNames: ["request_human_input", "list_models", "privacy_facts"] }),
+    ).toBe(false);
+  });
+
   test("any doubt keeps the router", () => {
     expect(expected({ agentConfig: null })).toBe(true);
     expect(expected({ routerInHistory: true })).toBe(true);

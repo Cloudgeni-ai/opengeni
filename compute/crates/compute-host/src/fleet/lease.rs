@@ -712,6 +712,7 @@ fn capacity(status: &HostStatus, info: &HostInfo, image: &str, guest: Option<&st
             .map_or(0, |_| mib(status.reclaimable_memory)),
         cpu_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.total),
         cpu_free_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.free),
+        vcpus_awake: status.cpu.as_ref().map_or(0, |cpu| cpu.vcpus),
         disk_free_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.free)),
         disk_available_mib: status.disk.as_ref().map(|disk| mib(disk.available)),
         disk_reclaimable_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.reclaimable)),

@@ -27,6 +27,7 @@ import {
   OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD,
   OPENGENI_SITE_BRIDGE_VERSION,
   OPENGENI_SITE_BRIDGE_VIEWER_METHOD,
+  OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD,
   isOpenGeniSiteBridgeCancelMessage,
   isOpenGeniSiteBridgeConnectMessage,
   isOpenGeniSiteBridgeRequestMessage,
@@ -36,6 +37,7 @@ import {
   sanitizeOpenGeniSiteToolCallRequest,
   sanitizeOpenGeniSiteToolInvokeRequest,
   type OpenGeniSiteBridgeEventMessage,
+  type OpenGeniSiteDataChange,
   type OpenGeniSiteBridgeReadyMessage,
   type OpenGeniSiteBridgeRequestMessage,
   type OpenGeniSiteBridgeResponseMessage,
@@ -58,6 +60,7 @@ import type {
 } from "./types";
 
 export type { SiteHttpRequest } from "./site-http";
+export type { OpenGeniSiteDataChange } from "./site";
 export {
   isOpenGeniReservedSitePath,
   openGeniSiteLocationHref,
@@ -98,6 +101,19 @@ export type SiteBridgeToolHandlers = {
    * routes (data, files and `sql/queries/<name>`) for the pinned Site.
    */
   siteData?: boolean;
+  /**
+   * Advertise live data hints (`dataChanges: 1`): the host calls
+   * `SiteBridgeHost.notifyDataChanged` when the Site's data changes, or
+   * supplies `subscribeDataChanges` and the bridge host follows it.
+   */
+  dataChanges?: boolean;
+  /** Call `listener` with each data hint; returns an unsubscribe. Implies `dataChanges`. */
+  subscribeDataChanges?: (listener: (change: OpenGeniSiteDataChange) => void) => () => void;
+  /**
+   * The Site started following data changes (`site.data.onChange`): a host
+   * can wait for this before opening its live connection.
+   */
+  watchDataChanges?: () => void;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -144,7 +160,8 @@ export type SiteBridgeRequestValue =
   | ToolGatewaySiteReadinessResponse
   | SiteViewer
   | OpenGeniSiteSignInResult
-  | OpenGeniSiteLocationValue;
+  | OpenGeniSiteLocationValue
+  | { watching: boolean };
 
 /** Capabilities the host advertises when a Site connects; Sites never ask for more. */
 export function siteBridgeReadyMessage(
@@ -158,6 +175,9 @@ export function siteBridgeReadyMessage(
     ...(bridge?.resolve && bridge?.invoke ? { targetTools: 1 as const } : {}),
     ...(bridge?.readiness ? { toolReadiness: 1 as const } : {}),
     ...(bridge?.fetch && bridge.siteData ? { siteData: 1 as const } : {}),
+    ...(bridge?.fetch && bridge.siteData && (bridge.dataChanges || bridge.subscribeDataChanges)
+      ? { dataChanges: 1 as const }
+      : {}),
     ...(viewer ? { viewer: 1 as const } : {}),
     ...(location ? { location: 1 as const } : {}),
   };
@@ -213,6 +233,8 @@ export class SiteBridgeHost {
   private readonly lease: SiteBridgeDocumentLease;
   private stopReadiness: (() => void) | null = null;
   private readinessSource: SiteBridgeToolHandlers["subscribeReadiness"] | null = null;
+  private stopDataChanges: (() => void) | null = null;
+  private dataChangesSource: SiteBridgeToolHandlers["subscribeDataChanges"] | null = null;
 
   constructor(
     private readonly source: SiteBridgeHostSource,
@@ -234,6 +256,9 @@ export class SiteBridgeHost {
     this.stopReadiness?.();
     this.stopReadiness = null;
     this.readinessSource = null;
+    this.stopDataChanges?.();
+    this.stopDataChanges = null;
+    this.dataChangesSource = null;
     this.lease.close();
   }
 
@@ -243,6 +268,20 @@ export class SiteBridgeHost {
       type: OPENGENI_SITE_BRIDGE_EVENT,
       version: OPENGENI_SITE_BRIDGE_VERSION,
       event: "tool_readiness",
+    });
+  }
+
+  /**
+   * Tell every connected client of the current document that Site data
+   * changed. Hints name collections only (or null for "anything"), never records.
+   */
+  notifyDataChanged(change: OpenGeniSiteDataChange): void {
+    this.post({
+      type: OPENGENI_SITE_BRIDGE_EVENT,
+      version: OPENGENI_SITE_BRIDGE_VERSION,
+      event: "data_changed",
+      collections: change.collections ? [...change.collections] : null,
+      seq: change.seq,
     });
   }
 
@@ -263,6 +302,15 @@ export class SiteBridgeHost {
     this.stopReadiness?.();
     this.readinessSource = subscribe;
     this.stopReadiness = subscribe ? subscribe(() => this.notifyToolReadiness()) : null;
+  }
+
+  /** Follow the current handlers' data hints (handlers may be swapped). */
+  private followDataChanges(tools: SiteBridgeToolHandlers | undefined): void {
+    const subscribe = tools?.subscribeDataChanges ?? null;
+    if (subscribe === this.dataChangesSource) return;
+    this.stopDataChanges?.();
+    this.dataChangesSource = subscribe;
+    this.stopDataChanges = subscribe ? subscribe((change) => this.notifyDataChanged(change)) : null;
   }
 
   /** Tell every connected client of the current document that the Site's address changed. */
@@ -357,6 +405,7 @@ export class SiteBridgeHost {
     port.start();
     const tools = this.source.tools();
     this.followReadiness(tools);
+    this.followDataChanges(tools);
     port.postMessage(
       siteBridgeReadyMessage(tools, this.source.viewer?.(), this.source.location?.()),
     );
@@ -502,6 +551,10 @@ export async function handleSiteBridgeRequest(
     return await location.navigate(to, { replace: message.payload.replace === true });
   }
   if (!bridge) throw new Error("Site tool bridge is unavailable");
+  if (message.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD) {
+    bridge.watchDataChanges?.();
+    return { watching: Boolean(bridge.dataChanges || bridge.subscribeDataChanges) };
+  }
   if (message.method === "resolve") {
     if (!bridge.resolve) throw new Error("Targeted Site tools are unavailable");
     return await bridge.resolve({ target: message.payload.target }, { signal });

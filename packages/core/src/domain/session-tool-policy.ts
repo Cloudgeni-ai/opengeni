@@ -21,6 +21,7 @@ import {
   SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH,
   mergeToolRefs,
   projectAgentEffectiveTools,
+  RARELY_USED_RUNTIME_TOOL_NAMES,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -41,7 +42,7 @@ import {
   isWorkspaceEuOnly,
   hasWorkspaceManagedSkill,
   requireWorkspace,
-  sessionsWithGoal,
+  sessionsWithSearchableRarelyUsedTools,
   sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
@@ -351,11 +352,11 @@ export type SessionEffectiveToolsContext = {
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
   /**
-   * The sessions in this response page that have a goal, in any state. When
-   * present, a configured session missing from it projects no `goal_resume`,
-   * as the worker omits it for a turn whose frozen goal is none.
+   * The sessions in this response page whose frozen first-request tools
+   * revision finds `list_models` and `privacy_facts` through tool search
+   * (sessionsWithSearchableRarelyUsedTools). Absent keeps them up front.
    */
-  goalSessionIds?: ReadonlySet<string>;
+  rarelyUsedToolsSearchableSessionIds?: ReadonlySet<string>;
   /** Resolved once per distinct model in this response page, using its catalog settings. */
   modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
@@ -380,45 +381,56 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly, goalSessions] =
-    await Promise.all([
-      workspaceRead ?? requireWorkspace(deps.db, workspaceId),
-      resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
-        accountId: configured[0]!.accountId,
-        workspaceId,
-        retainedProductModelIds: configured.map((session) => session.model),
-      }),
-      configured.some((session) => session.agent?.capabilities.skills === "read")
-        ? hasWorkspaceManagedSkill(deps.db, {
-            accountId: configured[0]!.accountId,
-            workspaceId,
-            subjectId,
-          })
-        : Promise.resolve(false),
-      deps.settings.sandboxSelfhostedEnabled
-        ? Promise.all(
-            sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
-              async (id) =>
-                [
+  const [
+    workspace,
+    catalog,
+    hasWorkspaceSkills,
+    sandboxes,
+    routerHistory,
+    euOnly,
+    rarelyUsedToolsSearchable,
+  ] = await Promise.all([
+    workspaceRead ?? requireWorkspace(deps.db, workspaceId),
+    resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+      accountId: configured[0]!.accountId,
+      workspaceId,
+      retainedProductModelIds: configured.map((session) => session.model),
+    }),
+    configured.some((session) => session.agent?.capabilities.skills === "read")
+      ? hasWorkspaceManagedSkill(deps.db, {
+          accountId: configured[0]!.accountId,
+          workspaceId,
+          subjectId,
+        })
+      : Promise.resolve(false),
+    deps.settings.sandboxSelfhostedEnabled
+      ? Promise.all(
+          sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
+            async (id) =>
+              [
+                id,
+                await getSandbox(
+                  deps.db,
+                  { accountId: configured[0]!.accountId, workspaceId, subjectId },
                   id,
-                  await getSandbox(
-                    deps.db,
-                    { accountId: configured[0]!.accountId, workspaceId, subjectId },
-                    id,
-                  ),
-                ] as const,
-            ),
-          )
-        : Promise.resolve([]),
-      sessionsWithToolRouterHistory(deps.db, {
-        accountId: configured[0]!.accountId,
-        workspaceId,
-        sessionIds: [...new Set(configured.map((session) => session.id))],
-      }),
-      // EU-only: the projection lists only tools the worker would attach.
-      isWorkspaceEuOnly(deps.db, { accountId: configured[0]!.accountId, workspaceId }),
-      sessionsWithGoal(deps.db, workspaceId, [...new Set(configured.map((session) => session.id))]),
-    ]);
+                ),
+              ] as const,
+          ),
+        )
+      : Promise.resolve([]),
+    sessionsWithToolRouterHistory(deps.db, {
+      accountId: configured[0]!.accountId,
+      workspaceId,
+      sessionIds: [...new Set(configured.map((session) => session.id))],
+    }),
+    // EU-only: the projection lists only tools the worker would attach.
+    isWorkspaceEuOnly(deps.db, { accountId: configured[0]!.accountId, workspaceId }),
+    sessionsWithSearchableRarelyUsedTools(
+      deps.db,
+      workspaceId,
+      configured.map((session) => session.id),
+    ),
+  ]);
   return {
     ...baseline,
     settings: euOnly ? { ...catalog.settings, requiredModelGeography: "eu" } : catalog.settings,
@@ -431,7 +443,7 @@ export async function workspaceSessionEffectiveToolsContext(
       ),
     ),
     routerHistorySessionIds: routerHistory,
-    goalSessionIds: goalSessions,
+    rarelyUsedToolsSearchableSessionIds: rarelyUsedToolsSearchable,
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,
@@ -571,9 +583,6 @@ export function sessionEffectiveToolProjectionInput(
     context && toolRefs.some((ref) => ref.id === "opengeni")
       ? resolveAgentToolFamilies(session.agent, {
           sandboxAttached: sandboxAvailable,
-          ...(context.goalSessionIds
-            ? { sessionGoal: context.goalSessionIds.has(session.id) }
-            : {}),
         })
           .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)
@@ -734,6 +743,13 @@ export function sessionEffectiveToolProjectionInput(
       ? ["tool_search", "tool_list", ...(native ? [] : ["tool_invoke" as const])]
       : [];
   for (const name of routerToolNames) upfrontToolNames.add(name);
+  // With the router present for other tools, a session of first-request tools
+  // revision 1 or later finds these through search, as the runtime does.
+  if (
+    routerToolNames.length > 0 &&
+    context?.rarelyUsedToolsSearchableSessionIds?.has(session.id) === true
+  )
+    for (const name of RARELY_USED_RUNTIME_TOOL_NAMES) upfrontToolNames.delete(name);
   return {
     config: session.agent,
     firstPartyMcpTools,

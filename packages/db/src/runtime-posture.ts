@@ -72,7 +72,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * which Nango connections a live connection still stands for (1482), the
  * unpaid sandbox fleet counts behind the fleet limits (1486), and the
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
- * (1487), and the managed warm box count fleet pressure reads (1492).
+ * (1487), and the managed warm box count fleet pressure reads (1492), and
+ * the subscription needs-sign-in notice sync (1503).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -115,6 +116,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "sandbox_unpaid_fleet_v1(uuid, boolean)",
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
+  "sync_subscription_relogin_notice_v1(uuid)",
 ] as const;
 
 /**
@@ -151,9 +153,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, settling a call sends no ended push and those phones ring out.
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
- * 1404 withholds the inventory of cold sandboxes whose chats are all
- * archived; until it is granted, such a non-compute sandbox keeps its saved
- * workspace until its chats are deleted (as before).
+ * 1404 withheld the inventory of cold sandboxes whose chats are all archived
+ * and 1502 grants it.
  * 1475 withheld the organization-wide sandbox counts and 1479 granted them.
  * 1482 withheld the check of which Nango connections a live connection
  * stands for and 1487 the listing of live Nango rows' owners; 1499 granted
@@ -163,6 +164,10 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * pressure reads the warm count of every lease, self-hosted ones included.
  * 1501 withholds the discard of a refused keyed session create; until it is
  * granted, such a shell stays (as before).
+ * 1503 withholds the subscription needs-sign-in notice sync; until it is
+ * granted, only a status write by the tables' owner (the definer that records
+ * a model request refused after refresh, and the migration's backfill) opens
+ * or resolves a notice, and the person dismisses one left after a reconnect.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -173,9 +178,9 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
-  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
+  "sync_subscription_relogin_notice_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -324,6 +329,15 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_events",
     "session_turns",
     "session_create_idempotency_guard",
+  ],
+  "sync_subscription_relogin_notice_v1(uuid)": [
+    "subscription_connections",
+    "organization_memberships",
+    "workspace_memberships",
+    "auth_sessions",
+    "opengeni_private.inbox_items",
+    "opengeni_private.native_push_devices",
+    "opengeni_private.native_push_deliveries",
   ],
 };
 
@@ -544,6 +558,11 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 1213: clears a new session's archive marker; triggers fire
   // without the inserting role holding EXECUTE.
   "session_insert_not_archived()",
+  // Migration 1503: the sign-in stamp and needs-sign-in notice triggers on
+  // subscription connections. Triggers fire without the writing role
+  // holding EXECUTE.
+  "stamp_subscription_connection_sign_in()",
+  "subscription_connection_relogin_notice()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -1965,6 +1984,8 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ...AGENTS_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
+  // 1505: refuses organization-agent chat claims from workers without that support.
+  "guard_org_agent_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
@@ -1997,6 +2018,8 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   ...AGENTS_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
+  // 1505: refuses organization-agent chat claims from workers without that support.
+  "guard_org_agent_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
@@ -2019,9 +2042,11 @@ export const FORCE_RLS_TABLES = [
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
+  "agent_publish_operations",
   "agent_revisions",
   "agent_run_states",
   "agent_slack_installs",
+  "agent_workspace_access",
   "agents",
   "api_keys",
   "attached_browser_devices",
@@ -2133,6 +2158,7 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
   "editable_artifacts",
+  "end_user_tool_credentials",
   "enrollment_token_redemptions",
   "enrollments",
   "event_deliveries",
@@ -2241,8 +2267,10 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policy_events",
   "organization_connectors",
   "organization_console_audit_events",
+  "organization_console_roles",
   "organization_credential_providers",
   "organization_end_user_labels",
+  "organization_end_user_profiles",
   "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
@@ -2281,6 +2309,7 @@ export const FORCE_RLS_TABLES = [
   "organization_session_review_settings",
   "organization_shared_workspace_administration_capabilities",
   "organization_skill_reach",
+  "organization_tool_servers",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -2415,8 +2444,10 @@ export const FORCE_RLS_TABLES = [
   "site_abuse_reports",
   "site_auth_codes",
   "site_auth_connections",
+  "site_data_changes",
   "site_data_collections",
   "site_data_files",
+  "site_data_insert_keys",
   "site_data_rate_windows",
   "site_data_record_values",
   "site_data_records",
@@ -2616,6 +2647,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "agent_run_states",
   // 1243_agents: the agent directory and its Slack installations.
   "agent_slack_installs",
+  "agent_workspace_access",
   "agents",
   "api_keys",
   "audit_events",
@@ -2665,6 +2697,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "document_chunks",
   "documents",
   "editable_artifact_replica_leases",
+  "end_user_tool_credentials",
   "enrollment_token_redemptions",
   "enrollments",
   "event_deliveries",
@@ -2713,6 +2746,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_codex_rotation_settings",
   "organization_connectors",
   "organization_credential_providers",
+  // 1510: end-user display name and email; erased when the end user is offboarded.
+  "organization_end_user_profiles",
   "organization_identity_issuers",
   "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
@@ -2727,6 +2762,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_service_accounts",
   "organization_session_review_settings",
   "organization_skill_reach",
+  "organization_tool_servers",
   "organization_webhook_deliveries",
   "organization_webhooks",
   "pr_review_app_registrations",
@@ -2796,8 +2832,10 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sessions",
   "site_abuse_reports",
   "site_auth_codes",
+  "site_data_changes",
   "site_data_collections",
   "site_data_files",
+  "site_data_insert_keys",
   "site_data_rate_windows",
   "site_data_record_values",
   "site_data_records",
@@ -3064,6 +3102,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "agent_calls",
+  "agent_publish_operations",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
@@ -3096,6 +3135,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "interaction_operations",
   "interaction_resource_operations",
   "network_routes",
+  // 1511: a member's Console role; 'none' clears it, never deleted.
+  "organization_console_roles",
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",

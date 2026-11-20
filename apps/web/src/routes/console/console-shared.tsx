@@ -1,5 +1,5 @@
 // Shared state and small pieces for the Opengeni Console pages.
-import type { ChatClient, ConsoleAuditAction, ConsoleEndUser, ConsoleRange } from "@opengeni/sdk";
+import type { ChatClient, ConsoleAuditEvent, ConsoleEndUser, ConsoleRange } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { LockIcon } from "lucide-react";
@@ -8,6 +8,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type DependencyList,
@@ -26,10 +27,13 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { consoleAccessCovers, type ConsoleAccessLevel } from "@/lib/console-access";
 import { onConsoleHost } from "@/lib/console-route";
 import { rememberConsoleSignedOut } from "@/lib/console-sign-in";
+import { orgAgentsApi, useOrgAgentsFlag, type OrgAgentsApi } from "@/lib/organization-agents";
 
 export type ConsoleClient = ChatClient<OpenGeniBrowserClient>;
 
@@ -41,14 +45,36 @@ export type ConsoleContextValue = {
   search: { org: string };
   /** A workspace in this organization the person can open in the app, for links there. */
   appWorkspaceId: string | null;
+  /**
+   * What the person may do here (docs/opengeni-console.md, "Roles"): `full`
+   * for owners and admins, else their Console role. The API checks every call.
+   */
+  access: Exclude<ConsoleAccessLevel, "none">;
 };
 
 export const ConsoleContext = createContext<ConsoleContextValue | null>(null);
+
+/** Whether the person's Console access allows what needs `needed`. */
+export function useConsoleCan(needed: Exclude<ConsoleAccessLevel, "none">): boolean {
+  return consoleAccessCovers(useConsole().access, needed);
+}
 
 export function useConsole(): ConsoleContextValue {
   const value = useContext(ConsoleContext);
   if (!value) throw new Error("Console context is not ready");
   return value;
+}
+
+/** Console agents and tool servers calls for this organization. */
+export function useOrgAgentsApi(): OrgAgentsApi {
+  const { client, organizationId } = useConsole();
+  return useMemo(() => orgAgentsApi(client, organizationId), [client, organizationId]);
+}
+
+/** Whether this organization has Console agents (the per-organization flag); null while unknown. */
+export function useOrgAgentsEnabled(): boolean | null {
+  const { client, organizationId } = useConsole();
+  return useOrgAgentsFlag(client, organizationId);
 }
 
 /* -------------------------------------------------------------- loading */
@@ -93,7 +119,8 @@ export function useConsoleQuery<T>(
 
 /* --------------------------------------------------------------- errors */
 
-const CONSOLE_FORBIDDEN = /Opengeni Console is for organization owners and admins/iu;
+const CONSOLE_FORBIDDEN =
+  /Opengeni Console is for organization owners|Only organization owners and admins can do this in Console/iu;
 const REVIEW_OFF = /Session review is off/iu;
 
 export function isConsoleForbidden(error: unknown): boolean {
@@ -125,20 +152,35 @@ export function useConsoleSignOut(): (() => void) | null {
 }
 
 /**
- * Console is for owners and admins: say so, with the way back to the app, or
- * on a Console host (where nothing leads into the app) Sign out.
+ * Console is for owners, admins and members with a Console role (or this page
+ * is for owners and admins): say so, with the way back to the app, or on a
+ * Console host (where nothing leads into the app) Sign out.
  */
-export function ConsoleForbidden() {
+export function ConsoleForbidden({
+  ownersAndAdmins = false,
+  title,
+}: {
+  /** A page for owners and admins (the person has a Console role). */
+  ownersAndAdmins?: boolean;
+  /** Overrides the title for a page the person's Console role doesn't cover. */
+  title?: string;
+}) {
+  const limited = ownersAndAdmins || title !== undefined;
   const signOut = useConsoleSignOut();
   const consoleHost = onConsoleHost();
   return (
     <EmptyState
       variant="page"
       icon={<LockIcon />}
-      title="Opengeni Console is for organization owners and admins"
-      description="Ask an owner of this organization for access."
+      title={
+        title ??
+        (ownersAndAdmins
+          ? "Only organization owners and admins can open this"
+          : "Opengeni Console is for organization owners, admins and members with a Console role")
+      }
+      description={limited ? undefined : "Ask an owner or admin of this organization for access."}
       action={
-        consoleHost ? (
+        limited ? undefined : consoleHost ? (
           signOut ? (
             <Button variant="outline" onClick={signOut}>
               Sign out
@@ -233,15 +275,101 @@ export function formatDuration(ms: number): string {
   return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
 }
 
-/** The product's own id for the person, else a short form of their subject. */
-export function endUserLabel(endUser: ConsoleEndUser | null | undefined): string {
-  if (!endUser) return "—";
-  if (endUser.externalId) return endUser.externalId;
-  const subject = endUser.subjectId.replace(/^(?:external_user|user):/u, "");
+export type EndUserDisplay = {
+  /** Name, else email, else the product's id, else a short form of the subject. */
+  primary: string;
+  /** The email under a name; null when the primary line already is the email or there is none. */
+  secondary: string | null;
+  /** The product's own id (else the subject): shown on hover and copied. */
+  id: string;
+  /** The name or email shown is what the product sent, which Opengeni doesn't verify. */
+  unverified: boolean;
+};
+
+/** Hover note on a name or email the product sent. */
+export const END_USER_UNVERIFIED_NOTE = "Name and email sent by your product, not verified";
+
+function shortSubject(subjectId: string): string {
+  const subject = subjectId.replace(/^(?:external_user|user):/u, "");
   return subject.length > 14 ? `${subject.slice(0, 12)}…` : subject;
 }
 
-export function auditActionText(action: ConsoleAuditAction): string {
+/** How Console names an end user: name, then email, then the product's id. */
+export function endUserDisplay(endUser: ConsoleEndUser | null | undefined): EndUserDisplay | null {
+  if (!endUser) return null;
+  const name = endUser.displayName?.trim() || null;
+  const email = endUser.email?.trim() || null;
+  const id = endUser.externalId ?? endUser.subjectId;
+  const primary = name ?? email ?? endUser.externalId ?? shortSubject(endUser.subjectId);
+  return {
+    primary,
+    secondary: name && email ? email : null,
+    id,
+    unverified: Boolean(name ?? email),
+  };
+}
+
+/** One line: the end user's name, else email, else the product's id. */
+export function endUserLabel(endUser: ConsoleEndUser | null | undefined): string {
+  return endUserDisplay(endUser)?.primary ?? "—";
+}
+
+/** Matches a search against the end user's name, email and id (client-side lists). */
+export function endUserMatches(endUser: ConsoleEndUser | null | undefined, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  if (!endUser) return false;
+  return [endUser.displayName, endUser.email, endUser.externalId, endUser.subjectId].some(
+    (value) => value?.toLowerCase().includes(needle) ?? false,
+  );
+}
+
+/**
+ * The end user in a table cell or detail row: name and email, wrapping
+ * instead of cutting off, with the product's id on hover. `copyable` adds the
+ * id with a copy button (detail pages).
+ */
+export function EndUserName({
+  endUser,
+  copyable = false,
+}: {
+  endUser: ConsoleEndUser | null | undefined;
+  copyable?: boolean;
+}) {
+  const display = endUserDisplay(endUser);
+  if (!display) return <span className="text-fg-subtle">—</span>;
+  return (
+    <span
+      className="flex min-w-0 flex-col whitespace-normal"
+      title={display.unverified ? `${display.id}\n${END_USER_UNVERIFIED_NOTE}` : display.id}
+    >
+      <span className="break-words">{display.primary}</span>
+      {display.secondary ? (
+        <span className="text-xs break-words text-fg-subtle">{display.secondary}</span>
+      ) : null}
+      {copyable ? (
+        <CopyField
+          value={display.id}
+          label="end user ID"
+          truncate="middle"
+          className="text-xs text-fg-subtle"
+        />
+      ) : null}
+    </span>
+  );
+}
+
+/** A workspace name in full: wraps instead of cutting off, with the name on hover. */
+export function WorkspaceName({ name }: { name: string }) {
+  return (
+    <span className="block whitespace-normal break-words" title={name}>
+      {name}
+    </span>
+  );
+}
+
+/** What an audit action did; an action a newer server added reads as itself. */
+export function auditActionText(action: ConsoleAuditEvent["action"]): string {
   switch (action) {
     case "session.transcript_viewed":
       return "Opened a transcript";
@@ -251,6 +379,36 @@ export function auditActionText(action: ConsoleAuditAction): string {
       return "Changed session review";
     case "workspace.kind_changed":
       return "Changed a workspace's kind";
+    case "agent.created":
+      return "Created an agent";
+    case "agent.updated":
+      return "Changed where an agent is available";
+    case "agent.version_saved":
+      return "Saved an agent version";
+    case "agent.published":
+      return "Published an agent";
+    case "agent.archived":
+      return "Archived an agent";
+    case "agent.management_changed":
+      return "Changed who manages an agent";
+    case "agent.deployed":
+      return "Deployed an agent";
+    case "tool_server.created":
+      return "Added a tool server";
+    case "tool_server.updated":
+      return "Changed a tool server";
+    case "tool_server.deleted":
+      return "Removed a tool server";
+    case "tool_credential.written":
+      return "Stored an end user's tool login";
+    case "tool_credential.deleted":
+      return "Removed an end user's tool login";
+    case "member.console_role_changed":
+      return "Changed a member's Console role";
+    case "agent.sessions_viewed":
+      return "Opened an agent's sessions";
+    default:
+      return action;
   }
 }
 

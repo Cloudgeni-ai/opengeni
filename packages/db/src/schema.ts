@@ -5581,9 +5581,23 @@ export const sessions = pgTable(
     // NULL is a legacy chat (instructions already in `instructions`): never
     // add the agent layer to it.
     agentPromptRevision: integer("agent_prompt_revision"),
+    // Migration 1505: the organization agent version this chat runs (with
+    // agentId), the version whose Instructions are in its system prompt (NULL:
+    // no agent layer, a worker without shared Instructions) and what the chat
+    // changed from the version ({setting: {agent, chat}}). NULL for every
+    // other chat.
+    agentVersion: integer("agent_version"),
+    agentPromptVersion: integer("agent_prompt_version"),
+    agentOverrides:
+      jsonb("agent_overrides").$type<Record<string, { agent: unknown; chat: unknown }>>(),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
+    // Migration 1513: which base runtime tools every request carries
+    // (CURRENT_FIRST_REQUEST_TOOLS_REVISION in @opengeni/contracts). Every
+    // older row is 0. A new row starts NULL and its first turn attempt sets it
+    // once, before any model request; forks copy their source's value.
+    firstRequestToolsRevision: integer("first_request_tools_revision"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Top-level xid, assigned by a BEFORE trigger in the original row write.
@@ -12280,6 +12294,7 @@ export const enrollments = pgTable(
     // Unused for workspace and personal machines.
     allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    allowManagedWorkspaces: boolean("allow_managed_workspaces").notNull().default(false),
     // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
     // Opengeni compute sandbox (migration 0858): bound to its sandbox group,
     // reached through the agent gateway, with no key or bearer, and never
@@ -15332,6 +15347,7 @@ export const rigs = pgTable(
     // (migration 1190), as for organization machines. Unused otherwise.
     allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    allowManagedWorkspaces: boolean("allow_managed_workspaces").notNull().default(false),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

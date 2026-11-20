@@ -30,9 +30,18 @@ export type ConsoleWorkspaceKind = z.infer<typeof ConsoleWorkspaceKind>;
 
 /** How a workspace came to be managed by the product. */
 export const ConsoleManagedSource = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["api_key", "backfill", "console"]),
+  z.enum(["api_key", "backfill", "console", "console_test"]),
 );
 export type ConsoleManagedSource = z.infer<typeof ConsoleManagedSource>;
+
+/**
+ * A workspace's managed source as read back: a known {@link ConsoleManagedSource}
+ * or one a newer server added. Readers must tolerate new ones.
+ */
+export const ConsoleManagedSourceValue = /* @__PURE__ */ defineSchema(() =>
+  z.union([ConsoleManagedSource, z.string().min(1).max(64)]),
+);
+export type ConsoleManagedSourceValue = z.infer<typeof ConsoleManagedSourceValue>;
 
 export const ConsoleRange = /* @__PURE__ */ defineSchema(() => z.enum(["7d", "30d", "90d"]));
 export type ConsoleRange = z.infer<typeof ConsoleRange>;
@@ -103,6 +112,8 @@ export const ConsoleSummary = /* @__PURE__ */ defineSchema(() =>
     endUsers: primitives.nonnegativeInteger,
     /** Set when the session counts stopped early on a very large organization. */
     countsTruncated: primitives.boolean,
+    /** Console agents are on for this organization. Absent on older servers and when off. */
+    orgAgents: primitives.optionalBoolean,
   }),
 );
 export type ConsoleSummary = z.infer<typeof ConsoleSummary>;
@@ -120,7 +131,7 @@ export const ConsoleWorkspace = /* @__PURE__ */ defineSchema(() =>
     id: primitives.uuid,
     name: primitives.string,
     kind: ConsoleWorkspaceKind,
-    managedSource: ConsoleManagedSource.nullable(),
+    managedSource: ConsoleManagedSourceValue.nullable(),
     /** The organization API key that created it, when known. */
     createdByApiKeyId: primitives.nullableUuid,
     externalSource: primitives.nullableString,
@@ -155,6 +166,10 @@ export const ConsoleEndUser = /* @__PURE__ */ defineSchema(() =>
     /** The product's own id for the user (`asUser(id)`), when Opengeni knows it. */
     externalId: primitives.nullableString,
     source: primitives.nullableString,
+    /** Name the product sent (`asUser(id, { displayName })`). Absent on older servers. */
+    displayName: primitives.nullableString.optional(),
+    /** Email the product sent (`asUser(id, { email })`), as given. Absent on older servers. */
+    email: primitives.nullableString.optional(),
   }),
 );
 export type ConsoleEndUser = z.infer<typeof ConsoleEndUser>;
@@ -193,7 +208,10 @@ export const ListConsoleSessionsQuery = /* @__PURE__ */ defineSchema(() =>
     limit: z.coerce.number().int().min(1).max(100).default(50),
     cursor: z.string().min(1).max(512).optional(),
     workspaceId: primitives.optionalUuid,
-    /** Matches the title and opening message; only with the `full` review level. */
+    /**
+     * Matches the workspace name and the end user's id, name or email; with
+     * the `full` review level also the title and opening messages.
+     */
     q: z.string().trim().min(1).max(200).optional(),
   }),
 );
@@ -259,14 +277,37 @@ export const ConsoleAuditAction = /* @__PURE__ */ defineSchema(() =>
     "session.metadata_viewed",
     "settings.review_level_changed",
     "workspace.kind_changed",
+    "agent.created",
+    "agent.updated",
+    "agent.version_saved",
+    "agent.published",
+    "agent.archived",
+    "agent.management_changed",
+    "agent.deployed",
+    "tool_server.created",
+    "tool_server.updated",
+    "tool_server.deleted",
+    "tool_credential.written",
+    "tool_credential.deleted",
+    "member.console_role_changed",
+    "agent.sessions_viewed",
   ]),
 );
 export type ConsoleAuditAction = z.infer<typeof ConsoleAuditAction>;
 
+/**
+ * An audit event's action as read back: a known {@link ConsoleAuditAction} or
+ * one a newer server added. Readers must tolerate new ones.
+ */
+export const ConsoleAuditEventAction = /* @__PURE__ */ defineSchema(() =>
+  z.union([ConsoleAuditAction, z.string().min(1).max(128)]),
+);
+export type ConsoleAuditEventAction = z.infer<typeof ConsoleAuditEventAction>;
+
 export const ConsoleAuditEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
-    action: ConsoleAuditAction,
+    action: ConsoleAuditEventAction,
     actorSubjectId: primitives.string,
     actorLabel: primitives.nullableString,
     workspaceId: primitives.nullableUuid,
@@ -318,3 +359,67 @@ export const ConsoleApiKeyUsageResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type ConsoleApiKeyUsageResponse = z.infer<typeof ConsoleApiKeyUsageResponse>;
+
+/**
+ * A member's Console role, set by an owner or admin. `none` (the default) is
+ * no Console access; `viewer` reads sessions (at the review level), cost and
+ * agents; `editor` also creates, edits, tests and publishes Console-managed
+ * agents. Owners and admins are always full in Console and have no row. A
+ * Console role never grants access to app workspaces.
+ */
+export const ConsoleMemberRole = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["none", "viewer", "editor"]),
+);
+export type ConsoleMemberRole = z.infer<typeof ConsoleMemberRole>;
+
+/** What the signed-in person may do in an organization's Console. */
+export const ConsoleAccessLevel = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["full", "editor", "viewer", "none"]),
+);
+export type ConsoleAccessLevel = z.infer<typeof ConsoleAccessLevel>;
+
+export const ConsoleAccessResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    organizationId: primitives.uuid,
+    access: ConsoleAccessLevel,
+    /**
+     * Console agents are on for this organization (the per-organization
+     * flag). Always false when `access` is `none`. Clients read this instead
+     * of probing the agent routes, which answer 404 while the flag is off.
+     */
+    orgAgentsEnabled: primitives.boolean,
+  }),
+);
+export type ConsoleAccessResponse = z.infer<typeof ConsoleAccessResponse>;
+
+/** One member's (`subjectId`) or pending invitation's (`invitationId`) Console role. */
+export const ConsoleMemberRoleEntry = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    subjectId: primitives.nullableString,
+    invitationId: primitives.nullableUuid,
+    role: ConsoleMemberRole,
+    updatedBySubjectId: primitives.string,
+    updatedAt: primitives.dateTime,
+  }),
+);
+export type ConsoleMemberRoleEntry = z.infer<typeof ConsoleMemberRoleEntry>;
+
+/** Every Console role set in the organization. Anyone not listed has `none`. */
+export const ConsoleMemberRolesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    roles: z.array(ConsoleMemberRoleEntry),
+  }),
+);
+export type ConsoleMemberRolesResponse = z.infer<typeof ConsoleMemberRolesResponse>;
+
+/**
+ * Sets the Console role of one member (`subjectId`). An invitation's role is
+ * chosen when inviting (`consoleRole`) and can't change afterwards.
+ */
+export const SetConsoleMemberRoleRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    subjectId: z.string().trim().min(6).max(1024),
+    role: ConsoleMemberRole,
+  }),
+);
+export type SetConsoleMemberRoleRequest = z.infer<typeof SetConsoleMemberRoleRequest>;

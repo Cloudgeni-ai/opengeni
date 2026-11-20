@@ -48,15 +48,20 @@ export const PERMISSIONS_POLICY = [
 const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
 
 /** CSP for the shell page. Turnstile's origin is added only when the human check is configured. */
-export function shellCsp(nonce: string, options: { turnstile: boolean }): string {
+export function shellCsp(
+  nonce: string,
+  options: { turnstile: boolean; siteOrigin?: string },
+): string {
   const turnstile = options.turnstile ? ` ${TURNSTILE_ORIGIN}` : "";
+  // Older browsers do not match ws(s): with 'self'; name the live origin.
+  const live = options.siteOrigin ? ` ${options.siteOrigin.replace(/^http/, "ws")}` : "";
   return [
     "default-src 'none'",
     `script-src 'nonce-${nonce}'${turnstile}`,
     `style-src 'nonce-${nonce}'`,
     "img-src 'self' data:",
     `frame-src 'self'${turnstile}`,
-    "connect-src 'self'",
+    `connect-src 'self'${live}`,
     "base-uri 'none'",
     "form-action 'self'",
     "object-src 'none'",

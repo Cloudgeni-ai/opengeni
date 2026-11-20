@@ -13,6 +13,7 @@ export * from "./billing-card-verification";
 export * from "./secret-value";
 export * from "./citation-urls";
 export * from "./claude-cite-tags";
+export * from "./provider-citation-handles";
 export * from "./machine-access";
 export * from "./no-reply";
 import { NO_REPLY_SENTINEL } from "./no-reply";
@@ -155,6 +156,7 @@ export const HostMcpCreateSelections = /* @__PURE__ */ defineSchema(() =>
 );
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { SessionOrgAgent } from "./organization-agents";
 import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
 import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
@@ -221,6 +223,7 @@ export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
 export * from "./agents";
+export * from "./organization-agents";
 export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
@@ -5034,11 +5037,22 @@ export function userSetupCardShownMessage(
   );
 }
 
-/** What the agent reads when the setup card could not be posted for it. */
-export function userSetupCardUnpostedMessage(blocker: UserSetupBlocker): string {
+/**
+ * What the agent reads when the setup card could not be posted for it.
+ * `cardTool` says whether the agent has capability_authorization_request:
+ * the message names that tool only when it may exist (undefined: unknown).
+ */
+export function userSetupCardUnpostedMessage(
+  blocker: UserSetupBlocker,
+  cardTool?: boolean,
+): string {
+  const card =
+    cardTool === false
+      ? ""
+      : `post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId})${cardTool ? "" : " if that tool is available"}, and `;
   return (
-    `${blocker.problem} The person can fix this. Offer the fix in this reply: post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId}) if that tool is available, ` +
-    `and tell them the exact next step: ${blocker.nextStep}. ` +
+    `${blocker.problem} The person can fix this. Offer the fix in this reply: ${card}` +
+    `tell them the exact next step: ${blocker.nextStep}. ` +
     "Do not only report that it is unavailable."
   );
 }
@@ -12824,14 +12838,18 @@ export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
  * Where an organization machine or rig works: always in the workspace it was
  * connected from or made in (`homeWorkspaceId`), plus every shared workspace
  * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
- * members' Personal workspaces when `allowPersonalWorkspaces` is on. Only
- * organization machines and rigs have it.
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on, and every
+ * workspace the organization's product manages (including ones it creates
+ * later) when `allowManagedWorkspaces` is on (migration 1512; servers before
+ * it omit the field). Only organization machines and rigs have it.
  */
 export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>
   z.object({
     homeWorkspaceId: primitives.uuid,
     allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
     allowPersonalWorkspaces: primitives.boolean,
+    /** Absent (older servers) means off. */
+    allowManagedWorkspaces: primitives.boolean.optional(),
   }),
 );
 export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
@@ -12841,12 +12859,14 @@ export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
  * PUT /v1/workspaces/:workspaceId/rigs/:rigId/reach: an organization owner or
  * admin changes where an organization machine or rig works. The ids are the
  * organization's shared workspaces; its home workspace always has it.
+ * `allowManagedWorkspaces` omitted keeps the current setting.
  */
 export const UpdateOrganizationComputeReachRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       allowedWorkspaceIds: z.array(primitives.uuid).max(1000).nullable(),
       allowPersonalWorkspaces: primitives.boolean,
+      allowManagedWorkspaces: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -17244,6 +17264,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * ordinary chat. Fixed at create. Omitted by older servers.
      */
     agentId: primitives.uuid.nullable().optional(),
+    /**
+     * The organization (Console) agent version this chat runs and what the
+     * chat changed from it; null or omitted for every other chat.
+     */
+    orgAgent: SessionOrgAgent.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -17917,6 +17942,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // A repository was attached to the chat after it started, such as one the
     // agent asked for and a person approved. The next turn clones it.
     "session.resources.added",
+    // An organization agent's tool server is attached without a usable login
+    // for this turn (`reason`: missing_credentials or credentials_expired).
+    "session.tool_server.unavailable",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -18203,6 +18231,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "turn.failed",
     "tool.auth_needed",
     "credential.auth_needed",
+    "session.tool_server.unavailable",
     "rig.setup.failed",
     "sandbox.operation.failed",
     "recording.failed",
@@ -18619,9 +18648,30 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
 );
 export type InboxItem = z.infer<typeof InboxItem>;
 
+/**
+ * A notice about something other than a chat, such as a subscription account
+ * that needs signing in again: shaped like a notification item, with no
+ * session and always a link (an address in the web app). It is marked seen or
+ * dismissed like an item.
+ */
+export const InboxNotice = /* @__PURE__ */ defineSchema(() =>
+  InboxItem.extend({
+    sessionId: z.null(),
+    kind: z.literal("notification"),
+    link: z.object({ url: primitives.string, label: primitives.string }),
+    sessionAvailable: z.literal(false).default(false),
+  }),
+);
+export type InboxNotice = z.infer<typeof InboxNotice>;
+
 export const ListInboxResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(InboxItem),
+    /**
+     * Open notices about something other than a chat, newest first. Not
+     * counted in `needsYouCount` or `unreadCount`.
+     */
+    notices: z.array(InboxNotice).optional(),
     /** Organization billing notices are not chat items or workspace events. */
     billingNotifications: z.array(BillingCreditNotification).optional(),
     /** Open items that need the person (questions, approvals, paused goals). */
@@ -19529,6 +19579,11 @@ export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
 // The single manifest blob (one per revision). Holds everything the workbench
 // needs for a cold paint: the tree index, per-repo status+diff, and the file
 // index (after-image refs). The M2 API serves this inline when small (≤2MB).
+// A capture never publishes a manifest larger than
+// WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES: diff hunks are shed (the entry is kept
+// with `truncated: true`) until it fits, so every reader can afford to parse
+// one. The API never parses a larger (legacy) manifest.
+export const WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
 export const WorkspaceCaptureManifest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     version: z.literal(1),
@@ -24091,6 +24146,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: primitives.optionalBoolean,
+    // Console agents (organization agents) are on for the caller's organization.
+    // Absent on older servers and when off.
+    orgAgents: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z
@@ -24422,6 +24480,7 @@ export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
+export * from "./workspace-filesystem-context";
 export * from "./agent-instructions-context";
 export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";

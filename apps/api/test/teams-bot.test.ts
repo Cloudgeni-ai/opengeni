@@ -270,6 +270,13 @@ describe("Teams actor and transport boundary", () => {
     expect(parts.join("")).toContain("(https://example.com/watch?v=abc)");
     expect(parts.join("")).not.toContain("utm_source");
   });
+  test("a reply has no web-search citation handles", () => {
+    expect(
+      teamsReplyParts(
+        "It ends in March. \uE200cite\uE202turn648869view0\uE202turn382080view0\uE201 Use v3.",
+      ),
+    ).toEqual(["It ends in March. Use v3."]);
+  });
 });
 
 test.each(["https://login.microsoftonline.com/example/v2.0", "https://api.botframework.com"])(

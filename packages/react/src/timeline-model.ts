@@ -194,4 +194,43 @@ export {
   agentWorkHumanInputSummary,
   isAgentWorkHumanInput,
 } from "./timeline/agent-work-human-input";
-export { automationRunLine, isAutomationRunBatch } from "./components/machine-input-display";
+export {
+  agentMemberSessionId,
+  agentMemberText,
+  agentMemberTitle,
+  automationRunLine,
+  cleanMachineInputSummary,
+  isAgentMember,
+  isAutomationRunBatch,
+  MACHINE_INPUT_META,
+  machineInputBatchLabel,
+  machineInputSummaryIsUseful,
+  readableMachineInputSource,
+} from "./components/machine-input-display";
+export {
+  goalLandmarkLabel,
+  goalLandmarkText,
+  goalLandmarkTone,
+  groupMachineInputMembers,
+  workerCompletionPresentation,
+  workerCompletionSections,
+  type GoalLandmarkTone,
+  type MachineInputMemberGroup,
+  type WorkerCompletionOutcome,
+} from "./timeline/landmark-model";
+export {
+  COMPACTION_TRIMMED_SUBTITLE,
+  COMPACTION_TRIMMED_TITLE,
+  compactionFailureDetails,
+  compactionPresentation,
+  compactionSkipSubtitle,
+  compactionSkipTitle,
+  isTrimmedCompaction,
+} from "./timeline/compaction-copy";
+export {
+  allowanceLabels,
+  allowanceResetSentence,
+  type AllowanceLabels,
+} from "./usage/allowance-copy";
+export { DEFAULT_SESSION_USAGE_LIMIT_LABELS } from "./usage/session-usage-limit";
+export { learningRefusalBody, learningRefusalTitle } from "./timeline/learning-refusal-copy";
