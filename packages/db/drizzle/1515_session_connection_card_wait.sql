@@ -12,14 +12,14 @@
 --   connection-card notices; null when none is open.
 -- * sessions.awaiting_connection_since: when the oldest of them was posted
 --   (kept while any stays open); null when none is open.
--- * An AFTER INSERT trigger on session_events (added by 1506) maintains both: a posted
+-- * An AFTER INSERT trigger on session_events (added by 1516) maintains both: a posted
 --   notice adds its key, a withdrawn one removes it, and a turn's first
 --   `turn.started` clears them: once the agent works again (the person wrote, the card's
 --   setup continued it, or anything else woke it) it no longer waits, and a
 --   card it still needs is posted again by that turn. A failure
 --   is a warning and never aborts the event's transaction. Imported
 --   read-only chats are left alone.
--- * The inbox trigger also takes `turn.started` (1506), which closes the chat's
+-- * The inbox trigger also takes `turn.started` (1516), which closes the chat's
 --   open connection-card notices (status withdrawn). Its function is 1289's
 --   plus that branch; same signature, so grants are kept.
 -- * A new session never starts waiting: a BEFORE INSERT trigger clears the
@@ -27,7 +27,7 @@
 -- * Changing the timestamp notifies session lists, like other list fields.
 --
 -- This migration changes only `sessions` (columns, its triggers and the
--- tracking function); 1506 attaches the triggers on session_events. Keeping
+-- tracking function); 1516 attaches the triggers on session_events. Keeping
 -- them in separate transactions means neither ever holds a lock on one table
 -- while waiting for the other, which live event writes take in the opposite
 -- order.
