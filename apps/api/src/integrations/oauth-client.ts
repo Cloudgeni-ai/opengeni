@@ -2698,16 +2698,7 @@ async function dynamicClientRegistration(
       ? ` ${host} said: ${providerError.error}${providerError.description ? ` (${providerError.description.replace(/[.!?]$/u, "")})` : ""}.`
       : "";
     const known = oauthProviderRefusal(providerError?.error);
-    if (response.status === 401 || response.status === 403) {
-      // The provider admits only clients it has approved (Dropbox, for one).
-      // Retrying cannot help; the deployment needs a client registered with it.
-      throw new OAuthProviderRefusalError(
-        `${host} doesn't let apps register themselves for sign-in. This deployment needs an OAuth client registered with ${host} before you can connect.${said}`,
-        providerError,
-        known ?? "app_registration_required",
-      );
-    }
-    if (response.status === 429 || response.status >= 500) {
+    if (response.status === 429 || response.status >= 500 || known === "provider_unavailable") {
       throw new OAuthProviderRefusalError(
         `${host} could not register this app (HTTP ${response.status}). Try again later.${said}`,
         providerError,
@@ -2715,14 +2706,22 @@ async function dynamicClientRegistration(
         response.status === 429 ? 429 : 502,
       );
     }
+    // 401/403: the provider admits only clients it has approved (Dropbox, for
+    // one), unless its code says something more specific.
+    const refusal =
+      known ??
+      (response.status === 401 || response.status === 403 ? "app_registration_required" : null);
     throw new OAuthProviderRefusalError(
-      known === "app_not_allowed"
+      refusal === "app_not_allowed"
         ? // An allow-list of redirect URIs (SuperOffice, for one): only the
           // provider can add this deployment's callback.
           `${host} only accepts sign-ins from apps it has approved. Ask ${host} to allow this app's sign-in address.${said}`
-        : `dynamic client registration failed with HTTP ${response.status}.${said}`,
+        : refusal === "app_registration_required"
+          ? // Retrying cannot help; the deployment needs a client registered with it.
+            `${host} doesn't let apps register themselves for sign-in. This deployment needs an OAuth client registered with ${host} before you can connect.${said}`
+          : `dynamic client registration failed with HTTP ${response.status}.${said}`,
       providerError,
-      known,
+      refusal,
     );
   }
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
@@ -3407,7 +3406,7 @@ function oauthStartApiError(error: OAuthStartStageError): ApiHttpError {
         ? error.cause.status
         : 422;
   return new ApiHttpError(status, {
-    code: timeout || status >= 500 ? "upstream_unavailable" : "validation_failed",
+    code: timeout || status >= 500 || status === 429 ? "upstream_unavailable" : "validation_failed",
     retryable:
       timeout ||
       status === 429 ||

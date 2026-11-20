@@ -4869,6 +4869,34 @@ describe("connections routes", () => {
         message: "Try again later",
       },
     },
+    {
+      name: "a rate limit",
+      status: 429,
+      contentType: "application/json",
+      body: { error: "slow_down" },
+      expected: {
+        httpStatus: 429,
+        code: "upstream_unavailable",
+        retryable: true,
+        providerRefusal: "provider_unavailable",
+        providerError: "slow_down",
+        message: "Try again later",
+      },
+    },
+    {
+      name: "an outage reported with a 403",
+      status: 403,
+      contentType: "application/json",
+      body: { error: "server_error" },
+      expected: {
+        httpStatus: 502,
+        code: "upstream_unavailable",
+        retryable: true,
+        providerRefusal: "provider_unavailable",
+        providerError: "server_error",
+        message: "Try again later",
+      },
+    },
   ])("oauth start passes on the provider's reason for $name at registration", async (scenario) => {
     if (!available) return;
     const workspace = await freshWorkspace();
