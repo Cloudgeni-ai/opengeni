@@ -1,5 +1,5 @@
-// The "Who should answer in #channel?" picker must say which buttons are
-// agents and which are workspaces.
+// The "Who should answer in #channel?" picker must say which options are
+// agents and which are workspaces, and show each agent recognisably.
 import { describe, expect, test } from "bun:test";
 import {
   SlackBotOperationConflictError,
@@ -26,10 +26,18 @@ const workspace = (id: string, name: string): SlackRouteChoiceCardOption => ({
 
 const OPTIONS = [
   agent("o1", "analytics"),
-  agent("o2", "Meeting preparation"),
+  agent("o2", "Meeting <prep>"),
   workspace("o3", "Analytics"),
   workspace("o4", "Cloudgeni"),
 ];
+
+const DETAILS = new Map([
+  [
+    "agent-o1",
+    { iconUrl: "https://app.example.test/a1.png", description: "Answers revenue questions." },
+  ],
+  ["agent-o2", { iconUrl: null, description: "Prepares   briefs." }],
+]);
 
 const base = {
   channel: "<#C123>",
@@ -70,17 +78,32 @@ const footer = {
 };
 
 describe("Slack route picker with agents", () => {
-  test("groups agents and workspaces under their own labels, with plain names", () => {
-    expect(slackRouteChoiceWithAgentsBlocks({ ...base, options: OPTIONS })).toEqual([
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "Who should answer in <#C123>?" },
-      },
+  test("groups agents and workspaces, showing each agent's avatar and description", () => {
+    expect(
+      slackRouteChoiceWithAgentsBlocks({ ...base, options: OPTIONS, agentDetails: DETAILS }),
+    ).toEqual([
+      { type: "section", text: { type: "mrkdwn", text: "Who should answer in <#C123>?" } },
       { type: "section", text: { type: "mrkdwn", text: "*Agents*" } },
       {
+        type: "context",
+        elements: [
+          { type: "image", image_url: "https://app.example.test/a1.png", alt_text: "analytics" },
+          { type: "mrkdwn", text: "*analytics*  Answers revenue questions." },
+        ],
+      },
+      {
         type: "actions",
-        block_id: "opengeni-route-choice-agents",
-        elements: [button("o1", "analytics"), button("o2", "Meeting preparation")],
+        block_id: "opengeni-route-choice-o1",
+        elements: [button("o1", "Choose")],
+      },
+      {
+        type: "context",
+        elements: [{ type: "mrkdwn", text: "*Meeting &lt;prep&gt;*  Prepares briefs." }],
+      },
+      {
+        type: "actions",
+        block_id: "opengeni-route-choice-o2",
+        elements: [button("o2", "Choose")],
       },
       { type: "section", text: { type: "mrkdwn", text: "*Workspaces*" } },
       {
@@ -92,6 +115,22 @@ describe("Slack route picker with agents", () => {
       cancel,
       footer,
     ]);
+  });
+
+  test("an agent without details is a plain button, and a long description is cut", () => {
+    const blocks = slackRouteChoiceWithAgentsBlocks({
+      ...base,
+      options: [agent("o1", "analytics"), agent("o2", "Ops")],
+      agentDetails: new Map([["agent-o2", { iconUrl: null, description: "x".repeat(300) }]]),
+    });
+    expect(blocks[2]).toEqual({
+      type: "actions",
+      block_id: "opengeni-route-choice-o1",
+      elements: [button("o1", "analytics")],
+    });
+    const described = blocks[3] as { elements: Array<{ text: string }> };
+    expect([...described.elements[0]!.text]).toHaveLength("*Ops*  ".length + 120);
+    expect(described.elements[0]!.text.endsWith("…")).toBe(true);
   });
 
   test("leaves out an empty group and keeps Not now on its own", () => {
@@ -106,18 +145,15 @@ describe("Slack route picker with agents", () => {
     expect(blocks.slice(-3, -1)).toEqual([{ type: "divider" }, cancel]);
 
     const onlyWorkspaces = JSON.stringify(
-      slackRouteChoiceWithAgentsBlocks({
-        ...base,
-        options: [workspace("o3", "Analytics")],
-      }),
+      slackRouteChoiceWithAgentsBlocks({ ...base, options: [workspace("o3", "Analytics")] }),
     );
     expect(onlyWorkspaces).toContain("*Workspaces*");
     expect(onlyWorkspaces).not.toContain("*Agents*");
   });
 
-  test("keeps the group label above its buttons on the Slack wire", () => {
+  test("keeps each group's rows together and valid on the Slack wire", () => {
     const wire = slackMessageWireBlocks(
-      slackRouteChoiceWithAgentsBlocks({ ...base, options: OPTIONS }),
+      slackRouteChoiceWithAgentsBlocks({ ...base, options: OPTIONS, agentDetails: DETAILS }),
     )!;
     const rows = wire.map((block) =>
       block.type === "section"
@@ -129,8 +165,10 @@ describe("Slack route picker with agents", () => {
     expect(rows).toEqual([
       "Who should answer in <#C123>?",
       "*Agents*",
-      "analytics",
-      "Meeting preparation",
+      "context",
+      "Choose",
+      "context",
+      "Choose",
       "*Workspaces*",
       "Analytics",
       "Cloudgeni",
@@ -138,44 +176,56 @@ describe("Slack route picker with agents", () => {
       "Not now",
       "context",
     ]);
+    const blockIds = wire.flatMap((block) =>
+      "block_id" in block && block.block_id ? [block.block_id] : [],
+    );
+    expect(new Set(blockIds).size).toBe(blockIds.length);
   });
 
-  test("re-sends the flat card under the same operation when an earlier release bound it", async () => {
+  function poster(failures: number) {
     const posted: Array<{ operationId: string; blocks: SlackMessageBlock[] }> = [];
-    let first = true;
-    await postSlackRouteChoiceWithAgentsCard(
-      {
-        async postMessage(input) {
-          if (first) {
-            first = false;
+    let remaining = failures;
+    return {
+      posted,
+      client: {
+        async postMessage(input: { operationId: string; blocks: SlackMessageBlock[] }) {
+          if (remaining > 0) {
+            remaining -= 1;
             throw new SlackBotOperationConflictError("post");
           }
-          posted.push(input);
+          posted.push({ operationId: input.operationId, blocks: input.blocks });
           return {};
         },
       },
-      {
-        ...base,
-        options: OPTIONS,
-        operationId: "op-1",
-        userId: "U1",
-        text: "Who should answer in <#C123>?",
-        boundLabel: (label) => label,
-      },
-    );
+    };
+  }
+
+  const post = {
+    ...base,
+    options: OPTIONS,
+    agentDetails: DETAILS,
+    operationId: "op-1",
+    userId: "U1",
+    text: "Who should answer in <#C123>?",
+    boundLabel: (label: string) => label,
+  };
+
+  test("re-sends the flat card under the same operation when an earlier release bound it", async () => {
+    const { posted, client } = poster(1);
+    await postSlackRouteChoiceWithAgentsCard(client, {
+      ...post,
+      alreadyPosted: async () => false,
+    });
     expect(posted).toEqual([
-      {
-        operationId: "op-1",
-        blocks: legacySlackRouteChoiceWithAgentsBlocks({
-          ...base,
-          options: OPTIONS,
-          boundLabel: (label) => label,
-        }),
-        userId: "U1",
-        text: "Who should answer in <#C123>?",
-      } as never,
+      { operationId: "op-1", blocks: legacySlackRouteChoiceWithAgentsBlocks(post) },
     ]);
     expect(JSON.stringify(posted[0]!.blocks)).toContain("Opengeni in Analytics");
+  });
+
+  test("posts nothing more when the card is already up", async () => {
+    const { posted, client } = poster(1);
+    await postSlackRouteChoiceWithAgentsCard(client, { ...post, alreadyPosted: async () => true });
+    expect(posted).toEqual([]);
   });
 
   test("does not swallow other post failures", async () => {
@@ -186,14 +236,7 @@ describe("Slack route picker with agents", () => {
             throw new Error("boom");
           },
         },
-        {
-          ...base,
-          options: OPTIONS,
-          operationId: "op-1",
-          userId: "U1",
-          text: "q",
-          boundLabel: (label) => label,
-        },
+        { ...post, alreadyPosted: async () => false },
       ),
     ).rejects.toThrow("boom");
   });

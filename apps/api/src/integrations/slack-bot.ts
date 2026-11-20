@@ -232,7 +232,10 @@ export type SlackMessageBlock =
   | {
       type: "context";
       block_id?: string;
-      elements: Array<{ type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean }>;
+      elements: Array<
+        | { type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean }
+        | { type: "image"; image_url: string; alt_text: string }
+      >;
     }
   | { type: "divider" };
 

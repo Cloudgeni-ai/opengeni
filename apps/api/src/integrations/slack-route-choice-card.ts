@@ -4,9 +4,18 @@
  *
  * Agents and workspaces are different kinds of answer: an agent is a named
  * assistant, a workspace is Opengeni itself working there. The card labels the
- * two groups so nobody has to guess which button is which.
+ * two groups so nobody has to guess which button is which, and shows each
+ * agent with its avatar and description.
  */
+import { escapeSlackMrkdwn } from "./slack-app-home";
 import { SlackBotOperationConflictError, type SlackMessageBlock } from "./slack-bot";
+
+/** What the card shows about an agent beyond its name. */
+export type SlackRouteChoiceAgentDetails = {
+  /** A public picture of the agent's avatar, or null to show none. */
+  iconUrl: string | null;
+  description: string;
+};
 
 /** One stored option, as the card renders it. */
 export type SlackRouteChoiceCardOption = {
@@ -24,7 +33,19 @@ export type SlackRouteChoiceCardInput = {
   cancelValue: string;
   /** The Opengeni workspace link for the footer, when known. */
   settingsUrl: string | null;
+  /** Avatar and description by Slack agent id; an agent without them shows its name only. */
+  agentDetails?: ReadonlyMap<string, SlackRouteChoiceAgentDetails>;
 };
+
+/** A description longer than this is cut, so a row stays one or two lines. */
+const AGENT_DESCRIPTION_MAX_CHARS = 120;
+
+function shortDescription(text: string): string {
+  const chars = [...text.replace(/\s+/gu, " ").trim()];
+  return chars.length <= AGENT_DESCRIPTION_MAX_CHARS
+    ? chars.join("")
+    : `${chars.slice(0, AGENT_DESCRIPTION_MAX_CHARS - 1).join("")}…`;
+}
 
 export const SLACK_ROUTE_SELECT_ACTION_ID = "opengeni.route.select";
 export const SLACK_ROUTE_CANCEL_ACTION_ID = "opengeni.route.cancel";
@@ -66,46 +87,87 @@ function footer(input: SlackRouteChoiceCardInput): SlackMessageBlock {
 }
 
 /**
+ * One agent: its avatar, name and description on a quiet line, then its button.
+ * Without details it is just a button with its name.
+ */
+function agentRows(
+  option: SlackRouteChoiceCardOption,
+  details: SlackRouteChoiceAgentDetails | undefined,
+): SlackMessageBlock[] {
+  const description = details ? shortDescription(details.description) : "";
+  if (!details || (!details.iconUrl && !description)) {
+    return [
+      {
+        type: "actions",
+        block_id: `opengeni-route-choice-${option.id}`,
+        elements: [optionButton(option, option.candidateLabel)],
+      },
+    ];
+  }
+  const name = `*${escapeSlackMrkdwn(option.candidateLabel)}*`;
+  return [
+    {
+      type: "context",
+      elements: [
+        ...(details.iconUrl
+          ? [
+              {
+                type: "image" as const,
+                image_url: details.iconUrl,
+                alt_text: option.candidateLabel,
+              },
+            ]
+          : []),
+        {
+          type: "mrkdwn" as const,
+          text: description ? `${name}  ${escapeSlackMrkdwn(description)}` : name,
+        },
+      ],
+    },
+    {
+      type: "actions",
+      block_id: `opengeni-route-choice-${option.id}`,
+      elements: [optionButton(option, "Choose")],
+    },
+  ];
+}
+
+/**
  * The card: the question, then "Agents" and "Workspaces" each above its own
- * buttons, then "Not now" on its own below a divider, then where to change the answer. An
- * empty group is left out. Rendered only from the stored options, so a replay
- * posts the same bytes.
+ * options, then "Not now" on its own below a divider, then where to change the
+ * answer. An empty group is left out. Options come from the stored snapshot,
+ * so a replay posts the same bytes unless an agent's avatar or description
+ * changed in between.
  */
 export function slackRouteChoiceWithAgentsBlocks(
   input: SlackRouteChoiceCardInput,
 ): SlackMessageBlock[] {
-  const groups = [
-    {
-      label: "Agents",
-      blockId: "opengeni-route-choice-agents",
-      options: input.options.filter((option) => option.candidateSlackAgentId !== null),
-    },
-    {
-      label: "Workspaces",
-      blockId: "opengeni-route-choice-workspaces",
-      options: input.options.filter((option) => option.candidateSlackAgentId === null),
-    },
-  ];
+  const agents = input.options.filter((option) => option.candidateSlackAgentId !== null);
+  const workspaces = input.options.filter((option) => option.candidateSlackAgentId === null);
+  const label = (text: string): SlackMessageBlock => ({
+    type: "section",
+    text: { type: "mrkdwn", text: `*${text}*` },
+  });
   return [
-    {
-      type: "section",
-      text: { type: "mrkdwn", text: slackRouteChoiceQuestion(input.channel) },
-    },
-    ...groups.flatMap((group): SlackMessageBlock[] =>
-      group.options.length === 0
-        ? []
-        : [
-            {
-              type: "section",
-              text: { type: "mrkdwn", text: `*${group.label}*` },
-            },
-            {
-              type: "actions",
-              block_id: group.blockId,
-              elements: group.options.map((option) => optionButton(option, option.candidateLabel)),
-            },
-          ],
-    ),
+    { type: "section", text: { type: "mrkdwn", text: slackRouteChoiceQuestion(input.channel) } },
+    ...(agents.length > 0
+      ? [
+          label("Agents"),
+          ...agents.flatMap((option) =>
+            agentRows(option, input.agentDetails?.get(option.candidateSlackAgentId!)),
+          ),
+        ]
+      : []),
+    ...(workspaces.length > 0
+      ? [
+          label("Workspaces"),
+          {
+            type: "actions" as const,
+            block_id: "opengeni-route-choice-workspaces",
+            elements: workspaces.map((option) => optionButton(option, option.candidateLabel)),
+          },
+        ]
+      : []),
     { type: "divider" },
     {
       type: "actions",
@@ -151,9 +213,11 @@ export function legacySlackRouteChoiceWithAgentsBlocks(
 }
 
 /**
- * Post the card. If the ledger refuses the bytes (it does so from its durable
- * claim, before any Slack write), the operation was bound by an earlier
- * release to the flat card, so retry once with that card under the same
+ * Post the card. The post ledger binds the prompt's operation id to a digest
+ * of the exact blocks and refuses other bytes from its durable claim, before
+ * any Slack write. A refusal means the operation was bound earlier: if that
+ * card is already up there is nothing to post; otherwise an earlier release
+ * bound it to the flat card, so retry once with that card under the same
  * operation id. Never mint a new id: that could put a second card up.
  */
 export async function postSlackRouteChoiceWithAgentsCard(
@@ -170,6 +234,8 @@ export async function postSlackRouteChoiceWithAgentsCard(
     userId: string;
     text: string;
     boundLabel: (label: string) => string;
+    /** Whether the operation's card was already posted. */
+    alreadyPosted: () => Promise<boolean>;
   },
 ): Promise<void> {
   const post = (blocks: SlackMessageBlock[]) =>
@@ -183,6 +249,7 @@ export async function postSlackRouteChoiceWithAgentsCard(
     await post(slackRouteChoiceWithAgentsBlocks(input));
   } catch (error) {
     if (!(error instanceof SlackBotOperationConflictError)) throw error;
+    if (await input.alreadyPosted()) return;
     await post(legacySlackRouteChoiceWithAgentsBlocks(input));
   }
 }

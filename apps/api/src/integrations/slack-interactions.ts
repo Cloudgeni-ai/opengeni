@@ -2661,9 +2661,18 @@ async function askSlackRouteChoice(
   entry: SlackInteractionInboxEntry,
   candidates: readonly SlackRoutableWorkspace[],
   agents: readonly SlackRoutingAgent[] = [],
+  agentRecords: readonly SlackAgentRecord[] = [],
 ): Promise<void> {
   if (agents.length > 0) {
-    await askSlackRouteChoiceWithAgents(deps, client, home, entry, candidates, agents);
+    await askSlackRouteChoiceWithAgents(
+      deps,
+      client,
+      home,
+      entry,
+      candidates,
+      agents,
+      agentRecords,
+    );
     return;
   }
   const offered = candidates.slice(0, MAX_SLACK_ROUTE_PROMPT_BUTTONS);
@@ -2752,8 +2761,8 @@ async function askSlackRouteChoice(
 
 /**
  * The picker in a channel of an installation with Slack agents: "Who should
- * answer in #channel?", with the agents and then the workspaces, each group
- * under its own label.
+ * answer in #channel?", with the agents (avatar and description) and then the
+ * workspaces, each group under its own label.
  * Same prompt row, same ledger and the same re-authorization on the answer.
  */
 async function askSlackRouteChoiceWithAgents(
@@ -2763,6 +2772,7 @@ async function askSlackRouteChoiceWithAgents(
   entry: SlackInteractionInboxEntry,
   candidates: readonly SlackRoutableWorkspace[],
   agents: readonly SlackRoutingAgent[],
+  agentRecords: readonly SlackAgentRecord[],
 ): Promise<void> {
   const offered: SlackRoutableWorkspace[] = [
     ...agents.slice(0, MAX_SLACK_ROUTE_PROMPT_BUTTONS).map((agent) => ({
@@ -2804,7 +2814,32 @@ async function askSlackRouteChoiceWithAgents(
     options: opened.prompt.options,
     cancelValue: opened.prompt.options[0]?.id ?? opened.prompt.id,
     settingsUrl: slackWorkspaceUrl(deps, home.workspaceId),
+    agentDetails: new Map(
+      agentRecords.map((agent) => [
+        agent.id,
+        {
+          iconUrl:
+            deps.settings.publicBaseUrl && deps.settings.slackSigningSecret
+              ? sessionAvatarImageUrl(
+                  deps.settings.publicBaseUrl,
+                  deps.settings.slackSigningSecret,
+                  { workspaceId: agent.targetWorkspaceId, avatar: agent.avatar },
+                )
+              : null,
+          description: agent.description,
+        },
+      ]),
+    ),
     boundLabel: boundedSlackRouteLabel,
+    alreadyPosted: async () =>
+      (
+        await getSlackBotPostOperation(
+          deps.db,
+          home.workspaceId,
+          entry.connectionId,
+          opened.prompt.messageOperationId,
+        )
+      )?.status === "completed",
   });
 }
 
@@ -3138,6 +3173,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       entry,
       resolution.candidates,
       resolution.agents ?? [],
+      slackAgents.records,
     );
     return;
   }

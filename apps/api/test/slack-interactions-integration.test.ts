@@ -13147,24 +13147,45 @@ describe("Slack agents", () => {
     type CardBlock = {
       type: string;
       text?: { text: string };
-      elements?: Array<{ text: { text: string } }>;
+      elements?: Array<{ type: string; text?: { text: string } | string; image_url?: string }>;
     };
-    const rows = (card!.blocks as CardBlock[]).map((block) =>
+    const blocks = card!.blocks as CardBlock[];
+    const rows = blocks.map((block) =>
       block.type === "section"
         ? block.text!.text
         : block.type === "actions"
-          ? block.elements!.map((element) => element.text.text).join(",")
-          : block.type,
+          ? block.elements!.map((element) => (element.text as { text: string }).text).join(",")
+          : block.type === "context"
+            ? block
+                .elements!.flatMap((element) =>
+                  element.type === "image" ? ["[icon]"] : [element.text as string],
+                )
+                .join(" ")
+            : block.type,
     );
     const names = await shared!.admin<{ name: string }[]>`
       select name from workspaces
       where id in (${value.owner.workspaceId}, ${value.routed!.workspaceId})`;
     expect(rows[0]).toBe("Who should answer in <#C_WHO_ANSWERS>?");
-    expect(rows.slice(1, 4)).toEqual(["*Agents*", "Analytics", "Ops Desk"]);
-    expect(rows[4]).toBe("*Workspaces*");
-    expect(rows.slice(5, 7).sort()).toEqual(names.map((row) => row.name).sort());
-    expect(rows.slice(7)).toEqual(["divider", "Not now", "context"]);
+    expect(rows.slice(1, 6)).toEqual([
+      "*Agents*",
+      "[icon] *Analytics*  Answers revenue questions.",
+      "Choose",
+      "[icon] *Ops Desk*  Handles incidents.",
+      "Choose",
+    ]);
+    expect(rows[6]).toBe("*Workspaces*");
+    expect(rows.slice(7, 9).sort()).toEqual(names.map((row) => row.name).sort());
+    expect(rows.slice(9, 11)).toEqual(["divider", "Not now"]);
+    // The avatar is the same public picture the agent posts with.
+    const icon = blocks[2]!.elements![0]!.image_url!;
+    expect(icon.startsWith("https://app.example.test/v1/public/session-avatars/")).toBe(true);
     expect(JSON.stringify(card!.blocks)).not.toContain("Opengeni in ");
+    // Asking again while the card is open re-posts through the same operation
+    // and puts no second card up.
+    const cards = value.slack.posts.length;
+    await mention(value, "C_WHO_ANSWERS", "1765000003.000200", "and another thing");
+    expect(value.slack.posts).toHaveLength(cards);
     // Nothing starts while the question is open.
     expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
     expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
