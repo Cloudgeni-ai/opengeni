@@ -163,7 +163,7 @@ describe("organization agents end to end", () => {
     const created = await call("POST", sessions(), { initialMessage: "Hello", agent: "support" });
     expect([created.status, created.body.orgAgent]).toEqual([
       202,
-      { id: agentId, key: "support", version: 1, overrides: null },
+      { id: agentId, key: "support", name: "support", version: 1, overrides: null },
     ]);
     const prompt = await runTurn(workspaceId, created.body.id);
     expect(prompt).toContain("Always greet the customer by name.");
