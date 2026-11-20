@@ -150,7 +150,7 @@ layouts. An older client simply doesn't show newer item types.
 
 ## Storage
 
-One table, `sidebar_layouts` (migration `1515_sidebar_layouts.sql`): one row
+One table, `sidebar_layouts` (migration `1516_sidebar_layouts.sql`): one row
 for the default (`subject_id` null) and one per person who changed anything,
 each with its JSON layout (at most 256 KB) and a revision for
 compare-and-set. Row-level security keeps it to its workspace.

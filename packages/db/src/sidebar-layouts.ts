@@ -1,4 +1,4 @@
-// The customizable sidebar (docs/sidebar-layout.md, migration 1515): the
+// The customizable sidebar (docs/sidebar-layout.md, migration 1516): the
 // workspace default (subject_id NULL) and each person's own changes on top,
 // as JSON the API validates, with a compare-and-set revision. Presentation
 // only: the API resolves every app against the reader's own access.

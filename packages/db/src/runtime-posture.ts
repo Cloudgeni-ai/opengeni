@@ -2831,7 +2831,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_turns",
   "session_workflow_wake_outbox",
   "sessions",
-  // 1515: sidebar layouts (workspace default and personal changes).
+  // 1516: sidebar layouts (workspace default and personal changes).
   "sidebar_layouts",
   "site_abuse_reports",
   "site_auth_codes",
