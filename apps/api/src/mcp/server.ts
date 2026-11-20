@@ -211,6 +211,7 @@ import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-comp
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
+import { registerAppSyncTools } from "./app-sync-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
 import { siteSqlGatewayConfig } from "../site-sql/gateway";
@@ -1748,6 +1749,16 @@ export function buildOpenGeniMcpServer(
         sessionId,
       );
     registerSiteDataTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
+    registerAppSyncTools(
       server,
       deps,
       grant,

@@ -1,3 +1,4 @@
+import { appSyncStatusForSite } from "../app-sync/service";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ReasoningEffort,
@@ -1320,6 +1321,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
     };
     const file = /^\/files\/([^/]+)$/u.exec(path);
+    if (method === "GET" && path === "/data/syncs")
+      return context.json(
+        await runSiteData(() => appSyncStatusForSite(deps, authority, siteId, surface)),
+      );
     if (method === "POST" && path === "/data/query")
       return context.json(
         await runSiteData(() =>
