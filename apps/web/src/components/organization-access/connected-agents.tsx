@@ -653,6 +653,36 @@ export function ConnectedAgentPage({
             </dl>
           )}
         </DetailSection>
+        <DetailSection
+          title="App data"
+          description={
+            mine
+              ? "Viewer reads and writes like someone viewing each app. Manager can also change its collections and settings."
+              : `${connection.connectedBy.name} chooses this.`
+          }
+        >
+          {mine ? (
+            <SegmentedControl
+              aria-label="App data"
+              options={[
+                { value: "viewer", label: "Viewer" },
+                { value: "manager", label: "Manager" },
+              ]}
+              value={connection.appDataAccess ?? "viewer"}
+              onValueChange={async (appDataAccess: "viewer" | "manager") => {
+                try {
+                  onSaved(await api.update(connection.id, { appDataAccess }));
+                } catch (caught) {
+                  toast.error(`The change wasn't saved. ${userErrorText(caught, "Try again.")}`);
+                }
+              }}
+            />
+          ) : (
+            <p className="m-0 text-sm leading-5 text-fg">
+              {connection.appDataAccess === "manager" ? "Manager" : "Viewer"}
+            </p>
+          )}
+        </DetailSection>
       </DetailPageBody>
       <DestructiveConfirm
         open={confirming}

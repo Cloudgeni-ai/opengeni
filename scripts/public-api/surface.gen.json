@@ -34031,7 +34031,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.access": "ref(OrganizationAccessPolicy)!"
+        "$.access": "ref(OrganizationAccessPolicy)?",
+        "$.appDataAccess": "enum?=[\"\\\"manager\\\"\",\"\\\"viewer\\\"\"]",
+        "$.defaultWorkspaceId": "string? null"
       }
     },
     "UpdateOrganizationMemberRequest": {

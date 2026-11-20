@@ -106,6 +106,14 @@ export type TargetGatewayOptions = {
   listPolicies?: typeof listConnectorToolPermissionPolicies;
   /** Observes the request's fence (statistics), never its authority. */
   onFence?: (fence: TargetAuthorityFence) => void;
+  /**
+   * The call may use an approval the same person already gave in the browser
+   * for this exact operation (same tool, arguments and authority) without its
+   * token: a connected outside agent retrying after the person approved from
+   * the link it showed them. Trusted server state only (see
+   * `mcp/stored-approval-claim.ts`).
+   */
+  claimStoredApproval?: boolean;
 };
 const unavailable = () => new HTTPException(404, { message: "tool_unavailable" });
 const isToolUnavailable = (error: unknown) =>
@@ -615,7 +623,10 @@ function assertDefinition(tool: ToolGatewayResolvedTool, expected: string | unde
 
 function approvalBinding(
   call: PreparedToolGatewayCall,
-  request: { siteArtifactId?: string | undefined; siteVersionId?: string | undefined },
+  request: {
+    siteArtifactId?: string | undefined;
+    siteVersionId?: string | undefined;
+  },
 ) {
   if (!call.effectDigest)
     throw new HTTPException(503, { message: "tool_effect_binding_unavailable" });
@@ -686,7 +697,11 @@ export async function invokeWorkspaceToolTarget(
           call.approvalDecision === "ask" ||
           (call.approvalDecision === undefined && tool.entry.approval === "human");
         let allowedForSite = false;
-        if (approvalRequired && request.approvalToken === undefined) {
+        const claimStored =
+          approvalRequired &&
+          request.approvalToken === undefined &&
+          options.claimStoredApproval === true;
+        if (approvalRequired && request.approvalToken === undefined && !claimStored) {
           // A Site call asks its viewer in the Opengeni frame, unless this person
           // chose "Always allow for this Site" for this tool and connection.
           // A Block never reaches here (`prepareCall` refuses it).
@@ -707,6 +722,7 @@ export async function invokeWorkspaceToolTarget(
           approvalAuthorityDigest: call.approvalAuthorityDigest,
           approvalRequired,
           ...(request.approvalToken ? { tokenHash: hashToken(request.approvalToken) } : {}),
+          ...(claimStored ? { claimStored: true } : {}),
         });
         if (!accepted) throw approvalRequiredError();
         meta.approvalConfirmed =
