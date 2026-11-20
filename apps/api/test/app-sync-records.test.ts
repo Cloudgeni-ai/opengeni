@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { APP_SYNC_MAX_RECORDS } from "@opengeni/contracts";
-import { appSyncRecords, readPath, toolResultValue } from "../src/app-sync/service";
+import {
+  appSyncRecords,
+  connectorToolOf,
+  readPath,
+  resolveAppSyncTool,
+  toolResultValue,
+} from "../src/app-sync/service";
 
 const settings = { recordsPath: null, key: "id", fields: null } as const;
 
@@ -67,4 +73,60 @@ test("tool results are read from structured content or JSON text", () => {
   expect(() => toolResultValue({ content: [{ type: "text", text: "plain" }] } as never)).toThrow(
     "didn't return JSON",
   );
+});
+
+test("a run uses the saved route if it is the person's, else their own account of its connector", () => {
+  const inventory = (accounts: Array<{ serverId: string; shared?: boolean }>) => ({
+    canonical: new Map([
+      ["orders", { capabilityId: null, name: "Orders", providerDomain: "orders.example" }],
+    ]),
+    plain: new Set(["plain-server"]),
+    accounts: accounts.map((account) => ({
+      ...account,
+      canonicalServerId: "orders",
+      connector: "Orders",
+      account: account.serverId,
+      connectionId: account.serverId,
+    })),
+  });
+  const action = {
+    tool: { serverId: "account-owner", toolName: "list" },
+    declaredTools: [{ serverId: "account-owner", toolName: "list" }],
+    connectorTool: { serverId: "orders", toolName: "list" },
+  };
+  const route = (serverId: string) => ({
+    kind: "route",
+    identity: { serverId, toolName: "list" },
+  });
+  expect(resolveAppSyncTool(inventory([{ serverId: "account-owner" }]), action, "shared")).toEqual(
+    route("account-owner"),
+  );
+  expect(
+    resolveAppSyncTool(
+      inventory([{ serverId: "account-b" }, { serverId: "account-c" }]),
+      action,
+      "personal",
+    ),
+  ).toEqual(route("account-b"));
+  expect(
+    resolveAppSyncTool(inventory([{ serverId: "ws", shared: true }]), action, "personal"),
+  ).toEqual({ kind: "no_own_account", connector: "Orders" });
+  expect(
+    resolveAppSyncTool(inventory([{ serverId: "ws", shared: true }]), action, "shared"),
+  ).toEqual(route("ws"));
+  expect(resolveAppSyncTool(inventory([]), action, "personal")).toEqual({
+    kind: "connect",
+    connector: "Orders",
+  });
+  const plain = { serverId: "plain-server", toolName: "list" };
+  expect(
+    resolveAppSyncTool(inventory([]), { tool: plain, declaredTools: [plain] }, "personal"),
+  ).toEqual({ kind: "route", identity: plain });
+  // Syncs saved before the connector was stored pair it through declaredTools.
+  expect(
+    connectorToolOf({
+      tool: action.tool,
+      declaredTools: [action.tool, { serverId: "orders", toolName: "list" }],
+    }),
+  ).toEqual({ serverId: "orders", toolName: "list" });
 });

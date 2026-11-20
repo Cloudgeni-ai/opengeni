@@ -30,6 +30,10 @@ import {
 import {
   appSyncActionOf,
   claimAppSyncRun,
+  clearAppSyncSubscriptions,
+  EVENT_AUTOMATION_MAX_CHAIN_DEPTH,
+  getAppAutomationCause,
+  renewAppSyncLease,
   countAppSyncSubscriptions,
   createScheduledTask,
   createScheduledTaskRun,
@@ -60,8 +64,9 @@ import {
 } from "../site-data/service";
 import {
   declareSiteToolsForEveryViewer,
+  connectorToolIdentity,
   readSiteToolAccountInventory,
-  routeSiteTool,
+  type SiteToolAccountInventory,
 } from "../site-tool-routing";
 import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
 import {
@@ -86,7 +91,13 @@ import {
  * stay blocked.
  */
 
-export type AppSyncDeps = ApiRouteDeps;
+export type AppSyncDeps = ApiRouteDeps & {
+  /** The person's connector accounts; tests replace it. */
+  appSyncToolInventory?: (
+    deps: ApiRouteDeps,
+    grant: AccessGrant,
+  ) => Promise<SiteToolAccountInventory>;
+};
 
 /** Calls one connected tool as a person. Tests replace it. */
 export type AppSyncToolCaller = (input: {
@@ -303,33 +314,101 @@ async function personGrant(
   });
 }
 
+async function readInventory(
+  deps: AppSyncDeps,
+  grant: AccessGrant,
+): Promise<SiteToolAccountInventory> {
+  return await (deps.appSyncToolInventory ?? readSiteToolAccountInventory)(deps, grant);
+}
+
 /**
- * The identity this person's call uses: the stored tool when it is theirs or
- * needs no account, else their own account of the same connector.
+ * The connector-level identity of a sync's tool: stored on syncs saved since
+ * it existed, else the one other identity `declaredTools` pairs with the same
+ * tool name, else the tool itself.
  */
+export function connectorToolOf(
+  action: Pick<AppSyncAction, "tool" | "declaredTools" | "connectorTool">,
+): ToolGatewayIdentity {
+  if (action.connectorTool) return action.connectorTool;
+  const paired = action.declaredTools.filter(
+    (item) => item.toolName === action.tool.toolName && item.serverId !== action.tool.serverId,
+  );
+  return paired.length === 1 ? paired[0]! : action.tool;
+}
+
+function uniqueTools(items: readonly ToolGatewayIdentity[]): ToolGatewayIdentity[] {
+  const result: ToolGatewayIdentity[] = [];
+  for (const item of items)
+    if (!result.some((existing) => sameTool(existing, item))) result.push(item);
+  return result;
+}
+
+export type AppSyncToolRoute =
+  /** Call exactly this identity. */
+  | { kind: "route"; identity: ToolGatewayIdentity }
+  /** The person has no account of the connector. */
+  | { kind: "connect"; connector: string }
+  /** A personal sync, and the person has only the workspace's shared account. */
+  | { kind: "no_own_account"; connector: string };
+
+/**
+ * Which identity one person's run calls. The saved route when it is that
+ * person's own account; otherwise that person's own account of the same
+ * connector (a shared sync may also use a workspace-shared account); a tool
+ * without accounts runs as itself. Never another person's account.
+ */
+export function resolveAppSyncTool(
+  inventory: SiteToolAccountInventory,
+  action: Pick<AppSyncAction, "tool" | "declaredTools" | "connectorTool">,
+  mode: "shared" | "personal",
+): AppSyncToolRoute {
+  const { tool } = action;
+  const personal = mode === "personal";
+  const own = inventory.accounts.find((account) => account.serverId === tool.serverId);
+  if (own && !(personal && own.shared === true)) return { kind: "route", identity: tool };
+  const connectorTool = connectorToolIdentity(
+    inventory,
+    uniqueTools([connectorToolOf(action), ...action.declaredTools]),
+    own ? tool : connectorToolOf(action),
+  );
+  const canonicalId = inventory.canonical.has(connectorTool.serverId)
+    ? connectorTool.serverId
+    : null;
+  // No connector with accounts behind it: the tool runs as itself.
+  if (!canonicalId) return { kind: "route", identity: tool };
+  const accounts = inventory.accounts.filter(
+    (account) => account.canonicalServerId === canonicalId,
+  );
+  const mine = accounts.filter((account) => account.shared !== true);
+  const pick = mine[0] ?? (personal ? undefined : accounts[0]);
+  if (pick)
+    return { kind: "route", identity: { serverId: pick.serverId, toolName: tool.toolName } };
+  const connector = inventory.canonical.get(canonicalId)?.name ?? "the tool's connector";
+  return accounts.length > 0
+    ? { kind: "no_own_account", connector }
+    : { kind: "connect", connector };
+}
+
+/** The identity this person's call uses (see `resolveAppSyncTool`). */
 async function toolForPerson(
   deps: AppSyncDeps,
   grant: AccessGrant,
   action: AppSyncAction,
 ): Promise<ToolGatewayIdentity> {
-  const declared = action.declaredTools.length > 0 ? action.declaredTools : [action.tool];
-  let inventory;
+  let inventory: SiteToolAccountInventory;
   try {
-    inventory = await readSiteToolAccountInventory(deps, grant);
+    inventory = await readInventory(deps, grant);
   } catch {
+    // Without the inventory the gateway still decides what the call may use.
     return action.tool;
   }
-  let route;
-  try {
-    route = routeSiteTool(inventory, declared, action.tool);
-  } catch {
-    return action.tool;
-  }
-  if (route.kind === "direct") return route.identity;
+  const route = resolveAppSyncTool(inventory, action, action.mode);
+  if (route.kind === "route") return route.identity;
   if (route.kind === "connect")
-    throw forbidden(`Connect ${route.connect.name} in Opengeni first, then the sync can use it.`);
-  const own = route.accounts.find((account) => !account.shared) ?? route.accounts[0]!;
-  return own.identity;
+    throw forbidden(`Connect ${route.connector} in Opengeni first, then the sync can use it.`);
+  throw forbidden(
+    `This personal sync runs on each person's own ${route.connector} account, and only the workspace's shared one is connected for you. Connect your own account in Opengeni.`,
+  );
 }
 
 // --- writing ---------------------------------------------------------------------
@@ -356,19 +435,32 @@ async function writeRecords(
   return written;
 }
 
+/** What one execution of a sync knows about the run it serves. */
+export type AppSyncRunContext = {
+  /** The run's automation chain depth; the sync's writes carry it. */
+  chainDepth: number;
+  /** The run, so the App's change events name the run that made them. */
+  runId?: string | null;
+  /** Keeps the run's queue lease alive; called between people and calls. */
+  renew?: () => Promise<void>;
+};
+
 /**
- * The access a sync run writes with: the Site as the person sees it (so a
- * lost audience or archived App stops the sync), the sync's own principal
- * and writer, and the run's automation chain depth on change events.
+ * The access a sync run writes with: the App as the person sees it (so a
+ * lost audience stops the sync), the sync's own principal and writer, and
+ * the run's automation chain depth and ids on change events. An archived App
+ * stops its syncs.
  */
 async function syncAccess(
   deps: AppSyncDeps,
   grant: AccessGrant,
   task: ScheduledTask,
   action: AppSyncAction,
-  chainDepth: number,
+  context: AppSyncRunContext,
 ): Promise<SiteDataAccess> {
   const access = await resolveSiteDataAccess(deps, grant, action.siteId);
+  if (access.site.status !== "active")
+    throw forbidden("The App is archived, so its syncs don't run. Restore the App to sync again.");
   const collection = await access.store.getCollection(
     { accountId: task.accountId, workspaceId: task.workspaceId, siteId: action.siteId },
     action.collection,
@@ -399,7 +491,9 @@ async function syncAccess(
       principal,
       actor: `schedule:${task.id}`,
       framed: false,
-      chainDepth,
+      chainDepth: context.chainDepth,
+      automationId: task.id,
+      ...(context.runId ? { automationRunId: context.runId } : {}),
     },
   };
 }
@@ -412,7 +506,7 @@ async function runForPerson(
   task: ScheduledTask,
   action: AppSyncAction,
   subjectId: string,
-  chainDepth: number,
+  context: AppSyncRunContext,
 ): Promise<PersonRun> {
   const empty: AppSyncRunSummary = {
     received: 0,
@@ -429,9 +523,10 @@ async function runForPerson(
           ? "The sync's owner is no longer in this workspace. Someone who manages the App should save the sync again."
           : "This person is no longer in the workspace.",
       );
-    const access = await syncAccess(deps, grant, task, action, chainDepth);
+    const access = await syncAccess(deps, grant, task, action, context);
     const identity = await toolForPerson(deps, grant, action);
     const result = await callTool({ deps, grant, identity, arguments: action.arguments });
+    await context.renew?.();
     if ((result as { isError?: unknown }).isError === true) {
       let detail = "";
       const content = (result as { content?: unknown }).content;
@@ -464,7 +559,7 @@ async function runForPerson(
 export async function executeAppSync(
   deps: AppSyncDeps,
   task: ScheduledTask,
-  chainDepth: number,
+  context: AppSyncRunContext,
   callTool: AppSyncToolCaller = callAppSyncToolThroughGateway,
 ): Promise<{ status: "succeeded" | "failed"; error: string | null; summary: AppSyncRunSummary }> {
   const action = appSyncActionOf(task.action);
@@ -475,7 +570,7 @@ export async function executeAppSync(
       summary: { received: 0, written: 0, skipped: 0, truncated: false, people: null },
     };
   if (action.mode === "shared") {
-    const run = await runForPerson(deps, callTool, task, action, action.ownerSubjectId, chainDepth);
+    const run = await runForPerson(deps, callTool, task, action, action.ownerSubjectId, context);
     return { status: run.error ? "failed" : "succeeded", error: run.error, summary: run.summary };
   }
   const people = await listAppSyncSubscriptions(
@@ -493,7 +588,7 @@ export async function executeAppSync(
   };
   let firstError: string | null = null;
   for (const person of people) {
-    const run = await runForPerson(deps, callTool, task, action, person.subjectId, chainDepth);
+    const run = await runForPerson(deps, callTool, task, action, person.subjectId, context);
     total.received += run.summary.received;
     total.written += run.summary.written;
     total.skipped += run.summary.skipped;
@@ -510,6 +605,7 @@ export async function executeAppSync(
       error: run.error,
       summary: run.summary,
     }).catch(() => undefined);
+    await context.renew?.();
   }
   const failed = total.people!.failed;
   return {
@@ -526,8 +622,9 @@ export async function executeAppSync(
 
 /**
  * Execute one queued run, if this executor can claim it. A run of a sync
- * that is gone or paused settles skipped; another run of the same sync still
- * running makes this one skip too (overlap policy `skip`).
+ * that is gone or paused settles skipped, and so does one whose sync has
+ * another run in progress (overlap policy `skip`). The run renews its lease
+ * as it goes, so a long personal sync is not claimed a second time.
  */
 export async function executeQueuedAppSyncRun(
   deps: AppSyncDeps,
@@ -556,11 +653,27 @@ export async function executeQueuedAppSyncRun(
       "The sync run stopped before it finished. It will run again at its next time.",
       null,
     );
+  if (claimed.overlapping)
+    return await settle("skipped", "Another run of this sync was still in progress.", null);
   const task = await getScheduledTask(deps.db, claimed.workspaceId, claimed.taskId);
   if (!task) return await settle("skipped", "The sync was deleted.", null);
   if (task.status !== "active" && claimed.triggerType !== "manual")
     return await settle("skipped", "The sync is paused.", null);
-  const result = await executeAppSync(deps, task, claimed.chainDepth, callTool);
+  const result = await executeAppSync(
+    deps,
+    task,
+    {
+      chainDepth: claimed.chainDepth,
+      runId: claimed.runId,
+      renew: async () => {
+        await renewAppSyncLease(deps.db, {
+          workspaceId: claimed.workspaceId,
+          runId: claimed.runId,
+        }).catch(() => undefined);
+      },
+    },
+    callTool,
+  );
   return await settle(result.status, result.error, result.summary);
 }
 
@@ -695,6 +808,61 @@ async function declaredToolsFor(
   }
 }
 
+const sameTool = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) =>
+  left.serverId === right.serverId && left.toolName === right.toolName;
+
+type RoutedTool = Pick<AppSyncAction, "tool" | "declaredTools" | "connectorTool">;
+
+/**
+ * The tool a sync stores when someone saves it. `requested` may be the
+ * saver's (or their agent's) account route, a connector, or a tool without
+ * accounts. The connector-level identity is kept for exports and for other
+ * people's runs; a shared sync is pinned to the new owner's own account of
+ * that connector, never the previous owner's.
+ */
+async function routeToolForOwner(
+  deps: AppSyncDeps,
+  grant: AccessGrant,
+  ownerSubjectId: string,
+  requested: ToolGatewayIdentity,
+  mode: "shared" | "personal",
+  previous?: RoutedTool,
+): Promise<RoutedTool> {
+  const declared = await declaredToolsFor(deps, grant, requested);
+  const inherited = previous ? [...previous.declaredTools, connectorToolOf(previous)] : [];
+  let connector = connectorToolOf({
+    tool: requested,
+    declaredTools: declared,
+    connectorTool: null,
+  });
+  let inventory: SiteToolAccountInventory | null = null;
+  try {
+    const owner = await personGrant(deps, grant, ownerSubjectId);
+    inventory = owner ? await readInventory(deps, owner) : null;
+  } catch {
+    inventory = null;
+  }
+  // The saver's own route maps through their accounts; another person's (an
+  // edit by a new owner) through the connector it was saved with.
+  if (inventory)
+    connector = connectorToolIdentity(
+      inventory,
+      uniqueTools([...declared, ...inherited]),
+      requested,
+    );
+  let tool = requested;
+  if (inventory && mode === "shared") {
+    const route = resolveAppSyncTool(
+      inventory,
+      { tool: requested, declaredTools: [...declared, ...inherited], connectorTool: connector },
+      "shared",
+    );
+    if (route.kind === "route") tool = route.identity;
+  }
+  const declaredTools = uniqueTools([tool, connector, ...declared]).slice(0, 8);
+  return { tool, declaredTools, connectorTool: connector };
+}
+
 async function requireSyncTask(
   deps: AppSyncDeps,
   grant: AccessGrant,
@@ -800,8 +968,7 @@ async function insertSync(
     ownerSubjectId,
     collection: request.collection,
     mode: request.mode,
-    tool: request.tool,
-    declaredTools: await declaredToolsFor(deps, grant, request.tool),
+    ...(await routeToolForOwner(deps, grant, ownerSubjectId, request.tool, request.mode)),
     arguments: request.arguments,
     recordsPath: request.recordsPath,
     key: request.key,
@@ -881,17 +1048,28 @@ export async function updateAppSync(
     await requireCollectionFor(access, grant, siteId, collection, mode);
   const schedule = patch.schedule ?? task.schedule;
   if (patch.schedule) validateSchedule(schedule);
-  const tool = patch.tool ?? action.tool;
+  const reroute =
+    patch.tool !== undefined || action.ownerSubjectId !== access.subjectId || mode !== action.mode;
+  const routed: RoutedTool = reroute
+    ? await routeToolForOwner(
+        deps,
+        grant,
+        access.subjectId,
+        patch.tool ?? action.tool,
+        mode,
+        patch.tool ? undefined : action,
+      )
+    : {
+        tool: action.tool,
+        declaredTools: action.declaredTools,
+        connectorTool: connectorToolOf(action),
+      };
   const nextAction = AppSyncAction.parse({
     ...action,
     ownerSubjectId: access.subjectId,
     collection,
     mode,
-    tool,
-    declaredTools:
-      patch.tool || action.ownerSubjectId !== access.subjectId
-        ? await declaredToolsFor(deps, grant, tool)
-        : action.declaredTools,
+    ...routed,
     ...(patch.arguments !== undefined ? { arguments: patch.arguments } : {}),
     ...(patch.recordsPath !== undefined ? { recordsPath: patch.recordsPath } : {}),
     ...(patch.key !== undefined ? { key: patch.key } : {}),
@@ -921,6 +1099,15 @@ export async function updateAppSync(
     if (events) await writeScheduledTaskEvents(tx, next, events);
     return next;
   });
+  // People opted in to run one tool with one set of arguments into one
+  // collection; anything else needs their consent again.
+  if (
+    !sameTool(connectorToolOf(action), connectorToolOf(nextAction)) ||
+    stableJson(action.arguments) !== stableJson(nextAction.arguments) ||
+    action.collection !== nextAction.collection ||
+    action.mode !== nextAction.mode
+  )
+    await clearAppSyncSubscriptions(deps.db, grant.workspaceId, task.id);
   await syncUpdatedScheduledTask({
     db: deps.db,
     workflowClient: deps.workflowClient,
@@ -929,6 +1116,16 @@ export async function updateAppSync(
   });
   const [view] = await syncViews(deps, [updated]);
   return view!;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isObject(value))
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  return JSON.stringify(value) ?? "null";
 }
 
 /** Delete a sync. Records it already wrote stay. */
@@ -959,6 +1156,34 @@ export async function deleteAppSync(
   return { deleted: syncId };
 }
 
+/**
+ * The chain depth of a manual run. A person's run starts a chain (1). An
+ * agent's run continues the chain of the automation behind its turn (that
+ * run's depth plus one), so an automation woken by the App's changes can't
+ * loop through `app_sync_run`: past the chain limit it is refused, as the
+ * event dispatcher refuses deeper event runs.
+ */
+async function manualRunChainDepth(deps: AppSyncDeps, grant: AccessGrant): Promise<number> {
+  if (grant.principalKind !== "agent_attempt" && grant.metadata?.delegated !== true) return 1;
+  const sessionId = grant.metadata?.sessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0) return 1;
+  const turnId = grant.metadata?.turnId;
+  const cause = await getAppAutomationCause(
+    deps.db,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    { sessionId, turnId: typeof turnId === "string" && turnId.length > 0 ? turnId : null },
+  );
+  if (!cause) return 1;
+  const limit = deps.settings.automationMaxChainDepth ?? EVENT_AUTOMATION_MAX_CHAIN_DEPTH;
+  if (cause.chainDepth >= limit)
+    throw new SiteDataError(
+      "forbidden",
+      `This automation was started by other automations ${cause.chainDepth} levels deep, so it can't run a sync: that could make automations wake each other in a loop. Run the sync from Opengeni or let its schedule run it.`,
+      { reason: "automation_chain_limit", maxChainDepth: limit },
+    );
+  return cause.chainDepth + 1;
+}
+
 /** Run a sync now and wait for it. Works while it is paused too, to try it out. */
 export async function runAppSyncNow(
   deps: AppSyncDeps,
@@ -967,8 +1192,9 @@ export async function runAppSyncNow(
   syncId: string,
   callTool: AppSyncToolCaller = callAppSyncToolThroughGateway,
 ): Promise<{ syncId: string; lastRun: AppSyncLastRun }> {
-  await managerAccess(deps, grant, siteId);
+  await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   const { task } = await requireSyncTask(deps, grant, siteId, syncId);
+  const chainDepth = await manualRunChainDepth(deps, grant);
   const run = await createScheduledTaskRun(deps.db, {
     workspaceId: task.workspaceId,
     taskId: task.id,
@@ -980,6 +1206,7 @@ export async function runAppSyncNow(
     workspaceId: task.workspaceId,
     taskId: task.id,
     runId: run.id,
+    chainDepth,
   });
   const result = await executeQueuedAppSyncRun(
     deps,
@@ -1085,7 +1312,9 @@ export async function listAppSyncDefinitions(
       name: task.name,
       collection: action.collection,
       mode: action.mode,
-      tool: action.tool,
+      // The connector, not one person's account: each installer's sync runs
+      // on their own account of it.
+      tool: connectorToolOf(action),
       arguments: action.arguments,
       recordsPath: action.recordsPath,
       key: action.key,

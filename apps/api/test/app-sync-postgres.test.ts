@@ -1,12 +1,18 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import type { AccessGrant } from "@opengeni/contracts";
+import { ScheduledTaskAgentConfig, type AccessGrant } from "@opengeni/contracts";
 import type { ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import { APP_PACKAGE_SYNC_HOOKS } from "../src/app-sync/package-hooks";
 import {
+  claimAppSyncRun,
   createDb,
   createOrganizationApiKey,
+  createScheduledTask,
   createScheduledTaskRun,
+  createSession,
+  EVENT_AUTOMATION_MAX_CHAIN_DEPTH,
+  finishAppSyncRun,
+  SiteDataError,
   createWorkspace,
   enqueueAppSyncRun,
   ensureExternalIdentity,
@@ -18,12 +24,18 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
+import postgres from "postgres";
 import { createApp, type AppDependencies } from "../src/app";
+import {
+  readSiteToolAccountInventory,
+  type SiteToolAccountInventory,
+} from "../src/site-tool-routing";
 import {
   createAppSyncFromDefinition,
   drainAppSyncRuns,
   listAppSyncDefinitions,
   runAppSyncNow,
+  type AppSyncDeps,
   type AppSyncToolCaller,
 } from "../src/app-sync/service";
 
@@ -102,6 +114,7 @@ function memoryObjectStorage() {
 type Who = { subjectId: string; grant: AccessGrant; headers: Record<string, string> };
 
 async function fixture() {
+  const inventory: { current: AppSyncDeps["appSyncToolInventory"] } = { current: undefined };
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('App sync fixture') returning id`;
   const accountId = String(account!.id);
@@ -142,6 +155,9 @@ async function fixture() {
       triggerScheduledTask: noop,
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
+    // Tests give people connector accounts through `inventories` below.
+    appSyncToolInventory: (routeDeps: never, grant: AccessGrant) =>
+      (inventory.current ?? readSiteToolAccountInventory)(routeDeps, grant),
   } as unknown as AppDependencies;
   const app = createApp(deps);
   const source = "example:instance";
@@ -185,6 +201,7 @@ async function fixture() {
   const owner = await person(managerPermissions);
   const alice = await person(viewerPermissions);
   const bob = await person(viewerPermissions);
+  const teammate = await person(managerPermissions);
   await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'app-sync-test')`;
   const base = `/v1/workspaces/${workspace.id}/published-artifacts`;
@@ -211,7 +228,20 @@ async function fixture() {
   });
   expect(published.status, JSON.stringify(published.json)).toBe(201);
   const siteId = String(published.json.artifact.id);
-  return { deps, accountId, workspace, owner, alice, bob, siteId, request };
+  const versionId = String(published.json.version.id);
+  return {
+    deps: deps as AppDependencies & AppSyncDeps,
+    accountId,
+    workspace,
+    owner,
+    alice,
+    bob,
+    teammate,
+    siteId,
+    versionId,
+    request,
+    inventory,
+  };
 }
 
 const tool = { serverId: "orders-server", toolName: "list_orders" };
@@ -512,4 +542,496 @@ test("queued runs from the worker execute; syncs export and install paused", asy
   expect(replayed.notCreated).toEqual([expect.objectContaining({ name: "Broken" })]);
   const after = await f.request(f.owner, "GET", `/${f.siteId}/syncs`);
   expect(after.json.syncs).toHaveLength(1);
+});
+
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+/** A connector with accounts ("orders"), and which accounts each person has. */
+function inventories(
+  f: Fixture,
+  accounts: Record<string, Array<{ serverId: string; shared?: boolean }>>,
+) {
+  f.inventory.current = async (_deps, grant): Promise<SiteToolAccountInventory> => ({
+    canonical: new Map([
+      ["orders", { capabilityId: null, name: "Orders", providerDomain: "orders.example" }],
+    ]),
+    plain: new Set(),
+    accounts: (accounts[grant.subjectId] ?? []).map((account) => ({
+      serverId: account.serverId,
+      canonicalServerId: "orders",
+      connector: "Orders",
+      account: `${account.serverId}@example.com`,
+      connectionId: crypto.randomUUID(),
+      ...(account.shared ? { shared: true } : {}),
+    })),
+  });
+}
+
+async function syncRuns(f: Fixture, syncId: string) {
+  return await shared.admin<Array<{ status: string; chain_depth: number; error: string | null }>>`
+    select status, chain_depth, error from scheduled_task_runs
+    where workspace_id = ${f.workspace.id} and task_id = ${syncId} order by created_at, id`;
+}
+
+test("an automation woken by a sync's changes can't loop through app_sync_run past the chain limit", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool,
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  const syncId = String(created.json.id);
+  // Someone listens for App changes, so they are recorded with their depth.
+  await shared.admin`insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types)
+    values (${f.accountId}, ${f.workspace.id}, 'https://example.test', 'sealed', array['app.record.added'])`;
+  let next = 0;
+  const fake = fakeTool(() => [{ id: `order-${(next += 1)}` }]);
+
+  // Automation A, which an `app.record.added` event wakes. Its runs are
+  // made the way the event dispatcher makes them: one deeper than the event.
+  const automationId = crypto.randomUUID();
+  await createScheduledTask(f.deps.db, {
+    id: automationId,
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    name: "React to new orders",
+    status: "active",
+    visibility: "workspace_shared",
+    schedule: { type: "manual" },
+    temporalScheduleId: `scheduled-task-${automationId}`,
+    runMode: "new_session_per_run",
+    overlapPolicy: "skip",
+    action: { kind: "agent_turn" },
+    agentConfig: ScheduledTaskAgentConfig.parse({ prompt: "Refresh the orders" }),
+    createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+    metadata: {},
+  } as never);
+  const automationAgent = async (depth: number): Promise<AccessGrant> => {
+    const run = { id: crypto.randomUUID() };
+    const session = await createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Refresh the orders",
+      resources: [],
+      tools: [],
+      metadata: { scheduledTaskRunId: run.id },
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    } as never);
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`insert into scheduled_task_runs (id, task_id, trigger_type, status, account_id,
+          workspace_id, session_id, fired_at, chain_depth)
+        values (${run.id}, ${automationId}, 'event', 'running', ${f.accountId}, ${f.workspace.id},
+          ${session.id}, now(), ${depth})`;
+    });
+    // The turn the automation's run started (fixture rows, so database
+    // guards for real dispatch are bypassed).
+    const [turn] = await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      return await tx<{ id: string }[]>`
+      INSERT INTO session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend,
+        execution_generation, initiator_kind, initiator_subject_id, initiator_context,
+        scheduled_task_run_id
+      ) VALUES (
+        ${f.accountId}, ${f.workspace.id}, ${session.id}, gen_random_uuid(),
+        ${`app-sync-loop-${crypto.randomUUID()}`}, 'running', 0, 'Refresh the orders',
+        'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${f.owner.subjectId}, '{"accepted":true}'::jsonb,
+        ${run.id}
+      ) RETURNING id`;
+    });
+    const attemptId = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx`UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${session.id}`;
+      await tx`UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
+      await tx`
+        INSERT INTO session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) VALUES (
+          ${attemptId}, ${f.accountId}, ${f.workspace.id}, ${session.id}, ${turn!.id}, 1,
+          'running', 'app-sync-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+        )`;
+    });
+    return {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: ["artifacts:read", "artifacts:publish", "scheduled_tasks:run"],
+      principalKind: "agent_attempt",
+      metadata: { sessionId: session.id, turnId: turn!.id, attemptId, executionGeneration: 1 },
+    };
+  };
+  const newestEventDepth = async () => {
+    const [row] = await shared.admin<{ chain_depth: number; automation_id: string | null }[]>`
+      select chain_depth, automation_id from workspace_activity_events
+      where workspace_id = ${f.workspace.id} and type = 'app.record.added'
+      order by created_at desc, id desc limit 1`;
+    expect(row?.automation_id).toBe(syncId);
+    return Number(row!.chain_depth);
+  };
+
+  // A person runs the sync: a chain of depth 1.
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  const depths = [await newestEventDepth()];
+  // The dispatcher wakes A for events below the limit; A runs the sync again.
+  for (let guard = 0; guard < 10 && depths.at(-1)! < EVENT_AUTOMATION_MAX_CHAIN_DEPTH; guard += 1) {
+    const agent = await automationAgent(depths.at(-1)! + 1);
+    const result = await runAppSyncNow(f.deps, agent, f.siteId, syncId, fake.callTool);
+    expect(result.lastRun.status).toBe("succeeded");
+    depths.push(await newestEventDepth());
+  }
+  expect(depths).toEqual([1, 3]);
+  expect((await syncRuns(f, syncId)).map((run) => run.chain_depth)).toEqual([1, 3]);
+
+  // An automation already at the limit can't run the sync at all.
+  const deep = await automationAgent(EVENT_AUTOMATION_MAX_CHAIN_DEPTH);
+  const refused = await runAppSyncNow(f.deps, deep, f.siteId, syncId, fake.callTool).catch(
+    (error: unknown) => error,
+  );
+  expect(refused).toBeInstanceOf(SiteDataError);
+  expect((refused as SiteDataError).message).toContain("loop");
+  expect(fake.calls).toHaveLength(2);
+});
+
+test("a long run renews its lease, and a run that overlaps another is skipped", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+    privateRecords: true,
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Mine",
+    collection: "mine",
+    mode: "personal",
+    tool,
+    key: "id",
+    schedule: { type: "interval", everySeconds: 3600 },
+  });
+  const syncId = String(created.json.id);
+  for (const who of [f.alice, f.bob])
+    expect((await f.request(who, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`)).status).toBe(
+      200,
+    );
+  const lease = async () => {
+    const [row] = await shared.admin<{ live: boolean }[]>`
+      select lease_until > now() + interval '60 seconds' as live from app_sync_queue
+      where task_id = ${syncId}`;
+    return row?.live ?? null;
+  };
+  let otherExecutor = -1;
+  let renewedBeforeSecondPerson: boolean | null = null;
+  const fake = fakeTool((subjectId) => {
+    if (subjectId === f.alice.subjectId) return [{ id: "a" }];
+    return [{ id: "b" }];
+  });
+  const callTool: AppSyncToolCaller = async (input) => {
+    if (input.grant.subjectId === f.alice.subjectId)
+      // The first person's call outlives the lease.
+      await shared.admin`update app_sync_queue set lease_until = now() - interval '1 second'
+        where task_id = ${syncId}`;
+    else {
+      renewedBeforeSecondPerson = await lease();
+      // Another executor finds nothing to take over.
+      otherExecutor = (await drainAppSyncRuns(f.deps, { limit: 50, callTool: fake.callTool }))
+        .claimed;
+    }
+    return await fake.callTool(input);
+  };
+  const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, callTool);
+  expect(run.lastRun).toMatchObject({
+    status: "succeeded",
+    summary: { written: 2, people: { total: 2, failed: 0 } },
+  });
+  expect(renewedBeforeSecondPerson).toBe(true);
+  expect(otherExecutor).toBe(0);
+
+  // Overlap: one run is in progress (claimed), a second one waits.
+  const enqueue = async () => {
+    const queued = await createScheduledTaskRun(f.deps.db, {
+      workspaceId: f.workspace.id,
+      taskId: syncId,
+      triggerType: "scheduled",
+      producerKey: `overlap:${crypto.randomUUID()}`,
+    });
+    await enqueueAppSyncRun(f.deps.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      taskId: syncId,
+      runId: queued.id,
+    });
+    return queued.id;
+  };
+  const first = await enqueue();
+  const inProgress = await claimAppSyncRun(f.deps.db, {
+    workspaceId: f.workspace.id,
+    runId: first,
+  });
+  expect(inProgress?.overlapping).toBe(false);
+  // Queue ids are listed across workspaces only outside any workspace
+  // context; inside another workspace's context none of them are visible.
+  const appRole = postgres(shared.appUrl, { max: 1 });
+  try {
+    const seen = await appRole.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${crypto.randomUUID()}, true),
+        set_config('opengeni.workspace_id', ${crypto.randomUUID()}, true)`;
+      return await tx`select run_id from app_sync_queue`;
+    });
+    expect(seen).toHaveLength(0);
+    const outside = await appRole`select run_id from app_sync_queue where run_id = ${first}`;
+    expect(outside).toHaveLength(1);
+  } finally {
+    await appRole.end();
+  }
+  const second = await enqueue();
+  const before = fake.calls.length;
+  expect((await drainAppSyncRuns(f.deps, { limit: 50, callTool: fake.callTool })).claimed).toBe(1);
+  expect(fake.calls).toHaveLength(before);
+  const [skipped] = await listScheduledTaskRuns(f.deps.db, f.workspace.id, syncId).then((runs) =>
+    runs.filter((item) => item.id === second),
+  );
+  expect(skipped).toMatchObject({ status: "skipped" });
+  expect(skipped!.error).toContain("still in progress");
+  await finishAppSyncRun(f.deps.db, {
+    workspaceId: f.workspace.id,
+    runId: first,
+    status: "succeeded",
+    error: null,
+    summary: null,
+  });
+});
+
+test("changing what a personal sync runs clears its opt-ins", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Mine",
+    collection: "mine",
+    mode: "personal",
+    tool,
+    arguments: { status: "open" },
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  const syncId = String(created.json.id);
+  await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`);
+  const optedIn = async () =>
+    (await f.request(f.alice, "GET", `/${f.siteId}/data/syncs`)).json.syncs[0].optedIn;
+  expect(await optedIn()).toBe(true);
+
+  // Renaming or rescheduling keeps consent; same arguments in another order too.
+  const renamed = await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    name: "My open orders",
+    arguments: { status: "open" },
+    schedule: { type: "interval", everySeconds: 3600 },
+  });
+  expect(renamed.status, JSON.stringify(renamed.json)).toBe(200);
+  expect(await optedIn()).toBe(true);
+
+  // New arguments: people opt in again.
+  const changed = await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    arguments: { status: "all" },
+  });
+  expect(changed.status).toBe(200);
+  expect(changed.json.subscribers).toBe(0);
+  expect(await optedIn()).toBe(false);
+
+  // So does a new tool.
+  await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`);
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    tool: { serverId: "orders-server", toolName: "list_all_orders" },
+  });
+  expect(await optedIn()).toBe(false);
+});
+
+test("each person's run uses their own account, and a new owner's shared sync uses theirs", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.owner.subjectId]: [{ serverId: "account-owner" }],
+    [f.teammate.subjectId]: [{ serverId: "account-teammate" }],
+    [f.alice.subjectId]: [{ serverId: "account-alice-2" }, { serverId: "account-alice" }],
+    [f.bob.subjectId]: [{ serverId: "account-workspace", shared: true }],
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+    privateRecords: true,
+  });
+  const ownRoute = { serverId: "account-owner", toolName: "list_orders" };
+  const sharedSync = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool: ownRoute,
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  expect(sharedSync.status, JSON.stringify(sharedSync.json)).toBe(201);
+  const sharedId = String(sharedSync.json.id);
+  const fake = fakeTool(() => [{ id: "x" }]);
+  const identities: Array<{ subjectId: string; serverId: string }> = [];
+  const callTool: AppSyncToolCaller = async (input) => {
+    identities.push({ subjectId: input.grant.subjectId, serverId: input.identity.serverId });
+    return await fake.callTool(input);
+  };
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, sharedId, callTool);
+  expect(identities.at(-1)).toEqual({ subjectId: f.owner.subjectId, serverId: "account-owner" });
+
+  // Another manager saves it: they own it, on their own account.
+  const taken = await f.request(f.teammate, "PATCH", `/${f.siteId}/syncs/${sharedId}`, {
+    name: "Team orders",
+  });
+  expect(taken.status, JSON.stringify(taken.json)).toBe(200);
+  expect(taken.json).toMatchObject({
+    ownerSubjectId: f.teammate.subjectId,
+    tool: { serverId: "account-teammate", toolName: "list_orders" },
+  });
+  await runAppSyncNow(f.deps, f.teammate.grant, f.siteId, sharedId, callTool);
+  expect(identities.at(-1)).toEqual({
+    subjectId: f.teammate.subjectId,
+    serverId: "account-teammate",
+  });
+
+  // Personal: Alice's own account; Bob has only the workspace's shared one.
+  const personal = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Mine",
+    collection: "mine",
+    mode: "personal",
+    tool: ownRoute,
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  const personalId = String(personal.json.id);
+  for (const who of [f.alice, f.bob])
+    await f.request(who, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`);
+  const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, personalId, callTool);
+  expect(identities.at(-1)).toEqual({ subjectId: f.alice.subjectId, serverId: "account-alice-2" });
+  expect(identities.some((item) => item.subjectId === f.bob.subjectId)).toBe(false);
+  expect(run.lastRun.summary?.people).toEqual({ total: 2, failed: 1 });
+  const bobStatus = await f.request(f.bob, "GET", `/${f.siteId}/data/syncs`);
+  const bobSync = bobStatus.json.syncs.find((sync: { id: string }) => sync.id === personalId);
+  expect(bobSync.lastRun.error).toContain("your own account");
+});
+
+test("an exported sync runs on the installer's own account in another workspace", async () => {
+  const author = await fixture();
+  inventories(author, { [author.owner.subjectId]: [{ serverId: "account-author" }] });
+  await author.request(author.owner, "PUT", `/${author.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const created = await author.request(author.owner, "POST", `/${author.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool: { serverId: "account-author", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "interval", everySeconds: 3600 },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const exported = await APP_PACKAGE_SYNC_HOOKS.list({
+    deps: author.deps,
+    grant: author.owner.grant,
+    appId: author.siteId,
+  });
+  // The connector travels, not the author's account.
+  expect(exported).toEqual([
+    expect.objectContaining({ tool: { serverId: "orders", toolName: "list_orders" } }),
+  ]);
+
+  const installer = await fixture();
+  inventories(installer, { [installer.owner.subjectId]: [{ serverId: "account-installer" }] });
+  await installer.request(installer.owner, "PUT", `/${installer.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const installed = await APP_PACKAGE_SYNC_HOOKS.createPaused({
+    deps: installer.deps,
+    grant: installer.owner.grant,
+    appId: installer.siteId,
+    syncs: exported,
+    installKey: crypto.randomUUID(),
+  });
+  expect(installed).toEqual({ created: ["Orders"], notCreated: [] });
+  const [sync] = (await installer.request(installer.owner, "GET", `/${installer.siteId}/syncs`))
+    .json.syncs;
+  expect(sync).toMatchObject({
+    status: "paused",
+    tool: { serverId: "account-installer", toolName: "list_orders" },
+  });
+  // The installer turns it on and it runs on their account.
+  const resumed = await installer.request(
+    installer.owner,
+    "PATCH",
+    `/${installer.siteId}/syncs/${sync.id}`,
+    { status: "active" },
+  );
+  expect(resumed.status, JSON.stringify(resumed.json)).toBe(200);
+  const used: string[] = [];
+  const fake = fakeTool(() => [{ id: "o-1", total: 3 }]);
+  const run = await runAppSyncNow(
+    installer.deps,
+    installer.owner.grant,
+    installer.siteId,
+    String(sync.id),
+    async (input) => {
+      used.push(input.identity.serverId);
+      return await fake.callTool(input);
+    },
+  );
+  expect(run.lastRun).toMatchObject({ status: "succeeded", summary: { written: 1 } });
+  expect(used).toEqual(["account-installer"]);
+  const records = await installer.request(
+    installer.owner,
+    "POST",
+    `/${installer.siteId}/data/query`,
+    {
+      collection: "orders",
+    },
+  );
+  expect(records.json.records).toEqual([
+    expect.objectContaining({ key: "o-1", data: { id: "o-1", total: 3 } }),
+  ]);
+});
+
+test("an archived App's syncs stop", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool,
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  const archived = await f.request(f.owner, "PATCH", `/${f.siteId}/status`, {
+    status: "archived",
+    expectedCurrentVersionId: f.versionId,
+    reason: "done",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(archived.status, JSON.stringify(archived.json)).toBe(200);
+  const fake = fakeTool(() => [{ id: "x" }]);
+  const run = await runAppSyncNow(
+    f.deps,
+    f.owner.grant,
+    f.siteId,
+    String(created.json.id),
+    fake.callTool,
+  );
+  expect(run.lastRun.status).toBe("failed");
+  expect(run.lastRun.error).toContain("archived");
+  expect(fake.calls).toHaveLength(0);
 });
