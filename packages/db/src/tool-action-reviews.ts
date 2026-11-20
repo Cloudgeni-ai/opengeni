@@ -434,8 +434,10 @@ export async function getToolActionReview(
       : approvedByViewer
         ? { approvedBy: "you" }
         : {}),
-    // Only a viewer who can still approve is asked for the provider's access.
-    ...(waiting && !ownerOnly && request.reviewArguments !== null && context?.accessNeeded
+    // Only a viewer who could approve is asked for the provider's access. It
+    // stays after the decision, so a surface that renders this review once
+    // (a Slack message, retried under one id) shows the same content again.
+    ...(!ownerOnly && request.reviewArguments !== null && context?.accessNeeded
       ? { accessNeeded: context.accessNeeded }
       : {}),
     detailsAvailable: args !== null,

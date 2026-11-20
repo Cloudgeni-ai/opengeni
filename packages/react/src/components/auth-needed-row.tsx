@@ -1,5 +1,5 @@
 import { CheckIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { authNeededPresentation } from "../auth-needed-presentation";
 import { bundledServiceLogoForDomain } from "../connection-service-presentation";
 import { cn } from "../lib/cn";
@@ -48,16 +48,49 @@ export type AuthNeededRecoveryHandler = (
  * When the app finishes recovery from the card (`{ outcome: "done" }`), or
  * the chat recorded that setup from it finished, the card says it is done.
  */
-const cardRuns = new Map<string, { current: AbortController | null }>();
+type CardRun = {
+  controller: AbortController | null;
+  busy: boolean;
+  failed: boolean;
+  done: boolean;
+};
 
-/** The run slot for one card, shared by every row that shows it. */
-function cardRun(cardId: string): { current: AbortController | null } {
-  let slot = cardRuns.get(cardId);
-  if (!slot) {
-    slot = { current: null };
-    cardRuns.set(cardId, slot);
-  }
-  return slot;
+const IDLE_RUN: CardRun = { controller: null, busy: false, failed: false, done: false };
+
+/**
+ * The run each card started, kept per card rather than per row: the card
+ * moves between the timeline and the composer as the chat works and idles,
+ * and the person's consent in the provider's window must not be cancelled,
+ * or look forgotten, because of that move.
+ */
+const cardRuns = new Map<string, CardRun>();
+const cardRunListeners = new Map<string, Set<() => void>>();
+
+function readCardRun(cardId: string): CardRun {
+  return cardRuns.get(cardId) ?? IDLE_RUN;
+}
+
+function writeCardRun(cardId: string, next: CardRun): void {
+  // A run that ended with nothing to show leaves nothing behind.
+  if (!next.controller && !next.busy && !next.failed && !next.done) cardRuns.delete(cardId);
+  else cardRuns.set(cardId, next);
+  for (const listener of cardRunListeners.get(cardId) ?? []) listener();
+}
+
+function subscribeCardRun(cardId: string, listener: () => void): () => void {
+  const listeners = cardRunListeners.get(cardId) ?? new Set<() => void>();
+  listeners.add(listener);
+  cardRunListeners.set(cardId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) cardRunListeners.delete(cardId);
+  };
+}
+
+/** Forget every card's run (tests). */
+export function resetAuthNeededRuns(): void {
+  for (const run of cardRuns.values()) run.controller?.abort();
+  cardRuns.clear();
 }
 
 export function AuthNeededRow({
@@ -74,14 +107,11 @@ export function AuthNeededRow({
 }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const [done, setDone] = useState(false);
-  // The run the card started last; starting again aborts the one before.
-  // It is kept per card, not per row: the card moves between the timeline and
-  // the composer as the chat works and idles, and the person's consent in the
-  // provider's window must not be cancelled by that move.
-  const run = useMemo(() => cardRun(item.id), [item.id]);
+  const { busy, failed, done } = useSyncExternalStore(
+    useCallback((listener: () => void) => subscribeCardRun(item.id, listener), [item.id]),
+    () => readCardRun(item.id),
+    () => IDLE_RUN,
+  );
   const recommendation = item.capability ?? null;
   const presentation = authNeededPresentation(t, item, { setupUnavailable });
   const { provider, actionLabel, title, reasonLine, unavailable } = presentation;
@@ -95,24 +125,26 @@ export function AuthNeededRow({
     // A step-up waits for the provider's consent window, which the app may
     // be unable to see close: pressing again starts over instead of waiting.
     if (busy && !presentation.moreAccess) return;
-    run.current?.abort();
+    // Starting again aborts the run before.
+    readCardRun(item.id).controller?.abort();
     const current = new AbortController();
-    run.current = current;
-    setBusy(true);
-    setFailed(false);
+    writeCardRun(item.id, { controller: current, busy: true, failed: false, done: false });
     try {
       // On success the app redirects to consent (or routes to credential entry),
       // so this row unmounts; a resolve without navigation just relaxes the button.
       // The callback starts authorization only. It never resumes this tool call.
       const result = await onReconnect(item, { signal: current.signal });
-      if (run.current !== current) return;
-      if (result?.outcome === "done") setDone(true);
-      setBusy(false);
+      if (readCardRun(item.id).controller !== current) return;
+      writeCardRun(item.id, {
+        controller: null,
+        busy: false,
+        failed: false,
+        done: result?.outcome === "done",
+      });
     } catch {
       // Superseded by a newer press: that run owns the card now.
-      if (run.current !== current || current.signal.aborted) return;
-      setFailed(true);
-      setBusy(false);
+      if (readCardRun(item.id).controller !== current || current.signal.aborted) return;
+      writeCardRun(item.id, { controller: null, busy: false, failed: true, done: false });
     }
   };
 

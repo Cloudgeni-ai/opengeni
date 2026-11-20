@@ -78,6 +78,15 @@ test("an action whose account still needs access is approved in the chat, not in
   };
   expect(slackToolReviewCanDecide(review)).toBe(true);
   expect(slackToolReviewCanDecide(needsAccess)).toBe(false);
+  // The review keeps it after the decision, so a retried Slack post is the same.
+  const settled: ToolActionReview = {
+    ...needsAccess,
+    status: "approved",
+    availableActions: [],
+    revision: "new",
+  };
+  expect(slackToolReviewCanDecide(settled)).toBe(false);
+  expect(slackToolReviewBlocks(settled, true)).toEqual(slackToolReviewBlocks(needsAccess, true));
 });
 
 test("only a server's confirmation is answerable in Slack; a form is answered in Opengeni", () => {

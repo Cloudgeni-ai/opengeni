@@ -1,9 +1,14 @@
-import { describe, expect, test } from "bun:test";
-import { AuthNeededRow, type AuthNeededRecoveryOptions } from "../src/components/auth-needed-row";
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  AuthNeededRow,
+  resetAuthNeededRuns,
+  type AuthNeededRecoveryOptions,
+} from "../src/components/auth-needed-row";
 import type { AuthNeededItem } from "../src/timeline/types";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
+afterEach(() => resetAuthNeededRuns());
 
 const GMAIL = "gmailmcp.googleapis.com";
 
@@ -79,9 +84,11 @@ describe("AuthNeededRow", () => {
 
   test("moving the card (pinned, then back in the timeline) keeps the consent going", async () => {
     const signals: AbortSignal[] = [];
+    const finish: Array<(result: { outcome: "done" }) => void> = [];
     const onReconnect = (_item: AuthNeededItem, options?: AuthNeededRecoveryOptions) => {
       signals.push(options!.signal);
-      return new Promise<undefined>((_resolve, reject) => {
+      return new Promise<{ outcome: "done" }>((resolve, reject) => {
+        finish.push(resolve);
         options!.signal.addEventListener("abort", () => reject(new Error("aborted")));
       });
     };
@@ -90,15 +97,15 @@ describe("AuthNeededRow", () => {
     await actRun(() => button(pinned.container)!.click());
     await pinned.unmount();
     expect(signals[0]!.aborted).toBe(false);
-    // Pressing the same card where it shows now starts over, once.
+    // Where the card shows now, it is still waiting for the same consent.
     const inTimeline = await renderComponent(
       <AuthNeededRow item={card} onReconnect={onReconnect} />,
     );
-    await actRun(() => button(inTimeline.container)!.click());
+    expect(button(inTimeline.container)?.textContent).toBe("Waiting for Google…");
+    await actRun(() => finish[0]!({ outcome: "done" }));
     await flush();
-    expect(signals).toHaveLength(2);
-    expect(signals[0]!.aborted).toBe(true);
-    expect(signals[1]!.aborted).toBe(false);
+    expect(inTimeline.container.textContent).toContain("Allowed");
+    expect(signals).toHaveLength(1);
     await inTimeline.unmount();
   });
 
