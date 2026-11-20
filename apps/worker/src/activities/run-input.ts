@@ -40,6 +40,7 @@ import {
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
   hasOpaqueProviderArtifact,
+  TURN_OPERATIONAL_NOTICE_PREFIX,
   type HistoryProviderApi,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
@@ -1230,6 +1231,24 @@ async function messageInput(
   };
   const historyItems = await project(stored, true);
   const turnId = preparationOptions.turnId;
+  // Compare against the last notice of this logical turn only. An identical
+  // notice from an earlier turn is historical and cannot stand in for this one.
+  let lastOperationalNotice: string | undefined;
+  if (turnId && internalContext) {
+    for (let index = stored.length - 1; index >= 0; index -= 1) {
+      const { turnId: owner, item } = stored[index]!;
+      if (
+        owner === turnId &&
+        item.type === "message" &&
+        item.role === "system" &&
+        typeof item.content === "string" &&
+        item.content.startsWith(TURN_OPERATIONAL_NOTICE_PREFIX)
+      ) {
+        lastOperationalNotice = item.content;
+        break;
+      }
+    }
+  }
   const prepared = await measureHistoryPreparationPhase(
     preparationOptions,
     "runtime_input_assembly",
@@ -1238,6 +1257,7 @@ async function messageInput(
         kind: "message",
         ...(text ? { text } : {}),
         ...(internalContext ? { internalContext } : {}),
+        ...(lastOperationalNotice !== undefined ? { lastOperationalNotice } : {}),
         historyItems: historyItems as any,
         sandboxEnvelope: envelope,
         ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),

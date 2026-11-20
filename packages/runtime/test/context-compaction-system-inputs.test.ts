@@ -155,6 +155,29 @@ for (const mode of ["portable", "remote_v2"] as const) {
       ]);
     });
 
+    test("one retained copy of an unchanged operational notice leaves room for the request", () => {
+      const activeTurnId = "00000000-0000-4000-8000-00000000000b";
+      const notice: CompactionItem = {
+        type: "message",
+        role: "system",
+        content: `${TURN_OPERATIONAL_NOTICE_PREFIX}Connector A is unavailable.`,
+      };
+      const changed: CompactionItem = {
+        ...notice,
+        content: `${TURN_OPERATIONAL_NOTICE_PREFIX}Connector B is unavailable.`,
+      };
+      const request: CompactionItem = { type: "message", role: "user", content: "Task" };
+      const duplicate = () => ({ ...notice });
+      const items = [request, ...Array.from({ length: 32 }, duplicate), changed, duplicate()];
+      const original = structuredClone(items);
+      const replacement = rebuild(items, (item) => (item === request ? 50 : 600), {
+        itemTurnIds: items.map(() => activeTurnId),
+        activeTurnId,
+      });
+      expect(replacement.slice(0, -1)).toEqual([request, notice, changed, notice]);
+      expect(items).toEqual(original);
+    });
+
     for (const state of ["active", "paused", "completed"] as const) {
       test(`retains the exact ${state} accepted goal and agent-message batch after older user intent`, () => {
         const historicalUser: CompactionItem = {
