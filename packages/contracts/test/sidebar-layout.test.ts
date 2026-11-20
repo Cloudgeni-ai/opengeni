@@ -65,7 +65,9 @@ describe("sidebar layout", () => {
     expect(isSidebarExternalUrl("http://example.com")).toBe(false);
     expect(isSidebarExternalUrl("javascript:alert(1)")).toBe(false);
     expect(isSidebarExternalUrl("https://user:pw@example.com")).toBe(false);
-    expect(() => parseChanges([{ op: "add", item: { type: "link", url: "http://x.y", label: "X" } }])).toThrow();
+    expect(() =>
+      parseChanges([{ op: "add", item: { type: "link", url: "http://x.y", label: "X" } }]),
+    ).toThrow();
   });
 
   test("an admin's default and a member's own changes stay separate", () => {
@@ -84,7 +86,11 @@ describe("sidebar layout", () => {
     expect(member.added).toHaveLength(1);
     const seen = mergeSidebarLayout(workspace, member);
     expect(seen.items.map((item) => item.id)).toEqual(["engineering", "link-n1"]);
-    expect((seen.items[0] as MergedSidebarGroup).items.map((item) => item.id)).toEqual(["releases", "reviews", "status"]);
+    expect((seen.items[0] as MergedSidebarGroup).items.map((item) => item.id)).toEqual([
+      "releases",
+      "reviews",
+      "status",
+    ]);
     expect(seen.hidden.map((entry) => [entry.parentId, entry.item.id])).toEqual([
       ["engineering", "incidents"],
     ]);
@@ -92,7 +98,12 @@ describe("sidebar layout", () => {
     const other = mergeSidebarLayout(workspace, EMPTY_SIDEBAR_PERSONAL_CHANGES);
     expect((other.items[0] as MergedSidebarGroup).items).toHaveLength(4);
     expect(sidebarPersonalChangesCustomized(member)).toBe(true);
-    const reset = applyPersonalSidebarChanges(workspace, member, parseChanges([{ op: "reset" }]), ids());
+    const reset = applyPersonalSidebarChanges(
+      workspace,
+      member,
+      parseChanges([{ op: "reset" }]),
+      ids(),
+    );
     expect(sidebarPersonalChangesCustomized(reset)).toBe(false);
   });
 
@@ -103,7 +114,12 @@ describe("sidebar layout", () => {
       EMPTY_SIDEBAR_PERSONAL_CHANGES,
       parseChanges([
         { op: "move", itemId: "status", index: 0 },
-        { op: "add", groupId: "engineering", index: 1, item: { id: "mine", type: "app", appId: APP_C } },
+        {
+          op: "add",
+          groupId: "engineering",
+          index: 1,
+          item: { id: "mine", type: "app", appId: APP_C },
+        },
         { op: "remove", itemId: "reviews" },
       ]),
       ids(),
@@ -115,14 +131,29 @@ describe("sidebar layout", () => {
       "releases",
       "incidents",
     ]);
-    member = applyPersonalSidebarChanges(workspace, member, parseChanges([{ op: "show", itemId: "reviews" }]), ids());
+    member = applyPersonalSidebarChanges(
+      workspace,
+      member,
+      parseChanges([{ op: "show", itemId: "reviews" }]),
+      ids(),
+    );
     seen = mergeSidebarLayout(workspace, member);
     expect((seen.items[0] as MergedSidebarGroup).items.map((item) => item.id)).toContain("reviews");
     expect(() =>
-      applyPersonalSidebarChanges(workspace, member, parseChanges([{ op: "update", itemId: "releases", label: "R" }]), ids()),
+      applyPersonalSidebarChanges(
+        workspace,
+        member,
+        parseChanges([{ op: "update", itemId: "releases", label: "R" }]),
+        ids(),
+      ),
     ).toThrow(SidebarLayoutChangeError);
     expect(() =>
-      applyPersonalSidebarChanges(workspace, member, parseChanges([{ op: "move", itemId: "releases", groupId: null, index: 0 }]), ids()),
+      applyPersonalSidebarChanges(
+        workspace,
+        member,
+        parseChanges([{ op: "move", itemId: "releases", groupId: null, index: 0 }]),
+        ids(),
+      ),
     ).toThrow(SidebarLayoutChangeError);
   });
 
@@ -131,10 +162,16 @@ describe("sidebar layout", () => {
     const member = applyPersonalSidebarChanges(
       workspace,
       EMPTY_SIDEBAR_PERSONAL_CHANGES,
-      parseChanges([{ op: "add", groupId: "engineering", item: { id: "mine", type: "app", appId: APP_C } }]),
+      parseChanges([
+        { op: "add", groupId: "engineering", item: { id: "mine", type: "app", appId: APP_C } },
+      ]),
       ids(),
     );
-    workspace = applyWorkspaceSidebarChanges(workspace, parseChanges([{ op: "remove", itemId: "engineering" }]), ids());
+    workspace = applyWorkspaceSidebarChanges(
+      workspace,
+      parseChanges([{ op: "remove", itemId: "engineering" }]),
+      ids(),
+    );
     expect(mergeSidebarLayout(workspace, member).items.map((item) => item.id)).toEqual(["mine"]);
   });
 
@@ -143,7 +180,15 @@ describe("sidebar layout", () => {
       version: 2,
       items: [
         { id: "future", type: "kanban_board", board: "x" },
-        { id: "g", type: "group", label: "G", items: [{ id: "f2", type: "chart" }, { id: "l", type: "link", url: "https://a.example", label: "A" }] },
+        {
+          id: "g",
+          type: "group",
+          label: "G",
+          items: [
+            { id: "f2", type: "chart" },
+            { id: "l", type: "link", url: "https://a.example", label: "A" },
+          ],
+        },
         { type: "app" },
         "junk",
       ],
@@ -158,9 +203,19 @@ describe("sidebar layout", () => {
       ids(),
     );
     expect(updated.items.map((item) => item.id)).toEqual(["future", "g", "x"]);
-    expect((updated.items[1]!.items as { id: string }[]).map((item) => item.id)).toEqual(["f2", "l"]);
-    expect(readResolvedSidebarItems([{ id: "z", type: "kanban_board", origin: "workspace" }, "x"])).toEqual([]);
-    expect(readStoredSidebarPersonalChanges({ hidden: ["a", 1, "a"], added: [{ item: { id: "b", type: "chart" } }] })).toEqual({
+    expect((updated.items[1]!.items as { id: string }[]).map((item) => item.id)).toEqual([
+      "f2",
+      "l",
+    ]);
+    expect(
+      readResolvedSidebarItems([{ id: "z", type: "kanban_board", origin: "workspace" }, "x"]),
+    ).toEqual([]);
+    expect(
+      readStoredSidebarPersonalChanges({
+        hidden: ["a", 1, "a"],
+        added: [{ item: { id: "b", type: "chart" } }],
+      }),
+    ).toEqual({
       version: 1,
       hidden: ["a"],
       added: [{ parentId: null, item: { id: "b", type: "chart" } }],
@@ -171,10 +226,20 @@ describe("sidebar layout", () => {
   test("duplicate ids and nested groups are refused", () => {
     const workspace = engineering();
     expect(() =>
-      applyWorkspaceSidebarChanges(workspace, parseChanges([{ op: "add", item: { id: "releases", type: "app", appId: APP_A } }]), ids()),
+      applyWorkspaceSidebarChanges(
+        workspace,
+        parseChanges([{ op: "add", item: { id: "releases", type: "app", appId: APP_A } }]),
+        ids(),
+      ),
     ).toThrow(SidebarLayoutChangeError);
     expect(() =>
-      applyWorkspaceSidebarChanges(workspace, parseChanges([{ op: "add", groupId: "engineering", item: { type: "group", label: "Inner" } }]), ids()),
+      applyWorkspaceSidebarChanges(
+        workspace,
+        parseChanges([
+          { op: "add", groupId: "engineering", item: { type: "group", label: "Inner" } },
+        ]),
+        ids(),
+      ),
     ).toThrow(SidebarLayoutChangeError);
   });
 
@@ -195,7 +260,10 @@ describe("sidebar layout", () => {
             label: "Recent apps",
             limit: 10,
             origin: "workspace",
-            apps: [APP_A, APP_B, APP_C, APP_A].map((appId, index) => ({ appId, title: `${index}` })),
+            apps: [APP_A, APP_B, APP_C, APP_A].map((appId, index) => ({
+              appId,
+              title: `${index}`,
+            })),
           },
         ],
       },

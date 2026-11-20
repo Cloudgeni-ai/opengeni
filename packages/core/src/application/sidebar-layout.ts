@@ -197,7 +197,10 @@ async function resolveSidebarLayout(
   const workspace = readStoredSidebarLayout(rows.workspace?.layout);
   const personal = readStoredSidebarPersonalChanges(rows.personal?.layout);
   const admin = isAdmin(grant);
-  const merged = mergeSidebarLayout(workspace, subjectId === null ? EMPTY_SIDEBAR_PERSONAL_CHANGES : personal);
+  const merged = mergeSidebarLayout(
+    workspace,
+    subjectId === null ? EMPTY_SIDEBAR_PERSONAL_CHANGES : personal,
+  );
   const defaults = admin ? mergeSidebarLayout(workspace, EMPTY_SIDEBAR_PERSONAL_CHANGES) : null;
   const view = await readAppView(deps, grant, [
     ...merged.items,
@@ -265,7 +268,9 @@ export async function updateSidebarLayoutForGrant(
     );
     const missing = newApps.find((id) => !found.apps.has(id));
     if (missing)
-      throw new HTTPException(422, { message: `App ${missing} wasn't found or you can't open it.` });
+      throw new HTTPException(422, {
+        message: `App ${missing} wasn't found or you can't open it.`,
+      });
   }
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   for (let attempt = 0; ; attempt += 1) {

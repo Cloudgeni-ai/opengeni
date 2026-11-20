@@ -53,7 +53,8 @@ export async function readSidebarLayouts(
           and (subject_id is null${subjectId === null ? sql`` : sql` or subject_id = ${subjectId}`})`),
       );
       const workspace = found.find((row) => row.subject_id === null);
-      const personal = subjectId === null ? undefined : found.find((row) => row.subject_id === subjectId);
+      const personal =
+        subjectId === null ? undefined : found.find((row) => row.subject_id === subjectId);
       return {
         workspace: workspace ? mapRow(workspace) : null,
         personal: personal ? mapRow(personal) : null,
@@ -132,7 +133,9 @@ export async function readSidebarApps(
   pinned: SidebarAppSummary[];
   recent: SidebarAppSummary[];
 }> {
-  const ids = [...new Set(input.appIds.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()))];
+  const ids = [
+    ...new Set(input.appIds.filter((id) => UUID.test(id)).map((id) => id.toLowerCase())),
+  ];
   const viewerSubject = input.viewer.subjectId;
   const visible = sql`a.account_id = ${scope.accountId}::uuid and a.workspace_id = ${scope.workspaceId}::uuid
     and a.status = 'active'

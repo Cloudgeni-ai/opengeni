@@ -89,7 +89,11 @@ function ItemRow({
   const fromWorkspace = scope === "personal" && item.origin === "workspace";
   return (
     <div
-      className={indent ? "flex min-h-12 items-center gap-3 py-2 pl-7" : "flex min-h-12 items-center gap-3 py-2"}
+      className={
+        indent
+          ? "flex min-h-12 items-center gap-3 py-2 pl-7"
+          : "flex min-h-12 items-center gap-3 py-2"
+      }
     >
       {itemIcon(item)}
       <div className="min-w-0 flex-1">
@@ -190,7 +194,9 @@ function useAppOptions(workspaceId: string, query: string) {
           ...(query.trim() ? { q: query.trim() } : {}),
           signal: abort.signal,
         })
-        .then((page) => setOptions(page.items.map((item) => ({ value: item.id, label: item.title }))))
+        .then((page) =>
+          setOptions(page.items.map((item) => ({ value: item.id, label: item.title }))),
+        )
         .catch(() => undefined)
         .finally(() => {
           if (!abort.signal.aborted) setLoading(false);
@@ -251,7 +257,8 @@ function AddForm({
     else if (kind === "link" && name && isSidebarExternalUrl(url.trim()))
       item = { type: "link", url: url.trim(), label: name };
     else if (kind === "group" && name) item = { type: "group", label: name };
-    else if (kind === "live_list") item = { type: "live_list", list, ...(name ? { label: name } : {}) };
+    else if (kind === "live_list")
+      item = { type: "live_list", list, ...(name ? { label: name } : {}) };
     if (!item) return;
     setSaving(true);
     void onAdd(item, kind === "group" || group === TOP_LEVEL ? undefined : group).finally(() =>
@@ -280,8 +287,17 @@ function AddForm({
               emptyMessage="No Apps found"
             />
           </Field>
-          <Field label="Page" optional hint="A page inside the App, such as /releases" error={pathError}>
-            <TextInput value={path} onChange={(event) => setPath(event.target.value)} placeholder="/" />
+          <Field
+            label="Page"
+            optional
+            hint="A page inside the App, such as /releases"
+            error={pathError}
+          >
+            <TextInput
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+              placeholder="/"
+            />
           </Field>
         </>
       ) : null}
@@ -300,12 +316,12 @@ function AddForm({
           <SelectMenu options={LIST_OPTIONS} value={list} onValueChange={setList} />
         </Field>
       ) : null}
-      <Field
-        label="Name"
-        optional={kind === "app" || kind === "live_list"}
-        error={labelError}
-      >
-        <TextInput value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} />
+      <Field label="Name" optional={kind === "app" || kind === "live_list"} error={labelError}>
+        <TextInput
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+          maxLength={80}
+        />
       </Field>
       {kind !== "group" && groups.length > 0 ? (
         <Field label="Group">
@@ -335,10 +351,13 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
   const canEditWorkspace = layout?.workspace.canEdit === true;
   const personalAvailable = layout?.personal.available !== false;
   const effectiveScope: Scope =
-    scope === "workspace" && canEditWorkspace ? "workspace" : personalAvailable ? "personal" : "workspace";
+    scope === "workspace" && canEditWorkspace
+      ? "workspace"
+      : personalAvailable
+        ? "personal"
+        : "workspace";
   const items = useMemo(
-    () =>
-      (effectiveScope === "workspace" ? layout?.workspace.items : layout?.items) ?? [],
+    () => (effectiveScope === "workspace" ? layout?.workspace.items : layout?.items) ?? [],
     [effectiveScope, layout],
   );
   const groups = items
@@ -416,7 +435,9 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
               <ItemRows items={items} scope={effectiveScope} onChange={onChange} />
             </Section>
           ) : (
-            <p className="text-sm text-fg-muted">Nothing here yet. Add an App, a link or a group.</p>
+            <p className="text-sm text-fg-muted">
+              Nothing here yet. Add an App, a link or a group.
+            </p>
           )
         ) : failed ? (
           <p className="text-sm text-fg-muted">Couldn't load the sidebar. Try again shortly.</p>
@@ -438,7 +459,9 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
         ) : null}
         {effectiveScope === "personal" && layout?.personal.customized ? (
           <div>
-            <RowButton onClick={() => onChange([{ op: "reset" }])}>Reset to workspace default</RowButton>
+            <RowButton onClick={() => onChange([{ op: "reset" }])}>
+              Reset to workspace default
+            </RowButton>
           </div>
         ) : null}
       </div>

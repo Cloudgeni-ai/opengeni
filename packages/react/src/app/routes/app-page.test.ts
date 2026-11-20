@@ -10,9 +10,9 @@ describe("app pages", () => {
       appId: APP,
       siteHref: "/",
     });
-    expect(matchAppPage(`/workspaces/w1/apps/${APP.toUpperCase()}/releases/2`, "?tab=1#top")).toEqual(
-      { workspaceId: "w1", appId: APP, siteHref: "/releases/2?tab=1#top" },
-    );
+    expect(
+      matchAppPage(`/workspaces/w1/apps/${APP.toUpperCase()}/releases/2`, "?tab=1#top"),
+    ).toEqual({ workspaceId: "w1", appId: APP, siteHref: "/releases/2?tab=1#top" });
     // `at` is only a query or fragment.
     expect(matchAppPage(`/workspaces/w1/apps/${APP}/a`, "//evil")?.siteHref).toBe("/a");
   });

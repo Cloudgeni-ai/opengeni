@@ -6,7 +6,7 @@ describe("resolveSiteUiStylesheet", () => {
     for (const tag of [
       '<link rel="stylesheet" href="/__opengeni/ui.css">',
       "<link href='/__opengeni/ui.css' rel='stylesheet' />",
-      "<LINK rel=stylesheet href=\"/__opengeni/ui.css\">",
+      '<LINK rel=stylesheet href="/__opengeni/ui.css">',
     ]) {
       const out = resolveSiteUiStylesheet(`<head>${tag}</head>`);
       expect(out).toContain("<style data-opengeni-ui>");

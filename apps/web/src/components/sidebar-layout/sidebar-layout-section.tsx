@@ -10,11 +10,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import type {
-  ResolvedSidebarChild,
-  ResolvedSidebarItem,
-  SidebarLayoutChange,
-} from "@opengeni/sdk";
+import type { ResolvedSidebarChild, ResolvedSidebarItem, SidebarLayoutChange } from "@opengeni/sdk";
 import { flattenSidebarItemsForMobile } from "@opengeni/contracts/sidebar-layout";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { cn } from "@opengeni/react/app/lib/utils";

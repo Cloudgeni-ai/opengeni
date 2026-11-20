@@ -27,8 +27,8 @@ afterAll(async () => {
 }, 180_000);
 
 async function workspace(name: string) {
-  const [account] =
-    await shared!.admin`insert into managed_accounts (name) values (${name}) returning id`;
+  const [account] = await shared!
+    .admin`insert into managed_accounts (name) values (${name}) returning id`;
   const accountId = String(account!.id);
   const workspaceId = (await createWorkspace(client!.db, { accountId, name })).id;
   return { accountId, workspaceId };

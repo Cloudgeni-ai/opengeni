@@ -227,9 +227,7 @@ export function readStoredSidebarLayout(value: unknown): StoredSidebarLayout {
   if (!isRecord(value) || !Array.isArray(value.items)) return EMPTY_SIDEBAR_LAYOUT;
   return {
     version: typeof value.version === "number" ? value.version : SIDEBAR_LAYOUT_VERSION,
-    items: value.items
-      .map(storedItem)
-      .filter((item): item is StoredSidebarItem => item !== null),
+    items: value.items.map(storedItem).filter((item): item is StoredSidebarItem => item !== null),
   };
 }
 
@@ -299,9 +297,7 @@ function orderLevel<T extends { id: string }>(items: T[], order: string[] | unde
   const rank = new Map(order.map((id, index) => [id, index]));
   // Ordered items first, by this person's order; the rest (added since) keep theirs.
   return [
-    ...items
-      .filter((item) => rank.has(item.id))
-      .sort((a, b) => rank.get(a.id)! - rank.get(b.id)!),
+    ...items.filter((item) => rank.has(item.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!),
     ...items.filter((item) => !rank.has(item.id)),
   ];
 }
@@ -551,7 +547,9 @@ function updateItem(
   change: Extract<SidebarLayoutChange, { op: "update" }>,
 ): StoredSidebarItem {
   if (!SIDEBAR_ITEM_TYPES.includes(item.type as SidebarItemType))
-    throw new SidebarLayoutChangeError("This item comes from a newer version and can't be edited here");
+    throw new SidebarLayoutChangeError(
+      "This item comes from a newer version and can't be edited here",
+    );
   const next: StoredSidebarItem = { ...item };
   const set = (key: string, value: unknown) => {
     if (value === null) delete next[key];
@@ -575,10 +573,12 @@ function updateItem(
     set("collapsed", change.collapsed);
   }
   if (change.limit !== undefined) {
-    if (item.type !== "live_list") throw new SidebarLayoutChangeError("Only live lists have a limit");
+    if (item.type !== "live_list")
+      throw new SidebarLayoutChangeError("Only live lists have a limit");
     set("limit", change.limit);
   }
-  if (!knownSidebarItem(next)) throw new SidebarLayoutChangeError("That change makes the item invalid");
+  if (!knownSidebarItem(next))
+    throw new SidebarLayoutChangeError("That change makes the item invalid");
   return next;
 }
 
@@ -616,7 +616,9 @@ export function applyWorkspaceSidebarChanges(
         if (change.groupId === undefined) insertAt(items, item, change.index);
         else {
           if (item.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
-          const group = items.find((entry) => entry.id === change.groupId && entry.type === "group");
+          const group = items.find(
+            (entry) => entry.id === change.groupId && entry.type === "group",
+          );
           if (!group) throw new SidebarLayoutChangeError(`No group "${change.groupId}"`);
           const children = Array.isArray(group.items) ? (group.items as StoredSidebarItem[]) : [];
           insertAt(children, item, change.index);
