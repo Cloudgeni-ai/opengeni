@@ -95,6 +95,90 @@ export function isTrimmedCompaction(item: Pick<ContextCompactionItem, "phase" | 
   return item.phase === "compacted" && item.implementation === TRIMMED_COMPACTION_IMPLEMENTATION;
 }
 
+/** What a compaction landmark says, the same on every renderer. */
+export type CompactionRowCopy = {
+  title: string;
+  /** Who started it (Auto, Manual, Overflow), once it has settled. */
+  trigger: string | null;
+  subtitle: string | null;
+  /** Still running: renderers show it as live work, not a settled marker. */
+  running: boolean;
+  /** History was trimmed instead of summarized. */
+  trimmed: boolean;
+  /** The summary request failed; the chat history is unchanged. */
+  failed: boolean;
+};
+
+/**
+ * Title, trigger and subtitle of a compaction landmark. A running compaction
+ * reads as live work ("Compacting conversation history…") so a long summary
+ * request never looks like a stalled turn; a settled one names its outcome.
+ */
+export function compactionRowCopy(
+  t: OpenGeniText,
+  item: Pick<
+    ContextCompactionItem,
+    | "phase"
+    | "trigger"
+    | "implementation"
+    | "estimatedTokensBefore"
+    | "estimatedTokensAfter"
+    | "skipReason"
+    | "providerRejection"
+  >,
+): CompactionRowCopy {
+  // Switching a Codex chat to another model rebuilds its context once; say
+  // that plainly instead of describing an ordinary compaction.
+  const modelSwitch = item.implementation === "portable_model_switch";
+  const trimmed = isTrimmedCompaction(item);
+  const trigger =
+    item.trigger && item.phase !== "started" && !modelSwitch
+      ? {
+          auto: t("messageTimeline.auto"),
+          operator: t("messageTimeline.manual"),
+          proactive: t("messageTimeline.auto"),
+          overflow: t("messageTimeline.overflow"),
+        }[item.trigger]
+      : null;
+  const before =
+    item.estimatedTokensBefore != null
+      ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
+      : null;
+  const after =
+    item.estimatedTokensAfter != null
+      ? Math.round(item.estimatedTokensAfter).toLocaleString(t.locale)
+      : null;
+  const title =
+    item.phase === "started"
+      ? modelSwitch
+        ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
+        : t("messageTimeline.compactingConversationHistory")
+      : item.phase === "compacted"
+        ? trimmed
+          ? COMPACTION_TRIMMED_TITLE(t)
+          : modelSwitch
+            ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
+            : before && after
+              ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+              : t("messageTimeline.conversationHistoryCompacted")
+        : compactionSkipTitle(t, item.skipReason);
+  const subtitle = trimmed
+    ? COMPACTION_TRIMMED_SUBTITLE(t)
+    : item.phase === "compacted" && !modelSwitch
+      ? t("messageTimeline.chatHistoryAboveIsUnchanged")
+      : item.phase === "skipped"
+        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
+        : null;
+  return {
+    title,
+    trigger,
+    subtitle,
+    running: item.phase === "started",
+    trimmed,
+    failed: item.phase === "skipped" && item.skipReason === "summarization_failed",
+  };
+}
+
 /**
  * Technical diagnostics for a failed compaction landmark, or for a checkpoint
  * that trimmed history because its summary failed, or null when it has none:

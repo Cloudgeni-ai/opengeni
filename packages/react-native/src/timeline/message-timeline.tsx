@@ -11,6 +11,7 @@ import {
   useTimelinePauses,
   type AgentMessageItem,
   type AuthNeededItem,
+  type ContextCompactionItem,
   type HumanInputItem,
   type TimelineGroup,
   type TimelineAnnotationSourceDescriptor,
@@ -22,6 +23,7 @@ import {
   agentWorkHumanInputSummary,
   automationRunLine,
   compactedLandmarkCount,
+  compactionRowCopy,
   durationBetween,
   flattenActivityItems,
   formatClockTime,
@@ -1144,7 +1146,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
       );
     }
     case "context-compaction":
-      return <SeparatorRow text="context compacted" />;
+      return <CompactionRow item={item} />;
     case "notice":
       return <NoticeRow item={item} />;
     case "goal":
@@ -1328,6 +1330,45 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
       <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
         {noticeDisplayText(t, item)}
       </Text>
+    </View>
+  );
+}
+
+/**
+ * A compaction landmark, worded like the web row. While the summary request
+ * runs (often a minute or more on a long chat) it reads as live work, so the
+ * turn never looks stalled; once settled it names the outcome.
+ */
+function CompactionRow({ item }: { item: ContextCompactionItem }) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const copy = compactionRowCopy(t, item);
+  return (
+    <View accessibilityLiveRegion="polite" style={{ gap: 4 }}>
+      <SeparatorRow
+        text={copy.trigger ? `${copy.title} · ${copy.trigger}` : copy.title}
+        dot={
+          copy.failed
+            ? theme.colors["status-failed"]
+            : copy.running
+              ? theme.colors["status-waiting"]
+              : undefined
+        }
+      />
+      {copy.subtitle ? (
+        <Text
+          style={{
+            ...fontStyle(theme),
+            alignSelf: "center",
+            maxWidth: "80%",
+            textAlign: "center",
+            fontSize: theme.size.xs,
+            color: copy.failed ? theme.colors["status-failed"] : theme.colors["fg-subtle"],
+          }}
+        >
+          {copy.subtitle}
+        </Text>
+      ) : null}
     </View>
   );
 }

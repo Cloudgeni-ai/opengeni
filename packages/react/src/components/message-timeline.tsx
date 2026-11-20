@@ -33,14 +33,7 @@ import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timelin
 import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
-import {
-  COMPACTION_TRIMMED_SUBTITLE,
-  COMPACTION_TRIMMED_TITLE,
-  compactionFailureDetails,
-  compactionSkipSubtitle,
-  compactionSkipTitle,
-  isTrimmedCompaction,
-} from "../timeline/compaction-copy";
+import { compactionFailureDetails, compactionRowCopy } from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -4417,61 +4410,14 @@ export function TimelineRow({
   }
 }
 
-const COMPACTION_TRIGGER_LABEL = (
-  t: OpenGeniText,
-): Record<NonNullable<ContextCompactionItem["trigger"]>, string> => ({
-  auto: t("messageTimeline.auto"),
-  operator: t("messageTimeline.manual"),
-  proactive: t("messageTimeline.auto"),
-  overflow: t("messageTimeline.overflow"),
-});
-
 function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const detailsId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
-  // Switching a Codex chat to another model rebuilds its context once; say
-  // that plainly instead of describing an ordinary compaction.
-  const modelSwitch = item.implementation === "portable_model_switch";
-  // The chat's model could not summarize, so older messages were trimmed.
-  const trimmed = isTrimmedCompaction(item);
-  const trigger =
-    item.trigger && item.phase !== "started" && !modelSwitch
-      ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
-      : null;
-  const before =
-    item.estimatedTokensBefore != null
-      ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
-      : null;
-  const after =
-    item.estimatedTokensAfter != null
-      ? Math.round(item.estimatedTokensAfter).toLocaleString(t.locale)
-      : null;
-  const title =
-    item.phase === "started"
-      ? modelSwitch
-        ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
-        : t("messageTimeline.compactingConversationHistory")
-      : item.phase === "compacted"
-        ? trimmed
-          ? COMPACTION_TRIMMED_TITLE(t)
-          : modelSwitch
-            ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
-            : before && after
-              ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
-              : t("messageTimeline.conversationHistoryCompacted")
-        : compactionSkipTitle(t, item.skipReason);
-  const subtitle = trimmed
-    ? COMPACTION_TRIMMED_SUBTITLE(t)
-    : item.phase === "compacted" && !modelSwitch
-      ? t("messageTimeline.chatHistoryAboveIsUnchanged")
-      : item.phase === "skipped"
-        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
-        : null;
+  const { title, trigger, subtitle, trimmed, failed } = compactionRowCopy(t, item);
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
   const details = compactionFailureDetails(t, item);
-  const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
   // Longer copy wraps, centred, instead of truncating.
   const wraps = failed || trimmed;
   const pill = failed
