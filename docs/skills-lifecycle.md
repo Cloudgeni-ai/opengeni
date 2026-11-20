@@ -161,7 +161,7 @@ historical tool outputs. The chat does not need to enter `requires_action`.
 
 A person's save may ask to follow Agent learning (`learningPolicy: "follow"`).
 The Skill content route sends it for agents outside Opengeni acting as the
-person (`skills_sync` on the organization MCP server), and migration `1515`
+person (`skills_sync` on the organization MCP server), and migration `1516`
 gives such a save the destination's Skills mode, as for an agent: Review first
 leaves it pending, Off refuses it with `42501`.
 

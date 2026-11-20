@@ -2752,7 +2752,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_identity_issuers",
   "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
-  // 1515: a connected agent's default workspace and app data reach.
+  // 1516: a connected agent's default workspace and app data reach.
   "organization_mcp_connection_settings",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",

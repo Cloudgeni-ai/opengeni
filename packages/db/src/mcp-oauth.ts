@@ -821,7 +821,7 @@ function stringArray(value: unknown): string[] {
 }
 
 /**
- * A connected agent's settings (migration 1515): the workspace its tools use
+ * A connected agent's settings (migration 1516): the workspace its tools use
  * when a call names none, and its app data reach. No row reads as viewer with
  * no default workspace. Never authority by itself.
  */

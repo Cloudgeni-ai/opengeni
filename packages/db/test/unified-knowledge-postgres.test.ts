@@ -1818,7 +1818,7 @@ describe("unified Knowledge storage", () => {
       ).outcome,
     ).toBe("applied");
     // A connected agent's upload is a person's save that follows Agent learning
-    // (migration 1515): Off refuses it, Review first leaves it pending.
+    // (migration 1516): Off refuses it, Review first leaves it pending.
     const follow = () => ({
       ...request,
       learningPolicy: "follow",

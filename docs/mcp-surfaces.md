@@ -214,7 +214,7 @@ connection's access setting; none adds authority.
 `npx opengeni connect` adds the server to Claude Code, Codex, Cursor and VS
 Code with Copilot on the computer, and installs a short `opengeni` skill
 for each ([setup guide](../docs-site/guides/connect-coding-agents.mdx)).
-Migration `1515` (rolling) adds the per-connection settings table
+Migration `1516` (rolling) adds the per-connection settings table
 `organization_mcp_connection_settings` and the Skill save that follows Agent
 learning.
 
