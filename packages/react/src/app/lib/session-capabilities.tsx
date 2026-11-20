@@ -120,6 +120,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "wait_for_input" ||
       tool.startsWith("goal_") ||
       tool.startsWith("project_") ||
+      tool.startsWith("sidebar_layout_") ||
       tool.startsWith("session_") ||
       tool.startsWith("sessions_") ||
       tool.startsWith("work_claim_"),

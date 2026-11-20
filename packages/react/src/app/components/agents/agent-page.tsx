@@ -1,12 +1,17 @@
 /**
- * One agent: chat with it, its chats, what it follows (Instructions and First
- * message), Memory, who can use it and where it is available. The app is
- * always on; the host renders the Slack part (`renderSlack`), which needs the
- * Slack integration's own pieces.
+ * One agent, set up from one page: Instructions, Starts when (its triggers),
+ * Can use (Allow, Ask first or Block per tool), Learns (Memory), who can use
+ * it with how to ask it in Slack, its Skills, and its chats. The host renders
+ * the Slack rows (`renderSlack`), which need the Slack integration's pieces.
  */
 import { useState, type ReactNode } from "react";
 import { DownloadIcon, MessageSquareIcon, PencilIcon } from "lucide-react";
-import type { Agent, AgentChat, AgentChatsFilter } from "@opengeni/contracts";
+import {
+  slackAgentCallText,
+  type Agent,
+  type AgentChat,
+  type AgentChatsFilter,
+} from "@opengeni/contracts";
 
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
@@ -30,6 +35,12 @@ import { toast } from "../../lib/toast";
 import { slackLogo } from "../new-session-starter-logos";
 import { SessionAvatar } from "../session/session-avatar";
 import { DestructiveConfirm } from "../ui/destructive-confirm";
+import {
+  AgentCanUse,
+  AgentMemoryEntries,
+  AgentSkills,
+  AgentStartsWhen,
+} from "./agent-setup-sections";
 
 export type AgentSlackSlot = (props: {
   agent: Agent;
@@ -363,12 +374,14 @@ export function AgentPage({
         }
       />
       <DetailPageBody>
-        <AgentChats agent={agent} workspaceId={workspaceId} />
         <DetailSection title="Instructions">
           <Prose text={agent.instructions} empty="None. It works like an ordinary chat." />
         </DetailSection>
-        <DetailSection title="Memory">
+        <AgentStartsWhen agent={agent} workspaceId={workspaceId} />
+        <AgentCanUse agent={agent} workspaceId={workspaceId} onSaved={saved} />
+        <DetailSection title="Learns">
           <MemoryRow agent={agent} workspaceId={workspaceId} onSaved={saved} />
+          <AgentMemoryEntries agent={agent} workspaceId={workspaceId} />
         </DetailSection>
         <DetailSection title="Who can use it">
           <p className="m-0 text-sm text-fg">
@@ -377,14 +390,19 @@ export function AgentPage({
               organizationName,
             })}
           </p>
-        </DetailSection>
-        <DetailSection title="Available in">
-          <SettingRow
-            label="Opengeni app"
-            description="Always on. Start a chat with it from the composer."
-          />
+          {/* The host's Slack rows name the app as each Slack workspace knows it. */}
+          {agent.slack.length > 0 && !renderSlack ? (
+            <p className="m-0 text-sm text-fg-muted" data-agent-slack-line="">
+              Ask in Slack:{" "}
+              <code className="rounded-[4px] bg-muted px-1 py-0.5 text-xs text-fg">
+                {slackAgentCallText(agent.name)}
+              </code>
+            </p>
+          ) : null}
           {renderSlack ? renderSlack({ agent, onAgentChange: saved }) : null}
         </DetailSection>
+        <AgentSkills agent={agent} workspaceId={workspaceId} onSaved={saved} />
+        <AgentChats agent={agent} workspaceId={workspaceId} />
         {agent.viewer.canEdit ? (
           <SettingDangerRow
             label="Delete agent"

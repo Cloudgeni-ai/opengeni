@@ -18,6 +18,8 @@ const PAGES = new Set([
   "automations",
   "bot-templates",
   "artifacts",
+  "apps",
+  "sidebar",
   "settings",
   "organization",
   "insights",

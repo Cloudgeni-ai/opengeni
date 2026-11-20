@@ -11,6 +11,7 @@ import {
 import type { OpenGeniSiteSignInResult, OpenGeniSiteViewer } from "@opengeni/sdk/site";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
+import { resolveSiteUiStylesheet } from "@opengeni/sdk/site-ui";
 import { HTML_FRAME_HOST_SANDBOX } from "@opengeni/contracts/html-frame-host";
 import { useContentHosting } from "../../lib/content-hosting";
 import { htmlFrameHostSrc, useHtmlFrameHost } from "./html-frame-host";
@@ -69,8 +70,11 @@ export type PublishedHtmlArtifactFrameProps = {
 export type PublishedHtmlArtifactToolBridge = SiteBridgeToolHandlers;
 
 export function publishedHtmlArtifactDocument(html: string, toolBridgeEnabled: boolean): string {
-  if (!toolBridgeEnabled) return html;
-  return injectSiteBridgeBootstrap(resolveSiteClientScript(html));
+  // The opt-in Opengeni look (`/__opengeni/ui.css`) is inlined, so it is there
+  // on the first paint.
+  const styled = resolveSiteUiStylesheet(html);
+  if (!toolBridgeEnabled) return styled;
+  return injectSiteBridgeBootstrap(resolveSiteClientScript(styled));
 }
 
 const SITE_ROOT: OpenGeniSiteLocationValue = { path: "/", search: "", hash: "" };
@@ -196,7 +200,13 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       host.close();
     };
   }, [props.html, toolBridgeEnabled, locationHandlers]);
-  const style = { ...props.style, ...(props.autoHeight && height ? { height } : {}) };
+  // The frame's color-scheme is the app's `prefers-color-scheme`, so an app
+  // follows Opengeni's light or dark theme, and switches without reloading.
+  const style: CSSProperties = {
+    ...(props.theme ? { colorScheme: props.theme } : {}),
+    ...props.style,
+    ...(props.autoHeight && height ? { height } : {}),
+  };
   if (frameHostSrc) {
     return (
       <iframe

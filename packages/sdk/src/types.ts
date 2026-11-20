@@ -4048,6 +4048,12 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  /**
+   * The workspace agent each run's chat is with (an agent's "Starts when"):
+   * its Instructions, Memory and Can use apply. Only for a task that starts
+   * its own chats.
+   */
+  agentId?: string | undefined;
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
   /**
@@ -4602,6 +4608,8 @@ export type FirstPartyMcpToolName =
   | "project_reorder"
   | "project_delete"
   | "session_set_project"
+  | "sidebar_layout_get"
+  | "sidebar_layout_update"
   | "admin_actions_search"
   | "admin_action_describe"
   | "admin_action_call"
@@ -8711,6 +8719,12 @@ export type SaveNewSessionDraftRequest = Omit<
 
 /** Input shape for agent config on create/update (server applies defaults). */
 export type ScheduledTaskAgentConfigInput = {
+  /**
+   * The workspace agent each run's chat is with (an agent's "Starts when"):
+   * it runs with that agent's Instructions, Memory and Can use. Only for a
+   * task that starts a new chat each run. Older servers ignore it.
+   */
+  agentId?: string | undefined;
   /**
    * Agent configuration frozen into the schedule and used by every run;
    * omitted runs follow the workspace's agent defaults.

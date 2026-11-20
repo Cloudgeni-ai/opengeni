@@ -407,6 +407,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   project_reorder: "workspaceAdmin",
   project_delete: "workspaceAdmin",
   session_set_project: "workspaceAdmin",
+  sidebar_layout_get: "workspaceAdmin",
+  sidebar_layout_update: "workspaceAdmin",
   // App actions: run as the person in a chat they started; changes ask first.
   admin_actions_search: "workspaceAdmin",
   admin_action_describe: "workspaceAdmin",

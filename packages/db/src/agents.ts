@@ -68,6 +68,12 @@ export type AgentRecord = {
    * it for the previous release, which still reads that.
    */
   organizationAccess: boolean;
+  /** Can use rules as stored (1517); read them through the contract's schema. */
+  toolPermissions: unknown[];
+  /** Skills listed on its page, as stored (1517). */
+  skills: unknown[];
+  /** The ready-made agent it was added from. */
+  templateKey: string | null;
   currentRevision: number;
   origin: AgentOriginValue;
   sourceSessionId: string | null;
@@ -121,6 +127,9 @@ type AgentRow = {
   memory_enabled: boolean;
   memory_collection_id: string | null;
   organization_access?: boolean | null;
+  tool_permissions?: unknown;
+  skills?: unknown;
+  template_key?: string | null;
   current_revision: number;
   origin: string;
   source_session_id: string | null;
@@ -158,6 +167,9 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     memoryEnabled: row.memory_enabled,
     memoryCollectionId: row.memory_collection_id,
     organizationAccess: row.visibility !== "private" && row.organization_access === true,
+    toolPermissions: Array.isArray(row.tool_permissions) ? row.tool_permissions : [],
+    skills: Array.isArray(row.skills) ? row.skills : [],
+    templateKey: row.template_key ?? null,
     currentRevision: Number(row.current_revision),
     origin: row.origin as AgentOriginValue,
     sourceSessionId: row.source_session_id,
@@ -206,7 +218,7 @@ function mapInstall(row: InstallRow): AgentSlackInstallRecord {
 const AGENT_COLUMNS = sql.raw(`a.id::text as id, a.account_id::text as account_id,
   a.workspace_id::text as workspace_id, a.visibility, a.owner_subject_id, a.name, a.description,
   a.avatar, a.memory_enabled, a.memory_collection_id::text as memory_collection_id,
-  a.organization_access,
+  a.organization_access, a.tool_permissions, a.skills, a.template_key,
   a.current_revision, a.origin, a.source_session_id::text as source_session_id,
   a.created_by_subject_id, a.version, a.created_at, a.updated_at`);
 
@@ -401,6 +413,12 @@ export type CreateAgentInput = {
   memoryEnabled: boolean;
   /** Anyone in the organization can use it (shared agents only). */
   organizationAccess?: boolean;
+  /** Can use rules, already validated. */
+  toolPermissions?: readonly unknown[];
+  /** Skills listed on its page, already validated. */
+  skills?: readonly unknown[];
+  /** The ready-made agent it is added from. */
+  templateKey?: string | null;
   origin: AgentOriginValue;
   sourceSessionId: string | null;
   createdBySubjectId: string | null;
@@ -441,18 +459,22 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
     tx,
     sql`insert into agents (${sql.raw(input.id ? "id, " : "")}account_id, workspace_id, visibility,
         owner_subject_id, name, name_key, description, avatar, memory_enabled, organization_access,
+        tool_permissions, skills, template_key,
         current_revision, origin, source_session_id, created_by_subject_id)
       values (${input.id ? sql`${input.id}::uuid, ` : sql``}${home.accountId}::uuid,
         ${home.workspaceId}::uuid, ${input.visibility}, ${input.ownerSubjectId}, ${input.name},
         lower(btrim(${input.name})), ${input.description},
         ${input.avatar === null ? sql`null` : sql`${JSON.stringify(input.avatar)}::jsonb`},
         ${input.memoryEnabled},
-        ${input.visibility === "workspace" && input.organizationAccess === true}, 1,
+        ${input.visibility === "workspace" && input.organizationAccess === true},
+        ${JSON.stringify(input.toolPermissions ?? [])}::jsonb, ${JSON.stringify(input.skills ?? [])}::jsonb,
+        ${input.templateKey ?? null}, 1,
         ${input.origin}, ${input.sourceSessionId}::uuid,
         ${input.createdBySubjectId})
       returning ${sql.raw(`id::text as id, account_id::text as account_id,
         workspace_id::text as workspace_id, visibility, owner_subject_id, name, description, avatar,
         memory_enabled, memory_collection_id::text as memory_collection_id, organization_access,
+        tool_permissions, skills, template_key,
         current_revision, origin, source_session_id::text as source_session_id, created_by_subject_id, version,
         created_at, updated_at`)}`,
   );
@@ -525,6 +547,10 @@ export type AgentPatch = {
   /** Older field: joins the Instructions as its own paragraph. */
   firstMessage?: string;
   memoryEnabled?: boolean;
+  /** Replaces every Can use rule, already validated. */
+  toolPermissions?: readonly unknown[];
+  /** Replaces the Skills list, already validated. */
+  skills?: readonly unknown[];
   /**
    * Anyone in the organization can use it. Written to the agent and, for the
    * previous release during the rollout, as `open` on every Slack
@@ -625,6 +651,8 @@ export async function updateAgent(
           memory_enabled = ${patch.memoryEnabled ?? current.memoryEnabled},
           memory_collection_id = ${patch.clearMemoryCollection ? null : current.memoryCollectionId}::uuid,
           organization_access = ${organizationAccess},
+          tool_permissions = ${JSON.stringify(patch.toolPermissions ?? current.toolPermissions)}::jsonb,
+          skills = ${JSON.stringify(patch.skills ?? current.skills)}::jsonb,
           current_revision = ${nextRevision}::integer,
           version = version + 1,
           updated_at = now()
@@ -1321,6 +1349,123 @@ export async function getSlackAgentProjection(
   });
 }
 
+export type ResolveAgentRefOutcome =
+  | { kind: "found"; agent: AgentRecord }
+  | { kind: "not_found" }
+  /** Several agents the reader can use share this name: name it by id. */
+  | { kind: "ambiguous"; agentIds: string[] };
+
+const AGENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/**
+ * An agent of the home workspace named by id or by name (case and outer
+ * spaces ignored), among those the reader can use: shared ones and the
+ * reader's own Only me ones. The one lookup behind delegation by name
+ * (`session_create`'s `agent`), automations and outside agents' tools.
+ */
+export async function resolveWorkspaceAgentRef(
+  db: Database,
+  home: AgentHome,
+  input: {
+    ref: string;
+    viewerSubjectId: string | null;
+    /** Only agents anyone in the organization can use (an open Slack chat). */
+    organizationAccessOnly?: boolean;
+  },
+): Promise<ResolveAgentRefOutcome> {
+  const ref = input.ref.trim();
+  if (ref.length === 0) return { kind: "not_found" };
+  return await withRlsContext(db, home, async (tx) => {
+    const rows = await rawRows<{ id: string }>(
+      tx,
+      sql`select a.id::text as id from agents a
+        where a.account_id = ${home.accountId}::uuid
+          and a.workspace_id = ${home.workspaceId}::uuid
+          and ${viewerFilter(input.viewerSubjectId)}
+          and ${
+            input.organizationAccessOnly === true
+              ? sql`a.visibility <> 'private' and a.organization_access = true`
+              : sql`true`
+          }
+          and ${
+            AGENT_ID_PATTERN.test(ref)
+              ? sql`(a.id = ${ref}::uuid or a.name_key = lower(btrim(${ref})))`
+              : sql`a.name_key = lower(btrim(${ref}))`
+          }
+        order by (a.id::text = lower(${ref})) desc, a.created_at, a.id
+        limit 5`,
+    );
+    const first = rows[0];
+    if (!first) return { kind: "not_found" as const };
+    const exactId = AGENT_ID_PATTERN.test(ref) && first.id === ref.toLowerCase();
+    if (!exactId && rows.length > 1) {
+      return { kind: "ambiguous" as const, agentIds: rows.map((row) => row.id) };
+    }
+    const agent = await getAgent(tx, home, first.id);
+    return agent ? { kind: "found" as const, agent } : { kind: "not_found" as const };
+  });
+}
+
+/**
+ * SQL for the agent governing a chat: its own agent, else the nearest chat
+ * above it that has one (a worker an agent's chat starts follows that
+ * agent; a chat delegated to another agent follows its own). Depth-bounded.
+ */
+function nearestSessionAgentIdSql(workspaceId: string, sessionId: string): SQL {
+  return sql`(with recursive chain(id, parent_id, agent_id, depth) as (
+      select s.id, s.parent_session_id, ${sessionAgentIdSql(sql.raw("s"))}, 0
+      from sessions s
+      where s.workspace_id = ${workspaceId}::uuid and s.id = ${sessionId}::uuid
+      union all
+      select p.id, p.parent_session_id, ${sessionAgentIdSql(sql.raw("p"))}, c.depth + 1
+      from chain c
+      join sessions p on p.workspace_id = ${workspaceId}::uuid and p.id = c.parent_id
+      where c.agent_id is null and c.depth < 16
+    )
+    select agent_id from chain where agent_id is not null order by depth limit 1)`;
+}
+
+/**
+ * Every agent up a chat's chain (its own, then each chat above it with one),
+ * nearest first. Can use applies the strictest of their rules, so handing
+ * work to another agent never drops a restriction set on the caller.
+ */
+export async function getSessionAgentChain(
+  db: Database,
+  input: { workspaceId: string; sessionId: string },
+): Promise<AgentRecord[]> {
+  const rows = await withWorkspaceRls(db, input.workspaceId, async (tx) =>
+    rawRows<{ account_id: string; agent_id: string }>(
+      tx,
+      sql`with recursive chain(id, parent_id, account_id, agent_id, depth) as (
+          select s.id, s.parent_session_id, s.account_id, ${sessionAgentIdSql(sql.raw("s"))}, 0
+          from sessions s
+          where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid
+          union all
+          select p.id, p.parent_session_id, p.account_id, ${sessionAgentIdSql(sql.raw("p"))}, c.depth + 1
+          from chain c
+          join sessions p on p.workspace_id = ${input.workspaceId}::uuid and p.id = c.parent_id
+          where c.depth < 16
+        )
+        select account_id::text as account_id, agent_id::text as agent_id
+        from chain where agent_id is not null order by depth`,
+    ),
+  );
+  const agents: AgentRecord[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.agent_id) || !AGENT_ID_PATTERN.test(row.agent_id)) continue;
+    seen.add(row.agent_id);
+    const agent = await getAgent(
+      db,
+      { accountId: row.account_id, workspaceId: input.workspaceId },
+      row.agent_id,
+    );
+    if (agent) agents.push(agent);
+  }
+  return agents;
+}
+
 /**
  * The agent a chat was started with, read from the chat's workspace (the
  * agent's home). `agentChat` stays true when the agent was deleted since, so
@@ -1346,8 +1491,10 @@ export async function getSessionAgent(
 
 /**
  * A chat's agent for its Memory rules, with the chat's audience. A worker a
- * chat started has no agent of its own, so it is checked as its root chat's:
- * it may not write to a Memory its root chat could not. Privacy and Memory
+ * chat started has no agent of its own, so it is checked as the nearest
+ * chat's above it that has one (its root chat's, unless a chat in between
+ * was delegated to another agent): it may not write to a Memory that chat
+ * could not. Privacy and Memory
  * scope are the asking chat's own (a private chat's workers are private too).
  */
 export async function getSessionAgentMemoryState(
@@ -1358,6 +1505,8 @@ export async function getSessionAgentMemoryState(
   agent: AgentRecord | null;
   chat: {
     private: boolean;
+    /** The session row itself is Only me (a Slack DM's row is shared). */
+    onlyMe: boolean;
     ownerSubjectId: string | null;
     memoryOff: boolean;
     slackDm: boolean;
@@ -1376,8 +1525,7 @@ export async function getSessionAgentMemoryState(
       // A Slack DM is private through its interaction, not its session row
       // (docs/slack-bot.md); its workers share the root's interaction.
       sql`select s.account_id::text as account_id,
-          coalesce(${sessionAgentIdSql(sql.raw("s"))},
-            ${sessionAgentIdSql(sql.raw("r"))})::text as agent_id,
+          ${nearestSessionAgentIdSql(input.workspaceId, input.sessionId)}::text as agent_id,
           s.visibility, s.owner_subject_id, s.memory_scope,
           (select p.owning_subject_id from slack_interactions p
             where p.workspace_id = s.workspace_id
@@ -1385,8 +1533,6 @@ export async function getSessionAgentMemoryState(
               and p.visibility = 'private'
             order by p.created_at, p.id limit 1) as dm_owner
         from sessions s
-        left join sessions r on r.workspace_id = s.workspace_id
-          and r.id = s.root_session_id and r.id <> s.id
         where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
     );
     return found ?? null;
@@ -1395,6 +1541,7 @@ export async function getSessionAgentMemoryState(
   const onlyMe = row.visibility === "user_private";
   const chat = {
     private: onlyMe || row.dm_owner !== null,
+    onlyMe,
     ownerSubjectId: onlyMe ? row.owner_subject_id : (row.dm_owner ?? row.owner_subject_id),
     memoryOff: row.memory_scope === "off",
     // Its saves land in workspace scope: neither Only me nor Memory scope user.

@@ -1,7 +1,9 @@
 import {
+  getAgent,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
   canonicalSecretPermissions,
+  type AgentRecord,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -38,6 +40,7 @@ import {
   type SessionSystemUpdatePayload,
   type ToolRef,
   type TurnInitiator,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
 } from "@opengeni/contracts";
 import {
   openGeniSlackBotMetadata,
@@ -142,7 +145,12 @@ import {
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
-import { agentRunAdmissionDenial, fundedBillingOrigin } from "@opengeni/core";
+import {
+  agentMemoryAccess,
+  agentMemoryGuidance,
+  agentRunAdmissionDenial,
+  fundedBillingOrigin,
+} from "@opengeni/core";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -1682,6 +1690,22 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             let sessionCreated = true;
             const taskMetadata = { ...task.agentConfig.metadata };
             delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
+            // An agent's "Starts when": the run is a chat with that agent,
+            // with its Instructions, Memory and Can use, checked as the
+            // task's owner when the session binds.
+            const runAgent = task.agentConfig.agentId
+              ? await getAgent(
+                  dispatchDb,
+                  { accountId: task.accountId, workspaceId: task.workspaceId },
+                  task.agentConfig.agentId,
+                )
+              : null;
+            const runInstructions = runAgent
+              ? scheduledAgentRunInstructions(runAgent, resolvedAgentInstructions, {
+                  private: task.visibility === "private",
+                  ownerSubjectId: task.ownerSubjectId,
+                })
+              : resolvedAgentInstructions;
             try {
               const sessionInput: Parameters<typeof createSession>[1] = {
                 accountId: task.accountId,
@@ -1696,8 +1720,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
                 ...(resolvedAgentConfig ? { agentConfig: resolvedAgentConfig } : {}),
-                ...(resolvedAgentInstructions !== undefined
-                  ? { instructions: resolvedAgentInstructions }
+                ...(runInstructions !== undefined ? { instructions: runInstructions } : {}),
+                ...(task.agentConfig.agentId
+                  ? {
+                      agent: {
+                        id: task.agentConfig.agentId,
+                        subjectId: task.ownerSubjectId,
+                      },
+                    }
                   : {}),
                 ...scheduledGeneratedChatSettings(task.agentConfig, creatorSessionPolicy),
                 ...(task.visibility === "private"
@@ -3582,4 +3612,22 @@ export function scheduledGeneratedChatSettings(
       : {}),
     ...(agentConfig.skills?.length ? { skills: SessionSkills.parse(agentConfig.skills) } : {}),
   };
+}
+
+/**
+ * A run with an agent gets that agent's Memory guidance after the task's own
+ * instructions, as an app chat with the agent does. Unchanged when Memory is
+ * off or there is no room (the knowledge tools still enforce the rules).
+ */
+function scheduledAgentRunInstructions(
+  agent: AgentRecord,
+  instructions: string | undefined,
+  chat: { private: boolean; ownerSubjectId: string | null },
+): string | undefined {
+  if (!agent.memoryEnabled) return instructions;
+  const guidance = agentMemoryGuidance(agentMemoryAccess(agent, { ...chat, memoryOff: false }));
+  if (!guidance) return instructions;
+  const own = instructions?.trim() ?? "";
+  const combined = own ? `${own}\n\n${guidance}` : guidance;
+  return combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS ? combined : instructions;
 }

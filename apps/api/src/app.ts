@@ -423,6 +423,7 @@ import { registerInteractionResourceRoutes } from "./routes/interaction-resource
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
+import { registerSidebarLayoutRoutes } from "./routes/sidebar-layout";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerEventSourceRoutes } from "./routes/event-sources";
@@ -2888,6 +2889,7 @@ export function createAppComposition(
   registerVaultRoutes(app, routeDeps);
   registerCredentialProfileRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
+  registerSidebarLayoutRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);

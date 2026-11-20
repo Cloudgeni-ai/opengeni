@@ -3,6 +3,7 @@ import {
   resolveConnectorActionPolicy,
   projectConnectorToolPermission,
   requireApprovalWithFloor,
+  withMinimumConnectorDecision,
   type ConnectorActionPolicySnapshotEntry,
 } from "../src/index";
 
@@ -36,8 +37,16 @@ describe("connector action policy resolution", () => {
   });
 
   test("fails closed when overlapping policies have equal specificity", () => {
-    const serverExact = policy({ toolName: "*", actionName: "read", policy: "allow" });
-    const toolExact = policy({ serverId: "*", actionName: "read", policy: "ask" });
+    const serverExact = policy({
+      toolName: "*",
+      actionName: "read",
+      policy: "allow",
+    });
+    const toolExact = policy({
+      serverId: "*",
+      actionName: "read",
+      policy: "ask",
+    });
     expect(
       resolveConnectorActionPolicy([serverExact, toolExact], {
         connectionId: "connection-1",
@@ -45,7 +54,12 @@ describe("connector action policy resolution", () => {
         toolName: "perform_action",
         actionName: "read",
       }),
-    ).toEqual({ managed: true, source: "ambiguous", entry: null, decision: "block" });
+    ).toEqual({
+      managed: true,
+      source: "ambiguous",
+      entry: null,
+      decision: "block",
+    });
   });
 
   test("preserves the historical unmanaged default when no policy matches", () => {
@@ -139,6 +153,42 @@ describe("connector action policy resolution", () => {
         toolName: entry.toolName,
         defaultDecision: "allow",
       }),
-    ).toMatchObject({ permission: "block", source: "action", inherited: false });
+    ).toMatchObject({
+      permission: "block",
+      source: "action",
+      inherited: false,
+    });
+  });
+});
+
+describe("agent Can use floor", () => {
+  test("raises an unmanaged or allowed call to the agent's choice", () => {
+    expect(withMinimumConnectorDecision({ managed: false }, "ask", "send")).toEqual({
+      managed: true,
+      source: "default",
+      entry: null,
+      decision: "ask",
+      actionName: "send",
+    });
+    const allowed = {
+      managed: true as const,
+      source: "explicit" as const,
+      entry: policy({ policy: "allow" }),
+    };
+    expect(withMinimumConnectorDecision(allowed, "block", "send")).toMatchObject({
+      decision: "block",
+    });
+  });
+
+  test("never weakens a stricter setting and is a no-op without a floor", () => {
+    const blocked = {
+      managed: true as const,
+      source: "explicit" as const,
+      entry: policy({ policy: "block" }),
+    };
+    expect(withMinimumConnectorDecision(blocked, "ask", "send")).toBe(blocked);
+    expect(withMinimumConnectorDecision({ managed: false }, undefined, "send")).toEqual({
+      managed: false,
+    });
   });
 });

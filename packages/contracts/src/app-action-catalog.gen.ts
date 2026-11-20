@@ -1014,6 +1014,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createAgentFromTemplate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
+    "request": [
+      "CreateAgentFromTemplateRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "createApiKey",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/api-keys",
@@ -4689,6 +4701,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSidebarLayout",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [],
+    "response": [
+      "SidebarLayoutResponse"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "getSiteAuthConnection",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
@@ -5497,6 +5519,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListAgentSlackInstallsResponse"
+    ]
+  },
+  {
+    "id": "listAgentTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-templates",
+    "request": [],
+    "response": [
+      "AgentTemplate",
+      "ListAgentTemplatesResponse"
     ]
   },
   {
@@ -11321,6 +11353,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UpdateSessionVisibilityResponse"
     ]
+  },
+  {
+    "id": "updateSidebarLayout",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [
+      "UpdateSidebarLayoutRequest"
+    ],
+    "response": [
+      "SidebarLayoutResponse"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "updateSiteAuthConnection",

@@ -319,7 +319,9 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         location={siteLocation}
         onLocationChange={onSiteLocationChange}
         className={cn(
-          "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
+          // Until the app paints, the frame is Opengeni's own canvas (no white flash in dark).
+          "block h-[clamp(30rem,62vh,48rem)] w-full border-0",
+          props.theme === "dark" ? "bg-canvas" : "bg-white",
           props.fill && "h-0 min-h-0 flex-1",
           focused && "min-h-0 flex-1",
         )}

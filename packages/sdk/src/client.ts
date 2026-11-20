@@ -89,6 +89,7 @@ import type {
   ArtifactLinkResolution,
   ArtifactPinResponse,
 } from "./artifact-catalog";
+import type { SidebarLayoutResponse, UpdateSidebarLayoutRequest } from "./sidebar-layout";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   Agent,
@@ -101,6 +102,9 @@ import type {
   AgentSlackIntroResponse,
   AgentSummary,
   CreateAgentRequest,
+  CreateAgentFromTemplateRequest,
+  AgentTemplate,
+  ListAgentTemplatesResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -8811,6 +8815,29 @@ export class OpenGeniClient {
     return response.agent;
   }
 
+  /** Ready-made agents people can add ("Add an agent"). */
+  async listAgentTemplates(workspaceId: string): Promise<AgentTemplate[]> {
+    const response = await this.requestJson<ListAgentTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-templates`,
+    );
+    return response.templates;
+  }
+
+  /** Add a ready-made agent. Its suggested triggers are not created. */
+  async createAgentFromTemplate(
+    workspaceId: string,
+    templateKey: string,
+    request: CreateAgentFromTemplateRequest = {},
+  ): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/agents`,
+      request,
+    );
+    return response.agent;
+  }
+
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */
   async deleteAgent(workspaceId: string, agentId: string): Promise<DeleteAgentResponse> {
     return await this.requestJson<DeleteAgentResponse>(
@@ -10188,6 +10215,42 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog/${encodeURIComponent(kind)}/${encodeURIComponent(artifactId)}/pin`,
       { pinned },
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * The sidebar as this person sees it: the workspace default with their own
+   * changes on top, limited to apps they can open. Needs `workspace:read`.
+   */
+  async getSidebarLayout(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SidebarLayoutResponse> {
+    return this.requestJson<SidebarLayoutResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Change this person's own sidebar (`scope: "personal"`) or the workspace
+   * default (`scope: "workspace"`, workspace admins). The changes apply
+   * together; answers the updated sidebar.
+   */
+  async updateSidebarLayout(
+    workspaceId: string,
+    request: UpdateSidebarLayoutRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SidebarLayoutResponse> {
+    return this.requestJson<SidebarLayoutResponse>(
+      "PATCH",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout`,
+      request,
       undefined,
       options,
     );
