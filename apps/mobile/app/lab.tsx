@@ -22,6 +22,7 @@ import type {
   ChatClient,
   DraftTimelineAnnotation,
   MachineView,
+  OpenGeniClient,
   SessionEvent,
   SessionHumanInputRequest,
 } from "@opengeni/sdk";
@@ -114,7 +115,7 @@ const labMachine = (overrides: Partial<MachineView>): MachineView =>
  * grant and catalog, and their machines (one the agent asked for, one off),
  * so the lab shows each card as a person would meet it.
  */
-function createLabClient(): ChatClient {
+function createLabClient(): ChatClient<OpenGeniClient> {
   let machines: MachineView[] = [
     labMachine({ sandboxId: "lab-machine-server", name: "Build server" }),
     labMachine({
@@ -160,7 +161,7 @@ function createLabClient(): ChatClient {
     },
     sendMessage: async () => ({ payload: { routing: "started" } }),
   };
-  return client as unknown as ChatClient;
+  return client as unknown as ChatClient<OpenGeniClient>;
 }
 
 export default function ReferenceLab() {
