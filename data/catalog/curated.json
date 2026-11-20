@@ -454,6 +454,45 @@
       ]
     },
     {
+      "mcpUrl": "https://mcp.superoffice.com/mcp",
+      "name": "SuperOffice CRM",
+      "description": "Read and update companies, contacts, sales, projects, appointments and tickets in SuperOffice CRM Online.",
+      "category": "sales",
+      "official": true,
+      "tier": "verified",
+      "provenance": "vendor-hosted:docs.superoffice.com/en/ai/learn/mcp",
+      "requireApproval": [
+        "update_appointment",
+        "update_company",
+        "update_person",
+        "update_project",
+        "update_sale",
+        "update_ticket"
+      ],
+      "presentation": {
+        "providerName": "SuperOffice",
+        "introduction": "Let agents work with the SuperOffice CRM Online tenant you sign in to.",
+        "capabilities": [
+          {
+            "title": "Find customer information",
+            "description": "Search and read companies, contacts, sales, projects, appointments and tickets."
+          },
+          {
+            "title": "Update records",
+            "description": "Update companies, contacts, sales, projects, appointments and tickets. Updates ask for approval by default."
+          }
+        ],
+        "permissionSummary": "Agents act as your SuperOffice user and see only what you can see. Reading needs CRM Suite Plus; updating needs CRM Suite Super."
+      },
+      "documentationUrl": "https://docs.superoffice.com/en/ai/learn/mcp",
+      "logoSourceUrl": "https://integrations.sh/logo/superoffice.com",
+      "notes": [
+        "SuperOffice's own hosted MCP server for CRM Online, documented at docs.superoffice.com/en/ai/learn/mcp. official is checkable: mcp.superoffice.com is under the snapshot domain superoffice.com.",
+        "OAuth discovery, dynamic client registration and PKCE S256 verified 2026-11-20. Registration accepts only redirect URIs SuperOffice has allow-listed, so Connect fails with invalid_redirect_uri until it approves Opengeni's callback; the connect dialog shows that reason.",
+        "tools/list verified 2026-11-20 on a CRM Online test tenant: 44 tools, 6 update_* writes and 38 reads. The writes default to Ask; every read defaults to Allow. No allowedTools, so new SuperOffice reads appear without a catalog change."
+      ]
+    },
+    {
       "mcpUrl": "https://mcp.atlassian.com/v2/mcp?tools=all",
       "name": "Atlassian",
       "description": "Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass through Atlassian's hosted MCP server, scoped to what you can already see.",

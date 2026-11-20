@@ -4823,6 +4823,84 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth start passes on the provider's reason when dynamic registration is refused", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const source = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        const origin = `http://127.0.0.1:${source.port}`;
+        if (url.pathname === "/mcp") {
+          return new Response("", {
+            status: 401,
+            headers: { "www-authenticate": `Bearer resource_metadata="${origin}/prm"` },
+          });
+        }
+        if (url.pathname === "/prm") {
+          return Response.json({
+            resource: `${origin}/mcp`,
+            authorization_servers: [`${origin}/as`],
+          });
+        }
+        if (url.pathname === "/.well-known/oauth-authorization-server/as") {
+          return Response.json({
+            issuer: `${origin}/as`,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            registration_endpoint: `${origin}/register`,
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["none"],
+          });
+        }
+        if (url.pathname === "/register") {
+          return Response.json(
+            {
+              error: "invalid_redirect_uri",
+              error_description: `Redirect URI 'https://api.opengeni.test/v1/integrations/oauth/callback' is not allowed.\n${"x".repeat(400)}`,
+            },
+            { status: 400 },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const response = await app({ environment: "test" }).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "dcr-refused.example.com",
+            mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
+          }),
+        },
+      );
+      const body = (await response.json()) as {
+        error: { code: string; message: string; details?: Record<string, string> };
+      };
+      expect(response.status).toBe(422);
+      expect(body.error.details).toMatchObject({
+        oauthStage: "client_registration",
+        providerRefusal: "app_not_allowed",
+        providerError: "invalid_redirect_uri",
+      });
+      const description = body.error.details?.providerErrorDescription ?? "";
+      expect(description).toStartWith("Redirect URI 'https://api.opengeni.test/");
+      expect(description).not.toContain("\n");
+      expect(description.length).toBeLessThanOrEqual(300);
+      expect(body.error.message).toContain("only accepts sign-ins from apps it has approved");
+      expect(body.error.message).toContain("invalid_redirect_uri");
+    } finally {
+      source.stop(true);
+    }
+  });
+
   test.each(["personal", "workspace"] as const)(
     "Slack MCP uses configured operator credentials with %s ownership",
     async (ownership) => {

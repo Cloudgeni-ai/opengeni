@@ -177,6 +177,7 @@ export const TOOL_FAMILY_INTEGRATION_DOMAINS = [
   "mcp.otter.ai",
   "mcp.notion.com",
   "mcp.hubspot.com",
+  "mcp.superoffice.com",
   "mcp.atlassian.com",
   "mcp.intercom.com",
 ] as const;

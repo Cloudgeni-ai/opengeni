@@ -364,6 +364,52 @@ describe("connector page account management", () => {
     }
   });
 
+  test("a custom server that never connected offers Remove when the server says so", async () => {
+    for (const canRemove of [true, false]) {
+      const custom = item({
+        id: "mcp:superoffice-abc123",
+        source: "manual",
+        name: "SuperOffice",
+        enabled: false,
+        actions: ["connect"],
+        metadata: {},
+        canRemove,
+      } as Partial<CapabilityCatalogItem>);
+      const onAction = mock(() => {});
+      const view = await render(
+        <CatalogItemPage
+          {...common}
+          item={custom}
+          health={{ state: "none" }}
+          onAction={onAction}
+        />,
+      );
+      try {
+        const trigger = view.container.querySelector(
+          'button[aria-label^="More actions"]',
+        ) as HTMLButtonElement | null;
+        if (trigger)
+          await act(async () => {
+            trigger.dispatchEvent(
+              new PointerEvent("pointerdown", { button: 0, ctrlKey: false, bubbles: true }),
+            );
+          });
+        const remove = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+          (node) => node.textContent?.trim() === "Remove from this workspace",
+        );
+        if (!canRemove) {
+          expect(remove).toBeUndefined();
+          continue;
+        }
+        expect(remove).toBeDefined();
+        await act(async () => remove!.click());
+        expect(onAction).toHaveBeenLastCalledWith({ type: "remove_server", item: custom });
+      } finally {
+        await view.unmount();
+      }
+    }
+  });
+
   test("an admin keeps Turn off, not Remove, on a server they may remove", async () => {
     const custom = item({
       id: "mcp:team-tools",

@@ -12727,6 +12727,42 @@ export async function removeCapabilityInstallation(
   );
 }
 
+/**
+ * Deletes a workspace's own catalog entry and its installation here, if any,
+ * in one transaction: for example a custom MCP server whose first Connect
+ * failed. Connections are separate and stay. Returns whether the entry
+ * existed.
+ */
+export async function deleteWorkspaceCatalogItem(
+  db: Database,
+  input: { accountId: string; workspaceId: string; capabilityId: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .delete(schema.capabilityInstallations)
+        .where(
+          and(
+            eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
+            eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
+          ),
+        );
+      const deleted = await scopedDb
+        .delete(schema.capabilityCatalogItems)
+        .where(
+          and(
+            eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+            eq(schema.capabilityCatalogItems.id, input.capabilityId),
+          ),
+        )
+        .returning({ id: schema.capabilityCatalogItems.id });
+      return deleted.length > 0;
+    },
+  );
+}
+
 export async function disableCapabilityInstallation(
   db: Database,
   workspaceId: string,
