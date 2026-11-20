@@ -14,6 +14,7 @@ import {
   ArrowLeftIcon,
   CopyIcon,
   CopyPlusIcon,
+  DownloadIcon,
   InfoIcon,
   LinkIcon,
   Maximize2Icon,
@@ -65,6 +66,7 @@ import {
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
 import { useSiteActions } from "../components/artifacts/site-actions";
+import { useExportApp } from "../components/artifacts/app-package";
 import { useSiteSidebarActions } from "../lib/site-sidebar-bridge";
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
@@ -500,6 +502,7 @@ function SiteActionsMenu({
   const site = useSiteActions(workspaceId, origin, { hasVersion });
   const sidebar = useSiteSidebarActions(workspaceId, origin);
   const resetAllowed = useResetSiteToolAllowances(workspaceId, origin.siteId, versionId);
+  const exportApp = useExportApp(workspaceId);
   return (
     <span data-site-actions-root="" className="contents">
       <DropdownMenu>
@@ -531,6 +534,15 @@ function SiteActionsMenu({
             <DropdownMenuItem disabled={site.duplicate.busy} onSelect={site.duplicate.run}>
               <CopyPlusIcon aria-hidden="true" />
               {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
+            </DropdownMenuItem>
+          ) : null}
+          {site.duplicate && exportApp ? (
+            <DropdownMenuItem
+              disabled={exportApp.busy}
+              onSelect={() => void exportApp.run(origin.siteId)}
+            >
+              <DownloadIcon aria-hidden="true" />
+              Export app
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem asChild>

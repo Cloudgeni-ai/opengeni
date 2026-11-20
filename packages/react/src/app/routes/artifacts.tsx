@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "../lib/toast";
 
 import { ArtifactLibrary } from "../components/artifacts/artifact-library";
+import { InstallAppButton } from "../components/artifacts/app-package";
 import { useCopyArtifactLink } from "../components/artifacts/copy-artifact-link";
 import {
   ARTIFACT_DETAIL_FRAME,
@@ -246,7 +247,16 @@ function ArtifactListRoute({
           icon={<PanelsTopLeftIcon />}
           title="Artifacts"
           description={`Sites, images, documents and files made with ${productName}`}
-          actions={empty && filters.kind === "all" ? null : newArtifact}
+          actions={
+            filters.kind === "site" && canPin ? (
+              <>
+                <InstallAppButton workspaceId={workspaceId} />
+                {newArtifact}
+              </>
+            ) : empty && filters.kind === "all" ? null : (
+              newArtifact
+            )
+          }
           tabs={
             <LineTabsList aria-label="Artifact types">
               {artifactKinds.map(([kind, label]) => (
