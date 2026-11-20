@@ -2279,6 +2279,7 @@ export const FORCE_RLS_TABLES = [
   "organization_invitation_binding_events",
   "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
+  "organization_mcp_connection_settings",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
   "organization_mcp_trusted_issuers",
@@ -2751,6 +2752,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_identity_issuers",
   "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
+  // 1516: a connected agent's default workspace and app data reach.
+  "organization_mcp_connection_settings",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
   "organization_mcp_trusted_issuers",
