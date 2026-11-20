@@ -21,6 +21,7 @@ import {
   CODEX_REFRESH_WINDOW_MS,
   CodexAppsCredentialUnavailable,
   CodexReloginRequired,
+  parseIdToken,
   refreshCodexToken,
 } from "@opengeni/codex";
 import { withCodexTokenDeadline } from "./codex-token-resolver";
@@ -29,7 +30,10 @@ import { setSubscriptionAdministrationSubject } from "./subscription-core/accoun
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
-import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
+import {
+  persistSubscriptionCoreRefreshWithPlan,
+  resolveSubscriptionConnectionId,
+} from "./subscription-core-repository";
 import {
   reserveSubscriptionCoreCodexAppsRequest,
   settleSubscriptionCoreCodexAppsRequest,
@@ -444,18 +448,30 @@ async function refreshAppsCredential(
           refresh_token: next.refreshToken ?? tokens.refreshToken,
           id_token: next.idToken ?? tokens.idToken,
         };
-        // Persist before any other fallible work.
-        const [persisted] = await rawRows<{ persisted: boolean }>(
-          tx,
-          sql`select opengeni_private.persist_subscription_codex_apps_refresh(
-              ${target.accountId}::uuid, ${target.workspaceId}::uuid, ${target.connectionId}::uuid,
-              ${generation}::bigint,
-              ${encryptEnvironmentValue(key, JSON.stringify(rotated))},
-              ${accessTokenExpiry(rotated.access_token)?.toISOString() ?? null}::timestamptz,
-              ${now().toISOString()}::timestamptz
-            ) as persisted`,
-        );
-        if (persisted?.persisted !== true) return { kind: "superseded" };
+        // The plan the new token reports; an unreadable token keeps the
+        // recorded plan.
+        let planType: string | null = null;
+        try {
+          planType = next.idToken ? parseIdToken(next.idToken).planType : null;
+        } catch {
+          planType = null;
+        }
+        // Persist before any other fallible work, through the shared refresh
+        // writer: outside a chat turn, on the authorization begin minted.
+        const persisted = await persistSubscriptionCoreRefreshWithPlan(tx, {
+          provider: "codex",
+          accountId: target.accountId,
+          workspaceId: target.workspaceId,
+          sessionId: null,
+          turnId: null,
+          connectionId: target.connectionId,
+          expectedRefreshGeneration: generation,
+          credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(rotated)),
+          expiresAt: accessTokenExpiry(rotated.access_token),
+          lastRefreshAt: now(),
+          planType,
+        });
+        if (!persisted) return { kind: "superseded" };
         return { kind: "refreshed", accessToken: rotated.access_token };
       } catch (error) {
         if (error instanceof CodexReloginRequired) {
