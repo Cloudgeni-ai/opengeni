@@ -388,19 +388,21 @@ describe("connector page account management", () => {
         const trigger = view.container.querySelector(
           'button[aria-label^="More actions"]',
         ) as HTMLButtonElement | null;
-        if (trigger)
-          await act(async () => {
-            trigger.dispatchEvent(
-              new PointerEvent("pointerdown", { button: 0, ctrlKey: false, bubbles: true }),
-            );
-          });
+        // A server that isn't on has no other menu items, so the menu exists
+        // only when Remove is offered.
+        if (!canRemove) {
+          expect(trigger).toBeNull();
+          continue;
+        }
+        expect(trigger).not.toBeNull();
+        await act(async () => {
+          trigger!.dispatchEvent(
+            new PointerEvent("pointerdown", { button: 0, ctrlKey: false, bubbles: true }),
+          );
+        });
         const remove = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
           (node) => node.textContent?.trim() === "Remove from this workspace",
         );
-        if (!canRemove) {
-          expect(remove).toBeUndefined();
-          continue;
-        }
         expect(remove).toBeDefined();
         await act(async () => remove!.click());
         expect(onAction).toHaveBeenLastCalledWith({ type: "remove_server", item: custom });

@@ -382,8 +382,11 @@ export class OAuthProviderRefusalError extends HTTPException {
     message: string,
     readonly providerError: OAuthProviderError | null,
     readonly refusal: OAuthProviderRefusal | null,
+    // 422 for a refusal; 502 or 429 when the provider failed or is busy, so
+    // the error says a retry may help.
+    status: 422 | 429 | 502 = 422,
   ) {
-    super(422, { message });
+    super(status, { message });
     this.name = "OAuthProviderRefusalError";
   }
 }
@@ -2692,26 +2695,34 @@ async function dynamicClientRegistration(
     );
     const host = new URL(as.issuer).host;
     const said = providerError
-      ? ` ${host} said: ${providerError.error}${providerError.description ? ` (${providerError.description})` : ""}.`
+      ? ` ${host} said: ${providerError.error}${providerError.description ? ` (${providerError.description.replace(/[.!?]$/u, "")})` : ""}.`
       : "";
+    const known = oauthProviderRefusal(providerError?.error);
     if (response.status === 401 || response.status === 403) {
       // The provider admits only clients it has approved (Dropbox, for one).
       // Retrying cannot help; the deployment needs a client registered with it.
       throw new OAuthProviderRefusalError(
         `${host} doesn't let apps register themselves for sign-in. This deployment needs an OAuth client registered with ${host} before you can connect.${said}`,
         providerError,
-        "app_not_allowed",
+        known ?? "app_registration_required",
       );
     }
-    const refusal = oauthProviderRefusal(providerError?.error);
+    if (response.status === 429 || response.status >= 500) {
+      throw new OAuthProviderRefusalError(
+        `${host} could not register this app (HTTP ${response.status}). Try again later.${said}`,
+        providerError,
+        "provider_unavailable",
+        response.status === 429 ? 429 : 502,
+      );
+    }
     throw new OAuthProviderRefusalError(
-      refusal === "app_not_allowed"
+      known === "app_not_allowed"
         ? // An allow-list of redirect URIs (SuperOffice, for one): only the
           // provider can add this deployment's callback.
           `${host} only accepts sign-ins from apps it has approved. Ask ${host} to allow this app's sign-in address.${said}`
         : `dynamic client registration failed with HTTP ${response.status}.${said}`,
       providerError,
-      refusal,
+      known,
     );
   }
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
@@ -3510,7 +3521,8 @@ async function readOAuthProviderError(
   signal?: AbortSignal,
 ): Promise<OAuthProviderError | null> {
   const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().includes("application/json")) {
+  // application/json and +json types such as application/problem+json.
+  if (!/^application\/(?:[\w.-]+\+)?json\b/iu.test(contentType.trim())) {
     await cancelResponseBody(response);
     return null;
   }

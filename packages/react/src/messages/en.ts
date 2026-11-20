@@ -5033,6 +5033,9 @@ export const englishMessages = {
   /** The service refused setup because it accepts sign-ins only from apps it has approved. */
   "sessionMcpCapabilityCard.serviceAllowsApprovedAppsOnly":
     "This service only accepts sign-ins from apps it has approved. Ask the provider to allow {product}.",
+  /** The service doesn't let apps register themselves; this app must be registered with it first. */
+  "sessionMcpCapabilityCard.serviceNeedsAppRegistered":
+    "This service doesn't let apps register themselves. {product} must be registered with it first.",
   /** The service refused the access the sign-in asked for. */
   "sessionMcpCapabilityCard.serviceRefusedTheAccess":
     "This service didn't accept the access {product} asked for.",

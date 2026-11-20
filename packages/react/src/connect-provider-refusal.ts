@@ -16,6 +16,8 @@ function refusalText(t: OpenGeniText, refusal: OAuthProviderRefusal): string {
   switch (refusal) {
     case "app_not_allowed":
       return t("sessionMcpCapabilityCard.serviceAllowsApprovedAppsOnly");
+    case "app_registration_required":
+      return t("sessionMcpCapabilityCard.serviceNeedsAppRegistered");
     case "access_not_accepted":
       return t("sessionMcpCapabilityCard.serviceRefusedTheAccess");
     case "provider_unavailable":

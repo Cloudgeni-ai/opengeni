@@ -35,6 +35,20 @@ describe("a service's refusal in plain words", () => {
     ).toContain("allow Northstar.");
   });
 
+  test("a service that admits only registered apps says so", () => {
+    expect(
+      setupRefusalText(
+        t,
+        setupFailure({
+          providerRefusal: "app_registration_required",
+          providerError: "access_denied",
+        }),
+      ),
+    ).toBe(
+      "This service doesn't let apps register themselves. Opengeni must be registered with it first.",
+    );
+  });
+
   test("an unfamiliar refusal shows the service's own reason", () => {
     expect(
       setupRefusalText(

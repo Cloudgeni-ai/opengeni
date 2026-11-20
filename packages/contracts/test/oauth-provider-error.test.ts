@@ -21,8 +21,22 @@ describe("a provider's OAuth error", () => {
       error: "server_error",
       error_description: "y".repeat(5_000),
     });
-    expect(long?.description?.length).toBe(OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX);
+    expect(Array.from(long?.description ?? "")).toHaveLength(OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX);
     expect(long?.description?.endsWith("…")).toBe(true);
+    // Invisible format characters go; a cut never splits a character.
+    expect(
+      oauthProviderError({
+        error: "invalid_request",
+        error_description: "safe\u202Etxt.exe\u200B\uFEFF done",
+      })?.description,
+    ).toBe("safetxt.exe done");
+    const emoji = oauthProviderError({
+      error: "server_error",
+      error_description: "😀".repeat(400),
+    });
+    expect(Array.from(emoji?.description ?? "")).toHaveLength(OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX);
+    // With the u flag this matches only a lone surrogate.
+    expect(emoji?.description).not.toMatch(/[\uD800-\uDFFF]/u);
     expect(oauthProviderError({ error: "invalid_scope", error_description: 42 })).toEqual({
       error: "invalid_scope",
     });

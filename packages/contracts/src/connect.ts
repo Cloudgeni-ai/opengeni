@@ -438,13 +438,22 @@ export function oauthProviderError(payload: unknown): OAuthProviderError | null 
 /** A provider's free-text error description, cleaned and bounded, or undefined. */
 export function oauthProviderErrorDescription(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
+  // Control characters and line breaks become spaces; invisible format
+  // characters (bidi overrides, zero-width, BOM) go, so the text cannot
+  // reorder or hide what is shown around it.
   const cleaned = value
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[\p{Cc}\u2028\u2029]/gu, " ")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/\s+/gu, " ")
     .trim();
   if (!cleaned) return undefined;
-  return cleaned.length > OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX
-    ? `${cleaned.slice(0, OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX - 1).trimEnd()}…`
+  // Count code points, so a cut never splits a character in two.
+  const characters = Array.from(cleaned);
+  return characters.length > OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX
+    ? `${characters
+        .slice(0, OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX - 1)
+        .join("")
+        .trimEnd()}…`
     : cleaned;
 }
 
@@ -452,16 +461,20 @@ export function oauthProviderErrorDescription(value: unknown): string | undefine
  * What a provider's refusal means for the person connecting:
  * - `app_not_allowed`: the provider accepts sign-ins only from apps it has
  *   approved, so the provider must allow this app first.
+ * - `app_registration_required`: the provider doesn't let apps register
+ *   themselves, so this app must be registered with it first.
  * - `access_not_accepted`: the provider refused the access asked for.
  * - `provider_unavailable`: the provider failed or is temporarily down.
  */
 export type OAuthProviderRefusal =
   | "app_not_allowed"
+  | "app_registration_required"
   | "access_not_accepted"
   | "provider_unavailable";
 
 export const OAUTH_PROVIDER_REFUSALS: readonly OAuthProviderRefusal[] = [
   "app_not_allowed",
+  "app_registration_required",
   "access_not_accepted",
   "provider_unavailable",
 ];
