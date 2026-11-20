@@ -1949,6 +1949,17 @@
       "fetchedAt": "2026-08-17T12:23:32.335Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:superoffice-com-eb567914b177",
+      "domain": "superoffice.com",
+      "mcpUrl": "https://mcp.superoffice.com/mcp",
+      "file": "superoffice-com-eb567914b177.png",
+      "sourceUrl": "https://integrations.sh/logo/superoffice.com",
+      "sha256": "37c4b18b7170aa11b45850cb0599ce4bc0ff4f436117394b07ece20d7b44e897",
+      "contentType": "image/png",
+      "sizeBytes": 1871,
+      "fetchedAt": "2026-11-20T12:12:50.607Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:synapse-org-712097e99aa4",
       "domain": "synapse.org",
       "mcpUrl": "https://mcp.synapse.org/mcp",

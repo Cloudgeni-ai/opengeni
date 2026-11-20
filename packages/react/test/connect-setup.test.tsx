@@ -222,6 +222,29 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
   expect(other).not.toContain("Copy message for IT");
 });
 
+test("a sign-in the service refused says why in plain words", async () => {
+  const refused = await render({ type: "none" }, "failed", {
+    error: {
+      code: "invalid_redirect_uri",
+      message:
+        "The provider refused the sign-in (invalid_redirect_uri). Start a new connection attempt.",
+      retryable: false,
+    },
+  });
+  expect(refused).toContain(
+    "This service only accepts sign-ins from apps it has approved. Ask the provider to allow Opengeni.",
+  );
+  expect(refused).not.toContain("Connection setup could not continue");
+  const generic = await render({ type: "none" }, "failed", {
+    error: {
+      code: "provider_denied",
+      message: "Authorization was not completed.",
+      retryable: false,
+    },
+  });
+  expect(generic).toContain("Connection setup could not continue");
+});
+
 test("GitHub account selection explains how a non-owner requests an organization install", async () => {
   const accounts = [
     {

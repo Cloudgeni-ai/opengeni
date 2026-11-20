@@ -10216,8 +10216,9 @@ export type CapabilityCatalogItem = {
   /**
    * Whether the viewer may remove this custom MCP server from the workspace
    * (`removeCapabilityInstallation` on the client): integration admins
-   * remove any, a member only one they turned on, while it is on. Older
-   * servers omit it.
+   * remove any, a member only one they turned on, while it is on. One that
+   * is not on, such as a server that never connected, is deleted by
+   * integration admins (`deleteCustomMcpServer`). Older servers omit it.
    */
   canRemove?: boolean | undefined;
 };

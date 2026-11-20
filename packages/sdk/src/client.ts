@@ -10090,6 +10090,20 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Delete a custom MCP server added in this workspace: its catalog entry and,
+   * if it was set up here, its installation. This removes a server that never
+   * connected, which `removeCapabilityInstallation` cannot. Connected accounts
+   * are kept. Integration admins only (otherwise 403 `capabilities:manage`);
+   * `canRemove` on a catalog item that is not on says whether the viewer may.
+   */
+  async deleteCustomMcpServer(workspaceId: string, capabilityId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}`,
+    );
+  }
+
   /** Read-only, permission-filtered workspace or session output discovery. */
   async listArtifactCatalog(
     workspaceId: string,
