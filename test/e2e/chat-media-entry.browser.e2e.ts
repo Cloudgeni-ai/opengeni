@@ -177,7 +177,7 @@ describe("rich chat media entry", () => {
       await page.getByRole("button", { name: "Jump to latest" }).click();
       expect(await site.getByRole("button", { name: "State retained" }).count()).toBe(1);
       const beforeFullscreen = await geometry(page);
-      await siteRow.getByRole("button", { name: "Open Site full screen" }).click();
+      await siteRow.getByRole("button", { name: "Open app full screen" }).click();
       expect((await geometry(page)).height).toBe(beforeFullscreen.height);
       expect(await site.getByRole("button", { name: "State retained" }).count()).toBe(1);
       await siteRow.getByRole("button", { name: "Back", exact: true }).click();

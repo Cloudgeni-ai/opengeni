@@ -203,7 +203,7 @@ export function SiteSessionGroupHeading({
         <>
           <div className={RAIL_ROW_QUICK_ACTIONS_CLASS} data-site-quick-actions={origin.siteId}>
             <RailRowQuickAction
-              label={`${pinLabel} Site`}
+              label={`${pinLabel} app`}
               tooltip={pinLabel}
               data-site-actions={origin.siteId}
               data-site-action="pin"
