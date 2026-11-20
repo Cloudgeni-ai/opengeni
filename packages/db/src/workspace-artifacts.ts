@@ -845,20 +845,54 @@ async function assertAttemptAuthority(
   }
 }
 
+type AttemptToolCatalogScope = Pick<
+  PublishMetadata,
+  | "accountId"
+  | "workspaceId"
+  | "sourceSessionId"
+  | "sourceTurnId"
+  | "sourceAttemptId"
+  | "sourceExecutionGeneration"
+>;
+
 async function assertArtifactRequestedToolsInAttemptCatalog(
   scopedDb: any,
-  input: Pick<
-    PublishMetadata,
-    | "accountId"
-    | "workspaceId"
-    | "sourceSessionId"
-    | "sourceTurnId"
-    | "sourceAttemptId"
-    | "sourceExecutionGeneration"
-  >,
+  input: AttemptToolCatalogScope,
   requestedTools: readonly ToolGatewayIdentity[],
 ): Promise<void> {
-  if (input.sourceAttemptId === null || requestedTools.length === 0) return;
+  const missing = await requestedToolsMissingFromAttemptCatalog(scopedDb, input, requestedTools);
+  if (missing.length > 0)
+    throw new WorkspaceArtifactOperationError(
+      "Artifact requested tools must be present in the exact attempt tool catalog",
+    );
+}
+
+/**
+ * The requested tools an agent attempt may not declare: neither in its exact
+ * tool catalog nor a connector identity paired with one of its own account
+ * routes. Empty for a caller that is not an attempt. Throws when the
+ * attempt's catalog can't be read.
+ */
+export async function artifactRequestedToolsMissingFromAttemptCatalog(
+  db: Database,
+  input: AttemptToolCatalogScope,
+  requestedTools: readonly ToolGatewayIdentity[],
+): Promise<ToolGatewayIdentity[]> {
+  if (input.sourceAttemptId === null || requestedTools.length === 0) return [];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await requestedToolsMissingFromAttemptCatalog(scopedDb, input, requestedTools),
+  );
+}
+
+async function requestedToolsMissingFromAttemptCatalog(
+  scopedDb: any,
+  input: AttemptToolCatalogScope,
+  requestedTools: readonly ToolGatewayIdentity[],
+): Promise<ToolGatewayIdentity[]> {
+  if (input.sourceAttemptId === null || requestedTools.length === 0) return [];
   if (
     input.sourceSessionId === null ||
     input.sourceTurnId === null ||
@@ -895,7 +929,7 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     );
   }
   const missing = requestedTools.filter((identity) => !allowed.has(toolIdentityKey(identity)));
-  if (missing.length === 0) return;
+  if (missing.length === 0) return [];
   // A connector identity paired with one of the attempt's own account routes
   // (`account-<hash>`, which is all an agent sees) is the same tool: the
   // turn's frozen account bindings name the connector behind each route.
@@ -922,11 +956,7 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
         binding.canonicalServerId === identity.serverId &&
         allowed.has(toolIdentityKey({ serverId: binding.serverId, toolName: identity.toolName })),
     );
-  if (!missing.every(paired)) {
-    throw new WorkspaceArtifactOperationError(
-      "Artifact requested tools must be present in the exact attempt tool catalog",
-    );
-  }
+  return missing.filter((identity) => !paired(identity));
 }
 
 function toolIdentityKey(identity: ToolGatewayIdentity): string {

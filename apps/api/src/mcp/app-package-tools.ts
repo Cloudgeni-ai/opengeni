@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   APP_PACKAGE_MAX_BYTES,
@@ -11,6 +10,7 @@ import { requireFileForSubject, withSessionRlsActorContext } from "@opengeni/db"
 import * as z4 from "zod/v4";
 import {
   AppPackageError,
+  appInstallOperationKey,
   appPackageHttpError,
   exportAppPackage,
   installAppPackage,
@@ -172,9 +172,12 @@ export function registerAppPackageTools(
           visibility: args.visibility,
           demoData: args.demoData,
           provenance: {
-            operationKey: `attempt:${createHash("sha256")
-              .update(`${claims.sessionId}:${claims.turnId}:app-install:${args.idempotencyKey}`)
-              .digest("hex")}`,
+            operationKey: appInstallOperationKey(
+              "attempt",
+              `${claims.sessionId}:${claims.turnId}`,
+              args.idempotencyKey,
+              pkg,
+            ),
             actorSubjectId: grant.subjectId,
             sourceSessionId: claims.sessionId,
             sourceTurnId: claims.turnId,

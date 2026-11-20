@@ -11,6 +11,7 @@ import {
   isSiteSqlTableName,
   normalizeWorkspaceArtifactSlug,
   parseAppPackage,
+  stableJson,
   type AccessGrant,
   type AppPackage,
   type AppPackageDemoRecord,
@@ -18,12 +19,14 @@ import {
   type AppPackageExportResponse,
   type AppPackageInstallResponse,
   type AppPackageProblem,
+  type SiteDataAccessMode,
   type SiteDataWriteOperation,
   type ToolGatewayIdentity,
   type WorkspaceArtifactVisibility,
 } from "@opengeni/contracts";
 import { resolveNewSiteAudience, siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
+  artifactRequestedToolsMissingFromAttemptCatalog,
   createWorkspaceArtifact,
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
@@ -34,6 +37,7 @@ import {
   WorkspaceArtifactOwnerRequiredError,
 } from "@opengeni/db";
 import { errorMessage } from "@opengeni/contracts/values";
+import { createHash } from "node:crypto";
 import { ApiHttpError } from "../http/api-error";
 import { siteDataHttpError } from "../routes/site-data";
 import { siteSqlHttpError } from "../routes/site-sql";
@@ -54,6 +58,7 @@ import {
   setSiteSqlSettings,
   SiteSqlError,
 } from "../site-sql/service";
+import { connectorToolIdentities, readSiteToolAccountInventory } from "../site-tool-routing";
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
@@ -183,7 +188,7 @@ export async function exportAppPackage(
       // An HTML-only app has no retained source of its own.
       ...(ref.sourceKey ? { source: content.source } : {}),
     },
-    tools: content.requestedTools,
+    tools: await portableTools(deps, grant, content.requestedTools, notExported),
     data: {
       collections: data.collections.map((collection) => ({
         name: collection.name,
@@ -209,7 +214,10 @@ export async function exportAppPackage(
   };
 
   const demo = await exportDemoData(deps, grant, appId, request.demoData, {
-    collections: data.collections.map((collection) => collection.name),
+    collections: data.collections.map((collection) => ({
+      name: collection.name,
+      accessMode: collection.accessMode,
+    })),
     sqlExists: sql.enabled || sql.migrations.length > 0,
     notExported,
     budget: Math.min(APP_PACKAGE_DEMO_MAX_BYTES, APP_PACKAGE_MAX_BYTES - jsonBytes(pkg)),
@@ -230,13 +238,39 @@ export async function exportAppPackage(
   return { package: pkg, filename: appPackageFilename(artifact.title), notExported };
 }
 
+const SHARED_ACCESS_MODES: ReadonlySet<SiteDataAccessMode> = new Set(["shared", "shared_read"]);
+
+/**
+ * The app's tools as another workspace can use them: account routes (the
+ * author's own accounts) become their connector-level entries, so each
+ * installer and viewer uses their own account.
+ */
+async function portableTools(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  declared: readonly ToolGatewayIdentity[],
+  notExported: AppPackageProblem[],
+): Promise<ToolGatewayIdentity[]> {
+  if (declared.length === 0) return [];
+  try {
+    return connectorToolIdentities(await readSiteToolAccountInventory(deps, grant), declared);
+  } catch (error) {
+    // Without the reader's accounts, tools stay as declared and the gap is reported.
+    notExported.push({ part: "tools", reason: reason(error, "reading connected accounts") });
+    return connectorToolIdentities(
+      { canonical: new Map(), plain: new Set(), accounts: [] },
+      declared,
+    );
+  }
+}
+
 async function exportDemoData(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   appId: string,
   demo: AppPackageExportRequest["demoData"],
   context: {
-    collections: readonly string[];
+    collections: ReadonlyArray<{ name: string; accessMode: SiteDataAccessMode }>;
     sqlExists: boolean;
     notExported: AppPackageProblem[];
     budget: number;
@@ -246,9 +280,21 @@ async function exportDemoData(
   const { notExported } = context;
   let budget = Math.max(0, context.budget);
   const records: Record<string, AppPackageDemoRecord[]> = {};
-  for (const name of selected(demo, "collections", context.collections)) {
-    if (!context.collections.includes(name)) {
+  const names = context.collections.map((collection) => collection.name);
+  for (const name of selected(demo, "collections", names)) {
+    const collection = context.collections.find((candidate) => candidate.name === name);
+    if (!collection) {
       notExported.push({ part: "demo_data", name, reason: "No collection with this name" });
+      continue;
+    }
+    // Only shared records are the app's own; per-person and submitted
+    // records belong to the people who wrote them.
+    if (!SHARED_ACCESS_MODES.has(collection.accessMode)) {
+      notExported.push({
+        part: "demo_data",
+        name,
+        reason: "Its records belong to the people who wrote them, so they aren't demo data",
+      });
       continue;
     }
     try {
@@ -353,6 +399,24 @@ async function exportDemoData(
 // Install
 // ---------------------------------------------------------------------------
 
+/**
+ * The operation key of an install: the caller's idempotency key within its
+ * namespace (a person, or an agent's turn) and the package's content, so the
+ * same key with a different package installs a different app instead of
+ * changing the first one.
+ */
+export function appInstallOperationKey(
+  prefix: "subject" | "attempt",
+  namespace: string,
+  idempotencyKey: string,
+  pkg: unknown,
+): string {
+  const digest = createHash("sha256").update(stableJson(pkg)).digest("hex");
+  return `${prefix}:${createHash("sha256")
+    .update(`${namespace}:app-install:${digest}:${idempotencyKey}`)
+    .digest("hex")}`;
+}
+
 /** Who installs, for the new app's history (an HTTP caller or an agent attempt). */
 export type AppInstallProvenance = {
   operationKey: string;
@@ -431,32 +495,45 @@ export async function installAppPackage(
       ...input.provenance,
     });
   let tools = pkg.tools;
+  // An agent may only declare tools its chat has: keep those, report the rest.
+  if (input.provenance.sourceAttemptId !== null && tools.length > 0) {
+    try {
+      const missing = await artifactRequestedToolsMissingFromAttemptCatalog(
+        deps.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sourceSessionId: input.provenance.sourceSessionId,
+          sourceTurnId: input.provenance.sourceTurnId,
+          sourceAttemptId: input.provenance.sourceAttemptId,
+          sourceExecutionGeneration: input.provenance.sourceExecutionGeneration,
+        },
+        tools,
+      );
+      const key = (tool: ToolGatewayIdentity) => `${tool.serverId}\u0000${tool.toolName}`;
+      const left = new Set(missing.map(key));
+      tools = tools.filter((tool) => !left.has(key(tool)));
+      for (const tool of missing)
+        notInstalled.push({
+          part: "tools",
+          name: tool.toolName,
+          reason:
+            "This chat doesn't have this tool, so the app doesn't use it. Connect it and install again, or install from the Apps page to keep it.",
+        });
+    } catch (error) {
+      notInstalled.push({ part: "tools", reason: reason(error, "reading this chat's tools") });
+      tools = [];
+    }
+  }
   let created: Awaited<ReturnType<typeof create>>;
   try {
     created = await create(tools);
   } catch (error) {
-    // The app's tools can't be declared here: too many to pair with the
-    // installer's accounts, or an agent whose turn doesn't have them (an
-    // agent may only declare tools it has). A replay of an install that
-    // already left them out lands here too. Install without them.
-    if (
-      tools.length === 0 ||
-      !(
-        error instanceof WorkspaceArtifactOperationError ||
-        error instanceof WorkspaceArtifactConflictError
-      )
-    )
-      throw error;
+    // Too many tools to pair with the installer's accounts: install without them.
+    if (tools.length === 0 || !(error instanceof WorkspaceArtifactOperationError)) throw error;
     tools = [];
     created = await create(tools);
-    notInstalled.push({
-      part: "tools",
-      reason:
-        input.provenance.sourceAttemptId !== null &&
-        error instanceof WorkspaceArtifactOperationError
-          ? "This chat doesn't have the app's tools, so the app doesn't declare them. Install the package from the Apps page to keep them."
-          : error.message,
-    });
+    notInstalled.push({ part: "tools", reason: error.message });
   }
   const app = created.artifact;
   installed.tools = tools.length;

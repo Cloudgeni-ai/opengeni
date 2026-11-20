@@ -1,4 +1,5 @@
 import { AppSyncDefinition, type AppPackageSync } from "@opengeni/contracts";
+import { hasPermission } from "@opengeni/core";
 import { syncName, type AppSyncHooks } from "../app-packages/syncs";
 import { createAppSyncFromDefinition, listAppSyncDefinitions } from "./service";
 
@@ -20,6 +21,15 @@ export const APP_PACKAGE_SYNC_HOOKS: AppSyncHooks = {
   createPaused: async ({ deps, grant, appId, syncs }) => {
     const created: string[] = [];
     const notCreated: Array<{ name: string; reason: string }> = [];
+    // Syncs are automations: adding them needs what managing syncs needs.
+    if (!hasPermission(grant.permissions, "scheduled_tasks:manage", grant.permissionMode)) {
+      for (const [index, raw] of syncs.entries())
+        notCreated.push({
+          name: syncName(raw, index),
+          reason: "Adding syncs needs permission to manage automations in this workspace",
+        });
+      return { created, notCreated };
+    }
     const existing = new Set(
       (await listAppSyncDefinitions(deps, grant, appId).catch(() => [])).map((sync) => sync.name),
     );

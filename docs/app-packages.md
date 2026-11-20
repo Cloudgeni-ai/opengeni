@@ -19,12 +19,12 @@ One JSON file, named `<title>.opengeni-app.json`:
 | `format`, `version` | `"opengeni.app-package"`, `1` |
 | `exportedAt` | ISO time of the export |
 | `app` | `title`, `description`, `html` of the current version, and its retained editable `source` when it has one |
-| `tools` | The tool identities the version requests ([requested tools](published-sites.md)) |
+| `tools` | The tools the version requests ([requested tools](published-sites.md)), as connector-level entries: the author's account routes become their connector (`connectorToolIdentities` in `apps/api/src/site-tool-routing.ts`) |
 | `data.collections` | Site Data collection definitions (name, access mode, schema), no records |
 | `sql.migrations` | Site SQL migrations in applied order (`name`, `sql`) |
 | `sql.queries` | Site SQL named queries (`name`, `sql`, access, parameters) |
 | `syncs` | Data sync definitions, as plain objects (see [Syncs](#syncs)) |
-| `demoData` | Only when the author asked: `records` per collection and `sqlRows` per table |
+| `demoData` | Only when the author asked: `records` of shared collections (`shared`, `shared_read`) and `sqlRows` per table. Per-person (`per_viewer`) and submission (`append_only`) collections belong to the people who wrote them and are listed in `notExported` |
 
 Limits: 24 MiB per package; demo data at most 1,000 records per collection,
 5,000 rows per table and 8 MiB in total; 50 syncs. Parts over a limit are left
@@ -61,7 +61,9 @@ Steps, each reported rather than failing the install:
 5. Load demo data (default on when the package has some; `demoData: false`
    declines), only into empty collections and tables.
 
-The idempotency key makes the app creation replay; the later steps are
+The idempotency key, together with the package's content, makes the app
+creation replay: the same key with a different package installs a different
+app and never changes the first. The later steps are
 idempotent themselves (upserts, skipped existing migrations, demo data only
 into empty targets), so a retried install completes a partial one.
 
@@ -77,6 +79,8 @@ startup:
 
 - Export lists the app's syncs: name, collection, shared or personal, tool,
   fixed arguments, key, kept fields, schedule and event triggers.
+- Install needs `scheduled_tasks:manage` (like managing syncs); without it
+  each sync is listed in `notInstalled`.
 - Install creates each one on the new app **paused**, owned by the installer,
   who confirms the account it runs on by turning it on. Event triggers name
   sources in the exporting workspace, so an installed sync keeps only its
@@ -92,8 +96,9 @@ startup:
 - `app_install { fileId | package, title?, visibility?, demoData?, idempotencyKey }`
   (`artifacts:publish`; `files:read` to read `fileId`): installs and returns
   the app with an `[Open app](artifact:…)` reference and `notInstalled`.
-  An agent can only declare tools its chat has; other packaged tools are left
-  out and reported. Installing from the Apps page keeps them all.
+  An agent can only declare tools its chat has (directly, or through its own
+  account for the tool's connector); each other packaged tool is left out and
+  reported by name. Installing from the Apps page keeps them all.
 
 ## Console
 
