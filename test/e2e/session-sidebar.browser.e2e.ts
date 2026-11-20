@@ -925,7 +925,7 @@ test("the row hover explains status, model and activity from the compact list ro
   await card.waitFor();
   const working = await card.innerText();
   expect(working).toContain("Astra strategy takeover - preserve and improve Grocery Bot");
-  expect(working).toContain("Running");
+  expect(working).toContain("Working");
   expect(working).toContain("GPT-6 Astra · Max reasoning");
   expect(working).toContain("5 sub-agents · 1 needs you · 1 unread failure · 2 running · 1 paused");
   expect(working).toContain("2 background commands running");
