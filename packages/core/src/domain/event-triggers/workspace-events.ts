@@ -179,7 +179,7 @@ const ACTIVITY_TYPES: Record<ActivityEventType, CatalogEntry & { fields: Field[]
     fields: APP_RECORD_FIELDS,
   },
   "app.sql.changed": {
-    description: "An App's SQL database was written to",
+    description: "Rows were written to an App's SQL database",
     summary: "App database changed",
     fields: [
       ...APP_FIELDS,

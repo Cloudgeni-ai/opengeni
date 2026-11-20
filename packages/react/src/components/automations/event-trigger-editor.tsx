@@ -494,7 +494,7 @@ export function EventTypePicker({
   sourceName?: string | undefined;
   /** Only one type (MCP triggers); picking replaces it. */
   single?: boolean | undefined;
-  /** Headings for "This workspace" types: Chats, Usage and Meetings. */
+  /** Headings for "This workspace" types: Chats, Usage, Meetings and Apps. */
   grouped?: boolean | undefined;
   invalid?: boolean | undefined;
   disabled?: boolean | undefined;
