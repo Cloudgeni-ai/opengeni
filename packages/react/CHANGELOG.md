@@ -1,5 +1,20 @@
 # @opengeni/react
 
+## 6.34.0
+
+### Minor Changes
+
+- e292b4a: Add SuperOffice CRM to the catalog: SuperOffice's hosted MCP server, with its six update tools asking for approval by default. When a service refuses a connection's sign-in setup, the connect dialog now says why, for example that the service only accepts apps it has approved, instead of a generic failure; the API passes the provider's OAuth error in the error details, and a provider outage during registration is now a retryable `upstream_unavailable` error. A refused sign-in that returns a standard OAuth code with a plain meaning (`invalid_redirect_uri`, `unauthorized_client`, `unapproved_software_statement`, `invalid_scope`, `server_error`, `temporarily_unavailable`) now keeps that code as the attempt's `error.code` instead of `provider_denied`. Admins can remove a custom MCP server that never connected, through the new `DELETE /v1/workspaces/:workspaceId/capabilities/:capabilityId` route and `deleteCustomMcpServer` on the SDK.
+
+### Patch Changes
+
+- 9a84b63: Assistant links in web and native chat no longer show or open with UTM tracking parameters. Other URL parameters, fragments, stored messages, and model inputs are unchanged.
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/contracts@6.34.0
+  - @opengeni/sdk@6.34.0
+  - @opengeni/connect@6.34.0
+
 ## 6.33.0
 
 ### Patch Changes

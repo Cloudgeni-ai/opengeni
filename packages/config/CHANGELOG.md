@@ -1,5 +1,16 @@
 # @opengeni/config
 
+## 6.34.0
+
+### Patch Changes
+
+- 71c05a3: While the card verification gate is on, a new Free or plan-less organization's agent can use a sandbox for 10 minutes (`cardTrialBoxSeconds`, one box at a time) before an owner must add a card. Terminals, desktops, viewers and background processes still need the card, and the reaper drains leftover boxes once the trial is used.
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/contracts@6.34.0
+  - @opengeni/codex@6.34.0
+  - @opengeni/xai-subscription@6.34.0
+
 ## 6.33.0
 
 ### Minor Changes
