@@ -2877,6 +2877,13 @@ access modes are enforced only in the API, Site frames reach it through the
 existing Site HTTP channel with host-pinned `current` routes only and always
 with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
 
+App data syncs fill Site Data from a connected tool without a model run. A
+sync is a scheduled task with action `app_sync`: the worker's dispatch records
+the run and queues it (`app_sync_queue`), and an executor loop in every API
+replica calls the tool through the workspace tool gateway as the owner or each
+opted-in person and writes through the Site Data write path. See
+[`app-sync.md`](app-sync.md).
+
 Site SQL is the optional per-Site database next to it: one SQLite-backed
 Durable Object per Site in the Sites gateway Worker, stored in Cloudflare's EU
 jurisdiction (older databases move there on first use), reached only by the API
@@ -3455,6 +3462,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Knowledge retrieval, source preparation, or review | `packages/db/src/knowledge-entries.ts`, `packages/core/src/domain/knowledge*.ts`, `apps/api/src/routes/knowledge.ts` | [`knowledge.md`](knowledge.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
 | Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
+| App data sync (no-model refresh of Site Data from a connected tool) | `packages/contracts/src/app-sync.ts`, `packages/db/src/app-sync.ts`, `apps/api/src/app-sync/service.ts`, `apps/api/src/routes/app-sync.ts`, `apps/api/src/mcp/app-sync-tools.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`app-sync.md`](app-sync.md) |
 | Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input and dictation | `packages/contracts/src/recordings.ts`, `apps/api/src/routes/recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |

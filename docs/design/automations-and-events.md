@@ -476,7 +476,10 @@ and the person's sources page shows only what they use.
 An event run is a scheduled-task run with `triggerType: "event"` and producer
 key `scheduled-task-event:<occurrenceId>`, started as the same Temporal fire
 workflow with that key as its workflow id, so a retried start is one run. It
-acts with the automation's own authority, like a scheduled fire.
+acts with the automation's own authority, like a scheduled fire. An App data
+sync (action `app_sync`, [app-sync.md](../app-sync.md)) takes event triggers
+from workspace sources the same way: the fire queues the run for the sync
+executor, no chat is created and the events are not passed to the tool.
 
 Its `scheduled_occurrence` chat update carries an `events` field: the
 occurrence id, how many events the batch accounts for, whether events may have
