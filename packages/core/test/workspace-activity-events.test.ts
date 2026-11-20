@@ -14,9 +14,7 @@ import {
 const ada = "subject-ada";
 const bob = "subject-bob";
 
-function fact(
-  overrides: Partial<WorkspaceActivityFact> = {},
-): WorkspaceActivityFact {
+function fact(overrides: Partial<WorkspaceActivityFact> = {}): WorkspaceActivityFact {
   return {
     id: "8b0c7f0e-1111-4c2b-9a51-000000000001",
     type: "turn.completed",
@@ -59,11 +57,7 @@ describe("This workspace event types", () => {
         .find((entry) => entry.type === "turn.completed")
         ?.fields.map((field) => field.field),
     ).toEqual(
-      expect.arrayContaining([
-        "data.sessionId",
-        "data.startedByYou",
-        "data.answerExcerpt",
-      ]),
+      expect.arrayContaining(["data.sessionId", "data.startedByYou", "data.answerExcerpt"]),
     );
   });
 });
@@ -88,9 +82,7 @@ describe("activity facts as events", () => {
       },
     });
     expect(workspaceActivityEvent(fact(), bob).data.startedByYou).toBe(false);
-    expect(workspaceActivityEvent(fact({ chatTitle: null }), ada).summary).toBe(
-      "Chat finished",
-    );
+    expect(workspaceActivityEvent(fact({ chatTitle: null }), ada).summary).toBe("Chat finished");
   });
 
   test("a chat an automation run caused is Opengeni's own and keeps its depth", () => {
@@ -116,9 +108,7 @@ describe("activity facts as events", () => {
       },
     });
     // Opengeni's own notices carry no turn.
-    expect(workspaceActivityEvent(fact({ turnId: null }), ada).actor.kind).toBe(
-      "opengeni",
-    );
+    expect(workspaceActivityEvent(fact({ turnId: null }), ada).actor.kind).toBe("opengeni");
     expect(boundEvent(event, new Date()).chainDepth).toBe(2);
   });
 
@@ -164,9 +154,7 @@ describe("activity facts as events", () => {
       summary: "Usage used up your limit",
       data: { forYou: true },
     });
-    expect(workspaceActivityEvent(own, ada).summary).toBe(
-      "Usage used up a member's limit",
-    );
+    expect(workspaceActivityEvent(own, ada).summary).toBe("Usage used up a member's limit");
   });
 
   test("replaying a delivery produces the same events, depth included", () => {
@@ -179,10 +167,7 @@ describe("activity facts as events", () => {
       title: "Weekly sync",
       purpose: "meeting",
     };
-    const activity = [
-      fact(),
-      fact({ id: "other", automationRunId: "run-1", chainDepth: 3 }),
-    ];
+    const activity = [fact(), fact({ id: "other", automationRunId: "run-1", chainDepth: 3 })];
     const body = workspaceDeliveryBody([recording], activity);
     expect(workspaceDeliveryEvents(body, ada)).toEqual([
       expect.objectContaining({ type: "recording.transcript.ready" }),
@@ -190,9 +175,7 @@ describe("activity facts as events", () => {
       workspaceActivityEvent(activity[1]!, ada),
     ]);
     // A recordings-only body keeps its earlier shape.
-    expect(
-      JSON.parse(new TextDecoder().decode(workspaceDeliveryBody([recording]))),
-    ).toEqual({
+    expect(JSON.parse(new TextDecoder().decode(workspaceDeliveryBody([recording])))).toEqual({
       recordingEvents: [recording],
     });
   });
@@ -254,9 +237,7 @@ describe("App data change facts as events", () => {
   });
 
   test("a write without a person, such as a guest or key, has an unknown actor", () => {
-    expect(
-      workspaceActivityEvent(appFact({ subjectId: null }), ada).actor,
-    ).toEqual({
+    expect(workspaceActivityEvent(appFact({ subjectId: null }), ada).actor).toEqual({
       kind: "unknown",
       name: null,
     });

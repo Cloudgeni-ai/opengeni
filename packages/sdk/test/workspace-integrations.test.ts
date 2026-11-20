@@ -73,9 +73,7 @@ test("organization helpers preserve method, organization, filter and one-time re
     workspaceFilter: { externalSource: "product:production" },
     eventTypes: ["turn.completed"] as const,
   };
-  expect(
-    await putOrganizationCredentialProvider(client, "org/one", provider),
-  ).toEqual(receipt);
+  expect(await putOrganizationCredentialProvider(client, "org/one", provider)).toEqual(receipt);
   await getOrganizationCredentialProvider(client, "org/one");
   await deleteOrganizationCredentialProvider(client, "org/one");
   await createOrganizationWebhook(client, "org/one", {
@@ -90,12 +88,7 @@ test("organization helpers preserve method, organization, filter and one-time re
   await listOrganizationWebhookDeliveries(client, "org/one", "hook/one", {
     limit: 25,
   });
-  await redeliverOrganizationWebhookDelivery(
-    client,
-    "org/one",
-    "hook/one",
-    "delivery/one",
-  );
+  await redeliverOrganizationWebhookDelivery(client, "org/one", "hook/one", "delivery/one");
   await deleteOrganizationWebhook(client, "org/one", "hook/one");
   const root = "/v1/organizations/org%2Fone";
   expect(calls.map((call) => [call.method, call.url.pathname])).toEqual([
@@ -136,9 +129,7 @@ test("workspace webhook get remains workspace-scoped", async () => {
       return Response.json(webhook);
     },
   });
-  expect(await getWorkspaceWebhook(client, "workspace", "hook")).toEqual(
-    webhook,
-  );
+  expect(await getWorkspaceWebhook(client, "workspace", "hook")).toEqual(webhook);
   expect(path).toBe("/v1/workspaces/workspace/webhooks/hook");
 });
 
@@ -180,9 +171,7 @@ test("signature helpers retain routing and embedder identity additions", async (
   const request = {
     type: "credentials.request" as const,
     lane: "organization" as const,
-    mcpServers: [
-      { id: "product-capabilities", url: "https://product.example/mcp" },
-    ],
+    mcpServers: [{ id: "product-capabilities", url: "https://product.example/mcp" }],
     purpose: "provision" as const,
     forceRefresh: false,
     accountId: "organization",
@@ -242,11 +231,7 @@ test("signature helpers retain routing and embedder identity additions", async (
 
 test("verified pre-upgrade session and usage deliveries default their missing lane", async () => {
   const secret = "legacy-lane-secret";
-  for (const type of [
-    "turn.completed",
-    "usage.exhausted",
-    "usage.period_reset",
-  ]) {
+  for (const type of ["turn.completed", "usage.exhausted", "usage.period_reset"]) {
     const event = {
       id: "event",
       type,
@@ -262,24 +247,15 @@ test("verified pre-upgrade session and usage deliveries default their missing la
         "OpenGeni-Signature": await signOpenGeniPayload(secret, body),
       },
     });
-    expect(JSON.stringify(verified.event)).toBe(
-      JSON.stringify({ ...event, lane: "workspace" }),
-    );
-    for (const lane of [
-      null,
-      "invalid",
-      ...(type.startsWith("usage.") ? ["organization"] : []),
-    ]) {
+    expect(JSON.stringify(verified.event)).toBe(JSON.stringify({ ...event, lane: "workspace" }));
+    for (const lane of [null, "invalid", ...(type.startsWith("usage.") ? ["organization"] : [])]) {
       const invalidBody = JSON.stringify({ ...event, lane });
       await expect(
         verifyWebhookEvent({
           body: invalidBody,
           secret,
           headers: {
-            "OpenGeni-Signature": await signOpenGeniPayload(
-              secret,
-              invalidBody,
-            ),
+            "OpenGeni-Signature": await signOpenGeniPayload(secret, invalidBody),
           },
         }),
       ).rejects.toThrow();
@@ -296,20 +272,16 @@ test("secret rotation helpers use exact scoped POSTs and return the new secret o
       return Response.json({ secret: "new-once", provider: {}, webhook: {} });
     },
   });
-  expect(
-    (await rotateOrganizationCredentialProviderSecret(client, "org/one"))
-      .secret,
-  ).toBe("new-once");
-  expect(
-    (await rotateOrganizationWebhookSecret(client, "org/one", "hook/one"))
-      .secret,
-  ).toBe("new-once");
-  expect(
-    (await rotateWorkspaceCredentialProviderSecret(client, "ws/one")).secret,
-  ).toBe("new-once");
-  expect(
-    (await rotateWorkspaceWebhookSecret(client, "ws/one", "hook/one")).secret,
-  ).toBe("new-once");
+  expect((await rotateOrganizationCredentialProviderSecret(client, "org/one")).secret).toBe(
+    "new-once",
+  );
+  expect((await rotateOrganizationWebhookSecret(client, "org/one", "hook/one")).secret).toBe(
+    "new-once",
+  );
+  expect((await rotateWorkspaceCredentialProviderSecret(client, "ws/one")).secret).toBe("new-once");
+  expect((await rotateWorkspaceWebhookSecret(client, "ws/one", "hook/one")).secret).toBe(
+    "new-once",
+  );
   expect(calls).toEqual([
     {
       method: "POST",
@@ -338,12 +310,8 @@ test("focused helpers require only requestJson and deletes opt in to void respon
       return undefined as T;
     },
   };
-  expect(
-    await deleteOrganizationCredentialProvider(client, "org"),
-  ).toBeUndefined();
-  expect(
-    await deleteOrganizationWebhook(client, "org", "hook"),
-  ).toBeUndefined();
+  expect(await deleteOrganizationCredentialProvider(client, "org")).toBeUndefined();
+  expect(await deleteOrganizationWebhook(client, "org", "hook")).toBeUndefined();
   expect(calls).toEqual([
     [
       "DELETE",
@@ -352,13 +320,7 @@ test("focused helpers require only requestJson and deletes opt in to void respon
       {},
       { responseType: "void" },
     ],
-    [
-      "DELETE",
-      "/v1/organizations/org/webhooks/hook",
-      undefined,
-      {},
-      { responseType: "void" },
-    ],
+    ["DELETE", "/v1/organizations/org/webhooks/hook", undefined, {}, { responseType: "void" }],
   ]);
 });
 
@@ -369,9 +331,7 @@ test("void helpers retain authentication and contract checks without relaxing or
     fetch: async () => new Response(null, { status: 204 }),
   });
   await deleteOrganizationCredentialProvider(client, "org");
-  await expect(
-    getOrganizationCredentialProvider(client, "org"),
-  ).rejects.toThrow();
+  await expect(getOrganizationCredentialProvider(client, "org")).rejects.toThrow();
 
   const strict = new OpenGeniClient({
     baseUrl: "https://fixture.invalid",
@@ -382,9 +342,7 @@ test("void helpers retain authentication and contract checks without relaxing or
         headers: { "x-opengeni-api-contract": "future-contract" },
       }),
   });
-  await expect(
-    deleteOrganizationCredentialProvider(strict, "org"),
-  ).rejects.toThrow("contract");
+  await expect(deleteOrganizationCredentialProvider(strict, "org")).rejects.toThrow("contract");
 });
 
 test("integration administration helpers are absent from the eager client", () => {
@@ -408,9 +366,7 @@ test("integration administration helpers are absent from the eager client", () =
     "getWorkspaceInheritedIntegrations",
     "updateOrganizationWebhook",
   ]) {
-    expect(
-      name in new OpenGeniClient({ baseUrl: "https://fixture.invalid" }),
-    ).toBe(false);
+    expect(name in new OpenGeniClient({ baseUrl: "https://fixture.invalid" })).toBe(false);
   }
 });
 

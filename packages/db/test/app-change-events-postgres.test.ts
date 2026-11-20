@@ -3,10 +3,7 @@
 // record nothing, row security narrows per-person records to who may read
 // them, and webhook payloads leave out record contents they may not see.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createDb,
@@ -40,9 +37,7 @@ let client: DbClient;
 let appSql: postgres.Sql;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase(
-    "migration-1515-app-change-events",
-  );
+  const acquired = await acquireSharedTestDatabase("migration-1515-app-change-events");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });
@@ -61,9 +56,7 @@ async function app() {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('App change events') returning id`;
   const accountId = String(account!.id);
-  const workspaceId = (
-    await createWorkspace(client.db, { accountId, name: "App events" })
-  ).id;
+  const workspaceId = (await createWorkspace(client.db, { accountId, name: "App events" })).id;
   const created = await createWorkspaceArtifact(client.db, {
     accountId,
     workspaceId,
@@ -89,10 +82,7 @@ async function app() {
     persistContent: async () => undefined,
     discardContent: async () => undefined,
   });
-  const caller = (
-    subject: string,
-    role: "manager" | "viewer",
-  ): SiteDataCaller => ({
+  const caller = (subject: string, role: "manager" | "viewer"): SiteDataCaller => ({
     accountId,
     workspaceId,
     siteId: created.artifact.id,
@@ -118,10 +108,7 @@ async function facts(workspaceId: string) {
 }
 
 /** App facts the application role shows `subject` in this workspace. */
-async function visibleTo(
-  scope: { accountId: string; workspaceId: string },
-  subject: string,
-) {
+async function visibleTo(scope: { accountId: string; workspaceId: string }, subject: string) {
   return (await appSql.begin(async (sql) => {
     await sql`select set_config('opengeni.account_id', ${scope.accountId}, true),
       set_config('opengeni.workspace_id', ${scope.workspaceId}, true),
@@ -136,11 +123,7 @@ test("App writes record facts only while someone listens, and unchanged writes n
   const store = createPostgresSiteDataStore(client.db);
   const a = await app();
   const manager = a.caller(OWNER, "manager");
-  await store.defineCollection(
-    manager,
-    { name: "contacts", accessMode: "shared" },
-    limits,
-  );
+  await store.defineCollection(manager, { name: "contacts", accessMode: "shared" }, limits);
   await store.write(
     manager,
     [{ op: "put", collection: "contacts", key: "ada", data: { name: "Ada" } }],
@@ -242,32 +225,18 @@ test("per-person records are visible to their owner and, unless private, the App
   await shared.admin`insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types)
     values (${a.accountId}, ${a.workspaceId}, 'https://example.test', 'sealed', array['app.record.added'])`;
   const manager = a.caller(OWNER, "manager");
-  await store.defineCollection(
-    manager,
-    { name: "notes", accessMode: "per_viewer" },
-    limits,
-  );
+  await store.defineCollection(manager, { name: "notes", accessMode: "per_viewer" }, limits);
   await store.defineCollection(
     manager,
     { name: "diary", accessMode: "per_viewer", privateRecords: true },
     limits,
   );
   const ada = a.caller("ada", "viewer");
-  await store.write(
-    ada,
-    [{ op: "insert", collection: "notes", data: { text: "n" } }],
-    { limits },
-  );
-  await store.write(
-    ada,
-    [{ op: "insert", collection: "diary", data: { text: "d" } }],
-    { limits },
-  );
+  await store.write(ada, [{ op: "insert", collection: "notes", data: { text: "n" } }], { limits });
+  await store.write(ada, [{ op: "insert", collection: "diary", data: { text: "d" } }], { limits });
 
   const written = await facts(a.workspaceId);
-  expect(
-    written.map((row) => [row.reader_subject_id, row.reader_owner_only]),
-  ).toEqual([
+  expect(written.map((row) => [row.reader_subject_id, row.reader_owner_only])).toEqual([
     ["ada", false],
     ["ada", true],
   ]);
@@ -277,9 +246,7 @@ test("per-person records are visible to their owner and, unless private, the App
   expect((await visibleTo(a, "bob")).length).toBe(0);
 
   // Webhooks never carry contents of records only some people may read.
-  const deliveries = await shared.admin<
-    Array<{ payload: { data: Record<string, unknown> } }>
-  >`
+  const deliveries = await shared.admin<Array<{ payload: { data: Record<string, unknown> } }>>`
     select payload from workspace_webhook_deliveries where workspace_id = ${a.workspaceId}`;
   expect(deliveries).toHaveLength(2);
   for (const delivery of deliveries) {

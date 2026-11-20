@@ -361,7 +361,12 @@ export const WorkspaceAppWebhookEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     lane: z.literal("workspace").default("workspace"),
     id: primitives.uuid,
-    type: z.enum(["app.record.added", "app.record.changed", "app.record.removed", "app.sql.changed"]),
+    type: z.enum([
+      "app.record.added",
+      "app.record.changed",
+      "app.record.removed",
+      "app.sql.changed",
+    ]),
     workspaceId: primitives.uuid,
     workspace: z
       .object({
