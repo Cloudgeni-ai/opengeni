@@ -121,10 +121,13 @@ function InstallRow({
       description={
         availability ? (
           <>
-            People ask it with{" "}
-            <span className="font-medium text-fg" data-agent-slack-handle="">
+            Ask in Slack:{" "}
+            <code
+              className="rounded-[4px] bg-muted px-1 py-0.5 text-xs font-medium text-fg"
+              data-agent-slack-handle=""
+            >
               {agentSlackCall(agent.name, install.botDisplayName)}
-            </span>
+            </code>
           </>
         ) : (
           agentSlackUnavailableText(agent, install, workspaceName)

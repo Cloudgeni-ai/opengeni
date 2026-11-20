@@ -1,4 +1,6 @@
 import {
+  AgentSkillRef,
+  AgentToolPermissionRule,
   SessionAvatar,
   slackAgentHandle,
   slackAgentNameKey,
@@ -157,6 +159,24 @@ export function agentSlackAvailabilityView(
   return slackAvailability(agent, install, teamNames);
 }
 
+/**
+ * An agent's stored Can use rules, each read through the contract. A rule a
+ * later release wrote in a shape this one cannot read is skipped.
+ */
+export function agentToolPermissionsOf(agent: Pick<AgentRecord, "toolPermissions">) {
+  return agent.toolPermissions.flatMap((rule) => {
+    const parsed = AgentToolPermissionRule.safeParse(rule);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function agentSkillsOf(agent: Pick<AgentRecord, "skills">) {
+  return agent.skills.flatMap((skill) => {
+    const parsed = AgentSkillRef.safeParse(skill);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
 /** An agent as lists show it. */
 export function agentSummaryView(agent: AgentRecord, context: AgentViewContext): AgentSummary {
   const avatar = SessionAvatar.safeParse(agent.avatar);
@@ -180,6 +200,9 @@ export function agentSummaryView(agent: AgentRecord, context: AgentViewContext):
       scope: agent.visibility === "private" ? "personal" : "workspace",
       reviewFirst: context.memoryReviewFirst,
     },
+    toolPermissions: agentToolPermissionsOf(agent),
+    skills: agentSkillsOf(agent),
+    templateKey: agent.templateKey,
     slack: context.installs
       .filter((install) => install.agentId === agent.id)
       .map((install) => slackAvailability(agent, install, context.slackTeamNames)),

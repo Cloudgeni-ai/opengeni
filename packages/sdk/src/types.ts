@@ -3999,6 +3999,12 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  /**
+   * The workspace agent each run's chat is with (an agent's "Starts when"):
+   * its Instructions, Memory and Can use apply. Only for a task that starts
+   * its own chats.
+   */
+  agentId?: string | undefined;
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
   /**

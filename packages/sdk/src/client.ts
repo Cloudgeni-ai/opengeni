@@ -101,6 +101,9 @@ import type {
   AgentSlackIntroResponse,
   AgentSummary,
   CreateAgentRequest,
+  CreateAgentFromTemplateRequest,
+  AgentTemplate,
+  ListAgentTemplatesResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -8768,6 +8771,29 @@ export class OpenGeniClient {
   }
 
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */
+  /** Ready-made agents people can add ("Add an agent"). */
+  async listAgentTemplates(workspaceId: string): Promise<AgentTemplate[]> {
+    const response = await this.requestJson<ListAgentTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-templates`,
+    );
+    return response.templates;
+  }
+
+  /** Add a ready-made agent. Its suggested triggers are not created. */
+  async createAgentFromTemplate(
+    workspaceId: string,
+    templateKey: string,
+    request: CreateAgentFromTemplateRequest = {},
+  ): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/agents`,
+      request,
+    );
+    return response.agent;
+  }
+
   async deleteAgent(workspaceId: string, agentId: string): Promise<DeleteAgentResponse> {
     return await this.requestJson<DeleteAgentResponse>(
       "DELETE",

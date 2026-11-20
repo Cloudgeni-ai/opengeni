@@ -167,6 +167,7 @@ export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
 export * from "./domain/agents";
+export * from "./agent-templates";
 export * from "./domain/org-agent-config";
 export * from "./domain/org-agents";
 export * from "./domain/org-agent-runs-on";

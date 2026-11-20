@@ -60,6 +60,8 @@ export function normalizeCalendarDays(
 }
 
 export type ScheduledTaskFormState = {
+  /** Each run is a chat with this agent (an agent's "Starts when"). */
+  agentId?: string;
   agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
   agentLearningVersion?: number;
   agentLearningBaselineScope?: "workspace" | "personal";
@@ -500,6 +502,7 @@ export function agentConfigFromFormState(
         };
   return {
     ...retainedConfig,
+    ...(form.agentId && form.runMode !== "existing_session" ? { agentId: form.agentId } : {}),
     prompt: existingTask ? form.prompt : form.prompt.trim(),
     ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     resources: form.resources,

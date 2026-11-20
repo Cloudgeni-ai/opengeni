@@ -2875,6 +2875,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/agent-templates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-templates",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
@@ -7630,6 +7637,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "secretFields": [
       "response.userCode"
     ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
+    "request": [
+      "CreateAgentFromTemplateRequest"
+    ],
+    "response": []
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/chat/completions",

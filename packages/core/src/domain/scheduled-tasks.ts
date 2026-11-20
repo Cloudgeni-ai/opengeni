@@ -78,6 +78,7 @@ import {
   updateScheduledTask,
   ScheduledTaskHeadChangedError,
   withWorkspaceSubjectRls,
+  getAgent,
   manualScheduledTaskRunBillingOrigin,
   markScheduledTaskApiBilled,
   type Database,
@@ -655,6 +656,13 @@ export async function createValidatedScheduledTask(input: {
     current: null,
     targetSessionId: target?.id ?? null,
     ownerSubjectId,
+  });
+  await validateScheduledTaskAgent(input.db, {
+    grant: input.grant,
+    agentId: agentConfig.agentId,
+    runMode: input.payload.runMode,
+    ownerSubjectId: ownerSubjectId ?? input.grant.subjectId ?? null,
+    privateTask: visibility === "user_private" || (visibility as string) === "private",
   });
   // Every run is billed as whoever set the task up: in the app, plan credit
   // first; over the API, credits only.
@@ -1914,6 +1922,18 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     throw new HTTPException(422, {
       message: "Updated scheduled message and attachments exceed the supported occurrence payload",
     });
+  if (
+    nextAgentConfig.agentId !== input.existing.agentConfig.agentId ||
+    nextRunMode !== input.existing.runMode
+  ) {
+    await validateScheduledTaskAgent(input.db, {
+      grant: input.grant,
+      agentId: nextAgentConfig.agentId,
+      runMode: nextRunMode,
+      ownerSubjectId: input.existing.ownerSubjectId ?? input.grant.subjectId ?? null,
+      privateTask: input.existing.visibility === "private",
+    });
+  }
   await validateScheduledTaskSlackChannel({
     grant: input.grant,
     authorization: input.authorization,
@@ -2793,4 +2813,44 @@ function trimmedScheduledTaskName(name: string): string {
     throw new HTTPException(422, { message: "scheduled task name is required" });
   }
   return trimmed;
+}
+
+/**
+ * An automation that starts chats with an agent (its "Starts when"): the
+ * agent must be one of this workspace's that the task's owner can use, and
+ * the task must start its own chats. Checked again when each run binds.
+ */
+async function validateScheduledTaskAgent(
+  db: Database,
+  input: {
+    grant: AccessGrant;
+    agentId: string | undefined;
+    runMode: ScheduledTask["runMode"];
+    ownerSubjectId: string | null;
+    privateTask: boolean;
+  },
+): Promise<void> {
+  if (!input.agentId) return;
+  if (input.runMode === "existing_session") {
+    throw new HTTPException(422, {
+      message: "An automation with an agent starts its own chats. Choose a new chat for each run.",
+    });
+  }
+  const agent = await getAgent(
+    db,
+    { accountId: input.grant.accountId, workspaceId: input.grant.workspaceId },
+    input.agentId,
+  );
+  const usable =
+    agent !== null &&
+    (agent.visibility === "workspace" ||
+      (input.ownerSubjectId !== null && agent.ownerSubjectId === input.ownerSubjectId));
+  if (!usable) {
+    throw new HTTPException(422, { message: "That agent is not available in this workspace." });
+  }
+  if (agent.visibility === "private" && !input.privateTask) {
+    throw new HTTPException(422, {
+      message: "This agent is Only me, so its automations are Only me too.",
+    });
+  }
 }

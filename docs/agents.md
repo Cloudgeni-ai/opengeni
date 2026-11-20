@@ -373,8 +373,9 @@ Instructions, since it joined the First message the same way.
 
 `POST /sessions` takes `agentId` (an agent the caller can see; Only me agents
 only for their owner and only in Only me chats, which is the default when
-`visibility` is omitted, otherwise `agent_requires_private_chat`; never for
-child chats, `agent_child_chat`). The chat gets
+`visibility` is omitted, otherwise `agent_requires_private_chat`). A child
+chat can be bound too: that is delegation (below); `agent_child_chat` is no
+longer returned. The chat gets
 `sessions.agent_id` and `agent_prompt_revision` = the agent's current
 revision, so its Instructions reach the model through the worker's agent layer
 ([run lifecycle](run-lifecycle.md#agent-instructions)). Agents have no First
@@ -497,6 +498,83 @@ stored; `first_message` stays, empty, until a later step drops it:
   endpoint deletes the agent: a shared agent can't leave only one linked
   Slack workspace.
 
+### Starts when, Can use, Learns and Skills
+
+An agent is set up from its page; these fields are on the agent (migration
+1515: `tool_permissions`, `skills`, `template_key`) and in `Agent` /
+`AgentSummary` (`toolPermissions`, `skills`, `templateKey`, defaulting to
+empty for older servers). `PATCH` replaces `toolPermissions` or `skills` as a
+whole.
+
+- **Starts when**: the agent's triggers are ordinary automations with
+  `agentConfig.agentId`. Each run starts a new chat bound to the agent (its
+  Instructions, Memory and Can use), created as the task with the task
+  owner's access to the agent (`agent.subjectId` on session create), so Only
+  me agents work in their owner's Only me automations. Saving checks the
+  agent is one the owner can use and that the task starts its own chats
+  (`existing_session` is refused). Any trigger type in the catalog works,
+  including types added later, because the trigger is the automation's own.
+  Event runs keep the automation limits: the chain limit, the storm guard
+  (`maxRunsPerHour`) and usage limits. The page lists the automations with
+  an on/off switch (pause/resume) and remove, and **Add trigger** opens the
+  automation form with `?agent=<id>`.
+- **Can use**: rules `{connector, tool, permission}`. `connector` is a
+  connection's server id, a provider domain such as `github.com` (any
+  connection to that provider; what ready-made agents use), or `*`; `tool` is
+  a tool name or `*`. The most specific rule wins (server id, then domain,
+  then `*`; an exact tool over `*`; ties take the strictest), see
+  `agentToolPermissionFor` in `@opengeni/contracts`. Rules only make chats
+  stricter: **Ask first** and **Block** raise the decision the connection's
+  own tool permissions give (`minimumDecision` on the connector action
+  ledger), and **Allow** follows the connection. They apply to every call
+  that goes through the connector action policy: native connectors (GitHub),
+  MCP servers, gateway (Codemode) calls and Codex Apps, which now goes
+  through the same approvals with a default of Allow. A blocked tool is
+  refused with a reason, not hidden. The chat's agent is its own, or the
+  nearest chat above it with one, so an agent's workers follow its Can use
+  and a delegated chat follows its own agent's. In an unattended run Ask
+  first refuses the call, as approvals do there.
+- **Learns**: **Remember across chats** plus the entries of the agent's
+  Memory collection, each editable and removable (Knowledge entry save and
+  archive).
+- **Skills**: a short list by name, linked to each Skill. Display only:
+  Skills stay available to every chat.
+
+Not in self-hosted deployments without these pieces: Codex Apps rules need
+the Codex Apps deployment flag, Slack lines need the Opengeni Slack app, and
+GitHub's command-line gateway (`git`/`gh` through Your GitHub) follows the
+person's GitHub action settings rather than an agent's Can use.
+
+### Ready-made agents
+
+`GET /v1/workspaces/:id/agent-templates` lists ready-made agents and
+`POST /v1/workspaces/:id/agent-templates/:key/agents` (`{name?, visibility?}`)
+adds one as an ordinary agent with `templateKey` set (SDK
+`listAgentTemplates`, `createAgentFromTemplate`). They are content files in
+`packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`):
+Triage, Bug fixer and PR reviewer, general for any software team, with
+Instructions written for autonomy with judgment (pick up work, fix it, and
+involve a person only when a decision needs one), suggested Can use rules
+(none merges a pull request) and suggested triggers. Suggested triggers are
+never created on add: the agent page offers each with **Set up**, which
+opens the automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`)
+so the person picks the repository or source and saves. Ready-made agents
+name no internal Skills.
+
+### Delegation by name
+
+An agent hands work to another agent of the same workspace by name or id:
+`session_create`'s `agentName` (the shared `agentRefToolInput` and
+`resolveDelegationAgent` in `apps/api/src/agent-delegation.ts`, which an
+outside agent's `delegate` tool reuses). The child is bound to that agent
+(Instructions, Memory guidance, Can use) and its final answer returns to the
+caller like any worker's. Who can use the agent is checked for the person the
+calling chat acts for: an Only me agent only for its owner in Only me chats,
+and from an open Slack chat only agents anyone in the organization can use.
+A name two agents share is refused with `agent_name_ambiguous` and their ids;
+an unknown one with `agent_not_found`. Delegated chats keep the nested agent
+depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer".
+
 ### Follow-ups
 
 Once the legacy drop is the previous release: stop writing
@@ -515,13 +593,15 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   say that templates and Slack agents became agents (shown when such agents
   exist, dismissible per browser), and a notice suggests renaming when names
   repeat.
+- Agents page: **Add an agent** lists ready-made agents not yet added here,
+  each with **Add**, which opens the new agent's page.
 - Agent page: **Chat** (`/sessions?agent=<id>`), **Export** (an `.agent.json`
   file with its name, icon, description, Instructions and Memory switch; no
   ids, chats, Memory contents or Slack; an older file's First message joins
-  the Instructions on import), its chats (Yours / Everyone's, each marked with
-  where it started), Instructions, **Remember across chats**, who can use it,
-  and **Available in**: the app always, and one row per linked Slack workspace
-  with no switch: how people ask it (`@Opengeni <Name>`) and
+  the Instructions on import), then **Instructions**, **Starts when**, **Can
+  use**, **Learns**, **Who can use it** and **Skills** (see above), and its
+  chats (Yours / Everyone's). Who can use it ends with one row per linked
+  Slack workspace with no switch: "Ask in Slack: `@Opengeni <Name>`" and
   **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`, or
   why it isn't there (Only me or its name). An agent is in several Slack
   workspaces at once. Controls follow the agent's `viewer` access. Choosing
