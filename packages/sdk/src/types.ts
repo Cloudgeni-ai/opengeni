@@ -4086,6 +4086,20 @@ export type ScheduledTaskAction =
       initiatingSubjectId: string;
       allDescendants: boolean;
       limits: KnowledgeSourceSyncLimits;
+    }
+  | {
+      /** An App data sync (see the App sync methods); no model runs. */
+      kind: "app_sync";
+      siteId: string;
+      collection: string;
+      mode: "shared" | "personal";
+      ownerSubjectId: string;
+      tool: { serverId: string; toolName: string };
+      declaredTools: Array<{ serverId: string; toolName: string }>;
+      arguments: Record<string, unknown>;
+      recordsPath: string | null;
+      key: string;
+      fields: string[] | null;
     };
 
 export type ScheduledTask = {
@@ -4699,6 +4713,11 @@ export type FirstPartyMcpToolName =
   | "site_data_import"
   | "site_data_export"
   | "site_data_reset"
+  | "app_sync_save"
+  | "app_sync_list"
+  | "app_sync_delete"
+  | "app_sync_run"
+  | "app_sync_opt_in"
   | "site_files_list"
   | "site_files_upload"
   | "site_files_delete"
@@ -8894,9 +8913,20 @@ export type ScheduledTaskRun = {
   firedAt: string;
   sessionId: string | null;
   triggerEventId: string | null;
-  actionKind: "agent_turn" | "knowledge_source_sync";
+  actionKind: "agent_turn" | "knowledge_source_sync" | "app_sync";
   knowledgeSyncRunId: string | null;
   knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
+  /** App data sync runs: what the run read and wrote. */
+  syncSummary?:
+    | {
+        received: number;
+        written: number;
+        skipped: number;
+        truncated: boolean;
+        people: { total: number; failed: number } | null;
+      }
+    | null
+    | undefined;
   completedAt: string | null;
   error: string | null;
   admissionDiagnostic?:

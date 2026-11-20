@@ -143,6 +143,15 @@ import type {
   WorkspaceAutomationTemplate,
 } from "@opengeni/contracts";
 import type {
+  AppSync,
+  AppSyncCreateRequest,
+  AppSyncListResponse,
+  AppSyncRunResponse,
+  AppSyncStatusResponse,
+  AppSyncSubscriptionResponse,
+  AppSyncUpdateRequest,
+} from "@opengeni/contracts";
+import type {
   SiteDataCollectionDefinitionRequest,
   SiteDataCollectionResponse,
   SiteDataDescribeResponse,
@@ -10342,6 +10351,122 @@ export class OpenGeniClient {
     return await this.requestJson<SiteDataDescribeResponse>(
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** An App's data syncs with their last run. Needs a manager of the App. */
+  async listAppSyncs(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncListResponse> {
+    return await this.requestJson<AppSyncListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/syncs`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Create a data sync: call a connected tool on a schedule or event, keep
+   * chosen fields and upsert them by key into a collection. No model runs.
+   * The caller owns it; a shared sync runs on their connection.
+   */
+  async createAppSync(
+    workspaceId: string,
+    siteId: string,
+    request: AppSyncCreateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSync> {
+    return await this.requestJson<AppSync>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/syncs`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change a data sync; only the given fields change and the caller becomes its owner. */
+  async updateAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    request: AppSyncUpdateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSync> {
+    return await this.requestJson<AppSync>(
+      "PATCH",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a data sync. Records it wrote stay. */
+  async deleteAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: string }> {
+    return await this.requestJson<{ deleted: string }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run a data sync now and wait for its result. */
+  async runAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncRunResponse> {
+    return await this.requestJson<AppSyncRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/run`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Opt the caller in to (or out of) a personal data sync. */
+  async setAppSyncOptIn(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    optedIn: boolean,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncSubscriptionResponse> {
+    return await this.requestJson<AppSyncSubscriptionResponse>(
+      optedIn ? "PUT" : "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/subscription`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Each data sync's last run as the caller sees it (what the App's page reads). */
+  async getAppSyncStatus(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncStatusResponse> {
+    return await this.requestJson<AppSyncStatusResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/data/syncs`,
       undefined,
       undefined,
       options,

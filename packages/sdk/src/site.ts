@@ -50,6 +50,7 @@ export {
 export {
   OpenGeniSiteDataError,
   SITE_DATA_PATH_PREFIX,
+  type OpenGeniAppSyncStatus,
   type OpenGeniSiteData,
   type OpenGeniSiteDataChange,
   type OpenGeniSiteDataCollection,
