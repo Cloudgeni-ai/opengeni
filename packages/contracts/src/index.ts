@@ -68,6 +68,8 @@ import { FileAccess } from "./file-access";
 export * from "./app-shot";
 import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
+export * from "./app-sync";
+import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
 export * from "./site-sql";
 export * from "./claude-subscription-usage";
@@ -1301,6 +1303,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_data_import",
   "site_data_export",
   "site_data_reset",
+  "app_sync_save",
+  "app_sync_list",
+  "app_sync_delete",
+  "app_sync_run",
+  "app_sync_opt_in",
   "site_files_list",
   "site_files_upload",
   "site_files_delete",
@@ -13217,7 +13224,7 @@ export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSc
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
 export const ScheduledTaskActionKind = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["agent_turn", "knowledge_source_sync"]),
+  z.enum(["agent_turn", "knowledge_source_sync", "app_sync"]),
 );
 export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
 
@@ -13294,6 +13301,7 @@ export const ScheduledTaskAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
   z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("agent_turn") }).strict(),
     KnowledgeSourceSyncAction,
+    AppSyncAction,
   ]),
 );
 export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
@@ -14512,6 +14520,8 @@ export const ScheduledTaskRun = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() 
     actionKind: ScheduledTaskActionKind.default("agent_turn"),
     knowledgeSyncRunId: KnowledgeSourceSyncUuid.nullable().default(null),
     knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
+    /** App data sync runs: what the run read and wrote. */
+    syncSummary: AppSyncRunSummary.nullable().optional(),
     completedAt: primitives.nullableString.default(null),
     error: primitives.nullableString,
     admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
@@ -14816,6 +14826,87 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */ define
   ]),
 );
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+/**
+ * An App data sync as a plain, portable definition: what App export writes
+ * and install reads. It names the tool but no account or person; an installed
+ * sync starts paused until someone confirms the account it runs on.
+ */
+export const AppSyncDefinition = /* @__PURE__ */ defineSchema(() =>
+  AppSyncSettings.extend({
+    name: z.string().trim().min(1).max(200),
+    schedule: ScheduledTaskScheduleSpec.describe(
+      "When it runs: manual, once, interval (everySeconds, at least 300) or calendar.",
+    ),
+    events: ScheduledTaskEventsInput.optional().describe(
+      "Event triggers that also start a run, like any automation.",
+    ),
+  }),
+);
+export type AppSyncDefinition = z.infer<typeof AppSyncDefinition>;
+export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
+
+/** Create a sync. */
+export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
+  AppSyncDefinition.extend({ status: ScheduledTaskStatus.default("active") }),
+);
+export type AppSyncCreateRequest = z.input<typeof AppSyncCreateRequest>;
+
+/** Change a sync: only the fields given change. */
+export const AppSyncUpdateRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      collection: AppSyncSettings.shape.collection,
+      mode: z.enum(["shared", "personal"]),
+      tool: AppSyncSettings.shape.tool,
+      arguments: AppSyncSettings.shape.arguments.unwrap(),
+      recordsPath: AppSyncSettings.shape.recordsPath.unwrap(),
+      key: AppSyncSettings.shape.key,
+      fields: AppSyncSettings.shape.fields.unwrap(),
+      schedule: ScheduledTaskScheduleSpec,
+      events: ScheduledTaskEventsInput,
+      status: ScheduledTaskStatus,
+    })
+    .partial(),
+);
+export type AppSyncUpdateRequest = z.input<typeof AppSyncUpdateRequest>;
+
+/** A sync as its App's managers see it. */
+export const AppSync = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    siteId: primitives.uuid,
+    name: z.string(),
+    status: ScheduledTaskStatus,
+    mode: z.enum(["shared", "personal"]),
+    collection: z.string(),
+    tool: AppSyncSettings.shape.tool,
+    arguments: z.record(z.string(), z.unknown()),
+    recordsPath: z.string().nullable(),
+    key: z.string(),
+    fields: z.array(z.string()).nullable(),
+    schedule: ScheduledTaskScheduleSpec,
+    events: ScheduledTaskEvents.nullable(),
+    ownerSubjectId: z.string(),
+    /** Personal syncs: how many people opted in. */
+    subscribers: z.number().int().nonnegative().nullable(),
+    lastRun: AppSyncLastRun.nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
+export type AppSync = z.infer<typeof AppSync>;
+
+export const AppSyncListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ syncs: z.array(AppSync) }),
+);
+export type AppSyncListResponse = z.infer<typeof AppSyncListResponse>;
+
+export const AppSyncRunResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ syncId: primitives.uuid, lastRun: AppSyncLastRun }),
+);
+export type AppSyncRunResponse = z.infer<typeof AppSyncRunResponse>;
 
 /** Reviewable access consequences of moving a schedule to another chat. */
 export const ScheduledTaskTargetAccessChange = /* @__PURE__ */ defineSchema(() =>

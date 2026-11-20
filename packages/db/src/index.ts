@@ -15,6 +15,7 @@ import { listWorkspaceBackgroundCommandsInScope } from "./session-background-com
 import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
+export * from "./app-sync";
 export * from "./organization-connectors";
 import {
   organizationConnectorLogin,
@@ -101045,6 +101046,7 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     actionKind: row.actionKind as ScheduledTaskActionKind,
     knowledgeSyncRunId: row.knowledgeSyncRunId,
     knowledgeSummary: row.knowledgeSummary as ScheduledTaskRun["knowledgeSummary"],
+    ...(row.syncSummary ? { syncSummary: row.syncSummary as ScheduledTaskRun["syncSummary"] } : {}),
     completedAt: row.completedAt?.toISOString() ?? null,
     error: row.error,
     admissionDiagnostic:
