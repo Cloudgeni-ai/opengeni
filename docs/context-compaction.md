@@ -499,14 +499,22 @@ the system prompt or tools, and the next request is a full write.
 counts 1, 2, 4, … and the full count). `model_call_facts.prompt_cache_diagnostics`
 stores that fingerprint, Claude's dropped signed-thinking counts by reason,
 and, when a call reads much less cache than the previous call of the same model
-in the session, a warm-miss class: `context_replaced`, `tools_changed`,
-`system_changed`, `release_changed`, `history_rewritten` (with the first
-diverging checkpoint), `thinking_dropped`, `account_changed`, `idle_gap`,
-`unobserved` or `unexplained`. The worker checks them in that order. Each
-fingerprint records the deployment revision that built the request, so a tools
-or system change between two deployments is `release_changed` (a release that
-edits model-facing text costs each live session one cold prefix) and the same
-change within one deployment is `tools_changed` or `system_changed`.
+in the session, a warm-miss class: `idle_gap`, `context_replaced`,
+`tools_changed`, `system_changed`, `release_changed`, `history_rewritten` (with
+the first diverging checkpoint), `thinking_dropped`, `account_changed`,
+`unobserved` or `unexplained`. The worker checks them in that order. Time comes
+first: more than 5 minutes after the previous call (the cache lifetime Opengeni
+requests by default) the prefix may have expired anyway, so no request change
+is blamed. `context_replaced` needs the prompt to fall below 60% of the
+previous one in tokens or in items: compaction keeps the tools, the system
+prompt and a summary, so a large fixed prefix can hold the token count up while
+the item count collapses. Each fingerprint records the deployment revision that built the
+request, so a tools or system change between two deployments is
+`release_changed` (a release that edits model-facing text costs each live
+session one cold prefix) and the same change within one deployment is
+`tools_changed` or `system_changed`. A call whose fingerprint has no revision
+came from a build older than revision recording, so it also counts as another
+deployment.
 `thinking_dropped` needs Claude to drop more signed thinking than it dropped
 for the previous call: a long conversation can drop the same old blocks on
 every request, which leaves the prompt unchanged, so a steady drop count falls

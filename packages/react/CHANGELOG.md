@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/connect@6.31.1
+- @opengeni/contracts@6.31.1
+- @opengeni/sdk@6.31.1
+
 ## 6.31.0
 
 ### Minor Changes

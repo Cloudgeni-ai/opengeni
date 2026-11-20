@@ -1,5 +1,11 @@
 # @opengeni/agent-host
 
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/sdk@6.31.1
+
 ## 6.31.0
 
 ### Patch Changes

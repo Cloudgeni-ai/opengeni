@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 6.31.1
+
+### Patch Changes
+
+- 23f4d6c: A stopped sandbox of archived chats is now forgotten even when a background command once ran in it, and deleting such a chat no longer fails. The finished command's records (its retained process, background command and closed terminal) go with the sandbox; a sandbox where a command still runs, or whose supervised output is not captured yet, is kept.
+  - @opengeni/codemode@6.31.1
+  - @opengeni/codex@6.31.1
+  - @opengeni/config@6.31.1
+  - @opengeni/contracts@6.31.1
+  - @opengeni/network@6.31.1
+  - @opengeni/observability@6.31.1
+  - @opengeni/subscriptions@6.31.1
+  - @opengeni/xai-subscription@6.31.1
+
 ## 6.31.0
 
 ### Minor Changes
