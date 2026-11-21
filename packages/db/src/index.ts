@@ -102213,6 +102213,7 @@ export {
   type ConnectionStatusGuard,
   type ConnectionTokenRefreshInput,
   type ConnectionTokenResolverOptions,
+  type CredentialReferenceResolution,
   type PermanentConnectionRefreshFailure,
   type RefreshTransportOptions,
   type ResolveConnectionCredentialInput,

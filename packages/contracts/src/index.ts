@@ -249,6 +249,7 @@ export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
+export * from "./shared-service-connections";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
@@ -7077,7 +7078,9 @@ export type McpCredentialAuthNeededReason =
   | CredentialAuthNeededReason
   | "personal_authority_unavailable"
   | "unsupported_auth"
-  | "resource_scope_unavailable";
+  | "resource_scope_unavailable"
+  /** A shared key's vault item is missing or out of the connection's reach. */
+  | "designated_credential_unavailable";
 
 export type ConnectionCredentialPlacement = {
   carrier: "header" | "query" | "cookie";

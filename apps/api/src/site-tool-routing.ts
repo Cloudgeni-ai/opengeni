@@ -58,6 +58,11 @@ export type SiteToolConnect = {
   capabilityId: string | null;
   name: string;
   providerDomain: string;
+  /**
+   * The connector takes an API key, not a sign-in: a workspace admin adds
+   * one shared key from a vault (a shared service connection) instead.
+   */
+  apiKey?: true;
 };
 
 export type SiteToolRouting =
@@ -202,6 +207,7 @@ export async function readSiteToolAccountInventory(
         capabilityServers.find((candidate) => candidate.id === server.id)?.capabilityId ?? null,
       name: server.name ?? server.id,
       providerDomain: ref.providerDomain,
+      ...(ref.kind === "api_key" ? { apiKey: true as const } : {}),
     });
   }
   const accounts = bindings.flatMap((binding) => {

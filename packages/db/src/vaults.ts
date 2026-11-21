@@ -93,7 +93,10 @@ function contextScope(context: VaultDbContext): {
   return {
     accountId: principal.accountId,
     workspaceId: principal.workspaceId,
-    subjectId: principal.kind === "attempt" ? null : principal.subjectId,
+    subjectId:
+      principal.kind === "attempt" || principal.kind === "service_connection"
+        ? null
+        : principal.subjectId,
     principal: JSON.stringify(principal),
   };
 }

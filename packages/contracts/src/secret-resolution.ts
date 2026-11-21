@@ -37,6 +37,18 @@ export type SecretPrincipal =
       subjectId: string;
       verifiedHuman: boolean;
       viaApiKey: boolean;
+    }
+  /**
+   * A shared service connection's own authority: workspace and organization
+   * vaults that reach the workspace, never an Only me vault or a task vault,
+   * and no person to ask. `connectionId` is the workspace-owned connection
+   * the key is for; null only while an admin sets one up.
+   */
+  | {
+      kind: "service_connection";
+      accountId: string;
+      workspaceId: string;
+      connectionId: string | null;
     };
 
 export const SECRET_USE_SURFACES = [

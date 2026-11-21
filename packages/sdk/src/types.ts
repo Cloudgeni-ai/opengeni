@@ -418,6 +418,13 @@ export type ToolGatewaySiteSetupItem = {
   connectionId: string | null;
   account: string | null;
   shared: boolean;
+  /**
+   * Set on `connect` when the connector takes an API key, not a sign-in: the
+   * workspace connects it once with a shared key from a vault. `add`: the
+   * viewer is a workspace admin and can add it; `ask_admin`: they can't, so
+   * the item only says to ask one.
+   */
+  sharedKey?: "add" | "ask_admin";
   /** The App's declared tools that wait on it. */
   tools: ToolGatewayIdentity[];
   /** On a published App: the App in Opengeni with this connect dialog open. */

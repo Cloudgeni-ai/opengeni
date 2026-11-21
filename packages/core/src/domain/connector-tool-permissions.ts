@@ -1,6 +1,7 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
+import { serviceConnectionCredentialReferences } from "./vaults/service-connection-credentials";
 import { personalWorkspaceExtensionApiIntegrations } from "./personal-workspace-connectors";
 import {
   boundMcpResponseBody,
@@ -393,10 +394,13 @@ async function listTools(
   if (reviewed !== null) return reviewed;
   let headers = { ...target.server.headers };
   if (target.server.connectionRef) {
-    const result = await buildConnectionTokenResolver(
-      input.db,
-      input.settings,
-    )({
+    const result = await buildConnectionTokenResolver(input.db, input.settings, undefined, {
+      // A shared key in an Opengeni vault lists its tools like any key.
+      resolveCredentialReferences: serviceConnectionCredentialReferences({
+        db: input.db,
+        settings: input.settings,
+      }),
+    })({
       // The selected account's credentials remain in its origin workspace;
       // approval preferences remain scoped to the workspace being configured.
       workspaceId: target.connection?.workspaceId ?? input.workspaceId,
