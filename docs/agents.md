@@ -546,7 +546,7 @@ whole.
   agent and its rule (`blocked by the agent "Triage" (its Can use rule
   blocks pull_request_merge of github.com)`), and the call's record keeps it: `agentRule`
   (`{agentId, agentName, connector, tool, permission}`) on `ToolActionReview`
-  and `connector_action_requests.agent_rule` (migration `1523`). The other
+  and `connector_action_requests.agent_rule` (migration `1531`). The other
   fields are unchanged (`reasonCode` stays `blocked_by_default` or
   `asks_by_default`), so older clients show the same refusal as before.
   Codex Apps calls carry no provider domain: rules name them by the

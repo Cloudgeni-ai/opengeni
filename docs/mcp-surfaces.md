@@ -217,7 +217,7 @@ connection's access setting; none adds authority.
   toward the first). Over the limit a call returns an error saying how many seconds to wait;
   nothing ran, so the retry is safe. The limits are shared by every API
   process: each connection's buckets are kept in Postgres
-  (`mcp_connection_rate_limits`, migration `1522`), so more replicas don't
+  (`mcp_connection_rate_limits`, migration `1530`), so more replicas don't
   raise them. While Postgres can't be reached, each process counts on its
   own.
 - **Not yet.** MCP Tasks (long-running calls) and MCP event notifications are

@@ -10,7 +10,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 /**
- * Content-free token buckets per connected agent (migration 1522), shared by
+ * Content-free token buckets per connected agent (migration 1530), shared by
  * every API process. FORCE RLS in the organization's account context.
  */
 export const mcpConnectionRateLimits = pgTable(

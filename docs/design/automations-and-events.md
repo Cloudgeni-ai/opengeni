@@ -291,7 +291,7 @@ has.
 Where the workspace has no GitHub app (or it can't read a repository), a
 person's own GitHub connection (Your GitHub) can still tell a chat that a
 pull request merged or a release was published: a source of kind
-`github_personal` (migrations `1525` to `1528`), named "GitHub (your
+`github_personal` (migrations `1533` to `1536`), named "GitHub (your
 connection)". A chat's merge wake (`session_links_add` with `wakeWhen`,
 [session-status-and-links.md](../session-status-and-links.md)) adds it on
 first use; `POST /event-sources {kind: "github_personal"}` does too.

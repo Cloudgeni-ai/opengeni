@@ -131,7 +131,7 @@ has at most one, so the wake uses it), or the chat's person's own GitHub
 connection able to read it. In that second case (also when the app reads the
 repository but the workspace has no GitHub event source) the wake uses their
 "GitHub (your connection)" event source (kind `github_personal`, private to
-them, added on first use; migrations `1525` to `1528`): it reads the pull
+them, added on first use; migrations `1533` to `1536`): it reads the pull
 request, and the repository's releases, with their connection every two
 minutes while the automation waits, and fires once for a merge or release
 from shortly before the wake was set up on (so up to two minutes after it

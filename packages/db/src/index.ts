@@ -17192,7 +17192,7 @@ export async function closeSlackInteractionDelivery(
      * by `sequence`, the delivery stays open for the woken answer, skipping to
      * the wake. A wake whose turn already ended here closes as usual. The
      * database decides that (trigger slack_interactions_delivery_stays_open_for_wake_v1,
-     * migration 1524), so every release's close behaves the same; a close
+     * migration 1532), so every release's close behaves the same; a close
      * with an `errorCode` (a failed delivery) always closes. Kept for callers.
      */
     settledTurn?: boolean;
