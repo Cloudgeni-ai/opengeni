@@ -6309,7 +6309,7 @@ function buildAgentCapabilitiesFromComposition(
     neutralizeStructuredToolTransport(filesystemCapability);
   }
   // Per-section apply_patch is the innermost call-level wrapper: turn
-  // cancellation (secret references, header refusal, `secretfile`), attempt
+  // cancellation (secret references and `secretfile` in content lines), attempt
   // authorization and the routing fences below see the whole patch once,
   // before any section is applied.
   if (settings.experimentApplyPatchThen) {

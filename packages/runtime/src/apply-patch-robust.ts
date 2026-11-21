@@ -385,7 +385,8 @@ const MAX_READ_BYTES = 4 * 1024 * 1024;
  * Make the filesystem capability's function `apply_patch` robust. Install it
  * before every call-level wrapper (turn cancellation, attempt authorization,
  * routing fences, `then`), so they handle the whole patch once (secret
- * references are resolved before it is split) and `then` is split off first.
+ * references in content lines are resolved before it is split) and `then` is
+ * split off first.
  * `Capability.clone()` copies this override onto every per-run instance, which
  * reads files from its own bound session.
  */
