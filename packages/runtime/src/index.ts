@@ -2592,6 +2592,11 @@ export type ConnectorActionToolCall = {
   defaultDecision?: "allow" | "ask";
   actionName?: string;
   /**
+   * Ask, or block, even when the connection's settings allow: an agent's Can
+   * use rule. Never loosens a decision; added by the worker's policy hooks.
+   */
+  minimumDecision?: "ask" | "block";
+  /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation); the ledger admits it once
    * after that rejection.
@@ -5381,11 +5386,7 @@ function installMcpApprovalPolicy(
       }
       // Opengeni's own servers have no workspace connector policy: only a tool
       // they ask approval for goes through the ledger, as on the gateway path.
-      if (
-        !policy.connectorBacked &&
-        !legacyApproval &&
-        attemptToolSource(policy.serverId) !== "mcp"
-      ) {
+      if (!policy.connectorBacked && !legacyApproval && !connectorPolicyGoverns(policy.serverId)) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -5833,7 +5834,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
-        attemptToolSource(server.id) === "mcp" ||
+        connectorPolicyGoverns(server.id) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -8054,7 +8055,7 @@ function installAttemptConnectorActionGatewayLifecycle(
     const legacyMcpApproval =
       Boolean(config) && !config!.connectionRef && definition.approval === "human";
     const workspaceConnectorPolicy = Boolean(
-      connectorActionPolicy && config && attemptToolSource(config.id) === "mcp",
+      connectorActionPolicy && config && connectorPolicyGoverns(config.id),
     );
     if (!binding && !config?.connectionRef && !legacyMcpApproval && !workspaceConnectorPolicy)
       return definition;
@@ -8594,6 +8595,17 @@ function configureMcpOperationRecovery(
 function configuredMcpOperationRecovery(server: PrefixedMcpServer, toolName: string) {
   const recovery = mcpOperationRecoveryByServer.get(server);
   return recovery && Object.hasOwn(recovery.policy, toolName) ? recovery : undefined;
+}
+
+/**
+ * Whether a server's tool calls go through the workspace connector policy
+ * (tool permissions, an agent's Can use, approvals): every third-party MCP
+ * server, and the Codex Apps gateway, whose connectors are third-party too.
+ * Codex Apps defaults to Allow, so only a person's or agent's rule changes it.
+ */
+function connectorPolicyGoverns(serverId: string): boolean {
+  const source = attemptToolSource(serverId);
+  return source === "mcp" || source === "codex_apps";
 }
 
 function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {

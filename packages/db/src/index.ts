@@ -243,6 +243,7 @@ import {
   connectorActionPoliciesForAccountRoutes,
   connectorToolPolicyRevision,
   ConnectorToolPermissionConflictError,
+  withMinimumConnectorDecision,
   type ResolvedConnectorActionPolicy,
 } from "./connector-action-policy";
 export {
@@ -252,6 +253,7 @@ export {
   connectorActionPoliciesForAccountRoutes,
   connectorToolPolicyRevision,
   ConnectorToolPermissionConflictError,
+  withMinimumConnectorDecision,
   type ResolvedConnectorActionPolicy,
 } from "./connector-action-policy";
 import {
@@ -721,6 +723,7 @@ import {
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./site-data";
+export * from "./sidebar-layouts";
 export * from "./site-publishing";
 export { withSiteRuntimeAdmission } from "./site-runtime-admission";
 export * from "./site-platform";
@@ -31301,10 +31304,11 @@ export type ConnectorActionInvocation = {
   /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
   /**
-   * Ask even when the policy allows: destructive or unrecognised requests
-   * (the personal GitHub gateway). An explicit Block still blocks.
+   * Ask (or block) even when the policy allows: destructive or unrecognised
+   * requests (the personal GitHub gateway), or an agent's Can use rule. An
+   * explicit Block still blocks; nothing here loosens a decision.
    */
-  minimumDecision?: "ask";
+  minimumDecision?: "ask" | "block";
   /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation). It is admitted once, from
@@ -32288,15 +32292,19 @@ export async function prepareConnectorActionApproval(
       const snapshot = await connectorActionAttemptSnapshot(tx, identity);
       const prior = await priorConnectorActionPreparation(tx, identity, normalized);
       if (prior) return prior;
-      const resolved = resolveConnectorActionPolicy(snapshot, {
-        connectionId: normalized.connectionId!,
-        serverId: normalized.serverId,
-        toolName: normalized.toolName,
-        actionName: normalized.policyActionSelector,
-        ...(normalized.defaultDecision !== undefined
-          ? { defaultDecision: normalized.defaultDecision }
-          : {}),
-      });
+      const resolved = withMinimumConnectorDecision(
+        resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+          ...(normalized.defaultDecision !== undefined
+            ? { defaultDecision: normalized.defaultDecision }
+            : {}),
+        }),
+        invocation.minimumDecision,
+        normalized.toolName,
+      );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -32356,15 +32364,19 @@ export async function previewConnectorActionApproval(
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
       const prior = await priorConnectorActionPreparation(scopedDb, identity, normalized);
       if (prior) return prior;
-      const resolved = resolveConnectorActionPolicy(snapshot, {
-        connectionId: normalized.connectionId!,
-        serverId: normalized.serverId,
-        toolName: normalized.toolName,
-        actionName: normalized.policyActionSelector,
-        ...(normalized.defaultDecision !== undefined
-          ? { defaultDecision: normalized.defaultDecision }
-          : {}),
-      });
+      const resolved = withMinimumConnectorDecision(
+        resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+          ...(normalized.defaultDecision !== undefined
+            ? { defaultDecision: normalized.defaultDecision }
+            : {}),
+        }),
+        invocation.minimumDecision,
+        normalized.toolName,
+      );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -32434,19 +32446,7 @@ export async function beginConnectorActionExecution(
         ? { defaultDecision: normalized.defaultDecision }
         : {}),
     });
-    if (
-      invocation.minimumDecision === "ask" &&
-      (!resolved.managed || connectorActionPolicyDecision(resolved) === "allow")
-    ) {
-      return {
-        managed: true,
-        source: "default",
-        entry: null,
-        decision: "ask",
-        actionName: normalized.toolName,
-      } as const satisfies ResolvedConnectorActionPolicy;
-    }
-    return resolved;
+    return withMinimumConnectorDecision(resolved, invocation.minimumDecision, normalized.toolName);
   };
   return await runConnectorActionLedgerTransaction(
     db,
@@ -32997,9 +32997,11 @@ export type SessionCreateInput = {
   /**
    * The agent the chat is started with. It runs on the agent's current
    * revision (`agent_prompt_revision`); the agent must be one of this
-   * workspace's that the creating person can see.
+   * workspace's that the creating person can see. `subjectId` names that
+   * person when the creating subject is not one (an automation run is
+   * created as its task; its owner's Only me agents count).
    */
-  agent?: { id: string } | null;
+  agent?: { id: string; subjectId?: string | null } | null;
   /**
    * The organization agent version the chat runs (`agent_version`), the
    * version whose Instructions are in its prompt, and what the create changed.
@@ -33727,15 +33729,15 @@ export class SessionAgentNotFoundError extends Error {
 
 /**
  * The agent and revision a new chat binds to, read in the chat's workspace.
- * Only me agents count only for their owner, in their Only me chats; a child
- * session never binds.
+ * Only me agents count only for their owner, in their Only me chats. A child
+ * session binds too: that is an agent delegating to another agent by name,
+ * checked against the person the creating chat acts for (`subjectId`).
  */
 async function sessionAgentBinding(
   tx: Database,
   input: Pick<SessionCreateInput, "workspaceId" | "parentSessionId" | "subjectId" | "visibility">,
   agentId: string,
 ): Promise<{ agentId: string; revision: number }> {
-  if (input.parentSessionId) throw new SessionAgentNotFoundError(agentId, "child_chat");
   const subjectId = input.subjectId ?? null;
   const [row] = await rawRows<{ id: string; current_revision: number; visibility: string }>(
     tx,
@@ -34043,7 +34045,11 @@ async function createSessionInTransaction(
     ? await childSessionRemovedRepositories(tx as unknown as Database, input, input.parentSessionId)
     : [];
   const agentBinding = input.agent
-    ? await sessionAgentBinding(tx as unknown as Database, input, input.agent.id)
+    ? await sessionAgentBinding(
+        tx as unknown as Database,
+        input.agent.subjectId ? { ...input, subjectId: input.agent.subjectId } : input,
+        input.agent.id,
+      )
     : null;
   if (agentBinding && input.orgAgent) {
     throw new Error("A chat runs a workspace agent or an organization agent, not both");

@@ -83,6 +83,13 @@ const workspaceRouteContracts = {
     kind: "self-managed",
     source: "../../../packages/react/src/app/routes/site-view.tsx",
   },
+  // An App opened from the sidebar fills the canvas; the rail shell draws it
+  // (kept open across switches) and the App scrolls itself.
+  workspaceAppPageRoute: {
+    kind: "self-managed",
+    source: "../../../packages/react/src/app/routes/app-page.tsx",
+  },
+  workspaceSidebarRoute: { kind: "page", source: "routes/sidebar-customize.tsx" },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
     source: "routes/editable-artifact.tsx",

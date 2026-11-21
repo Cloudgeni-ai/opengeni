@@ -34,6 +34,7 @@ export default defineConfig({
     "src/site.ts",
     "src/site-bridge-host.ts",
     "src/site-document.ts",
+    "src/site-ui.ts",
     "src/github-repositories.ts",
     "src/document-authority.ts",
     "src/knowledge.ts",

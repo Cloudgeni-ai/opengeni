@@ -2010,6 +2010,14 @@ Canonical: [`knowledge.md`](knowledge.md),
 [`artifact-engine.md`](artifact-engine.md), and
 [`artifact-collaboration.md`](artifact-collaboration.md).
 
+The sidebar's links and groups are one `sidebar_layouts` row per workspace
+default plus one per person's overlay (hide, add, order), merged and
+access-filtered by `packages/core/src/application/sidebar-layout.ts` from the
+pure model in `packages/contracts/src/sidebar-layout.ts`. Apps opened from it
+render as pages (`apps/$appId/$`) kept open by `AppPages` in
+`packages/react/src/app/routes/app-page.tsx`. Canonical:
+[`sidebar-layout.md`](sidebar-layout.md).
+
 ### 5.7 Usage, limits, and billing
 
 Organization credit alerts use `packages/db/src/billing-credit-notifications.ts`

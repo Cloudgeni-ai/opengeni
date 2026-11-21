@@ -643,6 +643,24 @@ the owner explicitly narrows them.
   app's form and the panel share the "When" field and the automation model.
 - **Agent tools.** See [Agent tools](#agent-tools).
 
+## Agent triggers
+
+An agent's **Starts when** (docs/agents.md) is a list of ordinary
+automations whose `agentConfig.agentId` names the agent. Each run starts a
+new chat bound to that agent, so it runs with the agent's Instructions,
+Memory and Can use; the run is created as the task, with the task owner's
+access to the agent. Every trigger type the catalog offers works, including
+types added later, because the trigger is the automation's own: nothing is
+agent-specific in intake or delivery. The runs keep every automation limit:
+the chain limit on event-started chats, the storm guard (`maxRunsPerHour`)
+and usage limits. Saving checks the agent is one the owner can use, for the
+automation as it will be after the edit (agent, run mode and visibility),
+and that each run starts a new chat (an `existing_session` or
+`reusable_session` task with an agent is refused). The automation form takes `?agent=<id>` (and `?agentTrigger=<n>`
+for a ready-made agent's suggestion) and binds the new automation to the
+agent. A ready-made agent's suggested triggers are never created on their
+own: each waits until the person picks its source and saves.
+
 ## Templates
 
 A template is where a new automation starts: "Meeting notes", "Review new pull

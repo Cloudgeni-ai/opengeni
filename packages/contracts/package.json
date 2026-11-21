@@ -38,6 +38,10 @@
       "types": "./src/html-frame-host.ts",
       "default": "./src/html-frame-host.ts"
     },
+    "./sidebar-layout": {
+      "types": "./src/sidebar-layout.ts",
+      "default": "./src/sidebar-layout.ts"
+    },
     "./billing-credit-notifications": {
       "types": "./src/billing-credit-notifications.ts",
       "default": "./src/billing-credit-notifications.ts"

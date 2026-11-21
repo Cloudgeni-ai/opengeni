@@ -1,3 +1,4 @@
+import { agentCanUseFor, withAgentCanUse } from "./agent-can-use";
 import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
@@ -35,6 +36,7 @@ import {
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
+  getSessionAgentChain,
   readPreparedBotMessage,
   resolveAttemptConnectorToolDecision,
   getSessionChainRoot,
@@ -114,6 +116,7 @@ import {
   nangoBackendsFor,
   postConnectionNeedsReauthNotice,
   connectedCommandOutputLook,
+  agentToolPermissionSetsForEnforcement,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
@@ -139,6 +142,7 @@ import {
   type ResourceRef,
   type Permission,
   type ToolAuthNeededPayload,
+  sessionSlackAgent,
 } from "@opengeni/contracts";
 
 import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
@@ -866,11 +870,34 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
+  // The agents this chat runs under (its own, and each chat above it with
+  // one): the strictest of their Can use rules raises every connector call's
+  // decision, whatever the connection type. Read once per attempt; a
+  // top-level chat without an agent (its own, or a Slack agent's) has none.
+  const canUseAgents =
+    session.agentId ||
+    session.rootSessionId !== session.id ||
+    sessionSlackAgent(session.metadata) !== null
+      ? await getSessionAgentChain(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        })
+      : [];
+  const agentCanUse = agentCanUseFor({
+    ruleSets: canUseAgents.flatMap((agent) => agentToolPermissionSetsForEnforcement(agent)),
+    bindings: turn.mcpAccountBindings,
+    servers: canonicalRunSettings.mcpServers,
+  });
   const appActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
     {
       preview: async (call) =>
-        await previewConnectorActionApproval(db, connectorActionIdentity, call),
-      prepare: async (call) => {
+        await previewConnectorActionApproval(
+          db,
+          connectorActionIdentity,
+          withAgentCanUse(agentCanUse, call),
+        ),
+      prepare: async (rawCall) => {
+        const call = withAgentCanUse(agentCanUse, rawCall);
         // Nobody can answer an approval here, so an Ask opens no request for
         // one: the call is refused (see the runtime) and nothing waits on it.
         if (unattended) {
@@ -879,7 +906,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         }
         return await prepareConnectorActionApproval(db, connectorActionIdentity, call);
       },
-      begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
+      begin: async (call) =>
+        await beginConnectorActionExecution(
+          db,
+          connectorActionIdentity,
+          withAgentCanUse(agentCanUse, call),
+        ),
       complete: async ({ requestId, outcome }) =>
         await completeConnectorActionExecution(db, {
           accountId: input.accountId,
