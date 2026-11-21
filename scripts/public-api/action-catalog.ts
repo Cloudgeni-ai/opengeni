@@ -46,6 +46,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "published Site gateway calls, signed by the gateway",
   },
   {
+    pattern: /^\/v1\/app-assets(\/|$)/,
+    reason: "files of multi-file app versions, loaded by the app's frame",
+  },
+  {
     pattern: /^\/v1\/native-app\//,
     reason: "signing the native app in and out, and its push device: the app's own credential",
   },
