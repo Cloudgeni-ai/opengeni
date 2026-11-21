@@ -7,8 +7,11 @@
 import {
   agentInitialsAvatar,
   applyPersonalSidebarChanges,
+  knownSidebarOptions,
+  mergeSidebarOptions,
   applyWorkspaceSidebarChanges,
   EMPTY_SIDEBAR_PERSONAL_CHANGES,
+  isSidebarExternalUrl,
   mergeSidebarLayout,
   readWorkspaceSidebarLayout,
   readStoredSidebarPersonalChanges,
@@ -139,10 +142,18 @@ function resolveChild(item: MergedSidebarChild, view: AppView): ResolvedSidebarC
         appId: app.appId,
         path: item.path ?? null,
         label: item.label ?? app.title,
+        ...(item.icon ? { icon: item.icon } : {}),
       };
     }
     case "link":
-      return { id: item.id, origin: item.origin, type: "link", url: item.url, label: item.label };
+      return {
+        id: item.id,
+        origin: item.origin,
+        type: "link",
+        url: item.url,
+        label: item.label,
+        ...(item.icon ? { icon: item.icon } : {}),
+      };
     case "agent": {
       const agent = view.agents.get(item.agentId.toLowerCase());
       if (!agent) return null;
@@ -191,6 +202,7 @@ function resolveItem(
     type: "group",
     label: item.label,
     collapsed: item.collapsed ?? false,
+    ...(item.icon ? { icon: item.icon } : {}),
     items: children,
   };
 }
@@ -273,6 +285,8 @@ async function resolveSidebarLayout(
     ...merged.hidden.map((entry) => entry.item),
     ...(defaults?.items ?? []),
   ]);
+  const ownOptions = subjectId === null ? undefined : knownSidebarOptions(personal.options);
+  const defaultOptions = knownSidebarOptions(workspace.options);
   const resolveAll = (items: readonly MergedSidebarItem[], keepEmptyGroups: boolean) =>
     items
       .map((item) => resolveItem(item, view, keepEmptyGroups))
@@ -287,12 +301,15 @@ async function resolveSidebarLayout(
       available: subjectId !== null,
       revision: rows.personal?.revision ?? 0,
       customized: subjectId !== null && sidebarPersonalChangesCustomized(personal),
+      ...(ownOptions ? { options: ownOptions } : {}),
     },
     workspace: {
       revision: rows.workspace?.revision ?? 0,
       canEdit: admin,
       ...(defaults ? { items: resolveAll(defaults.items, true) } : {}),
+      ...(admin && defaultOptions ? { options: defaultOptions } : {}),
     },
+    options: mergeSidebarOptions(defaultOptions, ownOptions),
   };
 }
 
@@ -456,4 +473,33 @@ export async function updateSidebarLayoutForGrant(
     if (request.expectedRevision !== undefined || attempt >= 2)
       throw new HTTPException(409, { message: SIDEBAR_LAYOUT_CONFLICT_MESSAGE });
   }
+}
+
+/**
+ * The sites (origins) of the outside links in this caller's sidebar: the
+ * default's and their own, hidden ones included. Their icons are fetched for
+ * them, and only theirs.
+ */
+export async function sidebarLinkOriginsForGrant(
+  deps: SidebarDeps,
+  grant: AccessGrant,
+): Promise<Set<string>> {
+  const subjectId = await personSubject(deps, grant);
+  const rows = await readSidebarLayouts(
+    deps.db,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    subjectId,
+  );
+  const workspace = readWorkspaceSidebarLayout(rows.workspace);
+  const personal = readStoredSidebarPersonalChanges(rows.personal?.layout);
+  const origins = new Set<string>();
+  const visit = (item: { type: string; url?: unknown; items?: unknown }) => {
+    if (item.type === "link" && typeof item.url === "string" && isSidebarExternalUrl(item.url))
+      origins.add(new URL(item.url).origin);
+    if (item.type === "group" && Array.isArray(item.items))
+      for (const child of item.items as { type: string }[]) visit(child);
+  };
+  for (const item of workspace.items) visit(item);
+  if (subjectId !== null) for (const entry of personal.added) visit(entry.item);
+  return origins;
 }

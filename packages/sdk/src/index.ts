@@ -279,11 +279,15 @@ export type {
   ResolvedSidebarExternalLink,
   ResolvedSidebarGroup,
   ResolvedSidebarItem,
+  ResolvedSidebarLayoutOptions,
   ResolvedSidebarLiveList,
+  SidebarItemIcon,
   SidebarItemOrigin,
   SidebarLayoutChange,
+  SidebarLayoutOptions,
   SidebarLayoutResponse,
   SidebarLiveListKind,
+  SidebarNavEntry,
   UpdateSidebarLayoutRequest,
 } from "./sidebar-layout";
 export type {

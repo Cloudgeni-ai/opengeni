@@ -1,8 +1,10 @@
 import {
+  isSidebarItemIcon,
   readResolvedSidebarItems,
   SIDEBAR_LIVE_LIST_MOBILE_LIMIT,
   sidebarItemsShown,
   sidebarLayoutIsOlder,
+  type SidebarItemIcon,
 } from "@opengeni/contracts/sidebar-layout";
 import type {
   ResolvedSidebarChild,
@@ -19,8 +21,15 @@ import type {
  */
 
 export type SidebarMenuRow =
-  | { key: string; kind: "app"; appId: string; path: string | null; label: string }
-  | { key: string; kind: "link"; url: string; label: string }
+  | {
+      key: string;
+      kind: "app";
+      appId: string;
+      path: string | null;
+      label: string;
+      icon?: SidebarItemIcon;
+    }
+  | { key: string; kind: "link"; url: string; label: string; icon?: SidebarItemIcon }
   | {
       key: string;
       kind: "agent";
@@ -33,17 +42,33 @@ export type SidebarMenuSection = {
   key: string;
   /** A group's or live list's name; null for top-level links. */
   heading: string | null;
+  /** The group's own icon, beside its heading. */
+  icon?: SidebarItemIcon;
   rows: SidebarMenuRow[];
 };
+
+/** An icon this version draws; anything else falls back to the row's usual icon. */
+function iconOf(item: { icon?: string | undefined }): { icon?: SidebarItemIcon } {
+  return isSidebarItemIcon(item.icon) ? { icon: item.icon } : {};
+}
 
 function childRows(item: ResolvedSidebarChild): SidebarMenuRow[] {
   switch (item.type) {
     case "app":
-      return [{ key: item.id, kind: "app", appId: item.appId, path: item.path, label: item.label }];
+      return [
+        {
+          key: item.id,
+          kind: "app",
+          appId: item.appId,
+          path: item.path,
+          label: item.label,
+          ...iconOf(item),
+        },
+      ];
     case "link":
       // Only https links open (the server allows nothing else).
       return /^https:\/\//iu.test(item.url)
-        ? [{ key: item.id, kind: "link", url: item.url, label: item.label }]
+        ? [{ key: item.id, kind: "link", url: item.url, label: item.label, ...iconOf(item) }]
         : [];
     case "agent":
       return [
@@ -88,7 +113,13 @@ export function sidebarMenuSections(
     }
     loose = null;
     const rows = item.type === "group" ? item.items.flatMap(childRows) : childRows(item);
-    if (rows.length) sections.push({ key: item.id, heading: item.label, rows });
+    if (rows.length)
+      sections.push({
+        key: item.id,
+        heading: item.label,
+        rows,
+        ...(item.type === "group" ? iconOf(item) : {}),
+      });
   }
   return sections.filter((section) => section.rows.length > 0);
 }

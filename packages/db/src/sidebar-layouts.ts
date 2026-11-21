@@ -3,7 +3,7 @@
 // as JSON the API validates, with a compare-and-set revision. Presentation
 // only: the API resolves every app against the reader's own access.
 import { sql } from "drizzle-orm";
-import { withRlsContext, type Database } from "./database";
+import { withRlsContext, withWorkspaceSubjectRls, type Database } from "./database";
 import type { WorkspaceArtifactViewer } from "./workspace-artifacts";
 
 export type SidebarLayoutScopeKey = { accountId: string; workspaceId: string };
@@ -116,8 +116,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * What the sidebar can show about apps for this viewer: the active apps among
- * `appIds` they can open, the workspace's pinned apps and their recently
- * opened ones. Archived, deleted and other people's Only me apps are left out.
+ * `appIds` they can open, the workspace's pinned apps and the ones they
+ * opened or edited (published a version of) most recently. Archived, deleted
+ * and other people's Only me apps are left out.
  */
 export async function readSidebarApps(
   db: Database,
@@ -142,11 +143,12 @@ export async function readSidebarApps(
     and (a.visibility = 'workspace_shared'${
       viewerSubject === null ? sql`` : sql` or a.owner_subject_id = ${viewerSubject}::text`
     })`;
-  return await withRlsContext(
+  const summary = (row: { id: string; title: string }) => ({ appId: row.id, title: row.title });
+  const read = await withRlsContext(
     db,
     scope,
     async (tx) => {
-      const [byId, pinned, recent] = await Promise.all([
+      const [byId, pinned] = await Promise.all([
         ids.length
           ? tx.execute(sql`select a.id::text as id, a.title from workspace_artifacts a
               where ${visible} and a.id = any(${`{${ids.join(",")}}`}::uuid[])`)
@@ -158,25 +160,45 @@ export async function readSidebarApps(
               where ${visible}
               order by lower(a.title), a.id limit ${input.pinnedLimit}`)
           : Promise.resolve([]),
-        input.recentLimit > 0 && viewerSubject !== null
-          ? tx.execute(sql`select a.id::text as id, a.title from site_opens o
-              join workspace_artifacts a on a.workspace_id = o.workspace_id and a.id = o.site_id
-              where o.workspace_id = ${scope.workspaceId}::uuid and o.subject_id = ${viewerSubject}
-                and ${visible}
-              order by o.opened_at desc, a.id limit ${input.recentLimit}`)
-          : Promise.resolve([]),
       ]);
-      const summary = (row: { id: string; title: string }) => ({ appId: row.id, title: row.title });
       return {
         apps: new Map(
           rows<{ id: string; title: string }>(byId).map((row) => [row.id, summary(row)]),
         ),
         pinned: rows<{ id: string; title: string }>(pinned).map(summary),
-        recent: rows<{ id: string; title: string }>(recent).map(summary),
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
+  // A person's opens are their own rows: row-level security shows them only
+  // under that person's identity, so this read runs as them.
+  const recent =
+    input.recentLimit > 0 && viewerSubject !== null
+      ? await withWorkspaceSubjectRls(
+          db,
+          scope.workspaceId,
+          viewerSubject,
+          async (tx) =>
+            rows<{ id: string; title: string }>(
+              await tx.execute(sql`select a.id::text as id, a.title from (
+                  select touched.site_id, max(touched.at) as at from (
+                    select o.site_id, o.opened_at as at from site_opens o
+                    where o.workspace_id = ${scope.workspaceId}::uuid and o.subject_id = ${viewerSubject}
+                    union all
+                    select v.artifact_id, v.created_at from workspace_artifact_versions v
+                    where v.workspace_id = ${scope.workspaceId}::uuid
+                      and v.created_by_subject_id = ${viewerSubject}
+                  ) touched group by touched.site_id
+                ) t
+                join workspace_artifacts a on a.workspace_id = ${scope.workspaceId}::uuid and a.id = t.site_id
+                where ${visible}
+                order by t.at desc, a.id limit ${input.recentLimit}`),
+            ).map(summary),
+          { isolationLevel: "repeatable read", accessMode: "read only" },
+          "none",
+        )
+      : [];
+  return { ...read, recent };
 }
 
 /**

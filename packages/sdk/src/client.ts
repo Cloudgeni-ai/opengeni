@@ -10292,6 +10292,34 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * The site icon of an outside link in this person's sidebar (an image),
+   * or null when the site has none to show. Only links in their sidebar.
+   */
+  async getSidebarLinkIcon(
+    workspaceId: string,
+    url: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Blob | null> {
+    const correlationId = crypto.randomUUID();
+    const response = await this.fetchImpl(
+      this.url(
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout/link-icon?url=${encodeURIComponent(url)}`,
+      ),
+      {
+        method: "GET",
+        headers: { ...this.headers(correlationId), Accept: "image/*" },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    if (response.status === 404) {
+      await cancelResponseBody(response, "sidebar link has no icon");
+      return null;
+    }
+    if (!response.ok) throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    return await response.blob();
+  }
+
   async listWorkspaceArtifacts(
     workspaceId: string,
     options: WorkspaceArtifactListOptions & { signal?: AbortSignal } = {},
