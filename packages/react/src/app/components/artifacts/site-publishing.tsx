@@ -26,7 +26,6 @@ import { toast } from "../../lib/toast";
 import { ModelPicker } from "../pickers";
 import { payerShortLabel } from "../models/models-ui";
 import { Button, buttonVariants } from "../../../ui/button";
-import { ChoiceCard, ChoiceCards } from "../../../ui/choice-cards";
 import { useCopyToClipboard } from "../../../ui/copy-field";
 import { showUndoToast } from "../ui/destructive-confirm";
 import { DropdownMenuItem } from "../../../ui/dropdown-menu";
@@ -206,7 +205,9 @@ function useHostnameAvailability(
   label: string,
   skip: boolean,
 ): Availability {
-  const [availability, setAvailability] = useState<Availability>({ state: "idle" });
+  const [availability, setAvailability] = useState<Availability>({
+    state: "idle",
+  });
   useEffect(() => {
     if (skip || labelProblemMessage(label)) {
       setAvailability({ state: "idle" });
@@ -257,6 +258,11 @@ export type SitePublishPageProps = {
   layout?: "page" | "panel" | undefined;
   /** After Publish or Save changes succeeds, for a page that then goes back. */
   onSubmitted?: (() => void) | undefined;
+  /**
+   * Panel only: the app's rarer settings (Duplicate, Export, Archive…),
+   * shown in the form's collapsed More with search engines and reports.
+   */
+  moreRows?: ReactNode | undefined;
 };
 
 /** The publish form's frame: its own page, or a panel in the Site's Settings. */
@@ -264,8 +270,10 @@ function PublishFrame({
   layout = "page",
   back,
   ...props
-}: Omit<FormFrameProps, "variant"> & { layout?: "page" | "panel" | undefined }) {
-  return layout === "panel" ? <FormInline {...props} /> : <FormPage back={back} {...props} />;
+}: Omit<FormFrameProps, "variant"> & {
+  layout?: "page" | "panel" | undefined;
+}) {
+  return layout === "panel" ? <FormInline plain {...props} /> : <FormPage back={back} {...props} />;
 }
 
 /**
@@ -276,18 +284,25 @@ function PublishFrame({
 export function SitePublishPage(props: SitePublishPageProps) {
   const { load, site, onBack, layout } = props;
   const back = { label: site.title, onClick: onBack };
+  // Until the form itself shows, its More holds only the app's rarer rows.
+  const more = props.moreRows ? (
+    <PublishMore summary={MORE_ROWS_SUMMARY}>{props.moreRows}</PublishMore>
+  ) : null;
   const blocked = (title: string, body: ReactNode, action?: ReactNode) => (
-    <PublishFrame
-      layout={layout}
-      back={back}
-      title="Publish to web"
-      submitLabel="Publish"
-      footer={false}
-    >
-      <Notice title={title} action={action} actionLayout="responsive">
-        {body}
-      </Notice>
-    </PublishFrame>
+    <>
+      <PublishFrame
+        layout={layout}
+        back={back}
+        title="Publish to web"
+        submitLabel="Publish"
+        footer={false}
+      >
+        <Notice title={title} action={action} actionLayout="responsive">
+          {body}
+        </Notice>
+      </PublishFrame>
+      {more}
+    </>
   );
   if (!props.canManage || load.state === "forbidden")
     return blocked(
@@ -321,14 +336,17 @@ export function SitePublishPage(props: SitePublishPageProps) {
     );
   if (load.state === "loading")
     return (
-      <PublishFrame
-        layout={layout}
-        back={back}
-        title="Publish to web"
-        submitLabel="Publish"
-        loading
-        loadingFields={4}
-      />
+      <>
+        <PublishFrame
+          layout={layout}
+          back={back}
+          title="Publish to web"
+          submitLabel="Publish"
+          loading
+          loadingFields={4}
+        />
+        {more}
+      </>
     );
   return (
     <SitePublishForm
@@ -352,6 +370,7 @@ function SitePublishForm({
   isAdmin,
   layout = "page",
   onSubmitted,
+  moreRows,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -361,7 +380,10 @@ function SitePublishForm({
   const [emailError, setEmailError] = useState<string | null>(null);
   const [limitError, setLimitError] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
-  const [refusal, setRefusal] = useState<{ title: string; body: string } | null>(null);
+  const [refusal, setRefusal] = useState<{
+    title: string;
+    body: string;
+  } | null>(null);
   const [busy, setBusy] = useState<"unpublish" | "restore" | null>(null);
   const [takedownOpen, setTakedownOpen] = useState(false);
   const update = (patch: Partial<SitePublishDraft>) =>
@@ -406,6 +428,13 @@ function SitePublishForm({
   // Readiness warnings describe the saved access; hide them while it changes.
   const warnings =
     saved?.status === "active" && saved.access === draft.access ? saved.warnings : [];
+  const openReports = saved?.moderation.openReports ?? 0;
+  const moreSummary =
+    openReports > 0
+      ? `${openReports} open ${openReports === 1 ? "report" : "reports"}`
+      : moreRows
+        ? `Search engines, reports, ${MORE_ROWS_SUMMARY.toLowerCase()}`
+        : "Search engines, reports";
 
   const submit = async () => {
     setLabelError(null);
@@ -457,7 +486,9 @@ function SitePublishForm({
       onPublication(await client.applySitePublicationFix(workspaceId, site.id, fix));
       toast.success("Fixed");
     } catch (error) {
-      toast.error("Couldn't apply the fix", { description: userErrorText(error) });
+      toast.error("Couldn't apply the fix", {
+        description: userErrorText(error),
+      });
     }
   };
 
@@ -475,7 +506,9 @@ function SitePublishForm({
             .updateSitePublication(workspaceId, site.id, { status: "active" })
             .then(onPublication)
             .catch((error) =>
-              toast.error("Couldn't publish again", { description: userErrorText(error) }),
+              toast.error("Couldn't publish again", {
+                description: userErrorText(error),
+              }),
             ),
       });
     } catch (error) {
@@ -491,7 +524,9 @@ function SitePublishForm({
       onPublication(await client.restoreSite(workspaceId, site.id));
       toast.success("App restored");
     } catch (error) {
-      toast.error("Couldn't restore the app", { description: userErrorText(error) });
+      toast.error("Couldn't restore the app", {
+        description: userErrorText(error),
+      });
     } finally {
       setBusy(null);
     }
@@ -503,11 +538,7 @@ function SitePublishForm({
         layout={layout}
         back={{ label: site.title, onClick: onBack }}
         title={publishing ? "Publish to web" : "Web address"}
-        description={
-          publishing
-            ? `Give “${site.title}” its own address on the web.`
-            : "Its address, who can open it and its agent."
-        }
+        description={publishing ? `Give “${site.title}” its own address on the web.` : undefined}
         submitLabel={publishing ? "Publish" : "Save changes"}
         pendingLabel={publishing ? "Publishing…" : "Saving…"}
         onSubmit={submit}
@@ -572,26 +603,26 @@ function SitePublishForm({
             </div>
           </Field>
 
-          <Field label="Who can open it" group>
-            <ChoiceCards
+          <Field label="Who can open it">
+            <SelectMenu
               value={draft.access}
-              onValueChange={(value) => update({ access: value as SitePublishDraft["access"] })}
-              variant="radio"
-            >
-              {ACCESS_CHOICES.map((choice) => (
-                <ChoiceCard
-                  key={choice.value}
-                  value={choice.value}
-                  title={choice.title}
-                  description={choice.description({
-                    workspaceName,
-                    loginOnly: sites.loginOnly === true,
-                  })}
-                  disabled={choice.value === "public" && publicDisabled}
-                  disabledReason="Public apps are turned off on this server."
-                />
-              ))}
-            </ChoiceCards>
+              onValueChange={(value) => update({ access: value })}
+              options={ACCESS_CHOICES.map((choice) => ({
+                value: choice.value,
+                label: choice.title,
+                description: choice.description({
+                  workspaceName,
+                  loginOnly: sites.loginOnly === true,
+                }),
+                ...(choice.value === "public" && publicDisabled
+                  ? {
+                      disabled: true,
+                      disabledReason: "Public apps are turned off on this server.",
+                    }
+                  : {}),
+              }))}
+              className="w-full max-w-80"
+            />
           </Field>
 
           {draft.access === "invited" ? (
@@ -651,24 +682,26 @@ function SitePublishForm({
             ) : null}
           </div>
 
-          <CheckboxField
-            label="Hide from search engines"
-            description="Asks search engines not to list the app."
-            checked={draft.noindex}
-            disabled={forceNoindex}
-            disabledReason="Always on for this server."
-            onCheckedChange={(noindex) => update({ noindex })}
-          />
-
-          {saved ? (
-            <SiteReports
-              client={client}
-              workspaceId={workspaceId}
-              siteId={site.id}
-              publication={saved}
-              onTakeDown={() => setTakedownOpen(true)}
+          {/* Rarely changed, and the dangerous ones: closed unless a report waits. */}
+          <PublishMore summary={moreSummary} defaultOpen={openReports > 0}>
+            <CheckboxField
+              label="Hide from search engines"
+              checked={draft.noindex}
+              disabled={forceNoindex}
+              disabledReason="Always on for this server."
+              onCheckedChange={(noindex) => update({ noindex })}
             />
-          ) : null}
+            {saved ? (
+              <SiteReports
+                client={client}
+                workspaceId={workspaceId}
+                siteId={site.id}
+                publication={saved}
+                onTakeDown={() => setTakedownOpen(true)}
+              />
+            ) : null}
+            {moreRows}
+          </PublishMore>
         </FieldStack>
       </PublishFrame>
       {saved ? (
@@ -677,7 +710,9 @@ function SitePublishForm({
           onOpenChange={setTakedownOpen}
           hostname={saved.hostname}
           onTakeDown={async (reason) => {
-            const next = await client.takeDownSite(workspaceId, site.id, { reason });
+            const next = await client.takeDownSite(workspaceId, site.id, {
+              reason,
+            });
             onPublication(next);
             toast.success("App taken down", {
               description: "Visitors see a takedown notice.",
@@ -686,6 +721,26 @@ function SitePublishForm({
         />
       ) : null}
     </>
+  );
+}
+
+/** What the app's rarer rows (`moreRows`) hold, for More's closed summary. */
+const MORE_ROWS_SUMMARY = "Duplicate, export, archive";
+
+/** The form's collapsed More: rare and dangerous settings, one row style. */
+export function PublishMore({
+  summary,
+  defaultOpen,
+  children,
+}: {
+  summary?: ReactNode | undefined;
+  defaultOpen?: boolean | undefined;
+  children: ReactNode;
+}) {
+  return (
+    <Disclosure title="More" summary={summary} defaultOpen={defaultOpen}>
+      <div className="flex min-w-0 flex-col gap-4 pt-2">{children}</div>
+    </Disclosure>
   );
 }
 
@@ -700,7 +755,7 @@ function AvailabilityHint({
   domain: string | null;
   unchanged: boolean;
 }) {
-  if (unchanged) return "Changing it moves the app. The old address stops working.";
+  if (unchanged) return "Changing it breaks the old address.";
   if (
     availability.state === "checking" ||
     (availability.state !== "idle" && availability.label !== label)
@@ -778,45 +833,20 @@ function PublicationStatus({
       </Notice>
     );
   return (
-    <Notice
-      icon={<GlobeIcon className="size-4" />}
-      title="Published"
-      actionLayout="responsive"
-      action={
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => void copy(publication.url)}
-            className="rounded-[10px] pointer-coarse:h-11"
-          >
-            {copied === "copied" ? (
-              <CheckIcon aria-hidden="true" />
-            ) : (
-              <CopyIcon aria-hidden="true" />
-            )}
-            {copied === "copied" ? "Copied" : "Copy link"}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy !== null}
-            onClick={onUnpublish}
-            className="rounded-[10px] pointer-coarse:h-11"
-          >
-            {busy === "unpublish" ? "Unpublishing…" : "Unpublish"}
-          </Button>
-        </div>
-      }
+    <div
+      data-site-publication-status=""
+      className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 text-sm"
     >
-      <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="inline-flex min-w-0 flex-1 basis-56 flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="inline-flex items-center gap-1.5 text-fg-muted">
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-status-idle" />
+          Published
+        </span>
         <a
           href={publication.url}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex max-w-full items-center gap-1 font-medium og-link"
+          className="inline-flex min-w-0 max-w-full items-center gap-1 font-medium og-link"
         >
           <span className="truncate">{publication.hostname}</span>
           <ExternalLinkIcon aria-hidden="true" className="size-3.5 shrink-0" />
@@ -827,7 +857,29 @@ function PublicationStatus({
           </a>
         ) : null}
       </span>
-    </Notice>
+      <span className="flex items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => void copy(publication.url)}
+          className="rounded-[10px] pointer-coarse:h-11"
+        >
+          {copied === "copied" ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
+          {copied === "copied" ? "Copied" : "Copy link"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy !== null}
+          onClick={onUnpublish}
+          className="rounded-[10px] pointer-coarse:h-11"
+        >
+          {busy === "unpublish" ? "Unpublishing…" : "Unpublish"}
+        </Button>
+      </span>
+    </div>
   );
 }
 
@@ -948,7 +1000,11 @@ function OutsideAgentSection({
             <button
               type="button"
               onClick={() =>
-                onChange({ personLimitOn: true, personLimit: "1", personPeriod: "day" })
+                onChange({
+                  personLimitOn: true,
+                  personLimit: "1",
+                  personPeriod: "day",
+                })
               }
               className="inline-flex items-center gap-1 self-start text-sm font-medium og-link"
             >
@@ -1126,17 +1182,20 @@ function SiteReports({
   }, [client, openReports, siteId, workspaceId]);
   const close = async (report: SiteAbuseReport, status: "dismissed" | "actioned") => {
     try {
-      await client.updateSiteAbuseReport(workspaceId, siteId, report.id, { status });
+      await client.updateSiteAbuseReport(workspaceId, siteId, report.id, {
+        status,
+      });
       setReports((current) => current?.filter((item) => item.id !== report.id) ?? null);
       toast.success(status === "dismissed" ? "Report dismissed" : "Report marked as handled");
     } catch (error) {
-      toast.error("Couldn't update the report", { description: userErrorText(error) });
+      toast.error("Couldn't update the report", {
+        description: userErrorText(error),
+      });
     }
   };
   return (
     <Section
       title="Reports"
-      description="Visitors can report this app from the link at the bottom of every page."
       action={
         publication.status === "suspended" ? null : (
           <Button
@@ -1150,9 +1209,8 @@ function SiteReports({
           </Button>
         )
       }
-      className="border-t border-border pt-6"
     >
-      <div className="mt-3">
+      <div className="mt-1">
         {failed ? (
           <p className="text-sm text-fg-muted">Couldn't load reports.</p>
         ) : reports === null ? (

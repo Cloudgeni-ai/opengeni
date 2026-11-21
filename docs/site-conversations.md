@@ -142,8 +142,9 @@
     Site's own publish form (`SitePublishPage` with `useSiteManagement`,
     exactly as its Settings tab) as a page in place of the Site, which stays
     mounted behind it, with the chat beside it; full screen is left first.
-    A successful Publish or Save, or its back link, returns to the Site and
-    the header shows the change at once. Nothing shows while the address is
+    The form is in the address (`?publishing`), so the browser's Back closes
+    it too. A successful Publish or Save, or its back link, returns to the
+    Site and the header shows the change at once. Nothing shows while the address is
     loading, or where publishing isn't available.
   - The version chip in the Site's header (`SiteVersionMenu`) shows the live
     version and its recent history (eight, then **All versions** on the
@@ -156,7 +157,16 @@
     meanwhile wins and the chip says "The Site changed meanwhile". People
     without publish permission, and archived Sites, get the history only.
     In full screen its menu opens inside the full-screen frame. An archived
-    Site's view links to its details, where it can be restored.
+    Site's view links to its Settings, where it can be restored.
+  - The header is one slim row on the page, without a frame around the
+    Site: back, title, version, the publication control, the Site's "…"
+    (Pin, Duplicate, Reload, Settings, Archive) and full screen. In the macOS
+    app the title is the window bar's and the controls join the bar. The
+    chat panel's header moves the chat to the other side, or opens the
+    conversation as a full chat, in one click. Settings opened from the "…"
+    goes back to the Site. Settings has one row style; search engines,
+    reports and takedown, duplicate, export, resetting allowed actions and
+    archive are under its collapsed **More** (open while a report waits).
 - A Site is a sidebar row even before anyone asks it anything. Placement has
   one rule: a Site is a top-level row in the project of the chat that created
   it (the session tree of its first version), and new Site conversations are

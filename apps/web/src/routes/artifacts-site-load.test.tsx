@@ -164,7 +164,7 @@ async function renderDetail(initialEntry = "/?tab=versions") {
 }
 
 // Archive lives in the Site's Settings tab.
-function hasArchive(container: HTMLElement) {
+function hasSettingsTab(container: HTMLElement) {
   return [...container.querySelectorAll('[role="tab"]')].some(
     (tab) => tab.textContent?.trim() === "Settings",
   );
@@ -182,7 +182,7 @@ test("loaded app keeps Archive and Edit with Opengeni behind permission checks",
   loadError = null;
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(true);
+    expect(hasSettingsTab(container)).toBe(true);
     expect(hasAction(container, "Edit with Opengeni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
     // Its owner sees that it is Only me and can share it.
@@ -261,7 +261,7 @@ test("missing app hides Archive and Edit with Opengeni", async () => {
   loadError = new OpenGeniApiError(404, "", { correlationId: "corr-missing-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    expect(hasSettingsTab(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This app isn't available");
     // The reference sits behind a quiet Copy details, not in the text.
@@ -280,9 +280,12 @@ test("read-only app hides mutation actions but keeps its details", async () => {
   accessContext.workspaceGrants[0]!.permissions = [];
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    // Settings shows for everyone (workspace access, their own allowed
+    // actions), but nothing in it changes the app.
+    expect(hasSettingsTab(container)).toBe(true);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Share with workspace")).toBe(false);
+    expect(hasAction(container, "Archive")).toBe(false);
     expect(container.textContent).toContain("Café menu");
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;
@@ -295,7 +298,7 @@ test("malformed app id hides mutation actions", async () => {
   loadError = new OpenGeniApiError(422, "", { correlationId: "corr-malformed-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    expect(hasSettingsTab(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This app link isn't valid");
   } finally {
@@ -308,7 +311,7 @@ test("transient app load failure offers retry without mutation actions", async (
   loadError = new OpenGeniApiError(503, "", { correlationId: "corr-transient-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasArchive(container)).toBe(false);
+    expect(hasSettingsTab(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Retry")).toBe(true);
     expect(container.textContent).toContain("Couldn't load this app");
@@ -336,7 +339,7 @@ test("App read refusal explains missing artifact access instead of removal", asy
       );
       expect(container.textContent).not.toContain("may have been removed");
       expect(hasAction(container, "Retry")).toBe(false);
-      expect(hasArchive(container)).toBe(false);
+      expect(hasSettingsTab(container)).toBe(false);
     } finally {
       accessContext.workspaceGrants[0]!.permissions = permissions;
       await act(async () => root.unmount());
@@ -367,6 +370,12 @@ test("Duplicate in Settings copies the app and opens the copy in the app view", 
   siteClient.duplicateWorkspaceArtifact.mockClear();
   const { container, root, router } = await renderDetail("/?tab=settings");
   try {
+    // Duplicate is one of the rarer actions, in Settings' collapsed More.
+    const more = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.trim().startsWith("More"),
+    );
+    expect(more).toBeDefined();
+    await act(async () => more!.click());
     const duplicate = [...container.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === "Duplicate",
     );

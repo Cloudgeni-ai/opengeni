@@ -113,12 +113,14 @@ mock.module("../lib/navigation", () => ({
     to,
     params,
     search,
+    state,
     ...props
   }: {
     children: ReactNode;
     to: string;
     params: Record<string, string>;
     search?: Record<string, string>;
+    state?: Record<string, string>;
     "aria-label"?: string;
     "aria-current"?: "page";
   }) => (
@@ -128,7 +130,7 @@ mock.module("../lib/navigation", () => ({
       aria-current={props["aria-current"]}
       onClick={(event) => {
         event.preventDefault();
-        navigations.push({ to, params, search });
+        navigations.push({ to, params, search, ...(state ? { state } : {}) });
       }}
     >
       {children}
@@ -406,7 +408,7 @@ async function render(selected?: string, { startNew }: { startNew?: boolean } = 
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  const draw = async (next?: string, nextStartNew = startNew) => {
+  const draw = async (next?: string, nextStartNew = startNew, publishing = false) => {
     await act(async () => {
       root!.render(
         <module.SiteViewRoute
@@ -414,13 +416,19 @@ async function render(selected?: string, { startNew }: { startNew?: boolean } = 
           siteId={siteId}
           conversation={next}
           startNew={nextStartNew}
+          publishing={publishing}
         />,
       );
     });
     await settle();
   };
   await draw(selected);
-  return { container, rerender: draw };
+  // The publish form is in the address: follow the route's last move to it.
+  const follow = async () => {
+    const last = navigations.at(-1) as { search?: { publishing?: true } } | undefined;
+    await draw(selected, startNew, last?.search?.publishing === true);
+  };
+  return { container, rerender: draw, follow };
 }
 const openConversation = (container: HTMLElement) =>
   container.querySelector("[data-conversation]")?.getAttribute("data-conversation");
@@ -459,10 +467,10 @@ test("shows the app with its newest conversation open as a regular chat, without
   expect(hintOptions).toEqual({ siteConversations: true });
   // The sidebar lists the Site's conversations; the panel doesn't repeat them.
   expect(panel(container).querySelector("nav")).toBeNull();
-  // Only the menu's two links; no rows to switch conversations.
+  // Only Open as a full chat; no rows to switch conversations.
   expect(
-    [...panel(container).querySelectorAll("a")].filter((a) => !a.closest("[role='menu']")),
-  ).toHaveLength(0);
+    [...panel(container).querySelectorAll("a")].map((a) => a.getAttribute("aria-label")),
+  ).toEqual(["Open as a full chat"]);
   expect(heading(container)).toBe("Time filters across all graphs");
   // The regular chat route, laid out for a narrow panel.
   expect(conversationProps.at(-1)).toMatchObject({
@@ -639,12 +647,14 @@ test("choosing a conversation ends composing", async () => {
   expect(openConversation(container)).toBe(id(2));
 });
 
-test("the menu opens the conversation as a full chat or the app's details", async () => {
+test("the chat opens as a full chat in one click, and the app's menu opens its settings", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
-  await act(async () => link(container, "Open as a full chat")!.click());
-  await act(async () => link(container, "App details")!.click());
+  await act(async () =>
+    container.querySelector<HTMLElement>("a[aria-label='Open as a full chat']")!.click(),
+  );
+  await act(async () => link(container, "Settings")!.click());
   expect(navigations).toEqual([
     {
       to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -655,10 +665,12 @@ test("the menu opens the conversation as a full chat or the app's details", asyn
       params: { workspaceId, artifactId: siteId },
       // Without a tab the address opens the Site view again.
       search: { tab: "settings" },
+      // Its Back returns to this app.
+      state: { artifactDetailFromSite: siteId },
     },
   ]);
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-archived-message")).toBe(
-    "This app is archived. Restore it from app details.",
+    "This app is archived. Restore it from its settings.",
   );
 });
 
@@ -672,11 +684,12 @@ test("an archived app links to its details, where it can be restored", async () 
   const { container } = await render();
   expect(container.querySelector("[data-site-view]")).toBeNull();
   expect(container.textContent).toContain("This app is archived.");
-  await act(async () => link(container, "Restore it from app details")!.click());
+  await act(async () => link(container, "Restore it from its settings")!.click());
   expect(navigations.at(-1)).toEqual({
     to: "/workspaces/$workspaceId/artifacts/$artifactId",
     params: { workspaceId, artifactId: siteId },
     search: { tab: "settings" },
+    state: { artifactDetailFromSite: siteId },
   });
 });
 
@@ -689,13 +702,13 @@ test("someone who can't restore an archived app isn't told to restore it", async
   const { container } = await render();
   expect(container.textContent).toContain("This app is archived.");
   expect(container.textContent).not.toContain("Restore");
-  await act(async () => link(container, "View app details")!.click());
-  // Without a tab the address opens the Site view again; details pick the
-  // first tab this person can see.
+  await act(async () => link(container, "View its settings")!.click());
+  // Without a tab the address opens the Site view again.
   expect(navigations.at(-1)).toEqual({
     to: "/workspaces/$workspaceId/artifacts/$artifactId",
     params: { workspaceId, artifactId: siteId },
     search: { tab: "settings" },
+    state: { artifactDetailFromSite: siteId },
   });
 });
 
@@ -1014,14 +1027,10 @@ test("Edit with Opengeni on an app already open starts a new conversation once",
   expect(navigations).toHaveLength(1);
 });
 
+/** The header's publication control, or nothing where there is none. */
 const publicationSlot = (container: HTMLElement) =>
-  container.querySelector<HTMLElement>("[data-live-status-slot]")!;
-/** The publication control's own text, without the Site's "…" menu beside it. */
-const publicationText = (container: HTMLElement) => {
-  const slot = publicationSlot(container).cloneNode(true) as HTMLElement;
-  for (const menu of slot.querySelectorAll("[data-site-actions-root]")) menu.remove();
-  return slot.textContent;
-};
+  container.querySelector<HTMLElement>("[data-site-publication-slot]");
+const publicationText = (container: HTMLElement) => publicationSlot(container)?.textContent ?? "";
 const siteHidden = (container: HTMLElement) =>
   container.querySelector("[data-site-view]")!.parentElement!.classList.contains("hidden");
 
@@ -1029,11 +1038,19 @@ test("an unpublished app offers Publish, which opens its publish form beside the
   conversations = [conversation(1, "Make the header blue", 2)];
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = notPublished;
-  const { container } = await render();
+  const { container, follow } = await render(id(1));
   expect(publicationText(container)).toBe("Publish");
   expect(container.querySelector("[data-publish-page]")).toBeNull();
 
   await act(async () => button(container, "Publish")!.click());
+  // The form is in the address, so Back closes it.
+  expect(navigations.at(-1)).toEqual({
+    to: "/workspaces/$workspaceId/sites/$siteId",
+    params: { workspaceId, siteId },
+    search: { conversation: id(1), publishing: true },
+    state: { sitePublishingFromSite: `${workspaceId}/${siteId}` },
+  });
+  await follow();
   // The form's code loads when it opens.
   await settle();
   // The Site's own publish form, as a page in place of the Site; the Site
@@ -1059,7 +1076,7 @@ test("an unpublished app offers Publish, which opens its publish form beside the
 
   // Publishing returns to the Site, which now says Published at once.
   await act(async () => button(container, "Publish now")!.click());
-  await settle();
+  await follow();
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(siteHidden(container)).toBe(false);
   expect(publications).toHaveLength(1);
@@ -1077,38 +1094,56 @@ test("in the macOS app the publish form names the window bar, and the app takes 
   document.body.append(container);
   root = createRoot(container);
   // As the session shell wraps every page but a chat in the macOS app.
-  await act(async () => {
-    root!.render(
-      <windowBar.WindowBarPageTitle enabled>
-        <module.SiteViewRoute workspaceId={workspaceId} siteId={siteId} />
-      </windowBar.WindowBarPageTitle>,
-    );
-  });
-  await settle();
+  const draw = async (publishing: boolean) => {
+    await act(async () => {
+      root!.render(
+        <windowBar.WindowBarPageTitle enabled>
+          <module.SiteViewRoute workspaceId={workspaceId} siteId={siteId} publishing={publishing} />
+        </windowBar.WindowBarPageTitle>,
+      );
+    });
+    await settle();
+  };
+  await draw(false);
   const bar = () => container.querySelector("[data-window-bar-title]")?.textContent ?? null;
   expect(bar()).toBe("Opengeni usage");
-  // The Site's name is in the bar, so its toolbar doesn't repeat it.
-  expect(siteViewProps.at(-1)!.showTitle).toBe(false);
+  // The Site's name is in the bar, and its controls join the bar: no row of
+  // their own above the Site.
+  const header = () => document.querySelector<HTMLElement>("[data-site-header]");
+  expect(header()?.hasAttribute("data-window-bar-controls")).toBe(true);
+  expect(container.contains(header())).toBe(false);
+  expect(header()?.textContent).not.toContain("Opengeni usage");
 
-  await act(async () => button(container, "Publish")!.click());
-  await settle();
+  await act(async () => button(document.body, "Publish")!.click());
+  expect((navigations.at(-1) as { search: object }).search).toEqual({ publishing: true });
+  await draw(true);
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
   expect(bar()).toBe("Publish to web");
+  expect(header()).toBeNull();
 
   await act(async () => button(container, "Back to the app")!.click());
+  expect(navigations.at(-1)).toMatchObject({ search: {}, replace: true });
+  await draw(false);
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(bar()).toBe("Opengeni usage");
-  expect(siteViewProps.at(-1)!.showTitle).toBe(false);
+  expect(header()?.hasAttribute("data-window-bar-controls")).toBe(true);
 });
 
 test("a published app's settings open the same form; its back link returns to the app", async () => {
   conversations = [];
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = async () => published;
-  const { container } = await render();
-  const slot = publicationSlot(container);
+  const { container, follow } = await render();
+  const slot = publicationSlot(container)!;
   expect(slot.textContent).toContain("Published");
   expect(slot.querySelector("a")?.getAttribute("href")).toBe("https://usage-4k9x.sites.example/");
+  // Copy link has one place, the Published menu: no separate link button.
+  expect(container.querySelector("[data-artifact-copy-link]")).toBeNull();
+  expect(
+    [...container.querySelectorAll("[data-site-header] button")].filter(
+      (element) => element.getAttribute("aria-label") === "Copy link",
+    ),
+  ).toHaveLength(0);
 
   // From full screen, the form first leaves it.
   await act(async () =>
@@ -1116,12 +1151,20 @@ test("a published app's settings open the same form; its back link returns to th
   );
   expect(siteViewProps.at(-1)!.fullScreen).toBe(true);
   await act(async () => button(container, "Publishing settings")!.click());
-  await settle();
+  await follow();
   expect(siteViewProps.at(-1)!.fullScreen).toBe(false);
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
   expect(document.activeElement?.textContent).toBe("Publish to web");
 
   await act(async () => button(container, "Back to the app")!.click());
+  // Back from the form returns to the app (opened by link, it replaces the form).
+  expect(navigations.at(-1)).toEqual({
+    to: "/workspaces/$workspaceId/sites/$siteId",
+    params: { workspaceId, siteId },
+    search: {},
+    replace: true,
+  });
+  await follow();
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(siteHidden(container)).toBe(false);
   expect(publications).toHaveLength(0);
@@ -1150,14 +1193,12 @@ test("the header never says Live, also where publishing isn't available", async 
   expect(publicationText(container)).toBe("");
 });
 
-const menuItem = (container: HTMLElement, text: string) =>
-  [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(
-    (element) => element.textContent === text,
-  );
+const moveButton = (container: HTMLElement, label: string) =>
+  panel(container).querySelector<HTMLButtonElement>(`button[aria-label='${label}']`) ?? undefined;
 const layoutRoot = (container: HTMLElement) =>
   container.querySelector<HTMLElement>("[data-site-chat-position]")!;
 
-test("the chat moves to the left from its menu, and stays there for this person", async () => {
+test("the chat moves to the left in one click, and stays there for this person", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
   const { container } = await render();
@@ -1165,10 +1206,11 @@ test("the chat moves to the left from its menu, and stays there for this person"
   expect(layoutRoot(container).getAttribute("data-site-chat-position")).toBe("right");
   expect(layoutRoot(container).className).not.toContain("lg:flex-row-reverse");
   expect(panel(container).className).toContain("lg:border-l");
-  expect(menuItem(container, "Move chat to right")).toBeUndefined();
+  // One click, no menu.
+  expect(moveButton(container, "Move chat to right")).toBeUndefined();
   const site = container.querySelector("[data-site-view]");
   const chat = container.querySelector("[data-conversation]");
-  await act(async () => menuItem(container, "Move chat to left")!.click());
+  await act(async () => moveButton(container, "Move chat to left")!.click());
   expect(layoutRoot(container).getAttribute("data-site-chat-position")).toBe("left");
   // The page only reverses: neither the Site nor the chat is drawn again.
   expect(layoutRoot(container).className).toContain("lg:flex-row-reverse");
@@ -1205,7 +1247,7 @@ test("the chat moves to the left from its menu, and stays there for this person"
   act(() => root?.unmount());
   const again = await render();
   expect(layoutRoot(again.container).getAttribute("data-site-chat-position")).toBe("left");
-  await act(async () => menuItem(again.container, "Move chat to right")!.click());
+  await act(async () => moveButton(again.container, "Move chat to right")!.click());
   expect(layoutRoot(again.container).getAttribute("data-site-chat-position")).toBe("right");
   expect(JSON.parse(localStorage.getItem(storageKey)!).position).toBe("right");
 });
@@ -1295,7 +1337,7 @@ const siteActions = (container: HTMLElement) =>
     ),
   ].map((item) => item.textContent);
 
-test("the app's own menu copies its title, duplicates it and opens its details", async () => {
+test("the app's own menu keeps the common actions; the rare ones are in its settings", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
@@ -1303,23 +1345,18 @@ test("the app's own menu copies its title, duplicates it and opens its details",
     "More app actions",
   );
   // Without a sidebar listing the Site, its Pin and Archive have nowhere to act.
-  expect(siteActions(container)).toEqual([
-    "Copy title",
-    "Duplicate",
-    "App details",
-    "Reset allowed actions",
-  ]);
-  // The chat's menu keeps to the chat.
-  const chatMenu = [...container.querySelectorAll("[role='menu']")].filter(
-    (menu) => !menu.closest("[data-site-actions-root]"),
+  expect(siteActions(container)).toEqual(["Duplicate", "Reload app", "Settings"]);
+  // The chat's header has no menu of its own.
+  const chatMenus = [...container.querySelectorAll("[role='menu']")].filter(
+    (menu) => !menu.closest("[data-site-actions-root]") && panel(container).contains(menu),
   );
-  for (const menu of chatMenu) expect(menu.textContent).not.toContain("App details");
+  expect(chatMenus).toHaveLength(0);
 });
 
 test("people who can't publish get no Duplicate in the app's menu", async () => {
   permissions = ["sessions:create"];
   const { container } = await render();
-  expect(siteActions(container)).toEqual(["Copy title", "App details", "Reset allowed actions"]);
+  expect(siteActions(container)).toEqual(["Reload app", "Settings"]);
 });
 
 test("the app's menu pins and archives through the sidebar's own actions", async () => {
@@ -1334,13 +1371,7 @@ test("the app's menu pins and archives through the sidebar's own actions", async
   });
   try {
     const { container } = await render();
-    expect(siteActions(container)).toEqual([
-      "Copy title",
-      "Unpin",
-      "App details",
-      "Reset allowed actions",
-      "Archive",
-    ]);
+    expect(siteActions(container)).toEqual(["Unpin", "Reload app", "Settings", "Archive"]);
     await act(async () => button(container, "Unpin")!.click());
     await act(async () => button(container, "Archive")!.click());
     expect(pins).toEqual([[siteId, false]]);
@@ -1358,5 +1389,5 @@ test("an app with nothing published yet offers no Duplicate", async () => {
     events: [],
   });
   const { container } = await render();
-  expect(siteActions(container)).toEqual(["Copy title", "App details"]);
+  expect(siteActions(container)).toEqual(["Reload app", "Settings"]);
 });

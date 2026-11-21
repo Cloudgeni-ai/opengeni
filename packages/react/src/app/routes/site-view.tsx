@@ -11,23 +11,22 @@ import type {
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   ArchiveIcon,
+  ArrowLeftRightIcon,
   ArrowLeftIcon,
   CopyIcon,
   CopyPlusIcon,
-  DownloadIcon,
-  InfoIcon,
   LinkIcon,
   Maximize2Icon,
   MoreHorizontalIcon,
   PanelLeftCloseIcon,
-  PanelLeftIcon,
   PanelLeftOpenIcon,
   PanelRightCloseIcon,
-  PanelRightIcon,
   PanelRightOpenIcon,
   PinIcon,
   PlusIcon,
-  RotateCcwIcon,
+  RefreshCwIcon,
+  Settings2Icon,
+  SquareArrowOutUpRightIcon,
 } from "lucide-react";
 import {
   lazy,
@@ -43,10 +42,12 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 import { SiteView } from "../../artifacts";
+import { useArtifactLabels } from "../../components/artifacts/artifact-chrome";
+import type { SiteLiveState } from "../../components/artifacts/artifact-sandbox";
 import { SiteVersionMenu } from "../components/artifacts/site-version-menu";
 import { useArtifactsBackLink } from "../components/artifacts/artifact-page-chrome";
-import { CopyArtifactLinkButton } from "../components/artifacts/copy-artifact-link";
 import type {
   CreatedConversation,
   NewConversationCreateOptions,
@@ -66,7 +67,6 @@ import {
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
 import { useSiteActions } from "../components/artifacts/site-actions";
-import { useExportApp } from "../components/artifacts/app-package";
 import { useSiteSidebarActions } from "../lib/site-sidebar-bridge";
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
@@ -82,14 +82,8 @@ import {
   useSitePublicationLink,
 } from "../components/artifacts/site-public-link";
 import { useAppApi } from "../lib/app-api";
-import {
-  notifySiteToolReadinessChanged,
-  useConsoleSiteToolBridge,
-  useConsoleSiteViewer,
-} from "../lib/console-site";
-import { toast } from "../lib/toast";
-import { userErrorText } from "../../ui/api-error";
-import { Link, useNavigate } from "../lib/navigation";
+import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
+import { Link, useNavigate, usePage, useRouter } from "../lib/navigation";
 import { hasWorkspacePermission } from "../lib/permissions";
 import type { SiteViewArtifactsReturn } from "../lib/routes";
 import { sessionDisplayTitle } from "../lib/session-rename";
@@ -142,7 +136,9 @@ type SiteState =
     };
 
 /** A conversation this panel just created, for its first open. */
-type SiteHandoff = CreatedConversation & { creation: SessionCreationHandoff | null };
+type SiteHandoff = CreatedConversation & {
+  creation: SessionCreationHandoff | null;
+};
 
 /**
  * A Site with its chat beside it. The Site fills the page; the panel shows
@@ -160,10 +156,14 @@ type SiteHandoff = CreatedConversation & { creation: SessionCreationHandoff | nu
  * reloads in place when one is published or restored, and the version chip
  * in its header offers the history and one-click Undo.
  *
- * Its header says whether the Site is on the web: "Published" opens or
- * copies the address, or Publish for people who can. Publishing and its
- * settings open the Site's own publish form in place of the Site, with the
- * chat still beside it.
+ * Its header is one slim row on the page itself, without a frame: the way
+ * back, the title and version, whether the Site is on the web ("Published"
+ * opens or copies the address, or Publish for people who can), its "…" and
+ * full screen. In the macOS app the title is the window bar's, and the
+ * controls join it there, so the Site starts right under the bar. Publishing
+ * and its settings open the Site's own publish form in place of the Site,
+ * with the chat still beside it; it is in the address (`?publishing`), so
+ * going back closes it.
  */
 export function SiteViewRoute({
   workspaceId,
@@ -173,6 +173,7 @@ export function SiteViewRoute({
   page,
   artifactsReturn,
   connect,
+  publishing: publishingRequested = false,
   embedded = false,
 }: {
   workspaceId: string;
@@ -195,9 +196,13 @@ export function SiteViewRoute({
   artifactsReturn?: SiteViewArtifactsReturn | undefined;
   /** Open this connect card item's dialog once (`?connect=`, from a published App). */
   connect?: string | undefined;
+  /** Show the publish form in place of the Site (`?publishing`). */
+  publishing?: boolean | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
+  const router = useRouter();
+  const pageHost = usePage();
   const viewer = useConsoleSiteViewer();
   // By value: a host may pass a new object on every render.
   const backKey = artifactsReturn?.browse ? JSON.stringify(artifactsReturn) : "";
@@ -216,10 +221,11 @@ export function SiteViewRoute({
           ...back,
           ...(conversation ? { conversation } : {}),
           ...(href === "/" ? {} : { page: href }),
+          ...(publishingRequested ? { publishing: true } : {}),
         },
         ...(options.replace ? { replace: true } : {}),
       }),
-    [back, conversation, navigate, siteId, workspaceId],
+    [back, conversation, navigate, publishingRequested, siteId, workspaceId],
   );
   // Anyone who can open the Site sees whether it is published and its
   // address; Publish and the publish form are for people who can publish.
@@ -248,10 +254,11 @@ export function SiteViewRoute({
           ...back,
           ...(conversation ? { conversation } : {}),
           ...(page ? { page } : {}),
+          ...(publishingRequested ? { publishing: true } : {}),
         },
         replace: true,
       }),
-    [back, conversation, navigate, page, siteId, workspaceId],
+    [back, conversation, navigate, page, publishingRequested, siteId, workspaceId],
   );
   const connectCard =
     artifact?.status === "active" ? (
@@ -265,11 +272,9 @@ export function SiteViewRoute({
         />
       </div>
     ) : null;
-  // The publish form, open for this Site; another Site starts without it.
+  // The publish form, open for this Site while the address says so.
   const siteKey = `${workspaceId}/${siteId}`;
-  const [publishingFor, setPublishingFor] = useState<string | null>(null);
-  const publishingSite =
-    publishingFor === siteKey && artifact?.status === "active" ? artifact : null;
+  const publishingSite = publishingRequested && artifact?.status === "active" ? artifact : null;
   const publishing = publishingSite !== null;
   // In the macOS app the Site's name is the window bar's title, as a page's
   // is, instead of in its toolbar (which shows it again in full screen, where
@@ -281,21 +286,46 @@ export function SiteViewRoute({
   });
   // Full screen is the route's so opening the form can leave it first.
   const [fullScreen, setFullScreen] = useState(false);
+  const publishingSearch = useCallback(
+    (open: boolean) => ({
+      ...back,
+      ...(conversation ? { conversation } : {}),
+      ...(page ? { page } : {}),
+      ...(open ? { publishing: true } : {}),
+    }),
+    [back, conversation, page],
+  );
   const openPublishing = useCallback(() => {
     setFullScreen(false);
-    setPublishingFor(siteKey);
-  }, [siteKey]);
+    void navigate({
+      to: SITE_ROUTE,
+      params: { workspaceId, siteId },
+      search: publishingSearch(true),
+      state: { sitePublishingFromSite: siteKey },
+    });
+  }, [navigate, publishingSearch, siteId, siteKey, workspaceId]);
   // Back from the form returns focus to the control that opened it.
   const siteColumn = useRef<HTMLDivElement>(null);
   const returnFocus = useRef(false);
+  // Opened from this Site in this tab: going back is the browser's Back, so
+  // the history doesn't keep the form. Opened by link: back replaces it.
   const closePublishing = useCallback(() => {
     returnFocus.current = true;
-    setPublishingFor(null);
-  }, []);
+    const openedHere =
+      router.state.location.state?.sitePublishingFromSite === siteKey && !pageHost.opensBeside;
+    if (openedHere) window.history.back();
+    else
+      void navigate({
+        to: SITE_ROUTE,
+        params: { workspaceId, siteId },
+        search: publishingSearch(false),
+        replace: true,
+      });
+  }, [navigate, pageHost, publishingSearch, router, siteId, siteKey, workspaceId]);
   useEffect(() => {
     if (publishing || !returnFocus.current) return;
     returnFocus.current = false;
-    siteColumn.current?.querySelector<HTMLElement>("[data-site-publication]")?.focus();
+    document.querySelector<HTMLElement>("[data-site-header] [data-site-publication]")?.focus();
   }, [publishing]);
   const site = useMemo<SiteState>(
     () =>
@@ -322,6 +352,9 @@ export function SiteViewRoute({
   ) : undefined;
   const { layout, update: updateLayout } = useSiteChatPanelLayout(accessContext.subjectId);
   const [relay] = useState(() => new ChatFileDropRelay());
+  const [liveState, setLiveState] = useState<SiteLiveState | undefined>(undefined);
+  const [reloadToken, setReloadToken] = useState(0);
+  const reload = useCallback(() => setReloadToken((value) => value + 1), []);
   if (embedded) {
     return (
       <div
@@ -345,6 +378,45 @@ export function SiteViewRoute({
       </div>
     );
   }
+  const archived = artifact?.status === "archived";
+  const titleNode = artifact ? (
+    <SiteTitleMenu workspaceId={workspaceId} origin={{ siteId, title: artifact.title }}>
+      <span className="min-w-0 truncate text-sm font-medium text-fg" title={artifact.title}>
+        {artifact.title}
+      </span>
+    </SiteTitleMenu>
+  ) : null;
+  const versionMenu =
+    live.detail && !archived ? (
+      <SiteVersionMenu
+        workspaceId={workspaceId}
+        siteId={siteId}
+        detail={live.detail}
+        canPublish={canPublish}
+        onRestored={check}
+      />
+    ) : null;
+  // The one publication control and the Site's "…". The Site view never
+  // says "Live": it stays current, and says so only while Updating or
+  // Reconnecting.
+  const siteControls =
+    artifact && !archived ? (
+      <>
+        <span data-site-publication-slot="" className="contents">
+          <SitePublicationControl
+            load={publication.load}
+            canPublish={canPublish}
+            onOpenPublishing={openPublishing}
+          />
+        </span>
+        <SiteActionsMenu
+          workspaceId={workspaceId}
+          origin={{ siteId, title: artifact.title }}
+          hasVersion={Boolean(artifact.currentVersion)}
+          onReload={reload}
+        />
+      </>
+    ) : null;
   return (
     <div
       className={cn(
@@ -356,13 +428,30 @@ export function SiteViewRoute({
       data-workspace-scroll-owner="self-managed"
       data-site-chat-position={layout.position}
     >
-      {/* The Site's column, not its chat: the Site's toolbar is this page's
-          top row. */}
+      {/* The Site's column, not its chat: the Site's header is this page's
+          top row (in the macOS app, the window bar). */}
       <div
         ref={siteColumn}
         data-site-column
         className="relative flex min-h-0 min-w-0 flex-1 flex-col"
       >
+        {publishing || fullScreen ? null : (
+          <SiteHeader inWindowBar={titleInWindowBar}>
+            {titleInWindowBar ? null : (
+              <>
+                {backControl}
+                {titleNode}
+              </>
+            )}
+            {versionMenu}
+            <span className="min-w-2 flex-1" />
+            <SiteLiveStateLabel state={liveState} />
+            {siteControls}
+            {artifact && !archived ? (
+              <FullScreenButton onClick={() => setFullScreen(true)} />
+            ) : null}
+          </SiteHeader>
+        )}
         {publishingSite ? (
           <Suspense fallback={<div className="min-h-0 flex-1 bg-bg" />}>
             <SitePublishingPage
@@ -375,25 +464,19 @@ export function SiteViewRoute({
             />
           </Suspense>
         ) : null}
-        {artifact?.status === "archived" ? (
-          <>
-            {backControl ? (
-              <div className="flex min-h-12 shrink-0 items-center border-b border-border/80 px-3 sm:px-4">
-                {backControl}
-              </div>
-            ) : null}
-            <p className="p-4 text-sm text-fg-muted">
-              This app is archived.{" "}
-              <Link
-                to="/workspaces/$workspaceId/artifacts/$artifactId"
-                params={{ workspaceId, artifactId: siteId }}
-                search={{ tab: "settings" }}
-                className="font-medium text-fg underline underline-offset-2"
-              >
-                {canPublish ? "Restore it from app details" : "View app details"}
-              </Link>
-            </p>
-          </>
+        {archived ? (
+          <p className="p-4 text-sm text-fg-muted">
+            This app is archived.{" "}
+            <Link
+              to="/workspaces/$workspaceId/artifacts/$artifactId"
+              params={{ workspaceId, artifactId: siteId }}
+              search={{ tab: "settings" }}
+              state={{ artifactDetailFromSite: siteId }}
+              className="font-medium text-fg underline underline-offset-2"
+            >
+              {canPublish ? "Restore it from its settings" : "View its settings"}
+            </Link>
+          </p>
         ) : (
           // Hidden, not unmounted, behind the form: the Site keeps its page.
           <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", publishing && "hidden")}>
@@ -405,8 +488,11 @@ export function SiteViewRoute({
               viewer={viewer}
               siteLocation={page ?? "/"}
               onSiteLocationChange={onSiteLocationChange}
-              toolbarStart={backControl}
-              showTitle={!titleInWindowBar || fullScreen}
+              // The header above draws the controls; the frame's own toolbar
+              // shows only in full screen.
+              showToolbar={false}
+              onLiveStateChange={setLiveState}
+              reloadToken={reloadToken}
               renderTitle={
                 artifact
                   ? (title) => (
@@ -419,48 +505,17 @@ export function SiteViewRoute({
                     )
                   : undefined
               }
-              // The one publication control. The Site view never says "Live":
-              // it stays current, and says so only while Updating or Reconnecting.
-              liveStatus={
-                <>
-                  <SitePublicationControl
-                    load={publication.load}
-                    canPublish={canPublish}
-                    onOpenPublishing={openPublishing}
-                  />
-                  <CopyArtifactLinkButton
-                    workspaceId={workspaceId}
-                    item={{ kind: "site", id: siteId }}
-                    className="size-8 rounded-md text-fg-muted hover:text-fg"
-                  />
-                  {artifact ? (
-                    <SiteActionsMenu
-                      workspaceId={workspaceId}
-                      origin={{ siteId, title: artifact.title }}
-                      hasVersion={Boolean(artifact.currentVersion)}
-                      versionId={artifact.currentVersion?.id ?? null}
-                    />
-                  ) : null}
-                </>
-              }
+              // In full screen the frame's toolbar carries the same controls
+              // (mounted only there, so there is one of each).
+              liveStatus={fullScreen ? siteControls : null}
               versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
               watch={live.watch}
-              versionControl={
-                live.detail ? (
-                  <SiteVersionMenu
-                    workspaceId={workspaceId}
-                    siteId={siteId}
-                    detail={live.detail}
-                    canPublish={canPublish}
-                    onRestored={check}
-                  />
-                ) : undefined
-              }
+              versionControl={fullScreen ? versionMenu : null}
               fullScreen={fullScreen}
               onFullScreenChange={setFullScreen}
               archivedMessage={
                 canPublish
-                  ? "This app is archived. Restore it from app details."
+                  ? "This app is archived. Restore it from its settings."
                   : "This app is archived."
               }
             />
@@ -522,25 +577,109 @@ function SiteTitleMenu({
 }
 
 /**
- * The Site's "…", as a chat's header has one: Copy title, the sidebar's Pin
- * and Archive (while the sidebar lists Sites), Duplicate and Site details.
- * Copy link and the published address keep their own controls beside it.
+ * The Site's header row. On the page it is a slim row with no frame of its
+ * own, so the Site reads as part of the page. In the macOS app, where the
+ * window bar already names the Site, its controls join the bar instead (on
+ * its right, beside the title line) and the Site starts right under it.
+ */
+function SiteHeader({ inWindowBar, children }: { inWindowBar: boolean; children: ReactNode }) {
+  if (inWindowBar) {
+    if (typeof document === "undefined") return null;
+    // `data-window-bar-controls`: hidden with the bar's other controls while a
+    // full-window layer covers the page.
+    return createPortal(
+      <div
+        data-site-header=""
+        data-window-bar-controls=""
+        className="fixed top-0 right-[calc(var(--og-window-panel-gap,4px)+0.5rem)] z-[47] flex h-[calc(2*var(--og-window-controls-center,22px))] min-h-min items-center gap-0.5 [-webkit-app-region:no-drag] [app-region:no-drag]"
+      >
+        {children}
+      </div>,
+      document.body,
+    );
+  }
+  return (
+    <div
+      data-site-header=""
+      className="flex h-11 shrink-0 items-center gap-1.5 bg-canvas pr-2 pl-3 sm:pl-4"
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Only while the Site isn't current: Updating or Reconnecting, announced politely. */
+function SiteLiveStateLabel({ state }: { state: SiteLiveState | undefined }) {
+  const labels = useArtifactLabels();
+  const busy = state === "updating" || state === "reconnecting";
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-live-status={busy ? state : undefined}
+      className={
+        busy
+          ? "mr-1 inline-flex items-center gap-1.5 text-2xs font-medium text-fg-muted"
+          : "sr-only"
+      }
+    >
+      {busy ? (
+        <>
+          <span
+            aria-hidden="true"
+            className={cn(
+              "size-1.5 rounded-full",
+              state === "updating"
+                ? "bg-status-running ring-4 ring-status-running/15 motion-safe:animate-pulse"
+                : "bg-status-waiting ring-4 ring-status-waiting/15",
+            )}
+          />
+          <span className="max-sm:sr-only">
+            {state === "updating" ? labels.liveUpdating : labels.liveReconnecting}
+          </span>
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+function FullScreenButton({ onClick }: { onClick: () => void }) {
+  const labels = useArtifactLabels();
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      aria-label={labels.openFullScreen}
+      title={labels.openFullScreen}
+      className="size-8 rounded-md text-fg-muted hover:text-fg pointer-coarse:size-11"
+      onClick={onClick}
+    >
+      <Maximize2Icon aria-hidden="true" className="size-3.5" />
+    </Button>
+  );
+}
+
+/**
+ * The Site's "…", as a chat's header has one, with the actions people use
+ * often: the sidebar's Pin and Archive (while the sidebar lists Sites),
+ * Duplicate, Reload and Settings. Rarer ones (export, allowed actions,
+ * versions) are in Settings; copying the address is in "Published".
  */
 function SiteActionsMenu({
   workspaceId,
   origin,
   hasVersion,
-  versionId,
+  onReload,
 }: {
   workspaceId: string;
   origin: { siteId: string; title: string };
   hasVersion: boolean;
-  versionId: string | null;
+  onReload: () => void;
 }) {
   const site = useSiteActions(workspaceId, origin, { hasVersion });
   const sidebar = useSiteSidebarActions(workspaceId, origin);
-  const resetAllowed = useResetSiteToolAllowances(workspaceId, origin.siteId, versionId);
-  const exportApp = useExportApp(workspaceId);
+  const labels = useArtifactLabels();
   return (
     <span data-site-actions-root="" className="contents">
       <DropdownMenu>
@@ -557,11 +696,7 @@ function SiteActionsMenu({
             <MoreHorizontalIcon aria-hidden="true" className="size-4" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-52">
-          <DropdownMenuItem onSelect={site.copyTitle}>
-            <CopyIcon aria-hidden="true" />
-            Copy title
-          </DropdownMenuItem>
+        <DropdownMenuContent align="end" className="w-48">
           {sidebar ? (
             <DropdownMenuItem onSelect={sidebar.togglePin}>
               <PinIcon aria-hidden="true" className={sidebar.pinned ? "fill-current" : undefined} />
@@ -574,27 +709,16 @@ function SiteActionsMenu({
               {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
             </DropdownMenuItem>
           ) : null}
-          {site.duplicate && exportApp ? (
-            <DropdownMenuItem
-              disabled={exportApp.busy}
-              onSelect={() => void exportApp.run(origin.siteId)}
-            >
-              <DownloadIcon aria-hidden="true" />
-              Export app
-            </DropdownMenuItem>
-          ) : null}
+          <DropdownMenuItem onSelect={onReload}>
+            <RefreshCwIcon aria-hidden="true" />
+            {labels.reloadSite}
+          </DropdownMenuItem>
           <DropdownMenuItem asChild>
-            <Link {...site.details}>
-              <InfoIcon aria-hidden="true" />
-              App details
+            <Link {...site.details} state={{ artifactDetailFromSite: origin.siteId }}>
+              <Settings2Icon aria-hidden="true" />
+              Settings
             </Link>
           </DropdownMenuItem>
-          {resetAllowed ? (
-            <DropdownMenuItem disabled={resetAllowed.busy} onSelect={resetAllowed.run}>
-              <RotateCcwIcon aria-hidden="true" />
-              Reset allowed actions
-            </DropdownMenuItem>
-          ) : null}
           {sidebar ? (
             <>
               <DropdownMenuSeparator />
@@ -608,41 +732,6 @@ function SiteActionsMenu({
       </DropdownMenu>
     </span>
   );
-}
-
-/**
- * Forget this person's "Always allow" choices on this Site: its next actions
- * ask again. Open frames hear it as a readiness change.
- */
-function useResetSiteToolAllowances(
-  workspaceId: string,
-  siteId: string,
-  versionId: string | null,
-): { busy: boolean; run: () => void } | null {
-  const api = useAppApi();
-  const [busy, setBusy] = useState(false);
-  const run = useCallback(() => {
-    if (!versionId) return;
-    setBusy(true);
-    api
-      .request<{ version: 1; removed: number }>(
-        `/v1/workspaces/${encodeURIComponent(workspaceId)}/tools/site-allowances/reset`,
-        {
-          method: "POST",
-          body: JSON.stringify({ siteArtifactId: siteId, siteVersionId: versionId }),
-        },
-      )
-      .then(
-        () => {
-          notifySiteToolReadinessChanged(siteId);
-          toast.success("Allowed actions reset");
-        },
-        (error: unknown) =>
-          toast.error("Couldn't reset allowed actions", { description: userErrorText(error) }),
-      )
-      .finally(() => setBusy(false));
-  }, [api, siteId, versionId, workspaceId]);
-  return versionId ? { busy, run } : null;
 }
 
 const PAGE_SIZE = 30;
@@ -1003,7 +1092,10 @@ function SiteChatPanel({
         `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
         {
           method: "POST",
-          headers: { [SITE_ID_HEADER]: siteId, [SITE_VERSION_HEADER]: versionId },
+          headers: {
+            [SITE_ID_HEADER]: siteId,
+            [SITE_VERSION_HEADER]: versionId,
+          },
           body: JSON.stringify({
             ...(voice ? { startMode: "realtime" } : { initialMessage, clientEventId }),
             idempotencyKey,
@@ -1015,7 +1107,10 @@ function SiteChatPanel({
         },
       );
       if (clientEventId)
-        createdSessions.current.set(created.id, { session: created, clientEventId });
+        createdSessions.current.set(created.id, {
+          session: created,
+          clientEventId,
+        });
       return created.id;
     },
     [api, siteId, versionId, workspaceId],
@@ -1091,7 +1186,7 @@ function SiteChatPanel({
           onCollapse={hide}
           className="max-lg:hidden"
         />
-        <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border pr-2 pl-4">
+        <div className="flex h-11 shrink-0 items-center gap-0.5 pr-2 pl-4">
           <h2
             className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
             title={title ?? undefined}
@@ -1103,52 +1198,42 @@ function SiteChatPanel({
               type="button"
               variant={showComposer ? "secondary" : "ghost"}
               size="sm"
-              className="pointer-coarse:h-11"
+              className="mr-0.5 pointer-coarse:h-11"
               onClick={startNew}
             >
               <PlusIcon aria-hidden="true" className="size-3.5" />
               New
             </Button>
           ) : null}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label="More"
-                title="More"
-                className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+          {selectedId ? (
+            <Button
+              asChild
+              variant="ghost"
+              size="icon-sm"
+              className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+            >
+              <Link
+                to="/workspaces/$workspaceId/sessions/$sessionId"
+                params={{ workspaceId, sessionId: selectedId }}
+                aria-label="Open as a full chat"
+                title="Open as a full chat"
               >
-                <MoreHorizontalIcon aria-hidden="true" className="size-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-52">
-              {selectedId ? (
-                <DropdownMenuItem asChild>
-                  <Link
-                    to="/workspaces/$workspaceId/sessions/$sessionId"
-                    params={{ workspaceId, sessionId: selectedId }}
-                  >
-                    <Maximize2Icon aria-hidden="true" />
-                    Open as a full chat
-                  </Link>
-                </DropdownMenuItem>
-              ) : null}
-              {/* Beside the Site only on wide screens; narrower ones stack the chat below. */}
-              <DropdownMenuItem
-                className="max-lg:hidden"
-                onSelect={() => updateLayout({ position: left ? "right" : "left" })}
-              >
-                {left ? (
-                  <PanelRightIcon aria-hidden="true" />
-                ) : (
-                  <PanelLeftIcon aria-hidden="true" />
-                )}
-                {left ? "Move chat to right" : "Move chat to left"}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+                <SquareArrowOutUpRightIcon aria-hidden="true" className="size-4" />
+              </Link>
+            </Button>
+          ) : null}
+          {/* Beside the Site only on wide screens; narrower ones stack the chat below. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={left ? "Move chat to right" : "Move chat to left"}
+            title={left ? "Move chat to right" : "Move chat to left"}
+            className="text-fg-muted hover:text-fg max-lg:hidden"
+            onClick={() => updateLayout({ position: left ? "right" : "left" })}
+          >
+            <ArrowLeftRightIcon aria-hidden="true" className="size-4" />
+          </Button>
           <Button
             id={hideButtonId}
             type="button"

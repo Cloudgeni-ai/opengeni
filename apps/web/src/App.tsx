@@ -962,7 +962,11 @@ const workspaceLegacyCapabilitiesRoute = createRoute({
 });
 const AUTOMATIONS_SEARCH_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-type AutomationsSearch = { sourceSessionId?: string; taskId?: string; targetSessionId?: string };
+type AutomationsSearch = {
+  sourceSessionId?: string;
+  taskId?: string;
+  targetSessionId?: string;
+};
 function automationsSearch(search: Record<string, unknown>): AutomationsSearch {
   return {
     ...(typeof search.sourceSessionId === "string" &&
@@ -1147,7 +1151,11 @@ const workspaceDocumentsRoute = createRoute({
   // Old Documents links (and `?memory=<id>` bookmarks) open Knowledge.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { memory?: string; from?: "brain"; authority?: DocumentAuthorityKind } => ({
+  ): {
+    memory?: string;
+    from?: "brain";
+    authority?: DocumentAuthorityKind;
+  } => ({
     ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
     ...(search.from === "brain" ? { from: "brain" as const } : {}),
     ...(search.authority === "organization" ||
@@ -1912,7 +1920,10 @@ function WorkspaceSettings() {
       }
       access={
         section === "access"
-          ? { ...(view ? { view: view as AccessUrlView } : {}), ...(member ? { member } : {}) }
+          ? {
+              ...(view ? { view: view as AccessUrlView } : {}),
+              ...(member ? { member } : {}),
+            }
           : undefined
       }
     />
@@ -1955,6 +1966,7 @@ function SiteViewPage() {
       page={search.page}
       artifactsReturn={siteViewArtifactsReturn(search)}
       connect={search.connect}
+      publishing={search.publishing === true}
     />
   );
 }

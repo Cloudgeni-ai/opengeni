@@ -14,7 +14,7 @@ import {
   hasSiteSettings,
   useSiteManagement,
 } from "../components/artifacts/site-settings";
-import { Link, useNavigate, useSearch } from "../lib/navigation";
+import { Link, useNavigate, useRouterState, useSearch } from "../lib/navigation";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -24,7 +24,7 @@ import {
   RotateCcwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { toast } from "../lib/toast";
 
 import { ArtifactLibrary } from "../components/artifacts/artifact-library";
@@ -40,7 +40,12 @@ import { invalidateArtifactCatalog, useArtifactCatalog } from "../lib/use-artifa
 import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
 import { Button } from "../../ui/button";
 import { ContentPage } from "../../ui/content-layout";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "../../ui/detail-page";
+import {
+  DetailPage,
+  DetailPageBody,
+  DetailPageHeader,
+  type DetailBackLink,
+} from "../../ui/detail-page";
 import { DetailSection } from "../../ui/detail-sheet";
 import { LineTabs, LineTabsContent, LineTabsList, LineTabsTrigger } from "../../ui/line-tabs";
 import { ListRow, RowList } from "../../ui/list-row";
@@ -218,9 +223,14 @@ function ArtifactListRoute({
     setPreparingNew(true);
     try {
       await readyNewChat(context.client, workspaceId, newArtifactPrompt(filters.kind));
-      await navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
+      await navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId },
+      });
     } catch (nextError) {
-      toast.error("Couldn't open a new chat", { description: userErrorText(nextError) });
+      toast.error("Couldn't open a new chat", {
+        description: userErrorText(nextError),
+      });
     } finally {
       setPreparingNew(false);
     }
@@ -501,7 +511,27 @@ function ArtifactDetailPage({
     "artifacts:publish",
   );
   const navigate = useNavigate();
-  const back = useArtifactsBackLink(workspaceId, fromSession);
+  const artifactsBack = useArtifactsBackLink(workspaceId, fromSession);
+  // Opened from the app's own view (its "…" Settings): Back returns to the
+  // app as it was, through the browser's history, which the tabs replace.
+  const fromSite = useRouterState({
+    select: (state) => state.location.state.artifactDetailFromSite === artifactId,
+  });
+  const back: DetailBackLink = fromSite
+    ? {
+        label: "App",
+        href: `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(artifactId)}`,
+        onClick: (event?: MouseEvent) => {
+          if (
+            event &&
+            (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+          )
+            return;
+          event?.preventDefault();
+          window.history.back();
+        },
+      }
+    : artifactsBack;
   const copyLink = useCopyArtifactLink(workspaceId);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
   // The tab is in the address, so Settings (from the workbench or the old
@@ -522,6 +552,8 @@ function ArtifactDetailPage({
           params: { workspaceId, artifactId },
           search: { ...search, view: undefined, tab: next },
           replace: true,
+          // Keeps where the page was opened from, for its Back.
+          state: true,
           resetScroll: false,
         });
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
@@ -646,7 +678,7 @@ function ArtifactDetailPage({
     (tab === "settings" && !showSettings) || (tab === "data" && !manageData) ? "versions" : tab;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
-      <DetailPage back={back}>
+      <DetailPage back={fromSite ? { ...back, label: artifact.title } : back}>
         <LineTabs
           value={shownTab}
           onValueChange={(value) => setTab(value as SiteTab)}
