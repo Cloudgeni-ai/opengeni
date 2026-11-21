@@ -218,6 +218,11 @@ has.
     follows the workspace's GitHub connection: its routes, one per bound
     installation, are recomputed whenever a binding changes or the source is
     added again (which repairs lost routes).
+  - Adding it needs that connection. Without one, the web app's add form
+    says GitHub isn't connected and offers **Connect GitHub** (the workspace's
+    GitHub connection in Connected tools, the same Connect flow), instead of
+    the server's "Connect GitHub to this workspace first" error
+    (`apps/web/src/components/schedules/event-source-connect-first.tsx`).
   - The route table has no tenant RLS, so a GitHub route keeps no
     installation id: its key is an HMAC-SHA-256 of the installation under a
     route secret derived from the deployment's encryption key. A deployment

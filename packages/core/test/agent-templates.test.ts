@@ -38,6 +38,23 @@ describe("ready-made agents", () => {
     expect(agentTemplateByKey("bug-fixer")?.name).toBe("Bug fixer");
     expect(agentTemplateByKey("missing")).toBeUndefined();
   });
+
+  test("Triage listens where reports arrive and hands bugs to Bug fixer by name", () => {
+    const triage = agentTemplateByKey("triage");
+    const kinds = triage?.suggestedTriggers.flatMap((suggestion) =>
+      suggestion.triggers.map((trigger) => trigger.source.kind),
+    );
+    expect(kinds).toEqual(expect.arrayContaining(["github", "slack", "webhook"]));
+    const slack = triage?.suggestedTriggers.find((suggestion) =>
+      suggestion.triggers.some((trigger) => trigger.source.kind === "slack"),
+    );
+    // New messages only, not every thread reply.
+    expect(slack?.triggers[0]?.eventTypes).toEqual(["message.posted"]);
+    expect(slack?.triggers[0]?.conditions).toEqual([
+      { field: "data.in_thread", op: "equals", value: false },
+    ]);
+    expect(triage?.instructions).toContain('"Bug fixer" agent');
+  });
 });
 
 describe("Can use enforcement", () => {

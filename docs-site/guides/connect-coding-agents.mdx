@@ -23,6 +23,23 @@ The first time an agent uses Opengeni, it opens sign-in in your browser. There y
 
 Options: `--client claude,codex,cursor,vscode` (or `all`) sets up those even when they aren't detected, `--no-skill` skips the skill, `--no-sign-in` skips starting sign-in, and `--base-url <url>` points at a self-hosted Opengeni.
 
+## Set up by hand
+
+If npm can't find the `opengeni` package yet, add the server yourself. Each agent signs in the first time it uses it, as above.
+
+- **Claude Code:** `claude mcp add --transport http --scope user opengeni https://app.opengeni.ai/v1/mcp`
+- **Codex:** add this to `~/.codex/config.toml`, then run `codex mcp login opengeni`:
+
+  ```toml
+  [mcp_servers.opengeni]
+  url = "https://app.opengeni.ai/v1/mcp"
+  ```
+
+- **Cursor:** in `~/.cursor/mcp.json`, add `"opengeni": { "url": "https://app.opengeni.ai/v1/mcp" }` under `mcpServers`.
+- **VS Code (Copilot):** in your user `mcp.json` (**MCP: Open User Configuration**), add `"opengeni": { "type": "http", "url": "https://app.opengeni.ai/v1/mcp" }` under `servers`.
+
+The [Opengeni plugin](/guides/developer-plugin) also includes the skill. Self-hosted, use your own origin instead of `https://app.opengeni.ai`.
+
 ## What your agent can do
 
 - **Hand off work**: `delegate` starts an Opengeni chat with a brief, a repository and branch, and optionally an agent or sandbox environment. `wait_for` follows it (up to 50 seconds per call) until it finishes with a final answer; `session_send` sends follow-ups. Stopping a wait in your agent doesn't stop the chat.

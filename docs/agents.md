@@ -507,7 +507,9 @@ empty for older servers). `PATCH` replaces `toolPermissions` or `skills` as a
 whole.
 
 - **Starts when**: the agent's triggers are ordinary automations with
-  `agentConfig.agentId`. Each run starts a new chat bound to the agent (its
+  `agentConfig.agentId` (an agent's `scheduled_tasks_create` call may give
+  `agentConfig.agentName`, a name or id, which the tool resolves like
+  `session_create`'s `agentName`). Each run starts a new chat bound to the agent (its
   Instructions, Memory and Can use), created as the task with the task
   owner's access to the agent (`agent.subjectId` on session create), so Only
   me agents work in their owner's Only me automations. Saving checks the
@@ -574,10 +576,12 @@ adds one as an ordinary agent with `templateKey` set (SDK
 `listAgentTemplates`, `createAgentFromTemplate`). They are content files in
 `packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`):
 Triage, Bug fixer and PR reviewer, general for any software team, with
-Instructions written for autonomy with judgment (pick up work, fix it, and
-involve a person only when a decision needs one), suggested Can use rules
+Instructions written for autonomy with judgment (pick up work with what they
+can reach instead of asking for setup first, hand off to each other by name,
+and involve a person only when blocked or a decision needs one), suggested Can use rules
 (each blocks merging a pull request, through a GitHub connection or
-Opengeni's own GitHub tools) and suggested triggers. Suggested triggers are
+Opengeni's own GitHub tools) and suggested triggers (Triage: a GitHub issue,
+a new message in a Slack channel, a Linear issue). Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`)
 so the person picks the repository or source and saves. Ready-made agents

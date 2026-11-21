@@ -45,6 +45,7 @@ import {
   useScheduleNavigation,
   type ScheduleNavigation,
 } from "./schedule-parts";
+import { ConnectGitHubFirst, useGitHubConnected } from "./event-source-connect-first";
 import { PastedWebhookSteps, StandardWebhookHelp, WebhookUrlField } from "./event-source-setup";
 import { useEventSourceLogo, useEventTriggersEnabled } from "./use-event-sources";
 
@@ -131,6 +132,8 @@ function EventSourceForm({
   const [created, setCreated] = useState<Created | null>(null);
   const servers = useEventMcpServers(choice === "mcp");
   const gmailAccounts = useGmailAccounts(workspaceId, choice === "gmail");
+  const githubConnected = useGitHubConnected(workspaceId, choice === "github");
+  const needsGitHub = choice === "github" && githubConnected === false;
 
   if (created?.signingSecret) {
     return (
@@ -159,6 +162,7 @@ function EventSourceForm({
       pendingLabel="Adding…"
       back={{ label: "Add an event source", onClick: () => go.newSource() }}
       onCancel={go.sources}
+      submitDisabled={needsGitHub}
       footerStart={
         meta.audience === "workspace"
           ? "Everyone in this workspace can use it."
@@ -199,6 +203,7 @@ function EventSourceForm({
       }}
     >
       <FieldStack>
+        {needsGitHub ? <ConnectGitHubFirst workspaceId={workspaceId} /> : null}
         {choice === "mcp" ? (
           <Field
             label="MCP server"
