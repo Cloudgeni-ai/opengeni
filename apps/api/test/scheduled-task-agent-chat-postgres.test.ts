@@ -444,3 +444,30 @@ test("agentConfigPatch never gives an automation an agent its owner can't use th
   const unchanged = await f.call(f.owner.headers, "GET", path);
   expect(unchanged.json.agentConfig.agentId).toBe(planner);
 });
+
+test("the existing-chat pickers' list: the agent's open chats only, as the reader may see them", async () => {
+  const f = await fixture();
+  const planner = await f.agent("Planner");
+  const open = await f.chat(planner);
+  const cancelled = await f.chat(planner);
+  const onlyMine = await f.chat(planner, "user_private");
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update sessions set status = 'cancelled' where id = ${cancelled.id}`;
+  });
+  const listed = async (headers: Record<string, string>, query: string) =>
+    (
+      (await f.call(headers, "GET", `/agents/${planner}/chats?filter=everyone${query}`)).json
+        .chats as { sessionId: string }[]
+    ).map((chat) => chat.sessionId);
+  expect(await listed(f.owner.headers, "")).toEqual(
+    expect.arrayContaining([open.id, cancelled.id, onlyMine.id]),
+  );
+  const direct = await listed(f.owner.headers, "&direct=true");
+  expect(direct).toEqual(expect.arrayContaining([open.id, onlyMine.id]));
+  expect(direct).not.toContain(cancelled.id);
+  // Someone else never sees the owner's Only me chat.
+  const theirs = await listed(f.other.headers, "&direct=true");
+  expect(theirs).toContain(open.id);
+  expect(theirs).not.toContain(onlyMine.id);
+});

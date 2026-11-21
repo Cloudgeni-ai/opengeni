@@ -1515,7 +1515,10 @@ function AgentScheduleForm({
           editing ? (
             task?.name
           ) : agent ? (
-            `Each run starts a chat with ${agent.name}.`
+            // Only while it's true: the chip or the chat choice can change it.
+            draft.agentId === agent.id && draft.runMode !== "existing_session" ? (
+              `Each run starts a chat with ${agent.name}.`
+            ) : undefined
           ) : offerAgent ? (
             <>
               Rather describe it? <HelpLink onClick={ask.open}>Create with {productName}</HelpLink>

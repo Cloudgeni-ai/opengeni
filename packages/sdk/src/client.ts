@@ -8901,7 +8901,7 @@ export class OpenGeniClient {
     agentId: string,
     options: {
       filter?: AgentChatsFilter;
-      /** Only chats that are with the agent, not Slack threads that only mentioned it. */
+      /** Only open chats that are with the agent itself: no Slack threads that only mentioned it, no cancelled chats. */
       direct?: boolean;
       cursor?: string;
       limit?: number;

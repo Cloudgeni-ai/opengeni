@@ -1,10 +1,10 @@
 /**
  * The chats with one agent that the reader can open, newest first,
  * for the pickers that post into an existing chat. The server filters by
- * agent (`GET …/agents/:agentId/chats?direct=true`, leaving out Slack threads
- * that only mentioned it, which can't be targets), 100 at a time, up to
- * `maxPages` pages. A failed read rejects: callers show an error, never
- * "no chats".
+ * agent (`GET …/agents/:agentId/chats?direct=true`, leaving out cancelled
+ * chats and Slack threads that only mentioned it, which can't be targets),
+ * 100 at a time, up to `maxPages` pages. A failed read rejects: callers show
+ * an error, never "no chats".
  */
 import type { AgentChat, AgentChatsFilter, ListAgentChatsResponse } from "@opengeni/sdk";
 

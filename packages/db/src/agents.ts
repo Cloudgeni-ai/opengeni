@@ -888,7 +888,10 @@ export async function listAgentChats(
     viewerSubjectId: string | null;
     filter: "yours" | "everyone";
     sharedOnly?: boolean;
-    /** Only chats that are with the agent, not Slack threads that only mentioned it. */
+    /**
+     * Only open chats that are with the agent itself (what an automation can
+     * post into): no Slack threads that only mentioned it, no cancelled chats.
+     */
     direct?: boolean;
     excludeSessionId?: string | null;
     /** Keyset cursor: chats created before this one (`cursorAt` of the last chat read). */
@@ -959,6 +962,7 @@ export async function listAgentChats(
         ) dm on true
         where s.archived_at is null
           and s.parent_session_id is null
+          ${input.direct ? sql`and s.status <> 'cancelled'` : sql``}
           -- A Site viewer's chat belongs to the Site's audience, not the workspace.
           and s.site_access_root_id is null
           and ${

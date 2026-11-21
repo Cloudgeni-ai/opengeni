@@ -239,16 +239,14 @@ export function scheduledTaskUpdateToolValidation() {
           });
           return;
         }
-        // The name resolves to an id before the call is sent.
-        candidate = { ...input, agentConfigPatch: { ...rest, agentId: NAMED_AGENT_PLACEHOLDER } };
+        // The name resolves to an id before the call is sent; null stands in for it here.
+        candidate = { ...input, agentConfigPatch: { ...rest, agentId: null } };
       }
     }
     const parsed = UpdateScheduledTaskRequest.safeParse(candidate);
     if (!parsed.success) for (const issue of parsed.error.issues) context.addIssue({ ...issue });
   });
 }
-
-const NAMED_AGENT_PLACEHOLDER = "00000000-0000-4000-8000-000000000000";
 
 export function scheduledTaskCreateToolInput(options: { events: boolean } = { events: false }) {
   return (
