@@ -40,9 +40,11 @@ count toward the limits, when:
   default it stays, for the people who can open it).
 
 Links to an archived app are kept, hidden while it's archived, so restoring
-the app brings them back. They still count toward the limits, except that a
-change that would go over a limit drops them first to make room (those links
-don't come back on restore).
+the app brings them back. They still count toward the limits, except that
+when a change would go over a limit, every archived link in the layout being
+changed (the default, or the person's own items) is dropped to make room, and
+those links don't come back on restore. A person's change doesn't drop the
+default's archived links, so a default group that is full stays full for them.
 
 The built-in default is one **Pinned apps** live list (`pinned_apps`, id
 `pinned-apps`). A live list with no apps is left out of the sidebar, as is a

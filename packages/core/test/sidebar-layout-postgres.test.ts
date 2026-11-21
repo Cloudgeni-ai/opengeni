@@ -225,7 +225,7 @@ test("people only see and add Apps they can open; gone Apps drop out of storage"
   await shared.admin`update sidebar_layouts
     set layout = jsonb_set(layout, '{items}', layout->'items' || ${JSON.stringify([
       { id: "gone", type: "app", appId: gone },
-    ])}::jsonb)
+    ])}::text::jsonb)
     where workspace_id = ${ws.workspaceId}::uuid and subject_id is null`;
   expect(await storedIds()).toEqual(["pinned-apps", "open", "old", "s", "gone"]);
   await updateSidebarLayoutForGrant(deps, ws.admin, {
@@ -249,7 +249,7 @@ test("links to archived Apps make room when a change would go over a limit", asy
   }));
   await shared.admin`insert into sidebar_layouts (account_id, workspace_id, subject_id, layout, revision)
     values (${ws.accountId}::uuid, ${ws.workspaceId}::uuid, null,
-      ${JSON.stringify({ version: 1, items: [{ id: "old", type: "app", appId: old }, ...links] })}::jsonb, 1)`;
+      ${JSON.stringify({ version: 1, items: [{ id: "old", type: "app", appId: old }, ...links] })}::text::jsonb, 1)`;
   const after = await updateSidebarLayoutForGrant(deps, ws.admin, {
     scope: "workspace",
     changes: [
