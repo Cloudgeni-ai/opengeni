@@ -184,6 +184,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "app_hostname_check" ||
       tool.startsWith("app_sql_") ||
       tool.startsWith("app_sync_") ||
+      tool.startsWith("app_webhook_") ||
       tool === "app_export" ||
       tool === "app_install" ||
       tool === "app_upgrade" ||

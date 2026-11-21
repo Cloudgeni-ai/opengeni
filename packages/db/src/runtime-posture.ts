@@ -572,7 +572,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // holding EXECUTE.
   "stamp_subscription_connection_sign_in()",
   "subscription_connection_relogin_notice()",
-  // Migration 1532: the app notification trigger (an invoker trigger that
+  // Migration 1539: the app notification trigger (an invoker trigger that
   // calls deliver_app_notification_v1 once the runtime may). Triggers fire
   // without the inserting role holding EXECUTE.
   "deliver_app_notification()",
@@ -2672,14 +2672,14 @@ export const RUNTIME_FULL_DML_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
-  // 1531_app_package_exports: stored app package files and their sweep.
+  // 1538_app_package_exports: stored app package files and their sweep.
   "app_package_exports",
-  // 1530_app_sync_paging_and_leases: the keys each sync wrote (removeMissing).
+  // 1537_app_sync_paging_and_leases: the keys each sync wrote (removeMissing).
   "app_sync_keys",
   // 1520_app_data_sync: App data sync executor queue and personal opt-ins.
   "app_sync_queue",
   "app_sync_subscriptions",
-  // 1532_app_webhooks_and_notifications: an app's inbound webhook addresses.
+  // 1539_app_webhooks_and_notifications: an app's inbound webhook addresses.
   "app_webhooks",
   "audit_events",
   "auth_identities",
@@ -3069,7 +3069,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 export const RUNTIME_READ_INSERT_TABLES = [
   // 1243_agents: immutable agent revisions.
   "agent_revisions",
-  // 1532_app_webhooks_and_notifications: app notifications, delivered by an owner trigger.
+  // 1539_app_webhooks_and_notifications: app notifications, delivered by an owner trigger.
   "app_notifications",
   "billing_auto_top_up_mutations",
   "browser_revision_components",

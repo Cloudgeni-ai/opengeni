@@ -201,7 +201,7 @@ Destructive changes need an explicit confirm; conflicts can't be upgraded.
 
 `app_export` stores each package file in object storage for the agent to
 download. Before storing it, the API records it in `app_package_exports`
-(migration 1531) with an expiry of 24 hours. An API pump
+(migration 1538) with an expiry of 24 hours. An API pump
 (`startAppPackageExportSweepPump` in `apps/api/src/app-packages/exports.ts`,
 every 60 seconds on each replica) finds expired rows, claims each one under
 its workspace's row-level security, deletes the object, then the row. A

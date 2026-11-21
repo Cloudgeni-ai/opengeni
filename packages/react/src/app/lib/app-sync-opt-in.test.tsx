@@ -83,7 +83,11 @@ describe("personal sync opt-in in the console", () => {
     ]);
 
     // Cancel: nothing is posted, and the App hears optedIn: false.
-    let result = requestSiteSyncOptIn("site", "s-1", true);
+    // The App's request updates the host, so it starts inside act().
+    // (Kept in an object: awaiting the promise itself would wait for the person.)
+    const ask = (optedIn: boolean) =>
+      actRun(() => ({ pending: requestSiteSyncOptIn("site", "s-1", optedIn) }));
+    let result = (await ask(true)).pending;
     await settle();
     const dialog = () => document.body.querySelector<HTMLElement>("[data-app-sync-opt-in]");
     expect(document.body.textContent).toContain("Join My orders?");
@@ -97,7 +101,7 @@ describe("personal sync opt-in in the console", () => {
     expect(calls.some((call) => call.method === "PUT")).toBe(false);
 
     // Join with the second account.
-    result = requestSiteSyncOptIn("site", "s-1", true);
+    result = (await ask(true)).pending;
     await settle();
     const select = dialog()!.querySelector<HTMLSelectElement>("select")!;
     await actRun(() => {
@@ -116,7 +120,9 @@ describe("personal sync opt-in in the console", () => {
     });
 
     // Leaving needs no confirmation.
-    expect(await requestSiteSyncOptIn("site", "s-1", false)).toEqual({ optedIn: false });
+    expect(await actRun(() => requestSiteSyncOptIn("site", "s-1", false))).toEqual({
+      optedIn: false,
+    });
     expect(calls.filter((call) => call.method === "DELETE")).toEqual([
       { path: `${base}/syncs/s-1/subscription`, method: "DELETE", body: null },
     ]);

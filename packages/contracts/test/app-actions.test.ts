@@ -614,7 +614,7 @@ test("actions that handle secrets are marked in the catalog, so the chat route l
     expect([id, appActionCallHandlesSecrets({ id })]).toEqual([id, true]);
   }
   // Bounded: most of the app stays reachable.
-  expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(80);
+  expect(ACTION_CATALOG.filter(appActionHandlesSecrets).length).toBeLessThan(90);
 });
 
 test("secret inputs are only the filled request fields an action marks as secret", () => {

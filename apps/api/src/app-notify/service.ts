@@ -37,7 +37,7 @@ import {
  * members to notify them; to everyone who can open the app (and allows it)
  * only as one of the app's managers. Rate limited per sender and app; the
  * same key updates the person's notice in place. The insert's trigger
- * delivers it (migration 1532).
+ * delivers it (migration 1539).
  */
 
 const forbidden = (message: string, code: string) =>

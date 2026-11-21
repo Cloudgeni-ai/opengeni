@@ -12,7 +12,7 @@ Code: `packages/contracts/src/app-webhook.ts` (schemas and limits),
 `packages/db/src/app-webhooks.ts`, `apps/api/src/app-webhooks/service.ts`,
 `apps/api/src/app-notify/service.ts`, `apps/api/src/routes/app-webhooks.ts`,
 `apps/api/src/mcp/app-webhook-tools.ts`, migration
-`1532_app_webhooks_and_notifications.sql`.
+`1539_app_webhooks_and_notifications.sql`.
 
 ## App webhooks
 
@@ -136,9 +136,9 @@ bundled app-building Skill and the public docs don't mention it.
   `agent` rule. Rows older than a day are removed.
 - **Rollout.** The runtime role's EXECUTE on that routine is withheld
   (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`, as for migration 1503), because the
-  release before 1532 refuses an unknown trigger definer or a runtime grant
+  release before 1539 refuses an unknown trigger definer or a runtime grant
   on an unknown definer. The follow-up grant migration can land once a
-  release with 1532 is the pinned previous release; it also removes the
+  release with 1539 is the pinned previous release; it also removes the
   `notify_not_available` refusal in `insertAppNotification` and adds
   `site.notify` to the Skill and docs-site.
 

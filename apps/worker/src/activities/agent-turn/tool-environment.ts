@@ -659,13 +659,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       postConnectionNeedsReauthNotice({ db, bus, observability }, broken),
     // A shared service connection's key resolves with the connection's own
     // vault reach, never the turn's or its person's.
-    resolveCredentialReferences: serviceConnectionCredentialReferences({
-      db,
-      settings: runSettings,
-      ...(deps.vaultAccess.serviceProviders
-        ? { providers: () => deps.vaultAccess.serviceProviders! }
-        : {}),
-    }),
+    resolveCredentialReferences: (() => {
+      // Hosts without vault access wiring resolve from hosted vaults only.
+      const serviceProviders = (deps.vaultAccess as AttemptVaultAccess | undefined)
+        ?.serviceProviders;
+      return serviceConnectionCredentialReferences({
+        db,
+        settings: runSettings,
+        ...(serviceProviders ? { providers: () => serviceProviders } : {}),
+      });
+    })(),
   });
   const personalConnectionDelegations = turn.personalConnectionDelegations;
   const delegatedMembershipChecks = new Map<string, Promise<boolean>>();

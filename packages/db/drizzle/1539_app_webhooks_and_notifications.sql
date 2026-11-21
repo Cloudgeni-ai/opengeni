@@ -272,6 +272,8 @@ CREATE TRIGGER app_notifications_deliver_trg
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    -- Default privileges may already have granted more; start from none.
+    EXECUTE 'REVOKE ALL ON TABLE app_webhooks, app_notifications FROM opengeni_app';
     EXECUTE 'GRANT SELECT, INSERT, DELETE, UPDATE ON TABLE app_webhooks TO opengeni_app';
     EXECUTE 'GRANT SELECT, INSERT ON TABLE app_notifications TO opengeni_app';
   END IF;
