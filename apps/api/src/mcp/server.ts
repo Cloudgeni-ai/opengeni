@@ -4482,7 +4482,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_prepare_upload",
     {
       description:
-        "Get signed upload URLs for an app's HTML and optional source JSON. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source upload may be omitted for HTML-only apps.",
+        "Get signed upload URLs for an app's HTML, optional source JSON and, for a multi-file build, optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.",
       inputSchema: {},
     },
     async () => {

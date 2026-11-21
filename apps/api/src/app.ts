@@ -367,6 +367,7 @@ import {
 } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
+import { registerAppAssetRoutes } from "./routes/app-assets";
 import { registerSessionAvatarImageRoutes } from "./routes/session-avatar-image";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
@@ -2904,6 +2905,7 @@ export function createAppComposition(
   registerApiIntegrationRoutes(app, routeDeps);
   registerIntegrationFacetRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
+  registerAppAssetRoutes(app, routeDeps);
   registerSessionAvatarImageRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
@@ -4532,6 +4534,7 @@ const routeLabelPatterns: Array<{
     label: "/v1/git/personal/:routeId/git-receive-pack",
   },
   { pattern: /^\/v1\/catalog-assets\/.+$/, label: "/v1/catalog-assets/*" },
+  { pattern: /^\/v1\/app-assets\/.+$/, label: "/v1/app-assets/*" },
   {
     pattern: /^\/v1\/public\/session-avatars\/[^/]+$/,
     label: "/v1/public/session-avatars/:file",

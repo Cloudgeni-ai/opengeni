@@ -5,6 +5,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/browser-response-headers.ts",
+    "src/app-assets.ts",
     "src/html-frame-host.ts",
     "src/sidebar-layout.ts",
     "src/modal-native-proof-v2.ts",

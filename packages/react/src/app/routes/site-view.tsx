@@ -317,6 +317,10 @@ export function SiteViewRoute({
     [artifact, live.failed],
   );
   const { check } = live;
+  // Embedded (the phone app's viewer) there is no page URL to keep the Site's
+  // address in, so it lives here, starting at `page`.
+  const [embeddedLocation, setEmbeddedLocation] = useState(page ?? "/");
+  const onEmbeddedLocationChange = useCallback((href: string) => setEmbeddedLocation(href), []);
   const backControl = back ? (
     <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
   ) : undefined;
@@ -335,7 +339,8 @@ export function SiteViewRoute({
           siteId={siteId}
           toolBridge={toolBridge}
           viewer={viewer}
-          siteLocation={page ?? "/"}
+          siteLocation={embeddedLocation}
+          onSiteLocationChange={onEmbeddedLocationChange}
           showToolbar={false}
           versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
           watch={live.watch}

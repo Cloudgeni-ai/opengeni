@@ -249,7 +249,8 @@ signature.
 | Method and suffix | Result |
 | --- | --- |
 | `GET /host` | `SiteHostMapRecord` for the signed host (the gateway's fallback on a KV miss), or 404 `site_not_found`. An optional `host` query must equal the signed host |
-| `GET /versions/:versionId/html` | The immutable HTML of the Site's current version, or of a version a publish or rollback replaced in the last 10 minutes (pages already open), with a sandbox CSP and an ETag. 404 `site_version_not_found` for any other version, of this Site or another |
+| `GET /versions/:versionId/html` | The immutable HTML of the Site's current version, or of a version a publish or rollback replaced in the last 10 minutes (pages already open), with a sandbox CSP and an ETag. 404 `site_version_not_found` for any other version, of this Site or another. A multi-file version's HTML starts with a `<base href="/_og/a/<versionId>/<token>/">` for its files |
+| `GET /assets/:versionId/:token/*path` | One file of a multi-file version of this Site, any of its versions ([Multi-file apps](published-sites.md#multi-file-apps)); no viewer needed, the token is checked against the version's manifest. Immutable caching with the content hash as ETag. 404 `site_asset_not_found` otherwise |
 | `POST /auth/exchange` | `SiteAuthExchangeResponse`. 400 `site_auth_code_invalid` (wrong verifier, host or redirect URI, expired, or already used) |
 | `POST /auth/logout` | 200 `{ revoked }`, even when the Site no longer exists |
 | `POST /site/reports` | 201. Rate limited per reporter, per client address and per Site |

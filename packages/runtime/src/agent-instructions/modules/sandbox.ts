@@ -2,9 +2,14 @@ import {
   blocks,
   bullets,
   hasSandbox,
+  sentences,
   type AgentPromptContext,
   type AgentPromptModule,
 } from "../types";
+
+/** Suggests `then` when the function apply_patch offers it (OPENGENI_EXPERIMENT_APPLY_PATCH_THEN). */
+export const APPLY_PATCH_THEN_GUIDANCE =
+  "Put all the edits you've decided on into one `apply_patch` call, and pass any check you'd run right after them as `then`.";
 
 function workspacePathRule(context: AgentPromptContext): string {
   const { managedSandbox, connectedMachine } = context.resources;
@@ -50,7 +55,10 @@ export const sandboxModule: AgentPromptModule = {
         "When declaring env vars or script variables, always avoid common system options. Never repurpose `$HOME` or `$home`. Instead, use a task-specific variable name.",
       ),
       "## File editing constraints",
-      "Use `apply_patch` for local file edits. Do not create or edit files with `cat` or other shell write tricks. Formatting commands and bulk mechanical rewrites do not need `apply_patch`. Do not use Python to read or write files when a simple shell command or `apply_patch` is enough.",
+      sentences(
+        "Use `apply_patch` for local file edits. Do not create or edit files with `cat` or other shell write tricks. Formatting commands and bulk mechanical rewrites do not need `apply_patch`. Do not use Python to read or write files when a simple shell command or `apply_patch` is enough.",
+        context.experiments?.applyPatchThenGuidance === true && APPLY_PATCH_THEN_GUIDANCE,
+      ),
       "## Destructive commands",
       bullets(
         "Do not use `$HOME`, `~`, `/`, a workspace root, or another broad directory as the target of a recursive or destructive command.",

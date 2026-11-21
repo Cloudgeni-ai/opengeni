@@ -36872,6 +36872,7 @@
       "shape": {
         "$": "object",
         "$.artifactId": "string!",
+        "$.assetBaseUrl": "string?",
         "$.contentSha256": "string! null",
         "$.contentType": "const!=[\"\\\"text/html\\\"\"]",
         "$.html": "string!",

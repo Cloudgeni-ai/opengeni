@@ -13,3 +13,11 @@ test("cut polling and lean exec_command arguments are on by default and can be t
   expect(disabled.experimentCutPolling).toBe(false);
   expect(disabled.experimentOutputCost).toBe(false);
 });
+
+test("the apply_patch package is on by default and can be switched off", () => {
+  expect(getSettings({ OPENGENI_ENV: "test" }).experimentApplyPatchThen).toBe(true);
+  expect(
+    getSettings({ OPENGENI_ENV: "test", OPENGENI_EXPERIMENT_APPLY_PATCH_THEN: "false" })
+      .experimentApplyPatchThen,
+  ).toBe(false);
+});

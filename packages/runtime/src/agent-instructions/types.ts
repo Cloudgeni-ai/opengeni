@@ -110,6 +110,8 @@ export type AgentPromptContext = {
 export type AgentPromptExperiments = {
   /** OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE */
   knowledgeRetrievalGuidance?: boolean | undefined;
+  /** OPENGENI_EXPERIMENT_APPLY_PATCH_THEN: the tool offers `then`, so the prompt suggests it. */
+  applyPatchThenGuidance?: boolean | undefined;
 };
 
 /**

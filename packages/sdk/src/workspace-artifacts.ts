@@ -150,6 +150,12 @@ export type WorkspaceArtifactContentResponse = {
   html: string;
   source: WorkspaceArtifactSourceBundle;
   requestedTools: ToolGatewayIdentity[];
+  /**
+   * A multi-file app version's asset folder: render `html` with this as its
+   * `<base href>` (`injectSiteAssetBase` in `@opengeni/contracts/app-assets`).
+   * Absent for a single-file app.
+   */
+  assetBaseUrl?: string;
 };
 export type WorkspaceArtifactMutationResponse = {
   artifact: WorkspaceArtifact;

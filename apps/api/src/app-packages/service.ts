@@ -172,6 +172,12 @@ export async function exportAppPackage(
     getWorkspaceArtifactCurrent(deps.db, grant.workspaceId, viewer, appId),
     getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, viewer, appId),
   ]);
+  // Packages carry one HTML file; a multi-file build's files aren't packaged yet.
+  if (ref.assetManifest)
+    throw new AppPackageError(
+      "validation",
+      "This app is a multi-file build, which packages don't support yet",
+    );
   // Managers only: the same check as reading the app's data definitions.
   const data = await describeSiteData(deps, grant, appId);
   const sql = await describeSiteSql(deps, grant, appId);

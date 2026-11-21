@@ -4,6 +4,7 @@ import type {
   WorkspaceArtifactDetailResponse,
 } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
+import { injectSiteAssetBase } from "@opengeni/contracts/app-assets";
 
 export type SiteDisplayContent = Pick<
   WorkspaceArtifactContentResponse,
@@ -63,10 +64,14 @@ export async function loadSiteSnapshot(
     (detail.artifact.status === "active" || options.includeArchivedContent)
   ) {
     if (!client.getWorkspaceArtifactContent) throw new Error("App version unavailable");
-    content = await client.getWorkspaceArtifactContent(workspaceId, siteId, {
+    const read = await client.getWorkspaceArtifactContent(workspaceId, siteId, {
       ...requestOptions,
       versionId,
     });
+    // A multi-file version renders with its asset folder as base, as `/html` serves it.
+    content = read.assetBaseUrl
+      ? { ...read, html: injectSiteAssetBase(read.html, read.assetBaseUrl) }
+      : read;
   }
   options.signal?.throwIfAborted();
   if (content && (content.artifactId !== siteId || content.versionId !== versionId))

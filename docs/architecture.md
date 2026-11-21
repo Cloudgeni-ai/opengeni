@@ -2887,6 +2887,12 @@ separately from Documents/editable artifacts. Agents publish signed-upload IDs,
 without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
+A version may also carry the files of a split build (`asset_manifest`:
+content-addressed objects per workspace plus a random per-version token); its
+HTML gets a `<base href>` for that version's folder, served immutable by the
+gateway (`/_og/a/...`) and, for the console frame, by the API
+(`/v1/app-assets/...`), with the token as the capability since app frames send
+no credentials ([published-sites.md](published-sites.md#multi-file-apps)).
 
 Site Data gives each published Site persistent JSON collections and files
 (Postgres `site_data_*` tables behind the backend-neutral `SiteDataStore`,

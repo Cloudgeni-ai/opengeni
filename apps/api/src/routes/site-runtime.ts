@@ -35,6 +35,9 @@ import {
   type Permission,
   type SiteAuthExchangeResponse,
   type SiteRuntimeConfig,
+  injectSiteAssetBase,
+  parseSiteAssetAddress,
+  siteAssetGatewayBase,
 } from "@opengeni/contracts";
 import {
   cancelPublishedSiteSession,
@@ -118,6 +121,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { markLocalInternalDispatch } from "../http/local-browser-boundary";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { siteAssetFile, siteAssetResponse } from "../site-assets";
 import {
   getSiteDataFileUrl,
   getSiteDataRecord,
@@ -626,6 +630,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "GET" && suffix === "/host") return await hostLookup(request);
     const version = /^\/versions\/([^/]+)\/html$/u.exec(suffix);
     if (method === "GET" && version) return await versionHtml(request, version[1]!);
+    if ((method === "GET" || method === "HEAD") && suffix.startsWith("/assets/"))
+      return await versionAsset(request, suffix.slice("/assets/".length), method);
     if (method === "POST" && suffix === "/auth/exchange") return await exchange(request);
     if (method === "POST" && suffix === "/auth/logout") return await logout(request);
     if (method === "POST" && suffix === "/auth/view-as") return await viewAs(request);
@@ -719,7 +725,17 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const object = version ? await deps.objectStorage.getObjectBytes(version.contentKey) : null;
     if (!version || !object)
       throw sitePublishingError(404, "not_found", "site_version_not_found", "Version not found");
-    return new Response(object.bytes as Uint8Array<ArrayBuffer>, {
+    // A multi-file build loads its files from this host (`/_og/a/...`); a
+    // single-file app is served byte for byte.
+    const body = version.assetManifest
+      ? new TextEncoder().encode(
+          injectSiteAssetBase(
+            new TextDecoder().decode(object.bytes),
+            siteAssetGatewayBase(version.id, version.assetManifest.token),
+          ),
+        )
+      : (object.bytes as Uint8Array<ArrayBuffer>);
+    return new Response(body, {
       headers: {
         ...USER_CONTENT_SECURITY_HEADERS,
         "Content-Type": "text/html; charset=utf-8",
@@ -729,6 +745,42 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Referrer-Policy": "no-referrer",
         ...(version.contentSha256 ? { ETag: `"${version.contentSha256}"` } : {}),
       },
+    });
+  };
+
+  /**
+   * One asset file of a multi-file version of this Site. Frames are
+   * opaque-origin and send no cookies, so there is no viewer: the version's
+   * unguessable token (only its access-checked HTML names it) is the
+   * capability. Only this Site's own versions are served, any of them, so a
+   * page open since an earlier version keeps loading its chunks; the
+   * gateway's host check already refuses unpublished and taken-down Sites.
+   */
+  const versionAsset = async (
+    request: RuntimeRequest,
+    address: string,
+    method: string,
+  ): Promise<Response> => {
+    const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
+    if (!deps.objectStorage)
+      throw sitePublishingError(
+        503,
+        "upstream_unavailable",
+        "site_storage_unavailable",
+        "Storage is not configured",
+      );
+    const parsed = parseSiteAssetAddress(address);
+    const version = parsed
+      ? await getPublishedSiteVersion(deps.db, host.scope, host.site.id, parsed.versionId)
+      : null;
+    const file = parsed
+      ? siteAssetFile(version?.assetManifest ?? null, parsed.token, parsed.path)
+      : null;
+    if (!file)
+      throw sitePublishingError(404, "not_found", "site_asset_not_found", "File not found");
+    return await siteAssetResponse(deps.objectStorage, host.scope.workspaceId, file, {
+      method,
+      ifNoneMatch: request.context.req.header("if-none-match") ?? null,
     });
   };
 

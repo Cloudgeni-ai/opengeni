@@ -17,6 +17,7 @@ import {
 } from "./workspace-artifact-content";
 import { userContentSignedGetUrlOptions } from "./http/user-content";
 import { declareSiteToolsForEveryViewer } from "./site-tool-routing";
+import { freezeSiteAssets } from "./site-assets";
 type Storage = NonNullable<ObjectStorageDependency>;
 export const MAX_SITE_SOURCE_BYTES = 64 * 1024 * 1024;
 
@@ -47,8 +48,10 @@ function keys(workspaceId: string, id: string) {
   return {
     html: `${base}/uploads/${id}/index.html`,
     source: `${base}/uploads/${id}/source.json`,
+    assets: `${base}/uploads/${id}/assets.json`,
     frozenHtml: `${base}/blobs/${id}.html`,
     frozenSource: `${base}/sources/${id}.json`,
+    frozenAssets: `${base}/asset-manifests/${id}.json`,
   };
 }
 function owner(grant: AccessGrant) {
@@ -63,9 +66,9 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
   await Promise.allSettled(
     expired.flatMap((row) => {
       const paths = keys(row.workspaceId, row.id);
-      return (row.status === "published" ? [paths.html, paths.source] : Object.values(paths)).map(
-        (key) => storage.deleteObject(key),
-      );
+      return (
+        row.status === "published" ? [paths.html, paths.source, paths.assets] : Object.values(paths)
+      ).map((key) => storage.deleteObject(key));
     }),
   );
   const row = await createWorkspaceArtifactUpload(deps.db, {
@@ -75,16 +78,20 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
   });
   const paths = keys(grant.workspaceId, row.id);
   const audience = grant.principalKind === "agent_attempt" ? "sandbox" : "public";
-  const [html, source] = await Promise.all([
+  const [html, source, assets] = await Promise.all([
     storage.createPutUrl({ key: paths.html, contentType: "text/html", audience }),
     storage.createPutUrl({ key: paths.source, contentType: "application/json", audience }),
+    storage.createPutUrl({ key: paths.assets, contentType: "application/json", audience }),
   ]);
   return {
     uploadId: row.id,
     html: { putUrl: html.url, requiredHeaders: html.requiredHeaders },
     source: { putUrl: source.url, requiredHeaders: source.requiredHeaders },
+    // A multi-file build: every file beside the entry HTML, as JSON
+    // {files: [{path, base64}]} (see @opengeni/contracts/app-assets).
+    assets: { putUrl: assets.url, requiredHeaders: assets.requiredHeaders },
     expiresAt: new Date(
-      Math.min(html.expiresAt.getTime(), source.expiresAt.getTime()),
+      Math.min(html.expiresAt.getTime(), source.expiresAt.getTime(), assets.expiresAt.getTime()),
     ).toISOString(),
   };
 }
@@ -210,6 +217,12 @@ export async function prepareWorkspaceArtifactPublication(
   if (sourceSizeBytes !== null) {
     await validateSiteSource(storage, paths.frozenSource, sourceSizeBytes);
   }
+  const assetManifest = await freezeSiteAssets(storage, grant.workspaceId, {
+    upload: paths.assets,
+    frozen: paths.frozenAssets,
+    // Like source: an upload first published without assets stays without them.
+    published: row.status === "published",
+  });
   return {
     uploadId: row.id,
     contentKey: paths.frozenHtml,
@@ -218,6 +231,7 @@ export async function prepareWorkspaceArtifactPublication(
     sourceKey: sourceSizeBytes === null ? null : paths.frozenSource,
     sourceSha256: null,
     sourceSizeBytes,
+    assetManifest,
     ...(input.requestedTools === undefined ? {} : { requestedTools: input.requestedTools }),
     ...declared,
     persistContent: async () => {},

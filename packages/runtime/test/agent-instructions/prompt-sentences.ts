@@ -60,6 +60,8 @@ export function modularAllText(): string {
     renderer: "opengeni",
     identity: DEFAULT_AGENT_IDENTITY,
     resources: ALL_RESOURCES,
+    // The legacy contract suggests apply_patch `then` (on by default).
+    experiments: { applyPatchThenGuidance: true },
   }).composed;
 }
 

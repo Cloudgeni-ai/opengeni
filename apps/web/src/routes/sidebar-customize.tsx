@@ -8,9 +8,11 @@ import {
   ArrowUpIcon,
   ArrowUpRightIcon,
   FolderIcon,
+  LinkIcon,
   ListIcon,
   PlusIcon,
 } from "lucide-react";
+import { useRouter } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 import type {
@@ -37,6 +39,8 @@ import { Section } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
+import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
+import { pathHasAppPage } from "@/lib/onboarding-return";
 
 type Scope = "personal" | "workspace";
 type AddKind = "app" | "link" | "group" | "live_list";
@@ -55,10 +59,15 @@ const LIST_OPTIONS: { value: SidebarLiveListKind; label: string }[] = [
 
 const TOP_LEVEL = "__top";
 
-function itemIcon(item: ResolvedSidebarItem) {
+function itemIcon(item: ResolvedSidebarItem, hasPage: (pathname: string) => boolean) {
   const className = "size-4 shrink-0 text-fg-muted";
   if (item.type === "group") return <FolderIcon aria-hidden="true" className={className} />;
-  if (item.type === "link") return <ArrowUpRightIcon aria-hidden="true" className={className} />;
+  if (item.type === "link")
+    return inAppLinkPath(item.url, window.location.origin, hasPage) !== null ? (
+      <LinkIcon aria-hidden="true" className={className} />
+    ) : (
+      <ArrowUpRightIcon aria-hidden="true" className={className} />
+    );
   if (item.type === "live_list") return <ListIcon aria-hidden="true" className={className} />;
   return <AppWindowIcon aria-hidden="true" className={className} />;
 }
@@ -84,6 +93,7 @@ function ItemRow({
   scope: Scope;
   onChange: (changes: SidebarLayoutChange[]) => void;
 }) {
+  const router = useRouter();
   const detail = itemDetail(item);
   const index = siblings.indexOf(item.id);
   const previous = index > 0 ? siblings[index - 1] : undefined;
@@ -97,7 +107,7 @@ function ItemRow({
           : "flex min-h-12 items-center gap-3 py-2"
       }
     >
-      {itemIcon(item)}
+      {itemIcon(item, (path) => pathHasAppPage(router, path))}
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-fg">{item.label}</div>
         {detail || fromWorkspace ? (
@@ -342,6 +352,7 @@ function AddForm({
 }
 
 export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) {
+  const router = useRouter();
   const { layout, failed, update } = useSidebarLayout(workspaceId);
   const [scope, setScope] = useState<Scope>("personal");
   const [adding, setAdding] = useState<AddKind | null>(null);
@@ -443,7 +454,7 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
           <Section title="Hidden" variant="group">
             {layout.hidden.map(({ item }) => (
               <div key={item.id} className="flex min-h-12 items-center gap-3 py-2">
-                {itemIcon(item)}
+                {itemIcon(item, (path) => pathHasAppPage(router, path))}
                 <div className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
                   {item.label}
                 </div>

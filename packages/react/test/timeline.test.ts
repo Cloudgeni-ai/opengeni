@@ -4391,6 +4391,83 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("only the newest card for the same connection stays a full card; a turn shows it once", () => {
+    reset();
+    const card = (turnId: string, id: string, name: string, rationale: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id,
+            name,
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale,
+            requiredVariables: [],
+          },
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "mcp:slack", "Slack", "Read the report."),
+      card("turn-1", "mcp:linear", "Linear", "Update the issue."),
+      card("turn-1", "mcp:slack", "Slack", "Search for duplicates."),
+      card("turn-2", "mcp:slack", "Slack", "Annotate the report."),
+      card("turn-3", "mcp:linear", "Linear", "Label the issue."),
+      card("turn-3", "mcp:linear", "Linear", "Set its priority."),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.turnId, item.capability?.rationale, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["turn-1", "Update the issue.", true],
+      ["turn-1", "Search for duplicates.", true],
+      ["turn-2", "Annotate the report.", false],
+      ["turn-3", "Set its priority.", false],
+    ]);
+  });
+
+  test("connection cards with inputs are never folded", () => {
+    reset();
+    const card = (turnId: string, rationale: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "mcp:jira",
+            name: "Jira",
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale,
+            requiredVariables: [],
+            inputs: [{ id: "site", label: "Site" }],
+          },
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "Connect the first site."),
+      card("turn-1", "Connect the second site."),
+      card("turn-2", "Connect the third site."),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.capability?.rationale, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["Connect the first site.", false],
+      ["Connect the second site.", false],
+      ["Connect the third site.", false],
+    ]);
+  });
+
   test("a Chrome setup card keeps its purpose and repeats separately from machine requests", () => {
     reset();
     const card = (turnId: string, purpose?: "chrome") =>
