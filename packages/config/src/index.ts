@@ -1417,6 +1417,13 @@ const SettingsSchema = z.object({
   // Lean non-strict `exec_command` schema: only `cmd` and `max_output_tokens`
   // are required (on by default after an A/B; set false to disable).
   experimentOutputCost: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_OUTPUT_COST
+  // The function `apply_patch` package (on by default; set false to restore the
+  // plain tool): an optional `then` command run once after the patch applies,
+  // through exec_command, with its result in the same tool output; one prompt
+  // sentence suggesting it; and per-section application (an empty Add File
+  // creates an empty file, an Invalid Context failure shows the closest region
+  // of the file, out-of-order hunks are retried in file order).
+  experimentApplyPatchThen: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_APPLY_PATCH_THEN
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -6639,6 +6646,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
+    experimentApplyPatchThen: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_THEN"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),
