@@ -369,12 +369,46 @@ export function workspaceSessionLinkStatusReader(
 
 /**
  * Reads Linear issues and Slack threads as the viewer (see
- * `session-link-viewer-status.ts`); cached per viewer, never shared.
+ * `session-link-viewer-status.ts`), and GitHub links the workspace's App
+ * can't read through the viewer's own GitHub connection (`readGitHub`, see
+ * `personalGitHubSessionLinkReader`); cached per viewer, never shared.
  */
 export type SessionLinkViewerReader = {
   subjectId: string;
   read: (link: SessionLink) => Promise<ViewerLinkRead>;
+  readGitHub?: ((link: SessionLink) => Promise<SessionLinkLiveStatus | null>) | undefined;
 };
+
+/**
+ * GitHub status as the person, through their own GitHub connection (Your
+ * GitHub), for repositories they allowed Opengeni to use. Null otherwise.
+ */
+export function personalGitHubSessionLinkReader(
+  deps: Pick<ApiRouteDeps, "db" | "settings" | "githubPersonalFetch">,
+  person: { accountId: string; workspaceId: string; subjectId: string },
+): (link: SessionLink) => Promise<SessionLinkLiveStatus | null> {
+  return async (link) => {
+    if (link.provider !== "github") return null;
+    const ref = classifySessionLinkUrl(link.url)?.github ?? parseGitHubLinkRef(link.ref);
+    if (!ref) return null;
+    const read = await personalGitHubReader(
+      { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+      { ...person, repository: `${ref.owner}/${ref.repo}` },
+    );
+    if (!read) return null;
+    const status =
+      link.kind === "issue"
+        ? readGitHubIssueStatus(read, ref)
+        : readGitHubPullRequestStatus(read, ref);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return await Promise.race([
+      status,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), GITHUB_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
+  };
+}
 
 /** Each link with its live status, read with bounded concurrency and a short cache. */
 export async function withSessionLinkStatuses(
@@ -384,40 +418,54 @@ export async function withSessionLinkStatuses(
   options: { fresh?: boolean; viewer?: SessionLinkViewerReader | null } = {},
 ): Promise<SessionLinkWithStatus[]> {
   const results: SessionLinkWithStatus[] = links.map((link) => ({ ...link, status: null }));
+  const viewerMaxAge = (cached: CachedStatus | undefined) =>
+    options.fresh
+      ? FRESH_MIN_INTERVAL_MS
+      : cached?.status || cached?.connect
+        ? VIEWER_STATUS_TTL_MS
+        : VIEWER_MISS_TTL_MS;
+  const cachedRead = async (
+    key: string,
+    maxAge: (cached: CachedStatus | undefined) => number,
+    read: () => Promise<Omit<CachedStatus, "at">>,
+  ): Promise<CachedStatus> => {
+    const cached = statusCache.get(key);
+    if (cached && Date.now() - cached.at < maxAge(cached)) return cached;
+    const entry = { at: Date.now(), ...(await read()) };
+    boundedSet(statusCache, key, entry);
+    return entry;
+  };
   let next = 0;
   const worker = async () => {
     while (next < links.length) {
       const index = next++;
       const link = links[index]!;
-      const viewer = viewerLinkProvider(link) ? (options.viewer ?? null) : null;
+      const viewer = options.viewer ?? null;
       // Read as the viewer: the cache is theirs alone.
-      const key = viewer
-        ? `${workspaceId}:viewer:${viewer.subjectId}:${link.url}`
-        : `${workspaceId}:${link.url}`;
-      const cached = statusCache.get(key);
-      const maxAge = options.fresh
-        ? FRESH_MIN_INTERVAL_MS
-        : viewer
-          ? cached?.status || cached?.connect
-            ? VIEWER_STATUS_TTL_MS
-            : VIEWER_MISS_TTL_MS
-          : STATUS_TTL_MS;
-      if (cached && Date.now() - cached.at < maxAge) {
-        results[index] = withRead(link, cached);
-        continue;
-      }
+      const viewerKey = viewer ? `${workspaceId}:viewer:${viewer.subjectId}:${link.url}` : null;
       let entry: CachedStatus;
-      if (viewer) {
-        const read = await viewer.read(link).catch((): ViewerLinkRead => ({ kind: "none" }));
-        entry = {
-          at: Date.now(),
-          status: read.kind === "status" ? read.status : null,
-          connect: read.kind === "connect" ? read.connect : null,
-        };
+      if (viewer && viewerKey && viewerLinkProvider(link)) {
+        entry = await cachedRead(viewerKey, viewerMaxAge, async () => {
+          const read = await viewer.read(link).catch((): ViewerLinkRead => ({ kind: "none" }));
+          return {
+            status: read.kind === "status" ? read.status : null,
+            connect: read.kind === "connect" ? read.connect : null,
+          };
+        });
       } else {
-        entry = { at: Date.now(), status: await reader(workspaceId, link).catch(() => null) };
+        entry = await cachedRead(
+          `${workspaceId}:${link.url}`,
+          () => (options.fresh ? FRESH_MIN_INTERVAL_MS : STATUS_TTL_MS),
+          async () => ({ status: await reader(workspaceId, link).catch(() => null) }),
+        );
+        // A GitHub link the workspace's App can't read, through the viewer's own connection.
+        const readGitHub = viewer?.readGitHub;
+        if (!entry.status && link.provider === "github" && readGitHub && viewerKey) {
+          entry = await cachedRead(viewerKey, viewerMaxAge, async () => ({
+            status: await readGitHub(link).catch(() => null),
+          }));
+        }
       }
-      boundedSet(statusCache, key, entry);
       results[index] = withRead(link, entry);
     }
   };
