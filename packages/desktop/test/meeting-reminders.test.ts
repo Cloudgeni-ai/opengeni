@@ -738,6 +738,11 @@ describe("a meeting tab left on the microphone", () => {
     run.microphone([meet], end + CALENDAR_OVERRUN_MS + 2 * STOP_UNANSWERED_MS);
     expect(card.closed).toBe(false);
     expect(run.page.sent.filter((request) => request.kind === "stop")).toEqual([]);
+    // Ignored that long, a short release of the microphone (a mute) still stops nothing.
+    run.microphone([], end + CALENDAR_OVERRUN_MS + 2 * STOP_UNANSWERED_MS + 1_000);
+    run.microphone([meet], end + CALENDAR_OVERRUN_MS + 2 * STOP_UNANSWERED_MS + 2_000);
+    expect(run.page.sent.filter((request) => request.kind === "stop")).toEqual([]);
+    expect(card.closed).toBe(false);
     // Keep recording: not asked again while the tab stays.
     card.done("dismissed");
     run.microphone([meet], end + 2 * 60 * MINUTE);
@@ -796,6 +801,35 @@ describe("a meeting tab left on the microphone", () => {
     await run.at(end - REMIND_BEFORE_MS);
     expect(promptText(run.shown()[0]!.prompt).question).toBe("Next");
     run.shown()[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    const stops = () => run.cards.filter((card) => card.prompt.kind === "stop");
+    for (let time = end; time < end + 30 * MINUTE + CALENDAR_OVERRUN_MS; time += MINUTE) {
+      run.microphone([meet], time);
+    }
+    expect(stops()).toHaveLength(0);
+    run.microphone([meet], end + 30 * MINUTE + CALENDAR_OVERRUN_MS);
+    expect(stops()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("switching from one meeting's recording to the next one's: asked after the next one ends", async () => {
+    const next = {
+      id: "evt-next",
+      title: "Next",
+      startsAt: new Date(end).toISOString(),
+      endsAt: new Date(end + 30 * MINUTE).toISOString(),
+    };
+    const run = reminders({ meetings: [wire(), wire(next)] });
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    await run.at(START - REMIND_BEFORE_MS);
+    run.shown()[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    await run.at(end - REMIND_BEFORE_MS);
+    expect(run.shown()[0]!.prompt).toMatchObject({ kind: "join", reminder: { replace: true } });
+    run.shown()[0]!.done("chosen");
+    // The page stops the first recording, then starts the next one's.
+    run.subject.setRecording(page, false);
     run.subject.setRecording(page, true);
     const stops = () => run.cards.filter((card) => card.prompt.kind === "stop");
     for (let time = end; time < end + 30 * MINUTE + CALENDAR_OVERRUN_MS; time += MINUTE) {

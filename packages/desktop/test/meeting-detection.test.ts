@@ -481,6 +481,10 @@ function detection(
     cards,
     notices,
     helper,
+    /** The clock moves, and nothing is reported. */
+    setNow: (at: number) => {
+      now = at;
+    },
     log,
     microphone,
     revealed: () => revealed,
@@ -998,13 +1002,30 @@ describe("when the meeting seems over", () => {
     subject.stop();
   });
 
-  test("while the microphone can't be watched, an unanswered question doesn't stop the recording", () => {
-    const { subject, stop, page, microphone, askedAt, helper } = ended();
-    // The helper stops: the call may still be going on.
+  test("while the microphone can't be watched, an unanswered question doesn't stop the recording", async () => {
+    const { subject, stop, page, microphone, askedAt, helper, setNow } = ended();
+    // The helper stops, and is started again: until it reports, the call may still be on.
     helper.emit("exit", 1, null);
-    microphone([], askedAt + 2 * STOP_UNANSWERED_MS);
+    setNow(askedAt + 2 * STOP_UNANSWERED_MS);
+    // The once-a-second check, and the helper's restart, run meanwhile.
+    await Bun.sleep(1_300);
     expect(page.sent).toEqual([]);
     expect(stop.closed).toBe(false);
+    // Its first report says no call is on: now it stops.
+    microphone([], askedAt + 2 * STOP_UNANSWERED_MS + 2_000);
+    expect(page.sent).toEqual([{ kind: "stop", app: "Zoom" }]);
+    subject.stop();
+  });
+
+  test("two blips in a row don't count as a rejoin", () => {
+    const { subject, stop, notices, microphone, askedAt } = ended();
+    microphone([zoom], askedAt + 30_000);
+    microphone([], askedAt + 31_000);
+    // Back within the grace period, more than a few seconds after the first blip began.
+    microphone([zoom], askedAt + 34_000);
+    microphone([], askedAt + 35_000);
+    expect(stop.closed).toBe(false);
+    expect(notices[0]!.closed).toBe(false);
     subject.stop();
   });
 

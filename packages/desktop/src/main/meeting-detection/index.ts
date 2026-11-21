@@ -481,6 +481,12 @@ export class MeetingPrompter {
         this.calls.set(id, { app, since: now, lastSeen: now, active: true, asked });
       } else {
         // Back within the grace period (a mute, a device switch): the same call.
+        // While asking whether the meeting is over, it counts from its return,
+        // so two blips don't make a rejoin.
+        const shown = this.shown?.prompt;
+        if (!call.active && this.recording && shown?.kind === "stop" && !shown.calendar) {
+          call.since = now;
+        }
         call.active = true;
         call.lastSeen = now;
       }
@@ -540,6 +546,9 @@ export class MeetingPrompter {
     }
     if (
       shown?.kind === "stop" &&
+      // The calendar's question is about a call still on: it never stops by
+      // itself. Once the call lets go, the ordinary question takes its place.
+      !shown.calendar &&
       this.shown?.prompt === shown &&
       this.unanswered &&
       this.stopAskedAt !== null &&
@@ -979,6 +988,8 @@ export class MeetingDetection {
   private restart: NodeJS.Timeout | null = null;
   private restartDelay = RESTART_MIN_MS;
   private problem: string | null = null;
+  /** The helper running now has reported who uses the microphone. */
+  private watching = false;
   private running = false;
   /** Pages that take choices, oldest first. */
   private readonly pages: MeetingPage[] = [];
@@ -1029,7 +1040,7 @@ export class MeetingDetection {
       },
       {
         // Not while the helper is down or failing: the call may still be on.
-        allowed: () => this.child !== null && this.problem === null,
+        allowed: () => this.watching && this.problem === null,
         stop: (app) => {
           this.options.log(
             `Meeting detection: nobody answered whether the meeting is over; stopping its recording (${app.id}).`,
@@ -1205,8 +1216,10 @@ export class MeetingDetection {
     else this.recordingSince ??= now;
     if (started || !any) {
       // A new recording: its own meeting, and asked again when that is over.
+      // Switching to a meeting joined from its reminder stops the recording
+      // going on first, so the joined meeting waits for the start.
       const joined = this.joined;
-      this.joined = null;
+      if (started) this.joined = null;
       this.recordedMeeting =
         started && joined && now - joined.at < REQUEST_WAIT_MS ? joined.meeting : null;
       this.askedToStop = false;
@@ -1296,6 +1309,7 @@ export class MeetingDetection {
     this.stopping.clear();
     const child = this.child;
     this.child = null;
+    this.watching = false;
     if (child) {
       child.stdin?.end();
       setTimeout(() => {
@@ -1658,6 +1672,7 @@ export class MeetingDetection {
       return;
     }
     this.child = child;
+    this.watching = false;
     let buffered = "";
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (text: string) => {
@@ -1675,6 +1690,7 @@ export class MeetingDetection {
     child.on("exit", (code, signal) => {
       if (this.child !== child) return;
       this.child = null;
+      this.watching = false;
       this.options.log(`Meeting detection: its helper exited (${signal ?? code}).`);
       this.prompter.observe([], this.now());
       this.scheduleRestart();
@@ -1685,6 +1701,7 @@ export class MeetingDetection {
     if (event.kind === "users") {
       this.restartDelay = RESTART_MIN_MS;
       this.setProblem(null);
+      this.watching = true;
       const now = this.now();
       this.prompter.observe(event.users, now);
       this.checkCalendarEnd(now);
