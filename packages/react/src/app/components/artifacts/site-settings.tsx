@@ -17,7 +17,7 @@ import { toast } from "../../lib/toast";
 
 import { useSiteAudience } from "./site-audience";
 import { sitePublishFormProps } from "./site-publish-form-props";
-import { PublishMore, SitePublishPage, useSitePublication } from "./site-publishing";
+import { PublishMore, SitePublishPage, sentenceStart, useSitePublication } from "./site-publishing";
 import { Button } from "../../../ui/button";
 import { ConfirmDialog } from "../../../ui/confirm-dialog";
 import { SettingRow } from "../../../ui/setting-row";
@@ -237,9 +237,20 @@ export function SiteSettings({
       {management.statusBusy ? "Restoring…" : "Restore"}
     </Button>
   );
+  const canDuplicate = management.canPublish && hasVersion;
+  const canExport = canDuplicate && exportApp !== null;
+  const canReset = resetAllowed !== null && !archived;
+  const moreSummary = [
+    canDuplicate && "duplicate",
+    canExport && "export",
+    canReset && "allowed actions",
+    management.canPublish && (archived ? "restore" : "archive"),
+  ]
+    .filter(Boolean)
+    .join(", ");
   const moreRows = (
     <>
-      {management.canPublish && hasVersion ? (
+      {canDuplicate ? (
         <SettingRow
           label="Duplicate"
           description="A new app from this version, owned by you."
@@ -257,7 +268,7 @@ export function SiteSettings({
           }
         />
       ) : null}
-      {management.canPublish && hasVersion && exportApp ? (
+      {canExport && exportApp ? (
         <SettingRow
           label="Export"
           description="Download the app as a package."
@@ -275,7 +286,7 @@ export function SiteSettings({
           }
         />
       ) : null}
-      {resetAllowed && !archived ? (
+      {canReset && resetAllowed ? (
         <SettingRow
           label="Allowed actions"
           description="Actions you always allowed ask again."
@@ -320,8 +331,30 @@ export function SiteSettings({
       ) : null}
     </>
   );
-  // The publish form carries the More (with search engines and reports);
-  // without it, the same rows get a More of their own.
+  const workspaceAccess = (
+    <SettingRow
+      label="Workspace access"
+      description={
+        onlyMe ? "Only you can open it." : `Everyone in ${management.workspaceName} can open it.`
+      }
+      hint={owner ? undefined : "Only its owner can change this."}
+      control={
+        audience.share ? (
+          <Button type="button" size="sm" variant="outline" onClick={audience.share}>
+            <UsersIcon aria-hidden="true" />
+            Share with workspace
+          </Button>
+        ) : audience.limit ? (
+          <Button type="button" size="sm" variant="outline" onClick={audience.limit}>
+            <LockKeyholeIcon aria-hidden="true" />
+            Limit to me
+          </Button>
+        ) : undefined
+      }
+    />
+  );
+  // The publish form carries Workspace access and the More (with search
+  // engines and reports) after its fields; without it, they follow here.
   const formShown = publishing && !archived;
   return (
     <div className="flex min-w-0 max-w-[560px] flex-col gap-6" data-site-settings="">
@@ -337,31 +370,17 @@ export function SiteSettings({
           onPublication={publication.setPublication}
           onBack={() => undefined}
           canManage
-          moreRows={moreRows}
+          settingsRows={workspaceAccess}
+          moreRows={moreSummary ? moreRows : undefined}
+          moreRowsSummary={moreSummary}
         />
-      ) : null}
-      <SettingRow
-        label="Workspace access"
-        description={
-          onlyMe ? "Only you can open it." : `Everyone in ${management.workspaceName} can open it.`
-        }
-        hint={owner ? undefined : "Only its owner can change this."}
-        control={
-          audience.share ? (
-            <Button type="button" size="sm" variant="outline" onClick={audience.share}>
-              <UsersIcon aria-hidden="true" />
-              Share with workspace
-            </Button>
-          ) : audience.limit ? (
-            <Button type="button" size="sm" variant="outline" onClick={audience.limit}>
-              <LockKeyholeIcon aria-hidden="true" />
-              Limit to me
-            </Button>
-          ) : undefined
-        }
-      />
-      {formShown ? null : (
-        <PublishMore summary="Duplicate, export, archive">{moreRows}</PublishMore>
+      ) : (
+        <>
+          {workspaceAccess}
+          {moreSummary ? (
+            <PublishMore summary={sentenceStart(moreSummary)}>{moreRows}</PublishMore>
+          ) : null}
+        </>
       )}
       <ConfirmDialog
         open={archiveOpen}

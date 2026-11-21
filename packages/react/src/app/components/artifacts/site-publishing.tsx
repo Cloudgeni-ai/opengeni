@@ -37,7 +37,6 @@ import { ListRow, RowList } from "../../../ui/list-row";
 import { LogoTile, type LogoTileSize } from "../../../ui/logo-tile";
 import { Notice } from "../../../ui/notice";
 import { RelativeTime } from "../../../ui/relative-time";
-import { Section } from "../../../ui/section";
 import { SelectMenu } from "../../../ui/select-menu";
 import { SettingRow } from "../../../ui/setting-row";
 import { StatusBadge } from "../../../ui/status-badge";
@@ -263,6 +262,10 @@ export type SitePublishPageProps = {
    * shown in the form's collapsed More with search engines and reports.
    */
   moreRows?: ReactNode | undefined;
+  /** What `moreRows` holds, lowercase, for More's closed summary: "duplicate, archive". */
+  moreRowsSummary?: string | undefined;
+  /** Panel only: the app's other settings rows, after the form's fields and before More. */
+  settingsRows?: ReactNode | undefined;
 };
 
 /** The publish form's frame: its own page, or a panel in the Site's Settings. */
@@ -284,10 +287,16 @@ function PublishFrame({
 export function SitePublishPage(props: SitePublishPageProps) {
   const { load, site, onBack, layout } = props;
   const back = { label: site.title, onClick: onBack };
-  // Until the form itself shows, its More holds only the app's rarer rows.
-  const more = props.moreRows ? (
-    <PublishMore summary={MORE_ROWS_SUMMARY}>{props.moreRows}</PublishMore>
-  ) : null;
+  // Until the form itself shows, the app's other rows follow it, and its
+  // More holds only the app's rarer rows.
+  const more = (
+    <>
+      {props.settingsRows}
+      {props.moreRows ? (
+        <PublishMore summary={sentenceStart(props.moreRowsSummary)}>{props.moreRows}</PublishMore>
+      ) : null}
+    </>
+  );
   const blocked = (title: string, body: ReactNode, action?: ReactNode) => (
     <>
       <PublishFrame
@@ -371,6 +380,8 @@ function SitePublishForm({
   layout = "page",
   onSubmitted,
   moreRows,
+  moreRowsSummary,
+  settingsRows,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -432,8 +443,8 @@ function SitePublishForm({
   const moreSummary =
     openReports > 0
       ? `${openReports} open ${openReports === 1 ? "report" : "reports"}`
-      : moreRows
-        ? `Search engines, reports, ${MORE_ROWS_SUMMARY.toLowerCase()}`
+      : moreRows && moreRowsSummary
+        ? `Search engines, reports, ${moreRowsSummary}`
         : "Search engines, reports";
 
   const submit = async () => {
@@ -682,6 +693,8 @@ function SitePublishForm({
             ) : null}
           </div>
 
+          {settingsRows}
+
           {/* Rarely changed, and the dangerous ones: closed unless a report waits. */}
           <PublishMore summary={moreSummary} defaultOpen={openReports > 0}>
             <CheckboxField
@@ -724,8 +737,10 @@ function SitePublishForm({
   );
 }
 
-/** What the app's rarer rows (`moreRows`) hold, for More's closed summary. */
-const MORE_ROWS_SUMMARY = "Duplicate, export, archive";
+/** "duplicate, archive" → "Duplicate, archive". */
+export function sentenceStart(text: string | undefined): string | undefined {
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : undefined;
+}
 
 /** The form's collapsed More: rare and dangerous settings, one row style. */
 export function PublishMore({
@@ -1194,59 +1209,61 @@ function SiteReports({
     }
   };
   return (
-    <Section
-      title="Reports"
-      action={
-        publication.status === "suspended" ? null : (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={onTakeDown}
-            className="rounded-[10px] text-danger hover:text-danger pointer-coarse:h-11"
-          >
-            Take down…
-          </Button>
-        )
-      }
-    >
-      <div className="mt-1">
-        {failed ? (
-          <p className="text-sm text-fg-muted">Couldn't load reports.</p>
-        ) : reports === null ? (
-          <p className="text-sm text-fg-muted">Loading reports…</p>
-        ) : reports.length === 0 ? (
-          <p className="text-sm text-fg-muted">No open reports.</p>
-        ) : (
-          <RowList label="Open reports" flush>
-            {reports.map((report) => (
-              <ListRow
-                key={report.id}
-                leading={reportRowLeading}
-                title={abuseCategoryLabel(report.category)}
-                description={report.message || undefined}
-                meta={[
-                  report.contactEmail ?? "Anonymous",
-                  <RelativeTime key="created" date={report.createdAt} />,
-                ]}
-                menuLabel={`Actions for the ${abuseCategoryLabel(report.category)} report`}
-                menu={
-                  <>
-                    <DropdownMenuItem onSelect={() => void close(report, "actioned")}>
-                      <CheckIcon />
-                      Mark as handled
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => void close(report, "dismissed")}>
-                      Dismiss
-                    </DropdownMenuItem>
-                  </>
-                }
-              />
-            ))}
-          </RowList>
-        )}
-      </div>
-    </Section>
+    <div className="flex min-w-0 flex-col gap-2">
+      <SettingRow
+        label="Reports"
+        description={
+          failed
+            ? "Couldn't load reports."
+            : reports === null
+              ? "Loading reports…"
+              : reports.length === 0
+                ? "No open reports."
+                : `${reports.length} open`
+        }
+        control={
+          publication.status === "suspended" ? undefined : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={onTakeDown}
+              className="rounded-[10px] text-danger hover:text-danger pointer-coarse:h-11"
+            >
+              Take down…
+            </Button>
+          )
+        }
+      />
+      {reports && reports.length > 0 ? (
+        <RowList label="Open reports" flush>
+          {reports.map((report) => (
+            <ListRow
+              key={report.id}
+              leading={reportRowLeading}
+              title={abuseCategoryLabel(report.category)}
+              description={report.message || undefined}
+              meta={[
+                report.contactEmail ?? "Anonymous",
+                <RelativeTime key="created" date={report.createdAt} />,
+              ]}
+              menuLabel={`Actions for the ${abuseCategoryLabel(report.category)} report`}
+              menu={
+                <>
+                  <DropdownMenuItem onSelect={() => void close(report, "actioned")}>
+                    <CheckIcon />
+                    Mark as handled
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => void close(report, "dismissed")}>
+                    Dismiss
+                  </DropdownMenuItem>
+                </>
+              }
+            />
+          ))}
+        </RowList>
+      ) : null}
+    </div>
   );
 }
 
