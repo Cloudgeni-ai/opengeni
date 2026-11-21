@@ -11,17 +11,24 @@
 --   window_count) rate limits deliveries in one atomic update.
 -- * app_notifications: one row per site.notify call. The runtime role only
 --   inserts and reads rows (reads count the sender's recent sends for the
---   rate limit). An AFTER INSERT trigger running as the tables' owner opens
---   or updates each recipient's inbox notice (an inbox item about something
---   other than a chat, 1503: no session, always a link into the app) and
---   queues its phone pushes under each device's `agent` rule. Because the
---   trigger function is owner-internal (triggers fire without the writing
---   role holding EXECUTE), no runtime EXECUTE grant is deferred. A failure
---   to notify one person never fails the insert. Rows older than a day are
---   pruned by the same trigger, per app.
+--   rate limit). An AFTER INSERT trigger calls
+--   opengeni_private.deliver_app_notification_v1(notification), which as the
+--   tables' owner opens or updates each recipient's inbox notice (an inbox
+--   item about something other than a chat, 1503: no session, always a link
+--   into the app) and queues its phone pushes under each device's `agent`
+--   rule. It delivers only a notification inserted in the calling
+--   transaction. A failure to notify one person never fails the insert. Rows
+--   older than a day are pruned by the same routine, per app.
 --
--- Rolling: two new tables and a new trigger the previous release never
--- reads or writes.
+-- The trigger function is an ordinary (invoker) trigger, and the runtime
+-- role's EXECUTE on the delivery routine is withheld for one release
+-- (DEFERRED_RUNTIME_PRIVATE_ROUTINES), like 1503: the previous release
+-- refuses an owner-only trigger definer, or a runtime grant on a definer, it
+-- doesn't know. Until a later migration grants it, the API refuses
+-- site.notify as not yet available instead of storing an undelivered send.
+--
+-- Rolling: two new tables, a new trigger and a definer nobody can call yet;
+-- the previous release never reads or writes any of them.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
 
@@ -136,25 +143,36 @@ DECLARE
   data_schema text := current_schema();
 BEGIN
   EXECUTE pg_catalog.format($definition$
-    CREATE FUNCTION opengeni_private.deliver_app_notification()
-    RETURNS trigger
+    CREATE FUNCTION opengeni_private.deliver_app_notification_v1(p_notification uuid)
+    RETURNS integer
     LANGUAGE plpgsql
+    VOLATILE
     SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
     DECLARE
+      v_sent app_notifications%%ROWTYPE;
       v_recipient text;
-      v_key text := 'app:' || NEW.site_id::text || ':' || NEW.notice_key;
+      v_key text;
       v_previous text;
       v_item uuid;
       v_version integer;
       v_from_other boolean;
+      v_delivered integer := 0;
     BEGIN
-      FOREACH v_recipient IN ARRAY NEW.recipients LOOP
+      -- Only a send made in this transaction, read under the caller's
+      -- workspace row security: an old send is never delivered again.
+      SELECT sent.* INTO v_sent FROM app_notifications sent
+      WHERE sent.id = p_notification AND sent.created_at = now();
+      IF NOT FOUND THEN
+        RETURN 0;
+      END IF;
+      v_key := 'app:' || v_sent.site_id::text || ':' || v_sent.notice_key;
+      FOREACH v_recipient IN ARRAY v_sent.recipients LOOP
         BEGIN
-          v_from_other := v_recipient IS DISTINCT FROM NEW.sender_subject_id;
+          v_from_other := v_recipient IS DISTINCT FROM v_sent.sender_subject_id;
           SELECT item.status INTO v_previous FROM opengeni_private.inbox_items item
-          WHERE item.account_id = NEW.account_id AND item.recipient_subject_id = v_recipient
+          WHERE item.account_id = v_sent.account_id AND item.recipient_subject_id = v_recipient
             AND item.kind = 'notification' AND item.source_key = v_key
             AND item.session_id IS NULL;
           -- The same key updates the person's notice in place, like an
@@ -164,11 +182,11 @@ BEGIN
             account_id, workspace_id, session_id, recipient_subject_id, kind, source_key,
             title, subtitle, body, link, urgency, sender_subject_id, sender_label
           ) VALUES (
-            NEW.account_id, NEW.workspace_id, NULL, v_recipient, 'notification', v_key,
-            left(NEW.title, 200), left(NEW.app_title, 120), left(NEW.body, 2000),
-            jsonb_build_object('url', NEW.link, 'label', 'Open app'), 'normal',
-            CASE WHEN v_from_other THEN NEW.sender_subject_id END,
-            CASE WHEN v_from_other THEN left(NEW.sender_label, 200) END
+            v_sent.account_id, v_sent.workspace_id, NULL, v_recipient, 'notification', v_key,
+            left(v_sent.title, 200), left(v_sent.app_title, 120), left(v_sent.body, 2000),
+            jsonb_build_object('url', v_sent.link, 'label', 'Open app'), 'normal',
+            CASE WHEN v_from_other THEN v_sent.sender_subject_id END,
+            CASE WHEN v_from_other THEN left(v_sent.sender_label, 200) END
           )
           ON CONFLICT (account_id, recipient_subject_id, kind, source_key)
             WHERE session_id IS NULL DO UPDATE SET
@@ -193,27 +211,50 @@ BEGIN
               jsonb_strip_nulls(jsonb_build_object(
                 'rule', 'agent',
                 'eventType', 'app.notification',
-                'workspaceId', NEW.workspace_id,
+                'workspaceId', v_sent.workspace_id,
                 'subjectId', device.subject_id,
-                'title', left(NEW.title, 120),
+                'title', left(v_sent.title, 120),
                 'subtitle', left(CASE WHEN v_from_other
-                  THEN NEW.app_title || ' · ' || NEW.sender_label ELSE NEW.app_title END, 160),
-                'body', left(nullif(NEW.body, ''), 1000),
-                'link', NEW.link))
+                  THEN v_sent.app_title || ' · ' || v_sent.sender_label ELSE v_sent.app_title END, 160),
+                'body', left(nullif(v_sent.body, ''), 1000),
+                'link', v_sent.link))
             FROM opengeni_private.native_push_devices device
             JOIN auth_sessions auth ON auth.id = device.auth_session_id AND auth.expires_at > now()
             WHERE device.subject_id = v_recipient AND 'agent' = ANY (device.rules)
             ON CONFLICT (auth_session_id, dedupe_key) DO NOTHING;
           END IF;
+          v_delivered := v_delivered + 1;
         EXCEPTION WHEN OTHERS THEN
           -- One person's notice never fails the others or the send.
-          RAISE WARNING 'app notification skipped for a recipient of %%: %%', NEW.id, SQLERRM;
+          RAISE WARNING 'app notification skipped for a recipient of %%: %%', v_sent.id, SQLERRM;
         END;
       END LOOP;
       -- Sends older than a day no longer count toward any rate limit.
       DELETE FROM app_notifications sent
-      WHERE sent.workspace_id = NEW.workspace_id AND sent.site_id = NEW.site_id
+      WHERE sent.workspace_id = v_sent.workspace_id AND sent.site_id = v_sent.site_id
         AND sent.created_at < now() - interval '1 day';
+      RETURN v_delivered;
+    END
+    $body$
+  $definition$, data_schema);
+
+  EXECUTE pg_catalog.format($definition$
+    CREATE FUNCTION opengeni_private.deliver_app_notification()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, %1$I, pg_temp
+    AS $body$
+    BEGIN
+      -- Runs as the inserting role, which may deliver once its EXECUTE is
+      -- granted (the API checks before it inserts).
+      IF pg_catalog.has_function_privilege(
+        'opengeni_private.deliver_app_notification_v1(uuid)', 'EXECUTE')
+      THEN
+        PERFORM opengeni_private.deliver_app_notification_v1(NEW.id);
+      END IF;
+      RETURN NULL;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'app notification %% not delivered: %%', NEW.id, SQLERRM;
       RETURN NULL;
     END
     $body$
@@ -221,6 +262,7 @@ BEGIN
 END
 $app_notifications$;
 
+REVOKE ALL ON FUNCTION opengeni_private.deliver_app_notification_v1(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.deliver_app_notification() FROM PUBLIC;
 
 CREATE TRIGGER app_notifications_deliver_trg

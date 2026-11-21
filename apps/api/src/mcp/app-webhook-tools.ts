@@ -66,7 +66,9 @@ export function registerAppWebhookTools(
         "Create or change an app webhook: an address another service posts JSON to, and each delivery becomes records in a shared collection of the app's data at once (live updates, automations and workspace webhooks see the change). With key a delivery upserts by that key; without, it inserts. Without webhookId it creates one (name and collection required) and returns its url and secret once; tell the person to keep the secret, it isn't shown again. With webhookId only the given fields change; rotateSecret returns a new secret. Senders authenticate with the secret as a bearer token or an HMAC signature.",
       inputSchema: {
         siteId: AppIdInput,
-        webhookId: WebhookIdInput.optional().describe("Change this webhook instead of creating one."),
+        webhookId: WebhookIdInput.optional().describe(
+          "Change this webhook instead of creating one.",
+        ),
         name: z4.string().min(1).max(200).optional().describe("A short name people recognize."),
         collection: z4
           .string()
@@ -89,12 +91,20 @@ export function registerAppWebhookTools(
           .nullable()
           .optional()
           .describe("Dot paths of the fields to keep. Omit to keep whole records."),
-        status: z4.enum(["active", "paused"]).optional().describe("A paused webhook refuses deliveries."),
-        rotateSecret: z4.boolean().optional().describe("Replace the secret (existing webhooks only)."),
+        status: z4
+          .enum(["active", "paused"])
+          .optional()
+          .describe("A paused webhook refuses deliveries."),
+        rotateSecret: z4
+          .boolean()
+          .optional()
+          .describe("Replace the secret (existing webhooks only)."),
       },
     },
     call(
-      async (args: { siteId: string; webhookId?: string | undefined } & Record<string, unknown>) => {
+      async (
+        args: { siteId: string; webhookId?: string | undefined } & Record<string, unknown>,
+      ) => {
         const { siteId, webhookId, rotateSecret, ...fields } = args;
         const body = Object.fromEntries(
           Object.entries(fields).filter(([, value]) => value !== undefined),
@@ -124,7 +134,8 @@ export function registerAppWebhookTools(
   server.registerTool(
     "app_webhook_delete",
     {
-      description: "Delete an app webhook; its address stops accepting deliveries. Records it wrote stay.",
+      description:
+        "Delete an app webhook; its address stops accepting deliveries. Records it wrote stay.",
       inputSchema: { siteId: AppIdInput, webhookId: WebhookIdInput },
     },
     call(async ({ siteId, webhookId }: { siteId: string; webhookId: string }) =>

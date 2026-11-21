@@ -41,6 +41,12 @@ Pages read data when they load; there are no live updates.
 
 Agents use `app_data_describe`, `app_data_query`, `app_data_write`, `app_data_import`, `app_data_export`, `app_data_reset` and `app_files_*`. A scheduled task runs them with the schedule's access, which makes an app a dashboard that refreshes itself. A conversation started from an app page acts like the page for its whole life: it reaches only that app's data, with viewer rights, even when its owner later continues it from the console.
 
+## Webhooks and notifications
+
+Another service can send data into an app: ask the agent to add a webhook to a collection, and give the service the address and secret it shows (once). Each delivery adds or updates records, and automations and workspace webhooks hear about them like any other change. Self-hosted deployments need an API address the service can reach.
+
+An app page can also notify people with `site.notify({ title, body, path })`: by default the person using it, or another member who allows notifications. The notification opens the app at `path`. Only workspace members can send them.
+
 ## Limits and usage
 
 By default an app can hold 100 MB of records (256 KB each, each charged an extra 512 bytes), 100,000 records per collection, 50 collections and 1 GB of files (10 MB each), and a workspace 1 GB of app data in total. One request carries at most 4 MB of records. Self-hosted deployments change these with the `OPENGENI_SITE_DATA_*` settings. Writes are rate limited per person and per app (managers and agents share a generous per-app limit), and reads from an app page per person. Usage is recorded for the workspace, which pays for what viewers do; it is not charged yet.

@@ -77,7 +77,7 @@ function encryptionKey(deps: SiteDataDeps): Uint8Array {
   if (!key)
     throw forbidden(
       "App webhooks need OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY on this deployment to keep their secrets.",
-      { code: "app_webhooks_unavailable" },
+      { reason: "app_webhooks_unavailable" },
     );
   return key;
 }
@@ -163,7 +163,7 @@ async function requireSharedCollection(access: SiteDataAccess, name: string): Pr
   if (collection.accessMode === "per_viewer")
     throw invalid(
       `"${name}" keeps each person's records separately, so a webhook can't fill it. Use a shared, shared_read or append_only collection.`,
-      { code: "collection_per_viewer" },
+      { reason: "collection_per_viewer" },
     );
 }
 
@@ -255,7 +255,8 @@ export async function updateAppWebhook(
     fields: request.fields !== undefined ? request.fields : current.fields,
     status: request.status ?? current.status,
   };
-  if (next.collection !== current.collection) await requireSharedCollection(access, next.collection);
+  if (next.collection !== current.collection)
+    await requireSharedCollection(access, next.collection);
   const secret = request.rotateSecret === true ? newSecret(deps) : null;
   const row = await writeAppWebhook(
     deps.db,

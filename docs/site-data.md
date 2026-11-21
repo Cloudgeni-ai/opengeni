@@ -121,6 +121,14 @@ and pages keep their timed checks.
 Live hints do not cover Site SQL writes (the Durable Object commit is not
 atomic with Postgres, so no hint is published).
 
+### Webhook writes
+
+App webhooks ([app-webhooks.md](app-webhooks.md)) write deliveries from other
+services through this same write path, as the trusted manager-level principal
+`webhook:<id>` (writer kind `service`), into shared collections only. Their
+writes send live hints and the app change events below like any other write,
+with chain depth 1, and count toward the same quotas and metering.
+
 ### App change events for automations and webhooks
 
 Automations and workspace webhooks hear about app data changes through the

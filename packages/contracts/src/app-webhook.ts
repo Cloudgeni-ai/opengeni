@@ -50,7 +50,9 @@ const SettingsShape = () => ({
     .max(100)
     .nullable()
     .optional()
-    .describe("Dot paths of the fields to keep, stored under the same path. Omit to keep whole records."),
+    .describe(
+      "Dot paths of the fields to keep, stored under the same path. Omit to keep whole records.",
+    ),
   status: AppWebhookStatus.optional(),
 });
 

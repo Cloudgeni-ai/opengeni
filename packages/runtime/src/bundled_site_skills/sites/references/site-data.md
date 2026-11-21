@@ -155,6 +155,23 @@ syncs, whether the viewer `optedIn`: show "Updated 5 minutes ago" or the error
 near the data. Use a scheduled agent task only when a run needs judgment
 (summaries, classification, several tools combined).
 
+**Webhooks: data pushed in by another service.** When a service can call a
+URL on events (payments, forms, alerts), save a webhook instead of polling:
+`app_webhook_save` with `siteId`, `name`, a shared `collection` (not
+`per_viewer`), and optionally `recordsPath`, `key` (put by key; without one,
+each delivery inserts) and `fields`. It returns the `url` and a `secret`
+shown once: give both to the user for the sending service (`Authorization:
+Bearer <secret>`, or the `X-Opengeni-Signature` HMAC). `rotateSecret: true`
+replaces it; `status: "paused"` stops deliveries. Pages see the records
+through `onChange` like any other write.
+
+**Notifications.** `await site.notify({ title, body, path, key })` sends the
+viewer an inbox notification that opens the app at `path`; `to` names another
+member (by email) or `"workspace"` (managers only, everyone who can open the
+app). Members only; it is rate limited, and the same `key` updates the
+notification instead of adding one. Use it for things a person must act on,
+not every change.
+
 Agents and scheduled tasks use the tools: `opengeni__app_data_describe`,
 `app_data_query`, `app_data_write` (batches of up to 100), `app_data_import`
 and `app_data_export` (JSON or CSV), `app_data_reset` (needs

@@ -41,7 +41,7 @@ import {
  */
 
 const forbidden = (message: string, code: string) =>
-  new SiteDataError("forbidden", message, { code });
+  new SiteDataError("forbidden", message, { reason: code });
 
 type Sender = {
   scope: { accountId: string; workspaceId: string };
@@ -49,8 +49,7 @@ type Sender = {
   subjectId: string;
 };
 
-const MEMBERS_ONLY =
-  "Only signed-in members of this workspace can send notifications from an app.";
+const MEMBERS_ONLY = "Only signed-in members of this workspace can send notifications from an app.";
 
 /** The person sending, the app, and the app as they see it. */
 async function senderOf(
@@ -62,7 +61,11 @@ async function senderOf(
   if (isPublishedViewer(authority)) {
     if (authority.site.id !== siteId)
       throw forbidden("An app can only send its own notifications", "other_app");
-    if (authority.guest || authority.access !== "member" || !authority.principal.startsWith("user:"))
+    if (
+      authority.guest ||
+      authority.access !== "member" ||
+      !authority.principal.startsWith("user:")
+    )
       throw forbidden(MEMBERS_ONLY, "members_only");
     return {
       scope: { accountId: authority.accountId, workspaceId: authority.workspaceId },
@@ -203,6 +206,11 @@ export async function notifyFromApp(
       windowSeconds: APP_NOTIFY_WINDOW_SECONDS,
     },
   );
+  if ("unavailable" in inserted)
+    throw forbidden(
+      "Notifications from apps aren't available on this deployment yet.",
+      "notify_not_available",
+    );
   if ("limited" in inserted)
     throw new SiteDataError(
       "rate_limited",

@@ -117,6 +117,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
+  "deliver_app_notification_v1(uuid)",
 ] as const;
 
 /**
@@ -181,6 +182,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
+  "deliver_app_notification_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -334,6 +336,13 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "subscription_connections",
     "organization_memberships",
     "workspace_memberships",
+    "auth_sessions",
+    "opengeni_private.inbox_items",
+    "opengeni_private.native_push_devices",
+    "opengeni_private.native_push_deliveries",
+  ],
+  "deliver_app_notification_v1(uuid)": [
+    "app_notifications",
     "auth_sessions",
     "opengeni_private.inbox_items",
     "opengeni_private.native_push_devices",
@@ -563,8 +572,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // holding EXECUTE.
   "stamp_subscription_connection_sign_in()",
   "subscription_connection_relogin_notice()",
-  // Migration 1524: delivers an app's notification to inboxes and phones as
-  // the tables' owner; the trigger fires without the inserting role holding EXECUTE.
+  // Migration 1524: the app notification trigger (an invoker trigger that
+  // calls deliver_app_notification_v1 once the runtime may). Triggers fire
+  // without the inserting role holding EXECUTE.
   "deliver_app_notification()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",

@@ -350,3 +350,24 @@ test("only file attachments are set aside for the console's Site view check", ()
   ).toBe("resources");
   expect(withoutFileResources(null)).toBeNull();
 });
+
+test("an app reaches notify as current, never its webhooks", () => {
+  const current = `${host}/published-artifacts/current`;
+  expect(siteSessionPath(`${current}/notify`, "ws", "POST", "site-1")).toBe(
+    "/v1/workspaces/ws/published-artifacts/site-1/notify",
+  );
+  // An unpinned host has no app to notify from.
+  expect(() => siteSessionPath(`${current}/notify`, "ws", "POST")).toThrow(
+    SiteDataUnsupportedError,
+  );
+  for (const [method, suffix] of [
+    ["GET", "/webhooks"],
+    ["POST", "/webhooks"],
+    ["PATCH", "/webhooks/one"],
+    ["GET", "/notify"],
+  ] as const) {
+    expect(() => siteSessionPath(`${current}${suffix}`, "ws", method, "site-1")).toThrow(
+      SiteSessionPathError,
+    );
+  }
+});
