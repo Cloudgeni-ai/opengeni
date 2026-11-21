@@ -101,6 +101,8 @@ const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: n
   "site-uploads.ts": { calls: 2, withUserContentOptions: 1 },
   // Site Data file downloads.
   "site-data/operations.ts": { calls: 1, withUserContentOptions: 1 },
+  // App package downloads for agents (app_export).
+  "mcp/app-package-tools.ts": { calls: 1, withUserContentOptions: 1 },
 };
 
 async function sourceFiles(directory: URL, prefix = ""): Promise<string[]> {
