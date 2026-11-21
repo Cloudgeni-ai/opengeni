@@ -154,6 +154,19 @@ export const AttemptToolCatalogEntry = /* @__PURE__ */ defineSchema(() =>
       icons: z.array(AttemptToolCatalogIcon).max(16).optional(),
       source: z.enum(["opengeni", "files", "docs", "mcp", "codex_apps", "interaction"]),
       approval: z.enum(["none", "human", "policy"]),
+      /**
+       * The effective tool permission from the person's and workspace's tool
+       * settings, for a connection-backed tool (`approval: "policy"` or a
+       * setting that asks). `fromSetting` is false when no setting names the
+       * tool and the provider's recommendation applies. Absent elsewhere.
+       */
+      permission: z
+        .object({
+          decision: z.enum(["allow", "ask", "block"]),
+          fromSetting: z.boolean(),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );

@@ -150,6 +150,7 @@ import {
   withBillingOriginOverride,
   getOrganizationMcpConnectionSettings,
   updateOrganizationMcpConnectionSettings,
+  admitMcpConnectionRateLimit,
   type OrganizationMcpConnectionSettings,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
@@ -219,6 +220,7 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
+import { createGitHubSkillSourceClient, readSkillRepository } from "@opengeni/core";
 import {
   eventTriggersEnabled,
   PersonalWorkspacesOffError,
@@ -330,7 +332,7 @@ import {
 } from "./mcp-oauth";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
 import { claimsStoredApproval } from "./mcp/stored-approval-claim";
-import { createConnectionRateLimiter } from "./mcp/connection-rate-limit";
+import { createSharedConnectionRateLimiter } from "./mcp/connection-rate-limit";
 import type { ActionAuditProvenance } from "./http/disconnect-audit-actor";
 import {
   CodemodeAuthorityError,
@@ -1995,15 +1997,23 @@ export function createAppComposition(
     );
   });
 
-  // Per connection: calls in general, and new delegated chats.
-  const organizationMcpCallLimiter = createConnectionRateLimiter({
-    capacity: 120,
-    refillPerSecond: 2,
-  });
-  const organizationMcpDelegateLimiter = createConnectionRateLimiter({
-    capacity: 20,
-    refillPerSecond: 1 / 30,
-  });
+  // Per connection: calls in general, and new delegated chats. Counted in
+  // Postgres so every API process shares one budget per connection.
+  const sharedMcpLimiter = (budget: string, capacity: number, refillPerSecond: number) =>
+    createSharedConnectionRateLimiter({
+      capacity,
+      refillPerSecond,
+      admitShared: (input) => admitMcpConnectionRateLimit(routeDeps.db, { ...input, budget }),
+      onFallback: (error) =>
+        observability.warn("MCP rate limit fell back to this process", {
+          budget,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    });
+  const organizationMcpCallLimiter = sharedMcpLimiter("call", 120, 2);
+  const organizationMcpDelegateLimiter = sharedMcpLimiter("delegate", 20, 1 / 30);
+  // skills_sync from a repository reads public GitHub, like a Skill import.
+  const skillRepositoryReader = createGitHubSkillSourceClient(routeDeps.settings);
   // The organization MCP server: every public action, as a person who signed
   // in (capped by their connection's access setting) or as an organization
   // API key. Each action runs the real route in this process.
@@ -2108,6 +2118,8 @@ export function createAppComposition(
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // The organization whose account context holds the shared bucket.
+    const rateAccountId = caller.kind === "person" ? caller.accountId : organizationKeyAccountId!;
     // This reaches every workspace of the organization: EU-only content stays
     // in EU-only workspaces when another Opengeni workspace calls.
     await requireCallingWorkspaceContentExchange(routeDeps.db, c.req.raw, {
@@ -2167,11 +2179,13 @@ export function createAppComposition(
             },
           }
         : {}),
-      admit: (toolName) =>
-        Math.max(
-          organizationMcpCallLimiter.admit(rateKey),
-          toolName === "delegate" ? organizationMcpDelegateLimiter.admit(rateKey) : 0,
-        ),
+      readSkillRepository: async (url) => await readSkillRepository(url, skillRepositoryReader),
+      admit: async (toolName) => {
+        const bucket = { accountId: rateAccountId, key: rateKey };
+        const call = await organizationMcpCallLimiter.admit(bucket);
+        if (call > 0 || toolName !== "delegate") return call;
+        return await organizationMcpDelegateLimiter.admit(bucket);
+      },
       dispatch: async (request) => {
         stampRequestBillingOrigin(
           request,

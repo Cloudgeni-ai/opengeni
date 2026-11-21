@@ -222,6 +222,8 @@ export type ToolGatewayCatalogEntry = {
   icons?: Array<Record<string, unknown>> | undefined;
   source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
   approval: "none" | "human" | "policy";
+  /** The effective permission from tool settings, for a connection-backed tool. */
+  permission?: { decision: "allow" | "ask" | "block"; fromSetting: boolean };
 };
 
 export type ToolGatewayCatalog = {
@@ -3810,6 +3812,8 @@ export type GitDiffRequest = {
   includeUntracked?: boolean;
   fromRef?: string;
   toRef?: string;
+  /** Compare against the merge base of fromRef and toRef (or HEAD and the working tree). */
+  mergeBase?: boolean;
   pathspec?: string[];
   contextLines?: number;
   maxBytesPerFile?: number;

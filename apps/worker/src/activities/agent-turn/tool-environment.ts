@@ -908,7 +908,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         })
       : [];
   const agentCanUse = agentCanUseFor({
-    ruleSets: canUseAgents.flatMap((agent) => agentToolPermissionSetsForEnforcement(agent)),
+    ruleSets: canUseAgents.flatMap((agent) =>
+      agentToolPermissionSetsForEnforcement(agent).map((rules) => ({
+        agent: { id: agent.id, name: agent.name },
+        rules,
+      })),
+    ),
     bindings: turn.mcpAccountBindings,
     servers: canonicalRunSettings.mcpServers,
   });

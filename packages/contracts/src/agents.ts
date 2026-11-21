@@ -320,9 +320,21 @@ export function agentToolPermissionFor(
   rules: readonly AgentToolPermissionRuleInput[],
   target: AgentToolPermissionTarget,
 ): AgentToolPermission | null {
-  let best: { rank: number; permission: AgentToolPermission } | null = null;
+  return agentToolPermissionRuleFor(rules, target)?.permission ?? null;
+}
+
+/**
+ * The rule {@link agentToolPermissionFor} decides by, with its tool
+ * normalized (`*` when omitted), or null when no rule names the call.
+ */
+export function agentToolPermissionRuleFor(
+  rules: readonly AgentToolPermissionRuleInput[],
+  target: AgentToolPermissionTarget,
+): AgentToolPermissionRule | null {
+  let best: { rank: number; rule: AgentToolPermissionRule } | null = null;
   for (const rule of rules) {
-    const connectorRank = ruleConnectorRank(rule.connector.trim(), target);
+    const connector = rule.connector.trim();
+    const connectorRank = ruleConnectorRank(connector, target);
     if (connectorRank === undefined) continue;
     const tool = (rule.tool ?? "*").trim();
     if (tool !== "*" && tool !== target.toolName) continue;
@@ -331,12 +343,12 @@ export function agentToolPermissionFor(
       best === null ||
       rank > best.rank ||
       (rank === best.rank &&
-        PERMISSION_STRICTNESS[rule.permission] > PERMISSION_STRICTNESS[best.permission])
+        PERMISSION_STRICTNESS[rule.permission] > PERMISSION_STRICTNESS[best.rule.permission])
     ) {
-      best = { rank, permission: rule.permission };
+      best = { rank, rule: { connector, tool, permission: rule.permission } };
     }
   }
-  return best?.permission ?? null;
+  return best?.rule ?? null;
 }
 
 /**

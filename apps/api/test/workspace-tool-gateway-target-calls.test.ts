@@ -1325,6 +1325,43 @@ describe("target-only workspace tool calls", () => {
     }
   });
 
+  test("catalog entries carry the effective permission from tool settings", async () => {
+    const f = createFixture();
+    const attestations = createWorkspaceToolGatewayCatalogAttestations();
+    try {
+      const permissionOf = async () =>
+        (await attestedCatalog(f, attestations)).entries.find(
+          (entry) =>
+            entry.identity.serverId === f.identity(f.shared).serverId &&
+            entry.identity.toolName === "query_prometheus",
+        );
+      f.state.connections = [f.shared];
+      const setting = (decision: "allow" | "ask" | "block") => ({
+        id: crypto.randomUUID(),
+        connectionId: f.shared.id,
+        serverId: "grafana",
+        toolName: "query_prometheus",
+        actionName: "*",
+        policy: decision,
+        version: 1,
+      });
+      // No setting: the provider's recommendation, listed as allowed.
+      expect((await permissionOf())?.permission).toEqual({ decision: "allow", fromSetting: false });
+      f.state.policies = [setting("ask")];
+      expect(await permissionOf()).toMatchObject({
+        approval: "human",
+        permission: { decision: "ask", fromSetting: true },
+      });
+      f.state.policies = [setting("block")];
+      expect(await permissionOf()).toMatchObject({
+        approval: "policy",
+        permission: { decision: "block", fromSetting: true },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
   test("approval capabilities bypass target preparation; approval-classified targets still ask", async () => {
     const f = createFixture();
     const attestations = createWorkspaceToolGatewayCatalogAttestations();

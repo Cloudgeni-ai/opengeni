@@ -152,8 +152,8 @@ connection's access setting; none adds authority.
 | `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Find, read and control chats |
 | `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; `workspace_use` sets the connection's default workspace |
 | `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change app data ([App data](site-data.md)); `app_query` runs a named query when given `sqlQuery` |
-| `tools_search`, `tool_call` | Search and call the workspace's connected tools; results show which tools need approval |
-| `skills_sync`, `skills_list` | Upload local Skill folders (`direction: "upload"`) or pull the workspace's (`direction: "pull"`) |
+| `tools_search`, `tool_call` | Search and call the workspace's connected tools; each result's `approval` (`none`, `human`, `blocked`) and `approvalSource` (`tool`, or `policy` when the person's or workspace's tool settings decide) say whether a call needs approval |
+| `skills_sync`, `skills_list` | Upload local Skill folders (`direction: "upload"`), pull the workspace's (`direction: "pull"`), or sync every Skill folder of a GitHub repository (`direction: "repository"`, `repository`: a repository or folder URL) |
 | `knowledge_search`, `knowledge_get`, `knowledge_save` | Search, read and save Knowledge |
 
 `sites_list`, `site_describe`, `site_query`, `site_write` and
@@ -201,13 +201,25 @@ connection's access setting; none adds authority.
   `unchanged`, `pending_review`, `invalid` with the YAML or frontmatter
   error, `conflict`, `failed`). Approving, rejecting or restoring a Skill
   revision is the person's review, so connected agents are refused those.
-  Pulling returns each Skill's files. Syncing straight from a Git repository
-  isn't supported; the agent reads the folders locally.
+  Pulling returns each Skill's files. `direction: "repository"` reads every
+  folder with a `SKILL.md` in a public GitHub repository (or one folder of
+  it, `/tree/<ref>/<path>`) at one commit, at most 50, and saves them the
+  same way, with "Synced from owner/repo@commit" as the change reason; the
+  result names the commit and each Skill's `path`, and lists folders it
+  couldn't read. It reads at most 40 files per sync: GitHub's public request
+  limit (about 60 an hour) is per server address and shared by everyone on
+  it, so folders past that are listed as skipped (sync a folder URL, or
+  upload). Private repositories are synced with `upload` from a local
+  checkout; self-hosted servers need outbound access to `api.github.com`.
 - **Rate limits.** Each connection (or personal key) may make 120 calls in a
   burst refilling at 2 per second, and 20 `delegate` calls refilling at one
   per 30 seconds (chats started through the generic action tools count only
   toward the first). Over the limit a call returns an error saying how many seconds to wait;
-  nothing ran, so the retry is safe. The limits are per API process.
+  nothing ran, so the retry is safe. The limits are shared by every API
+  process: each connection's buckets are kept in Postgres
+  (`mcp_connection_rate_limits`, migration `1530`), so more replicas don't
+  raise them. While Postgres can't be reached, each process counts on its
+  own.
 - **Not yet.** MCP Tasks (long-running calls) and MCP event notifications are
   not supported; use `wait_for`.
 
@@ -219,8 +231,8 @@ Migration `1516` (rolling) adds the per-connection settings table
 learning.
 
 When self-hosted, sign-in needs `OPENGENI_PUBLIC_BASE_URL` set to the public
-origin (approval links use it too), the rate limits count per API replica,
-and `npx opengeni connect --base-url <origin>` points the agents at it.
+origin (approval links use it too), the rate limits are shared across API
+replicas through the deployment's Postgres, and `npx opengeni connect --base-url <origin>` points the agents at it.
 
 #### Auto-connect (Enterprise-Managed Authorization)
 

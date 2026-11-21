@@ -94,6 +94,7 @@ export * from "./managed-auth-session-set-schema";
 export * from "./secret-approvals-schema";
 export * from "./credential-profiles-schema";
 export * from "./slack-api-rate-limit-schema";
+export * from "./mcp-connection-rate-limit-schema";
 export * from "./organization-recovery-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
@@ -9113,6 +9114,12 @@ export const connectorActionRequests = pgTable(
     policyVersion: integer("policy_version"),
     policySource: text("policy_source").$type<"explicit" | "default" | "ambiguous">().notNull(),
     policyDecision: text("policy_decision").$type<ConnectorActionPolicyDecision>().notNull(),
+    /**
+     * The agent and Can use rule that made the call ask or blocked it; null
+     * when the connection's own settings decided (`policy_source` stays
+     * `default` for an agent rule, as before this column).
+     */
+    agentRule: jsonb("agent_rule").$type<import("@opengeni/contracts").ToolReviewAgentRule>(),
     actionFingerprint: text("action_fingerprint").notNull(),
     reviewArguments: text("review_arguments"),
     reviewContext: jsonb("review_context").$type<import("@opengeni/contracts").ToolReviewContext>(),

@@ -1198,7 +1198,20 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           // The filter then hides a tool that still needs approval only when
           // its provider recommends Ask and it has no approval preflight. Its
           // execution still resolves the exact arguments.
-          return { ...definition, approval: permission.approvalRequired ? "human" : "policy" };
+          // A tool whose every action is blocked is refused on call; say so
+          // in the catalog instead of listing it as allowed.
+          const decision =
+            permission.permission === "block" &&
+            permission.actionPermissions.every((action) => action.permission === "block")
+              ? "block"
+              : permission.approvalRequired
+                ? "ask"
+                : "allow";
+          return {
+            ...definition,
+            approval: permission.approvalRequired ? "human" : "policy",
+            permission: { decision, fromSetting: permission.source !== "recommended" },
+          };
         },
         resolveApproval: async ({ call, entry }) => {
           const defaultDecision =

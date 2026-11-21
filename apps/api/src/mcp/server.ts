@@ -12,7 +12,12 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
-import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
+import {
+  assertGoalResumeAllowed,
+  createGitHubPersonalEventSource,
+  MissingPermissionRefusal,
+  personalGitHubReader,
+} from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { registerSidebarLayoutTools } from "./sidebar-layout-tools";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
@@ -699,6 +704,7 @@ import {
   agentRefToolInput,
   delegatedChatInstructions,
   resolveDelegationAgent,
+  delegationAgentSubject,
 } from "../agent-delegation";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -1688,7 +1694,11 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       wake: () => sessionLinkWake,
-      wakeTarget: (link) => sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link),
+      wakeTarget: async (link) =>
+        await sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link, async () => {
+          const { subjectId } = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+          return subjectId ? { accountId: grant.accountId, subjectId } : null;
+        }),
       json,
     });
   }
@@ -2707,13 +2717,61 @@ export function buildOpenGeniMcpServer(
           return { automationId: pending.id, name: pending.name, once: true, existing: true };
         }
         const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
-        const source = (
-          await listSessionLinkEventSources(deps.db, grant.workspaceId, viewer.subjectId)
-        ).find(
-          (candidate) =>
-            candidate.kind === "github" &&
-            sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+        // The workspace's GitHub App source, or, where only the person's own
+        // GitHub connection can read the repository, their "GitHub (your
+        // connection)" source, added on first use.
+        const sources = await listSessionLinkEventSources(
+          deps.db,
+          grant.workspaceId,
+          viewer.subjectId,
         );
+        const usable = (kind: "github" | "github_personal") =>
+          sources.find(
+            (candidate) =>
+              candidate.kind === kind &&
+              (kind === "github" || candidate.ownerSubjectId === viewer.subjectId) &&
+              sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+          );
+        let kind: "github" | "github_personal" =
+          wake.via === "personal" ? "github_personal" : "github";
+        let source: { id: string } | undefined = usable(kind);
+        // The App reads the repository but the workspace has no GitHub event
+        // source: the person's own connection can still watch it.
+        const repository = wake.conditions.find(
+          (condition) => condition.field === "data.repository.full_name",
+        )?.value;
+        if (
+          !source &&
+          kind === "github" &&
+          viewer.subjectId &&
+          typeof repository === "string" &&
+          (await personalGitHubReader(
+            { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              subjectId: viewer.subjectId,
+              repository,
+            },
+          ).catch(() => null))
+        ) {
+          kind = "github_personal";
+          source = usable(kind);
+        }
+        if (!source && kind === "github_personal" && viewer.subjectId) {
+          source = await createGitHubPersonalEventSource({
+            db: deps.db,
+            settings: deps.settings,
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            createdBySubjectId: grant.subjectId,
+            ownerSubjectId: viewer.subjectId,
+          }).catch((error: unknown) => {
+            throw new ToolArgumentError(
+              `${errorMessage(error)} The link was added without a wake.`,
+            );
+          });
+        }
         if (!source) {
           throw new ToolArgumentError(
             "No GitHub event source is available. A person adds it in Automations (it needs the workspace's GitHub app); the link was added without a wake.",
@@ -7209,6 +7267,8 @@ function registerWorkspaceOrchestrationTools(
           const { machineTarget, title, projectId, agentName, ...request } = args;
           // Delegation by name: the child is a chat with that agent.
           let delegated: { agentId: string; instructions?: string } | null = null;
+          // Whose agents the child may run, when not the grant's subject.
+          let agentAccessSubjectId: string | undefined;
           if (agentName !== undefined) {
             // The child inherits the calling chat's privacy; its Memory
             // guidance must match what the knowledge tools will allow.
@@ -7240,6 +7300,10 @@ function registerWorkspaceOrchestrationTools(
               agentId: resolved.agent.id,
               ...(instructions !== undefined ? { instructions } : {}),
             };
+            const agentSubject = delegationAgentSubject(grant, caller);
+            if (agentSubject && agentSubject !== grant.subjectId) {
+              agentAccessSubjectId = agentSubject;
+            }
           }
           const rawRequest = {
             ...request,
@@ -7266,6 +7330,7 @@ function registerWorkspaceOrchestrationTools(
             rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
+            agentAccessSubjectId ? { agentAccessSubjectId } : {},
           );
           return json(
             sessionCreateMutationReceipt(

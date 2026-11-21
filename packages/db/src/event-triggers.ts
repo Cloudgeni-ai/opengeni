@@ -269,7 +269,7 @@ export async function createEventSource(
                       ? eq(schema.eventSources.connectionId, input.connectionId)
                       : isNull(schema.eventSources.connectionId),
                   )
-                : input.kind === "workspace"
+                : input.kind === "workspace" || input.kind === "github_personal"
                   ? eq(schema.eventSources.ownerSubjectId, input.ownerSubjectId ?? "")
                   : eq(schema.eventSources.externalKey, input.externalKey ?? ""),
             ),
@@ -319,7 +319,7 @@ export async function createEventSource(
  * "This workspace" reads Opengeni's own recording events the same way.
  */
 export function eventSourceKindHasFeed(kind: EventSourceKind): boolean {
-  return kind === "gmail" || kind === "workspace";
+  return kind === "gmail" || kind === "workspace" || kind === "github_personal";
 }
 
 /** Have the feed pump read these sources' feeds now. */
