@@ -1083,7 +1083,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
           .strict()
           .optional()
           .describe(
-            "Change one setting of a separate agent without replacing agentConfig: prompt, model, reasoningEffort, or the agent each run's chat is with (agentName or agentId; agentId null runs without one).",
+            "Change prompt, model, reasoningEffort or the agent (agentName or agentId; null removes it) without replacing agentConfig.",
           ),
         ...(events ? { events: scheduledTaskEventsToolInput() } : {}),
       })

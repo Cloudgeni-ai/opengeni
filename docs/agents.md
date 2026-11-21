@@ -128,7 +128,7 @@ path is the agent's home.
 | `POST /agents` | `sessions:create`; Only me needs a person who is a member of the organization; `organization` needs an organization admin |
 | `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates); changing it to `organization` also needs an organization admin |
 | `GET /agents/:id/revisions?cursor&limit` | `sessions:read` |
-| `GET /agents/:id/chats?filter=yours\|everyone&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner |
+| `GET /agents/:id/chats?filter=yours\|everyone&direct&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner; `direct=true` leaves out Slack threads that only mentioned the agent |
 | `GET /agents/:id/slack` | `sessions:read`; also catches the agent up in the linked Slack workspaces |
 | `PUT /agents/:id/slack/:connectionId` | `workspace:admin`; the older `open` field sets **Anyone in the organization** for the agent (turning it on needs an organization admin) |
 | `DELETE /agents/:id/slack/:connectionId` | always `409 agent_slack_always_available`: there is nothing to turn off |
@@ -554,7 +554,7 @@ whole.
   for this trigger** (`reusable_session`) or **An existing chat**
   (`existing_session` with `targetSessionId`, offering only chats started
   with this agent, read through the server's agent filter
-  `GET /v1/workspaces/:id/agents/:agentId/chats?filter=everyone`, the
+  `GET /v1/workspaces/:id/agents/:agentId/chats?filter=everyone&direct=true`, the
   same list the automation form offers); the dialog's description says which. It saves
   through `createScheduledTask` with `agentConfig.agentId`, named
   `<agent>: <when>`, and with an explicit `visibility`: `private` for an

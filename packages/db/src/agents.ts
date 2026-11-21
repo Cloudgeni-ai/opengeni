@@ -888,6 +888,8 @@ export async function listAgentChats(
     viewerSubjectId: string | null;
     filter: "yours" | "everyone";
     sharedOnly?: boolean;
+    /** Only chats that are with the agent, not Slack threads that only mentioned it. */
+    direct?: boolean;
     excludeSessionId?: string | null;
     /** Keyset cursor: chats created before this one (`cursorAt` of the last chat read). */
     before?: { createdAt: string; sessionId: string } | null;
@@ -918,13 +920,17 @@ export async function listAgentChats(
       sql`with bound as (
           select s.id from sessions s
           where s.workspace_id = ${home.workspaceId}::uuid and s.agent_id = ${input.agentId}::uuid
-          union
+          ${
+            input.direct
+              ? sql``
+              : sql`union
           select i.session_id from slack_interactions i
           join sessions s on s.id = i.session_id and s.workspace_id = i.workspace_id
           where i.workspace_id = ${home.workspaceId}::uuid
             and i.slack_agent_id = ${input.agentId}::uuid
             and i.session_id is not null
-            and s.agent_id is null
+            and s.agent_id is null`
+          }
         )
         select s.id::text as id, s.title, s.visibility, s.created_by_subject_id,
           s.owner_subject_id, s.created_at, s.updated_at,

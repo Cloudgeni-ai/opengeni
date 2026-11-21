@@ -1,9 +1,10 @@
 /**
- * The chats started with one agent that the reader can open, newest first,
+ * The chats with one agent that the reader can open, newest first,
  * for the pickers that post into an existing chat. The server filters by
- * agent (`GET …/agents/:agentId/chats`), so this reads only the agent's
- * chats, 100 at a time, up to `maxPages` pages. A failed read rejects:
- * callers show an error, never "no chats".
+ * agent (`GET …/agents/:agentId/chats?direct=true`, leaving out Slack threads
+ * that only mentioned it, which can't be targets), 100 at a time, up to
+ * `maxPages` pages. A failed read rejects: callers show an error, never
+ * "no chats".
  */
 import type { AgentChat, AgentChatsFilter, ListAgentChatsResponse } from "@opengeni/sdk";
 
@@ -13,7 +14,7 @@ export interface AgentChatsClient {
   listAgentChats(
     workspaceId: string,
     agentId: string,
-    options: { filter?: AgentChatsFilter; cursor?: string; limit?: number },
+    options: { filter?: AgentChatsFilter; direct?: boolean; cursor?: string; limit?: number },
   ): Promise<ListAgentChatsResponse>;
 }
 
@@ -30,6 +31,7 @@ export async function listAgentChats(
     options.signal?.throwIfAborted();
     const result = await client.listAgentChats(workspaceId, agentId, {
       filter: "everyone",
+      direct: true,
       limit: PAGE_SIZE,
       ...(cursor ? { cursor } : {}),
     });

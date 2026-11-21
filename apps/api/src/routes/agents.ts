@@ -588,6 +588,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       agentId: agent.id,
       viewerSubjectId: context.viewer.subjectId,
       filter: filter.success ? filter.data : "yours",
+      direct: c.req.query("direct") === "true",
       before: decodeChatCursor(c.req.query("cursor")),
       limit: limit + 1,
     });

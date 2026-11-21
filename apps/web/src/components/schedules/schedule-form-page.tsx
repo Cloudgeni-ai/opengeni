@@ -818,18 +818,22 @@ function AgentScheduleForm({
   // An agent's automation posts only into that agent's chats, read filtered by
   // the server; the chosen chat is always read in full into `sessions`.
   const [agentChats, setAgentChats] = useState<AgentChat[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [sessionsError, setSessionsError] = useState<unknown>(null);
+  const [chatListLoading, setChatListLoading] = useState(false);
+  const [chatListError, setChatListError] = useState<unknown>(null);
+  const [agentChatsLoading, setAgentChatsLoading] = useState(false);
+  const [agentChatsError, setAgentChatsError] = useState<unknown>(null);
   const [sessionsRetry, setSessionsRetry] = useState(0);
   const needsSessions = inheritsChatSettings && access.canTargetSessions;
   const sourceSessionId = mode.kind === "create" ? mode.sourceSessionId : undefined;
   const targetSessionId = materializedSessionId ?? draft.targetSessionId;
   const chatAgentId = draft.agentId;
+  const sessionsLoading = chatListLoading || agentChatsLoading;
+  const sessionsError = chatListError ?? agentChatsError;
   useEffect(() => {
     if (!needsSessions) return;
     let live = true;
-    setSessionsLoading(true);
-    setSessionsError(null);
+    setChatListLoading(true);
+    setChatListError(null);
     void Promise.allSettled([
       materializedSessionId || chatAgentId
         ? Promise.resolve([] as Session[])
@@ -837,10 +841,7 @@ function AgentScheduleForm({
       targetSessionId
         ? client.getSession(workspaceId, targetSessionId, { fresh: true })
         : Promise.resolve(null),
-      !materializedSessionId && chatAgentId
-        ? listAgentChats(client, workspaceId, chatAgentId)
-        : Promise.resolve([] as AgentChat[]),
-    ]).then(([listResult, exactResult, agentResult]) => {
+    ]).then(([listResult, exactResult]) => {
       if (!live) return;
       const list = listResult.status === "fulfilled" ? listResult.value : [];
       const exact = exactResult.status === "fulfilled" ? exactResult.value : null;
@@ -855,17 +856,14 @@ function AgentScheduleForm({
           ),
         ].filter((session) => session.status !== "cancelled"),
       );
-      setAgentChats(agentResult.status === "fulfilled" ? agentResult.value : []);
-      setSessionsError(
+      setChatListError(
         exactResult.status === "rejected"
           ? exactResult.reason
           : listResult.status === "rejected"
             ? listResult.reason
-            : agentResult.status === "rejected"
-              ? agentResult.reason
-              : null,
+            : null,
       );
-      setSessionsLoading(false);
+      setChatListLoading(false);
     });
     return () => {
       live = false;
@@ -879,6 +877,32 @@ function AgentScheduleForm({
     workspaceId,
     sessionsRetry,
   ]);
+  // The agent's chats, read once per agent: choosing a chat doesn't reread them.
+  useEffect(() => {
+    if (!needsSessions || materializedSessionId || !chatAgentId) {
+      setAgentChats([]);
+      setAgentChatsLoading(false);
+      setAgentChatsError(null);
+      return;
+    }
+    const controller = new AbortController();
+    setAgentChatsLoading(true);
+    setAgentChatsError(null);
+    listAgentChats(client, workspaceId, chatAgentId, { signal: controller.signal }).then(
+      (chats) => {
+        if (controller.signal.aborted) return;
+        setAgentChats(chats);
+        setAgentChatsLoading(false);
+      },
+      (error: unknown) => {
+        if (controller.signal.aborted) return;
+        setAgentChats([]);
+        setAgentChatsError(error);
+        setAgentChatsLoading(false);
+      },
+    );
+    return () => controller.abort();
+  }, [chatAgentId, client, materializedSessionId, needsSessions, workspaceId, sessionsRetry]);
 
   /* ----- who can see it */
   const [canCreatePrivate, setCanCreatePrivate] = useState<boolean | null>(null);
@@ -1467,17 +1491,19 @@ function AgentScheduleForm({
         onSelect={(agentId) => {
           const picked = workspaceAgents.agents?.find((entry) => entry.id === agentId);
           setDraft((current) => {
-            const { agentId: _previous, ...rest } = current;
+            const { agentId: previous, ...rest } = current;
+            const changed = (agentId ?? undefined) !== previous;
             return {
               ...rest,
               ...(agentId ? { agentId } : {}),
+              // An existing chat keeps its agent, so a new agent needs one of its chats.
+              ...(changed && rest.runMode === "existing_session" ? { targetSessionId: "" } : {}),
               // An Only me agent's automations are Only me too.
               ...(picked?.visibility === "private" ? { visibility: "private" as const } : {}),
             };
           });
           setErrors((current) => ({ ...current, target: undefined }));
         }}
-        onBrowse={() => go.agents()}
       />
     ) : null;
 
@@ -1529,7 +1555,7 @@ function AgentScheduleForm({
             </Notice>
           ) : null}
           <Field label="Chat">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <div className="flex min-w-0 items-center gap-2">
               {agentChip}
               <SelectMenu
                 value={eachRun}
@@ -1555,7 +1581,7 @@ function AgentScheduleForm({
                     description: "Start each run with a fresh conversation.",
                   },
                 ]}
-                className="max-w-full"
+                className="min-w-0 max-w-full flex-1"
               />
             </div>
             {materializedSessionId ? (

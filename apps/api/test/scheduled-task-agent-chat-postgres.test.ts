@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY } from "@opengeni/contracts";
 import type { SessionWorkflowClient } from "@opengeni/core";
 import {
+  createAgent,
   createDb,
   createOrganizationApiKey,
   createSession,
@@ -373,4 +374,73 @@ test("agentConfigPatch changes or removes an automation's agent without replacin
   expect(retargeted.status, JSON.stringify(retargeted.json)).toBe(200);
   expect(retargeted.json).toMatchObject({ targetSessionId: reviewerChat.id });
   expect(retargeted.json.agentConfig).toMatchObject({ agentId: reviewer, prompt: "Check in" });
+});
+
+test("agentConfigPatch never gives an automation an agent its owner can't use there", async () => {
+  const f = await fixture();
+  const planner = await f.agent("Planner");
+  const ownOnlyMe = await f.call(f.owner.headers, "POST", "/agents", {
+    name: "My notes",
+    visibility: "private",
+  });
+  expect(ownOnlyMe.status, JSON.stringify(ownOnlyMe.json)).toBe(201);
+  const othersOnlyMe = await f.call(f.other.headers, "POST", "/agents", {
+    name: "Their notes",
+    visibility: "private",
+  });
+  expect(othersOnlyMe.status, JSON.stringify(othersOnlyMe.json)).toBe(201);
+  const created = await f.call(f.owner.headers, "POST", "/scheduled-tasks", {
+    name: "Daily plan",
+    schedule,
+    runMode: "new_session_per_run",
+    agentConfig: f.agentConfig(planner),
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const path = `/scheduled-tasks/${created.json.id}`;
+  const patch = async (headers: Record<string, string>, agentId: string) =>
+    await f.call(headers, "PATCH", path, {
+      expectedExecutionDigest: created.json.executionDigest,
+      agentConfigPatch: { agentId },
+    });
+
+  // Someone else's Only me agent isn't available to the owner.
+  const foreign = await patch(f.owner.headers, othersOnlyMe.json.agent.id);
+  expect(foreign.status).toBe(422);
+  expect(foreign.json.error.message).toBe("That agent is not available in this workspace.");
+  // The owner's own Only me agent needs an Only me automation.
+  const onShared = await patch(f.owner.headers, ownOnlyMe.json.agent.id);
+  expect(onShared.status).toBe(422);
+  expect(onShared.json.error.message).toBe(
+    "This agent is Only me, so its automations are Only me too.",
+  );
+  // Another workspace's agent isn't available here.
+  const elsewhere = await createWorkspace(db.db, {
+    accountId: f.accountId,
+    name: "Other workspace",
+  });
+  const { agent: foreignAgent } = await createAgent(
+    db.db,
+    { accountId: f.accountId, workspaceId: elsewhere.id },
+    {
+      visibility: "workspace",
+      ownerSubjectId: null,
+      name: "Elsewhere",
+      description: "",
+      avatar: null,
+      instructions: "",
+      firstMessage: "",
+      memoryEnabled: false,
+      origin: "app",
+      sourceSessionId: null,
+      createdBySubjectId: f.owner.subjectId,
+      maxPerWorkspace: 500,
+    },
+  );
+  const otherWorkspace = await patch(f.owner.headers, foreignAgent.id);
+  expect(otherWorkspace.status).toBe(422);
+  // Someone who isn't the owner can't change it at all.
+  const notOwner = await patch(f.other.headers, planner);
+  expect([403, 404]).toContain(notOwner.status);
+  const unchanged = await f.call(f.owner.headers, "GET", path);
+  expect(unchanged.json.agentConfig.agentId).toBe(planner);
 });

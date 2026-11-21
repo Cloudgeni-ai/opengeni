@@ -6810,6 +6810,7 @@ export const SITE_BROWSER_RUNTIME: string = [
   "){",
   "let query=new URLSearchParams;",
   "if(options.filter)query.set(\"filter\",options.filter);",
+  "if(options.direct)query.set(\"direct\",\"true\");",
   "if(options.cursor)query.set(\"cursor\",options.cursor);",
   "if(options.limit!==void 0)query.set(\"limit\",String(options.limit));",
   "let suffix=query.size>0?`?${",

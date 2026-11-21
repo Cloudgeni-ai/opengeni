@@ -606,6 +606,31 @@ test("an agent's automation offers the agent's other chats", async () => {
   await act(async () => root.unmount());
 });
 
+test("another agent for an existing-chat automation asks for one of its chats, in place", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render();
+  const chip = container.querySelector<HTMLButtonElement>("[data-composer-agent]")!;
+  await act(async () => {
+    chip.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+    await flush();
+  });
+  const items = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")];
+  // Every agent is listed here; nothing navigates away from the draft.
+  expect(items.some((item) => item.textContent?.includes("Browse agents"))).toBe(false);
+  await act(async () => {
+    items.find((item) => item.textContent?.includes("Reviewer"))!.click();
+    await flush();
+  });
+  const selected = [...container.querySelectorAll<HTMLOptionElement>("option")].find(
+    (entry) => entry.textContent === "Source chat",
+  );
+  // Triage's chat can't be Reviewer's, so it is no longer chosen.
+  expect(selected?.selected).not.toBe(true);
+  await act(async () => root.unmount());
+});
+
 test("an agent's automation aimed at another chat says it isn't the agent's", async () => {
   task = { ...task, runMode: "existing_session", targetSessionId: "destination-chat" };
   task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };

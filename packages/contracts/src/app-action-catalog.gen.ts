@@ -5527,6 +5527,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "query": [
       "cursor",
+      "direct",
       "filter",
       "limit"
     ],
