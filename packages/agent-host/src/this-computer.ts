@@ -807,7 +807,9 @@ export class ThisComputer {
             ? ("agent" as const)
             : signIn === "renewal_required"
               ? ("sign_in" as const)
-              : null;
+              : reading?.kind === "listed" && !reading.machine.online
+                ? ("server" as const)
+                : null;
     return {
       ...base,
       ...signInStatus,
