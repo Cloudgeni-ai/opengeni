@@ -71,7 +71,8 @@ export type RecordingsClientLike = Pick<
   | "listRecordingLiveSegments"
   | "listRecordingNotes"
   | "saveRecordingNote"
->;
+> &
+  Partial<Pick<OpenGeniRecordingsClient, "reportRecordingTimings">>;
 
 /** Refresh every `intervalMs` while `active`, without an extra read when it turns on. */
 function useRefreshWhile(
@@ -340,6 +341,8 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       createRecordingUploads: (...args) => clientRef.current.createRecordingUploads(...args),
       completeRecordingChunks: (...args) => clientRef.current.completeRecordingChunks(...args),
       finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
+      reportRecordingTimings: async (...args) =>
+        clientRef.current.reportRecordingTimings?.(...args),
       deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
       ...(typeof methods.updateRecording === "function"
         ? {
