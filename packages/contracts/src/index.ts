@@ -24364,6 +24364,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Console agents (organization agents) are on for the caller's organization.
     // Absent on older servers and when off.
     orgAgents: primitives.optionalBoolean,
+    // Whether this deployment can export an editable artifact as an Office
+    // file (it runs the artifact materializer). Absent on older servers:
+    // clients then treat it as unknown.
+    artifactExport: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z

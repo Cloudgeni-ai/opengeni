@@ -17,7 +17,12 @@ let loadError: unknown = new Error("Fixture unavailable");
 const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";
 const fromSession = "cf39f8d3-673f-43c0-9f98-c2787fdcf84e";
 const artifactId = "d10307ab68064d36855af499c9e3ccc7";
-const context = { accessKeyVersion: 0, accessContext: {}, workspaces: [] };
+const context: {
+  accessKeyVersion: number;
+  accessContext: object;
+  workspaces: never[];
+  clientConfig: { artifactExport?: boolean };
+} = { accessKeyVersion: 0, accessContext: {}, workspaces: [], clientConfig: {} };
 mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("@/lib/editable-artifact-browser", () => ({
   createConsoleEditableArtifactAuthority: async () => ({}),
@@ -47,11 +52,14 @@ mock.module(workbenchModule, () => ({
     spreadsheet,
     presentation,
   }: {
-    document: { title: string; showHeader: boolean };
-    spreadsheet: { showHeader: boolean };
-    presentation: { showHeader: boolean };
+    document: { title: string; showHeader: boolean; download?: unknown };
+    spreadsheet: { showHeader: boolean; download?: unknown };
+    presentation: { showHeader: boolean; download?: unknown };
   }) => (
     <h1
+      data-downloads={[document, spreadsheet, presentation]
+        .map((surface) => (surface.download ? "yes" : "no"))
+        .join(",")}
       data-document-header={String(document.showHeader)}
       data-spreadsheet-header={String(spreadsheet.showHeader)}
       data-presentation-header={String(presentation.showHeader)}
@@ -138,6 +146,43 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
       });
     }
   }
+}
+
+// Older servers do not say whether they export, so only an explicit "no" hides Download.
+for (const [artifactExport, downloads] of [
+  [undefined, "yes,yes,yes"],
+  [true, "yes,yes,yes"],
+  [false, "no,no,no"],
+] as const) {
+  test(`offers Download when the deployment reports export ${String(artifactExport)}`, async () => {
+    modality = "document";
+    state = "ready";
+    context.clientConfig = artifactExport === undefined ? {} : { artifactExport };
+    const { EditableArtifactRoute } = await import("./editable-artifact");
+    const route = createRootRoute({
+      component: () => (
+        <EditableArtifactRoute workspaceId={workspaceId} artifactId={artifactId} embedded />
+      ),
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      expect(container.querySelector("h1")!.getAttribute("data-downloads")).toBe(downloads);
+    } finally {
+      context.clientConfig = {};
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 }
 
 for (const [status, title, retry] of [

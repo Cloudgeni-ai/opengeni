@@ -2111,8 +2111,10 @@ sets it to `true`. While it is false, the `editable_artifact_export` and
 `editable_artifact_export_status` tools are removed from the first-party tool
 ceiling, Google Drive publication of editable artifacts is unavailable, and
 `POST .../editable-artifacts/:artifactId/materializations` returns a
-non-retryable 503 instead of queuing a job nothing would drain. Collaborative
-editing is unaffected. A deployment that runs the materializer outside the
+non-retryable 503 instead of queuing a job nothing would drain. The client
+configuration reports the same fact as `artifactExport`, and the web console
+shows no Download action in an editable artifact when it is `false`.
+Collaborative editing is unaffected. A deployment that runs the materializer outside the
 chart must set it to `true` explicitly.
 
 For Kubernetes nodes that restrict nested user namespaces or mask `/proc`, the
