@@ -51,11 +51,15 @@ function set(key: string, entry: Entry) {
   emit();
 }
 
-/** Show `layout` unless a newer one is already shown (answers can arrive out of order). */
-function show(key: string, layout: SidebarLayoutResponse) {
+/**
+ * Show `layout` unless a newer one is already shown (answers can arrive out
+ * of order). Returns whether it was shown.
+ */
+function show(key: string, layout: SidebarLayoutResponse): boolean {
   const shown = entries.get(key)?.layout;
-  if (sidebarLayoutIsOlder(layout, shown)) return;
+  if (sidebarLayoutIsOlder(layout, shown)) return false;
   set(key, { layout, failed: false, loading: false });
+  return true;
 }
 
 type Client = ReturnType<typeof useAppContext>["client"];
@@ -122,7 +126,10 @@ export function useSidebarLayout(workspaceId: string, enabled = true) {
       generations.set(key, (generations.get(key) ?? 0) + 1);
       inFlight.delete(key);
       // Two overlapping updates can finish in either order; the newer stays.
-      show(key, layout);
+      // An update's answer carries the other scope as it was before the
+      // write, so when it's kept out (it may still be newer in its own
+      // scope), a fresh read shows both scopes as they are now.
+      if (!show(key, layout)) void load(client, key, workspaceId);
       return layout;
     },
     [client, key, workspaceId],
