@@ -36,7 +36,7 @@ prost = "0.13"
 prost-build = "0.13"
 # Pure-Rust protobuf compiler so `cargo build` needs NO `protoc` binary
 # (hermetic on NixOS, where downloaded binaries do not run).
-protox = "0.7"
+protox = "0.10"
 thiserror = "2"
 
 # Async runtime + ergonomics. The agent is IO-bound (NATS, child processes,
