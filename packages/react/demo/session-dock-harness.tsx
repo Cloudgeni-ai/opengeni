@@ -5,22 +5,26 @@
 //   ?pr=1          the chat has a linked pull request (PR tab first)
 //   ?state=<key>   a workbench dock state (default branch-review)
 //   ?theme=light   light theme (default dark)
-//   ?nav=<kind>    how Changes moves between files: rail, focus, stream, tree
+//   ?artifacts=0   the chat has no artifacts yet (Artifacts in the "+" menu)
 import type { SessionLinkWithStatus, SessionPullRequestDetail } from "@opengeni/sdk";
-import { GitPullRequestIcon } from "lucide-react";
+import { GitPullRequestIcon, PanelsTopLeftIcon } from "lucide-react";
+import { useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { PullRequestView } from "@opengeni/react/app/components/session/pull-request-panel";
+import {
+  SessionEditableArtifactsWorkspace,
+  type SessionEditableArtifactSummary,
+} from "@opengeni/react/app/components/session/editable-artifacts-workspace";
+import { AppContext } from "@opengeni/react/app/app-context";
+import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
+import { useMemoryNavigation } from "@opengeni/react/app/embed/memory-navigation";
 // Vite's `?worker` transform synthesizes this default export.
 // oxlint-disable-next-line import/default
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import { enableWorkbenchDemoPeers } from "./workbench-peers";
-import {
-  WorkbenchChangesNavigationContext,
-  type WorkbenchChangesNavigation,
-} from "../src/components/workbench-changes-nav";
 import "./agent-settings.css";
 
 enableWorkbenchDemoPeers();
@@ -29,7 +33,8 @@ enablePierreDiffs({ worker: () => new DiffsWorker() });
 const params = new URLSearchParams(window.location.search);
 const withPr = params.get("pr") === "1";
 const light = params.get("theme") === "light";
-const nav = (params.get("nav") ?? undefined) as WorkbenchChangesNavigation | undefined;
+const withArtifacts = params.get("artifacts") !== "0";
+const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 const state = DOCK_STATES[params.get("state") ?? "branch-review"] ?? DOCK_STATES["branch-review"]!;
 const client = new DockStateMockClient(state);
 document.documentElement.setAttribute("data-og-theme", light ? "light" : "dark");
@@ -104,6 +109,31 @@ const detail: SessionPullRequestDetail = {
   ],
 };
 
+const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString();
+const artifacts: SessionEditableArtifactSummary[] = (
+  [
+    ["site-1", "site", "API status app", 1],
+    ["doc-1", "document", "Security hardening notes", 2],
+    ["sheet-1", "spreadsheet", "Rate limit budget", 3],
+    ["img-1", "image", "Architecture diagram", 5],
+    ["deck-1", "presentation", "Hardening review", 26],
+  ] as const
+).map(([id, modality, title, hours]) => ({
+  id,
+  modality,
+  title,
+  catalogItem: {
+    id,
+    kind: modality === "image" ? "file" : modality,
+    title,
+    createdAt: hoursAgo(hours + 1),
+    updatedAt: hoursAgo(hours),
+    status: "active",
+    sourceSessionId: DOCK_SESSION_ID,
+    ...(modality === "image" ? { filename: "architecture.png", contentType: "image/png" } : {}),
+  } as never,
+}));
+
 function Harness() {
   const { events } = useSessionEvents(DOCK_SESSION_ID);
   return (
@@ -125,6 +155,23 @@ function Harness() {
             </p>
           </section>
         }
+        trailingTabs={[
+          {
+            id: "artifacts",
+            label: "Artifacts",
+            icon: <PanelsTopLeftIcon />,
+            ...(withArtifacts ? {} : { optional: true }),
+            content: (
+              <SessionEditableArtifactsWorkspace
+                workspaceId={WORKSPACE_ID}
+                sessionId={DOCK_SESSION_ID}
+                artifacts={withArtifacts ? artifacts : []}
+                status="ready"
+                onRetry={() => {}}
+              />
+            ),
+          },
+        ]}
         {...(withPr
           ? {
               leadingTabs: [
@@ -148,10 +195,59 @@ function Harness() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <OpenGeniProvider client={client as never} workspaceId="11111111-2222-4333-8444-555555555555">
-    <WorkbenchChangesNavigationContext.Provider value={nav}>
-      <Harness />
-    </WorkbenchChangesNavigationContext.Provider>
-  </OpenGeniProvider>,
-);
+function App() {
+  const navigation = useMemoryNavigation({
+    initialPath: `/workspaces/${WORKSPACE_ID}/sessions/${DOCK_SESSION_ID}`,
+    consoleOrigin: window.location.origin,
+    handles: () => true,
+  });
+  const context = useMemo(
+    () =>
+      ({
+        client,
+        accessContext: {
+          mode: "managed",
+          subjectId: "user:kari",
+          workspaceGrants: [
+            {
+              workspaceId: WORKSPACE_ID,
+              subjectId: "user:kari",
+              principalKind: "human_session",
+              permissions: ["sessions:read", "sessions:control", "artifacts:publish"],
+            },
+          ],
+        },
+        workspaces: [
+          {
+            id: WORKSPACE_ID,
+            accountId: "account-preview",
+            kind: "shared",
+            name: "Acme",
+            settings: {},
+            agentInstructions: null,
+          },
+        ],
+        clientConfig: {},
+        managedSelfContext: null,
+        workspaceDefaultToolIds: [],
+        toolMcpServers: [],
+        workspaceCapabilityCatalog: [],
+        captureWorkspaceInvocation: () => ({}),
+        ownsWorkspaceInvocation: () => true,
+      }) as never,
+    [],
+  );
+  return (
+    <OpenGeniProvider client={client as never} workspaceId={WORKSPACE_ID}>
+      <AppHostProvider
+        host={{ api: { apiBaseUrl: "https://app.opengeni.ai" } as never, navigation }}
+      >
+        <AppContext.Provider value={context}>
+          <Harness />
+        </AppContext.Provider>
+      </AppHostProvider>
+    </OpenGeniProvider>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<App />);

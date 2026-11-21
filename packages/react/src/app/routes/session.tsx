@@ -2185,7 +2185,8 @@ function SessionDockPanel(props: SessionDockProps) {
     id: "artifacts",
     label: "Artifacts",
     icon: <PanelsTopLeftIcon />,
-    optional: true,
+    // On the strip once the chat has artifacts; until then, in the "+" menu.
+    ...(artifactSummaries.length === 0 ? { optional: true } : {}),
     content: (
       <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
         <LazySessionEditableArtifactsWorkspace

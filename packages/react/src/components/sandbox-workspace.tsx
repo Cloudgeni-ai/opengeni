@@ -67,6 +67,7 @@ import {
   type WorkbenchChangesComparison,
   type WorkbenchPullRequest,
 } from "./workbench-changes";
+import type { WorkbenchChangesNavigation } from "./workbench-changes-nav";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 import { useOpenGeniText } from "../messages/runtime";
@@ -831,6 +832,7 @@ export function useSandboxWorkspaceTabs(
             {...(filesEnabled && onOpenFile ? { onOpenFile: openGuardedFile } : {})}
             pullRequest={stablePullRequest}
             {...(onOpenPullRequest ? { onOpenPullRequest } : {})}
+            navigation={relevantOnly ? "tree" : "rail"}
           />
         ),
       });
@@ -1346,6 +1348,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       {...(activeTab !== undefined ? { activeTab } : {})}
       onActiveTabChange={selectTab}
       essentials={tabVisibility === "relevant"}
+      {...(sessionId ? { tabScope: sessionId } : {})}
       // Browser and Desktop select independent workspace resources, potentially
       // on another placement. Their own viewers report runtime status; the
       // agent-session machine chip must not describe those resources.
@@ -1487,6 +1490,7 @@ function ChangesTabContent({
   onOpenFile,
   pullRequest,
   onOpenPullRequest,
+  navigation,
 }: {
   git: UseSandboxGitResult;
   comparison: SandboxGitComparison;
@@ -1504,6 +1508,7 @@ function ChangesTabContent({
   onOpenFile?: ((path: string) => void) | undefined;
   pullRequest?: WorkbenchPullRequest | null | undefined;
   onOpenPullRequest?: (() => void) | undefined;
+  navigation?: WorkbenchChangesNavigation | undefined;
 }) {
   const t = useOpenGeniText();
   const diff = git.diff;
@@ -1548,6 +1553,7 @@ function ChangesTabContent({
             pullRequest={pullRequest ?? null}
             {...(onOpenPullRequest ? { onOpenPullRequest } : {})}
             comparison={picker}
+            {...(navigation ? { navigation } : {})}
           />
         </div>
       </div>

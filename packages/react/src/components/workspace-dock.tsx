@@ -16,10 +16,8 @@ import {
   ChevronsLeftRightIcon,
   Maximize2Icon,
   Minimize2Icon,
-  CheckIcon,
-  ChevronDownIcon,
-  EllipsisIcon,
   PanelRightCloseIcon,
+  PlusIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -56,8 +54,9 @@ export type WorkspaceTab = {
   /** A small badge after the label (e.g. dirty count, live pill). */
   badge?: ReactNode | undefined;
   /**
-   * Listed in the strip's menu instead of as a tab. While it is active, the
-   * menu button shows its name. Omitted: the tab is always on the strip.
+   * Listed in the strip's "+" menu until the person opens it; then it stays
+   * on the strip, with a close button, until they close it. Omitted: the tab
+   * is always on the strip.
    */
   optional?: boolean | undefined;
 };
@@ -87,6 +86,9 @@ export type WorkspaceDockProps = {
    * menu. The phone overlay keeps its close button.
    */
   essentials?: boolean | undefined;
+  /** Remembers which optional tabs the person opened, per value (e.g. the
+   *  chat's id). Omitted: the dock remembers them while it is mounted. */
+  tabScope?: string | undefined;
   /** Persisted layout id (localStorage key) for react-resizable-panels. */
   autoSaveId?: string | undefined;
   /** Default dock width as a percent of the session area. */
@@ -207,6 +209,7 @@ export function WorkspaceDock({
   headerAccessory,
   mobileLeadingControl,
   essentials = false,
+  tabScope,
   autoSaveId = "og.session.dock",
   defaultSize = 34,
   minSize = 22,
@@ -290,8 +293,31 @@ export function WorkspaceDock({
     },
     [onActiveTabChange],
   );
-  // Optional tabs live in the strip's menu; the menu button names the active one.
-  const shownTabs = useMemo(() => tabs.filter((tab) => !tab.optional), [tabs]);
+  // Optional tabs live in the "+" menu until the person opens one; an opened
+  // tab stays on the strip (remembered per scope) until they close it.
+  const [opened, setOpened] = useOpenedTabs(tabScope);
+  const currentIsOptional = tabs.some((tab) => tab.id === current && tab.optional);
+  useEffect(() => {
+    if (currentIsOptional) setOpened((ids) => (ids.includes(current) ? ids : [...ids, current]));
+  }, [current, currentIsOptional, setOpened]);
+  const shownTabs = useMemo(
+    () =>
+      tabs.filter(
+        (tab) => !tab.optional || opened.includes(tab.id) || (tab.id === current && tab.optional),
+      ),
+    [tabs, opened, current],
+  );
+  const closeTab = useCallback(
+    (id: string) => {
+      setOpened((ids) => ids.filter((value) => value !== id));
+      if (id !== current) return;
+      const strip = shownTabs.filter((tab) => tab.id !== id);
+      const index = shownTabs.findIndex((tab) => tab.id === id);
+      const next = strip[Math.max(0, index - 1)] ?? tabs.find((tab) => tab.id !== id);
+      if (next) setTab(next.id);
+    },
+    [current, setOpened, setTab, shownTabs, tabs],
+  );
   const setCollapsed = useCallback(
     (next: boolean) => {
       setInternalCollapsed((previous) => (previous === next ? previous : next));
@@ -494,6 +520,7 @@ export function WorkspaceDock({
             shownTabs={shownTabs}
             current={current}
             onTab={setTab}
+            onClose={closeTab}
             onExpandClaim={claimExpand}
             leading={mobileLeadingControl}
             accessory={headerAccessory}
@@ -558,6 +585,7 @@ export function WorkspaceDock({
       shownTabs={shownTabs}
       current={current}
       onTab={setTab}
+      onClose={closeTab}
       onExpandClaim={claimExpand}
       accessory={headerAccessory}
       accessoryInMenu={essentials}
@@ -720,6 +748,37 @@ type DockMenuAction = {
   onSelect: () => void;
 };
 
+// Opened optional tabs by scope, for the life of the page: coming back to a
+// chat shows the tabs the person had opened there.
+const OPENED_TABS = new Map<string, readonly string[]>();
+
+function useOpenedTabs(
+  scope: string | undefined,
+): [readonly string[], (update: (ids: readonly string[]) => readonly string[]) => void] {
+  const [state, setState] = useState<{ scope: string | undefined; ids: readonly string[] }>(() => ({
+    scope,
+    ids: (scope !== undefined && OPENED_TABS.get(scope)) || [],
+  }));
+  const ids =
+    state.scope === scope ? state.ids : (scope !== undefined && OPENED_TABS.get(scope)) || [];
+  const update = useCallback(
+    (fn: (ids: readonly string[]) => readonly string[]) => {
+      setState((previous) => {
+        const base =
+          previous.scope === scope
+            ? previous.ids
+            : (scope !== undefined && OPENED_TABS.get(scope)) || [];
+        const next = fn(base);
+        if (next === base && previous.scope === scope) return previous;
+        if (scope !== undefined) OPENED_TABS.set(scope, next);
+        return { scope, ids: next };
+      });
+    },
+    [scope],
+  );
+  return [ids, update];
+}
+
 function tabName(tab: WorkspaceTab): string {
   return tab.ariaLabel ?? (typeof tab.label === "string" ? tab.label : tab.id);
 }
@@ -729,6 +788,7 @@ function DockChrome({
   shownTabs,
   current,
   onTab,
+  onClose,
   onExpandClaim,
   leading,
   accessory,
@@ -742,6 +802,8 @@ function DockChrome({
   shownTabs: WorkspaceTab[];
   current: string;
   onTab: (id: string) => void;
+  /** Close an opened optional tab (back to the "+" menu). */
+  onClose: (id: string) => void;
   /** A panel's content shows (or stops showing) its own expand. */
   onExpandClaim: (tabId: string, claimed: boolean) => void;
   /** Host navigation at the start of mobile overlay chrome. */
@@ -760,9 +822,10 @@ function DockChrome({
   const tabsetId = useId();
   const tabRefs = useRef(new Map<string, HTMLButtonElement | null>());
   const [visitedTabs, setVisitedTabs] = useState<Set<string>>(() => new Set());
+  // A tab picked from the "+" menu takes focus once the menu closes.
+  const pickedRef = useRef<string | null>(null);
   const activeId = active?.id ?? "";
   const menuTabs = tabs.filter((tab) => !shownTabs.includes(tab));
-  const activeInMenu = active !== undefined && menuTabs.includes(active) ? active : null;
   const menuAccessory = accessoryInMenu && accessory ? accessory : null;
   const actions = menuActions ?? [];
   const hasMenu = menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null;
@@ -788,6 +851,12 @@ function DockChrome({
 
   const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
     if (shownTabs.length === 0) return;
+    const tab = shownTabs[index];
+    if (tab?.optional && (event.key === "Delete" || event.key === "Backspace")) {
+      event.preventDefault();
+      onClose(tab.id);
+      return;
+    }
     let nextIndex: number | null = null;
     if (event.key === "ArrowRight") nextIndex = (index + 1) % shownTabs.length;
     else if (event.key === "ArrowLeft")
@@ -801,11 +870,11 @@ function DockChrome({
 
   return (
     <div data-dock-chrome className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="flex min-h-10 shrink-0 items-center gap-1 border-b border-og-border px-1.5 max-[1023px]:min-h-12">
+      <div className="flex min-h-10 shrink-0 items-stretch gap-0.5 px-1.5 shadow-[inset_0_-1px_0_var(--og-color-border)] max-[1023px]:min-h-12">
         {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
         {shownTabs.length > 0 ? (
           <div
-            className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none]"
+            className="flex min-w-0 items-stretch gap-0.5 overflow-x-auto [scrollbar-width:none]"
             role="tablist"
             aria-label={msg("workspaceDock.workspacePanels")}
             aria-orientation="horizontal"
@@ -814,39 +883,72 @@ function DockChrome({
               const selected = tab.id === current;
               const tabIndex = tabs.indexOf(tab);
               return (
-                <button
+                <div
                   key={tab.id}
-                  ref={(node) => {
-                    tabRefs.current.set(tab.id, node);
-                  }}
-                  id={`${tabsetId}-tab-${tabIndex}`}
-                  type="button"
-                  role="tab"
-                  aria-label={tabName(tab)}
-                  aria-selected={selected}
-                  aria-controls={`${tabsetId}-panel-${tabIndex}`}
-                  tabIndex={selected || (activeInMenu && index === 0) ? 0 : -1}
-                  onClick={() => onTab(tab.id)}
-                  onKeyDown={(event) => onTabKeyDown(event, index)}
-                  data-dock-tab={tab.id}
+                  data-dock-tab-item={tab.id}
                   className={cn(
-                    "flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-                    selected ? "bg-og-surface-2 text-og-fg" : "text-og-fg-muted hover:text-og-fg",
+                    "group/tab relative flex shrink-0 items-center transition-colors",
+                    "after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:transition-colors motion-reduce:after:transition-none",
+                    selected
+                      ? "text-og-fg after:bg-og-accent"
+                      : "text-og-fg-muted hover:text-og-fg after:bg-transparent",
                   )}
                 >
-                  {tab.icon ? (
+                  <button
+                    ref={(node) => {
+                      tabRefs.current.set(tab.id, node);
+                    }}
+                    id={`${tabsetId}-tab-${tabIndex}`}
+                    type="button"
+                    role="tab"
+                    aria-label={tabName(tab)}
+                    aria-selected={selected}
+                    aria-controls={`${tabsetId}-panel-${tabIndex}`}
+                    tabIndex={selected ? 0 : -1}
+                    onClick={() => onTab(tab.id)}
+                    onKeyDown={(event) => onTabKeyDown(event, index)}
+                    data-dock-tab={tab.id}
+                    className={cn(
+                      "flex min-h-8 items-center gap-1.5 rounded-og-sm px-2 text-og-xs font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+                      tab.optional && "pr-1",
+                    )}
+                  >
+                    {tab.icon ? (
+                      <span
+                        className={cn(
+                          "flex size-3.5 shrink-0 items-center justify-center [&>svg]:size-3.5",
+                          selected ? "text-og-accent" : "text-og-fg-subtle",
+                        )}
+                        aria-hidden
+                      >
+                        {tab.icon}
+                      </span>
+                    ) : null}
                     <span
-                      className="flex size-3.5 shrink-0 items-center justify-center [&>svg]:size-3.5"
-                      aria-hidden
+                      data-contrast-audited
+                      className="max-w-[12rem] truncate whitespace-nowrap"
                     >
-                      {tab.icon}
+                      {tab.label}
                     </span>
+                    {tab.badge ? <span className="shrink-0">{tab.badge}</span> : null}
+                  </button>
+                  {tab.optional ? (
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      aria-label={msg("workspaceDock.closeTab", { name: tabName(tab) })}
+                      title={msg("workspaceDock.closeTab", { name: tabName(tab) })}
+                      onClick={() => onClose(tab.id)}
+                      data-dock-tab-close={tab.id}
+                      className={cn(
+                        "mr-1 inline-flex size-4 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-opacity hover:bg-og-surface-2 hover:text-og-fg group-hover/tab:opacity-100 max-[1023px]:size-8 pointer-coarse:size-8 pointer-coarse:opacity-100",
+                        selected ? "opacity-100" : "opacity-0",
+                      )}
+                    >
+                      <XIcon className="size-3" aria-hidden />
+                    </button>
                   ) : null}
-                  <span data-contrast-audited className="max-w-[12rem] truncate whitespace-nowrap">
-                    {tab.label}
-                  </span>
-                  {tab.badge ? <span className="shrink-0">{tab.badge}</span> : null}
-                </button>
+                </div>
               );
             })}
           </div>
@@ -856,43 +958,25 @@ function DockChrome({
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                id={activeInMenu ? `${tabsetId}-tab-${tabs.indexOf(activeInMenu)}` : undefined}
                 title={msg("workspaceDock.more")}
-                aria-label={
-                  activeInMenu
-                    ? `${tabName(activeInMenu)}, ${msg("workspaceDock.more")}`
-                    : msg("workspaceDock.more")
-                }
+                aria-label={msg("workspaceDock.more")}
                 data-dock-menu
-                data-dock-menu-active={activeInMenu?.id}
-                className={cn(
-                  "inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:bg-og-surface-2 max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-                  activeInMenu
-                    ? "bg-og-surface-2 px-2 text-og-fg"
-                    : "min-w-7 justify-center text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg max-[1023px]:min-w-11 pointer-coarse:min-w-11",
-                )}
+                className="my-auto inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:bg-og-surface-2 data-[state=open]:text-og-fg max-[1023px]:size-11 pointer-coarse:size-11"
               >
-                {activeInMenu ? (
-                  <>
-                    {activeInMenu.icon ? (
-                      <span
-                        className="flex size-3.5 shrink-0 items-center justify-center [&>svg]:size-3.5"
-                        aria-hidden
-                      >
-                        {activeInMenu.icon}
-                      </span>
-                    ) : null}
-                    <span className="max-w-[12rem] truncate whitespace-nowrap">
-                      {activeInMenu.label}
-                    </span>
-                    <ChevronDownIcon className="size-3 text-og-fg-subtle" aria-hidden />
-                  </>
-                ) : (
-                  <EllipsisIcon className="size-4" aria-hidden />
-                )}
+                <PlusIcon className="size-4" aria-hidden />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-[12rem]">
+            <DropdownMenuContent
+              align="start"
+              className="min-w-[12rem]"
+              onCloseAutoFocus={(event) => {
+                const picked = pickedRef.current;
+                pickedRef.current = null;
+                if (!picked) return;
+                event.preventDefault();
+                requestAnimationFrame(() => tabRefs.current.get(picked)?.focus());
+              }}
+            >
               {menuAccessory ? (
                 <>
                   <div className="px-2 py-1.5 text-og-fg-muted" data-dock-menu-accessory>
@@ -905,7 +989,10 @@ function DockChrome({
                 <DropdownMenuItem
                   key={tab.id}
                   data-dock-menu-tab={tab.id}
-                  onSelect={() => onTab(tab.id)}
+                  onSelect={() => {
+                    pickedRef.current = tab.id;
+                    onTab(tab.id);
+                  }}
                 >
                   <span
                     className="flex size-4 shrink-0 items-center justify-center text-og-fg-subtle [&>svg]:size-4"
@@ -914,9 +1001,6 @@ function DockChrome({
                     {tab.icon}
                   </span>
                   <span className="min-w-0 flex-1 truncate">{tab.label}</span>
-                  {tab.id === activeId ? (
-                    <CheckIcon className="size-3.5 shrink-0" aria-hidden />
-                  ) : null}
                 </DropdownMenuItem>
               ))}
               {actions.length > 0 && menuTabs.length > 0 ? <DropdownMenuSeparator /> : null}
@@ -940,10 +1024,12 @@ function DockChrome({
         ) : null}
         <div className="min-w-0 flex-1" />
         {accessory && !menuAccessory ? (
-          <div className="min-w-0 shrink text-og-fg-muted">{accessory}</div>
+          <div className="my-auto min-w-0 shrink text-og-fg-muted">{accessory}</div>
         ) : null}
         {controls ? (
-          <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
+          <div className="my-auto flex shrink-0 items-center gap-0.5 text-og-fg-subtle">
+            {controls}
+          </div>
         ) : null}
       </div>
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -958,7 +1044,10 @@ function DockChrome({
                 {...(shownTabs.includes(tab)
                   ? { "aria-labelledby": `${tabsetId}-tab-${index}` }
                   : { "aria-label": tabName(tab) })}
-                className="h-full min-h-0 min-w-0 overflow-hidden"
+                className={cn(
+                  "h-full min-h-0 min-w-0 overflow-hidden",
+                  selected && "animate-in fade-in-0 duration-150 motion-reduce:animate-none",
+                )}
                 hidden={!selected}
                 role="tabpanel"
               >

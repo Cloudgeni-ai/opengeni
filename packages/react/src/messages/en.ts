@@ -6692,6 +6692,7 @@ export const englishMessages = {
   "workbenchChanges.viewOnGitHub": "View on GitHub",
   "workbenchChanges.root": "(root)",
   "workbenchChanges.workspace": "(workspace)",
+  "workspaceDock.closeTab": "Close {name}",
   "workspaceDock.hideWorkspace": "Hide workspace",
   "workspaceDock.maximize": "Maximize",
   "workspaceDock.maximizeDock": "Maximize dock",

@@ -12,11 +12,9 @@ import {
 } from "lucide-react";
 import {
   Component,
-  type KeyboardEvent as ReactKeyboardEvent,
   memo,
   type ReactNode,
   useCallback,
-  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -37,10 +35,7 @@ import {
   ChangesTree,
   FileChangeWords,
   FileGlyph,
-  FocusFileSwitcher,
-  StreamOutline,
   type WorkbenchChangesNavigation,
-  WorkbenchChangesNavigationContext,
 } from "./workbench-changes-nav";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import {
@@ -122,9 +117,8 @@ export type WorkbenchChangesProps = {
   /** Leave out the summary row (view menu and pull-request action), for a host
    *  that draws its own header above the changes. */
   hideSummary?: boolean | undefined;
-  /** How the person moves between files: a file rail (default), one file at
-   *  a time with a jump menu ("focus"), one continuous diff with a slim
-   *  outline ("stream"), or a quiet tree ("tree"). */
+  /** How the person moves between files: a file rail (default) or a quiet
+   *  folder tree with change bars ("tree"). */
   navigation?: WorkbenchChangesNavigation | undefined;
   className?: string | undefined;
 };
@@ -375,12 +369,10 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   onOpenPullRequest,
   comparison,
   hideSummary = false,
-  navigation: navigationProp,
+  navigation = "rail",
   className,
 }: WorkbenchChangesProps) {
   const t = useOpenGeniText();
-  const contextNavigation = useContext(WorkbenchChangesNavigationContext);
-  const navigation = navigationProp ?? contextNavigation ?? "rail";
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [compact, setCompact] = useState(false);
   const [coarsePointer, setCoarsePointer] = useState(false);
@@ -530,23 +522,6 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   const sourceBadge = describeSource(t, source, capturedAt, captureRevision ?? null);
   const activeFile = orderedFiles[activeIndex] ?? orderedFiles[0];
   const onToggle = toggleCollapsed;
-  // One file at a time: the focus navigation, and any narrow surface.
-  const single = compact || navigation === "focus";
-  const focusNav = navigation === "focus";
-  const selectIndex = useCallback(
-    (index: number) => setActivePath(layoutRef.current.orderedFiles[index]?.path ?? null),
-    [],
-  );
-  const onFocusKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!single || !focusNav) return;
-    const target = event.target as HTMLElement;
-    if (target.closest("input, textarea, select, [contenteditable=true], [role=menu]")) return;
-    if (event.key !== "[" && event.key !== "]") return;
-    const next = activeIndex + (event.key === "]" ? 1 : -1);
-    if (next < 0 || next >= orderedFiles.length) return;
-    event.preventDefault();
-    selectIndex(next);
-  };
 
   return (
     <div
@@ -554,7 +529,6 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
       className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
       data-workbench-changes-layout={compact ? "compact" : "rail"}
       data-workbench-changes-navigation={navigation}
-      onKeyDown={onFocusKey}
     >
       <span role="status" aria-atomic="true" aria-live="polite" className="sr-only">
         {t("workbenchChanges.filesChanged", { count: diff.length })} +{additions} −{deletions}
@@ -581,35 +555,7 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
         </div>
       )}
 
-      {single && focusNav ? (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center px-2 pb-1">
-            <FocusFileSwitcher files={orderedFiles} index={activeIndex} onSelect={selectIndex} />
-          </div>
-          <div
-            aria-label={t("workbenchChanges.changedFileDiff")}
-            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
-            data-opengeni-changes-pane
-            role="region"
-            tabIndex={0}
-          >
-            {activeFile ? (
-              <div
-                key={activeFile.path}
-                className="animate-in fade-in-0 slide-in-from-bottom-1 duration-150 motion-reduce:animate-none"
-              >
-                <DiffSection
-                  file={activeFile}
-                  layout={compact ? "unified" : layout}
-                  themeType={resolvedTheme}
-                  hideHeader
-                  {...(onOpenFile ? { onOpenFile } : {})}
-                />
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : single ? (
+      {compact ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="shrink-0 border-b border-og-border p-2">
             <label className="sr-only" htmlFor={pickerId}>
@@ -729,15 +675,6 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
                 })}
               </div>
             </div>
-            {navigation === "stream" ? (
-              <StreamOutline
-                files={orderedFiles}
-                offsets={windowed.offsets}
-                totalHeight={windowed.totalHeight}
-                activeIndex={activeIndex}
-                onSelect={jumpTo}
-              />
-            ) : null}
           </div>
         </div>
       )}

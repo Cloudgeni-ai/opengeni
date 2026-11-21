@@ -458,7 +458,13 @@ function PullRequestTabBody({ tab, detail }: { tab: SubTab; detail: SessionPullR
           </p>
         ) : null}
         <div className="min-h-0 flex-1">
-          <WorkbenchChanges diff={files} source={null} capturedAt={null} hideSummary />
+          <WorkbenchChanges
+            diff={files}
+            source={null}
+            capturedAt={null}
+            hideSummary
+            navigation="tree"
+          />
         </div>
       </div>
     );
