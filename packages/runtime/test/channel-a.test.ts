@@ -2327,6 +2327,71 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(JSON.stringify(external)).not.toContain("outside secret");
   });
 
+  test("a merge-base branch diff shows only the branch's own changes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-merge-base-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(
+      root,
+      [
+        "git init -q -b main",
+        "git config user.email test@opengeni.local",
+        "git config user.name Opengeni",
+        "git config commit.gpgsign false",
+        "printf 'base\\n' > shared.txt",
+        "git add -A",
+        "git commit -q -m base",
+        "git switch -q -c feature",
+        "printf 'branch work\\n' > feature.txt",
+        "git add -A",
+        "git commit -q -m feature",
+        // The default branch moves on after the feature branched off.
+        "git switch -q main",
+        "printf 'later upstream\\n' > upstream.txt",
+        "printf 'base\\nupstream edit\\n' > shared.txt",
+        "git add -A",
+        "git commit -q -m upstream",
+        "git update-ref refs/remotes/origin/main main",
+        "git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main",
+        "git switch -q feature",
+        "printf 'uncommitted\\n' > notes.txt",
+      ].join(" && "),
+    );
+    const svc = new SandboxChannelAService({
+      session: makeModalLikeExecOnlySession(root).session,
+      workspaceRoot: root,
+    });
+    const request = {
+      path: "",
+      staged: false,
+      includeUntracked: true,
+      fromRef: "origin/HEAD",
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 2 * 1024 * 1024,
+    };
+
+    const branch = await svc.gitDiff({ ...request, mergeBase: true });
+    expect(branch.files.map((file) => file.path).sort()).toEqual(["feature.txt", "notes.txt"]);
+
+    // The plain comparison still means "working tree versus fromRef".
+    const plain = await svc.gitDiff({ ...request, mergeBase: false });
+    expect(plain.files.map((file) => file.path).sort()).toEqual([
+      "feature.txt",
+      "notes.txt",
+      "shared.txt",
+      "upstream.txt",
+    ]);
+
+    // An explicit tip compares commits only, from the merge base.
+    const committed = await svc.gitDiff({
+      ...request,
+      includeUntracked: false,
+      toRef: "feature",
+      mergeBase: true,
+    });
+    expect(committed.files.map((file) => file.path)).toEqual(["feature.txt"]);
+  });
+
   test("exec-only untracked reads pin the opened descriptor across a symlink swap", async () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-symlink-race-"));
     temporaryRoots.push(root);

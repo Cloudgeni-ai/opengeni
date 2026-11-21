@@ -3802,6 +3802,8 @@ export type GitDiffRequest = {
   includeUntracked?: boolean;
   fromRef?: string;
   toRef?: string;
+  /** Compare against the merge base of fromRef and toRef (or HEAD and the working tree). */
+  mergeBase?: boolean;
   pathspec?: string[];
   contextLines?: number;
   maxBytesPerFile?: number;

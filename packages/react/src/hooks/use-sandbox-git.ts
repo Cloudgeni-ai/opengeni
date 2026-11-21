@@ -255,7 +255,7 @@ export function useSandboxGit(
           {
             path: root,
             ...(comparison === "branch"
-              ? { fromRef: "origin/HEAD", includeUntracked: true }
+              ? { fromRef: "origin/HEAD", mergeBase: true, includeUntracked: true }
               : comparison === "working"
                 ? { fromRef: "HEAD", includeUntracked: true }
                 : { staged: true, includeUntracked: false }),
@@ -289,7 +289,7 @@ export function useSandboxGit(
                     diff: {
                       path: root,
                       ...(comparison === "branch"
-                        ? { fromRef: "origin/HEAD", includeUntracked: true }
+                        ? { fromRef: "origin/HEAD", mergeBase: true, includeUntracked: true }
                         : comparison === "working"
                           ? { fromRef: "HEAD", includeUntracked: true }
                           : { staged: true, includeUntracked: false }),

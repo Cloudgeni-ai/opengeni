@@ -20624,6 +20624,7 @@
         "$.fromRef": "string?",
         "$.includeUntracked": "boolean?",
         "$.maxBytesPerFile": "integer?",
+        "$.mergeBase": "boolean?",
         "$.path": "string?",
         "$.pathspec": "array?",
         "$.pathspec[]": "string",
