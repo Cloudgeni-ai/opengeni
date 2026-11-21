@@ -12,6 +12,7 @@ import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   ArchiveIcon,
   ArrowLeftIcon,
+  CircleArrowUpIcon,
   CopyIcon,
   CopyPlusIcon,
   DownloadIcon,
@@ -66,7 +67,7 @@ import {
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
 import { useSiteActions } from "../components/artifacts/site-actions";
-import { useExportApp } from "../components/artifacts/app-package";
+import { useExportApp, useUpgradeApp } from "../components/artifacts/app-package";
 import { useSiteSidebarActions } from "../lib/site-sidebar-bridge";
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
@@ -106,6 +107,7 @@ import {
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
 import { AppConnectCard } from "../lib/app-connect-card";
+import { AppSyncJoinCard, AppSyncOptInHost } from "../lib/app-sync-opt-in";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
@@ -255,7 +257,8 @@ export function SiteViewRoute({
   );
   const connectCard =
     artifact?.status === "active" ? (
-      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex justify-end">
+      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex flex-col items-end gap-2">
+        <AppSyncJoinCard workspaceId={workspaceId} siteId={siteId} />
         <AppConnectCard
           workspaceId={workspaceId}
           siteId={siteId}
@@ -263,6 +266,7 @@ export function SiteViewRoute({
           connectKey={connect}
           onConnectKeyHandled={connectHandled}
         />
+        <AppSyncOptInHost workspaceId={workspaceId} siteId={siteId} />
       </div>
     ) : null;
   // The publish form, open for this Site; another Site starts without it.
@@ -541,6 +545,7 @@ function SiteActionsMenu({
   const sidebar = useSiteSidebarActions(workspaceId, origin);
   const resetAllowed = useResetSiteToolAllowances(workspaceId, origin.siteId, versionId);
   const exportApp = useExportApp(workspaceId);
+  const upgradeApp = useUpgradeApp(workspaceId, origin.siteId);
   return (
     <span data-site-actions-root="" className="contents">
       <DropdownMenu>
@@ -583,6 +588,12 @@ function SiteActionsMenu({
               Export app
             </DropdownMenuItem>
           ) : null}
+          {site.duplicate && upgradeApp ? (
+            <DropdownMenuItem onSelect={upgradeApp.open}>
+              <CircleArrowUpIcon aria-hidden="true" />
+              Upgrade from package
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem asChild>
             <Link {...site.details}>
               <InfoIcon aria-hidden="true" />
@@ -606,6 +617,7 @@ function SiteActionsMenu({
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
+      {upgradeApp?.element}
     </span>
   );
 }

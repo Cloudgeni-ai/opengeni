@@ -460,6 +460,7 @@ import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
 import { registerAppSyncRoutes } from "./routes/app-sync";
+import { registerAppWebhookRoutes } from "./routes/app-webhooks";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
@@ -2895,6 +2896,7 @@ export function createAppComposition(
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
   registerAppSyncRoutes(app, routeDeps);
+  registerAppWebhookRoutes(app, routeDeps);
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
@@ -3846,6 +3848,10 @@ const routeLabelPatterns: Array<{
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
   { pattern: /^\/v1\/webhooks\/events\/[^/]+$/, label: "/v1/webhooks/events/:routeId" },
   { pattern: /^\/v1\/webhooks\/github$/, label: "/v1/webhooks/github" },
+  {
+    pattern: /^\/v1\/webhooks\/apps\/[^/]+\/[^/]+$/,
+    label: "/v1/webhooks/apps/:workspaceId/:webhookId",
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
     label: "/v1/workspaces/:workspaceId/mcp",

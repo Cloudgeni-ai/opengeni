@@ -24,6 +24,8 @@ type TurnConnectionInput = {
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
   /** Told once when a use finds the provider rejected a connection's grant. */
   onConnectionNeedsReauth?: ConnectionTokenResolverOptions["onConnectionNeedsReauth"];
+  /** Resolves a shared service connection's vault references (docs/secrets.md). */
+  resolveCredentialReferences?: ConnectionTokenResolverOptions["resolveCredentialReferences"];
 };
 
 type CredentialResolver = (
@@ -33,14 +35,14 @@ type CredentialResolver = (
 export function connectionTokenResolverForTurn(input: TurnConnectionInput): CredentialResolver {
   return bindNativeConnectionCredentialsToTurn(
     input,
-    buildConnectionTokenResolver(
-      input.db,
-      input.settings,
-      undefined,
-      input.onConnectionNeedsReauth
+    buildConnectionTokenResolver(input.db, input.settings, undefined, {
+      ...(input.onConnectionNeedsReauth
         ? { onConnectionNeedsReauth: input.onConnectionNeedsReauth }
-        : {},
-    ),
+        : {}),
+      ...(input.resolveCredentialReferences
+        ? { resolveCredentialReferences: input.resolveCredentialReferences }
+        : {}),
+    }),
   );
 }
 

@@ -77,6 +77,7 @@ export * from "./app-shot";
 import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./app-sync";
+export * from "./app-webhook";
 import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
 export * from "./app-assets";
@@ -251,6 +252,7 @@ export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
+export * from "./shared-service-connections";
 export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
@@ -1324,6 +1326,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sync_delete",
   "app_sync_run",
   "app_sync_opt_in",
+  "app_webhook_save",
+  "app_webhook_list",
+  "app_webhook_delete",
   "app_files_list",
   "app_files_upload",
   "app_files_delete",
@@ -1343,6 +1348,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sql_reset",
   "app_export",
   "app_install",
+  "app_upgrade",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -7079,7 +7085,9 @@ export type McpCredentialAuthNeededReason =
   | CredentialAuthNeededReason
   | "personal_authority_unavailable"
   | "unsupported_auth"
-  | "resource_scope_unavailable";
+  | "resource_scope_unavailable"
+  /** A shared key's vault item is missing or out of the connection's reach. */
+  | "designated_credential_unavailable";
 
 export type ConnectionCredentialPlacement = {
   carrier: "header" | "query" | "cookie";
@@ -14918,7 +14926,18 @@ export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
 
 /** Create a sync. */
 export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
-  AppSyncDefinition.extend({ status: ScheduledTaskStatus.default("active") }),
+  AppSyncDefinition.extend({
+    /** Optional with a Site SQL `target`: it defaults to the table's name. */
+    collection: AppSyncSettings.shape.collection.optional(),
+    status: ScheduledTaskStatus.default("active"),
+    /**
+     * Shared syncs: the owner's account to run on (an `id` from their
+     * accounts of the connector). Omitted, it runs on the route it was saved
+     * with, else the owner's first own account. Not part of a definition, so
+     * packages stay portable.
+     */
+    account: z.string().min(1).max(256).optional(),
+  }),
 );
 export type AppSyncCreateRequest = z.input<typeof AppSyncCreateRequest>;
 
@@ -14937,6 +14956,11 @@ export const AppSyncUpdateRequest = /* @__PURE__ */ defineSchema(() =>
       schedule: ScheduledTaskScheduleSpec,
       events: ScheduledTaskEventsInput,
       status: ScheduledTaskStatus,
+      target: AppSyncSettings.shape.target.unwrap().nullable(),
+      paging: AppSyncSettings.shape.paging.unwrap().nullable(),
+      maxRecords: AppSyncSettings.shape.maxRecords.unwrap().nullable(),
+      removeMissing: AppSyncSettings.shape.removeMissing.unwrap(),
+      account: z.string().min(1).max(256),
     })
     .partial(),
 );
@@ -14956,6 +14980,12 @@ export const AppSync = /* @__PURE__ */ defineSchema(() =>
     recordsPath: z.string().nullable(),
     key: z.string(),
     fields: z.array(z.string()).nullable(),
+    target: AppSyncSettings.shape.target.unwrap().nullable().optional(),
+    paging: AppSyncSettings.shape.paging.unwrap().nullable().optional(),
+    maxRecords: z.number().int().nullable().optional(),
+    removeMissing: z.boolean().optional(),
+    /** Shared syncs: the owner's chosen account, when they chose one. */
+    account: z.string().nullable().optional(),
     schedule: ScheduledTaskScheduleSpec,
     events: ScheduledTaskEvents.nullable(),
     ownerSubjectId: z.string(),

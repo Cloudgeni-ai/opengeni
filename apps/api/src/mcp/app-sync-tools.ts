@@ -1,6 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
+  APP_SYNC_MAX_RUN_RECORDS,
   AppSyncMode,
+  AppSyncPaging,
+  AppSyncTableTarget,
   ScheduledTaskEventsInput,
   ScheduledTaskScheduleSpec,
   ScheduledTaskStatus,
@@ -75,11 +78,43 @@ const SAVE_FIELDS = {
     .describe(
       "Dot paths of the fields to keep, stored under the same path. Omit to keep whole records.",
     ),
+  target: AppSyncTableTarget.nullable()
+    .optional()
+    .describe(
+      "Fill one of the app's SQL tables instead of a collection (shared syncs only): each record is upserted by keyColumn. Give either collection or target.",
+    ),
+  paging: AppSyncPaging.nullable()
+    .optional()
+    .describe(
+      "Read more than one page per run: cursor mode passes the result's cursor back in cursorArgument; page mode counts pageArgument up. Stops at maxPages (default 10).",
+    ),
+  maxRecords: z4
+    .number()
+    .int()
+    .min(1)
+    .max(APP_SYNC_MAX_RUN_RECORDS)
+    .nullable()
+    .optional()
+    .describe("At most this many records per run; more marks the run truncated."),
+  removeMissing: z4
+    .boolean()
+    .optional()
+    .describe(
+      "Delete records this sync wrote that a complete run no longer returns. Never after a truncated or failed run.",
+    ),
+  account: z4
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe(
+      "Shared sync: which of your accounts of the tool's connector it runs on. Omit to use the one you saved with, else your first own account.",
+    ),
   schedule: ScheduledTaskScheduleSpec.optional().describe(
     'When it runs, like any automation: {"type":"interval","everySeconds":3600} (at least 300), {"type":"calendar","hour":7,"minute":0,"timeZone":"Europe/Oslo"}, or {"type":"manual"} for event triggers or app_sync_run only.',
   ),
   events: ScheduledTaskEventsInput.optional().describe(
-    "Event triggers that also start a run, as on any automation (workspace event sources only).",
+    "Event triggers that also start a run, as on any automation: workspace event sources or the owner's own.",
   ),
   status: ScheduledTaskStatus.optional().describe("active (default) or paused."),
 };
@@ -126,7 +161,7 @@ export function registerAppSyncTools(
     "app_sync_save",
     {
       description:
-        "Create or change an app data sync: on a schedule or event, call one connected tool with fixed arguments, keep chosen fields of each returned record and upsert them by key into a collection of the app's data. No model runs, so prefer it over an agent automation for plain data refresh. Without syncId it creates a sync (name, collection, tool, key and schedule are required); with syncId only the given fields change. Whoever saves a sync owns it: a shared sync runs on their connection. Tools that ask for approval first can't run unattended; a run of one fails with a readable error. Try it with app_sync_run.",
+        "Create or change an app data sync: on a schedule or event, call one connected tool with fixed arguments, keep chosen fields of each returned record and upsert them by key into a collection of the app's data or one of its SQL tables. No model runs, so prefer it over an agent automation for plain data refresh. Without syncId it creates a sync (name, collection or target, tool, key and schedule are required); with syncId only the given fields change. Whoever saves a sync owns it: a shared sync runs on their connection. Tools that ask for approval first can't run unattended; a run of one fails with a readable error. Try it with app_sync_run.",
       inputSchema: {
         siteId: AppIdInput,
         syncId: SyncIdInput.optional().describe("Change this sync instead of creating one."),
@@ -190,6 +225,14 @@ export function registerAppSyncTools(
         siteId: AppIdInput,
         syncId: SyncIdInput,
         optedIn: z4.boolean().optional().describe("false opts out. Default true."),
+        account: z4
+          .string()
+          .min(1)
+          .max(256)
+          .optional()
+          .describe(
+            "Which of their accounts of the tool's connector it runs on. Omit to keep an earlier choice, else their first own account; the answer lists accounts when there are several.",
+          ),
       },
     },
     call(
@@ -197,11 +240,22 @@ export function registerAppSyncTools(
         siteId,
         syncId,
         optedIn,
+        account,
       }: {
         siteId: string;
         syncId: string;
         optedIn?: boolean | undefined;
-      }) => setAppSyncOptIn(deps, grant, siteId, syncId, optedIn ?? true),
+        account?: string | undefined;
+      }) =>
+        setAppSyncOptIn(
+          deps,
+          grant,
+          siteId,
+          syncId,
+          optedIn ?? true,
+          {},
+          account ? { account } : {},
+        ),
     ),
   );
 }

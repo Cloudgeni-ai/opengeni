@@ -5,6 +5,9 @@ export type {
   AppPackageInstallRequest,
   AppPackageInstallResponse,
   AppPackageProblem,
+  AppPackageUpgradePlan,
+  AppPackageUpgradeRequest,
+  AppPackageUpgradeResponse,
 } from "@opengeni/contracts";
 export type {
   ModelDecisionRequest,
@@ -147,14 +150,28 @@ export type {
   AppSyncCreateRequest,
   AppSyncDefinition,
   AppSyncLastRun,
+  AppSyncAccountChoice,
   AppSyncListResponse,
   AppSyncMode,
+  AppSyncOptInReview,
+  AppSyncPaging,
   AppSyncRunResponse,
   AppSyncRunSummary,
   AppSyncStatus,
   AppSyncStatusResponse,
   AppSyncSubscriptionResponse,
+  AppSyncTableTarget,
   AppSyncUpdateRequest,
+} from "@opengeni/contracts";
+export type {
+  AppNotifyRequest,
+  AppNotifyResponse,
+  AppWebhook,
+  AppWebhookCreateRequest,
+  AppWebhookListResponse,
+  AppWebhookSaveResponse,
+  AppWebhookStatus,
+  AppWebhookUpdateRequest,
 } from "@opengeni/contracts";
 export type {
   SiteDataAccessMode,

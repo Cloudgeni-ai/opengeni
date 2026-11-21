@@ -118,6 +118,7 @@ import {
   connectedCommandOutputLook,
   addSessionLink,
   agentToolPermissionSetsForEnforcement,
+  serviceConnectionCredentialReferences,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
@@ -656,6 +657,18 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     // The owner hears once, on their inbox and phone, that it stopped working.
     onConnectionNeedsReauth: (broken) =>
       postConnectionNeedsReauthNotice({ db, bus, observability }, broken),
+    // A shared service connection's key resolves with the connection's own
+    // vault reach, never the turn's or its person's.
+    resolveCredentialReferences: (() => {
+      // Hosts without vault access wiring resolve from hosted vaults only.
+      const serviceProviders = (deps.vaultAccess as AttemptVaultAccess | undefined)
+        ?.serviceProviders;
+      return serviceConnectionCredentialReferences({
+        db,
+        settings: runSettings,
+        ...(serviceProviders ? { providers: () => serviceProviders } : {}),
+      });
+    })(),
   });
   const personalConnectionDelegations = turn.personalConnectionDelegations;
   const delegatedMembershipChecks = new Map<string, Promise<boolean>>();

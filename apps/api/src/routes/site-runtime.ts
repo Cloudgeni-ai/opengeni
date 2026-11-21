@@ -1,4 +1,4 @@
-import { appSyncStatusForSite } from "../app-sync/service";
+import { appSyncOptInReview, appSyncStatusForSite, setAppSyncOptIn } from "../app-sync/service";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ReasoningEffort,
@@ -205,6 +205,7 @@ import {
   type SiteRuntimeViewer,
 } from "../site-publishing/viewer";
 import { runSiteSqlQuery } from "../site-sql/service";
+import { notifyFromApp } from "../app-notify/service";
 import { siteDataHttpError } from "./site-data";
 import { runSiteSqlRoute } from "./site-sql";
 
@@ -301,6 +302,14 @@ function unsupported() {
     "This operation is not available to published apps",
   );
 }
+
+const SiteSyncOptInToolRequest = z
+  .object({
+    syncId: z.string().uuid(),
+    optedIn: z.boolean().optional(),
+    account: z.string().min(1).max(256).optional(),
+  })
+  .strict();
 
 function parseJson<S extends z.ZodType>(bytes: Uint8Array, schema: S): z.infer<S> {
   let value: unknown = null;
@@ -631,7 +640,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "POST" && suffix === "/platform/timings") return await platformTimings(request);
     if (method === "POST" && suffix === "/live/admit") return await liveAdmit(request);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
-    const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
+    const tool = /^\/tools\/([a-z][a-z-]*)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
     const sitePath = suffix === "/v1/config/client" ? suffix : `/v1/workspaces/site-host${suffix}`;
     const matched = matchSiteOperation(method, sitePath);
@@ -1061,6 +1070,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     } else if (method === "setup") {
       // The host's connect card; the page sends no body worth reading.
       result = await describeWorkspaceSiteToolSetup(deps, authorization, site, options);
+    } else if (method === "sync-review" || method === "sync-opt-in") {
+      // Only the host's own page reaches tool methods: it shows the platform's
+      // confirmation and posts the opt-in after the viewer confirms.
+      const input = parseJson(request.body, SiteSyncOptInToolRequest);
+      result = await runSiteData(() =>
+        method === "sync-review"
+          ? appSyncOptInReview(deps, authorization.grant, site.siteArtifactId, input.syncId)
+          : setAppSyncOptIn(
+              deps,
+              authorization.grant,
+              site.siteArtifactId,
+              input.syncId,
+              input.optedIn !== false,
+              {},
+              input.account ? { account: input.account } : {},
+            ),
+      );
     } else if (method === "invoke") {
       result = await withSiteSecretContext(
         { siteId: site.siteArtifactId, siteVersion: site.siteVersionId },
@@ -1277,6 +1303,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return await siteData(request, host, viewer, limits.guestWritesPerMinute);
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
+      case "site.notify":
+        // Members only: notifyFromApp refuses guests and invited viewers.
+        return context.json(
+          await runSiteData(() =>
+            notifyFromApp(
+              deps,
+              publishedViewer(host, viewer),
+              host.site.id,
+              parseJson(request.body, z.unknown()),
+              { frameSiteId: host.site.id },
+            ),
+          ),
+        );
       default:
         if (id.startsWith("sessions.")) {
           const assistant = await agentViewing(host, viewer, limits);

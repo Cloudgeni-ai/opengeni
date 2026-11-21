@@ -109,6 +109,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path.startsWith("/v1/webhooks/events/")) {
     return true;
   }
+  // App webhooks: the webhook's secret (bearer or signature), checked by the
+  // intake over the raw body before reading anything.
+  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/apps/")) {
+    return true;
+  }
   // The GitHub App's webhooks: GitHub's signature with the App's webhook secret.
   if (c.req.method === "POST" && path === "/v1/webhooks/github") {
     return true;

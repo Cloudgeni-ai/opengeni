@@ -1895,6 +1895,11 @@ Knowledge, artifacts, notifications and any new first-party tool) never resolve
 them: they store or forward reference text, and the receiving work resolves it
 at its own execution boundary. Only a short, justified list of first-party
 tools receives values (`packages/runtime/src/secret-argument-resolution.ts`).
+A shared service connection (a workspace API-key connection whose stored
+headers are references) resolves in the connection resolver for each request,
+as the `service_connection` vault principal with the workspace's own reach
+(`packages/core/src/domain/vaults/service-connection-credentials.ts`; see
+[`secrets.md`](secrets.md#shared-service-connections)).
 Opt-in credential profiles (workspace, plus session additions children inherit)
 name variables whose references the attempt's resolver turns into values for
 each command's own environment at the same boundary
@@ -2904,8 +2909,21 @@ App data syncs fill Site Data from a connected tool without a model run. A
 sync is a scheduled task with action `app_sync`: the worker's dispatch records
 the run and queues it (`app_sync_queue`), and an executor loop in every API
 replica calls the tool through the workspace tool gateway as the owner or each
-opted-in person and writes through the Site Data write path. See
-[`app-sync.md`](app-sync.md).
+opted-in person and writes through the Site Data write path (or the Site SQL
+service for a table target). Claims carry a lease token that every renewal and
+settle checks; `app_sync_keys` records the keys a sync wrote for
+`removeMissing`. Apps ask the platform host to confirm personal opt-ins
+(bridge `syncs.optIn`). See [`app-sync.md`](app-sync.md).
+
+App webhooks let other services post JSON into one shared collection of an
+app (`app_webhooks`, public `POST /v1/webhooks/apps/:workspaceId/:webhookId`,
+bearer secret or HMAC signature), written through the Site Data write path as
+`webhook:<id>` while the person who saved it still manages the app, so the
+normal change events fire. `site.notify` (inbox notifications from an app
+page) is routed but not enabled yet: its trigger calls an owner definer that
+writes chat-less inbox items and native push once a follow-up migration grants
+the runtime EXECUTE on it. See
+[`app-webhooks.md`](app-webhooks.md).
 
 Site SQL is the optional per-Site database next to it: one SQLite-backed
 Durable Object per Site in the Sites gateway Worker, stored in Cloudflare's EU
@@ -2917,7 +2935,10 @@ pages run only named queries with `:viewer` bound by the API. See
 
 App packages export an app's current version and data definitions (no data
 unless the author includes demo data) as one file and install it into another
-workspace as a new app. See [`app-packages.md`](app-packages.md).
+workspace as a new app, or upgrade an existing app in place (a dry-run plan,
+then only what is new; destructive changes need explicit confirmation). Files
+`app_export` stores for agents are recorded in `app_package_exports` and an
+API pump deletes them after 24 hours. See [`app-packages.md`](app-packages.md).
 
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
@@ -3489,9 +3510,10 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Knowledge retrieval, source preparation, or review | `packages/db/src/knowledge-entries.ts`, `packages/core/src/domain/knowledge*.ts`, `apps/api/src/routes/knowledge.ts` | [`knowledge.md`](knowledge.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
 | Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
-| App data sync (no-model refresh of Site Data from a connected tool) | `packages/contracts/src/app-sync.ts`, `packages/db/src/app-sync.ts`, `apps/api/src/app-sync/service.ts`, `apps/api/src/routes/app-sync.ts`, `apps/api/src/mcp/app-sync-tools.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`app-sync.md`](app-sync.md) |
+| App webhooks and app notifications (`site.notify`) | `packages/contracts/src/app-webhook.ts`, `packages/db/src/app-webhooks.ts`, `apps/api/src/app-webhooks/service.ts`, `apps/api/src/app-notify/service.ts`, `apps/api/src/routes/app-webhooks.ts`, `apps/api/src/mcp/app-webhook-tools.ts` | [`app-webhooks.md`](app-webhooks.md) |
+| App data sync (no-model refresh of Site Data from a connected tool) | `packages/contracts/src/app-sync.ts`, `packages/db/src/app-sync.ts`, `apps/api/src/app-sync/service.ts`, `apps/api/src/routes/app-sync.ts`, `apps/api/src/mcp/app-sync-tools.ts`, `apps/worker/src/activities/scheduled-tasks.ts`, `packages/react/src/app/lib/app-sync-opt-in.tsx` | [`app-sync.md`](app-sync.md) |
 | Site Data (Site collections, files, access modes, quotas, App change events) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `packages/db/src/app-activity-events.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
-| App packages (export, install, syncs hook) | `packages/contracts/src/app-package.ts`, `apps/api/src/app-packages/`, `apps/api/src/routes/app-packages.ts`, `apps/api/src/mcp/app-package-tools.ts` | [`app-packages.md`](app-packages.md) |
+| App packages (export, install, upgrade, export file cleanup, syncs hook) | `packages/contracts/src/app-package.ts`, `apps/api/src/app-packages/`, `apps/api/src/routes/app-packages.ts`, `apps/api/src/mcp/app-package-tools.ts` | [`app-packages.md`](app-packages.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input and dictation | `packages/contracts/src/recordings.ts`, `apps/api/src/routes/recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Stateless model calls (chat and typed decisions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `apps/api/src/routes/decisions.ts`, `packages/runtime/src/single-model-call.ts`, `packages/runtime/src/configured-decision-model.ts` | [`chat-completions.md`](chat-completions.md), [`model-inference.md`](model-inference.md) |

@@ -281,6 +281,11 @@ Operations:
   - `GET /data/syncs` (`site.data.syncs()`) returns each app data sync's last
     run and, for personal syncs, the viewer's own last run and opt-in
     ([app-sync.md](app-sync.md)).
+- `site.notify` (`POST /published-artifacts/current/notify`,
+  `site.notify({ title, body?, to?, path?, key? })`) is routed but not
+  enabled yet: it answers 403 with `details.reason` `notify_not_available`
+  until a follow-up migration grants delivery. Its checks and limits are in
+  [app-webhooks.md](app-webhooks.md#notifications-from-apps).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable
@@ -452,6 +457,14 @@ version's `requestedTools`.
   picks the account; blocked, unavailable and permission-denied tools are not
   something one click fixes, so they don't show. Tools whose connector has no
   catalog entry are left out.
+- **API-key tools.** A connector that takes an API key keeps each person's
+  own `connect` item. When the app's shared syncs wait on it, a separate
+  `connect` item with `shared: true` carries `sharedKey`: `add` for a workspace admin who
+  may use secrets ("Add a shared key for Stripe", which connects it once for
+  the workspace with a key from a vault), or `ask_admin` for anyone else
+  ("Ask an admin to connect Stripe", shown as text, with no `openUrl`). Once a
+  shared service connection covers the tool it is ready and has no item. See
+  [connection presentation](connection-presentation.md#app-connect-card).
 - **Console.** The card sits over the app's bottom right corner. Its button
   opens Opengeni's own connect or reconnect dialog (the same
   `McpConnectionCard` flow as chat), and the card refreshes when it finishes
@@ -468,7 +481,8 @@ version's `requestedTools`.
   longer lists.
 - **From the app.** `site.connections` in `@opengeni/sdk/site`:
   `status()` resolves `{ supported, ready, needed }` (each need with `key`,
-  `action`, `connector`, `account`, `label` and `tools`; no ids or
+  `action`, `connector`, `account`, `sharedKey` (when set), `label` and
+  `tools`; no ids or
   addresses), `connect(key?)` starts one need's action and resolves
   `{ connected }`, `showCard()` shows the platform card again even after it
   was closed, and `onChange(listener)` fires when what the viewer has

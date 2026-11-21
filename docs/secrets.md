@@ -201,6 +201,63 @@ it needs full access, which already acts as the person.
 Stored and agent-visible content is otherwise kept exact
 ([Agent-visible content](#agent-visible-content)).
 
+### Shared service connections
+
+A tool without OAuth that authenticates with a header (an API-key MCP server)
+can be connected once for the whole workspace with a key from a vault: a
+**shared service connection**. A workspace admin (`capabilities:manage`,
+`connections:write` and `secrets:use`) connects it with ownership `workspace`
+and a header value that is a reference, for example
+`Authorization: Bearer {{secret:Team/Example key}}`, from the app connect
+card's **Add a shared key**, the connect flow (`mcp-headers` or
+`mcp-bearer` credentials) or `admin_action_call` on `advanceConnectAttempt`,
+which keeps the reference text.
+
+- **Stored as the reference.** The connection's encrypted credential holds the
+  header with the reference, never the value, and its metadata says
+  `credentialSource: "vault"` with the references (`credentialReferences`).
+  Responses, events, logs and audit rows never carry the value.
+- **Resolved only when Opengeni calls the tool**, for that one request, in the
+  API's workspace tool gateway (apps, syncs, Codemode over HTTP) and in agent
+  turns, through `resolveServiceConnectionHeaders`
+  (`packages/core/src/domain/vaults/service-connection-credentials.ts`). The
+  credential-free preflight resolves nothing.
+- **The connection's own reach.** It resolves as the `service_connection`
+  principal: the workspace's vaults and the organization vaults that work in
+  this workspace, never anyone's Only me vault, never a chat's task vault, and
+  never the reach of the person or agent whose call it is. Each use records
+  `vault.secret.used` with `principalKind: "service_connection"` and the
+  `connectionId`, plus `onBehalfOf` (the person, chat and turn whose call it
+  was, when known) for the audit trail only. An item set to ask before each
+  use can't be used here. Agents can't add a shared key through their prepared
+  connection setup; an admin adds it.
+- **Fails closed.** Adding one checks the key straight away: a missing item, an
+  item out of reach, or a malformed reference is refused with a readable
+  message that names nothing secret. If the item later disappears, calls stop
+  with the connection's "needs reconnecting" state
+  (`designated_credential_unavailable`), and nothing, not even the reference,
+  is sent to the tool.
+- **Approvals are unchanged.** Allow, ask first and block apply to its tools as
+  to any connection, on every path.
+- A personal connection can't hold a reference (422), and a literal key keeps
+  working as before. Installation headers given to the capability enable
+  route and a chat's own MCP server headers stay literal; use a shared
+  service connection for a vault key.
+- **This release never sends references as text.** A stored connection header
+  that holds a reference but isn't marked as a shared service connection (for
+  example a key saved by an older API replica while a rolling deploy is in
+  progress) fails closed with `designated_credential_unavailable` and sends
+  nothing; an admin adds the shared key again. Releases before this one don't
+  know shared keys: while one still serves requests (during a rolling deploy,
+  or after rolling back) it sends the stored reference text, which names the
+  vault item but holds no value, and the call fails authentication.
+- **Self-hosting.** Needs `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like every
+  stored connection credential and hosted vault value. Keys in connected
+  vaults (1Password, host, external providers) resolve in the API's tool
+  gateway and in agent turns. Listing a connector's tools for its permission
+  settings and MCP event sources read hosted Opengeni vaults only; with a key
+  in a connected vault those fail closed like a missing item.
+
 For `run_on`, resolution is scoped to exec `op.cmd` and write `op.content`;
 `target`, `op.path` and `op.workdir` are literal routing/path inputs. Secret
 failures dispatch no command or file write and return the gateway's canonical

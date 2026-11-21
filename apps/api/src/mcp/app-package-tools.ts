@@ -15,6 +15,8 @@ import {
   exportAppPackage,
   installAppPackage,
 } from "../app-packages/service";
+import { appUpgradeOperationKey, upgradeAppFromPackage } from "../app-packages/upgrade";
+import { recordAppPackageExport } from "../app-packages/exports";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { exactAgentAttemptClaims } from "../sandbox/agent-fleet-context";
 import {
@@ -54,11 +56,12 @@ function contents(exported: AppPackageExportResponse) {
 }
 
 /**
- * app_export and app_install: carry an app (a Site) to another workspace as
- * one package file. Both act with the agent's own authority through the same
- * service as the HTTP routes: exporting needs the manager role on the app,
- * installing needs artifacts:publish here. A published Site's own visitor
- * assistant is refused, as for every management tool.
+ * app_export, app_install and app_upgrade: carry an app (a Site) to another
+ * workspace as one package file, and upgrade an installed copy from a newer
+ * one. They act with the agent's own authority through the same service as
+ * the HTTP routes: exporting needs the manager role on the app, installing
+ * needs artifacts:publish here, upgrading both. A published Site's own
+ * visitor assistant is refused, as for every management tool.
  */
 export function registerAppPackageTools(
   server: McpServer,
@@ -113,6 +116,12 @@ export function registerAppPackageTools(
       const storage = deps.objectStorage!;
       const bytes = new TextEncoder().encode(JSON.stringify(exported.package));
       const key = `workspaces/${grant.workspaceId}/app-packages/${crypto.randomUUID()}/${exported.filename}`;
+      // Recorded first, so the sweeper deletes it once it expires (24 hours).
+      await recordAppPackageExport(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        objectKey: key,
+      });
       await storage.putObject({ key, contentType: "application/json", body: bytes });
       const signed = await storage.createGetUrl({
         key,
@@ -196,6 +205,68 @@ export function registerAppPackageTools(
                   "When the person opens the app, it asks them to connect the accounts its tools use.",
               }
             : {}),
+        };
+      },
+    ),
+  );
+
+  server.registerTool(
+    "app_upgrade",
+    {
+      description:
+        "Upgrade an existing app from a newer package of it (made by app_export): its version becomes the app's new version, and only what is new runs (new collections, new migrations, query and sync changes). The app's data stays; nothing is deleted. Call with dryRun: true first and tell the person the plan. Changes marked destructive need allowDestructive: true and the person's explicit agreement; conflicts stop the upgrade. Give fileId or the package JSON. Retrying with the same idempotencyKey applies it once.",
+      inputSchema: {
+        appId: z4.string().uuid().describe("The app (Site) to upgrade."),
+        fileId: z4.string().uuid().optional().describe("The package file's id in this workspace."),
+        package: z4
+          .record(z4.string(), z4.unknown())
+          .optional()
+          .describe("The package JSON itself, instead of fileId."),
+        dryRun: z4.boolean().optional().describe("Only return the plan; nothing changes."),
+        allowDestructive: z4
+          .boolean()
+          .optional()
+          .describe("Apply changes the plan marks destructive, after the person agreed."),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    call(
+      async (args: {
+        appId: string;
+        fileId?: string | undefined;
+        package?: Record<string, unknown> | undefined;
+        dryRun?: boolean | undefined;
+        allowDestructive?: boolean | undefined;
+        idempotencyKey: string;
+      }) => {
+        if ((args.fileId === undefined) === (args.package === undefined))
+          throw new AppPackageError("validation", "Give exactly one of fileId or package");
+        const claims = exactAgentAttemptClaims(grant);
+        if (!claims) throw new AppPackageError("validation", "Upgrading needs a live agent turn");
+        const pkg = args.package ?? (await readPackageFile(deps, grant, args.fileId!));
+        const result = await upgradeAppFromPackage(deps, grant, args.appId, {
+          package: pkg,
+          dryRun: args.dryRun,
+          allowDestructive: args.allowDestructive,
+          provenance: {
+            operationKey: appUpgradeOperationKey(
+              "attempt",
+              `${claims.sessionId}:${claims.turnId}`,
+              args.appId,
+              args.idempotencyKey,
+              pkg,
+            ),
+            actorSubjectId: grant.subjectId,
+            sourceSessionId: claims.sessionId,
+            sourceTurnId: claims.turnId,
+            sourceAttemptId: claims.attemptId,
+            sourceExecutionGeneration: claims.executionGeneration,
+            sourceToolName: "app_upgrade",
+          },
+        });
+        return {
+          ...result,
+          artifactReference: `[Open app](artifact:${result.app.id})`,
         };
       },
     ),

@@ -172,7 +172,10 @@ export type OpenGeniSiteDataCollection<
 export type OpenGeniAppSyncStatus = {
   id: string;
   name: string;
+  /** The collection it fills, or the table name for a sync into an SQL table. */
   collection: string;
+  /** Set when the sync fills an SQL table. */
+  table?: string;
   mode: "shared" | "personal";
   active: boolean;
   /** The newest run; for a personal sync, the viewer's own. Null before the first run. */
@@ -181,7 +184,16 @@ export type OpenGeniAppSyncStatus = {
     /** When it finished (or started, while it runs). */
     at: string;
     error: string | null;
-    summary: { received: number; written: number; skipped: number; truncated: boolean } | null;
+    summary: {
+      received: number;
+      written: number;
+      skipped: number;
+      truncated: boolean;
+      /** Tool calls the run made (one per page). */
+      pages?: number;
+      /** Records removed because the tool no longer returned them (`removeMissing`). */
+      removed?: number;
+    } | null;
   } | null;
   /** Personal syncs: whether the viewer opted in. Null for shared syncs. */
   optedIn: boolean | null;
@@ -199,8 +211,20 @@ export type OpenGeniSiteData = {
    * collection the viewer can read, or `$files`). Returns an unsubscribe.
    */
   onChange(listener: (change: OpenGeniSiteDataChange) => void): () => void;
-  /** The App's data syncs: when each last ran and whether it failed. */
-  syncs(): Promise<OpenGeniAppSyncStatus[]>;
+  /**
+   * The App's data syncs: when each last ran and whether it failed. Its
+   * `optIn(id)` and `optOut(id)` ask the host to confirm joining or leaving a
+   * personal sync with the viewer; they resolve the viewer's choice.
+   */
+  syncs: OpenGeniAppSyncs;
+};
+
+/** `site.data.syncs`: callable for the statuses, plus personal sync opt-in. */
+export type OpenGeniAppSyncs = {
+  (): Promise<OpenGeniAppSyncStatus[]>;
+  /** Opengeni shows its own confirmation; resolves `optedIn: false` when the viewer cancels. */
+  optIn(syncId: string): Promise<{ syncId: string; optedIn: boolean }>;
+  optOut(syncId: string): Promise<{ syncId: string; optedIn: boolean }>;
 };
 
 export type OpenGeniSiteFile = {
@@ -230,6 +254,35 @@ export type OpenGeniSiteFiles = {
   delete(fileId: string): Promise<void>;
 };
 
+/** What `site.notify` sends: a normal Opengeni notification linking back into the app. */
+export type OpenGeniSiteNotifyInput = {
+  /** What happened, in a few words. */
+  title: string;
+  /** One or two short sentences. */
+  body?: string;
+  /**
+   * Who gets it. Omitted: the viewer. A member's email or subject id: that
+   * member, when they can open the app and allow other members to notify
+   * them. `"workspace"`: everyone else who can open the app and allows it
+   * (the app's managers only).
+   */
+  to?: string;
+  /** The app's own address the notification opens (`/tasks/42`); its root when omitted. */
+  path?: string;
+  /** Sending the same key again updates the person's notification in place. */
+  key?: string;
+};
+
+export type OpenGeniSiteNotifyResult = {
+  key: string;
+  /** People it reached. */
+  delivered: number;
+  /** For `"workspace"`: members left out because they don't allow it. */
+  skipped: number;
+  /** For `"workspace"`: members left out past the recipient limit. */
+  overLimit?: number;
+};
+
 /** Path prefix the host rewrites to its pinned Site; Site code never names a Site id. */
 export const SITE_DATA_PATH_PREFIX = "/v1/workspaces/site-host/published-artifacts/current";
 
@@ -244,7 +297,12 @@ export function createOpenGeniSiteData(
   ready: () => Promise<boolean>,
   subscribeChanges: (listener: (change: OpenGeniSiteDataChange) => void) => () => void = () => () =>
     undefined,
-): { data: OpenGeniSiteData; files: OpenGeniSiteFiles } {
+  syncOptIn?: (syncId: string, optedIn: boolean) => Promise<{ syncId: string; optedIn: boolean }>,
+): {
+  data: OpenGeniSiteData;
+  files: OpenGeniSiteFiles;
+  notify: (input: OpenGeniSiteNotifyInput) => Promise<OpenGeniSiteNotifyResult>;
+} {
   const send = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
     if (!(await ready()))
       throw new OpenGeniSiteDataError(
@@ -262,6 +320,15 @@ export function createOpenGeniSiteData(
     }
     if (response.ok) return value as T;
     throw siteDataErrorFromResponse(response.status, value);
+  };
+  const optInVia = async (syncId: string, optedIn: boolean) => {
+    if (!syncOptIn)
+      throw new OpenGeniSiteDataError(
+        "site_data_unsupported",
+        "This app host can't ask the viewer to join a sync",
+        0,
+      );
+    return await syncOptIn(String(syncId), optedIn);
   };
   const json = (body: unknown): RequestInit => ({
     method: "POST",
@@ -365,8 +432,14 @@ export function createOpenGeniSiteData(
     batch: write,
     count: async (collection, where) => await count(collection, where),
     onChange: (listener) => subscribeChanges(listener),
-    syncs: async () =>
-      (await send<{ syncs: OpenGeniAppSyncStatus[] }>("/data/syncs", { method: "GET" })).syncs,
+    syncs: Object.assign(
+      async () =>
+        (await send<{ syncs: OpenGeniAppSyncStatus[] }>("/data/syncs", { method: "GET" })).syncs,
+      {
+        optIn: async (syncId: string) => await optInVia(syncId, true),
+        optOut: async (syncId: string) => await optInVia(syncId, false),
+      },
+    ),
   };
 
   const files: OpenGeniSiteFiles = {
@@ -400,7 +473,9 @@ export function createOpenGeniSiteData(
       await send(`/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
     },
   };
-  return { data, files };
+  const notify = async (input: OpenGeniSiteNotifyInput): Promise<OpenGeniSiteNotifyResult> =>
+    await send<OpenGeniSiteNotifyResult>("/notify", json(input));
+  return { data, files, notify };
 }
 
 function refFields(ref: OpenGeniSiteDataRef): RefFields {
