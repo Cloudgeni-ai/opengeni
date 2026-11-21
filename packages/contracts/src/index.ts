@@ -78,6 +78,7 @@ export * from "./site-data";
 export * from "./app-sync";
 import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
+export * from "./app-assets";
 export * from "./site-sql";
 export * from "./app-package";
 export * from "./sidebar-layout";

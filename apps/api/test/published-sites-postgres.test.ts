@@ -3412,6 +3412,126 @@ test("a viewer's event stream and pages carry only the Site-safe projection", as
   for (const event of bare.json as Array<{ payload: unknown }>) expect(event.payload).toEqual({});
 }, 60_000);
 
+test("a multi-file app serves its files from the gateway and the console, by version token", async () => {
+  const f = await fixture();
+  const storage = f.deps.objectStorage!;
+  const put = async (url: string, body: string) =>
+    await storage.putObject({
+      key: url.replace("https://storage.example.test/", ""),
+      contentType: "application/octet-stream",
+      body: new TextEncoder().encode(body),
+    } as Parameters<typeof storage.putObject>[0]);
+  const upload = await f.api(f.owner, "POST", `${f.sites}/uploads`);
+  expect(upload.status, JSON.stringify(upload.json)).toBe(200);
+  const entry = `<!doctype html><html><head><script type="module" src="./assets/index-1.js"></script><link rel="stylesheet" href="./assets/index-1.css"></head><body><div id="root"></div></body></html>`;
+  const chunk = "export const page = 'reports';";
+  await put(upload.json.html.putUrl, entry);
+  await put(
+    upload.json.assets.putUrl,
+    JSON.stringify({
+      files: [
+        {
+          path: "assets/index-1.js",
+          base64: Buffer.from("import('./reports-2.js')").toString("base64"),
+        },
+        { path: "assets/reports-2.js", base64: Buffer.from(chunk).toString("base64") },
+        { path: "assets/index-1.css", base64: Buffer.from("body{margin:0}").toString("base64") },
+      ],
+    }),
+  );
+  const created = await f.api(f.owner, "POST", f.sites, {
+    title: "Split app",
+    uploadId: upload.json.uploadId,
+    idempotencyKey: crypto.randomUUID(),
+    visibility: "workspace",
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const siteId = String(created.json.artifact.id);
+  const versionId = String(created.json.version.id);
+  const published = await f.publication(f.owner, siteId, "PUT", { access: "public" });
+  expect(published.status, JSON.stringify(published.json)).toBe(201);
+  const host = String(published.json.hostname);
+  const visitor = visitorId();
+
+  // Published: the HTML names this host's asset folder, with the version's token.
+  const html = await f.gateway(host, "GET", `/versions/${versionId}/html`, { visitor });
+  expect(html.status).toBe(200);
+  const base = /<base href="\/_og\/a\/([^/]+)\/([^/]+)\/">/u.exec(String(html.json));
+  expect(base?.[1]).toBe(versionId);
+  const token = base![2]!;
+  expect(String(html.json)).toContain('src="./assets/index-1.js"');
+  const asset = await f.gatewayRaw(
+    host,
+    "GET",
+    `/assets/${versionId}/${token}/assets/reports-2.js`,
+  );
+  expect(asset.status).toBe(200);
+  expect(await asset.text()).toBe(chunk);
+  expect(asset.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+  // The gateway sets its own caching; the console route below is cached by browsers directly.
+  expect(asset.headers.get("access-control-allow-origin")).toBe("*");
+  const etag = asset.headers.get("etag")!;
+  const revalidated = await f.gatewayRaw(
+    host,
+    "GET",
+    `/assets/${versionId}/${token}/assets/reports-2.js`,
+    { headers: { "if-none-match": etag } },
+  );
+  expect(revalidated.status).toBe(304);
+  // A wrong token, an unlisted file or another app's host finds nothing.
+  for (const path of [
+    `/assets/${versionId}/${"x".repeat(22)}/assets/reports-2.js`,
+    `/assets/${versionId}/${token}/assets/missing.js`,
+    `/assets/${versionId}/${token}/../secret.js`,
+  ])
+    expect((await f.gatewayRaw(host, "GET", path)).status).toBe(404);
+  const other = await f.live("Other app", { access: "public" });
+  expect(
+    (await f.gatewayRaw(other.host, "GET", `/assets/${versionId}/${token}/assets/reports-2.js`))
+      .status,
+  ).toBe(404);
+
+  // Console: the HTML names the API's public asset route, which needs no credentials.
+  const content = await f.api(f.owner, "GET", `${f.sites}/${siteId}/content`);
+  expect(content.status, JSON.stringify(content.json)).toBe(200);
+  const consoleBase = new RegExp(
+    `<base href="(http[^"]+/v1/app-assets/${f.workspace.id}/${versionId}/${token}/)">`,
+    "u",
+  ).exec(content.json.html)?.[1];
+  expect(consoleBase).toBeDefined();
+  const raw = await f.app.request(`${f.sites}/${siteId}/html?versionId=${versionId}`, {
+    headers: f.owner.headers,
+  });
+  expect(await raw.text()).toContain(`<base href="${consoleBase}">`);
+  const consoleAsset = await f.app.request(`${new URL(consoleBase!).pathname}assets/index-1.css`);
+  expect(consoleAsset.status).toBe(200);
+  expect(await consoleAsset.text()).toBe("body{margin:0}");
+  expect(consoleAsset.headers.get("content-type")).toBe("text/css; charset=utf-8");
+  expect(consoleAsset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  expect(consoleAsset.headers.get("access-control-allow-origin")).toBe("*");
+  expect(
+    (
+      await f.app.request(
+        `/v1/app-assets/${f.workspace.id}/${versionId}/${"y".repeat(22)}/assets/index-1.css`,
+      )
+    ).status,
+  ).toBe(404);
+
+  // A new single-file version is served byte for byte, without a base.
+  const next = await f.api(f.owner, "POST", `${f.sites}/${siteId}/versions`, {
+    html: "<!doctype html><h1>One file</h1>",
+    expectedCurrentVersionId: versionId,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(next.status, JSON.stringify(next.json)).toBe(200);
+  const single = await f.api(f.owner, "GET", `${f.sites}/${siteId}/content`);
+  expect(single.json.html).toBe("<!doctype html><h1>One file</h1>");
+  // Files of the earlier version keep loading for pages still open on it.
+  expect(
+    (await f.gatewayRaw(host, "GET", `/assets/${versionId}/${token}/assets/index-1.js`)).status,
+  ).toBe(200);
+}, 60_000);
+
 test("version HTML is this Site's immutable bytes, without cookies; scanning is off by default", async () => {
   const f = await fixture();
   const site = await f.live("Versions", { access: "public" });

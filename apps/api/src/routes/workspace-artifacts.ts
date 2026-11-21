@@ -20,6 +20,9 @@ import {
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
   normalizeWorkspaceArtifactSlug,
+  injectSiteAssetBase,
+  siteAssetApiBase,
+  type SiteAssetManifest,
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
@@ -138,6 +141,26 @@ export function workspaceArtifactErrorResponse(context: Context, error: unknown)
     );
   }
   throw error;
+}
+
+/**
+ * Where the console frame loads a multi-file version's files: the API's
+ * public asset route (it needs no Sites domain). Null for a single-file app.
+ * The API's public address, else the address this request reached it on.
+ */
+export function siteVersionAssetBaseUrl(
+  publicBaseUrl: string | undefined,
+  requestUrl: string,
+  workspaceId: string,
+  ref: { version: { id: string }; assetManifest: SiteAssetManifest | null },
+): string | null {
+  if (!ref.assetManifest) return null;
+  return siteAssetApiBase(
+    publicBaseUrl ?? new URL(requestUrl).origin,
+    workspaceId,
+    ref.version.id,
+    ref.assetManifest.token,
+  );
 }
 
 function prepareContent(
@@ -522,6 +545,38 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     } catch (error) {
       return workspaceArtifactErrorResponse(context, error);
     }
+    const htmlHeaders = {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "private, no-store",
+      // A Site runs its own scripts, but only inside an opaque origin: no
+      // same-origin access to the console, and no cross-site embedding.
+      "Content-Security-Policy": "sandbox allow-scripts",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      "X-Content-Type-Options": "nosniff",
+      // Clients read this HTML with fetch and render it in their own frame
+      // (the console uses srcdoc). Opening the raw URL downloads it rather
+      // than running a publisher-authored page at an app-origin URL.
+      ...userContentDispositionHeaders("text/html", "site.html"),
+    };
+    const assetBase = siteVersionAssetBaseUrl(
+      deps.settings.publicBaseUrl,
+      context.req.url,
+      workspaceId,
+      ref,
+    );
+    if (assetBase) {
+      // A multi-file build: the frame needs the version's asset folder as its base.
+      let content: Awaited<ReturnType<typeof readWorkspaceArtifactContent>>;
+      try {
+        content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
+      } catch (error) {
+        throw new HTTPException(503, {
+          message: error instanceof Error ? error.message : "Artifact content is unavailable",
+          cause: error,
+        });
+      }
+      return new Response(injectSiteAssetBase(content.html, assetBase), { headers: htmlHeaders });
+    }
     const iterator = readArtifactObject(deps.objectStorage, ref.contentKey);
     return new Response(
       new ReadableStream({
@@ -538,21 +593,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           await iterator.return();
         },
       }),
-      {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "private, no-store",
-          // A Site runs its own scripts, but only inside an opaque origin: no
-          // same-origin access to the console, and no cross-site embedding.
-          "Content-Security-Policy": "sandbox allow-scripts",
-          "Cross-Origin-Resource-Policy": "same-origin",
-          "X-Content-Type-Options": "nosniff",
-          // Clients read this HTML with fetch and render it in their own frame
-          // (the console uses srcdoc). Opening the raw URL downloads it rather
-          // than running a publisher-authored page at an app-origin URL.
-          ...userContentDispositionHeaders("text/html", "site.html"),
-        },
-      },
+      { headers: htmlHeaders },
     );
   });
 
@@ -581,6 +622,12 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           cause: error,
         });
       }
+      const assetBase = siteVersionAssetBaseUrl(
+        deps.settings.publicBaseUrl,
+        context.req.url,
+        workspaceId,
+        ref,
+      );
       return context.json(
         WorkspaceArtifactContentResponse.parse({
           artifactId: ref.artifactId,
@@ -588,6 +635,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           contentType: "text/html",
           contentSha256: ref.version.contentSha256,
           ...content,
+          html: assetBase ? injectSiteAssetBase(content.html, assetBase) : content.html,
         }),
       );
     } catch (error) {

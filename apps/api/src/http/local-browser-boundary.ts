@@ -265,7 +265,7 @@ export function createLocalBrowserBoundary(
       const host = localBrowserRequestHost(request);
       const origin = request.headers.get("origin");
       if (browserHost(host)) {
-        if (origin !== null && !originAllowed(origin, host)) {
+        if (origin !== null && !originAllowed(origin, host) && !appAssetRead(request)) {
           return refuse("LOCAL_ORIGIN_NOT_ALLOWED", origin, host);
         }
         return null;
@@ -354,6 +354,20 @@ function exactOrigin(origin: string, allowed: ReadonlySet<string>): boolean {
     url !== null &&
     url.origin === origin.toLowerCase().replace(/\/$/u, "") &&
     allowed.has(url.origin)
+  );
+}
+
+/**
+ * App frames are opaque-origin (`Origin: null`) and load a multi-file app's
+ * files with CORS. The asset route reads no credentials and acts as nobody:
+ * the version's token in the path is its only authority, so any origin may
+ * read it, as in every other environment.
+ */
+function appAssetRead(request: Request): boolean {
+  const method = request.method.toUpperCase();
+  return (
+    (method === "GET" || method === "HEAD") &&
+    requestPathname(request).startsWith("/v1/app-assets/")
   );
 }
 

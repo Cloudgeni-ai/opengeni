@@ -34,6 +34,7 @@ import type {
   SlackUserLinkAccessRequest,
   SubscriptionPersonalAuthorityV2,
   TimelineAnnotation,
+  SiteAssetManifest,
   ToolGatewayIdentity,
   UserResourceDelegation,
   VaultPolicy,
@@ -555,6 +556,8 @@ export const workspaceArtifactVersions = pgTable(
     sourceSha256: text("source_sha256"),
     sourceSizeBytes: bigint("source_size_bytes", { mode: "number" }),
     requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
+    /** Asset files of a multi-file build (migration 1522); null for a single-file app. */
+    assetManifest: jsonb("asset_manifest").$type<SiteAssetManifest>(),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),

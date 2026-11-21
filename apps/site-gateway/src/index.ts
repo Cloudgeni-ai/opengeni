@@ -20,6 +20,7 @@ import {
 } from "@opengeni/contracts";
 import { SITE_UI_CSS, SITE_UI_STYLESHEET_PATH } from "@opengeni/sdk/site-ui";
 import { handleApi } from "./api";
+import { handleAsset, isAssetPath } from "./assets";
 import { handleCallback, handleLogin, handleLogout } from "./auth";
 import { parseCookies, readSession, readVisitor } from "./cookies";
 import {
@@ -267,6 +268,7 @@ export async function handleRequest(
     if (pathname === SITE_GATEWAY_TIMING_PATH) return await handleTimingBeacon(site);
     if (pathname.startsWith(`${SITE_GATEWAY_VERSION_PREFIX}/`))
       return await handleVersionHtml(site, pathname.slice(SITE_GATEWAY_VERSION_PREFIX.length + 1));
+    if (isAssetPath(pathname)) return await handleAsset(site, pathname);
     if (pathname === SITE_GATEWAY_PREFIX || pathname.startsWith(`${SITE_GATEWAY_PREFIX}/`))
       return neutralPage(site);
     if (request.method !== "GET" && request.method !== "HEAD")
@@ -287,6 +289,7 @@ export async function handleRequest(
 export function gatewayRoute(pathname: string): string {
   if (isApiPath(pathname)) return "api";
   if (pathname.startsWith(`${SITE_GATEWAY_VERSION_PREFIX}/`)) return "version";
+  if (isAssetPath(pathname)) return "asset";
   if (pathname === SITE_GATEWAY_LIVE_PATH) return "live";
   if (pathname === SITE_GATEWAY_TIMING_PATH) return "timing";
   if (pathname.startsWith(`${SITE_GATEWAY_PREFIX}/auth/`)) return "auth";

@@ -34,6 +34,10 @@
       "types": "./src/browser-response-headers.ts",
       "default": "./src/browser-response-headers.ts"
     },
+    "./app-assets": {
+      "types": "./src/app-assets.ts",
+      "default": "./src/app-assets.ts"
+    },
     "./html-frame-host": {
       "types": "./src/html-frame-host.ts",
       "default": "./src/html-frame-host.ts"

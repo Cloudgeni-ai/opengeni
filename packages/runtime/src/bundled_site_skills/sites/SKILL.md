@@ -5,10 +5,10 @@ description: Build, edit, and publish apps. Use when the user asks for a site, d
 
 # Apps
 
-An app is a saved page or web app in the workspace: one self-contained HTML
-file that the console shows, shares and can put on the web, plus optional
-editable source. Apps have no server of their own; Opengeni AI, tools and
-saved data come from the host.
+An app is a saved page or web app in the workspace: one HTML file (a large
+app adds build files) that the console shows, shares and can put on the web,
+plus optional editable source. Apps have no server of their own; Opengeni AI,
+tools and saved data come from the host.
 
 Do not invent an app framework, deployment service, App Host, custom domain
 setup, provider-specific API wrapper, or platform-only build CLI. Putting a
@@ -144,15 +144,17 @@ URLs, and signed URLs out of every app's source and HTML.
    locally and PUT it to `source.putUrl`. Paths must be relative and
    traversal-free. Exclude node_modules, caches, build output, and credentials.
    Source is optional: skip this upload for an HTML-only app.
-4. Call `opengeni__artifacts_create` with `uploadId`, title, description,
+4. Multi-file build only: PUT the other `dist/` files to `assets.putUrl`
+   ("Large apps").
+5. Call `opengeni__artifacts_create` with `uploadId`, title, description,
    idempotency key, and exact `requestedTools`. For an edit, call
    `opengeni__artifacts_publish` with the artifact id and
    `expectedCurrentVersionId` from `artifacts_get_source`.
 
-Do not put generated HTML or source into model tool arguments. Upload file
-bytes directly from the sandbox. No special SDK upload helper is required.
-Finish both intended uploads before publishing. For changed content, prepare
-a new upload; published versions do not change if an old PUT URL is reused.
+Upload bytes directly from the sandbox, never through tool arguments; no SDK
+helper is needed. Finish every intended upload before publishing. For changed
+content, prepare a new upload; reusing an old PUT URL changes no published
+version.
 
 If an idempotent create or publish reports an uncertain outcome, inspect the
 artifact list/source and rerun that same persistent script with the exact same
@@ -165,24 +167,25 @@ use this link form, with the exact returned ID and a descriptive title:
 [Open <app title>](artifact:<artifactId>)
 ```
 
-Include that link in the completion reply instead of making the user search for
-the app. Never present a sandbox URL, API content URL, or object-storage URL as
-the finished destination. Mention source files, tests or tool names only to
+Include that link in the completion reply. Never present a sandbox URL, API
+content URL, or object-storage URL as the finished destination.
+Mention source files, tests or tool names only to
 someone who asked about them.
 
 Archive with `opengeni__artifacts_archive` and restore with
-`opengeni__artifacts_restore`. Archiving unpublishes the app but preserves its
-immutable versions and retained source. There is no hard-delete workflow.
+`opengeni__artifacts_restore`. Archiving unpublishes the app and keeps its
+versions and source; there is no hard delete.
 
 ### Keep the page small
 
 Visitors download all of the HTML before anything shows, and the apps gateway
-can't serve a page over 256 MB. Keep it under 5 MB: resize and compress images
-to their shown size (WebP or JPEG), and link video or large images from where
-they are hosted. App files (`references/site-data.md`) also hold media:
+can't serve a page over 256 MB. Keep it under 5 MB; a full app over about 1 MB
+builds as several files instead ("Large apps"). For media, resize and compress
+images to their shown size (WebP or JPEG), and link video or large images from
+where they are hosted. App files (`references/site-data.md`) also hold media:
 shared files open for every visitor of the app, signed-out guests of a public
-app included. A create or publish result with `warnings` means the page is
-too heavy: shrink or move the media and publish again.
+app included. A create or publish result with `warnings` means the page is too
+heavy: shrink or move the media and publish again.
 
 ## Publish to the web
 
@@ -280,14 +283,13 @@ To embed a published app, use a fenced `opengeni-site` block containing JSON:
 {"siteId":"<artifact.id>","versionId":"<published version.id>"}
 ```
 
-Use the actual returned ids. `versionId` is optional; omitting it loads the
-current version when the embed opens. Including it preserves the intended
-version. The viewer can choose another version within the embed without
-publishing or rolling back the app. The embed uses the same app renderer,
-reload/full-screen controls, tool declarations and viewer permissions as the
-app page. Embeds resolve in the chat's workspace. Keep a normal app link when
-it helps the user reopen or share it. Archived or inaccessible apps display
-an unavailable state.
+Use the actual returned ids. `versionId` is optional: omitted, the embed loads
+the current version; included, it keeps that version. The viewer can pick
+another version in the embed without publishing or rolling back. The embed
+uses the same app renderer, reload/full-screen controls, tool declarations and
+viewer permissions as the app page, in the chat's workspace. Keep a normal app
+link when it helps the user reopen or share it. Archived or inaccessible apps
+show as unavailable.
 
 Use inline HTML for a visualization that belongs in this response. Use an app
 for a reusable app or durable page, and embed it when useful. Both can be small;
