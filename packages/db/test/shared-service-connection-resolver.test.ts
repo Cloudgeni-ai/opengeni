@@ -100,6 +100,7 @@ describe("shared service connections", () => {
         headers: { Authorization: `Bearer ${REFERENCE}` },
         serverId: "linear",
         toolName: "list_issues",
+        onBehalfOf: { subjectId: "user:a" },
         destinationUrl: "https://mcp.linear.app/mcp",
       },
     ]);
@@ -193,6 +194,48 @@ describe("shared service connections", () => {
       status: "ok",
       headers: { Authorization: "Bearer literal" },
     });
+    expect(calls).toBe(0);
+  });
+
+  test("a reference stored without the shared-key marker is never sent or resolved", async () => {
+    // For example a key saved by an older replica during a rolling deploy.
+    let calls = 0;
+    const unmarked = { mcpUrl: "https://mcp.linear.app/mcp" };
+    for (const credential of [
+      sharedKey({ metadata: unmarked }),
+      sharedKey({ metadata: unmarked, subjectId: "user:a" }),
+      sharedKey({
+        metadata: unmarked,
+        credential: { placements: [{ carrier: "header", name: "X-Key", value: REFERENCE }] },
+      }),
+    ]) {
+      const resolver = buildConnectionTokenResolver(
+        {} as Database,
+        settings,
+        deps(credential).deps,
+        {
+          resolveCredentialReferences: async () => {
+            calls += 1;
+            return { Authorization: "Bearer synthetic-value" };
+          },
+        },
+      );
+      for (const mode of ["execution", "preflight"] as const) {
+        const result = await resolver({
+          ...input,
+          credentialResolutionMode: mode,
+          connectionRef: {
+            ...input.connectionRef,
+            subjectScope: credential.subjectId ? ("subject" as const) : ("workspace" as const),
+          },
+        });
+        expect(result).toMatchObject({
+          status: "auth_needed",
+          reason: "designated_credential_unavailable",
+        });
+        expect(JSON.stringify(result)).not.toContain("secret:");
+      }
+    }
     expect(calls).toBe(0);
   });
 });

@@ -19,7 +19,11 @@ import type {
 } from "@opengeni/contracts";
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
-import { isVaultCredentialConnection } from "@opengeni/contracts";
+import {
+  containsSecretReference,
+  credentialHeadersHaveSecretReferences,
+  isVaultCredentialConnection,
+} from "@opengeni/contracts";
 import {
   isNangoConnectionCredential,
   isNangoProviderDomain,
@@ -725,7 +729,17 @@ export function buildConnectionTokenResolver(
       };
     }
     let headers = material.headers;
-    if (isVaultCredentialConnection(cred.metadata)) {
+    if (!isVaultCredentialConnection(cred.metadata)) {
+      // A reference stored without the shared-key marker (for example a key
+      // saved by an older replica during a rolling deploy) is never sent as
+      // text and never resolved: only a connection set up as a shared key may
+      // read a vault. Fail closed and send nothing.
+      if (
+        credentialHeadersHaveSecretReferences(material.headers) ||
+        material.placements?.some((placement) => containsSecretReference(placement.value))
+      )
+        return authNeeded(ref, "designated_credential_unavailable", cred.id);
+    } else {
       // A shared service connection: its headers hold vault references. Only
       // a workspace-owned header key qualifies, and the values are read only
       // for a real request; the credential-free preflight sends nothing.

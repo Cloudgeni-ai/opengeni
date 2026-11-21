@@ -461,8 +461,9 @@ version's `requestedTools`.
   picks the account; blocked, unavailable and permission-denied tools are not
   something one click fixes, so they don't show. Tools whose connector has no
   catalog entry are left out.
-- **API-key tools.** A `connect` item for a connector that takes an API key
-  rather than a sign-in carries `sharedKey`: `add` for a workspace admin who
+- **API-key tools.** A connector that takes an API key keeps each person's
+  own `connect` item. When the app's shared syncs wait on it, a separate
+  `connect` item with `shared: true` carries `sharedKey`: `add` for a workspace admin who
   may use secrets ("Add a shared key for Stripe", which connects it once for
   the workspace with a key from a vault), or `ask_admin` for anyone else
   ("Ask an admin to connect Stripe", shown as text, with no `openUrl`). Once a

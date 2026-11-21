@@ -76,8 +76,9 @@ become a request for the person to enter the same secret again.
 
 A tool that signs in with an API key rather than OAuth can be connected once
 for the whole workspace with a key from a workspace or organization vault,
-hosted or connected. An admin picks **Add a shared key** on an app's connect
-card (or connects the server for the workspace with a header such as
+hosted or connected. When an app's shared data syncs need such a tool, an admin
+picks **Add a shared key** on its connect card; people still connect their own
+key for their own use (or an admin connects the server for the workspace with a header such as
 `Authorization: Bearer {{secret:Team/Example key}}`). Opengeni stores only the
 reference and reads the value when it calls the tool, for apps, data syncs and
 agents alike; nobody, including the agent, sees the value. Everyone else is

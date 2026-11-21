@@ -141,4 +141,42 @@ describe("the App connect card", () => {
     ).toBe(false);
     expect(opened).toBe(0);
   });
+
+  test("an API-key tool keeps each person's own Connect next to a shared sync's key", async () => {
+    const own = { ...connect, key: "connect:Stripe:own", connector: "Stripe" };
+    const shared = {
+      ...own,
+      key: "connect:Stripe:shared",
+      shared: true,
+      sharedKey: "ask_admin" as const,
+    };
+    const clicked: string[] = [];
+    const view = await renderComponent(
+      <AppConnectCardView
+        items={[own, shared]}
+        onConnect={(key) => clicked.push(key)}
+        onDismiss={() => undefined}
+      />,
+    );
+    const card = document.body.querySelector<HTMLElement>("[data-app-connect-card]")!;
+    expect(card.textContent).toContain("Connect Stripe");
+    expect(card.textContent).toContain("Ask an admin to connect Stripe");
+    await actRun(() => card.querySelectorAll("button")[0]!.click());
+    expect(clicked).toEqual([own.key]);
+    await view.unmount();
+
+    // Their own Connect opens the ordinary connect flow.
+    let opened = 0;
+    const consent = {
+      connectForToolCall: async () => {
+        opened += 1;
+        return true;
+      },
+      recoverToolCall: async () => true,
+    };
+    expect(
+      await runSiteConnectCardItem(consent, "workspace", own, new AbortController().signal),
+    ).toBe(true);
+    expect(opened).toBe(1);
+  });
 });

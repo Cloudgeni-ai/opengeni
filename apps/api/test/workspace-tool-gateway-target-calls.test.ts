@@ -2740,12 +2740,14 @@ describe("Site tool readiness and typed failures", () => {
     ).not.toBe(siteToolSetupKey({ action: "connect", capabilityId: "c", connectionId: "x" }));
   });
 
-  test("an API-key connector offers admins a shared key and tells others to ask one", async () => {
+  test("an API-key connector keeps each person's Connect; a shared sync adds a shared key", async () => {
     const f = createFixture();
     try {
       f.state.connections = [f.foreign];
+      let sharedSyncTools: { serverId: string; toolName: string }[] = [];
       const apiKeyConnector = {
         readReconnect: async () => [],
+        readSharedSyncTools: async () => sharedSyncTools,
         readAccounts: async (...args: Parameters<typeof readSiteToolAccountInventory>) => {
           const inventory = await readSiteToolAccountInventory(...args);
           return {
@@ -2774,15 +2776,21 @@ describe("Site tool readiness and typed failures", () => {
           )
         ).items;
       };
-      const [member] = await setup(["workspace:read", "connections:write"]);
+      const admin = ["workspace:read", "capabilities:manage", "connections:write", "secrets:use"];
+      // Only each person's own use waits on it: their own Connect, for admins too.
+      const [own, ...rest] = await setup(admin);
+      expect(own).toMatchObject({ action: "connect", shared: false });
+      expect(own).not.toHaveProperty("sharedKey");
+      expect(rest).toEqual([]);
+      // A shared sync calls it: a separate shared-key item next to the Connect.
+      sharedSyncTools = [canonical];
+      const [memberOwn, member] = await setup(["workspace:read", "connections:write"]);
+      expect(memberOwn).toMatchObject({ key: own!.key, action: "connect" });
+      expect(memberOwn).not.toHaveProperty("sharedKey");
       expect(member).toMatchObject({ action: "connect", sharedKey: "ask_admin", openUrl: null });
-      const [admin] = await setup([
-        "workspace:read",
-        "capabilities:manage",
-        "connections:write",
-        "secrets:use",
-      ]);
-      expect(admin).toMatchObject({ action: "connect", sharedKey: "add" });
+      expect(member!.key).not.toBe(own!.key);
+      const [, adminShared] = await setup(admin);
+      expect(adminShared).toMatchObject({ action: "connect", sharedKey: "add", shared: true });
       // Once the workspace has a shared connection for it, nothing is left to do.
       f.state.connections = [f.personal, f.foreign];
       expect(await setup(["workspace:read"])).toEqual([]);

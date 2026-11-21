@@ -849,9 +849,10 @@ export const ToolGatewaySiteSetupItem = /* @__PURE__ */ defineSchema(() =>
       /** The account is shared with the workspace rather than the viewer's own. */
       shared: z.boolean(),
       /**
-       * Set on `connect` for a connector that takes an API key rather than a
-       * sign-in: the workspace connects it once, with a shared key from a
-       * vault (a shared service connection), instead of each person.
+       * Set on the extra `connect` item for a connector that takes an API key
+       * when the app's shared syncs wait on it: the workspace connects it
+       * once, with a shared key from a vault (a shared service connection).
+       * Each person's own use keeps its ordinary `connect` item.
        */
       sharedKey: ToolGatewaySiteSetupSharedKey.optional(),
       /** The declared tools that wait on it. */

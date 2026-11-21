@@ -243,6 +243,12 @@ which keeps the reference text.
   working as before. Installation headers given to the capability enable
   route and a chat's own MCP server headers stay literal; use a shared
   service connection for a vault key.
+- **References are never sent as text.** A stored connection header that holds
+  a reference but isn't marked as a shared service connection (for example a
+  key saved by an older API replica while a rolling deploy is in progress)
+  fails closed with `designated_credential_unavailable` and sends nothing. During that
+  short window an older replica may still store or send such a key as
+  written; once the deploy finishes, an admin adds the shared key again.
 - **Self-hosting.** Needs `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like every
   stored connection credential and hosted vault value. Keys in connected
   vaults (1Password, host, external providers) resolve in the API's tool
