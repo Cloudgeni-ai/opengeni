@@ -787,7 +787,7 @@ function SiteActionsMenu({
             <MoreHorizontalIcon aria-hidden="true" className="size-4" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuContent align="end" className="w-56">
           {onFullScreen ? (
             <DropdownMenuItem onSelect={onFullScreen}>
               <Maximize2Icon aria-hidden="true" />
