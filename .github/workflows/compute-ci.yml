@@ -199,7 +199,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
       - name: Helm chart (computeControl)
         run: bun test deploy/helm/opengeni/test/compute-control.test.ts
       # The all-GCP end-to-end environment's scripts and suite: they run only
