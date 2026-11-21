@@ -383,10 +383,21 @@ test("keyless deliveries insert once per delivery id; per-viewer targets and arc
   // id header, inserts nothing new.
   const signedBody = JSON.stringify({ kind: "refunded" });
   const signature = signTimestampedHmac({ secret: String(created.json.secret), body: signedBody });
-  for (const id of ["a", "b"])
+  // Other accepted spellings of the same signature are the same delivery too.
+  const variants = [
+    signature,
+    ` ${signature.replace(",", " , ")}`,
+    signature.replace(/v1=([0-9a-f]+)/u, (_all, hex: string) => `v1=${hex.toUpperCase()}`),
+    `${signature},v0=ignored`,
+  ];
+  for (const [index, variant] of variants.entries())
     expect(
-      (await f.deliver(url, signedBody, { "x-opengeni-signature": signature, "webhook-id": id }))
-        .status,
+      (
+        await f.deliver(url, signedBody, {
+          "x-opengeni-signature": variant,
+          "webhook-id": `id-${index}`,
+        })
+      ).status,
     ).toBe(200);
   expect(await records(f, "events")).toHaveLength(2);
 

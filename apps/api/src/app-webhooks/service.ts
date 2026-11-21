@@ -330,7 +330,7 @@ export function verifyAppWebhookDelivery(input: {
   body: Uint8Array;
   decrypt: (stored: string) => string;
   nowSeconds: number;
-}): { ok: true } | { ok: false; reason: string } {
+}): { ok: true; signedAt?: number } | { ok: false; reason: string } {
   const authorization = input.headers.get("authorization");
   if (authorization !== null) {
     const match = /^Bearer\s+(\S+)\s*$/iu.exec(authorization);
@@ -348,7 +348,9 @@ export function verifyAppWebhookDelivery(input: {
       toleranceSeconds: APP_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS,
       nowSeconds: input.nowSeconds,
     });
-    return verified.ok ? { ok: true } : { ok: false, reason: verified.reason };
+    return verified.ok
+      ? { ok: true, signedAt: verified.timestampSeconds }
+      : { ok: false, reason: verified.reason };
   }
   return {
     ok: false,
@@ -361,14 +363,14 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * A signed delivery's id comes from its signature (which covers the time and
- * the body), so replaying it inside the signature window, or changing an
- * unsigned id header, can't insert its records again.
+ * A signed delivery's id comes from what its signature covers (the signed
+ * time and the exact body), so replaying it inside the signature window, in
+ * any accepted spelling of the header, or with a changed unsigned id header,
+ * can't insert its records again.
  */
-function signedDeliveryId(headers: Headers): string | null {
-  if (headers.get("authorization") !== null) return null;
-  const signature = headers.get(APP_WEBHOOK_SIGNATURE_HEADER)?.trim();
-  return signature ? `sig:${sha256Hex(signature)}` : null;
+function signedDeliveryId(signedAt: number | undefined, body: Uint8Array): string | null {
+  if (signedAt === undefined) return null;
+  return `sig:${signedAt}:${createHash("sha256").update(body).digest("hex")}`;
 }
 
 /** A sender's delivery id, for idempotent inserts. */
@@ -535,7 +537,7 @@ export async function receiveAppWebhook(
         }),
     );
   };
-  let verification: { ok: true } | { ok: false; reason: string };
+  let verification: { ok: true; signedAt?: number } | { ok: false; reason: string };
   try {
     verification = verifyAppWebhookDelivery({
       row,
@@ -580,7 +582,7 @@ export async function receiveAppWebhook(
     const { operations, skipped } = appWebhookOperations(
       value,
       row,
-      signedDeliveryId(input.headers) ?? deliveryIdOf(input.headers),
+      signedDeliveryId(verification.signedAt, input.body) ?? deliveryIdOf(input.headers),
     );
     const written =
       operations.length === 0

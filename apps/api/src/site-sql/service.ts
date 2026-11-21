@@ -1262,6 +1262,8 @@ export async function runSiteSqlStatement(
 const SYNC_UPSERT_ROWS = 100;
 /** Keys per sync delete statement (the Durable Object binds at most 100 values). */
 const SYNC_DELETE_KEYS = 50;
+/** Bound parameters one conditional sync delete may use (the limit is 100). */
+const SYNC_DELETE_PARAMS = 90;
 
 function syncResolved(deps: SiteSqlDeps, access: SiteDataAccess, siteId: string): Resolved {
   return {
@@ -1381,6 +1383,7 @@ export async function deleteSiteSqlRowsForSync(
     try {
       for (let start = 0; start < request.keys.length; start += SYNC_DELETE_KEYS) {
         let keys = request.keys.slice(start, start + SYNC_DELETE_KEYS);
+        let matched: SiteSqlRow[] | null = null;
         if (request.match) {
           const key = quoteSiteSqlIdentifier(request.keyColumn);
           const read = await callSiteDb<SiteDbRunResponse>(
@@ -1403,34 +1406,71 @@ export async function deleteSiteSqlRowsForSync(
             siteSqlTransport.fetch,
           );
           addUsage(usage, read);
-          const owned = new Set(
-            read.rows.filter(request.match.owned).map((row) => String(row[request.keyColumn])),
+          const scalar = (value: unknown) =>
+            value === null || ["string", "number", "boolean"].includes(typeof value);
+          // A row cut off from the answer (too large), or holding a value
+          // that can't be compared again (a blob), is kept.
+          matched = read.rows.filter(
+            (row) =>
+              request.match!.owned(row) &&
+              request.match!.columns.every((column) => scalar(row[column])),
           );
-          // A row cut off from the answer (too large) is kept.
+          const owned = new Set(matched.map((row) => String(row[request.keyColumn])));
           keys = keys.filter((value) => owned.has(value));
           if (keys.length === 0) continue;
         }
-        const params = Object.fromEntries(keys.map((key, index) => [`k${index}`, key]));
-        const response = await callSiteDb<SiteDbRunResponse>(
-          gateway,
-          siteId,
-          "run",
-          {
-            sql: `DELETE FROM ${quoteSiteSqlIdentifier(request.table)} WHERE ${quoteSiteSqlIdentifier(
-              request.keyColumn,
-            )} IN (${keys.map((_, index) => `:k${index}`).join(", ")})`,
-            profile: "agent",
-            params,
-            expect: "write",
-            maxRows: 1,
-            maxResponseBytes: limits.maxResponseBytes,
-            maxDatabaseBytes: limits.storageBytesPerSite,
-          },
-          siteSqlTransport.fetch,
-        );
-        addUsage(usage, response);
-        // Matched rows were just read, so each key is one row (row writes count indexes too).
-        deleted += request.match ? keys.length : response.rowsWritten;
+        const keyColumn = quoteSiteSqlIdentifier(request.keyColumn);
+        // Without a match, one delete by key. With one, each row is deleted
+        // only while its columns still hold the values just read, so a row
+        // changed in between is kept; rows are grouped to stay under the
+        // site database's bound-parameter limit.
+        const perRow = 1 + (request.match?.columns.length ?? 0);
+        const groups: Array<{ where: string; params: Record<string, unknown> }> = [];
+        if (!matched)
+          groups.push({
+            where: `${keyColumn} IN (${keys.map((_, index) => `:k${index}`).join(", ")})`,
+            params: Object.fromEntries(keys.map((key, index) => [`k${index}`, key])),
+          });
+        else {
+          const rowsPerDelete = Math.max(1, Math.floor(SYNC_DELETE_PARAMS / perRow));
+          for (let at = 0; at < matched.length; at += rowsPerDelete) {
+            const params: Record<string, unknown> = {};
+            const where = matched
+              .slice(at, at + rowsPerDelete)
+              .map((row, index) => {
+                params[`k${index}`] = row[request.keyColumn];
+                const conditions = request.match!.columns.map((column, position) => {
+                  params[`k${index}c${position}`] = row[column];
+                  return `${quoteSiteSqlIdentifier(column)} IS :k${index}c${position}`;
+                });
+                return `(${[`${keyColumn} = :k${index}`, ...conditions].join(" AND ")})`;
+              })
+              .join(" OR ");
+            groups.push({ where, params });
+          }
+        }
+        for (const group of groups) {
+          const response = await callSiteDb<SiteDbRunResponse>(
+            gateway,
+            siteId,
+            "run",
+            {
+              sql: `DELETE FROM ${quoteSiteSqlIdentifier(request.table)} WHERE ${group.where}`,
+              profile: "agent",
+              params: group.params,
+              expect: "write",
+              maxRows: 1,
+              maxResponseBytes: limits.maxResponseBytes,
+              maxDatabaseBytes: limits.storageBytesPerSite,
+            },
+            siteSqlTransport.fetch,
+          );
+          addUsage(usage, response);
+          if (!matched) deleted += response.rowsWritten;
+        }
+        // Matched rows were just read, so each key is one row (row writes
+        // count indexes too); a row changed in between is still counted.
+        if (matched) deleted += keys.length;
       }
     } finally {
       await meter(deps, resolved, usage, { countTowardCaps: false });
