@@ -1052,6 +1052,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createAppWebhook",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks",
+    "request": [
+      "AppWebhookCreateRequest"
+    ],
+    "response": [
+      "AppWebhookSaveResponse"
+    ],
+    "secretFields": [
+      "response.secret"
+    ]
+  },
+  {
     "id": "createAutomationTemplate",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/automation-templates",
@@ -1954,6 +1968,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteAppSync",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteAppWebhook",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks/:webhookId",
     "request": [],
     "response": []
   },
@@ -3576,6 +3597,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningSettingsRecord"
+    ]
+  },
+  {
+    "id": "getAppSyncOptInReview",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/opt-in",
+    "request": [],
+    "response": [
+      "AppSyncOptInReview"
     ]
   },
   {
@@ -5629,6 +5659,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAppWebhooks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks",
+    "request": [],
+    "response": [
+      "AppWebhookListResponse"
+    ]
+  },
+  {
     "id": "listArtifactCatalog",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog",
@@ -7301,6 +7340,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:control",
     "secretFields": [
       "response.token"
+    ]
+  },
+  {
+    "id": "notifyFromApp",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/notify",
+    "request": [
+      "AppNotifyRequest"
+    ],
+    "response": [
+      "AppNotifyResponse"
     ]
   },
   {
@@ -10691,6 +10741,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateAppWebhook",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/webhooks/:webhookId",
+    "request": [
+      "AppWebhookUpdateRequest"
+    ],
+    "response": [
+      "AppWebhookSaveResponse"
+    ],
+    "secretFields": [
+      "response.secret"
+    ]
+  },
+  {
     "id": "updateArtifactPin",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
@@ -11653,6 +11717,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceWebhook"
     ]
+  },
+  {
+    "id": "upgradeAppPackage",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/package/upgrade",
+    "request": [
+      "AppPackageUpgradeRequest"
+    ],
+    "response": []
   },
   {
     "id": "upgradeBillingSubscription",
