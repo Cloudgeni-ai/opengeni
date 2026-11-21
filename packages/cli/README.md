@@ -35,7 +35,9 @@ for completion and checks in editors. The schema is in this package
 See [Console agents](../../docs/agents.md#console-agents).
 
 The package version follows the other Opengeni packages. It is published only
-by the repository release workflows.
+by the repository release workflows. A CLI-only release
+(`.github/workflows/publish-cli.yml`) ships just the self-contained `opengeni`
+command, without the programmatic entry below.
 
 Programmatic use:
 
