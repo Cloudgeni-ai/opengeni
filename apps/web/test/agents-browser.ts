@@ -49,6 +49,18 @@ const shots: Shot[] = [
   { name: "agents-gallery", view: "agents", height: 1300, ready: text("Add an agent") },
   { name: "agent-setup", view: "agent-setup", height: 2100, ready: text("Starts when") },
   {
+    name: "agent-template-cve-scanner",
+    view: "agent-template&template=cve-scanner",
+    height: 1900,
+    ready: text("Every Monday morning"),
+  },
+  {
+    name: "agent-template-incident-responder",
+    view: "agent-template&template=incident-responder",
+    height: 1900,
+    ready: text("When an alert arrives"),
+  },
+  {
     name: "agent-setup-per-tool",
     view: "agent-setup",
     height: 2100,

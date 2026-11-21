@@ -2,12 +2,26 @@ import { describe, expect, test } from "bun:test";
 import { agentTemplateByKey, agentTemplates } from "../src/index";
 
 describe("ready-made agents", () => {
-  test("all three content files are valid and in gallery order", () => {
+  test("every content file is valid and in gallery order", () => {
     expect(agentTemplates().map((template) => template.key)).toEqual([
       "triage",
       "bug-fixer",
       "pr-reviewer",
+      "cve-scanner",
+      "incident-responder",
+      "dependency-updater",
     ]);
+  });
+
+  test("names and keys are unique, and every agent named for a handoff is one of them", () => {
+    const names = agentTemplates().map((template) => template.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(new Set(agentTemplates().map((template) => template.key)).size).toBe(names.length);
+    for (const template of agentTemplates()) {
+      for (const [, named] of template.instructions.matchAll(/"([^"]+)" agent/gu)) {
+        expect(names).toContain(named);
+      }
+    }
   });
 
   test("each has instructions, a merge Block and at least one suggested trigger", () => {
@@ -32,6 +46,50 @@ describe("ready-made agents", () => {
       expect(text).not.toContain("cloudgeni");
       expect(template.skills).toEqual([]);
     }
+  });
+
+  test("CVE scanner runs weekly and on pull requests, skips ones without dependency changes, and hands fixes to PR reviewer", () => {
+    const scanner = agentTemplateByKey("cve-scanner");
+    expect(scanner?.suggestedTriggers.map((suggestion) => suggestion.schedule)).toEqual([
+      { type: "calendar", hour: 8, minute: 0, daysOfWeek: ["MONDAY"] },
+      null,
+    ]);
+    // GitHub events carry no changed paths, so the run itself skips other pull requests.
+    const pullRequests = scanner?.suggestedTriggers[1];
+    expect(pullRequests?.triggers[0]?.eventTypes).toEqual([
+      "pull_request.opened",
+      "pull_request.ready_for_review",
+    ]);
+    expect(pullRequests?.instructions).toContain("Otherwise, do nothing.");
+    expect(scanner?.instructions).toContain("lockfile");
+    expect(scanner?.instructions).toContain('"PR reviewer" agent');
+  });
+
+  test("Incident responder listens for alerts and Slack reports and hands fixes to Bug fixer", () => {
+    const responder = agentTemplateByKey("incident-responder");
+    const triggers = responder?.suggestedTriggers.flatMap((suggestion) => suggestion.triggers);
+    expect(triggers?.map((trigger) => trigger.source)).toEqual([
+      { kind: "webhook", adapter: "standard" },
+      { kind: "slack" },
+    ]);
+    expect(triggers?.[0]?.eventTypes).toEqual(["*"]);
+    expect(triggers?.[1]?.conditions).toEqual([
+      { field: "data.in_thread", op: "equals", value: false },
+    ]);
+    expect(responder?.instructions).toContain('"Bug fixer" agent');
+  });
+
+  test("Dependency updater opens one pull request a week for PR reviewer", () => {
+    const updater = agentTemplateByKey("dependency-updater");
+    expect(updater?.suggestedTriggers).toHaveLength(1);
+    expect(updater?.suggestedTriggers[0]?.schedule).toEqual({
+      type: "calendar",
+      hour: 9,
+      minute: 0,
+      daysOfWeek: ["MONDAY"],
+    });
+    expect(updater?.suggestedTriggers[0]?.triggers).toEqual([]);
+    expect(updater?.instructions).toContain('"PR reviewer" agent');
   });
 
   test("lookup by key", () => {

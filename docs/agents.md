@@ -638,14 +638,28 @@ has no read approvals; `gh` would fail rather than wait). `git clone` and
 `POST /v1/workspaces/:id/agent-templates/:key/agents` (`{name?, visibility?}`)
 adds one as an ordinary agent with `templateKey` set (SDK
 `listAgentTemplates`, `createAgentFromTemplate`). They are content files in
-`packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`):
-Triage, Bug fixer and PR reviewer, general for any software team, with
+`packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`),
+listed in gallery order in its `index.ts`: Triage, Bug fixer, PR reviewer,
+CVE scanner, Incident responder and Dependency updater, general for any software team, with
 Instructions written for autonomy with judgment (pick up work with what they
 can reach instead of asking for setup first, hand off to each other by name,
 and involve a person only when blocked or a decision needs one), suggested Can use rules
 (each blocks merging a pull request, through a GitHub connection or
-Opengeni's own GitHub tools) and suggested triggers (Triage: a GitHub issue,
-a new message in a Slack channel, a Linear issue). Suggested triggers are
+Opengeni's own GitHub tools) and suggested triggers:
+
+| Agent | Does | Hands off to | Suggested triggers |
+| --- | --- | --- | --- |
+| Triage | Sorts new issues and reports | Bug fixer | A GitHub issue opens; a new message in a Slack channel; a Linear issue is created |
+| Bug fixer | Reproduces and fixes a bug in a pull request | PR reviewer | An issue is labelled `bug` |
+| PR reviewer | Reviews pull requests | None | A pull request opens or is ready for review |
+| CVE scanner | Checks lockfiles and container images against known advisories (GitHub advisories, or osv-scanner or trivy in its sandbox), ranks by reachability and severity, fixes safe upgrades in one pull request, reports the rest | PR reviewer | Every Monday at 08:00; a pull request opens or is ready for review |
+| Incident responder | Gathers logs, metrics and recent deploys from connected tools, posts the likely cause and a mitigation | Bug fixer | Any event on a webhook (`*`, for alerts from monitoring); a new message in a Slack channel |
+| Dependency updater | Batches patch and minor upgrades into one pull request a week | PR reviewer | Every Monday at 09:00 |
+
+GitHub events carry no changed file paths, so CVE scanner's pull request
+trigger fires for every pull request and its run stops at once when no
+lockfile, dependency manifest or Dockerfile changed. A new ready-made agent
+is one more content file; no product code names any of them. Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the same dialog filled in from the suggestion (its events,
 conditions, note and name) so the person only picks the source and, for
@@ -672,7 +686,8 @@ can hand work to its owner's other Only me agents (the child is bound with
 the child (see Can use above).
 A name two agents share is refused with `agent_name_ambiguous` and their ids;
 an unknown one with `agent_not_found`. Delegated chats keep the nested agent
-depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer".
+depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer"; Incident responder hands
+fixes to "Bug fixer", and CVE scanner and Dependency updater ask "PR reviewer".
 
 ### Follow-ups
 
@@ -687,7 +702,8 @@ The sidebar's **Agents** page (`/workspaces/:id/agents`) replaces **Bot
 templates** and the Slack agents list; `/bot-templates` redirects there.
 
 - Agents page: All / Yours, one row per agent (icon, name, what it helps with,
-  an Only me or Slack badge), **New agent** and **Import** (`.agent.json`, or an
+  and an Only me badge on an agent that stays in the app; every shared agent is
+  in Slack, so there is no Slack badge), **New agent** and **Import** (`.agent.json`, or an
   older `.bot.json` whose setup instructions become the Instructions). Banners
   say that templates and Slack agents became agents (shown when such agents
   exist, dismissible per browser), and a notice suggests renaming when names

@@ -262,7 +262,7 @@ test("saving an agent whose Memory has no collection yet sends Memory again, so 
 
 // --- Agents page ---------------------------------------------------------------
 
-test("the Agents page lists agents with their Slack badge and the moved-here notes", async () => {
+test("the Agents page lists agents, marks Only me ones, and shows the moved-here notes", async () => {
   const client = fakeAgentsClient([
     makeAgent({ name: "Data team", origin: "slack_agent", slack: [slackAvailability()] }),
     makeAgent({ name: "Release manager", origin: "bot_template", visibility: "private" }),
@@ -277,8 +277,11 @@ test("the Agents page lists agents with their Slack badge and the moved-here not
   expect(container.textContent).toContain(BOT_TEMPLATES_MOVED);
   expect(container.textContent).toContain(SLACK_AGENTS_MOVED);
   expect(container.textContent).toContain("More than one agent is called “Release manager”.");
-  expect(container.textContent).toContain("Slack");
-  expect(container.textContent).toContain("Only me");
+  // Every shared agent is in Slack: no per-agent Slack badge, only Only me.
+  const badges = [...container.querySelectorAll('[data-slot="meta-chip"]')].map(
+    (chip) => chip.textContent,
+  );
+  expect(badges).toEqual(["Only me"]);
   // Dismissed notes stay dismissed.
   const dismiss = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
     (element) => element.getAttribute("aria-label") === "Dismiss",
@@ -1542,6 +1545,42 @@ test("a listed GitHub connection's row also offers Opengeni's own GitHub tools",
   await flush();
   expect(rows[0]!.textContent).toContain("search_code");
   expect(rows[0]!.textContent).toContain("pull_request_merge");
+});
+
+test("Add an agent offers every ready-made agent's content file not yet added here", async () => {
+  const keys = [
+    "triage",
+    "bug-fixer",
+    "pr-reviewer",
+    "cve-scanner",
+    "incident-responder",
+    "dependency-updater",
+  ];
+  const templates = await Promise.all(
+    keys.map(
+      async (key) =>
+        (await import(`../../core/src/agent-templates/${key}.agent.json`)).default as {
+          name: string;
+          description: string;
+        },
+    ),
+  );
+  const client = fakeAgentsClient([makeAgent({ name: "Triage", templateKey: "triage" })], {
+    templates,
+  });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  await flush();
+  const text = container.textContent ?? "";
+  // Triage is already here, so it isn't offered again.
+  expect(text).not.toContain(templates[0]!.description);
+  for (const template of templates.slice(1)) {
+    expect(text).toContain(template.name);
+    expect(text).toContain(template.description);
+  }
 });
 
 test("Add an agent adds a ready-made agent once", async () => {
