@@ -253,7 +253,7 @@ signature.
 | `POST /auth/exchange` | `SiteAuthExchangeResponse`. 400 `site_auth_code_invalid` (wrong verifier, host or redirect URI, expired, or already used) |
 | `POST /auth/logout` | 200 `{ revoked }`, even when the Site no longer exists |
 | `POST /site/reports` | 201. Rate limited per reporter, per client address and per Site |
-| `POST /tools/:method` | Member-only page `catalog`, `declarations`, `call`, `resolve`, `invoke`, `readiness`; normal console gateway request/response shapes (`readiness` takes `{ targets }`; the host adds the Site; anything needing a confirmation, an account choice or a connect answers `open_in_opengeni`). Exact current-version `requestedTools` intersect live viewer authority and account selection. Outside viewers: 403 `not_available_for_viewer`, `feature: "workspace_tools"`; undeclared tools: 403 `site_tool_not_authorized`; missing approval: 409 `tool_gateway_approval_required`. Independent of agent settings. |
+| `POST /tools/:method` | Member-only page `catalog`, `declarations`, `call`, `resolve`, `invoke`, `readiness`, `setup`; normal console gateway request/response shapes (`readiness` takes `{ targets }`; `setup` takes `{}` and answers the connect card's `ToolGatewaySiteSetupResponse`; the host adds the Site; anything needing a confirmation, an account choice or a connect answers `open_in_opengeni`). Exact current-version `requestedTools` intersect live viewer authority and account selection. Outside viewers: 403 `not_available_for_viewer`, `feature: "workspace_tools"`; undeclared tools: 403 `site_tool_not_authorized`; missing approval: 409 `tool_gateway_approval_required`. Independent of agent settings. |
 | `POST /auth/view-as` (`{ viewAs: "invited" \| "public" \| null }`) | 200 `{ viewAs }`: a workspace member starts or ends previewing the Site as that role on their own site session. 403 `site_view_as_members_only` for anyone else |
 | `POST /platform/requests` | Gateway request counts (`{ v: 1, reportId, hosts: [{ host, requests }] }`, at most 500 hosts), signed on the Sites domain apex; 200 `{ counted }`. Each report id counts once per host; unknown hosts are skipped. 400 when signed for a Site host |
 | `SITE_OPERATIONS` suffixes | Served for the viewer, as below. Anything else returns 404 `site_operation_unsupported` |
@@ -277,6 +277,9 @@ Operations:
   - Guests read and open the Site's `shared` files (list and short-lived
     download URLs, within the same per-visitor and per-address request
     limits). They never upload or delete files, and never see `private` files.
+  - `GET /data/syncs` (`site.data.syncs()`) returns each app data sync's last
+    run and, for personal syncs, the viewer's own last run and opt-in
+    ([app-sync.md](app-sync.md)).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable
@@ -419,21 +422,77 @@ Operations:
     session appears that the conversation record does not track, it is
     cancelled and the call returns 502 `site_conversation_failed`.
 
+## Connect card
+
+When a workspace member opens an app (a Site), Opengeni shows a small card
+for each connected tool the app declares that they still have to connect or
+reconnect: "Connect Gmail", one button each, and a close button. Nothing shows
+when everything is ready, for guests and invited viewers outside the
+workspace, or after the viewer closed it (until a new need appears or the app
+asks for it again). App authors build nothing: the list comes from the current
+version's `requestedTools`.
+
+- **Source.** `POST /v1/workspaces/:workspaceId/tools/site-setup`
+  (`{ siteArtifactId, siteVersionId }`, `workspace:read`) in the console, and
+  `POST /v1/site-runtime/tools/setup` (`{}`) for a published app. Both answer
+  `ToolGatewaySiteSetupResponse` `{ version: 1, items }`; each item has a
+  stable `key` (`<action>:<digest>`, the digest of the connector's catalog
+  capability and the account's connection, so connectors that share a name
+  stay apart and Site code sees no ids), `action` (`connect` or
+  `reconnect`), `connector`, `capabilityId`, `connectionId`, `account`,
+  `shared`, the declared `tools` waiting on it, and `openUrl` (published
+  hosts only). It runs the same readiness as `tools/readiness` over every
+  declared tool, for every connection type, including gateway-provider
+  connections, and never calls a provider.
+- **What becomes a card item.** `connect` (no account yet) and `reconnect`
+  (the account's sign-in stopped working, or it lacks scopes a declared tool
+  needs and can sign in again). Tools that only need a confirmation or an
+  account choice are left to the call's own confirmation, where the viewer
+  picks the account; blocked, unavailable and permission-denied tools are not
+  something one click fixes, so they don't show. Tools whose connector has no
+  catalog entry are left out.
+- **Console.** The card sits over the app's bottom right corner. Its button
+  opens Opengeni's own connect or reconnect dialog (the same
+  `McpConnectionCard` flow as chat), and the card refreshes when it finishes
+  and when the window regains focus.
+- **Published app.** The gateway shell shows the same card to members. A
+  published page has no Opengeni frame to sign in through, so the button opens
+  `openUrl`, the app in the Opengeni console with `?connect=<key>`, in a new
+  tab, which opens that dialog at once; returning to the app refreshes the
+  card and its tool readiness. `openUrl` uses `OPENGENI_WEB_BASE_URL`,
+  falling back to `OPENGENI_PUBLIC_BASE_URL` as other console links do; set
+  `OPENGENI_WEB_BASE_URL` when the console is served from another origin
+  than the API, or the link opens the API's address. The console opens the
+  dialog once its connect dialogs are ready and drops a key the card no
+  longer lists.
+- **From the app.** `site.connections` in `@opengeni/sdk/site`:
+  `status()` resolves `{ supported, ready, needed }` (each need with `key`,
+  `action`, `connector`, `account`, `label` and `tools`; no ids or
+  addresses), `connect(key?)` starts one need's action and resolves
+  `{ connected }`, `showCard()` shows the platform card again even after it
+  was closed, and `onChange(listener)` fires when what the viewer has
+  connected may have changed. Hosts advertise this with `connections: 1` in
+  the bridge ready message; local previews, older hosts and outside viewers
+  answer `supported: false`, `ready: true`.
+- **Self-hosted.** Published app hosts (the Site gateway on Cloudflare) are not
+  available self-hosted, so there the card shows only in the console, where it
+  works the same. `site.connections` in the console behaves as above.
+
 ## Opengeni look for apps
 
 Apps opened in Opengeni follow its light or dark theme: the frame's
-`color-scheme` is Opengeni's, so `prefers-color-scheme` inside the App
+`color-scheme` is Opengeni's, so `prefers-color-scheme` inside the app
 matches it and changes without a reload. (Safari doesn't pass a frame's
-`color-scheme` to `prefers-color-scheme`, so there an App follows the
+`color-scheme` to `prefers-color-scheme`, so there an app follows the
 system's theme; that differs only when Opengeni's appearance is set to the
-other one.) An App that wants Opengeni's own look opts in with one tag:
+other one.) An app that wants Opengeni's own look opts in with one tag:
 
 ```html
 <link rel="stylesheet" href="/__opengeni/ui.css">
 ```
 
 A bundler (`bun build ./index.html`, Vite) tries to resolve that link and
-fails, so in a built App use a style that only imports it, which bundlers
+fails, so in a built app use a style that only imports it, which bundlers
 leave alone:
 
 ```html

@@ -9,7 +9,11 @@ import {
   ToolGatewayTargetApprovalResponse,
   ToolGatewaySiteConsentResponse,
   ToolGatewaySiteReadinessResponse,
+  ToolGatewaySiteSetupResponse,
   ToolGatewaySiteAllowancesResetResponse,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  type ToolGatewaySiteSetupItem,
+  type ToolGatewaySiteSetupRequest,
   type ToolGatewaySiteAllowancesResetRequest,
   type ToolGatewaySiteConsentRequest,
   type ToolGatewaySiteReadinessRequest,
@@ -1173,6 +1177,115 @@ export async function describeWorkspaceSiteToolReadiness(
   request: ToolGatewaySiteReadinessRequest,
   options: TargetGatewayOptions = {},
 ): Promise<ToolGatewaySiteReadinessResponse> {
+  const { tools } = await siteToolReadiness(deps, authorization, request, options);
+  return ToolGatewaySiteReadinessResponse.parse({ version: 1, tools });
+}
+
+/**
+ * The platform's connect card for a pinned App (Site) version: every declared
+ * tool's readiness for this viewer, kept to what they can fix themselves with
+ * one click (connect a connector, or sign in to an account again), one item
+ * per connector or account. A connector the catalog can't connect from here
+ * (no capability) is left out: there is nothing to click. Choosing between
+ * several accounts and confirming stay with the call's own Opengeni prompt.
+ *
+ * On a published address the items carry `openUrl`, the App in the Opengeni
+ * console with that connect dialog open, because a published page has no
+ * Opengeni frame to connect in.
+ */
+export async function describeWorkspaceSiteToolSetup(
+  deps: ApiRouteDeps,
+  authorization: WorkspaceToolGatewayAuthorization,
+  request: ToolGatewaySiteSetupRequest,
+  options: TargetGatewayOptions = {},
+): Promise<ToolGatewaySiteSetupResponse> {
+  const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  options.signal?.throwIfAborted();
+  await options.reauthorize?.();
+  const { reauthorize: _reauthorized, ...readOptions } = options;
+  const { declared } = await readSiteVersionDeclarations(deps, authorization, request, readOptions);
+  if (declared.length === 0) return ToolGatewaySiteSetupResponse.parse({ version: 1, items: [] });
+  const targets = declared
+    .slice(0, WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+    .map((identity) => ({ identity }));
+  const { needs } = await siteToolReadiness(
+    deps,
+    authorization,
+    { ...request, targets },
+    // Reauthorized once above for the whole card.
+    readOptions,
+  );
+  const published = isPublishedSiteToolAuthorization(authorization);
+  // The console's address, as other console links read it: the public base
+  // serves the console unless OPENGENI_WEB_BASE_URL names another origin.
+  const base = (deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl ?? "").replace(/\/+$/u, "");
+  const items = new Map<string, ToolGatewaySiteSetupItem>();
+  for (const need of needs) {
+    if (!need.capabilityId) continue;
+    const itemKey = siteToolSetupKey(need);
+    const existing = items.get(itemKey);
+    if (existing) {
+      if (!existing.tools.some((tool) => sameIdentity(tool, need.identity)))
+        existing.tools.push(need.identity);
+      continue;
+    }
+    items.set(itemKey, {
+      key: itemKey,
+      action: need.action,
+      connector: need.connector,
+      capabilityId: need.capabilityId,
+      connectionId: need.connectionId,
+      account: need.account,
+      shared: need.shared,
+      tools: [need.identity],
+      openUrl:
+        published && base
+          ? `${base}/workspaces/${encodeURIComponent(grant.workspaceId)}/sites/${encodeURIComponent(
+              request.siteArtifactId,
+            )}?connect=${encodeURIComponent(itemKey)}`
+          : null,
+    });
+  }
+  return ToolGatewaySiteSetupResponse.parse({ version: 1, items: [...items.values()] });
+}
+
+/**
+ * A card item's key: its action and a digest of the catalog capability and
+ * the account's connection, so two connectors that share a display name stay
+ * apart. Stable across reloads (dismissals and `?connect=` use it); Site code
+ * sees the digest, never the ids behind it.
+ */
+export function siteToolSetupKey(
+  need: Pick<SiteToolSetupNeed, "action" | "capabilityId" | "connectionId">,
+) {
+  const digest = createHash("sha256")
+    .update(`opengeni.app-connect-card.v1\0${need.capabilityId ?? ""}\0${need.connectionId ?? ""}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `${need.action}:${digest}`;
+}
+
+/**
+ * What a viewer would connect to make one target ready: a connector with no
+ * account yet, or an account that must sign in again (or allow more access).
+ * Host-side detail for the connect card; never sent to Site code as is.
+ */
+type SiteToolSetupNeed = {
+  action: "connect" | "reconnect";
+  connector: string;
+  capabilityId: string | null;
+  connectionId: string | null;
+  account: string | null;
+  shared: boolean;
+  identity: ToolGatewayIdentity;
+};
+
+async function siteToolReadiness(
+  deps: ApiRouteDeps,
+  authorization: WorkspaceToolGatewayAuthorization,
+  request: ToolGatewaySiteReadinessRequest,
+  options: TargetGatewayOptions,
+): Promise<{ tools: ToolGatewaySiteReadinessTool[]; needs: SiteToolSetupNeed[] }> {
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
   options.signal?.throwIfAborted();
   await options.reauthorize?.();
@@ -1229,6 +1342,9 @@ export async function describeWorkspaceSiteToolReadiness(
     return (await reconnect).find((account) => account.canonicalServerId === canonicalServerId);
   };
   const tools: ToolGatewaySiteReadinessTool[] = [];
+  const needs: SiteToolSetupNeed[] = [];
+  const capabilityFor = (canonicalServerId: string) =>
+    inventory.canonical.get(canonicalServerId)?.capabilityId ?? null;
   for (const target of request.targets) {
     options.signal?.throwIfAborted();
     const entry = (
@@ -1257,6 +1373,15 @@ export async function describeWorkspaceSiteToolReadiness(
     if (routed.kind === "connect") {
       const stale = await reconnectFor(routed.declaredIdentity.serverId);
       const connector = routed.connect.name;
+      needs.push({
+        action: stale ? "reconnect" : "connect",
+        connector,
+        capabilityId: routed.connect.capabilityId,
+        connectionId: stale?.connectionId ?? null,
+        account: stale?.account ?? null,
+        shared: stale?.shared ?? false,
+        identity: routed.declaredIdentity,
+      });
       if (stale)
         tools.push(
           entry(published ? "open_in_opengeni" : "reconnect", {
@@ -1338,6 +1463,17 @@ export async function describeWorkspaceSiteToolReadiness(
           )
         : null;
     if (missingScopes) {
+      // Signing in to the same account again asks for the access it lacks.
+      if (account && !account.fixedAccess)
+        needs.push({
+          action: "reconnect",
+          connector: account.connector,
+          capabilityId: capabilityFor(account.canonicalServerId),
+          connectionId: account.connectionId,
+          account: account.account,
+          shared: account.shared === true,
+          identity: routing.declaredIdentity,
+        });
       tools.push(
         account?.fixedAccess
           ? entry("unavailable", {
@@ -1367,7 +1503,7 @@ export async function describeWorkspaceSiteToolReadiness(
             : "unavailable";
     tools.push(entry(state, { confirm, runsAs, connector }));
   }
-  return ToolGatewaySiteReadinessResponse.parse({ version: 1, tools });
+  return { tools, needs };
 }
 
 /**

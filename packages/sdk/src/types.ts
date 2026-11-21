@@ -403,6 +403,28 @@ export type ToolGatewaySiteReadinessResponse = {
   /** One entry per requested target, in order. */
   tools: ToolGatewaySiteReadinessTool[];
 };
+/**
+ * One item of an App's (Site's) connect card: a connector the viewer has no
+ * account for yet (`connect`), or an account of theirs that must sign in
+ * again or allow more access (`reconnect`). Host data: Site code receives
+ * `OpenGeniSiteConnectionNeed` instead, without ids or addresses.
+ */
+export type ToolGatewaySiteSetupItem = {
+  /** Stable for this viewer, connector and account (the card's dismissal key). */
+  key: string;
+  action: "connect" | "reconnect";
+  connector: string;
+  capabilityId: string | null;
+  connectionId: string | null;
+  account: string | null;
+  shared: boolean;
+  /** The App's declared tools that wait on it. */
+  tools: ToolGatewayIdentity[];
+  /** On a published App: the App in Opengeni with this connect dialog open. */
+  openUrl: string | null;
+};
+export type ToolGatewaySiteSetupRequest = { siteArtifactId: string; siteVersionId: string };
+export type ToolGatewaySiteSetupResponse = { version: 1; items: ToolGatewaySiteSetupItem[] };
 /** Remove every "Always allow for this Site" choice the caller made on one Site (host code only). */
 export type ToolGatewaySiteAllowancesResetRequest = {
   siteArtifactId: string;
@@ -4092,6 +4114,20 @@ export type ScheduledTaskAction =
       initiatingSubjectId: string;
       allDescendants: boolean;
       limits: KnowledgeSourceSyncLimits;
+    }
+  | {
+      /** An App data sync (see the App sync methods); no model runs. */
+      kind: "app_sync";
+      siteId: string;
+      collection: string;
+      mode: "shared" | "personal";
+      ownerSubjectId: string;
+      tool: { serverId: string; toolName: string };
+      declaredTools: Array<{ serverId: string; toolName: string }>;
+      arguments: Record<string, unknown>;
+      recordsPath: string | null;
+      key: string;
+      fields: string[] | null;
     };
 
 export type ScheduledTask = {
@@ -4731,6 +4767,11 @@ export type FirstPartyMcpToolName =
   | "site_data_import"
   | "site_data_export"
   | "site_data_reset"
+  | "app_sync_save"
+  | "app_sync_list"
+  | "app_sync_delete"
+  | "app_sync_run"
+  | "app_sync_opt_in"
   | "site_files_list"
   | "site_files_upload"
   | "site_files_delete"
@@ -4748,6 +4789,8 @@ export type FirstPartyMcpToolName =
   | "site_sql_export"
   | "site_sql_import"
   | "site_sql_reset"
+  | "app_export"
+  | "app_install"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -8941,9 +8984,20 @@ export type ScheduledTaskRun = {
   firedAt: string;
   sessionId: string | null;
   triggerEventId: string | null;
-  actionKind: "agent_turn" | "knowledge_source_sync";
+  actionKind: "agent_turn" | "knowledge_source_sync" | "app_sync";
   knowledgeSyncRunId: string | null;
   knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
+  /** App data sync runs: what the run read and wrote. */
+  syncSummary?:
+    | {
+        received: number;
+        written: number;
+        skipped: number;
+        truncated: boolean;
+        people: { total: number; failed: number } | null;
+      }
+    | null
+    | undefined;
   completedAt: string | null;
   error: string | null;
   admissionDiagnostic?:

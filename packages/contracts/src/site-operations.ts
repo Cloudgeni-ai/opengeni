@@ -124,6 +124,8 @@ export const SITE_TOOL_METHODS = Object.freeze([
   "resolve",
   "invoke",
   "readiness",
+  // The platform's connect card for the App: what the viewer still has to connect.
+  "setup",
 ] as const);
 export type SiteToolMethod = (typeof SITE_TOOL_METHODS)[number];
 

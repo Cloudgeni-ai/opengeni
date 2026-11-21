@@ -9,7 +9,8 @@ const migration = readFileSync(
 
 // The session_events trigger's WHEN clause lists the chat types a "This
 // workspace" trigger can listen for: the outbound webhook types, less usage
-// (written from allowance notices), recordings (their own table) and the
+// (written from allowance notices), recordings (their own table), App data
+// changes (written by the App data and SQL paths, migration 1519) and the
 // types core's catalog leaves out (workspaceEventTypesNotOffered, checked
 // against the same two in core's tests). A new chat webhook type is then a
 // conscious decision here too.
@@ -23,7 +24,10 @@ test("1105's session trigger fires for exactly the offered chat types", () => {
   ];
   const chatTypes = WORKSPACE_WEBHOOK_EVENT_TYPES.filter(
     (type) =>
-      !type.startsWith("usage.") && !type.startsWith("recording.") && !notOffered.includes(type),
+      !type.startsWith("usage.") &&
+      !type.startsWith("recording.") &&
+      !type.startsWith("app.") &&
+      !notOffered.includes(type),
   );
   const when =
     /WHEN \(NEW\.duplicate_of_event_id IS NULL AND NEW\.type = ANY \(ARRAY\[([^\]]*)\]\)\)/u.exec(

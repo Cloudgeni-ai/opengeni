@@ -10,6 +10,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { AccessGrant, SiteDataDescribeResponse } from "@opengeni/contracts";
 import {
   createPostgresSiteDataStore,
+  getAppAutomationCause,
   getSiteDataScheduledRun,
   getSiteDataSite,
   getSitePublication,
@@ -904,9 +905,14 @@ export async function resolveSiteDataAccess(
   const grant = authority;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   const agentIds = agentSessionIds(grant);
-  const scheduledRun = agentIds
-    ? await getSiteDataScheduledRun(deps.db, scope, agentIds.sessionId)
-    : null;
+  const [scheduledRun, automationCause] = agentIds
+    ? await Promise.all([
+        getSiteDataScheduledRun(deps.db, scope, agentIds.sessionId),
+        // The run behind this agent's turn (also through the chats that
+        // started it), so App change events carry its chain depth.
+        getAppAutomationCause(deps.db, scope, agentIds).catch(() => null),
+      ])
+    : [null, null];
   const scheduledTaskId = scheduledRun?.taskId ?? null;
   const framed = surface.frameSiteId !== undefined && surface.frameSiteId !== null;
   if (surface.frameSiteId != null && surface.frameSiteId !== siteId)
@@ -943,7 +949,15 @@ export async function resolveSiteDataAccess(
     principal: siteDataPrincipal(grant, viewer.subjectId, scheduledTaskId),
     actor: siteDataActor(grant, viewer.subjectId),
     framed,
-    ...(scheduledRun ? { chainDepth: scheduledRun.chainDepth } : {}),
+    ...(automationCause
+      ? {
+          chainDepth: automationCause.chainDepth,
+          automationId: automationCause.taskId,
+          automationRunId: automationCause.runId,
+        }
+      : scheduledRun
+        ? { chainDepth: scheduledRun.chainDepth }
+        : {}),
   };
   const limits = siteDataLimits(deps.settings);
   return {

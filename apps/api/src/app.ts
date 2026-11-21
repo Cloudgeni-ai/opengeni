@@ -25,6 +25,7 @@ import {
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
   describeWorkspaceSiteToolReadiness,
+  describeWorkspaceSiteToolSetup,
   resetWorkspaceSiteToolAllowances,
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
@@ -105,6 +106,7 @@ import {
   ToolGatewayTargetApprovalRequest,
   ToolGatewaySiteConsentRequest,
   ToolGatewaySiteReadinessRequest,
+  ToolGatewaySiteSetupRequest,
   ToolGatewaySiteAllowancesResetRequest,
   ToolGatewayManifestRequest,
   type AccessGrant,
@@ -453,11 +455,15 @@ import { registerSlackAgentUpdateRoutes } from "./routes/slack-agent-updates";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
+import { registerAppSyncRoutes } from "./routes/app-sync";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerSiteSqlRoutes } from "./routes/site-sql";
+import { registerAppPackageRoutes } from "./routes/app-packages";
+import { setAppSyncHooks } from "./app-packages/syncs";
+import { APP_PACKAGE_SYNC_HOOKS } from "./app-sync/package-hooks";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
@@ -2463,6 +2469,7 @@ export function createAppComposition(
     "target-approvals",
     "manifest",
     "readiness",
+    "site-setup",
   ] as const) {
     app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
@@ -2493,7 +2500,9 @@ export function createAppComposition(
               ? ToolGatewayManifestRequest
               : operation === "readiness"
                 ? ToolGatewaySiteReadinessRequest
-                : ToolGatewayTargetApprovalRequest;
+                : operation === "site-setup"
+                  ? ToolGatewaySiteSetupRequest
+                  : ToolGatewayTargetApprovalRequest;
       parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
@@ -2528,12 +2537,19 @@ export function createAppComposition(
                       ToolGatewaySiteReadinessRequest.parse(body),
                       options,
                     )
-                  : await approveWorkspaceToolTarget(
-                      routeDeps,
-                      authorization,
-                      ToolGatewayTargetApprovalRequest.parse(body),
-                      options,
-                    );
+                  : operation === "site-setup"
+                    ? await describeWorkspaceSiteToolSetup(
+                        routeDeps,
+                        authorization,
+                        ToolGatewaySiteSetupRequest.parse(body),
+                        options,
+                      )
+                    : await approveWorkspaceToolTarget(
+                        routeDeps,
+                        authorization,
+                        ToolGatewayTargetApprovalRequest.parse(body),
+                        options,
+                      );
         c.header(
           "server-timing",
           `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"` +
@@ -2862,10 +2878,13 @@ export function createAppComposition(
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
+  registerAppSyncRoutes(app, routeDeps);
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
   registerSiteSqlRoutes(app, routeDeps);
+  setAppSyncHooks(APP_PACKAGE_SYNC_HOOKS);
+  registerAppPackageRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);

@@ -76,6 +76,7 @@ import {
   bindScheduledTaskRunSessionInTransaction,
   checkSessionUsageLimitAdmission,
   createScheduledTaskRun,
+  enqueueAppSyncRun,
   recordScheduledTaskAdmissionFailure,
   recordScheduledTaskAdmissionRefusal,
   type ScheduledTaskAdmissionRefusalReason,
@@ -438,6 +439,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         triggerType: input.triggerType,
         producerKey: stableProducerKey,
       });
+      // An App data sync runs no model: the run is queued for the API's
+      // executor, which calls the tool and writes the App's data.
+      if (priorRun?.actionKind === "app_sync") {
+        if (priorRun.status === "queued" || priorRun.status === "dispatched") {
+          await enqueueAppSyncRun(db, {
+            accountId: priorRun.accountId,
+            workspaceId: priorRun.workspaceId,
+            taskId: priorRun.taskId,
+            runId: priorRun.id,
+          });
+          return { action: "handed_off", runId: priorRun.id };
+        }
+        return scheduledRunTerminalResult(priorRun.error);
+      }
       if (priorRun?.actionKind === "agent_turn") {
         if (priorRun.admissionDiagnostic || priorRun.admissionRefusal) {
           return scheduledAdmissionRefusalResult(priorRun);
@@ -538,6 +553,27 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // unbounded retry loop for work that no longer exists.
       if (!task) {
         return { action: "deleted" };
+      }
+      if (task.action.kind === "app_sync") {
+        if (task.status !== "active") {
+          return { action: "blocked", reason: "scheduled_task_paused" };
+        }
+        const run = await createScheduledTaskRun(db, {
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          triggerType: input.triggerType,
+          producerKey: stableProducerKey,
+        });
+        if (run.status === "queued" || run.status === "dispatched") {
+          await enqueueAppSyncRun(db, {
+            accountId: run.accountId,
+            workspaceId: run.workspaceId,
+            taskId: run.taskId,
+            runId: run.id,
+          });
+          return { action: "handed_off", runId: run.id };
+        }
+        return scheduledRunTerminalResult(run.error);
       }
       // Schedules only run agent turns. A Knowledge source sync task can only
       // be a stray row from a release before its removal; it never runs and

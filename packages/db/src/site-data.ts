@@ -1,4 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
+import { recordAppRecordChangesInTransaction, type AppRecordChange } from "./app-activity-events";
 import { rawRows, withRlsContext, type Database } from "./database";
 import {
   isPlainJsonObject,
@@ -83,6 +84,9 @@ export type SiteDataCaller = SiteDataScope & {
    * automations reacting to them can stop loops.
    */
   chainDepth?: number;
+  /** The automation and run that caused this write, recorded on App change events. */
+  automationId?: string | null;
+  automationRunId?: string | null;
 };
 
 /** What kind of change a Site Data transaction made. */
@@ -897,6 +901,11 @@ type SiteDataChangeFact = {
   opCounts?: Record<string, number>;
   recordIds?: string[];
 };
+
+/** Stored JSON (jsonb keeps keys in one order), compared by value. */
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
 
 /** Who wrote, coarsely: never the principal itself. */
 export function siteDataActorKind(
@@ -1839,10 +1848,33 @@ export function createPostgresSiteDataStore(
         const opCounts: Record<string, number> = {};
         // Distinct ids; one past the cap is kept so the row says it is truncated.
         const changedIdSet = new Set<string>();
-        const changed = (collection: SiteDataCollection, op: string, id: string) => {
+        // Per-record changes, for App change events (app.record.*).
+        const appChanges: AppRecordChange[] = [];
+        const changed = (
+          collection: SiteDataCollection,
+          op: string,
+          id: string,
+          app?: { change: AppRecordChange["change"]; record: SiteDataRecord },
+        ) => {
           changedCollections.add(collection.name);
           opCounts[op] = (opCounts[op] ?? 0) + 1;
           if (changedIdSet.size <= SITE_DATA_CHANGE_RECORD_IDS) changedIdSet.add(id);
+          if (app)
+            appChanges.push({
+              change: app.change,
+              collection: {
+                name: collection.name,
+                accessMode: collection.accessMode,
+                privateRecords: collection.privateRecords,
+              },
+              record: {
+                id: app.record.id,
+                key: app.record.key,
+                owner: app.record.owner,
+                version: app.record.version,
+                data: app.record.data,
+              },
+            });
         };
         const collections = new Map<string, SiteDataCollection>();
         const collectionFor = async (name: string) => {
@@ -2060,7 +2092,7 @@ export function createPostgresSiteDataStore(
                     values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId},
                       ${collection.id}, ${caller.principal}, ${idempotencyKey}, ${record.id})`,
                 );
-              changed(collection, "insert", record.id);
+              changed(collection, "insert", record.id, { change: "added", record });
               results.push({ op: "insert", record });
               break;
             }
@@ -2083,7 +2115,15 @@ export function createPostgresSiteDataStore(
                     index,
                   )
                 : await insertRecord(collection, key, op.data, index);
-              changed(collection, "put", record.id);
+              changed(
+                collection,
+                "put",
+                record.id,
+                // Putting the same data again (a sync's refresh) is no App event.
+                visible && sameJson(visible.data, record.data)
+                  ? undefined
+                  : { change: visible ? "changed" : "added", record },
+              );
               results.push({ op: "put", record });
               break;
             }
@@ -2099,7 +2139,12 @@ export function createPostgresSiteDataStore(
                 { ...row.data, ...op.data },
                 index,
               );
-              changed(collection, "patch", record.id);
+              changed(
+                collection,
+                "patch",
+                record.id,
+                sameJson(row.data, record.data) ? undefined : { change: "changed", record },
+              );
               results.push({ op: "patch", record });
               break;
             }
@@ -2111,7 +2156,7 @@ export function createPostgresSiteDataStore(
                 sql`delete from site_data_records where workspace_id = ${caller.workspaceId} and id = ${row.id}`,
               );
               account(collection, -1, -siteDataChargedBytes(row.size_bytes));
-              changed(collection, "delete", row.id);
+              changed(collection, "delete", row.id, { change: "removed", record: toRecord(row) });
               results.push({ op: "delete", deleted: { id: row.id } });
               break;
             }
@@ -2132,7 +2177,7 @@ export function createPostgresSiteDataStore(
                   writeSiteDataPath({}, segments, by),
                   index,
                 );
-                changed(collection, "increment", record.id);
+                changed(collection, "increment", record.id, { change: "added", record });
                 results.push({ op: "increment", record });
                 break;
               }
@@ -2145,7 +2190,7 @@ export function createPostgresSiteDataStore(
                 writeSiteDataPath(row.data, segments, (current ?? 0) + by),
                 index,
               );
-              changed(collection, "increment", record.id);
+              changed(collection, "increment", record.id, { change: "changed", record });
               results.push({ op: "increment", record });
               break;
             }
@@ -2214,6 +2259,20 @@ export function createPostgresSiteDataStore(
                   },
           },
         );
+        // Imports are bulk loads, not record-by-record changes: they send no App events.
+        if (!imported)
+          await recordAppRecordChangesInTransaction(
+            tx,
+            caller,
+            {
+              principal: caller.principal,
+              writerKind: siteDataActorKind(caller),
+              automationId: caller.automationId ?? null,
+              automationRunId: caller.automationRunId ?? null,
+              chainDepth: caller.chainDepth ?? 0,
+            },
+            appChanges,
+          );
         await options.afterWrite?.(tx, summary);
         return { results, summary };
       });

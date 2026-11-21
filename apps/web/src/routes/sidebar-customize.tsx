@@ -238,7 +238,7 @@ function AddForm({
     submitted && !isSidebarExternalUrl(url.trim()) ? "Use an https:// address" : undefined;
   const labelError =
     submitted && (kind === "link" || kind === "group") && !label.trim() ? "Add a name" : undefined;
-  const appError = submitted && kind === "app" && !appId ? "Choose an App" : undefined;
+  const appError = submitted && kind === "app" && !appId ? "Choose an app" : undefined;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     setSubmitted(true);
@@ -276,18 +276,18 @@ function AddForm({
               options={apps.options}
               value={appId}
               onValueChange={setAppId}
-              placeholder="Choose an App"
-              searchPlaceholder="Search Apps"
+              placeholder="Choose an app"
+              searchPlaceholder="Search apps"
               onSearchChange={setAppQuery}
               filterLocally={false}
               searching={apps.loading}
-              emptyMessage="No Apps found"
+              emptyMessage="No apps found"
             />
           </Field>
           <Field
             label="Page"
             optional
-            hint="A page inside the App, such as /releases"
+            hint="A page inside the app, such as /releases"
             error={pathError}
           >
             <TextInput
@@ -433,7 +433,7 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
             </Section>
           ) : (
             <p className="text-sm text-fg-muted">
-              Nothing here yet. Add an App, a link or a group.
+              Nothing here yet. Add an app, a link or a group.
             </p>
           )
         ) : failed ? (

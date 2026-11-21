@@ -55,6 +55,10 @@ beforeEach(async () => {
   context = await browser.newContext({ viewport: { width: 1160, height: 1100 } });
   page = await context.newPage();
   page.setDefaultTimeout(10_000);
+  // The preview serves no API; an App's connect card asks which tools need connecting.
+  await page.route("**/v1/workspaces/*/tools/site-setup", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: '{"items":[]}' }),
+  );
   pageErrors = [];
   consoleErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));

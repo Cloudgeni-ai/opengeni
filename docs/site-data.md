@@ -118,11 +118,67 @@ others write (activity timing, never content); readable collections are fixed
 per connection until it reconnects. Without `OPENGENI_SITES_LIVE_ENABLED` and the `SITE_LIVE` gateway binding the live routes answer 404
 and pages keep their timed checks.
 
-Not covered: Site SQL writes (the Durable Object commit is not atomic with
-Postgres, so no event is published), and workspace webhooks or the "This
-workspace" automation source. `site_data_changes` with its listener flag is
-the seam for those: a consumer would keep `live_until` fresh and read rows by
-`change_seq`.
+Live hints do not cover Site SQL writes (the Durable Object commit is not
+atomic with Postgres, so no hint is published).
+
+### App change events for automations and webhooks
+
+Automations and workspace webhooks hear about app data changes through the
+same vocabulary as Opengeni's other events (migration `1519`,
+`packages/db/src/app-activity-events.ts`):
+
+- `app.record.added`, `app.record.changed`, `app.record.removed`: one fact per
+  record a write transaction inserted (`insert`, a new `put` key, an
+  `increment` that created the record), changed (`put`, `patch`, `increment`)
+  or deleted. A `put` or `patch` that leaves the stored data unchanged sends
+  nothing, so a sync that refreshes the same data stays quiet. Imports,
+  collection resets and collection deletes send none.
+- `app.sql.changed`: a Site SQL write (a saved write query or
+  `app_sql_execute`) that wrote rows. The app's database commits in its
+  Durable Object, outside Postgres, so the API records this fact right after
+  the call returns, best effort: a crash in between loses the event, never
+  the write.
+
+Facts go to `workspace_activity_events` (the 1105 facts table) with the app's
+id, in the write's own transaction, and only while someone listens: an active
+"This workspace" event source or an enabled workspace webhook subscribed to an
+app type. Otherwise the write pays one indexed lookup. A fact carries the
+collection, record id, key, version, the record owner's subject, the writer's
+kind and the record's data when it is at most 4 KB (`recordTruncated`
+otherwise), plus the automation run that caused the write and its chain depth:
+an agent's write is traced to the run behind its turn the way chat facts are
+(the turn's run, the automation's own chat, or up to eight parent chats), so
+a loop of automations stops at the chain limit (depth 3) and the storm guard
+applies. A fact that cannot be written is logged and never fails the write.
+
+Who sees a fact is decided by row security, as the "This workspace" source
+reads as its owner:
+
+- The person must be able to open the app: it is shared with the workspace,
+  or it is their own Only me app.
+- In a collection where viewers read only their own records (`per_viewer`,
+  `append_only`), the record's owner sees it, and so do the app's managers
+  (members who may publish apps, and workspace administrators) unless the
+  records are private (`privateRecords`), when only the owner does.
+
+Workspace webhooks receive every app fact of the workspace, but without the
+record's data, key and owner when only some people may read it
+(`recordWithheld: true`): a
+record in a collection where people read only their own, or any record of an
+app that isn't shared with the workspace (an Only me app).
+Organization webhooks don't offer app types. Events for automations are
+rendered like other "This workspace" events: summary `Record added in
+<App> / <collection>`, the App's console address, `data.appId`,
+`data.appTitle`, `data.writtenByYou`, and the fields above. Filter on
+`data.appId` and `data.collection` to listen to one collection.
+
+A [data sync](app-sync.md) writes through the same path, so its changes send
+these events with the sync run's chain depth. They are not marked as
+Opengeni's own (a sync runs no model), so a trigger hears them without
+"include Opengeni's own events".
+
+Self-hosted: record events work wherever Site Data does. `app.sql.changed`
+needs Site SQL, which runs only on the hosted Cloudflare gateway.
 
 ## Access rules
 
@@ -140,7 +196,7 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   `privateRecords`. Everyone else who can view the Site is a **viewer**.
 - Agents outside Opengeni (connected agents and personal API keys on the
   [organization MCP server](mcp-surfaces.md#named-tools-for-connected-agents))
-  are **viewers** unless the person set the connection's App data to Manager
+  are **viewers** unless the person set the connection's app data to Manager
   (`outside_agent_viewer`), and reach only members-only or unpublished Sites
   (`outside_agent_members_only`): text from outside visitors must not reach an
   agent that picks up work. Describe answers them with `access: "viewer"`.
@@ -358,6 +414,10 @@ Stored records are untrusted; the Sites skill requires rendering them as text.
 use the schedule's. Site-origin agents use the same native role as console agents.
 
 
+
+**Syncs.** An app data sync keeps a collection filled from a connected tool on
+a schedule without a model run; the page reads each sync's last run with
+`site.data.syncs()` (`GET /data/syncs`). See [app-sync.md](app-sync.md).
 
 **Web.** The Site page's Data tab (`packages/react/src/app/components/artifacts/site-data.tsx`)
 is shown to likely managers and trusts the API's answer: collections with
@@ -675,6 +735,9 @@ Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
 agent as to a page viewer (managers run every query). The tools are only
 registered when the gateway origin and secret are configured.
 
+To move an app with its migrations, named queries and collection definitions
+to another workspace, export it as a package ([App packages](app-packages.md)).
+
 Site and console agents use identical native Site SQL authorization. Members
 are not pinned to the originating Site. Outside-workspace visitor conversations
 retain viewer-bound data tools: only their own Site's data and permitted named
@@ -812,8 +875,9 @@ answered; a metering failure is logged and does not fail the call.
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
   principals.
-- Site Data change events to workspace webhooks and the "This workspace"
-  automation source (read `site_data_changes`); Site SQL change events.
+- App change events for imports, resets and file uploads; Site SQL change
+  events that name the tables a statement wrote; a durable outbox for Site
+  SQL change events instead of the best-effort write after the call.
 
 
 - Site SQL: per-call CPU time is bounded only by the Durable Object's own

@@ -1,3 +1,4 @@
+import { appSyncStatusForSite } from "../app-sync/service";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ReasoningEffort,
@@ -108,6 +109,7 @@ import {
 } from "../workspace-tool-gateway";
 import {
   describeWorkspaceSiteToolReadiness,
+  describeWorkspaceSiteToolSetup,
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
 } from "../workspace-tool-target";
@@ -1004,6 +1006,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         { ...parseJson(request.body, ToolGatewaySiteReadinessTargets), ...site },
         options,
       );
+    } else if (method === "setup") {
+      // The host's connect card; the page sends no body worth reading.
+      result = await describeWorkspaceSiteToolSetup(deps, authorization, site, options);
     } else if (method === "invoke") {
       result = await withSiteSecretContext(
         { siteId: site.siteArtifactId, siteVersion: site.siteVersionId },
@@ -1320,6 +1325,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
     };
     const file = /^\/files\/([^/]+)$/u.exec(path);
+    if (method === "GET" && path === "/data/syncs")
+      return context.json(
+        await runSiteData(() => appSyncStatusForSite(deps, authority, siteId, surface)),
+      );
     if (method === "POST" && path === "/data/query")
       return context.json(
         await runSiteData(() =>

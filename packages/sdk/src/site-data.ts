@@ -168,6 +168,25 @@ export type OpenGeniSiteDataCollection<
   onChange(listener: (change: OpenGeniSiteDataChange) => void): () => void;
 };
 
+/** One App data sync as the App's page sees it (see docs/app-sync.md). */
+export type OpenGeniAppSyncStatus = {
+  id: string;
+  name: string;
+  collection: string;
+  mode: "shared" | "personal";
+  active: boolean;
+  /** The newest run; for a personal sync, the viewer's own. Null before the first run. */
+  lastRun: {
+    status: "queued" | "running" | "succeeded" | "failed" | "skipped";
+    /** When it finished (or started, while it runs). */
+    at: string;
+    error: string | null;
+    summary: { received: number; written: number; skipped: number; truncated: boolean } | null;
+  } | null;
+  /** Personal syncs: whether the viewer opted in. Null for shared syncs. */
+  optedIn: boolean | null;
+};
+
 export type OpenGeniSiteData = {
   collection<T extends Record<string, unknown> = Record<string, unknown>>(
     name: string,
@@ -180,6 +199,8 @@ export type OpenGeniSiteData = {
    * collection the viewer can read, or `$files`). Returns an unsubscribe.
    */
   onChange(listener: (change: OpenGeniSiteDataChange) => void): () => void;
+  /** The App's data syncs: when each last ran and whether it failed. */
+  syncs(): Promise<OpenGeniAppSyncStatus[]>;
 };
 
 export type OpenGeniSiteFile = {
@@ -344,6 +365,8 @@ export function createOpenGeniSiteData(
     batch: write,
     count: async (collection, where) => await count(collection, where),
     onChange: (listener) => subscribeChanges(listener),
+    syncs: async () =>
+      (await send<{ syncs: OpenGeniAppSyncStatus[] }>("/data/syncs", { method: "GET" })).syncs,
   };
 
   const files: OpenGeniSiteFiles = {
