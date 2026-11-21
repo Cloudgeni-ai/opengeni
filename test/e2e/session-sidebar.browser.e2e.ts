@@ -1211,6 +1211,15 @@ test("the Site view starts below the desktop window bar", async () => {
     ).boundingBox();
     expect(first).not.toBeNull();
     await expectWindowTop(page, desktop);
+    if (desktop === "macos") {
+      // The bar's title line stops before the Site's controls at the bar's
+      // right end, so a long title truncates instead of running under them.
+      const title = await page.locator("[data-window-bar-title]").first().boundingBox();
+      const controls = await page.locator("[data-window-bar-end]").boundingBox();
+      expect(title).not.toBeNull();
+      expect(controls).not.toBeNull();
+      expect(title!.x + title!.width).toBeLessThanOrEqual(controls!.x);
+    }
     return first!;
   };
 

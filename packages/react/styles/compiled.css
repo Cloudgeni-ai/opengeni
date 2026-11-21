@@ -2377,9 +2377,6 @@
 :where(.og-root).max-w-\[calc\(100\%-2rem\)\],:where(.og-root) .max-w-\[calc\(100\%-2rem\)\] {
     max-width: calc(100% - 2rem);
   }
-:where(.og-root).max-w-\[calc\(100\%-var\(--og-window-bar-title-reserve\,0px\)\)\],:where(.og-root) .max-w-\[calc\(100\%-var\(--og-window-bar-title-reserve\,0px\)\)\] {
-    max-width: calc(100% - var(--og-window-bar-title-reserve,0px));
-  }
 :where(.og-root).max-w-\[calc\(100vw-2rem\)\],:where(.og-root) .max-w-\[calc\(100vw-2rem\)\] {
     max-width: calc(100vw - 2rem);
   }

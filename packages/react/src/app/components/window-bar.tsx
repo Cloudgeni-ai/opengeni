@@ -100,8 +100,10 @@ const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : us
  * A page's own controls at the bar's right end (a Site's publication, "…"
  * and chat toggle), `right` px from the window's right edge (by default
  * beside the window's edge). While they show, the bar's title line stops
- * short of them (`--og-window-bar-title-reserve`), so a long title truncates
- * instead of running under them.
+ * short of them (`--og-window-bar-title-reserve`, the distance from their
+ * left edge to the window's right, read by the bar row's `right` in the app's
+ * stylesheet), so a long title truncates instead of running under them. One
+ * page draws them at a time: the reserve is a single value on the document.
  */
 export function WindowBarEndControls({
   right,
@@ -226,7 +228,7 @@ export function WindowBarTitle({
       data-window-drag
       data-titlebar
       data-window-bar-title
-      className="flex max-w-[calc(100%-var(--og-window-bar-title-reserve,0px))] min-w-0 shrink-0 items-center gap-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))]"
+      className="flex min-w-0 shrink-0 items-center gap-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))]"
     >
       {trail.length > 0 ? (
         <nav aria-label="Location" className="flex min-w-0 shrink items-center gap-1">
