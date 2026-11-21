@@ -4,6 +4,8 @@ import { Markdown, OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+// Vite's `?worker` transform synthesizes this default export.
+// oxlint-disable-next-line import/default
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 import { enableWorkbenchDemoPeers } from "./workbench-peers";
 

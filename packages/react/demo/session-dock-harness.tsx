@@ -12,6 +12,8 @@ import { createRoot } from "react-dom/client";
 import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { PullRequestView } from "@opengeni/react/app/components/session/pull-request-panel";
+// Vite's `?worker` transform synthesizes this default export.
+// oxlint-disable-next-line import/default
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import { enableWorkbenchDemoPeers } from "./workbench-peers";
