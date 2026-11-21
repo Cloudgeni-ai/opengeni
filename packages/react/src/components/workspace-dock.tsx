@@ -861,33 +861,28 @@ function DockChrome({
   const hasMenu =
     !landing && (menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null);
 
-  // One pill slides under the selected tab.
+  // One pill slides under the selected tab. It's positioned directly (no
+  // state), so a switch costs no extra render.
   const stripRef = useRef<HTMLDivElement | null>(null);
-  const [pill, setPill] = useState<{ left: number; width: number } | null>(null);
+  const pillRef = useRef<HTMLSpanElement | null>(null);
   const shownKey = shownTabs.map((tab) => tab.id).join("\u0000");
   useLayoutEffect(() => {
     const strip = stripRef.current;
-    if (!strip) {
-      setPill(null);
-      return;
-    }
+    const pill = pillRef.current;
+    if (!strip || !pill) return;
     const measure = () => {
       const node = strip.querySelector<HTMLElement>(
         `[data-dock-tab-item="${CSS.escape(current)}"]`,
       );
-      setPill((previous) => {
-        if (!node) return null;
-        const next = { left: node.offsetLeft, width: node.offsetWidth };
-        return previous && previous.left === next.left && previous.width === next.width
-          ? previous
-          : next;
-      });
+      pill.style.opacity = node ? "1" : "0";
+      if (!node) return;
+      pill.style.width = `${node.offsetWidth}px`;
+      pill.style.transform = `translateX(${node.offsetLeft}px)`;
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(strip);
-    for (const child of Array.from(strip.children)) observer.observe(child);
     return () => observer.disconnect();
   }, [current, shownKey]);
 
@@ -926,11 +921,11 @@ function DockChrome({
   return (
     <div
       data-dock-chrome
-      className="flex h-full min-h-0 min-w-0 flex-col bg-og-bg [--og-color-bg:var(--og-color-canvas)] [--color-bg:var(--og-color-canvas)] bg-[radial-gradient(130%_70%_at_100%_-20%,color-mix(in_oklch,var(--og-color-accent)_9%,transparent),transparent_65%)] [--og-diff-surface:transparent] [--og-diff-separator:color-mix(in_oklch,var(--og-color-fg)_4%,transparent)]"
+      className="flex h-full min-h-0 min-w-0 flex-col bg-og-bg [--og-color-bg:var(--og-color-canvas)] [--color-bg:var(--og-color-canvas)] [--og-diff-separator:color-mix(in_oklch,var(--og-color-fg)_4%,transparent)]"
     >
       <div
         className={cn(
-          "min-h-11 shrink-0 items-center gap-1 px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
+          "min-h-11 shrink-0 items-center gap-1 bg-[radial-gradient(120%_180%_at_100%_0%,color-mix(in_oklch,var(--og-color-accent)_8%,transparent),transparent_70%)] px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
           // The empty view needs no header unless it carries host controls.
           landing && !leading && !controls ? "hidden" : "flex",
         )}
@@ -944,14 +939,12 @@ function DockChrome({
             aria-label={msg("workspaceDock.workspacePanels")}
             aria-orientation="horizontal"
           >
-            {pill ? (
-              <span
-                aria-hidden
-                data-dock-tab-pill=""
-                className="pointer-events-none absolute inset-y-1.5 left-0 rounded-full bg-og-surface-2 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_8%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_6px_18px_-8px_color-mix(in_oklch,var(--og-color-accent)_45%,transparent)] transition-[transform,width] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none"
-                style={{ width: pill.width, transform: `translateX(${pill.left}px)` }}
-              />
-            ) : null}
+            <span
+              ref={pillRef}
+              aria-hidden
+              data-dock-tab-pill=""
+              className="pointer-events-none absolute inset-y-1.5 left-0 w-0 rounded-full bg-og-surface-2 opacity-0 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_8%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_6px_18px_-8px_color-mix(in_oklch,var(--og-color-accent)_45%,transparent)] transition-[transform,width] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none"
+            />
             {shownTabs.map((tab, index) => {
               const selected = tab.id === current;
               const tabIndex = tabs.indexOf(tab);
@@ -1127,7 +1120,7 @@ function DockChrome({
                 // animation restarts when `hidden` lifts); a static class keeps
                 // the switch from mutating the panel's class, which ancestor
                 // observers (portal token styles) would react to.
-                className="h-full min-h-0 min-w-0 overflow-hidden animate-in fade-in-0 slide-in-from-bottom-0.5 duration-200 ease-out motion-reduce:animate-none"
+                className="h-full min-h-0 min-w-0 overflow-hidden animate-in fade-in-0 duration-150 motion-reduce:animate-none"
                 hidden={!selected}
                 role="tabpanel"
               >
