@@ -352,8 +352,8 @@ export function withApplyPatchRobust(
             const retried = reordered
               ? await applyOne(runContext, { ...operation, diff: reordered }, details)
               : null;
-            if (retried === "Patch applied.") {
-              output = retried;
+            if (retried !== null && (retried || APPLIED) === APPLIED) {
+              output = APPLIED;
             } else if (content !== null) {
               const context = output.slice(failure[0].length).split("\n");
               output = `${output.trimEnd()}\n${closestContextRegion(content, context, operation.path)}`;
@@ -383,9 +383,11 @@ const MAX_READ_BYTES = 4 * 1024 * 1024;
 
 /**
  * Make the filesystem capability's function `apply_patch` robust. Install it
- * after the other filesystem wrappers and before `linkApplyPatchThen`, so
- * `then` is split off first. `Capability.clone()` copies this override onto
- * every per-run instance, which reads files from its own bound session.
+ * before every call-level wrapper (turn cancellation, attempt authorization,
+ * routing fences, `then`), so they handle the whole patch once (secret
+ * references are resolved before it is split) and `then` is split off first.
+ * `Capability.clone()` copies this override onto every per-run instance, which
+ * reads files from its own bound session.
  */
 export function linkApplyPatchRobust(filesystem: CapabilityLike): void {
   const filesystemTools = filesystem.tools;

@@ -309,6 +309,35 @@ describe("apply_patch `then` execution", () => {
     expect(fake.commands[0]!.cmd).toContain("OPENGENI_SECRET_0");
   });
 
+  test("secret references in the patch resolve once, before it is applied per section", async () => {
+    const resolver = createStaticSecretResolver({ Plain: "plain-patch-value" });
+    const fake = fakeSession();
+    const patch = named(
+      boundTools(fake.session, testSettings(), { secretResolver: resolver }),
+      "apply_patch",
+    );
+    const output = await patch.invoke(
+      {} as never,
+      JSON.stringify({
+        patch: `*** Begin Patch\n*** Add File: a.txt\n+${PLAIN_REFERENCE}\n*** Add File: b.txt\n+b\n*** End Patch`,
+      }),
+      callDetails("call-patch-secret"),
+    );
+    expect(output).toBe("Added a.txt: Patch applied.\nAdded b.txt: Patch applied.");
+    expect(resolver.calls).toEqual([
+      {
+        refs: [PLAIN_REFERENCE],
+        use: expect.objectContaining({
+          surface: "file_write",
+          toolName: "apply_patch",
+          sourceCallId: "call-patch-secret",
+        }),
+      },
+    ]);
+    expect(JSON.stringify(fake.operations)).toContain("plain-patch-value");
+    expect(JSON.stringify(fake.operations)).not.toContain("{{secret");
+  });
+
   test("the edit and its command finish before the next call of the response starts", async () => {
     const fake = fakeSession();
     const tools = boundTools(fake.session).filter((candidate) => candidate.name === "apply_patch");

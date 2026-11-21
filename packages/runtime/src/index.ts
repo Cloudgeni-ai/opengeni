@@ -582,7 +582,10 @@ import { z } from "zod";
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import { sandboxBaseInstructions } from "./sandbox-base-instructions";
-import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
+import {
+  OPENGENI_OPERATIONAL_INSTRUCTIONS,
+  OPENGENI_OPERATIONAL_INSTRUCTIONS_WITHOUT_APPLY_PATCH_THEN,
+} from "./operational-instructions";
 import {
   agentSharesWorkspace,
   agentInstructionsLayerContent,
@@ -756,7 +759,6 @@ import {
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import { APPLY_PATCH_THEN_PARAMETER, linkApplyPatchThen } from "./apply-patch-then";
 import { linkApplyPatchRobust } from "./apply-patch-robust";
-import { APPLY_PATCH_THEN_GUIDANCE } from "./agent-instructions/modules/sandbox";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
 import {
@@ -3509,22 +3511,15 @@ export function agentPromptExperimentsFor(settings: Settings): {
   return Object.keys(experiments).length > 0 ? { experiments } : {};
 }
 
-const LEGACY_APPLY_PATCH_RULE = "Use `apply_patch` for local file edits.";
-
 /**
- * The legacy operational contract, with the apply_patch `then` sentence
- * appended to its file-editing paragraph under the same setting the modular
- * `sandbox` module reads. Off renders the constant byte for byte.
+ * The legacy operational contract. Its file-editing paragraph suggests the
+ * apply_patch `then` argument; with that argument off (the same setting the
+ * modular `sandbox` module reads) the sentence is left out.
  */
 function legacyOperationalInstructions(settings: Settings): string {
-  if (agentPromptExperimentsFor(settings).experiments?.applyPatchThenGuidance !== true) {
-    return OPENGENI_OPERATIONAL_INSTRUCTIONS;
-  }
-  const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(LEGACY_APPLY_PATCH_RULE);
-  if (start < 0) return OPENGENI_OPERATIONAL_INSTRUCTIONS;
-  const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("\n", start);
-  const at = end < 0 ? OPENGENI_OPERATIONAL_INSTRUCTIONS.length : end;
-  return `${OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(0, at)} ${APPLY_PATCH_THEN_GUIDANCE}${OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(at)}`;
+  return agentPromptExperimentsFor(settings).experiments?.applyPatchThenGuidance === true
+    ? OPENGENI_OPERATIONAL_INSTRUCTIONS
+    : OPENGENI_OPERATIONAL_INSTRUCTIONS_WITHOUT_APPLY_PATCH_THEN;
 }
 
 function appendDeploymentAgentInstructions(content: string, settings: Settings): string {
@@ -6313,6 +6308,15 @@ function buildAgentCapabilitiesFromComposition(
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
+  // Per-section apply_patch is the innermost call-level wrapper: turn
+  // cancellation (secret references, header refusal, `secretfile`), attempt
+  // authorization and the routing fences below see the whole patch once,
+  // before any section is applied.
+  if (settings.experimentApplyPatchThen) {
+    linkApplyPatchRobust(
+      filesystemCapability as unknown as Parameters<typeof linkApplyPatchRobust>[0],
+    );
+  }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
     shell({
@@ -6433,12 +6437,6 @@ function buildAgentCapabilitiesFromComposition(
   // `then` on the function apply_patch runs through the final exec_command
   // above, so this link is installed after every other tool wrapper.
   const shellCapability = caps.find((capability) => capability.type === "shell");
-  // Robust apply_patch sits just inside `then`, which strips `then` first.
-  if (settings.experimentApplyPatchThen) {
-    linkApplyPatchRobust(
-      filesystemCapability as unknown as Parameters<typeof linkApplyPatchRobust>[0],
-    );
-  }
   if (settings.experimentApplyPatchThen && shellCapability) {
     linkApplyPatchThen(
       filesystemCapability as unknown as Parameters<typeof linkApplyPatchThen>[0],
