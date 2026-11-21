@@ -5629,6 +5629,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAppTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/app-templates",
+    "request": [],
+    "response": [
+      "AppTemplate",
+      "ListAppTemplatesResponse"
+    ],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "listArtifactCatalog",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog",
@@ -6270,6 +6281,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "KnowledgeReviewBatchListResponse"
     ]
+  },
+  {
+    "id": "listLibrarySkills",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/skills/library",
+    "request": [],
+    "response": [
+      "CapabilityCatalogItem",
+      "ListLibrarySkillsResponse"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "listMachines",

@@ -242,15 +242,20 @@ test("installed shortcuts use Skill icons and truthful active/pending/inactive l
   try {
     const rows = [...view.container.querySelectorAll(".og-connection-installed button")];
     expect(rows).toHaveLength(4);
-    expect(rows.every((row) => row.querySelector(".lucide-book-open"))).toBe(true);
+    // The same rows as the catalog: an initial, the name and one status line with whose it is.
+    expect(rows.every((row) => row.querySelector('[data-slot="logo-tile"]'))).toBe(true);
     expect(rows.map((row) => row.getAttribute("title"))).toEqual([
-      "Installed",
-      "Pending changes",
-      "Pending changes",
-      "Inactive",
+      "Installed · Workspace",
+      "Pending changes · Workspace",
+      "Pending changes · Workspace",
+      "Inactive · Workspace",
     ]);
-    expect(rows[1]!.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
-    expect(rows[2]!.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
+    expect(rows[1]!.querySelector(".og-capability-catalog-notice")?.textContent).toBe(
+      "Needs attention",
+    );
+    expect(rows[2]!.querySelector(".og-capability-catalog-notice")?.textContent).toBe(
+      "Needs attention",
+    );
     expect(rows.every((row) => row.querySelectorAll("button").length === 0)).toBe(true);
     expect(calls.filter((call) => call.method === "read")).toHaveLength(0);
   } finally {
@@ -537,8 +542,8 @@ test("inactive skills can be removed with confirmation; failed retries retain th
   });
   const view = await mount(context);
   try {
-    expect(view.container.querySelector(".og-connection-installed-status")?.textContent).toBe(
-      "Inactive",
+    expect(view.container.querySelector(".og-capability-catalog-status-line")?.textContent).toBe(
+      "Inactive · Workspace",
     );
     await view.click("Example");
     await view.click("Remove skill");

@@ -1,0 +1,35 @@
+{
+  "key": "decision-log",
+  "name": "Decision log",
+  "description": "Record what the team decided, why, and who owns it.",
+  "team": "Product",
+  "package": {
+    "format": "opengeni.app-package",
+    "version": 1,
+    "exportedAt": "2026-11-21T00:00:00.000Z",
+    "app": {
+      "title": "Decision log",
+      "description": "What the team decided, and why.",
+      "html": "<!doctype html>\n<html lang='en'>\n<head>\n<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width, initial-scale=1'>\n<title>Decision log</title>\n<style>\n:root { color-scheme: light dark; --line: color-mix(in srgb, currentColor 14%, transparent); --muted: color-mix(in srgb, currentColor 62%, transparent); }\n* { box-sizing: border-box; }\nbody { margin: 0; font: 15px/1.5 system-ui, sans-serif; }\nmain { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }\nh1 { font-size: 22px; margin: 0 0 4px; }\np.lead { margin: 0 0 24px; color: var(--muted); }\nform { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 28px; }\ninput, textarea, button { font: inherit; color: inherit; }\ninput, textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: transparent; }\ntextarea { min-height: 72px; resize: vertical; }\nbutton { justify-self: start; padding: 8px 14px; border: 0; border-radius: 8px; background: #3b5bdb; color: #fff; cursor: pointer; }\nul { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }\nli { padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }\nli h2 { font-size: 16px; margin: 0 0 2px; }\nli .meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; }\nli p { margin: 4px 0 0; white-space: pre-wrap; }\n.note { color: var(--muted); }\n</style>\n</head>\n<body>\n<main>\n<h1>Decision log</h1>\n<p class='lead'>What the team decided, and why.</p>\n<form id='add'>\n<input name='title' required maxlength='200' placeholder='Decision'>\n<textarea name='why' maxlength='4000' placeholder='Why, and what else was considered'></textarea>\n<input name='owner' maxlength='120' placeholder='Owner'>\n<button type='submit'>Add decision</button>\n</form>\n<p id='status' class='note' role='status'></p>\n<ul id='list'></ul>\n</main>\n<script src='/__opengeni/site-tools/client.js'></script>\n<script>\nconst statusLine = document.getElementById('status');\nconst list = document.getElementById('list');\nlet decisions = null;\ntry { decisions = createOpenGeniSiteClient().data.collection('decisions'); } catch { statusLine.textContent = 'Open the saved app to keep decisions.'; }\nfunction render(records) {\n  list.replaceChildren();\n  if (records.length === 0) statusLine.textContent = 'No decisions yet.';\n  for (const record of records) {\n    const item = document.createElement('li');\n    const title = document.createElement('h2');\n    title.textContent = record.data.title;\n    const meta = document.createElement('div');\n    meta.className = 'meta';\n    meta.textContent = [record.data.date, record.data.owner].filter(Boolean).join(' · ');\n    const why = document.createElement('p');\n    why.textContent = record.data.why || '';\n    item.append(title, meta, why);\n    list.append(item);\n  }\n}\nasync function load() {\n  if (!decisions) return;\n  try {\n    const { records } = await decisions.list({ sort: [{ field: '$createdAt', direction: 'desc' }], limit: 200 });\n    statusLine.textContent = '';\n    render(records);\n  } catch { statusLine.textContent = 'Couldn’t load decisions. Try again in a moment.'; }\n}\ndocument.getElementById('add').addEventListener('submit', async (event) => {\n  event.preventDefault();\n  if (!decisions) return;\n  const formEl = event.currentTarget;\n  const button = formEl.querySelector('button');\n  if (button.disabled) return;\n  const form = new FormData(formEl);\n  const entry = { title: String(form.get('title')).trim(), why: String(form.get('why')).trim(), owner: String(form.get('owner')).trim(), date: new Date().toISOString().slice(0, 10) };\n  if (!entry.title) return;\n  button.disabled = true;\n  try { await decisions.insert(entry); formEl.reset(); await load(); }\n  catch { statusLine.textContent = 'Couldn’t save that decision. Try again.'; }\n  finally { button.disabled = false; }\n});\nvoid load();\n</script>\n</body>\n</html>\n"
+    },
+    "tools": [],
+    "data": {
+      "collections": [
+        {
+          "name": "decisions",
+          "accessMode": "shared"
+        }
+      ]
+    },
+    "sql": {
+      "migrations": [],
+      "queries": []
+    },
+    "syncs": [],
+    "sidebar": [
+      {
+        "label": "Decision log"
+      }
+    ]
+  }
+}

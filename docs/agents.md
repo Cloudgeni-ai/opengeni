@@ -592,7 +592,8 @@ Opengeni's own GitHub tools) and suggested triggers. Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`)
 so the person picks the repository or source and saves. Ready-made agents
-name no internal Skills.
+name no internal Skills. Each names the `team` it is for ("Engineering"); Capabilities
+**Ready-made** groups by it.
 
 ### Delegation by name
 

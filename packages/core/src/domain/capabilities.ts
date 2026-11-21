@@ -3453,6 +3453,25 @@ async function discoverCuratedSkillLibraryItems(): Promise<CapabilityCatalogItem
   return listSkillLibraryEntries().map((entry) => curatedSkillCatalogItem(entry));
 }
 
+/**
+ * Every reviewed library skill this deployment can install, `enabled` once
+ * the workspace added it directly. The capability catalog lists only added
+ * ones; this is the list to add from.
+ */
+export async function listLibrarySkillCatalogItems(
+  db: Database,
+  workspaceId: string,
+): Promise<CapabilityCatalogItem[]> {
+  const installed = new Set(
+    (await listInstalledSkills(db, workspaceId))
+      .filter((skill) => skill.owners.some((owner) => owner.kind === "direct"))
+      .map((skill) => skill.capabilityId),
+  );
+  return (await discoverCuratedSkillLibraryItems()).map((item) =>
+    installed.has(item.id) ? { ...item, enabled: true } : item,
+  );
+}
+
 function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogItem {
   return CapabilityCatalogItem.parse({
     id: `skill:${entry.id}`,
@@ -3472,6 +3491,7 @@ function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogIte
     metadata: {
       libraryId: entry.id,
       version: entry.version,
+      ...(entry.team ? { team: entry.team } : {}),
       contentSha256: entry.contentSha256,
       sourceCommit: entry.sourceCommit,
       sourceUrl: entry.sourceUrl,

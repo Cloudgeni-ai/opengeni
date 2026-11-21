@@ -163,6 +163,12 @@ import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-contex
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
+import {
+  capabilitiesSectionFromSearch,
+  readyMadeKindFromSearch,
+  type CapabilitiesSection,
+  type ReadyMadeKind,
+} from "@/components/capabilities/capabilities-section";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
@@ -944,20 +950,25 @@ const workspaceInsightsRoute = createRoute({
   }),
   component: Insights,
 });
+/** `?section=` names a Capabilities tab; `?kind=` narrows Ready-made. */
+function capabilitiesSearch(search: Record<string, unknown>): {
+  section?: CapabilitiesSection;
+  kind?: ReadyMadeKind;
+} {
+  const section = capabilitiesSectionFromSearch(search.section);
+  const kind = section === "ready-made" ? readyMadeKindFromSearch(search.kind) : undefined;
+  return { ...(section ? { section } : {}), ...(kind ? { kind } : {}) };
+}
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
   component: CapabilitiesLegacyRedirect,
 });
 const AUTOMATIONS_SEARCH_UUID =
@@ -1670,9 +1681,14 @@ function CapabilitiesLegacyRedirect() {
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
-  const { section } = workspaceCapabilitiesRoute.useSearch();
+  const { section, kind } = workspaceCapabilitiesRoute.useSearch();
   return (
-    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+    <LazyCapabilitiesRoute
+      key={workspaceId}
+      workspaceId={workspaceId}
+      initialSection={section}
+      readyMadeKind={kind}
+    />
   );
 }
 
