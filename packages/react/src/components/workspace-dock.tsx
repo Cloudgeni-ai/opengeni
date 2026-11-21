@@ -1044,10 +1044,11 @@ function DockChrome({
                 {...(shownTabs.includes(tab)
                   ? { "aria-labelledby": `${tabsetId}-tab-${index}` }
                   : { "aria-label": tabName(tab) })}
-                className={cn(
-                  "h-full min-h-0 min-w-0 overflow-hidden",
-                  selected && "animate-in fade-in-0 duration-150 motion-reduce:animate-none",
-                )}
+                // The fade replays whenever the panel is shown again (a CSS
+                // animation restarts when `hidden` lifts); a static class keeps
+                // the switch from mutating the panel's class, which ancestor
+                // observers (portal token styles) would react to.
+                className="h-full min-h-0 min-w-0 overflow-hidden animate-in fade-in-0 duration-150 motion-reduce:animate-none"
                 hidden={!selected}
                 role="tabpanel"
               >

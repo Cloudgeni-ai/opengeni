@@ -570,7 +570,10 @@ export function useSandboxFiles(
   // echo of our own write is suppressed. Only EXTERNAL changes (the agent writing,
   // source:"agent"/"watch" we didn't cause) drive a targeted reconcile.
   const ownRevisionsRef = useRef<Set<number>>(new Set());
-  const onMutationError = options.onMutationError;
+  // Latest callback through a ref: hosts often pass an inline function, which
+  // must not change the identity of every mutation (and the hook's result).
+  const onMutationErrorRef = useRef(options.onMutationError);
+  onMutationErrorRef.current = options.onMutationError;
 
   // Keep the ref mirror current for the optimistic snapshot path.
   treeRef.current = tree;
@@ -1034,11 +1037,11 @@ export function useSandboxFiles(
         // after the user successfully resolves the conflict.
         if (err instanceof FileWriteConflictError) throw err;
         setError(err);
-        onMutationError?.(err, opName);
+        onMutationErrorRef.current?.(err, opName);
         throw err;
       }
     },
-    [applyStatus, reconcilePath, onMutationError],
+    [applyStatus, reconcilePath],
   );
 
   const writeFile = useCallback(
@@ -1474,23 +1477,51 @@ export function useSandboxFiles(
   );
 
   const identityMatches = enabled && stateIdentity === identityKey;
-  return {
-    tree: identityMatches ? tree : [],
-    expand,
-    expandingPaths: identityMatches ? expandingPaths : new Set<string>(),
-    readFile,
-    writeFile,
-    createFile,
-    createDir,
-    deleteEntry,
-    moveEntry,
-    refresh,
-    contentRevision: identityMatches ? contentRevision : 0,
-    source: identityMatches ? source : null,
-    capturedAt: identityMatches && source === "capture" ? (capture?.capturedAt ?? null) : null,
-    gitSummary: identityMatches ? gitSummary : null,
-    gitLoading: identityMatches && gitLoading,
-    loading: identityMatches && loading,
-    error: identityMatches ? error : null,
-  };
+  const capturedAt = identityMatches && source === "capture" ? (capture?.capturedAt ?? null) : null;
+  // One stable result while nothing changed: hosts memoize on it, so a fresh
+  // object each render would rebuild every surface that reads it.
+  return useMemo(
+    () => ({
+      tree: identityMatches ? tree : NO_TREE,
+      expand,
+      expandingPaths: identityMatches ? expandingPaths : NO_PATHS,
+      readFile,
+      writeFile,
+      createFile,
+      createDir,
+      deleteEntry,
+      moveEntry,
+      refresh,
+      contentRevision: identityMatches ? contentRevision : 0,
+      source: identityMatches ? source : null,
+      capturedAt,
+      gitSummary: identityMatches ? gitSummary : null,
+      gitLoading: identityMatches && gitLoading,
+      loading: identityMatches && loading,
+      error: identityMatches ? error : null,
+    }),
+    [
+      identityMatches,
+      tree,
+      expand,
+      expandingPaths,
+      readFile,
+      writeFile,
+      createFile,
+      createDir,
+      deleteEntry,
+      moveEntry,
+      refresh,
+      contentRevision,
+      source,
+      capturedAt,
+      gitSummary,
+      gitLoading,
+      loading,
+      error,
+    ],
+  );
 }
+
+const NO_TREE: FileTreeNode[] = [];
+const NO_PATHS = new Set<string>();

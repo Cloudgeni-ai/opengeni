@@ -379,14 +379,12 @@ export function useSandboxTerminal(
     void client.terminalPtyClose(workspaceId, sessionId, { ptyId: activePtyId }).catch(() => {});
   }, [client, workspaceId, sessionId, activePtyId]);
 
-  return {
-    chunks,
-    running: activePtyId !== null,
-    write,
-    activePtyId,
-    close,
-    error: identityMatches ? openError : null,
-  };
+  const error = identityMatches ? openError : null;
+  // One stable result while nothing changed (hosts memoize on it).
+  return useMemo(
+    () => ({ chunks, running: activePtyId !== null, write, activePtyId, close, error }),
+    [chunks, activePtyId, write, close, error],
+  );
 }
 
 /** The terminal's history page for one session and set of output types. */

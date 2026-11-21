@@ -470,6 +470,7 @@ export function useSandboxWorkspaceTabs(
   const resolvedActiveTab = activeTab ?? initialTab;
   const changesActive = resolvedActiveTab === WORKBENCH_TAB_CHANGES;
   const filesActive = resolvedActiveTab === WORKBENCH_TAB_FILES;
+  const browserActive = resolvedActiveTab === WORKBENCH_TAB_BROWSER;
   const turnInFlight = workspaceTurnInFlight(events);
   const surfaceIdentity = WORKBENCH_SURFACES.filter((surface) => surfaceSet.has(surface)).join(",");
 
@@ -951,7 +952,7 @@ export function useSandboxWorkspaceTabs(
               // start BrowserViewer—the lazy panel is still unmounted until the
               // user/agent first visits it.
               enabled={workspaceVisible}
-              active={resolvedActiveTab === WORKBENCH_TAB_BROWSER}
+              active={browserActive}
               onNotify={onNotify}
               initialBrowserSessionId={initialBrowserSessionId}
               onBrowserSessionIdChange={onBrowserSessionIdChange}
@@ -1035,7 +1036,9 @@ export function useSandboxWorkspaceTabs(
     browserWebSocketFactory,
     computerWebSocketFactory,
     workspaceVisible,
-    resolvedActiveTab,
+    // Only Browser reads which tab is active: switching between the other
+    // tabs must not rebuild (and re-render) every panel.
+    browserActive,
     client,
     workspaceId,
     liveness,
