@@ -162,18 +162,28 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         throw new Error("expected a failure");
       };
       // Someone's Only me vault is out of reach, even its owner's.
-      for (const headers of [{ Authorization: RAW("Mine/My key") }, { Authorization: RAW("My key") }]) {
+      for (const headers of [
+        { Authorization: RAW("Mine/My key") },
+        { Authorization: RAW("My key") },
+      ]) {
         const error = await failure(resolve(headers));
         expect(error).toBeInstanceOf(ServiceConnectionCredentialError);
         expect((error as Error).message).not.toContain("My key");
         expect((error as Error).message).not.toContain("mine-synthetic");
       }
       expect(
-        ((await failure(resolve({ Authorization: RAW("Team/Missing") }))) as ServiceConnectionCredentialError)
-          .code,
+        (
+          (await failure(
+            resolve({ Authorization: RAW("Team/Missing") }),
+          )) as ServiceConnectionCredentialError
+        ).code,
       ).toBe("not_found");
       expect(
-        ((await failure(resolve({ Authorization: "{{secret:" }))) as ServiceConnectionCredentialError).code,
+        (
+          (await failure(
+            resolve({ Authorization: "{{secret:" }),
+          )) as ServiceConnectionCredentialError
+        ).code,
       ).toBe("invalid");
       // Only an active, workspace-owned, vault-marked connection may resolve.
       for (const other of [
@@ -181,12 +191,14 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         await w.connection({ status: "revoked" }),
         await w.connection({ vault: false }),
       ]) {
-        expect(await failure(resolve({ Authorization: RAW("Team/Team key") }, other))).toBeInstanceOf(
-          ServiceConnectionCredentialError,
-        );
+        expect(
+          await failure(resolve({ Authorization: RAW("Team/Team key") }, other)),
+        ).toBeInstanceOf(ServiceConnectionCredentialError);
       }
 
-      const rows = await shared!.admin<{ subject_id: string | null; metadata: Record<string, unknown> }[]>`
+      const rows = await shared!.admin<
+        { subject_id: string | null; metadata: Record<string, unknown> }[]
+      >`
         select subject_id, metadata from audit_events
         where account_id = ${w.grant.accountId}::uuid and action = 'vault.secret.used'
         order by occurred_at`;

@@ -34040,6 +34040,7 @@
         "$.key": "string!",
         "$.openUrl": "string! null",
         "$.shared": "boolean!",
+        "$.sharedKey": "ref(ToolGatewaySiteSetupSharedKey)?",
         "$.tools": "array!",
         "$.tools[]": "ref(AttemptToolIdentity)"
       }
@@ -34053,6 +34054,14 @@
         "$.items": "array!",
         "$.items[]": "ref(ToolGatewaySiteSetupItem)",
         "$.version": "const!=[\"1\"]"
+      }
+    },
+    "ToolGatewaySiteSetupSharedKey": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"add\\\"\",\"\\\"ask_admin\\\"\"]"
       }
     },
     "ToolGatewayTarget": {
@@ -41459,6 +41468,7 @@
       "SITE_CONNECT_CARD_DISMISSED_PREFIX": "value",
       "SITE_DATA_PATH_PREFIX": "value",
       "siteConnectCardDismissals": "value",
+      "siteConnectCardItemActionable": "value",
       "siteConnectCardLabel": "value",
       "siteConnectionStatus": "value",
       "SiteHttpRequest": "type",
@@ -41503,6 +41513,7 @@
       "SiteBridgeToolHandlers": "type",
       "SiteBridgeViewerHandlers": "type",
       "siteConnectCardDismissals": "value",
+      "siteConnectCardItemActionable": "value",
       "siteConnectCardLabel": "value",
       "siteConnectionStatus": "value",
       "SiteHttpRequest": "type"

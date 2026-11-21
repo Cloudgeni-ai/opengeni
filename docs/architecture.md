@@ -1895,6 +1895,11 @@ Knowledge, artifacts, notifications and any new first-party tool) never resolve
 them: they store or forward reference text, and the receiving work resolves it
 at its own execution boundary. Only a short, justified list of first-party
 tools receives values (`packages/runtime/src/secret-argument-resolution.ts`).
+A shared service connection (a workspace API-key connection whose stored
+headers are references) resolves in the connection resolver for each request,
+as the `service_connection` vault principal with the workspace's own reach
+(`packages/core/src/domain/vaults/service-connection-credentials.ts`; see
+[`secrets.md`](secrets.md#shared-service-connections)).
 Opt-in credential profiles (workspace, plus session additions children inherit)
 name variables whose references the attempt's resolver turns into values for
 each command's own environment at the same boundary

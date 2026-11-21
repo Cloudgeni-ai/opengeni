@@ -16,7 +16,9 @@ import {
 const REFERENCE = "{{secret:Team/Linear key}}";
 const settings = testSettings() as Settings;
 
-function sharedKey(overrides: Partial<ConnectionCredentialForBroker> = {}): ConnectionCredentialForBroker {
+function sharedKey(
+  overrides: Partial<ConnectionCredentialForBroker> = {},
+): ConnectionCredentialForBroker {
   return {
     id: "shared-linear",
     accountId: "acct_1",
@@ -106,12 +108,17 @@ describe("shared service connections", () => {
 
   test("the credential-free preflight reads nothing and sends no headers", async () => {
     let calls = 0;
-    const resolver = buildConnectionTokenResolver({} as Database, settings, deps(sharedKey()).deps, {
-      resolveCredentialReferences: async () => {
-        calls += 1;
-        return {};
+    const resolver = buildConnectionTokenResolver(
+      {} as Database,
+      settings,
+      deps(sharedKey()).deps,
+      {
+        resolveCredentialReferences: async () => {
+          calls += 1;
+          return {};
+        },
       },
-    });
+    );
     expect(await resolver({ ...input, credentialResolutionMode: "preflight" })).toMatchObject({
       status: "ok",
       headers: {},
@@ -149,9 +156,14 @@ describe("shared service connections", () => {
         },
       }),
     ]) {
-      const resolver = buildConnectionTokenResolver({} as Database, settings, deps(credential).deps, {
-        resolveCredentialReferences: resolve,
-      });
+      const resolver = buildConnectionTokenResolver(
+        {} as Database,
+        settings,
+        deps(credential).deps,
+        {
+          resolveCredentialReferences: resolve,
+        },
+      );
       const result = await resolver({
         ...input,
         connectionRef: {

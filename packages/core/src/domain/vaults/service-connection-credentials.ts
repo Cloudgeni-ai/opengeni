@@ -81,7 +81,10 @@ export async function resolveServiceConnectionHeaders(
   input: ServiceConnectionHeaderInput,
 ): Promise<Record<string, string>> {
   if (collectInvalidReferencesDeep(input.headers).length > 0)
-    throw new ServiceConnectionCredentialError("invalid", "The shared key's reference is malformed.");
+    throw new ServiceConnectionCredentialError(
+      "invalid",
+      "The shared key's reference is malformed.",
+    );
   const references = collectReferencesDeep(input.headers);
   if (references.some((reference) => reference.kind !== "secret"))
     throw new ServiceConnectionCredentialError("invalid", FAILURE_MESSAGES.invalid);

@@ -29,7 +29,8 @@ let settings: Settings;
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api_shared_service_connection");
   if (!shared) {
-    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("Real PostgreSQL is required");
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("Real PostgreSQL is required");
     return;
   }
   client = createDb(shared.appUrl, { max: 4 });
@@ -182,7 +183,11 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       expect(receipt).not.toContain("synthetic-shared-key");
       // The stored credential is the reference.
       const [row] = await shared!.admin<
-        { credential_encrypted: string; subject_id: string | null; metadata: Record<string, unknown> }[]
+        {
+          credential_encrypted: string;
+          subject_id: string | null;
+          metadata: Record<string, unknown>;
+        }[]
       >`select credential_encrypted, subject_id, metadata from connections
         where workspace_id = ${grant.workspaceId} and provider_domain = 'mcp.example.test'`;
       expect(row!.subject_id).toBeNull();

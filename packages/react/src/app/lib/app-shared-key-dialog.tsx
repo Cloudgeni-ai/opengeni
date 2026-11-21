@@ -22,11 +22,15 @@ import type { AppApiHost } from "./app-api";
 
 /** Vaults a shared key may come from: never anyone's Only me or a task's. */
 export function sharedKeyVaults(vaults: readonly VaultSummary[]): VaultSummary[] {
-  return vaults.filter((vault) => vault.ownerKind === "workspace" || vault.ownerKind === "organization");
+  return vaults.filter(
+    (vault) => vault.ownerKind === "workspace" || vault.ownerKind === "organization",
+  );
 }
 
 /** The header the key goes in: the connector's own contract, else a bearer token. */
-export function sharedKeyHeaderDefaults(capability: Pick<CapabilityCatalogItem, "metadata"> | null): {
+export function sharedKeyHeaderDefaults(
+  capability: Pick<CapabilityCatalogItem, "metadata"> | null,
+): {
   headerName: string;
   scheme: string;
 } {
@@ -296,7 +300,9 @@ export function AppSharedKeyDialog({
       () => onClose(true),
       (failure: unknown) => {
         setBusy(false);
-        setError(failure instanceof Error && failure.message ? failure.message : "Couldn't connect.");
+        setError(
+          failure instanceof Error && failure.message ? failure.message : "Couldn't connect.",
+        );
       },
     );
   };

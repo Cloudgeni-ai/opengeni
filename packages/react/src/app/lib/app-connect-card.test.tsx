@@ -99,8 +99,18 @@ describe("the App connect card", () => {
   });
 
   test("an API-key tool: admins add a shared key, others are told to ask an admin", async () => {
-    const addKey = { ...connect, key: "connect:Stripe:", connector: "Stripe", sharedKey: "add" as const };
-    const askAdmin = { ...addKey, key: "connect:Linear:", connector: "Linear", sharedKey: "ask_admin" as const };
+    const addKey = {
+      ...connect,
+      key: "connect:Stripe:",
+      connector: "Stripe",
+      sharedKey: "add" as const,
+    };
+    const askAdmin = {
+      ...addKey,
+      key: "connect:Linear:",
+      connector: "Linear",
+      sharedKey: "ask_admin" as const,
+    };
     const clicked: string[] = [];
     const view = await renderComponent(
       <AppConnectCardView

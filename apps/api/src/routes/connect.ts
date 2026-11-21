@@ -1211,7 +1211,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   resource: mcpUrl,
                   // References only, never a value: shown to admins as the key it uses.
                   ...(vaultReferences
-                    ? { credentialSource: VAULT_CREDENTIAL_SOURCE, credentialReferences: references }
+                    ? {
+                        credentialSource: VAULT_CREDENTIAL_SOURCE,
+                        credentialReferences: references,
+                      }
                     : {}),
                 };
                 const subjectId = current.ownership === "personal" ? scope.subjectId : null;

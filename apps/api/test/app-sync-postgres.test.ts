@@ -988,10 +988,16 @@ test("a shared sync runs on the workspace's shared service connection", async ()
   expect(created.status, JSON.stringify(created.json)).toBe(201);
   const fake = fakeTool(() => [{ id: "1" }]);
   const served: string[] = [];
-  const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, String(created.json.id), async (input) => {
-    served.push(input.identity.serverId);
-    return await fake.callTool(input);
-  });
+  const run = await runAppSyncNow(
+    f.deps,
+    f.owner.grant,
+    f.siteId,
+    String(created.json.id),
+    async (input) => {
+      served.push(input.identity.serverId);
+      return await fake.callTool(input);
+    },
+  );
   expect(served).toEqual(["account-workspace"]);
   expect(run.lastRun.status).toBe("succeeded");
 });

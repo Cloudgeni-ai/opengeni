@@ -451,6 +451,13 @@ version's `requestedTools`.
   picks the account; blocked, unavailable and permission-denied tools are not
   something one click fixes, so they don't show. Tools whose connector has no
   catalog entry are left out.
+- **API-key tools.** A `connect` item for a connector that takes an API key
+  rather than a sign-in carries `sharedKey`: `add` for a workspace admin who
+  may use secrets ("Add a shared key for Stripe", which connects it once for
+  the workspace with a key from a vault), or `ask_admin` for anyone else
+  ("Ask an admin to connect Stripe", shown as text, with no `openUrl`). Once a
+  shared service connection covers the tool it is ready and has no item. See
+  [connection presentation](connection-presentation.md#app-connect-card).
 - **Console.** The card sits over the app's bottom right corner. Its button
   opens Opengeni's own connect or reconnect dialog (the same
   `McpConnectionCard` flow as chat), and the card refreshes when it finishes
@@ -467,7 +474,8 @@ version's `requestedTools`.
   longer lists.
 - **From the app.** `site.connections` in `@opengeni/sdk/site`:
   `status()` resolves `{ supported, ready, needed }` (each need with `key`,
-  `action`, `connector`, `account`, `label` and `tools`; no ids or
+  `action`, `connector`, `account`, `sharedKey` (when set), `label` and
+  `tools`; no ids or
   addresses), `connect(key?)` starts one need's action and resolves
   `{ connected }`, `showCard()` shows the platform card again even after it
   was closed, and `onChange(listener)` fires when what the viewer has

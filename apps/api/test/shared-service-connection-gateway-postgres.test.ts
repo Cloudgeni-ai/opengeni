@@ -143,7 +143,9 @@ describe("shared service connections in the API tool gateway", () => {
       );
       expect(failure).not.toBeNull();
       expect(JSON.stringify(failure)).not.toContain(VALUE);
-      expect(provider.requests.slice(before).some((request) => request.jsonRpcMethod === "tools/call")).toBe(false);
+      expect(
+        provider.requests.slice(before).some((request) => request.jsonRpcMethod === "tools/call"),
+      ).toBe(false);
       // The reference text itself is never sent as a credential.
       expect(seen.some((value) => value?.includes("secret:"))).toBe(false);
     } finally {

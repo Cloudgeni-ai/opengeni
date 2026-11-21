@@ -27,14 +27,23 @@ describe("Add a shared key", () => {
   });
 
   test("the header follows the connector's contract, else a bearer token", () => {
-    expect(sharedKeyHeaderDefaults(null)).toEqual({ headerName: "Authorization", scheme: "Bearer" });
+    expect(sharedKeyHeaderDefaults(null)).toEqual({
+      headerName: "Authorization",
+      scheme: "Bearer",
+    });
     expect(
-      sharedKeyHeaderDefaults({ metadata: { authContract: { headerName: "X-Api-Key", scheme: "raw" } } }),
+      sharedKeyHeaderDefaults({
+        metadata: { authContract: { headerName: "X-Api-Key", scheme: "raw" } },
+      }),
     ).toEqual({ headerName: "X-Api-Key", scheme: "" });
-    expect(sharedKeyHeaders({ headerName: "Authorization", scheme: "Bearer", reference: REFERENCE })).toEqual({
+    expect(
+      sharedKeyHeaders({ headerName: "Authorization", scheme: "Bearer", reference: REFERENCE }),
+    ).toEqual({
       Authorization: `Bearer ${REFERENCE}`,
     });
-    expect(sharedKeyHeaders({ headerName: " X-Api-Key ", scheme: "", reference: REFERENCE })).toEqual({
+    expect(
+      sharedKeyHeaders({ headerName: " X-Api-Key ", scheme: "", reference: REFERENCE }),
+    ).toEqual({
       "X-Api-Key": REFERENCE,
     });
   });
@@ -44,9 +53,11 @@ describe("Add a shared key", () => {
     const api = {
       request: async <T,>(path: string, init?: RequestInit) => {
         calls.push({ path, body: JSON.parse(String(init?.body)) });
-        return (path.endsWith("/advance")
-          ? { id: "attempt", revision: 2, state: "complete" }
-          : { id: "attempt", revision: 1, state: "pending" }) as T;
+        return (
+          path.endsWith("/advance")
+            ? { id: "attempt", revision: 2, state: "complete" }
+            : { id: "attempt", revision: 1, state: "pending" }
+        ) as T;
       },
     };
     await addSharedServiceKey(api, {

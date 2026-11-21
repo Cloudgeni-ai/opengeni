@@ -85,6 +85,13 @@ when actually needed. Prepared key setup cannot start OAuth, alter unrelated
 credentials, or replace another person's account. No-auth servers use the
 existing catalog installation flow, not an empty credential-header setup.
 
+A workspace-owned key setup may take a vault reference instead of the key
+itself (a header value such as `Bearer {{secret:Team/Example key}}`): the
+connection is then a shared service connection that stores the reference and
+reads the value from a workspace or organization vault only when it calls the
+tool. Only a workspace admin who may use secrets adds one; a personal setup
+can't. See [Shared service connections](secrets.md#shared-service-connections).
+
 ## Discovery bounds
 
 Tool discovery shares a 4,096-entry allowance across the prepared catalog. One

@@ -572,9 +572,9 @@ export type ConnectionTokenResolverOptions = {
    * connection never resolves: the result is auth_needed, and no reference
    * text is ever sent to the tool.
    */
-  resolveCredentialReferences?: (input: CredentialReferenceResolution) => Promise<
-    Record<string, string>
-  >;
+  resolveCredentialReferences?: (
+    input: CredentialReferenceResolution,
+  ) => Promise<Record<string, string>>;
 };
 
 /** One request's shared-key resolution (see `resolveCredentialReferences`). */

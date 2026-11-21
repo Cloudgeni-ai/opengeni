@@ -334,6 +334,8 @@ The probe runs with those headers, and on success the values are stored encrypte
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
+Header values given here are stored as written: a `{{secret:…}}` reference is not resolved. To keep a server's key in a workspace or organization vault, connect it as a shared service connection instead (an admin's **Add a shared key**, or the connect flow with ownership `workspace`); Opengeni stores the reference and reads the value only when it calls the tool. See [Shared service connections](secrets.md#shared-service-connections).
+
 The generic `capability_catalog_items` and `capability_installations` tables are
 MCP-only. Skills, Plugins, and Integration Definitions are projected
 from their dedicated authoritative ledgers, and their mutations use their
