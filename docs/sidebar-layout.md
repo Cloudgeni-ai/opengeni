@@ -226,7 +226,12 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   viewer at its page (`/native-view/workspaces/<id>/sites/<appId>?page=<path>`;
   a server without `?page=` opens its home page), and an outside link opens
   in the browser. It's read only: changes are made on the web or by an agent.
-  Item icons show there too; outside links without one keep the arrow.
+  Item icons show there too, and an outside link without one shows its
+  site's icon (the arrow while it loads or when there is none). Hidden
+  built-in entries are left out as on the web: Automations in the side menu,
+  and Artifacts, Meetings or Inbox in the tab bar (Chats always stays, and an
+  entry stays while it's open, recording or has something waiting). The
+  phone has no Capabilities, Knowledge or Agents entries.
   It refreshes each time the menu opens and on pull to refresh, and shows the
   last layout at once.
 

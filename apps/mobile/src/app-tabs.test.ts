@@ -8,6 +8,7 @@ import {
   tabBadge,
   tabForPath,
   tabNavigation,
+  visibleAppTabs,
   TAB_BAR_HEIGHT,
   TAB_BAR_GAP,
 } from "./app-tabs";
@@ -68,4 +69,20 @@ test("Inbox's badge counts what waits, capped at 99+", () => {
   expect(tabBadge(0)).toBeNull();
   expect(tabBadge(3)).toBe("3");
   expect(tabBadge(120)).toBe("99+");
+});
+
+test("hidden entries leave the bar, except Chats, the place in use and what needs attention", () => {
+  const tabs = (hidden: string[], keep: Partial<Parameters<typeof visibleAppTabs>[1]> = {}) =>
+    visibleAppTabs(hidden, {
+      current: "chats",
+      recording: false,
+      inboxWaiting: false,
+      ...keep,
+    }).map((entry) => entry.tab);
+  expect(tabs([])).toEqual(["chats", "artifacts", "meetings", "inbox"]);
+  expect(tabs(["artifacts", "meetings", "inbox", "knowledge"])).toEqual(["chats"]);
+  expect(tabs(["artifacts"], { current: "artifacts" })).toEqual(APP_TABS.map((e) => e.tab));
+  expect(tabs(["meetings", "inbox"], { recording: true, inboxWaiting: true })).toEqual(
+    APP_TABS.map((e) => e.tab),
+  );
 });

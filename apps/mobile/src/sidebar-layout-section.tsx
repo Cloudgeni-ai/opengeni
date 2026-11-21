@@ -7,8 +7,16 @@ import {
   type SessionAvatarClient,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
-import { Linking, Pressable, Text, View } from "react-native";
-import type { SidebarMenuRow, SidebarMenuSection } from "@/sidebar-layout";
+import { useEffect, useState } from "react";
+import { Image, Linking, Pressable, Text, View } from "react-native";
+import {
+  loadSidebarLinkIcon,
+  type SidebarLinkIconClient,
+  type SidebarMenuRow,
+  type SidebarMenuSection,
+} from "@/sidebar-layout";
+
+type SectionClient = SessionAvatarClient & SidebarLinkIconClient;
 
 // Every sidebar item icon is drawn natively (scripts/generate-native-icons.ts).
 SIDEBAR_ITEM_ICONS satisfies readonly NativeIconName[];
@@ -22,7 +30,7 @@ SIDEBAR_ITEM_ICONS satisfies readonly NativeIconName[];
 export function SidebarLayoutSection(props: {
   sections: readonly SidebarMenuSection[];
   workspaceId: string;
-  client?: SessionAvatarClient | null;
+  client?: SectionClient | null;
   onOpenApp: (row: Extract<SidebarMenuRow, { kind: "app" }>) => void;
   onOpenAgent: (row: Extract<SidebarMenuRow, { kind: "agent" }>) => void;
 }) {
@@ -86,7 +94,7 @@ function Row({
 }: {
   row: SidebarMenuRow;
   workspaceId: string;
-  client?: SessionAvatarClient | null | undefined;
+  client?: SectionClient | null | undefined;
   onPress: () => void;
 }) {
   const theme = useNativeTimelineTheme();
@@ -118,6 +126,8 @@ function Row({
           size="xs"
           client={client}
         />
+      ) : row.kind === "link" && !row.icon ? (
+        <SiteIcon url={row.url} workspaceId={workspaceId} client={client} color={c["fg-muted"]} />
       ) : (
         <Icon
           name={row.icon ?? (row.kind === "link" ? "arrow-up-right" : "app-window")}
@@ -132,5 +142,40 @@ function Row({
         {row.label}
       </Text>
     </Pressable>
+  );
+}
+
+/** An outside link's site icon, or the arrow while it loads and when there is none. */
+function SiteIcon({
+  url,
+  workspaceId,
+  client,
+  color,
+}: {
+  url: string;
+  workspaceId: string;
+  client?: SectionClient | null | undefined;
+  color: string;
+}) {
+  const [icon, setIcon] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setFailed(false);
+    void loadSidebarLinkIcon(client, workspaceId, url).then((found) => {
+      if (active) setIcon(found);
+    });
+    return () => {
+      active = false;
+    };
+  }, [client, workspaceId, url]);
+  if (!icon || failed) return <Icon name="arrow-up-right" size={16} color={color} />;
+  return (
+    <Image
+      source={{ uri: icon }}
+      accessibilityIgnoresInvertColors
+      style={{ width: 16, height: 16, borderRadius: 3 }}
+      onError={() => setFailed(true)}
+    />
   );
 }
