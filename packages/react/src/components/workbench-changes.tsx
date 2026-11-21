@@ -604,7 +604,7 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
               files={orderedFiles}
               activeIndex={activeIndex}
               onSelect={jumpTo}
-              className="w-[clamp(12rem,32%,18rem)] shrink-0 bg-og-surface-1/60"
+              className="w-[clamp(12rem,32%,18rem)] shrink-0 shadow-[inset_-1px_0_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)]"
             />
           ) : null}
           {/* File rail — virtualized (virtua): a dense change set is fine. */}
@@ -874,7 +874,7 @@ function DiffFileHeader({
       <span className="min-w-0 flex-1 truncate text-left" title={label}>
         <span
           className={cn(
-            "font-og-mono text-[12px] font-medium text-og-fg",
+            "font-og-mono text-[12px] font-semibold tracking-[-0.01em] text-og-fg",
             file.status === "deleted" && "line-through",
           )}
         >
@@ -890,7 +890,7 @@ function DiffFileHeader({
     </>
   );
   const className =
-    "group/file sticky top-0 z-10 flex w-full items-center gap-2 bg-og-bg/95 px-3 py-1.5 text-og-sm text-og-fg shadow-[inset_0_-1px_0_var(--og-color-border)] backdrop-blur-sm";
+    "group/file sticky top-0 z-10 flex min-h-9 w-full items-center gap-2 bg-[color-mix(in_oklch,var(--og-diff-header,var(--og-color-bg))_88%,transparent)] px-3.5 py-1.5 text-og-sm text-og-fg shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_60%,transparent)] backdrop-blur-md";
   if (!onToggle) return <header className={className}>{body}</header>;
   return (
     <button
@@ -899,7 +899,7 @@ function DiffFileHeader({
       onClick={() => onToggle(file.path)}
       className={cn(
         className,
-        "hover:bg-og-surface-1/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
+        "transition-colors duration-150 hover:bg-og-surface-1/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
       )}
     >
       {body}
@@ -918,7 +918,7 @@ function PullRequestAction({
 }) {
   const t = useOpenGeniText();
   const className =
-    "inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 py-0.5 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11";
+    "inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-full px-3 py-0.5 text-og-xs font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11";
   if (pullRequest?.url) {
     return (
       <a
@@ -926,7 +926,7 @@ function PullRequestAction({
         target="_blank"
         rel="noreferrer noopener"
         data-workbench-pr-action="view"
-        className={className}
+        className={cn(className, "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg")}
         {...(pullRequest.number ? { title: `#${pullRequest.number}` } : {})}
       >
         {t("workbenchChanges.viewOnGitHub")}
@@ -940,7 +940,10 @@ function PullRequestAction({
       type="button"
       onClick={onOpenPullRequest}
       data-workbench-pr-action="open"
-      className={cn(className, "border border-og-border")}
+      className={cn(
+        className,
+        "bg-og-primary text-og-primary-fg shadow-[0_6px_16px_-8px_color-mix(in_oklch,var(--og-color-accent)_70%,transparent)] hover:bg-og-primary-hover",
+      )}
     >
       <GitPullRequestArrowIcon className="size-3.5" aria-hidden />
       {t("workbenchChanges.openPullRequest")}

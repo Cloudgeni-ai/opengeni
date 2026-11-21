@@ -112,6 +112,7 @@ import {
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
+import { initialWorkspaceTab, WORKBENCH_TAB_CHANGES } from "../../components/sandbox-workspace";
 import {
   SessionSecretsMenuBody,
   sessionSecretsSummary,
@@ -1961,6 +1962,7 @@ function SessionDockPanel(props: SessionDockProps) {
     sessionId: string;
     tab: string;
     requestId: number;
+    expand?: boolean;
   } | null>(null);
   const agentSettingsRequestId = props.openAgentSettingsRequest?.requestId ?? null;
   const agentSettingsTarget = props.openAgentSettingsRequest?.target ?? "learning";
@@ -2136,8 +2138,31 @@ function SessionDockPanel(props: SessionDockProps) {
       sessionId: props.sessionId,
       tab: PULL_REQUEST_TAB,
       requestId: ++tabRequestSeq.current,
+      // Select it, but don't open a closed panel in the middle of reading.
+      expand: false,
     });
   }, [pullRequestLink, props.sessionId, dockNavigation.activeTab]);
+  // Something new in a closed panel (the first change, a pull request or the
+  // first artifact) puts a small dot on the header toggle until it's opened.
+  const hasChanges = useMemo(
+    () => initialWorkspaceTab(props.events) === WORKBENCH_TAB_CHANGES,
+    [props.events],
+  );
+  const contentBits =
+    (hasChanges ? 1 : 0) | (pullRequestLink ? 2 : 0) | (artifactSummaries.length > 0 ? 4 : 0);
+  const seenContent = useRef<{ sessionId: string; bits: number } | null>(null);
+  const setInspectorHint = context.setInspectorHint;
+  useEffect(() => {
+    if (!setInspectorHint) return;
+    const seen = seenContent.current;
+    if (!seen || seen.sessionId !== props.sessionId || !props.dockCollapsed) {
+      seenContent.current = { sessionId: props.sessionId, bits: contentBits };
+      setInspectorHint(false);
+      return;
+    }
+    if ((contentBits & ~seen.bits) !== 0) setInspectorHint(true);
+  }, [contentBits, props.dockCollapsed, props.sessionId, setInspectorHint]);
+  useEffect(() => () => setInspectorHint?.(false), [setInspectorHint]);
   const pullRequestNumberLabel = pullRequestLink ? pullRequestNumber(pullRequestLink) : null;
   const leadingTabs: WorkspaceTab[] = pullRequestLink
     ? [

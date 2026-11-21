@@ -6694,6 +6694,8 @@ export const englishMessages = {
   "workbenchChanges.root": "(root)",
   "workbenchChanges.workspace": "(workspace)",
   "workspaceDock.closeTab": "Close {name}",
+  "workspaceDock.emptyTitle": "Nothing here yet",
+  "workspaceDock.emptyBody": "Changes, pull requests and files the agent makes show up here.",
   "workspaceDock.hideWorkspace": "Hide workspace",
   "workspaceDock.maximize": "Maximize",
   "workspaceDock.maximizeDock": "Maximize dock",

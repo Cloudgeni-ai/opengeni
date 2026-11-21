@@ -136,6 +136,7 @@ export function SessionHeader({
   keyAuthRequired,
   onForgetAccessKey,
   inspectorOpen,
+  inspectorHint = false,
   onToggleInspector,
   onRename,
   onPin,
@@ -173,6 +174,8 @@ export function SessionHeader({
   keyAuthRequired: boolean;
   onForgetAccessKey: () => void;
   inspectorOpen: boolean;
+  /** Something new is waiting in the closed panel: a small dot on the toggle. */
+  inspectorHint?: boolean | undefined;
   /** Absent: the surface shows no session panel, so no toggle. */
   onToggleInspector?: (() => void) | undefined;
   onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
@@ -622,13 +625,20 @@ export function SessionHeader({
               (inspectorOpen ? "Hide workspace" : "Open workspace") +
               (panelKeys ? ` (${panelKeys.label})` : "")
             }
-            className="pointer-coarse:size-11"
+            className="relative pointer-coarse:size-11"
+            data-inspector-hint={inspectorHint && !inspectorOpen ? "" : undefined}
           >
             {inspectorOpen ? (
               <PanelRightCloseIcon className="size-4" />
             ) : (
               <PanelRightOpenIcon className="size-4" />
             )}
+            {inspectorHint && !inspectorOpen ? (
+              <span
+                aria-hidden
+                className="absolute right-1 top-1 size-1.5 rounded-full bg-og-accent shadow-[0_0_0_2px_var(--og-color-bg)] motion-safe:animate-in motion-safe:zoom-in-50 motion-safe:fade-in-0"
+              />
+            ) : null}
           </Button>
         ) : null}
         <DropdownMenu>

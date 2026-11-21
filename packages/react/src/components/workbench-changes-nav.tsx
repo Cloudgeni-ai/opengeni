@@ -8,7 +8,9 @@ import {
   FileIcon,
   FileJsonIcon,
   FileTextIcon,
+  FlaskConicalIcon,
   ImageIcon,
+  PaletteIcon,
 } from "lucide-react";
 import { memo, type ReactNode, useMemo, useState } from "react";
 import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
@@ -29,21 +31,45 @@ const CODE =
   /\.(tsx?|jsx?|mjs|cjs|py|go|rs|rb|java|kt|swift|c|cc|cpp|h|hpp|cs|php|sh|sql|vue|svelte|css|scss|html)$/i;
 const CONFIG = /(\.(ya?ml|toml|ini|tf|tfvars|env|lock|conf)|Dockerfile|Makefile)$/i;
 const IMAGE = /\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)$/i;
+const TEST = /(\.|\/|^)(test|spec)s?(\.|\/)|__tests__\//i;
+const STYLE = /\.(css|scss|sass|less)$/i;
 
-/** A small file-type glyph, muted, from the file name. */
+// File-type hues, mixed with the foreground so they stay soft in both themes.
+const tone = (hue: string) => `color-mix(in oklch, ${hue} 72%, var(--og-color-fg))`;
+const TONE = {
+  code: tone("oklch(0.68 0.13 250)"),
+  test: tone("oklch(0.7 0.13 165)"),
+  json: tone("oklch(0.75 0.14 75)"),
+  style: tone("oklch(0.68 0.14 330)"),
+  config: tone("oklch(0.68 0.11 295)"),
+  image: tone("oklch(0.7 0.13 25)"),
+} as const;
+
+/** A small file-type glyph, tinted by kind, from the file name. */
 export function FileGlyph({ path, className }: { path: string; className?: string }) {
-  const Icon = IMAGE.test(path)
-    ? ImageIcon
+  const [Icon, color] = IMAGE.test(path)
+    ? [ImageIcon, TONE.image]
     : /\.json$/i.test(path)
-      ? FileJsonIcon
-      : CODE.test(path)
-        ? FileCode2Icon
-        : CONFIG.test(path)
-          ? FileCogIcon
-          : /\.(md|mdx|txt|rst)$/i.test(path)
-            ? FileTextIcon
-            : FileIcon;
-  return <Icon aria-hidden className={cn("size-3.5 shrink-0 text-og-fg-subtle", className)} />;
+      ? [FileJsonIcon, TONE.json]
+      : STYLE.test(path)
+        ? [PaletteIcon, TONE.style]
+        : TEST.test(path) && CODE.test(path)
+          ? [FlaskConicalIcon, TONE.test]
+          : CODE.test(path)
+            ? [FileCode2Icon, TONE.code]
+            : CONFIG.test(path)
+              ? [FileCogIcon, TONE.config]
+              : /\.(md|mdx|txt|rst)$/i.test(path)
+                ? [FileTextIcon, undefined]
+                : [FileIcon, undefined];
+  return (
+    <Icon
+      aria-hidden
+      data-file-glyph=""
+      className={cn("size-3.5 shrink-0 text-og-fg-subtle", className)}
+      {...(color ? { style: { color } } : {})}
+    />
+  );
 }
 
 /** The file's size of change at a glance: a slim bar whose filled length
@@ -68,12 +94,15 @@ export const ChangeBar = memo(function ChangeBar({
       title={`+${additions} −${deletions}`}
       data-change-bar=""
       className={cn(
-        "relative inline-flex h-1 w-7 shrink-0 overflow-hidden rounded-full bg-og-surface-2",
+        "relative inline-flex h-[3px] w-7 shrink-0 gap-px overflow-hidden rounded-full bg-og-surface-2/70",
         className,
       )}
     >
-      <span className="h-full bg-og-status-idle" style={{ width: `${added}%` }} />
-      <span className="h-full bg-og-status-failed" style={{ width: `${removed}%` }} />
+      <span className="h-full rounded-full bg-og-status-idle/85" style={{ width: `${added}%` }} />
+      <span
+        className="h-full rounded-full bg-og-status-failed/85"
+        style={{ width: `${removed}%` }}
+      />
     </span>
   );
 });
@@ -164,6 +193,18 @@ export const ChangesTree = memo(function ChangesTree({
       else next.add(path);
       return next;
     });
+  // Hairline guides, one per enclosing folder.
+  const guides = (depth: number) =>
+    Array.from({ length: depth }, (_, level) => (
+      <span
+        // Guides are positional by level.
+        // oxlint-disable-next-line react/no-array-index-key
+        key={level}
+        aria-hidden
+        className="pointer-events-none absolute inset-y-0 w-px bg-og-border/60"
+        style={{ left: 16 + level * 12 }}
+      />
+    ));
   const render = (node: TreeNode, depth: number): ReactNode[] => [
     ...node.dirs.flatMap((dir) => {
       const open = !closed.has(dir.path);
@@ -174,14 +215,18 @@ export const ChangesTree = memo(function ChangesTree({
           aria-expanded={open}
           onClick={() => toggle(dir.path)}
           data-tree-dir={dir.path}
-          style={{ paddingLeft: 8 + depth * 10 }}
-          className="flex min-h-6 w-full items-center gap-1.5 pr-2 text-left text-og-xs text-og-fg-subtle transition-colors hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11"
+          style={{ paddingLeft: 10 + depth * 12 }}
+          className="relative flex min-h-[26px] w-full items-center gap-1.5 pr-3 text-left text-og-xs text-og-fg-subtle transition-colors duration-150 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11"
         >
+          {guides(depth)}
           <ChevronRightIcon
             aria-hidden
-            className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
+            className={cn(
+              "size-3 shrink-0 opacity-70 transition-transform duration-200 motion-reduce:transition-none",
+              open && "rotate-90",
+            )}
           />
-          <span className="min-w-0 truncate">{dir.name}</span>
+          <span className="min-w-0 truncate font-medium">{dir.name}</span>
         </button>,
         ...(open ? render(dir, depth + 1) : []),
       ];
@@ -198,25 +243,34 @@ export const ChangesTree = memo(function ChangesTree({
           data-rail-file=""
           data-rail-file-path={file.path}
           aria-current={active ? "true" : undefined}
-          style={{ paddingLeft: 8 + depth * 10 + 14 }}
+          style={{ paddingLeft: 10 + depth * 12 + 16 }}
           className={cn(
-            "relative flex min-h-6 w-full items-center gap-1.5 pr-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
+            "group/row relative flex min-h-[26px] w-full items-center gap-2 pr-3 text-left transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent motion-reduce:transition-none pointer-coarse:min-h-11",
+            "before:absolute before:inset-y-px before:left-1.5 before:right-1.5 before:-z-0 before:rounded-lg before:transition-colors before:duration-150",
             active
-              ? "bg-og-accent-soft text-og-fg before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-og-accent"
-              : "text-og-fg-muted hover:bg-og-surface-2/60 hover:text-og-fg",
+              ? "text-og-fg before:bg-og-surface-2 before:shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_6%,transparent)]"
+              : "text-og-fg-muted hover:text-og-fg hover:before:bg-og-surface-2/50",
           )}
         >
-          <FileGlyph path={file.path} className={cn(active && "text-og-fg-muted")} />
+          {guides(depth)}
+          <FileGlyph path={file.path} className="relative" />
           <span
             className={cn(
-              "min-w-0 flex-1 truncate font-og-mono text-[12px]",
+              "relative min-w-0 flex-1 truncate font-og-mono text-[12px]",
               file.status === "deleted" && "line-through opacity-70",
             )}
           >
             {name}
           </span>
           <FileChangeWords file={file} />
-          <ChangeBar additions={file.additions} deletions={file.deletions} className="w-5" />
+          <ChangeBar
+            additions={file.additions}
+            deletions={file.deletions}
+            className={cn(
+              "relative w-5 opacity-60 transition-opacity duration-150 group-hover/row:opacity-100",
+              active && "opacity-100",
+            )}
+          />
         </button>
       );
     }),
@@ -225,7 +279,7 @@ export const ChangesTree = memo(function ChangesTree({
     <nav
       aria-label={t("workbenchChanges.changedFiles")}
       data-changes-tree=""
-      className={cn("overflow-y-auto py-1.5", className)}
+      className={cn("isolate overflow-y-auto py-2", className)}
     >
       {render(tree, 0)}
     </nav>

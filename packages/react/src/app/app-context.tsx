@@ -94,6 +94,10 @@ export type AppContextValue = {
   setLatencyMode: Dispatch<SetStateAction<LatencyMode>>;
   inspectorOpen: boolean;
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
+  /** Something new appeared in the closed workspace panel (a change, a pull
+   *  request or an artifact); the header toggle shows a small dot. */
+  inspectorHint?: boolean | undefined;
+  setInspectorHint?: Dispatch<SetStateAction<boolean>> | undefined;
   session: Session | null;
   setSession: Dispatch<SetStateAction<Session | null>>;
   /** Browser-only ownership of list/point-read channel projections. */

@@ -132,4 +132,44 @@ describe("WorkspaceDock tab strip", () => {
     expect(rendered.container.querySelectorAll("[data-dock-menu-action]").length).toBe(0);
     await rendered.unmount();
   });
+
+  test("with nothing to show, the empty view offers tabs until one is picked", async () => {
+    const { useState } = await import("react");
+    const EMPTY_TABS = TABS.map((tab) => ({ ...tab, optional: true }));
+    function Host() {
+      const [landing, setLanding] = useState(true);
+      return (
+        <WorkspaceDock
+          autoSaveId="og.test.workspace-dock-landing"
+          essentials
+          tabScope="chat-landing"
+          landing={landing}
+          onStripEmptied={() => setLanding(true)}
+          onActiveTabChange={() => setLanding(false)}
+          primary={<div>Chat pane</div>}
+          tabs={EMPTY_TABS}
+        />
+      );
+    }
+    const rendered = await renderComponent(<Host />);
+    const shown = () =>
+      [...rendered.container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) =>
+        tab.getAttribute("aria-label"),
+      );
+    expect(rendered.container.querySelector("[data-dock-landing]")).not.toBeNull();
+    expect(shown()).toEqual([]);
+    expect(rendered.container.textContent).not.toContain("Changes content");
+
+    await click(rendered.container.querySelector('[data-dock-landing-tab="terminal"]'));
+    await flush();
+    expect(rendered.container.querySelector("[data-dock-landing]")).toBeNull();
+    expect(shown()).toEqual(["Terminal"]);
+
+    // Closing the last tab goes back to the empty view.
+    await click(rendered.container.querySelector('[data-dock-tab-close="terminal"]'));
+    await flush();
+    expect(rendered.container.querySelector("[data-dock-landing]")).not.toBeNull();
+    expect(shown()).toEqual([]);
+    await rendered.unmount();
+  });
 });

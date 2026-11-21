@@ -14,6 +14,9 @@ import {
 } from "react";
 import {
   ChevronsLeftRightIcon,
+  FileTextIcon,
+  GitCompareArrowsIcon,
+  GitPullRequestIcon,
   Maximize2Icon,
   Minimize2Icon,
   PanelRightCloseIcon,
@@ -89,6 +92,15 @@ export type WorkspaceDockProps = {
   /** Remembers which optional tabs the person opened, per value (e.g. the
    *  chat's id). Omitted: the dock remembers them while it is mounted. */
   tabScope?: string | undefined;
+  /**
+   * Nothing has content yet: while every tab is optional and the person has
+   * opened none, the dock shows one calm line with a few tabs to open instead
+   * of an empty tab.
+   */
+  landing?: boolean | undefined;
+  /** The person closed the last tab on the strip (with `landing`, the dock
+   *  goes back to its empty view; the host should stop forcing a tab). */
+  onStripEmptied?: (() => void) | undefined;
   /** Persisted layout id (localStorage key) for react-resizable-panels. */
   autoSaveId?: string | undefined;
   /** Default dock width as a percent of the session area. */
@@ -210,6 +222,8 @@ export function WorkspaceDock({
   mobileLeadingControl,
   essentials = false,
   tabScope,
+  landing = false,
+  onStripEmptied,
   autoSaveId = "og.session.dock",
   defaultSize = 34,
   minSize = 22,
@@ -297,26 +311,36 @@ export function WorkspaceDock({
   // tab stays on the strip (remembered per scope) until they close it.
   const [opened, setOpened] = useOpenedTabs(tabScope);
   const currentIsOptional = tabs.some((tab) => tab.id === current && tab.optional);
+  const showLanding =
+    landing && opened.length === 0 && tabs.length > 0 && tabs.every((tab) => tab.optional);
   useEffect(() => {
-    if (currentIsOptional) setOpened((ids) => (ids.includes(current) ? ids : [...ids, current]));
-  }, [current, currentIsOptional, setOpened]);
+    if (currentIsOptional && !landing)
+      setOpened((ids) => (ids.includes(current) ? ids : [...ids, current]));
+  }, [current, currentIsOptional, landing, setOpened]);
   const shownTabs = useMemo(
     () =>
-      tabs.filter(
-        (tab) => !tab.optional || opened.includes(tab.id) || (tab.id === current && tab.optional),
-      ),
-    [tabs, opened, current],
+      showLanding
+        ? []
+        : tabs.filter(
+            (tab) =>
+              !tab.optional || opened.includes(tab.id) || (tab.id === current && tab.optional),
+          ),
+    [tabs, opened, current, showLanding],
   );
   const closeTab = useCallback(
     (id: string) => {
       setOpened((ids) => ids.filter((value) => value !== id));
-      if (id !== current) return;
       const strip = shownTabs.filter((tab) => tab.id !== id);
+      if (strip.length === 0 && onStripEmptied) {
+        onStripEmptied();
+        return;
+      }
+      if (id !== current) return;
       const index = shownTabs.findIndex((tab) => tab.id === id);
       const next = strip[Math.max(0, index - 1)] ?? tabs.find((tab) => tab.id !== id);
       if (next) setTab(next.id);
     },
-    [current, setOpened, setTab, shownTabs, tabs],
+    [current, onStripEmptied, setOpened, setTab, shownTabs, tabs],
   );
   const setCollapsed = useCallback(
     (next: boolean) => {
@@ -518,6 +542,7 @@ export function WorkspaceDock({
           <DockChrome
             tabs={tabs}
             shownTabs={shownTabs}
+            landing={showLanding}
             current={current}
             onTab={setTab}
             onClose={closeTab}
@@ -583,6 +608,7 @@ export function WorkspaceDock({
     <DockChrome
       tabs={tabs}
       shownTabs={shownTabs}
+      landing={showLanding}
       current={current}
       onTab={setTab}
       onClose={closeTab}
@@ -786,6 +812,7 @@ function tabName(tab: WorkspaceTab): string {
 function DockChrome({
   tabs,
   shownTabs,
+  landing = false,
   current,
   onTab,
   onClose,
@@ -800,6 +827,8 @@ function DockChrome({
   tabs: WorkspaceTab[];
   /** The tabs on the strip, in order; the rest are in the menu. */
   shownTabs: WorkspaceTab[];
+  /** Show the empty view (nothing has content yet) instead of a tab. */
+  landing?: boolean | undefined;
   current: string;
   onTab: (id: string) => void;
   /** Close an opened optional tab (back to the "+" menu). */
@@ -828,17 +857,49 @@ function DockChrome({
   const menuTabs = tabs.filter((tab) => !shownTabs.includes(tab));
   const menuAccessory = accessoryInMenu && accessory ? accessory : null;
   const actions = menuActions ?? [];
-  const hasMenu = menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null;
+  // The empty view lists its tabs itself; the menu returns with the first tab.
+  const hasMenu =
+    !landing && (menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null);
+
+  // One pill slides under the selected tab.
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const [pill, setPill] = useState<{ left: number; width: number } | null>(null);
+  const shownKey = shownTabs.map((tab) => tab.id).join("\u0000");
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (!strip) {
+      setPill(null);
+      return;
+    }
+    const measure = () => {
+      const node = strip.querySelector<HTMLElement>(
+        `[data-dock-tab-item="${CSS.escape(current)}"]`,
+      );
+      setPill((previous) => {
+        if (!node) return null;
+        const next = { left: node.offsetLeft, width: node.offsetWidth };
+        return previous && previous.left === next.left && previous.width === next.width
+          ? previous
+          : next;
+      });
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(strip);
+    for (const child of Array.from(strip.children)) observer.observe(child);
+    return () => observer.disconnect();
+  }, [current, shownKey]);
 
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId || landing) return;
     setVisitedTabs((previous) => {
       if (previous.has(activeId)) return previous;
       const next = new Set(previous);
       next.add(activeId);
       return next;
     });
-  }, [activeId]);
+  }, [activeId, landing]);
 
   const activateTab = (index: number) => {
     const tab = shownTabs[index];
@@ -863,16 +924,34 @@ function DockChrome({
   };
 
   return (
-    <div data-dock-chrome className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="flex min-h-10 shrink-0 items-stretch gap-0.5 px-1.5 shadow-[inset_0_-1px_0_var(--og-color-border)] max-[1023px]:min-h-12">
+    <div
+      data-dock-chrome
+      className="flex h-full min-h-0 min-w-0 flex-col bg-og-bg [--og-color-bg:var(--og-color-canvas)] [--color-bg:var(--og-color-canvas)] bg-[radial-gradient(130%_70%_at_100%_-20%,color-mix(in_oklch,var(--og-color-accent)_9%,transparent),transparent_65%)] [--og-diff-surface:transparent] [--og-diff-separator:color-mix(in_oklch,var(--og-color-fg)_4%,transparent)]"
+    >
+      <div
+        className={cn(
+          "min-h-11 shrink-0 items-center gap-1 px-2 shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_70%,transparent)] max-[1023px]:min-h-12",
+          // The empty view needs no header unless it carries host controls.
+          landing && !leading && !controls ? "hidden" : "flex",
+        )}
+      >
         {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
         {shownTabs.length > 0 ? (
           <div
-            className="flex min-w-0 items-stretch gap-0.5 overflow-x-auto [scrollbar-width:none]"
+            ref={stripRef}
+            className="relative flex min-w-0 items-center gap-0.5 overflow-x-auto py-1.5 [scrollbar-width:none]"
             role="tablist"
             aria-label={msg("workspaceDock.workspacePanels")}
             aria-orientation="horizontal"
           >
+            {pill ? (
+              <span
+                aria-hidden
+                data-dock-tab-pill=""
+                className="pointer-events-none absolute inset-y-1.5 left-0 rounded-full bg-og-surface-2 shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_8%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_6px_18px_-8px_color-mix(in_oklch,var(--og-color-accent)_45%,transparent)] transition-[transform,width] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none"
+                style={{ width: pill.width, transform: `translateX(${pill.left}px)` }}
+              />
+            ) : null}
             {shownTabs.map((tab, index) => {
               const selected = tab.id === current;
               const tabIndex = tabs.indexOf(tab);
@@ -881,11 +960,8 @@ function DockChrome({
                   key={tab.id}
                   data-dock-tab-item={tab.id}
                   className={cn(
-                    "group/tab relative flex shrink-0 items-center transition-colors",
-                    "after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:transition-colors motion-reduce:after:transition-none",
-                    selected
-                      ? "text-og-fg after:bg-og-accent"
-                      : "text-og-fg-muted hover:text-og-fg after:bg-transparent",
+                    "group/tab relative z-[1] flex shrink-0 items-center rounded-full transition-colors duration-200",
+                    selected ? "text-og-fg" : "text-og-fg-muted hover:text-og-fg",
                   )}
                 >
                   <button
@@ -903,15 +979,15 @@ function DockChrome({
                     onKeyDown={(event) => onTabKeyDown(event, index)}
                     data-dock-tab={tab.id}
                     className={cn(
-                      "flex min-h-8 items-center gap-1.5 rounded-og-sm px-2 text-og-xs font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-                      tab.optional && "pr-1",
+                      "flex min-h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium tracking-[-0.005em] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+                      tab.optional && "pr-1.5",
                     )}
                   >
                     {tab.icon ? (
                       <span
                         className={cn(
-                          "flex size-3.5 shrink-0 items-center justify-center [&>svg]:size-3.5",
-                          selected ? "text-og-accent" : "text-og-fg-subtle",
+                          "flex size-3.5 shrink-0 items-center justify-center transition-colors duration-200 [&>svg]:size-3.5",
+                          selected ? "text-og-fg" : "text-og-fg-subtle",
                         )}
                         aria-hidden
                       >
@@ -934,7 +1010,7 @@ function DockChrome({
                       onClick={() => onClose(tab.id)}
                       data-dock-tab-close={tab.id}
                       className={cn(
-                        "mr-1 inline-flex size-4 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-opacity hover:bg-og-surface-2 hover:text-og-fg focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent group-hover/tab:opacity-100 max-[1023px]:size-8 pointer-coarse:size-8 pointer-coarse:opacity-100",
+                        "mr-1.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full text-og-fg-subtle transition-opacity hover:bg-og-surface-3 hover:text-og-fg focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent group-hover/tab:opacity-100 max-[1023px]:size-8 pointer-coarse:size-8 pointer-coarse:opacity-100",
                         selected ? "opacity-100" : "opacity-0",
                       )}
                     >
@@ -954,7 +1030,7 @@ function DockChrome({
                 title={msg("workspaceDock.more")}
                 aria-label={msg("workspaceDock.more")}
                 data-dock-menu
-                className="my-auto inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:bg-og-surface-2 data-[state=open]:text-og-fg max-[1023px]:size-11 pointer-coarse:size-11"
+                className="my-auto inline-flex size-7 shrink-0 items-center justify-center rounded-full text-og-fg-subtle transition-[color,background-color,transform] duration-200 hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:rotate-45 data-[state=open]:bg-og-surface-2 data-[state=open]:text-og-fg motion-reduce:transition-none max-[1023px]:size-11 pointer-coarse:size-11"
               >
                 <PlusIcon className="size-4" aria-hidden />
               </button>
@@ -1026,9 +1102,19 @@ function DockChrome({
         ) : null}
       </div>
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        {landing ? (
+          <DockLanding
+            choices={menuTabs}
+            onPick={(id) => {
+              pickedRef.current = id;
+              onTab(id);
+              requestAnimationFrame(() => tabRefs.current.get(id)?.focus());
+            }}
+          />
+        ) : null}
         {tabs.length > 0 ? (
           tabs.map((tab, index) => {
-            const selected = tab.id === activeId;
+            const selected = tab.id === activeId && !landing;
             const shouldMount = selected || visitedTabs.has(tab.id);
             return (
               <div
@@ -1041,7 +1127,7 @@ function DockChrome({
                 // animation restarts when `hidden` lifts); a static class keeps
                 // the switch from mutating the panel's class, which ancestor
                 // observers (portal token styles) would react to.
-                className="h-full min-h-0 min-w-0 overflow-hidden animate-in fade-in-0 duration-150 motion-reduce:animate-none"
+                className="h-full min-h-0 min-w-0 overflow-hidden animate-in fade-in-0 slide-in-from-bottom-0.5 duration-200 ease-out motion-reduce:animate-none"
                 hidden={!selected}
                 role="tabpanel"
               >
@@ -1061,6 +1147,77 @@ function DockChrome({
           />
         )}
       </div>
+    </div>
+  );
+}
+
+// The surfaces the empty view offers first; the rest stay in "+".
+const LANDING_FIRST = ["files", "terminal", "browser"];
+
+/** Nothing has content yet: one calm line and a few tabs to open. */
+function DockLanding({
+  choices,
+  onPick,
+}: {
+  choices: WorkspaceTab[];
+  onPick: (id: string) => void;
+}) {
+  const msg = useOpenGeniText();
+  const ranked = [...choices].sort((a, b) => {
+    const rank = (tab: WorkspaceTab) => {
+      const index = LANDING_FIRST.indexOf(tab.id);
+      return index === -1 ? LANDING_FIRST.length : index;
+    };
+    return rank(a) - rank(b);
+  });
+  const shown = ranked.slice(0, 3);
+  return (
+    <div
+      data-dock-landing=""
+      className="flex h-full min-h-0 flex-col items-center justify-center gap-5 px-6 pb-10 text-center animate-in fade-in-0 duration-300 motion-reduce:animate-none"
+    >
+      <div aria-hidden className="relative h-[72px] w-36">
+        <span className="absolute left-2 top-4 flex size-12 -rotate-[14deg] items-center justify-center rounded-[14px] bg-og-surface-1 text-og-status-idle shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_5%,transparent)]">
+          <GitCompareArrowsIcon className="size-[18px]" />
+        </span>
+        <span className="absolute right-2 top-4 flex size-12 rotate-[14deg] items-center justify-center rounded-[14px] bg-og-surface-1 text-og-charge shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_7%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_5%,transparent)]">
+          <FileTextIcon className="size-[18px]" />
+        </span>
+        <span className="absolute left-1/2 top-0 flex size-14 -translate-x-1/2 items-center justify-center rounded-2xl bg-og-surface-2 text-og-fg shadow-[inset_0_1px_0_color-mix(in_oklch,var(--og-color-fg)_10%,transparent),0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_6%,transparent),0_14px_30px_-12px_color-mix(in_oklch,var(--og-color-accent)_60%,transparent)]">
+          <GitPullRequestIcon className="size-5" />
+        </span>
+      </div>
+      <div className="flex max-w-[30ch] flex-col gap-1.5">
+        <p className="text-og-md font-semibold tracking-[-0.01em] text-og-fg">
+          {msg("workspaceDock.emptyTitle")}
+        </p>
+        <p className="text-og-sm leading-relaxed text-og-fg-muted">
+          {msg("workspaceDock.emptyBody")}
+        </p>
+      </div>
+      {shown.length > 0 ? (
+        <div className="flex flex-wrap items-center justify-center gap-1.5">
+          {shown.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              data-dock-landing-tab={tab.id}
+              onClick={() => onPick(tab.id)}
+              className="inline-flex min-h-8 items-center gap-1.5 rounded-full bg-og-surface-1 px-3 text-og-xs font-medium text-og-fg-muted shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--og-color-fg)_8%,transparent)] transition-colors duration-200 hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent motion-reduce:transition-none pointer-coarse:min-h-11"
+            >
+              {tab.icon ? (
+                <span
+                  aria-hidden
+                  className="flex size-3.5 items-center justify-center text-og-fg-subtle [&>svg]:size-3.5"
+                >
+                  {tab.icon}
+                </span>
+              ) : null}
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

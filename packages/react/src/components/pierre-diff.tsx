@@ -201,10 +201,11 @@ export const PierreDiff = memo(function PierreDiff({
   // Pin the diff's own base background to the dock surface and quiet the hunk
   // separator slab so collapsed context rows do not become heavy bars.
   const pierreVars = {
-    "--diffs-dark-bg": "var(--og-color-bg)",
-    "--diffs-light-bg": "var(--og-color-bg)",
+    // A host surface can set `--og-diff-surface` (the workbench uses its own tone).
+    "--diffs-dark-bg": "var(--og-diff-surface, var(--og-color-bg))",
+    "--diffs-light-bg": "var(--og-diff-surface, var(--og-color-bg))",
     "--diffs-bg-buffer-override": "var(--og-color-surface-1)",
-    "--diffs-bg-separator-override": "var(--og-color-surface-1)",
+    "--diffs-bg-separator-override": "var(--og-diff-separator, var(--og-color-surface-1))",
     // Pierre's default (fg mixed 65% into bg) falls under 4.5:1 on the lifted
     // graphite separator; quiet meta text keeps AA on every diff surface.
     "--diffs-fg-number-override": "var(--og-color-fg-subtle)",
@@ -213,13 +214,13 @@ export const PierreDiff = memo(function PierreDiff({
     "--diffs-fg-number-addition-override": "var(--og-color-status-idle)",
     "--diffs-fg-number-deletion-override": "var(--og-color-status-failed)",
     "--diffs-bg-addition-override":
-      "color-mix(in oklab, var(--og-color-status-idle) 12%, var(--og-color-bg))",
+      "color-mix(in oklab, var(--og-color-status-idle) 12%, var(--og-diff-surface, var(--og-color-bg)))",
     "--diffs-bg-deletion-override":
-      "color-mix(in oklab, var(--og-color-status-failed) 12%, var(--og-color-bg))",
+      "color-mix(in oklab, var(--og-color-status-failed) 12%, var(--og-diff-surface, var(--og-color-bg)))",
     "--diffs-bg-addition-emphasis-override":
-      "color-mix(in oklab, var(--og-color-status-idle) 22%, var(--og-color-bg))",
+      "color-mix(in oklab, var(--og-color-status-idle) 22%, var(--og-diff-surface, var(--og-color-bg)))",
     "--diffs-bg-deletion-emphasis-override":
-      "color-mix(in oklab, var(--og-color-status-failed) 22%, var(--og-color-bg))",
+      "color-mix(in oklab, var(--og-color-status-failed) 22%, var(--og-diff-surface, var(--og-color-bg)))",
     "--diffs-header-font-family": "var(--og-font-sans)",
     "--diffs-font-family": "var(--og-font-mono)",
     "--diffs-font-size": "var(--og-code-font-size)",

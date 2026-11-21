@@ -252,15 +252,16 @@ export function PullRequestView({
   };
   return (
     <div className="flex h-full min-h-0 flex-col" data-session-pr-panel="">
-      <header className="flex shrink-0 items-start gap-2 px-4 pb-2 pt-3">
+      <header className="flex shrink-0 items-start gap-3 px-5 pb-3 pt-4">
         <div className="min-w-0 flex-1">
+          <PullRequestChips detail={detail} />
           <h2
-            className="truncate text-[15px] font-semibold leading-snug tracking-[-0.01em] text-fg"
+            className="mt-2 line-clamp-2 text-[17px] font-semibold leading-[1.3] tracking-[-0.015em] text-fg"
             title={detail.title}
           >
             {detail.title}
           </h2>
-          <PullRequestFacts detail={detail} />
+          <PullRequestPeople detail={detail} />
           {state.status === "error" ? (
             <p className="mt-1 text-xs text-fg-muted" data-pr-refresh-error="">
               Couldn't refresh.{" "}
@@ -285,7 +286,7 @@ export function PullRequestView({
             disabled={merging !== "idle"}
             data-pr-merge=""
             title="Ask the agent to merge, with its usual approvals"
-            className="shrink-0"
+            className="shrink-0 rounded-full px-3.5 shadow-[0_8px_20px_-10px_color-mix(in_oklch,var(--color-status-success,var(--og-color-status-idle))_80%,transparent)]"
           >
             {merging === "asking" ? (
               <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
@@ -360,16 +361,17 @@ export function PullRequestView({
   );
 }
 
-const STATE_TONE: Record<PullRequestState, { dot: string; text: string }> = {
-  open: { dot: "bg-status-success", text: "text-status-success" },
-  draft: { dot: "bg-fg-subtle", text: "text-fg-muted" },
-  merged: { dot: "bg-og-accent", text: "text-og-accent" },
-  closed: { dot: "bg-status-failed", text: "text-status-failed" },
+const STATE_TONE: Record<PullRequestState, { dot: string; chip: string }> = {
+  open: { dot: "bg-status-success", chip: "text-status-success bg-status-success/12" },
+  draft: { dot: "bg-fg-subtle", chip: "text-fg-muted bg-surface-2" },
+  merged: { dot: "bg-og-accent", chip: "text-og-accent bg-og-accent/12" },
+  closed: { dot: "bg-status-failed", chip: "text-status-failed bg-status-failed/12" },
 };
 
-/** The status line under the title: state, branch and checks, each with its
- *  own small mark rather than one string of words. */
-function PullRequestFacts({ detail }: { detail: SessionPullRequestDetail }) {
+const CHIP = "inline-flex h-[22px] items-center gap-1.5 rounded-full px-2 text-[11.5px] font-medium";
+
+/** State, checks and review as small coloured chips above the title. */
+function PullRequestChips({ detail }: { detail: SessionPullRequestDetail }) {
   const tone = STATE_TONE[detail.state];
   const checks =
     detail.checks === "passing"
@@ -377,27 +379,78 @@ function PullRequestFacts({ detail }: { detail: SessionPullRequestDetail }) {
       : detail.checks === "failing"
         ? { Icon: CircleXIcon, text: "Checks failing", className: "text-status-failed" }
         : detail.checks === "pending"
-          ? { Icon: CircleDashedIcon, text: "Checks running", className: "text-fg-muted" }
+          ? { Icon: CircleDashedIcon, text: "Checks running", className: "text-status-waiting" }
           : null;
   const review =
     detail.review === "approved"
-      ? { text: "Approved", className: "text-status-success" }
+      ? { Icon: CheckIcon, text: "Approved", className: "text-status-success" }
       : detail.review === "changes_requested"
-        ? { text: "Changes requested", className: "text-status-failed" }
+        ? { Icon: XIcon, text: "Changes requested", className: "text-status-failed" }
         : detail.review === "review_required"
-          ? { text: "Review requested", className: "text-fg-muted" }
+          ? { Icon: CircleDotIcon, text: "Review requested", className: "text-fg-muted" }
           : null;
   return (
     <div
-      className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted"
+      className="flex min-w-0 flex-wrap items-center gap-1.5"
       data-pr-state={detail.state}
     >
-      <span className={cn("inline-flex items-center gap-1.5 font-medium", tone.text)}>
-        <span aria-hidden className={cn("size-1.5 rounded-full", tone.dot)} />
+      <span className={cn(CHIP, tone.chip)}>
+        <span
+          aria-hidden
+          className={cn(
+            "size-1.5 rounded-full shadow-[0_0_0_3px_color-mix(in_oklch,currentColor_22%,transparent)]",
+            tone.dot,
+          )}
+        />
         {STATE_WORD[detail.state]}
       </span>
+      {checks ? (
+        <span className={cn(CHIP, "bg-surface-2/70", checks.className)}>
+          <checks.Icon aria-hidden className="size-3" />
+          {checks.text}
+        </span>
+      ) : null}
+      {review ? (
+        <span className={cn(CHIP, "bg-surface-2/70", review.className)}>
+          <review.Icon aria-hidden className="size-3" />
+          {review.text}
+        </span>
+      ) : null}
+      {detail.state === "open" && detail.mergeable === false ? (
+        <span className={cn(CHIP, "bg-status-failed/12 text-status-failed")}>Conflicts</span>
+      ) : null}
+    </div>
+  );
+}
+
+/** Who is on it (author, then people in the discussion) and which branch
+ *  merges where. */
+function PullRequestPeople({ detail }: { detail: SessionPullRequestDetail }) {
+  const people = useMemo(() => {
+    const seen = new Map<string, { login: string; avatarUrl: string | null }>();
+    if (detail.author) seen.set(detail.author.login, detail.author);
+    for (const comment of detail.comments) {
+      if (comment.author && !seen.has(comment.author.login))
+        seen.set(comment.author.login, comment.author);
+    }
+    return [...seen.values()].slice(0, 4);
+  }, [detail.author, detail.comments]);
+  return (
+    <div className="mt-2.5 flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5 text-xs text-fg-muted">
+      {people.length > 0 ? (
+        <span className="inline-flex min-w-0 items-center gap-2">
+          <span className="flex shrink-0 -space-x-1.5" aria-hidden>
+            {people.map((person) => (
+              <Avatar key={person.login} person={person} />
+            ))}
+          </span>
+          {detail.author ? (
+            <span className="truncate font-medium text-fg">{detail.author.login}</span>
+          ) : null}
+        </span>
+      ) : null}
       <span
-        className="inline-flex min-w-0 items-center gap-1 font-mono text-[11px]"
+        className="inline-flex min-w-0 items-center gap-1 rounded-md bg-surface-2/60 px-1.5 py-0.5 font-mono text-[11px]"
         title={`${detail.head} into ${detail.base}`}
       >
         <GitBranchIcon aria-hidden className="size-3 shrink-0 text-fg-subtle" />
@@ -407,17 +460,29 @@ function PullRequestFacts({ detail }: { detail: SessionPullRequestDetail }) {
         </span>
         <span className="truncate">{detail.base}</span>
       </span>
-      {checks ? (
-        <span className={cn("inline-flex items-center gap-1", checks.className)}>
-          <checks.Icon aria-hidden className="size-3.5" />
-          {checks.text}
-        </span>
-      ) : null}
-      {review ? <span className={review.className}>{review.text}</span> : null}
-      {detail.state === "open" && detail.mergeable === false ? (
-        <span className="text-status-failed">Conflicts</span>
-      ) : null}
     </div>
+  );
+}
+
+/** A round avatar; without a picture, the login's initial on a soft hue. */
+function Avatar({ person }: { person: { login: string; avatarUrl: string | null } }) {
+  if (person.avatarUrl)
+    return (
+      <img
+        src={person.avatarUrl}
+        alt=""
+        className="size-5 rounded-full bg-surface-2 ring-2 ring-[var(--og-color-canvas,var(--color-bg))]"
+      />
+    );
+  let hash = 0;
+  for (const char of person.login) hash = (hash * 31 + char.charCodeAt(0)) % 360;
+  return (
+    <span
+      className="flex size-5 items-center justify-center rounded-full text-[10px] font-semibold uppercase text-white ring-2 ring-[var(--og-color-canvas,var(--color-bg))]"
+      style={{ background: `oklch(0.6 0.11 ${hash})` }}
+    >
+      {person.login.slice(0, 1)}
+    </span>
   );
 }
 

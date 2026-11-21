@@ -1106,8 +1106,9 @@ export type SandboxWorkspaceProps = ClientOverride<ChatClient> & {
    *  `UseSandboxWorkspaceTabsOptions.tabVisibility`. */
   tabVisibility?: SandboxWorkspaceTabVisibility | undefined;
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
-  /** Open a built-in or host-injected tab. A new requestId reopens the same tab. */
-  openTabRequest?: { tab: string; requestId: number } | null | undefined;
+  /** Open a built-in or host-injected tab. A new requestId reopens the same tab.
+   *  `expand: false` selects it without opening a closed dock. */
+  openTabRequest?: { tab: string; requestId: number; expand?: boolean } | null | undefined;
   initialFilePath?: string | null | undefined;
   onFilePathChange?: ((path: string | null) => void) | undefined;
   /** Presentation-only filter for Files tree nodes and selected-file viewing. */
@@ -1199,9 +1200,13 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     className,
   } = props;
 
+  // `picked`: the person (or a host request) chose this tab, rather than the
+  // source-driven default. With nothing to show, an unpicked dock shows its
+  // empty view.
   const [storedSelection, setStoredSelection] = useState<{
     sessionId: string;
     tab: string;
+    picked?: boolean;
   } | null>(null);
   const [requestedFile, setRequestedFile] = useState<{
     sessionId: string;
@@ -1231,9 +1236,9 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       ) || (surfaces ?? WORKBENCH_SURFACES).some((tab) => tab === openTabRequest.tab);
     if (!available) return;
     handledTabRequest.current = { sessionId, requestId: openTabRequest.requestId };
-    setStoredSelection({ sessionId, tab: openTabRequest.tab });
+    setStoredSelection({ sessionId, tab: openTabRequest.tab, picked: true });
     onActiveTabChange?.(openTabRequest.tab);
-    onCollapsedChange?.(false);
+    if (openTabRequest.expand !== false) onCollapsedChange?.(false);
   }, [
     openTabRequest,
     sessionId,
@@ -1252,7 +1257,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
         line: line != null && line > 0 ? line : null,
         requestId: ++nextFileRequestId.current,
       });
-      setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
+      setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES, picked: true });
       onActiveTabChange?.(WORKBENCH_TAB_FILES);
       onFilePathChange?.(path);
       onCollapsedChange?.(false);
@@ -1274,7 +1279,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
         computerSessionId,
         requestId: nextComputerRequestId.current,
       });
-      setStoredSelection({ sessionId, tab: WORKBENCH_TAB_DESKTOP });
+      setStoredSelection({ sessionId, tab: WORKBENCH_TAB_DESKTOP, picked: true });
       onActiveTabChange?.(WORKBENCH_TAB_DESKTOP);
       onComputerSessionIdChange?.(computerSessionId);
     },
@@ -1327,11 +1332,21 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   // so committing the real default at first-resolve produces no CONTENT switch.
   const tabs: WorkspaceTab[] = [...(leadingTabs ?? []), ...workbenchTabs, ...(trailingTabs ?? [])];
   const preferredTab = selectedTab ?? defaultTab;
-  const activeTab =
-    preferredTab && tabs.some((tab) => tab.id === preferredTab) ? preferredTab : tabs[0]?.id;
+  // Essentials: until the person picks a tab, a default without content
+  // (e.g. Files) yields to the first tab that has some (e.g. Artifacts).
+  const preferredOptional =
+    tabVisibility === "relevant" &&
+    !(storedSelection?.sessionId === sessionId && storedSelection.picked === true) &&
+    tabs.some((tab) => tab.id === preferredTab && tab.optional);
+  const firstWithContent = preferredOptional ? tabs.find((tab) => !tab.optional) : undefined;
+  const activeTab = firstWithContent
+    ? firstWithContent.id
+    : preferredTab && tabs.some((tab) => tab.id === preferredTab)
+      ? preferredTab
+      : tabs[0]?.id;
   const selectTab = useCallback(
     (tab: string) => {
-      setStoredSelection({ sessionId, tab });
+      setStoredSelection({ sessionId, tab, picked: true });
       onActiveTabChange?.(tab);
     },
     [onActiveTabChange, sessionId],
@@ -1341,8 +1356,15 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     // Once the source-driven choice resolves, make it the real controlled
     // selection. Without this handoff the dock could visibly show Files while
     // the data hooks continued treating the selection as unresolved.
-    setStoredSelection({ sessionId, tab: defaultTab });
-  }, [defaultTab, selectedTab, sessionId]);
+    // A host's remembered tab counts as the person's choice.
+    setStoredSelection({ sessionId, tab: defaultTab, picked: Boolean(initialTab) });
+  }, [defaultTab, initialTab, selectedTab, sessionId]);
+  const picked = storedSelection?.sessionId === sessionId && storedSelection.picked === true;
+  const backToLanding = useCallback(() => {
+    setStoredSelection((previous) =>
+      previous?.sessionId === sessionId ? { ...previous, picked: false } : previous,
+    );
+  }, [sessionId]);
 
   return (
     <WorkspaceDock
@@ -1351,6 +1373,9 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       {...(activeTab !== undefined ? { activeTab } : {})}
       onActiveTabChange={selectTab}
       essentials={tabVisibility === "relevant"}
+      {...(tabVisibility === "relevant"
+        ? { landing: !picked, onStripEmptied: backToLanding }
+        : {})}
       {...(sessionId ? { tabScope: sessionId } : {})}
       // Browser and Desktop select independent workspace resources, potentially
       // on another placement. Their own viewers report runtime status; the

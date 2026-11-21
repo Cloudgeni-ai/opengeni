@@ -6,9 +6,12 @@
 //   ?state=<key>   a workbench dock state (default branch-review)
 //   ?theme=light   light theme (default dark)
 //   ?artifacts=0   the chat has no artifacts yet (Artifacts in the "+" menu)
+//   ?state=empty   nothing changed (with ?artifacts=0: the empty panel)
+//   ?closed=1      the panel starts closed; ?hint=1 adds the header's new-content dot
+//   ?tab=<id>      the tab the person last opened (e.g. browser)
 import type { SessionLinkWithStatus, SessionPullRequestDetail } from "@opengeni/sdk";
 import { GitPullRequestIcon, PanelsTopLeftIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
@@ -20,6 +23,7 @@ import {
 import { AppContext } from "@opengeni/react/app/app-context";
 import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
 import { useMemoryNavigation } from "@opengeni/react/app/embed/memory-navigation";
+import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
 // Vite's `?worker` transform synthesizes this default export.
 // oxlint-disable-next-line import/default
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
@@ -34,6 +38,9 @@ const params = new URLSearchParams(window.location.search);
 const withPr = params.get("pr") === "1";
 const light = params.get("theme") === "light";
 const withArtifacts = params.get("artifacts") !== "0";
+const startClosed = params.get("closed") === "1";
+const withHint = params.get("hint") === "1";
+const rememberedTab = params.get("tab");
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 const state = DOCK_STATES[params.get("state") ?? "branch-review"] ?? DOCK_STATES["branch-review"]!;
 const client = new DockStateMockClient(state);
@@ -136,15 +143,36 @@ const artifacts: SessionEditableArtifactSummary[] = (
 
 function Harness() {
   const { events } = useSessionEvents(DOCK_SESSION_ID);
+  const [collapsed, setCollapsed] = useState(startClosed);
   return (
-    <div className="h-dvh bg-bg">
+    <div className="flex h-dvh flex-col bg-bg">
+      <SessionHeader
+        session={headerSession}
+        ancestors={[]}
+        connectionState="live"
+        status="idle"
+        keyAuthRequired={false}
+        onForgetAccessKey={() => undefined}
+        inspectorOpen={!collapsed}
+        inspectorHint={withHint}
+        onToggleInspector={() => setCollapsed((value) => !value)}
+        onRename={async () => null}
+        onPin={async () => null}
+      />
+      <div className="min-h-0 flex-1">
       <SandboxWorkspace
         sessionId={DOCK_SESSION_ID}
         events={events}
         autoSaveId={`og.session-dock.${withPr ? "pr" : "changes"}`}
         defaultSize={60}
         tabVisibility="relevant"
-        {...(withPr ? { initialTab: "pull-request" } : {})}
+        collapsed={collapsed}
+        onCollapsedChange={setCollapsed}
+        {...(withPr
+          ? { initialTab: "pull-request" }
+          : rememberedTab
+            ? { initialTab: rememberedTab }
+            : {})}
         {...(withPr
           ? { pullRequest: { url: PR_URL, number: 482 } }
           : { onOpenPullRequest: async () => {} })}
@@ -191,9 +219,31 @@ function Harness() {
             }
           : {})}
       />
+      </div>
     </div>
   );
 }
+
+const headerSession = {
+  id: DOCK_SESSION_ID,
+  workspaceId: WORKSPACE_ID,
+  initialMessage: "Harden the API",
+  title: "Harden the API",
+  titleSource: "user",
+  parentSessionId: null,
+  model: "codex/gpt-5.6-sol",
+  reasoningEffort: "high",
+  latencyMode: "standard",
+  metadata: {},
+  status: "idle",
+  pinned: false,
+  effectiveControl: {
+    state: "active",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+  },
+} as never;
 
 function App() {
   const navigation = useMemoryNavigation({
