@@ -886,6 +886,7 @@ function AgentScheduleForm({
       return;
     }
     const controller = new AbortController();
+    setAgentChats([]);
     setAgentChatsLoading(true);
     setAgentChatsError(null);
     listAgentChats(client, workspaceId, chatAgentId, { signal: controller.signal }).then(
@@ -1558,7 +1559,7 @@ function AgentScheduleForm({
             </Notice>
           ) : null}
           <Field label="Chat">
-            <div className="flex min-w-0 items-center gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 sm:flex-nowrap">
               {agentChip}
               <SelectMenu
                 value={eachRun}
