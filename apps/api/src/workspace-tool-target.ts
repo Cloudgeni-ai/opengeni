@@ -30,6 +30,8 @@ import {
 import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  hasIntegrationAdminPermission,
+  hasPermission,
   isVerifiedDelegatedHumanAuthorization,
   withSiteSessionOrigin,
   siteViewerForGrant,
@@ -1071,7 +1073,14 @@ export async function describeWorkspaceSiteToolConsent(
     ),
     selected: choices.selected,
     review,
-    connect: choices.connect,
+    // The consent answer's connect contract: the connector, not how it signs in.
+    connect: choices.connect
+      ? {
+          capabilityId: choices.connect.capabilityId,
+          name: choices.connect.name,
+          providerDomain: choices.connect.providerDomain,
+        }
+      : null,
   });
 }
 
@@ -1219,6 +1228,12 @@ export async function describeWorkspaceSiteToolSetup(
   // The console's address, as other console links read it: the public base
   // serves the console unless OPENGENI_WEB_BASE_URL names another origin.
   const base = (deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl ?? "").replace(/\/+$/u, "");
+  // A connector that takes an API key is connected once for the workspace,
+  // with a shared key from a vault: workspace admins add it, others ask one.
+  const mayAddSharedKey =
+    hasIntegrationAdminPermission(grant) &&
+    hasPermission(grant.permissions, "connections:write", grant.permissionMode) &&
+    hasPermission(grant.permissions, "secrets:use", grant.permissionMode);
   const items = new Map<string, ToolGatewaySiteSetupItem>();
   for (const need of needs) {
     if (!need.capabilityId) continue;
@@ -1237,9 +1252,12 @@ export async function describeWorkspaceSiteToolSetup(
       connectionId: need.connectionId,
       account: need.account,
       shared: need.shared,
+      ...(need.apiKey && need.action === "connect"
+        ? { sharedKey: mayAddSharedKey ? ("add" as const) : ("ask_admin" as const) }
+        : {}),
       tools: [need.identity],
       openUrl:
-        published && base
+        published && base && !(need.apiKey && need.action === "connect" && !mayAddSharedKey)
           ? `${base}/workspaces/${encodeURIComponent(grant.workspaceId)}/sites/${encodeURIComponent(
               request.siteArtifactId,
             )}?connect=${encodeURIComponent(itemKey)}`
@@ -1278,6 +1296,8 @@ type SiteToolSetupNeed = {
   account: string | null;
   shared: boolean;
   identity: ToolGatewayIdentity;
+  /** The connector takes an API key rather than a sign-in. */
+  apiKey?: boolean;
 };
 
 async function siteToolReadiness(
@@ -1381,6 +1401,7 @@ async function siteToolReadiness(
         account: stale?.account ?? null,
         shared: stale?.shared ?? false,
         identity: routed.declaredIdentity,
+        ...(routed.connect.apiKey ? { apiKey: true } : {}),
       });
       if (stale)
         tools.push(

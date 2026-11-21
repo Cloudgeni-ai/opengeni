@@ -62,6 +62,12 @@ in the automation's run history with its status, error and a `syncSummary`
   person's own account, else that person's own account of the connector
   (`resolveAppSyncTool`, built on `connectorToolIdentity` in
   `site-tool-routing.ts`). A tool without accounts runs as itself.
+- **Shared service connections.** A shared sync can run on a tool connected
+  once for the workspace with a shared key from a vault
+  ([Shared service connections](secrets.md#shared-service-connections)): it is
+  a workspace-shared account, so an owner without an account of their own uses
+  it, and the key is read from the vault only for each call. Personal syncs
+  still need each person's own account.
 
 ### Reading records
 

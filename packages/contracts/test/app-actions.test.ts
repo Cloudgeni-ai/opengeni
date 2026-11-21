@@ -661,6 +661,21 @@ test("secret inputs are only the filled request fields an action marks as secret
   expect(
     appActionCallSecretInputs({ id: "connectClaudeSubscriptionSetupToken", body: { token: "x" } }),
   ).toEqual(["x"]);
+  // A connect attempt's headers keep reference text: a shared key is stored
+  // as the reference and read from the vault only at call time.
+  expect(
+    appActionCallSecretInputs({
+      id: "advanceConnectAttempt",
+      body: {
+        expectedRevision: 1,
+        idempotencyKey: "k",
+        action: {
+          type: "credentials",
+          values: { mcpUrl: "https://x.test/mcp", headers: '{"Authorization":"Bearer ref"}' },
+        },
+      },
+    }),
+  ).toEqual([]);
   // Only creating or updating a vault item keeps its body in the vault.
   expect(
     appActionCallStoresVaultItem({ id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items" }),

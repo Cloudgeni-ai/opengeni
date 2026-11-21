@@ -2740,6 +2740,58 @@ describe("Site tool readiness and typed failures", () => {
     ).not.toBe(siteToolSetupKey({ action: "connect", capabilityId: "c", connectionId: "x" }));
   });
 
+  test("an API-key connector offers admins a shared key and tells others to ask one", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.foreign];
+      const apiKeyConnector = {
+        readReconnect: async () => [],
+        readAccounts: async (...args: Parameters<typeof readSiteToolAccountInventory>) => {
+          const inventory = await readSiteToolAccountInventory(...args);
+          return {
+            ...inventory,
+            canonical: new Map(
+              [...inventory.canonical].map(([id, connect]) => [
+                id,
+                { ...connect, capabilityId: "capability-grafana", apiKey: true as const },
+              ]),
+            ),
+          };
+        },
+      };
+      const setup = async (permissions: string[]) => {
+        const authorization = targetAuthorization();
+        authorization.grant = {
+          ...authorization.grant,
+          permissions: permissions as AccessGrant["permissions"],
+        };
+        return (
+          await describeWorkspaceSiteToolSetup(
+            f.deps,
+            authorization,
+            site,
+            targetOptions({ readSiteVersion: siteVersion([canonical]), ...apiKeyConnector }),
+          )
+        ).items;
+      };
+      const [member] = await setup(["workspace:read", "connections:write"]);
+      expect(member).toMatchObject({ action: "connect", sharedKey: "ask_admin", openUrl: null });
+      const [admin] = await setup([
+        "workspace:read",
+        "capabilities:manage",
+        "connections:write",
+        "secrets:use",
+      ]);
+      expect(admin).toMatchObject({ action: "connect", sharedKey: "add" });
+      // Once the workspace has a shared connection for it, nothing is left to do.
+      f.state.connections = [f.personal, f.foreign];
+      expect(await setup(["workspace:read"])).toEqual([]);
+      expect(f.grafana.requests).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
   test("an undeclared target is unavailable; a replaced Site version is refused", async () => {
     const f = createFixture();
     try {

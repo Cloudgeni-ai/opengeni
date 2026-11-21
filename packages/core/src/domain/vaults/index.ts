@@ -23,6 +23,13 @@ export {
   createSecretResolver,
   type SecretResolverOptions,
 } from "./secret-resolver";
+export {
+  resolveServiceConnectionHeaders,
+  serviceConnectionCredentialReferences,
+  ServiceConnectionCredentialError,
+  type ServiceConnectionCredentialDeps,
+  type ServiceConnectionHeaderInput,
+} from "./service-connection-credentials";
 export type { VaultRequestActor, VaultServiceDeps } from "./types";
 export { getVaultItemApproval, revokeVaultItemGrant, setVaultItemApproval } from "./use-approvals";
 export { createVaultService, vaultActorIsApiKey, type VaultService } from "./vault-service";

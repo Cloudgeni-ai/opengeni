@@ -970,6 +970,38 @@ test("each person's run uses their own account, and a new owner's shared sync us
   expect(bobSync.lastRun.error).toContain("your own account");
 });
 
+test("a shared sync runs on the workspace's shared service connection", async () => {
+  // An API-key connector connected once for the workspace with a shared key
+  // from a vault (docs/secrets.md): the owner has no account of their own.
+  const f = await fixture();
+  inventories(f, { [f.owner.subjectId]: [{ serverId: "account-workspace", shared: true }] });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool: { serverId: "orders", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const fake = fakeTool(() => [{ id: "1" }]);
+  const served: string[] = [];
+  const run = await runAppSyncNow(
+    f.deps,
+    f.owner.grant,
+    f.siteId,
+    String(created.json.id),
+    async (input) => {
+      served.push(input.identity.serverId);
+      return await fake.callTool(input);
+    },
+  );
+  expect(served).toEqual(["account-workspace"]);
+  expect(run.lastRun.status).toBe("succeeded");
+});
+
 test("an exported sync runs on the installer's own account in another workspace", async () => {
   const author = await fixture();
   inventories(author, { [author.owner.subjectId]: [{ serverId: "account-author" }] });

@@ -67,6 +67,7 @@ import type {
 export type { SiteHttpRequest } from "./site-http";
 export {
   siteConnectCardDismissals,
+  siteConnectCardItemActionable,
   siteConnectCardLabel,
   siteConnectionStatus,
   type OpenGeniSiteConnectionNeed,

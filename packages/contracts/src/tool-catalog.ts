@@ -823,6 +823,15 @@ export const ToolGatewaySiteSetupAction = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type ToolGatewaySiteSetupAction = z.infer<typeof ToolGatewaySiteSetupAction>;
+export const ToolGatewaySiteSetupSharedKey = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // The viewer is a workspace admin: they add one shared key from a vault.
+    "add",
+    // Someone else: a workspace admin has to add the key.
+    "ask_admin",
+  ]),
+);
+export type ToolGatewaySiteSetupSharedKey = z.infer<typeof ToolGatewaySiteSetupSharedKey>;
 export const ToolGatewaySiteSetupItem = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -839,6 +848,12 @@ export const ToolGatewaySiteSetupItem = /* @__PURE__ */ defineSchema(() =>
       account: primitives.string.max(320).nullable(),
       /** The account is shared with the workspace rather than the viewer's own. */
       shared: z.boolean(),
+      /**
+       * Set on `connect` for a connector that takes an API key rather than a
+       * sign-in: the workspace connects it once, with a shared key from a
+       * vault (a shared service connection), instead of each person.
+       */
+      sharedKey: ToolGatewaySiteSetupSharedKey.optional(),
       /** The declared tools that wait on it. */
       tools: z.array(ToolGatewayIdentity).max(SITE_READINESS_TARGETS_MAX),
       /**

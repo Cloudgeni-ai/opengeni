@@ -43,6 +43,7 @@ import {
 export {
   isOpenGeniSiteConnectionStatus,
   siteConnectCardDismissals,
+  siteConnectCardItemActionable,
   siteConnectCardLabel,
   siteConnectionStatus,
   SITE_CONNECT_CARD_DISMISSED_PREFIX,

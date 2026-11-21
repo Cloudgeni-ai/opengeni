@@ -29,6 +29,9 @@ import {
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   connectorProviderDomain,
+  credentialHeaderReferences,
+  credentialHeadersHaveSecretReferences,
+  VAULT_CREDENTIAL_SOURCE,
 } from "@opengeni/contracts";
 import {
   CORE_INTEGRATION_DEFINITIONS,
@@ -69,9 +72,12 @@ import {
   workspaceSettingsAuthorized,
   nangoBackendsFor,
   projectConnectionsForBackends,
+  resolveServiceConnectionHeaders,
+  ServiceConnectionCredentialError,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
+import { vaultProviderRegistryFor } from "./vault-providers";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import { prepareFikenTokenInstall, startFikenOAuth } from "../integrations/fiken";
@@ -1064,12 +1070,69 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       const encryptionKey = requireEnvironmentEncryption(deps.settings);
       const mcpUrl = destination.toString();
+      // A shared service connection: header values that are vault references
+      // are stored as the references, and the server reads the values only
+      // when it calls the tool. Only a connection shared with the workspace
+      // may hold one; it resolves with the workspace's own vault reach.
+      const vaultReferences = credentialHeadersHaveSecretReferences(credentialHeaders);
+      let references: string[] = [];
+      let requestHeaders = credentialHeaders;
+      if (vaultReferences) {
+        if (before.ownership !== "workspace")
+          throw new HTTPException(422, {
+            message:
+              "A key from a vault is for a connection shared with the workspace. Share the connection, or enter the key itself.",
+          });
+        if (
+          !hasIntegrationAdminPermission(actor.grant) ||
+          !hasPermission(actor.grant.permissions, "secrets:use", actor.grant.permissionMode)
+        )
+          throw new HTTPException(403, {
+            message: "Only a workspace admin can add a shared key from a vault.",
+          });
+        try {
+          references = credentialHeaderReferences(credentialHeaders);
+        } catch {
+          throw new HTTPException(422, { message: "Fix the vault reference in the headers." });
+        }
+        try {
+          // Checked now as the connection will read it, so a key in someone's
+          // Only me vault or a missing item fails here, not on first use.
+          requestHeaders = await resolveServiceConnectionHeaders(
+            {
+              db: deps.db,
+              settings: deps.settings,
+              providers: (vaultWorkspaceId) =>
+                vaultProviderRegistryFor(deps, { workspaceId: vaultWorkspaceId, subjectId: null }),
+            },
+            {
+              connection: {
+                id: null,
+                accountId: actor.grant.accountId,
+                workspaceId,
+                providerDomain: destination.hostname,
+              },
+              headers: credentialHeaders,
+              serverId: "connection_setup",
+              toolName: "connection_setup",
+              destinationUrl: mcpUrl,
+            },
+          );
+        } catch (error) {
+          throw new HTTPException(422, {
+            message:
+              error instanceof ServiceConnectionCredentialError
+                ? error.message
+                : "Couldn't read the key from the vault.",
+          });
+        }
+      }
       // An Opengeni API key reads its organization: EU-only content stays in
       // EU-only workspaces.
       await assertMcpCredentialContentFlowAllowed(deps.db, {
         target: { accountId: actor.grant.accountId, workspaceId: actor.grant.workspaceId },
         url: mcpUrl,
-        headers: credentialHeaders,
+        headers: requestHeaders,
       });
       return c.json(
         await executeConnectOperation({
@@ -1096,7 +1159,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   settings: deps.settings,
                   setup: attempt.mcpSetup,
                   ownership: attempt.ownership,
-                  headers: credentialHeaders,
+                  headers: requestHeaders,
                   ...(deps.mcpCapabilityProbe ? { probe: deps.mcpCapabilityProbe } : {}),
                   logoStorage: deps.objectStorage,
                 });
@@ -1142,7 +1205,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   throw new HTTPException(409, {
                     message: "MCP account changed; reload before replacing credentials",
                   });
-                const metadata = { connectAdapter: current.providerId, mcpUrl, resource: mcpUrl };
+                const metadata = {
+                  connectAdapter: current.providerId,
+                  mcpUrl,
+                  resource: mcpUrl,
+                  // References only, never a value: shown to admins as the key it uses.
+                  ...(vaultReferences
+                    ? {
+                        credentialSource: VAULT_CREDENTIAL_SOURCE,
+                        credentialReferences: references,
+                      }
+                    : {}),
+                };
                 const subjectId = current.ownership === "personal" ? scope.subjectId : null;
                 const connection = existing
                   ? await updateConnection(tx, {
