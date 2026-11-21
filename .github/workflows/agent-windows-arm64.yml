@@ -2,6 +2,8 @@ name: Build Windows ARM64 agent
 
 # Safe to dispatch by itself: this builds and tests, but cannot sign or publish.
 on:
+  push:
+    branches: [verify/windows-arm64-agent-release]
   workflow_call:
     outputs:
       artifact-id:
