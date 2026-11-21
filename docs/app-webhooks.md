@@ -107,12 +107,6 @@ Managers of the app (`artifacts:publish`), never from inside the app's frame:
 (operation `site.notify`, `POST …/published-artifacts/current/notify`; SDK
 `notifyFromApp` from a server). Answers `{ key, delivered, skipped, overLimit }`.
 
-**Not enabled yet.** Every send currently answers 403 with `details.reason`
-`notify_not_available` and stores nothing (see Rollout below). Delivery
-starts once a follow-up migration grants the runtime role EXECUTE on
-`opengeni_private.deliver_app_notification_v1(uuid)`. Until then the
-bundled app-building Skill and the public docs don't mention it.
-
 - **Who sends.** Signed-in workspace members only, with live membership:
   guests and invited viewers who aren't members get 403 with `details.reason`
   `members_only`.
@@ -134,13 +128,11 @@ bundled app-building Skill and the public docs don't mention it.
   sender when it isn't the recipient, a link that opens the app at `path` in
   the console) and native push for new or reopened items under each device's
   `agent` rule. Rows older than a day are removed.
-- **Rollout.** The runtime role's EXECUTE on that routine is withheld
+- **Rollout.** 1543 withheld the runtime role's EXECUTE on that routine
   (`DEFERRED_RUNTIME_PRIVATE_ROUTINES`, as for migration 1503), because the
-  release before 1543 refuses an unknown trigger definer or a runtime grant
-  on an unknown definer. The follow-up grant migration can land once a
-  release with 1543 is the pinned previous release; it also removes the
-  `notify_not_available` refusal in `insertAppNotification` and adds
-  `site.notify` to the Skill and docs-site.
+  release before 1543 refuses a runtime grant on a definer it doesn't know;
+  1545 grants it. 1545 may deploy only once a release with 1543 is the pinned
+  previous production release.
 
 ## Self-hosting
 

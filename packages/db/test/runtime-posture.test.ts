@@ -4386,7 +4386,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sandbox_fleet_warm_boxes_v1()",
       "discard_refused_session_create_v1(uuid, uuid)",
       "sync_subscription_relogin_notice_v1(uuid)",
-      "deliver_app_notification_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

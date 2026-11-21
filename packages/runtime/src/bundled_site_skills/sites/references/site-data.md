@@ -208,6 +208,13 @@ through `onChange` like any other write. It writes on the saving person's
 authority: deliveries are refused once they can no longer manage the app,
 until a manager saves it again.
 
+**Notifications.** A page can notify signed-in members in their Opengeni
+inbox and phone: `await site.notify({ title, body?, to?, path?, key? })`.
+Without `to` it notifies the viewer; `to` is a member (email, id or name) who
+can open the app and allows it, or `"workspace"` (managers only). `path`
+opens the app there; the same `key` updates the earlier notification. Send
+only on a person's action or a real event, never in a loop.
+
 Agents and scheduled tasks use the tools: `opengeni__app_data_describe`,
 `app_data_query`, `app_data_write` (batches of up to 100), `app_data_import`
 and `app_data_export` (JSON or CSV), `app_data_reset` (needs

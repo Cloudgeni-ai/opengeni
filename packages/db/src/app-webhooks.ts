@@ -284,16 +284,8 @@ export async function insertAppNotification(
   scope: Scope,
   input: AppNotificationInsert,
   limits: AppNotificationLimits,
-): Promise<{ id: string } | { limited: "sender" | "workspace" } | { unavailable: true }> {
+): Promise<{ id: string } | { limited: "sender" | "workspace" }> {
   return await withRlsContext(db, scope, async (tx) => {
-    // Delivery runs once this role may execute it (granted a release after
-    // migration 1543); until then a send is refused rather than stored.
-    const [privilege] = await rawRows<{ allowed: boolean }>(
-      tx,
-      sql`select has_function_privilege(
-        'opengeni_private.deliver_app_notification_v1(uuid)', 'EXECUTE') as allowed`,
-    );
-    if (privilege?.allowed !== true) return { unavailable: true as const };
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`app-notify:${input.siteId}:${input.senderSubjectId}`}, 0))`,
     );

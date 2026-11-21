@@ -169,6 +169,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, only a status write by the tables' owner (the definer that records
  * a model request refused after refresh, and the migration's backfill) opens
  * or resolves a notice, and the person dismisses one left after a reconnect.
+ * 1543 withheld the app notification delivery and 1545 grants it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -182,7 +183,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sandbox_fleet_warm_boxes_v1()",
   "discard_refused_session_create_v1(uuid, uuid)",
   "sync_subscription_relogin_notice_v1(uuid)",
-  "deliver_app_notification_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -573,7 +573,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "stamp_subscription_connection_sign_in()",
   "subscription_connection_relogin_notice()",
   // Migration 1543: the app notification trigger (an invoker trigger that
-  // calls deliver_app_notification_v1 once the runtime may). Triggers fire
+  // calls deliver_app_notification_v1, granted by 1545). Triggers fire
   // without the inserting role holding EXECUTE.
   "deliver_app_notification()",
   "sync_usage_maintenance_due()",

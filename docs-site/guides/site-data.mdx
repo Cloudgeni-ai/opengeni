@@ -45,6 +45,10 @@ Agents use `app_data_describe`, `app_data_query`, `app_data_write`, `app_data_im
 
 Another service can send data into an app: ask the agent to add a webhook to a collection, and give the service the address and secret it shows (once). Each delivery adds or updates records, and automations and workspace webhooks hear about them like any other change. Self-hosted deployments need an API address the service can reach.
 
+## Notifications
+
+A page can notify workspace members in their inbox and on their phone: `await site.notify({ title, body, to, path, key })`. Without `to` it notifies the person using the app; `to` names a member who can open the app and allows notifications from others, or `"workspace"` for the app's managers. `path` opens the app at that page, and the same `key` updates an earlier notification instead of adding one. Each person can send 30 notifications per app in 10 minutes.
+
 ## Data syncs
 
 A data sync refills a collection, or one of the app's SQL tables, from a connected tool on a schedule or event, with no model run. Ask Opengeni to set one up (agents use the `app_sync_*` tools). A sync can page through results, and with `removeMissing` it deletes records it wrote that the tool no longer returns.

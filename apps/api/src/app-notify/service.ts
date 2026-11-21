@@ -209,11 +209,6 @@ export async function notifyFromApp(
       windowSeconds: APP_NOTIFY_WINDOW_SECONDS,
     },
   );
-  if ("unavailable" in inserted)
-    throw forbidden(
-      "Notifications from apps aren't available on this deployment yet.",
-      "notify_not_available",
-    );
   if ("limited" in inserted)
     throw new SiteDataError(
       "rate_limited",

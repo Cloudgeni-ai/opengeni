@@ -282,10 +282,9 @@ Operations:
     run and, for personal syncs, the viewer's own last run and opt-in
     ([app-sync.md](app-sync.md)).
 - `site.notify` (`POST /published-artifacts/current/notify`,
-  `site.notify({ title, body?, to?, path?, key? })`) is routed but not
-  enabled yet: it answers 403 with `details.reason` `notify_not_available`
-  until a follow-up migration grants delivery. Its checks and limits are in
-  [app-webhooks.md](app-webhooks.md#notifications-from-apps).
+  `site.notify({ title, body?, to?, path?, key? })`) notifies signed-in
+  workspace members in their inbox and on their phones. Its checks and limits
+  are in [app-webhooks.md](app-webhooks.md#notifications-from-apps).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable

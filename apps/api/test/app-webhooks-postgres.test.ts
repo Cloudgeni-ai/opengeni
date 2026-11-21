@@ -461,26 +461,13 @@ async function inbox(f: Fixture, subjectId: string) {
     where workspace_id = ${f.workspace.id} and recipient_subject_id = ${subjectId}`;
 }
 
-const deliverNotice = "opengeni_private.deliver_app_notification_v1(uuid)";
-
-test("site.notify is refused, storing nothing, until the runtime may deliver it", async () => {
-  // The runtime role's EXECUTE on delivery is withheld for one release (1543).
-  const f = await fixture();
-  const sent = await f.request(f.alice, "POST", `/${f.siteId}/notify`, { title: "Saved" });
-  expect(sent.status, JSON.stringify(sent.json)).toBe(403);
-  expect(sent.json.error.details.reason).toBe("notify_not_available");
-  const [stored] = await shared.admin<{ count: string }[]>`
-    select count(*)::text as count from app_notifications where site_id = ${f.siteId}`;
-  expect(stored!.count).toBe("0");
-});
-
 test("site.notify reaches the viewer, permitted members and, for managers, the workspace", async () => {
-  await shared.admin.unsafe(`grant execute on function ${deliverNotice} to opengeni_app`);
-  try {
-    await notifyCases();
-  } finally {
-    await shared.admin.unsafe(`revoke execute on function ${deliverNotice} from opengeni_app`);
-  }
+  // Migration 1545 grants the runtime role delivery; nothing here grants it.
+  const [privilege] = await shared.admin<{ allowed: boolean }[]>`
+    select has_function_privilege('opengeni_app',
+      'opengeni_private.deliver_app_notification_v1(uuid)', 'EXECUTE') as allowed`;
+  expect(privilege!.allowed).toBe(true);
+  await notifyCases();
 });
 
 async function notifyCases() {
