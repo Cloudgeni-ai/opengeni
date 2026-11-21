@@ -109,7 +109,7 @@ function itemDetail(item: ResolvedSidebarItem): string | null {
 }
 
 /** A group's name, edited in place: Enter or leaving the field saves, Escape cancels. */
-function RenameField({
+export function RenameField({
   label,
   onSave,
   onDone,
@@ -340,10 +340,13 @@ function useAgentOptions(workspaceId: string, enabled: boolean) {
     [],
   );
   const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (!enabled) return;
     let current = true;
     setLoading(true);
+    setError(null);
     void client
       .listAgents(workspaceId)
       .then((agents) => {
@@ -363,18 +366,20 @@ function useAgentOptions(workspaceId: string, enabled: boolean) {
           })),
         );
       })
-      .catch(() => undefined)
+      .catch((caught: unknown) => {
+        if (current) setError(userErrorText(caught));
+      })
       .finally(() => {
         if (current) setLoading(false);
       });
     return () => {
       current = false;
     };
-  }, [client, enabled, workspaceId]);
-  return { options, loading };
+  }, [attempt, client, enabled, workspaceId]);
+  return { options, loading, error, retry: () => setAttempt((value) => value + 1) };
 }
 
-function AddForm({
+export function AddForm({
   kind,
   workspaceId,
   groups,
@@ -471,7 +476,21 @@ function AddForm({
         </>
       ) : null}
       {kind === "agent" ? (
-        <Field label="Agent" error={agentError}>
+        <Field
+          label="Agent"
+          error={
+            agents.error ? (
+              <>
+                {`Couldn't load agents. ${agents.error} `}
+                <button type="button" className="og-link" onClick={agents.retry}>
+                  Try again
+                </button>
+              </>
+            ) : (
+              agentError
+            )
+          }
+        >
           <SelectMenu
             variant="combobox"
             options={agents.options}
@@ -480,7 +499,7 @@ function AddForm({
             placeholder="Choose an agent"
             searchPlaceholder="Search agents"
             searching={agents.loading}
-            emptyMessage="No agents found"
+            emptyMessage={agents.error ? "Couldn't load agents" : "No agents found"}
           />
         </Field>
       ) : null}

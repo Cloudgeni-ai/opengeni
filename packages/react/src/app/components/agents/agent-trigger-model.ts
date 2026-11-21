@@ -33,6 +33,7 @@ import {
 } from "../../../components/automations/automation-template-model";
 import {
   eventSourceChoiceOf,
+  eventSourceStatusBadge,
   eventSourceSubjectOfChoice,
   type EventSourceChoice,
   type EventSourceChoiceMeta,
@@ -86,6 +87,11 @@ export interface AgentTriggerOption {
   subject?: EventSourceLogoSubject | undefined;
   /** For a kind not added yet: what adding it takes. */
   setup?: AgentTriggerSetup | undefined;
+  /**
+   * A source that is off or needs attention: shown so its kind isn't offered
+   * again as new, but it can't be picked. Says why.
+   */
+  unavailable?: string | undefined;
 }
 
 export function agentTriggerPickKey(pick: AgentTriggerPick): string {
@@ -108,9 +114,10 @@ export function agentTriggerNewSetup(
  * Everything that can start the agent, from the catalog "Add a source"
  * offers: a schedule, then each of the person's sources, then each kind they
  * can still add. A kind they already have is offered once, as their source;
- * webhooks, app webhooks and MCP servers can be added again. Nothing here
- * names a kind, so a kind added to the catalog, or a source of a kind this
- * client doesn't know, shows up without changes.
+ * webhooks, app webhooks and MCP servers can be added again. A source that is
+ * off or blocked shows as unavailable, with why, rather than hiding its kind.
+ * Nothing here names a kind, so a kind added to the catalog, or a source of
+ * a kind this client doesn't know, shows up without changes.
  */
 export function agentTriggerOptions(
   t: OpenGeniText,
@@ -129,16 +136,20 @@ export function agentTriggerOptions(
   if (!input.eventTriggers) return [schedule];
   const sources = input.sources ?? [];
   const have = new Set(sources.map((source) => eventSourceChoiceOf(source)));
-  const existing = sources
-    .filter((source) => source.status === "active")
-    .map(
-      (source): AgentTriggerOption => ({
+  // Active sources first; an inactive one still stands for its kind.
+  const existing = [...sources]
+    .sort((a, b) => Number(a.status !== "active") - Number(b.status !== "active"))
+    .map((source): AgentTriggerOption => {
+      const option: AgentTriggerOption = {
         key: agentTriggerPickKey({ kind: "source", sourceId: source.id }),
         pick: { kind: "source", sourceId: source.id },
         label: source.name,
         subject: source,
-      }),
-    );
+      };
+      if (source.status === "active") return option;
+      const badge = eventSourceStatusBadge(t, source);
+      return { ...option, unavailable: badge?.reason ?? badge?.label ?? "Unavailable" };
+    });
   const fresh = input.choices
     .filter((meta) => meta.setup === "paste" || meta.choice === "mcp" || !have.has(meta.choice))
     .map((meta): AgentTriggerOption => {
@@ -299,14 +310,6 @@ export type AgentTriggerChat =
   | { mode: "existing_session"; sessionId: string };
 
 export const AGENT_TRIGGER_NEW_CHAT: AgentTriggerChat = { mode: "new_session_per_run" };
-
-/** The chats a trigger can continue: only chats started with this agent. */
-export function agentTriggerChats<T extends { agentId?: string | null | undefined }>(
-  agent: Pick<Agent, "id">,
-  sessions: readonly T[],
-): T[] {
-  return sessions.filter((session) => session.agentId === agent.id);
-}
 
 /** What the dialog says each run does, for the chat picked. */
 export function agentTriggerChatWords(agent: Pick<Agent, "name">, chat: AgentTriggerChat): string {

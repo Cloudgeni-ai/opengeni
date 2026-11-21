@@ -183,12 +183,16 @@ function createFixture() {
       }
       return response();
     },
-    listAgents: async () =>
-      AGENTS.map((agent) => ({
+    listAgents: async () => {
+      // `&agents=error`: the agent list can't be read.
+      if (new URLSearchParams(window.location.search).get("agents") === "error")
+        throw new Error("Service unavailable.");
+      return AGENTS.map((agent) => ({
         id: agent.id,
         name: agent.name,
         avatar: agent.avatar,
-      })),
+      }));
+    },
     listArtifactCatalog: async () => ({
       items: APPS.map((app) => ({ id: app.appId, title: app.title })),
     }),

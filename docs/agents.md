@@ -535,7 +535,8 @@ whole.
   picker is built from the source catalog the Add a source page uses
   (`eventSourceChoices`), so it names no kind itself: **Schedule**, each of
   the person's event sources (and ready ones they can use without adding,
-  such as This workspace), then every kind they can still add, including
+  such as This workspace; one that is off or needs attention shows greyed
+  with why and keeps its kind from being offered again), then every kind they can still add, including
   **Create a webhook**; each shows its app's logo, or its glyph or initial.
   A kind added to the catalog, or a source of a kind the client doesn't
   know, shows up with no change here. Picking a source shows its events and
@@ -558,9 +559,10 @@ whole.
   Only me agent, otherwise `workspace` (never the organization's default
   for new schedules). The server's rules for who may create a shared
   automation still apply; a refused one says so in the dialog. **Open full
-  form** opens the automation form with `?agent=<id>&returnTo=agent` for
-  every other setting; its back link, Cancel and Save return to the
-  agent's page.
+  form** opens the automation form with `?agent=<id>&returnTo=agent`, plus
+  `?source=<id>` for the source picked, for every other setting (the note
+  and chat choice aren't carried over); its back link, Cancel and Save
+  return to the agent's page.
   The list comes from the server
   (`GET /v1/workspaces/:id/scheduled-tasks?agentId=<id>`, SDK
   `listScheduledTasks({ agentId })`), which filters on

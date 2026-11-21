@@ -4,6 +4,7 @@ import { OpenGeniProvider } from "@opengeni/react";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { AgentStartsWhen } from "@opengeni/react/app/components/agents/agent-setup-sections";
 import { Button } from "@opengeni/react/ui/button";
+import { EventSourceNewPage } from "../../../components/schedules/event-source-new-page";
 import { ScheduleFormPage } from "../../../components/schedules/schedule-form-page";
 import { KitCanvas, KitSection } from "../kit";
 
@@ -17,11 +18,13 @@ import { KitCanvas, KitSection } from "../kit";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 
-type State = "connected" | "no-source" | "not-allowed" | "before";
+type State = "connected" | "no-source" | "paused" | "chats-error" | "not-allowed" | "before";
 
 const STATES: { value: State; label: string }[] = [
   { value: "connected", label: "GitHub connected" },
   { value: "no-source", label: "GitHub not connected" },
+  { value: "paused", label: "GitHub source off" },
+  { value: "chats-error", label: "Chats can't load" },
   { value: "not-allowed", label: "Shared not allowed" },
   { value: "before", label: "Before: full form" },
 ];
@@ -116,11 +119,24 @@ const REPOSITORIES = ["platform/api", "platform/web"].map((fullName, index) => (
   installationId: 77,
 }));
 
+const AGENT_CHATS = [
+  { id: "55555555-5555-4555-8555-555555555555", title: "Review queue", agentId: AGENT.id },
+  { id: "66666666-6666-4666-8666-666666666666", title: "Release review", agentId: AGENT.id },
+];
+
 function fixtureClient(state: State) {
   const tasks: unknown[] = [];
   const client = {
     listScheduledTasks: async () => tasks,
-    listEventSources: async () => (state === "no-source" ? [] : [GITHUB_SOURCE, LINEAR_SOURCE]),
+    listEventSources: async () =>
+      state === "no-source"
+        ? []
+        : state === "paused"
+          ? [
+              { ...GITHUB_SOURCE, status: "disabled", statusReasonCode: "turned_off" },
+              LINEAR_SOURCE,
+            ]
+          : [GITHUB_SOURCE, LINEAR_SOURCE],
     listReadyEventSources: async () => [],
     listEventSourceTypes: async () => EVENT_TYPES,
     getAgent: async () => AGENT,
@@ -130,10 +146,13 @@ function fixtureClient(state: State) {
       version: 1,
       ownerKey: `workspace:${WORKSPACE_ID}`,
     }),
-    listSessions: async () => [
-      { id: "55555555-5555-4555-8555-555555555555", title: "Review queue", agentId: AGENT.id },
-      { id: "66666666-6666-4666-8666-666666666666", title: "Release review", agentId: AGENT.id },
-    ],
+    listSessions: async () => AGENT_CHATS,
+    listSessionPage: async () => {
+      if (state === "chats-error") {
+        throw new OpenGeniApiError(503, JSON.stringify({ message: "Service unavailable" }), {});
+      }
+      return { pinned: [], sessions: AGENT_CHATS, nextCursor: null };
+    },
     getSessionTenancyCreateCapabilities: async () => ({
       activated: true,
       canCreatePrivate: true,
@@ -158,6 +177,7 @@ function fixtureClient(state: State) {
       };
     },
     listAgentTemplates: async () => [TEMPLATE],
+    getGitHubApp: async () => ({ status: state === "no-source" ? "unbound" : "bound" }),
     catalogAssetUrl: (path: string) => path,
     createScheduledTask: async (_workspaceId: string, request: Record<string, unknown>) => {
       if (state === "not-allowed") {
@@ -210,7 +230,12 @@ function Provider({ state, children }: { state: State; children: ReactNode }) {
       workspaceCapabilityCatalog: [],
       accessContext: {
         subjectId: "kit-person",
-        workspaceGrants: [{ workspaceId: WORKSPACE_ID, permissions: ["schedules:manage"] }],
+        workspaceGrants: [
+          {
+            workspaceId: WORKSPACE_ID,
+            permissions: ["schedules:manage", "scheduled_tasks:manage"],
+          },
+        ],
         accountGrants: [],
       },
       selectedCapabilityToolIds: new Set<string>(),
@@ -257,6 +282,12 @@ export default function AgentTriggerSection() {
             ) : (
               <AgentStartsWhen agent={AGENT} workspaceId={WORKSPACE_ID} />
             )}
+            {state === "no-source" ? (
+              // The Add a source page at GitHub, as Add trigger's Add a source opens it.
+              <div data-kit-add-github className="mt-10 border-t border-border pt-6">
+                <EventSourceNewPage workspaceId={WORKSPACE_ID} kind="github" />
+              </div>
+            ) : null}
           </Provider>
         </div>
       </KitCanvas>

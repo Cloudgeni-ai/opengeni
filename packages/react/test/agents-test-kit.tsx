@@ -101,6 +101,12 @@ export function fakeAgentsClient(
     createTaskError?: unknown;
     /** Chats in the workspace, with the agent each was started with. */
     sessions?: { id: string; title: string; agentId?: string | null }[] | undefined;
+    /** Chats per page of the session list (default 100). */
+    sessionsPageSize?: number | undefined;
+    /** Makes reading the session list fail with this error. */
+    sessionsError?: unknown;
+    /** Makes createEventSource fail with this error. */
+    createSourceError?: unknown;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
@@ -224,7 +230,21 @@ export function fakeAgentsClient(
     },
     async listSessions(workspaceId: string) {
       calls.push(["listSessions", workspaceId]);
+      if (options.sessionsError) throw options.sessionsError;
       return options.sessions ?? [];
+    },
+    async listSessionPage(workspaceId: string, query: { cursor?: string; limit?: number }) {
+      calls.push(["listSessionPage", workspaceId, query.cursor ?? null]);
+      if (options.sessionsError) throw options.sessionsError;
+      const all = options.sessions ?? [];
+      const size = Math.min(options.sessionsPageSize ?? 100, query.limit ?? 100);
+      const start = Number(query.cursor ?? 0);
+      const end = start + size;
+      return {
+        pinned: [],
+        sessions: all.slice(start, end),
+        nextCursor: end < all.length ? String(end) : null,
+      };
     },
     async listEventSourceTypes(workspaceId: string, sourceId: string) {
       calls.push(["listEventSourceTypes", workspaceId, sourceId]);
@@ -232,6 +252,7 @@ export function fakeAgentsClient(
     },
     async createEventSource(workspaceId: string, request: Record<string, unknown>) {
       calls.push(["createEventSource", workspaceId, request]);
+      if (options.createSourceError) throw options.createSourceError;
       const id = uuid();
       const kind = String(request.kind);
       return {

@@ -138,7 +138,7 @@ The SDK has `client.getSidebarLayout(workspaceId)` and
 `client.updateSidebarLayout(workspaceId, request)`. Both routes are app
 actions, so agents with app actions can call them as the person.
 
-An App package installer (or any integration) adds an App to the default with
+An app package installer (or any integration) adds an app to the default with
 one call:
 
 ```json
@@ -167,8 +167,8 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   pointer is over it (always on touch screens). Both, the account menu's
   Customize sidebar and settings search ("sidebar") open the Sidebar page
   (`/workspaces/<id>/sidebar`): Yours, and Workspace default for admins. Its
-  Add menu adds an App, an Agent (picked from the agents you can see), a
-  Link, a Group or a List; a group's menu has Rename (inline: Enter or
+  **Add** menu adds an **App**, an **Agent** (picked from the agents you can
+  see), a **Link**, a **Group** or a **List**; a group's menu has Rename (inline: Enter or
   leaving the field saves, Escape cancels) for your own groups, and for the
   default's groups under Workspace default. Groups remember open or closed
   per browser. The icon-only rail

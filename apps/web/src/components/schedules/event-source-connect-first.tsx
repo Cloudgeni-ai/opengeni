@@ -1,20 +1,20 @@
 /**
  * A GitHub source needs this workspace's GitHub connection (the GitHub App
  * installed on an account or organization): it receives the App's events.
- * Without one, adding the source points at the existing Connect flow instead
- * of failing with "Connect GitHub to this workspace first".
+ * Without one, the Add GitHub page says so and its one action is Connect
+ * GitHub (the existing Connect flow) instead of failing with "Connect GitHub
+ * to this workspace first".
  */
 import { useEffect, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { Button } from "@opengeni/react/ui/button";
+import { githubConnectedOf, githubConnectHref } from "@opengeni/react/app/lib/github-connect";
 import { Notice } from "@opengeni/react/ui/notice";
 import type { GitHubAppInfo } from "@opengeni/sdk";
 
 /** Where Connected tools opens the GitHub connection. */
 export function connectGitHubHref(workspaceId: string): string {
-  return `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`;
+  return githubConnectHref(workspaceId);
 }
 
 /**
@@ -22,7 +22,7 @@ export function connectGitHubHref(workspaceId: string): string {
  * when this server has no GitHub App ("disabled"), which the server explains.
  */
 export function githubConnectedFromStatus(status: GitHubAppInfo["status"]): boolean | null {
-  return status === "disabled" ? null : status === "bound";
+  return githubConnectedOf(status);
 }
 
 /** True when GitHub is connected here, false when it isn't, null while unknown or unreadable. */
@@ -44,22 +44,7 @@ export function useGitHubConnected(workspaceId: string, enabled: boolean): boole
   return enabled ? connected : null;
 }
 
-export function ConnectGitHubFirst({ workspaceId }: { workspaceId: string }) {
-  const navigate = useNavigate();
-  return (
-    <Notice
-      action={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => void navigate({ href: connectGitHubHref(workspaceId) })}
-        >
-          Connect GitHub
-        </Button>
-      }
-    >
-      GitHub isn't connected to this workspace yet.
-    </Notice>
-  );
+/** Why GitHub can't be added yet; the page's own action is Connect GitHub. */
+export function ConnectGitHubFirst() {
+  return <Notice>GitHub isn't connected to this workspace yet.</Notice>;
 }
