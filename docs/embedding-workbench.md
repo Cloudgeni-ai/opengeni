@@ -227,7 +227,13 @@ such as the chat's id (`SandboxWorkspace` passes its `sessionId`). Tabs without
 `optional` always show, so embedders passing their own tabs keep today's
 behaviour. `WorkspaceDock`'s `essentials` prop also moves the expand and hide
 buttons and the header accessory into that menu (`SandboxWorkspace` sets it
-for `tabVisibility="relevant"`). Visited panels stay mounted, so switching back
+for `tabVisibility="relevant"`); `headerAccessoryPinned` keeps the accessory in
+the header (`SandboxWorkspace` pins the machine chip while it isn't live).
+With `landing`, a dock whose tabs are all optional and unopened shows one line
+and a few tabs to open instead of an empty tab; `onStripEmptied` fires when the
+person closes the last tab. `SandboxWorkspace` uses both for
+`tabVisibility="relevant"`, and `openTabRequest.expand: false` selects a tab
+without opening a closed dock. Visited panels stay mounted, so switching back
 keeps their scroll and selection.
 
 `WorkbenchChanges` takes an optional `comparison` (`{ value, options, onChange }`)
