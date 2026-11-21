@@ -10,11 +10,11 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "0148be10941e38465a0abf0493f3ee9c38b1410682f322fe108948966ce3481a"
+      "sha256": "507d3feb7c696841bcfd3515b94e23aa0ca186296bb933992032143e786d1510"
     },
     {
       "path": ".github/workflows/agent-windows-arm64.yml",
-      "sha256": "8fbda640c15734baaf23ad10a7d61e45df5030d110429351645784c0ffbf2726"
+      "sha256": "9cf56550fe86632a51aa2d1b5a73ee9802cc08bd277a85e0b0359b8d17d8ff79"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",

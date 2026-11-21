@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Arch, ControlRequest, ControlResponse, Hello, Os } from "../packages/agent-proto/src";
-import { connect } from "../packages/events/src";
+
+// Use the workspace's pinned NATS client without loading the event bus or its database.
+const { connect } = createRequire(new URL("../packages/events/package.json", import.meta.url))(
+  "nats",
+) as Pick<typeof import("../packages/events/src"), "connect">;
 
 assert.equal(process.platform, "win32");
 assert.equal(process.arch, "arm64");
