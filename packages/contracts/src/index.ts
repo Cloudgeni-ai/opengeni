@@ -36,6 +36,8 @@ import { CONNECTION_LABEL_MAX_LENGTH } from "./connection-account-label";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
+export * from "./session-links";
+import { SessionWaitingOn } from "./session-links";
 export * from "./turn-serving-policy";
 import {
   AzureOpenAIEndpoint,
@@ -1101,6 +1103,9 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
  */
 export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
+  "set_waiting_on",
+  "session_links_add",
+  "session_links_remove",
   "notify_user",
   "notification_withdraw",
   "inbox_tidy",
@@ -17552,6 +17557,9 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
       })
       .nullable()
       .optional(),
+    /** Who the chat waits on: the agent said so, or an open question or
+     * approval. Omitted by older servers. See ./session-links.ts. */
+    waitingOn: SessionWaitingOn.nullable().optional(),
     lastSequence: primitives.nonnegativeInteger,
     // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
     // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -17821,6 +17829,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     rootSessionId: true,
     effectiveControl: true,
     inputWait: true,
+    waitingOn: true,
     lastSequence: true,
     pinned: true,
     pinnedAt: true,
@@ -18084,6 +18093,10 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "session.title_set",
     // A chat's description or avatar changed (display metadata only).
     "session.profile_set",
+    // Who the chat waits on, or that it no longer waits (./session-links.ts).
+    "session.waiting_on.changed",
+    // The chat's Linked items changed; the payload carries the whole list.
+    "session.links.changed",
     "session.model_settings.updated",
     // An authorized person or host changed the task root's usage limit.
     "session.usage_limit.updated",

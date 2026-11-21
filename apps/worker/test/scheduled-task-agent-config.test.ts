@@ -281,7 +281,10 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         "inbox_tidy",
         "notification_withdraw",
         "notify_user",
+        "session_links_add",
+        "session_links_remove",
         "set_session_title",
+        "set_waiting_on",
         "wait_for_input",
       ].filter((tool) => DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool as never)),
     );

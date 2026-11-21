@@ -15,7 +15,7 @@ export function sessionStatusLabel(status: SessionDisplayStatus): string {
     case "recovering":
       return "Recovering";
     case "running":
-      return "Running";
+      return "Working";
     case "queued":
       return "Queued";
     case "failed":
@@ -25,7 +25,7 @@ export function sessionStatusLabel(status: SessionDisplayStatus): string {
     case "archived":
       return "Archived";
     default:
-      return "Idle";
+      return "Done";
   }
 }
 
@@ -45,8 +45,12 @@ export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact =
   return compact ? `Waiting · ${time}` : `Waiting · recheck at ${time}`;
 }
 
-/** Honest user-facing state: lifecycle first, then the effective pause policy. */
-export function sessionStateLabel(session: Session): string {
+/**
+ * Honest user-facing state: lifecycle first, then the effective pause policy.
+ * `waitingOnLabel` ("Waiting on Ana", see ../lib/waiting-on.ts) replaces the
+ * lifecycle while the chat waits on a person.
+ */
+export function sessionStateLabel(session: Session, waitingOnLabel?: string | null): string {
   // Archiving stops (and so pauses) the chat's work: it reads as archived,
   // never as "Cancelled · Paused here".
   if (sessionDisplayStatus(session) === "archived") return sessionStatusLabel("archived");
@@ -75,9 +79,13 @@ export function sessionStateLabel(session: Session): string {
       : `${commandActivity.count} background commands running`;
   }
   const waiting = sessionInputWait(session);
-  const lifecycle = waiting
-    ? sessionWaitLabel(waiting.deadlineAt, Date.now(), true)
-    : sessionStatusLabel(sessionDisplayStatus(session));
+  const display = sessionDisplayStatus(session);
+  const lifecycle =
+    waitingOnLabel && (display === "idle" || display === "requires_action")
+      ? waitingOnLabel
+      : waiting
+        ? sessionWaitLabel(waiting.deadlineAt, Date.now(), true)
+        : sessionStatusLabel(display);
   const attentionOrTerminal =
     session.status === "requires_action" ||
     session.status === "failed" ||

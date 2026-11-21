@@ -6261,6 +6261,14 @@ export function sessionAuthorizationOperationForHttp(
     if (verb === "PUT" || verb === "DELETE") return "session.share_link.write";
     return null;
   }
+  // The Linked panel: reading it is a read; adding or removing a link is a
+  // control write, like the agent's own link tools.
+  if (suffix === "/links") {
+    if (verb === "GET") return "session.read";
+    if (verb === "POST") return "session.control";
+    return null;
+  }
+  if (/^\/links\/[^/]+$/.test(suffix) && verb === "DELETE") return "session.control";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   // Stands in for the person's own next message, so it needs the same access.

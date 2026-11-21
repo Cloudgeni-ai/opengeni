@@ -24,6 +24,9 @@ export type FirstPartyToolAuthorization = {
  */
 export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   set_session_title: { sessionRequired: true, allOf: ["sessions:control"] },
+  set_waiting_on: { sessionRequired: true, allOf: ["sessions:control"] },
+  session_links_add: { sessionRequired: true, allOf: ["sessions:control"] },
+  session_links_remove: { sessionRequired: true, allOf: ["sessions:control"] },
   notify_user: { sessionRequired: true, allOf: ["sessions:control"] },
   notification_withdraw: { sessionRequired: true, allOf: ["sessions:control"] },
   inbox_tidy: { sessionRequired: true, allOf: ["sessions:control"] },

@@ -181,6 +181,7 @@ import {
   sessionInputWait,
   visualTreeDepth,
 } from "../../lib/session-rail";
+import { useWaitingOnLabel } from "../../lib/waiting-on";
 import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
 import {
   cancelSessionRowRevealIntent,
@@ -5249,7 +5250,8 @@ function SessionRow(props: {
     context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
     null,
   );
-  const stateLabel = sessionStateLabel(props.session);
+  const waitingOnLabel = useWaitingOnLabel(rail.workspaceId, props.session.waitingOn);
+  const stateLabel = sessionStateLabel(props.session, waitingOnLabel);
   const hoverDescendantCount = props.session.treeStats?.totalDescendants ?? props.childCount;
   const hoverDescendantCountTruncated =
     props.session.treeStats?.truncated ?? props.childCountTruncated;

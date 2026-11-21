@@ -796,6 +796,9 @@ import type {
   SessionShareLink,
   SessionShareLinkList,
   SessionShareLinkState,
+  SessionLink,
+  SessionLinksResponse,
+  AddSessionLinkRequest,
   SharedSession,
   SessionVisibilityChangePreview,
   SessionScopeSubjectId,
@@ -2037,6 +2040,47 @@ export class OpenGeniClient {
     return await this.requestJson<{ revoked: boolean }>(
       "DELETE",
       `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /**
+   * A chat's Linked items (issues, pull requests, threads, records, URLs) with
+   * live status where the deployment can read it. `fresh` skips the short
+   * status cache.
+   */
+  async listSessionLinks(
+    workspaceId: string,
+    sessionId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<SessionLinksResponse> {
+    return await this.requestJson<SessionLinksResponse>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/links${options.fresh ? "?fresh=true" : ""}`,
+    );
+  }
+
+  /** Link something to a chat; the same URL again updates its title. */
+  async addSessionLink(
+    workspaceId: string,
+    sessionId: string,
+    request: AddSessionLinkRequest,
+  ): Promise<SessionLink> {
+    return await this.requestJson<SessionLink>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/links`,
+      request,
+    );
+  }
+
+  /** Remove a link from a chat. */
+  async removeSessionLink(
+    workspaceId: string,
+    sessionId: string,
+    linkId: string,
+  ): Promise<{ removed: boolean }> {
+    return await this.requestJson<{ removed: boolean }>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/links/${encodeURIComponent(linkId)}`,
     );
   }
 

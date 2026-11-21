@@ -368,3 +368,10 @@ Structured input counts as supported only when the contracts, persisted owner,
 atomic runtime checkpoint, API authorization, SDK, embed UI, restart/expiry
 behavior, and real-database tests all remain present. A form mock or a model
 prompt that merely describes a question is not equivalent support.
+
+## Waiting on a person
+
+An open question or approval also sets the chat's `waitingOn` (the person the
+turn works for), shown as "Waiting on <person>" in the header and the session
+list. The agent can name someone else with `set_waiting_on`. See
+[session-status-and-links.md](session-status-and-links.md).

@@ -546,6 +546,9 @@
       "firstPartyMcpPermissions": null,
       "firstPartyMcpTools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -1489,6 +1492,9 @@
       "firstPartyMcpPermissions": null,
       "firstPartyMcpTools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -1895,6 +1901,9 @@
       "first_party_mcp_permissions": null,
       "first_party_mcp_tools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -2868,6 +2877,9 @@
       "firstPartyMcpPermissions": null,
       "firstPartyMcpTools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -3723,6 +3735,9 @@
       "firstPartyMcpPermissions": null,
       "firstPartyMcpTools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -4099,6 +4114,9 @@
       "first_party_mcp_permissions": null,
       "first_party_mcp_tools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -5055,6 +5073,9 @@
       "firstPartyMcpPermissions": null,
       "firstPartyMcpTools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -5930,6 +5951,9 @@
       "firstPartyMcpPermissions": null,
       "firstPartyMcpTools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",
@@ -6320,6 +6344,9 @@
       "first_party_mcp_permissions": null,
       "first_party_mcp_tools": [
         "set_session_title",
+        "set_waiting_on",
+        "session_links_add",
+        "session_links_remove",
         "notify_user",
         "notification_withdraw",
         "inbox_tidy",

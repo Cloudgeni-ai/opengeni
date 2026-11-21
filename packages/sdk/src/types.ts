@@ -1969,6 +1969,50 @@ export type SessionShareLink = {
   updatedAt: string;
 };
 
+/**
+ * Who a chat waits on. `agent`: the agent said so (`set_waiting_on`);
+ * `input`: an open question or approval, which waits on the person the turn
+ * works for (`subjectId`). `person` is the name to show when known.
+ */
+export type SessionWaitingOn = {
+  source: "agent" | "input";
+  person: string | null;
+  subjectId: string | null;
+  reason: string | null;
+  since: string;
+};
+
+export type SessionLinkKind = "pull_request" | "issue" | "thread" | "record" | "link";
+export type SessionLinkProvider = "github" | "linear" | "slack" | "opengeni" | "other";
+
+/** Something a chat works on, shown in its Linked panel. */
+export type SessionLink = {
+  id: string;
+  url: string;
+  title: string | null;
+  kind: SessionLinkKind;
+  provider: SessionLinkProvider;
+  /** `owner/repo#number` for GitHub, the issue key for Linear, `channel/ts` for Slack. */
+  ref: string | null;
+  addedBy: "agent" | "person" | "automatic";
+  addedAt: string;
+};
+
+/** A link's live state as the viewer can read it; null status shows the title only. */
+export type SessionLinkLiveStatus = {
+  state: "open" | "draft" | "merged" | "closed" | "done" | "unknown";
+  label: string | null;
+  title: string | null;
+  checks: "passing" | "failing" | "pending" | "none" | null;
+  review: "approved" | "changes_requested" | "review_required" | "none" | null;
+};
+
+export type SessionLinkWithStatus = SessionLink & { status: SessionLinkLiveStatus | null };
+
+export type SessionLinksResponse = { links: SessionLinkWithStatus[] };
+
+export type AddSessionLinkRequest = { url: string; title?: string; kind?: SessionLinkKind };
+
 /** Whether the person can share a chat here, and their live link. */
 export type SessionShareLinkState = {
   /** False when this deployment has turned share links off. */
@@ -2209,6 +2253,8 @@ export type Session = {
   effectiveControl: EffectiveSessionControl;
   /** Current durable input wait; an elapsed deadline does not prove a new turn started. */
   inputWait?: { deadlineAt: string; reason: string } | null | undefined;
+  /** Who the chat waits on: the agent said so, or an open question or approval. */
+  waitingOn?: SessionWaitingOn | null | undefined;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -2344,6 +2390,7 @@ export type SessionListEntry = Pick<
   | "rootSessionId"
   | "effectiveControl"
   | "inputWait"
+  | "waitingOn"
   | "lastSequence"
   | "pinned"
   | "pinnedAt"
@@ -3061,6 +3108,8 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.exited",
   "session.title_set",
   "session.profile_set",
+  "session.waiting_on.changed",
+  "session.links.changed",
   "session.visibility.changed",
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
@@ -4544,6 +4593,9 @@ export type FirstPartyMcpToolName =
   | "instruction_policy_save"
   | "instruction_policy_get"
   | "set_session_title"
+  | "set_waiting_on"
+  | "session_links_add"
+  | "session_links_remove"
   | "notify_user"
   | "notification_withdraw"
   | "inbox_tidy"

@@ -331,6 +331,12 @@ export function isDerivedAgentToolOwner(
  */
 export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
+  // Tracking multi-turn work: who the chat waits on and the things it works
+  // on (its Linked panel, with merge wakes). Not runtime mechanics, so a
+  // minimal "none" agent carries no extra tools.
+  set_waiting_on: "goals",
+  session_links_add: "goals",
+  session_links_remove: "goals",
   wait_for_input: "runtime",
   capability_authorization_request: "runtime",
   // Reaching the person: a push to the phones of whoever started the session.
@@ -935,7 +941,10 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
     label: "Skills",
     description: "Read installed Skills; with manage, also save, install, and publish them.",
   },
-  goals: { label: "Goals", description: "Work toward a goal across many turns until it is done." },
+  goals: {
+    label: "Goals",
+    description: "Work toward a goal across many turns, and track linked work and who it waits on.",
+  },
   subagents: {
     label: "Subagents",
     description: "Start, message, and follow other sessions; see available models.",

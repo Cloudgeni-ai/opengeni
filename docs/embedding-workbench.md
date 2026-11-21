@@ -205,6 +205,7 @@ being observed.
 | `openFileRequest` | a host request `{ path, line?, requestId }` that opens Files, passes the exact path to the selected session target, reveals its lazy tree ancestors, selects and scrolls the file, and optionally focuses a 1-based line. Change `requestId` to repeat the same open. |
 | `openTabRequest` | a host request `{ tab, requestId }` that selects an available built-in or host-injected tab and expands the dock. Change `requestId` to repeat an open; ordinary rerenders do not steal the user's selection. Unknown tab IDs are ignored. This is presentation state, not artifact or compute authority. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
+| `pullRequest` / `onOpenPullRequest` | optional. `pullRequest: { url, number? }` shows **View on GitHub** in the Changes summary bar; otherwise `onOpenPullRequest` shows **Open PR** (the host decides how to ask for one; `apps/web` asks the agent). Omit both and the bar is unchanged. Every embedder gets the collapsible per-file headers. See [session-status-and-links.md](session-status-and-links.md). |
 
 For chat or timeline Markdown, wire `Markdown.onSandboxFile` to
 `SandboxWorkspace.openFileRequest`. `sandbox:` is an application protocol, not a

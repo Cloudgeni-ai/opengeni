@@ -18,6 +18,12 @@ import { registerSidebarLayoutTools } from "./sidebar-layout-tools";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
+import { listEventSources as listSessionLinkEventSources } from "@opengeni/db";
+import { sessionLinkGitHubWakeTarget } from "../integrations/session-link-status";
+import {
+  registerSessionCoordinationTools,
+  type SessionLinkWake,
+} from "./session-coordination-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
   connectableIntegrationDefinitions,
@@ -497,6 +503,7 @@ import {
   requireVisibleScheduledTask,
   scheduledTaskAccess,
   scheduledTaskViewerForGrant,
+  eventSourceAccess as sessionLinkEventSourceAccess,
   siteViewerForGrant,
   resolveNewSiteAudience,
   resolveNewProjectAudience,
@@ -1660,6 +1667,24 @@ export function buildOpenGeniMcpServer(
       json,
     });
   }
+  // Who the chat waits on and what it works on (session-coordination-tools.ts).
+  // A link's wake is set up with the schedule tools below, when this chat
+  // may create event automations.
+  let sessionLinkWake: SessionLinkWake | null = null;
+  if (sessionId !== null) {
+    registerSessionCoordinationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      wake: () => sessionLinkWake,
+      wakeTarget: (link) => sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link),
+      json,
+    });
+  }
   // Notifications reach the person who started this session: their inbox and,
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
@@ -2645,6 +2670,97 @@ export function buildOpenGeniMcpServer(
         );
       },
     );
+
+    // session_links_add's wakeWhen: the same create path as above, with a
+    // one-time GitHub event trigger into this chat.
+    if (eventTriggers && sessionId !== null) {
+      sessionLinkWake = async (wake) => {
+        // Asking again for the same wake reuses the pending automation.
+        const pending = (
+          await listScheduledTasks(deps.db, grant.workspaceId, 100, 0, sessionId)
+        ).find(
+          (task) =>
+            task.targetSessionId === sessionId &&
+            task.status === "active" &&
+            task.name === wake.name &&
+            task.events?.once === true &&
+            task.events.completedAt === null,
+        );
+        if (pending) {
+          return { automationId: pending.id, name: pending.name, once: true, existing: true };
+        }
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+        const source = (
+          await listSessionLinkEventSources(deps.db, grant.workspaceId, viewer.subjectId)
+        ).find(
+          (candidate) =>
+            candidate.kind === "github" &&
+            sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+        );
+        if (!source) {
+          throw new ToolArgumentError(
+            "No GitHub event source is available. A person adds it in Automations (it needs the workspace's GitHub app); the link was added without a wake.",
+          );
+        }
+        const payload = resolveScheduledTaskCreateInput(
+          {
+            name: wake.name,
+            prompt: wake.prompt,
+            events: {
+              once: true,
+              triggers: [
+                {
+                  sourceId: source.id,
+                  eventTypes: [wake.eventType],
+                  conditions: wake.conditions,
+                  // A merge or release made through Opengeni's own GitHub App
+                  // (an agent or the merge queue) still reports back.
+                  includeOwnEvents: true,
+                },
+              ],
+            },
+          },
+          sessionId,
+        );
+        await requireLimit(deps, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          action: "schedule:create",
+          quantity: 1,
+        });
+        const task = await createValidatedScheduledTask({
+          settings: deps.settings,
+          db: deps.db,
+          objectStorage: deps.objectStorage,
+          grant,
+          payload,
+          toolsProvided: false,
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
+          githubPersonalFetch: deps.githubPersonalFetch,
+        });
+        try {
+          await syncCreatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          // The automation is saved; its schedule sync is retried. Don't create it again.
+          return {
+            automationId: task.id,
+            name: task.name,
+            once: true,
+            partialFailure: { stage: "schedule_sync", retryable: true },
+          };
+        }
+        return { automationId: task.id, name: task.name, once: true };
+      };
+    }
 
     server.registerTool(
       "scheduled_tasks_update",

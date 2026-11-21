@@ -51,7 +51,9 @@ import type {
   ApiIntegrationAuthPreview,
   ResolvedAgentConfig,
   SessionAvatar,
+  SessionLink,
   SessionToolPolicy,
+  SessionWaitingOn,
 } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
@@ -3694,6 +3696,9 @@ export const slackInteractions = pgTable(
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
       .notNull()
       .default("open"),
+    // A wake asked to reopen the delivery while it was open: a run settling at
+    // or before this sequence leaves it open for the woken answer.
+    deliveryReopenAfterSequence: integer("delivery_reopen_after_sequence"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -5271,6 +5276,12 @@ export const sessions = pgTable(
     // an avatar. Never part of the model's context; copied by forks.
     description: text("description"),
     avatar: jsonb("avatar").$type<SessionAvatar>(),
+    // Who the chat waits on, as the agent said (1521). `turnId` is the turn
+    // that said it: the wait shows only while that turn is the chat's latest
+    // and the chat is idle, so a reply or a new turn clears it.
+    waitingOn: jsonb("waiting_on").$type<SessionWaitingOn & { turnId: string | null }>(),
+    // The chat's Linked items (1521). NULL means none. Bounded by the contract.
+    links: jsonb("links").$type<SessionLink[]>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a

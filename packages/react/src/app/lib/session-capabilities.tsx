@@ -110,6 +110,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     kind: "opengeni",
     matches: (tool) =>
       tool === "set_session_title" ||
+      tool === "set_waiting_on" ||
       tool === "set_other_session_title" ||
       tool === "bot_template_save" ||
       tool === "notify_user" ||

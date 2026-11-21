@@ -461,6 +461,74 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
   });
 });
 
+describe("WorkbenchChanges — per-file sections and the pull request action", () => {
+  test("each file folds behind its own header", async () => {
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(2)} source="live" capturedAt={null} />,
+    );
+    await flush();
+    const header = container(r).querySelector<HTMLButtonElement>(
+      '[data-diff-file="src/file-000.ts"] > button',
+    );
+    expect(header?.getAttribute("aria-expanded")).toBe("true");
+    expect(header?.textContent).toContain("src/file-000.ts");
+    await act(async () => header!.click());
+    await flush();
+    const section = container(r).querySelector('[data-diff-file="src/file-000.ts"]');
+    expect(section?.hasAttribute("data-diff-collapsed")).toBe(true);
+    expect(section?.querySelector("button")?.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      container(r)
+        .querySelector('[data-diff-file="src/file-001.ts"]')
+        ?.hasAttribute("data-diff-collapsed"),
+    ).toBe(false);
+    await r.unmount();
+  });
+
+  test("shows View on GitHub when a pull request exists, else Open PR", async () => {
+    let asked = 0;
+    const withPr = await renderComponent(
+      <WorkbenchChanges
+        diff={manyFiles(1)}
+        source="live"
+        capturedAt={null}
+        pullRequest={{ url: "https://github.com/acme/api/pull/7", number: 7 }}
+        onOpenPullRequest={() => asked++}
+      />,
+    );
+    const view = container(withPr).querySelector<HTMLAnchorElement>(
+      '[data-workbench-pr-action="view"]',
+    );
+    expect(view?.href).toBe("https://github.com/acme/api/pull/7");
+    expect(view?.textContent).toBe("View on GitHub");
+    expect(container(withPr).querySelector('[data-workbench-pr-action="open"]')).toBeNull();
+    await withPr.unmount();
+
+    const withoutPr = await renderComponent(
+      <WorkbenchChanges
+        diff={manyFiles(1)}
+        source="live"
+        capturedAt={null}
+        onOpenPullRequest={() => asked++}
+      />,
+    );
+    const open = container(withoutPr).querySelector<HTMLButtonElement>(
+      '[data-workbench-pr-action="open"]',
+    );
+    expect(open?.textContent).toBe("Open PR");
+    await act(async () => open!.click());
+    expect(asked).toBe(1);
+    await withoutPr.unmount();
+
+    // An embedder that passes neither keeps the old summary bar.
+    const neither = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(1)} source="live" capturedAt={null} />,
+    );
+    expect(container(neither).querySelector("[data-workbench-pr-action]")).toBeNull();
+    await neither.unmount();
+  });
+});
+
 function container(r: { container: HTMLElement }): HTMLElement {
   return r.container;
 }

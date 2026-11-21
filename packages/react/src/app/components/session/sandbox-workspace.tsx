@@ -6,7 +6,12 @@
 // This adapter only supplies the two app-specific things the package can't know:
 //   1. the sonner-backed notification sink (the package has no toast dependency);
 //   2. app-injected extra tabs (Run / Debug) passed as leading/trailing tabs.
-import { SandboxWorkspace, type WorkspaceNotification, type WorkspaceTab } from "../../..";
+import {
+  SandboxWorkspace,
+  type WorkbenchPullRequest,
+  type WorkspaceNotification,
+  type WorkspaceTab,
+} from "../../..";
 import {
   type ReactNode,
   useCallback,
@@ -59,6 +64,10 @@ export function SessionWorkspace(props: {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   mobileLeadingControl?: ReactNode | undefined;
+  /** The chat's open pull request, if any (from its Linked items). */
+  pullRequest?: WorkbenchPullRequest | null | undefined;
+  /** Ask the agent to open a pull request for the changes. */
+  onOpenPullRequest?: (() => void) | undefined;
   openFileRequest?:
     | {
         path: string;
@@ -136,6 +145,8 @@ export function SessionWorkspace(props: {
       {...(initialTab ? { initialTab } : {})}
       onActiveTabChange={rememberActiveTab}
       openTabRequest={props.openTabRequest}
+      {...(props.pullRequest ? { pullRequest: props.pullRequest } : {})}
+      {...(props.onOpenPullRequest ? { onOpenPullRequest: props.onOpenPullRequest } : {})}
       initialFilePath={navigation.filePath}
       onFilePathChange={rememberFilePath}
       initialBrowserSessionId={navigation.browserSessionId}
