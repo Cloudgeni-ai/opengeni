@@ -375,7 +375,10 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
       container(r).querySelectorAll("[data-rail-file]"),
       (node) => node.textContent,
     );
-    expect(fileRows.every((text) => text?.includes("src/file-000.ts"))).toBe(true);
+    // The rail shows the file name, then its directory (inside the repository).
+    expect(
+      fileRows.every((text) => text?.startsWith("Mfile-000.ts") && text.includes("src")),
+    ).toBe(true);
     await r.unmount();
   });
 
@@ -407,12 +410,13 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     await r.unmount();
   });
 
-  test("source badge reads 'Live diff' for the live source", async () => {
+  test("a live diff carries no source badge (the machine chip says it is live)", async () => {
     const r = await renderComponent(
       <WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />,
     );
     await flush();
-    expect(container(r).textContent).toContain("Live diff");
+    expect(container(r).textContent).not.toContain("Live diff");
+    expect(container(r).textContent).not.toContain("as of");
     await r.unmount();
   });
 
@@ -471,7 +475,8 @@ describe("WorkbenchChanges — per-file sections and the pull request action", (
       '[data-diff-file="src/file-000.ts"] > button',
     );
     expect(header?.getAttribute("aria-expanded")).toBe("true");
-    expect(header?.textContent).toContain("src/file-000.ts");
+    expect(header?.textContent).toContain("file-000.ts");
+    expect(header?.textContent).toContain("src");
     await act(async () => header!.click());
     await flush();
     const section = container(r).querySelector('[data-diff-file="src/file-000.ts"]');

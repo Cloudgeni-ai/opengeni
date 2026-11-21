@@ -4,7 +4,9 @@ import {
   type CSSProperties,
   type ReactNode,
   lazy,
+  memo,
   Suspense,
+  useMemo,
   useEffect,
   useState,
   useSyncExternalStore,
@@ -14,6 +16,7 @@ import { gitFileDiffToPatch } from "../lib/git-patch";
 import {
   loadPierreDiffs,
   pierreDiffsRevision,
+  pierreDiffsWorkerFactory,
   subscribePierreDiffs,
 } from "../lib/pierre-diffs-loader";
 import { useOpenGeniText } from "../messages/runtime";
@@ -70,13 +73,36 @@ const LazyPatchDiff = lazy(async () => {
   return { default: mod.PatchDiff };
 });
 
+const DEFAULT_THEME = {
+  dark: "github-dark-high-contrast",
+  light: "github-light-high-contrast",
+} as const;
+
+type WorkerPoolProviderComponent = ComponentType<{
+  children: ReactNode;
+  poolOptions: { workerFactory: () => Worker; poolSize?: number };
+  highlighterOptions: { theme?: { dark: string; light: string } };
+}>;
+
+// The optional highlighter worker pool (one shared pool for every diff).
+const LazyWorkerPool = lazy(async () => {
+  const mod = (await loadPierreDiffs()) as {
+    WorkerPoolContextProvider: WorkerPoolProviderComponent;
+  };
+  return { default: mod.WorkerPoolContextProvider };
+});
+
+/** Two workers keep a burst of newly visible files highlighting in parallel
+ *  without competing with the page for every core. */
+const WORKER_POOL_SIZE = 2;
+
 /**
  * The Pierre-backed diff: Shiki-highlighted, virtualized, unified/split. Renders
  * one `PatchDiff` per changed file (a reconstructed unified patch from the
  * `GitFileDiff` hunks). The ONE workbench diff renderer; a host without
  * `@pierre/diffs` gets the built-in plain-text degrade (`PlainPatch`).
  */
-export function PierreDiff({
+export const PierreDiff = memo(function PierreDiff({
   diff,
   layout = "unified",
   themeType,
@@ -132,6 +158,30 @@ export function PierreDiff({
     };
   }, [plain, loaderRevision]);
 
+  // Stable inputs: Pierre re-renders (and may re-highlight) when its options
+  // or patch change, so a parent re-render must not hand it new ones.
+  const themeDark = theme?.dark ?? DEFAULT_THEME.dark;
+  const themeLight = theme?.light ?? DEFAULT_THEME.light;
+  // Default to the dark theme: the host UI is dark-first, and Pierre's own
+  // auto-detection otherwise lands on the light Shiki theme (a white diff pane
+  // inside a dark dock). Callers pass `themeType="light"` to opt into light.
+  const resolvedThemeType = themeType ?? "dark";
+  const options = useMemo(
+    () => ({
+      diffStyle: layout,
+      overflow,
+      stickyHeader: true,
+      ...(disableFileHeader ? { disableFileHeader: true } : {}),
+      theme: { dark: themeDark, light: themeLight },
+      themeType: resolvedThemeType,
+    }),
+    [layout, overflow, disableFileHeader, themeDark, themeLight, resolvedThemeType],
+  );
+  const patches = useMemo(
+    () => diff.map((file) => ({ path: file.path, patch: gitFileDiffToPatch(file) })),
+    [diff],
+  );
+
   if (plain || failed || forcedColors) {
     // `plain` opts out of highlighting; `failed` = `@pierre/diffs` not installed.
     // Render the caller's fallback, or a plain (unhighlighted) patch dump — NOT a
@@ -145,25 +195,6 @@ export function PierreDiff({
       </div>
     );
   }
-
-  // Default to the dark theme: the host UI is dark-first, and Pierre's own
-  // auto-detection otherwise lands on the light Shiki theme (a white diff pane
-  // inside a dark dock). Callers pass `themeType="light"` to opt into light.
-  const options = {
-    diffStyle: layout,
-    overflow,
-    stickyHeader: true,
-    ...(disableFileHeader ? { disableFileHeader: true } : {}),
-    ...(theme
-      ? { theme }
-      : {
-          theme: {
-            dark: "github-dark-high-contrast",
-            light: "github-light-high-contrast",
-          },
-        }),
-    themeType: themeType ?? "dark",
-  };
 
   // Pierre renders inside a shadow DOM, so host CSS can't reach it — but it reads
   // a set of `--diffs-*-override` custom properties through the shadow boundary.
@@ -195,24 +226,39 @@ export function PierreDiff({
     "--diffs-line-height": "var(--og-code-line-height)",
   } as CSSProperties;
 
+  const body = patches.map((file) => (
+    <div key={file.path} className="mb-2">
+      <LazyPatchDiff
+        patch={file.patch}
+        options={options}
+        {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
+      />
+    </div>
+  ));
+  // The pool carries one theme for every diff, so a custom theme highlights
+  // on the main thread instead.
+  const workerFactory = pierreDiffsWorkerFactory();
+  const pooled = ready && workerFactory !== null && !theme && disableWorkerPool !== true;
+
   return (
     <div className={cn("min-w-0", className)} data-opengeni-pierre-diff style={pierreVars}>
       <Suspense fallback={loading ?? <DiffSkeleton />}>
-        {ready
-          ? diff.map((file) => (
-              <div key={file.path} className="mb-2">
-                <LazyPatchDiff
-                  patch={gitFileDiffToPatch(file)}
-                  options={options}
-                  {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
-                />
-              </div>
-            ))
-          : (loading ?? <DiffSkeleton />)}
+        {!ready ? (
+          (loading ?? <DiffSkeleton />)
+        ) : pooled ? (
+          <LazyWorkerPool
+            poolOptions={{ workerFactory, poolSize: WORKER_POOL_SIZE }}
+            highlighterOptions={{ theme: DEFAULT_THEME }}
+          >
+            {body}
+          </LazyWorkerPool>
+        ) : (
+          body
+        )}
       </Suspense>
     </div>
   );
-}
+});
 
 function DiffSkeleton() {
   const t = useOpenGeniText();

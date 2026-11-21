@@ -165,6 +165,7 @@ import { sessionAgentsSignal } from "../../session-agents-model";
 import { useNavigate, usePage, useRouterState } from "../lib/navigation";
 import {
   BugIcon,
+  GitPullRequestIcon,
   LinkIcon,
   Loader2Icon,
   MenuIcon,
@@ -254,6 +255,13 @@ import {
   SessionLinkedPanel,
   useSessionLinks,
 } from "../components/session/linked-panel";
+import {
+  mergePullRequestMessage,
+  pullRequestLinkFromLinks,
+  pullRequestNumber,
+  SessionPullRequestPanel,
+} from "../components/session/pull-request-panel";
+
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
 import {
@@ -371,6 +379,9 @@ import { useUiEventTarget } from "../lib/ui-events";
 import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
 import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
+
+/** The dock tab for the chat's pull request. */
+const PULL_REQUEST_TAB = "pull-request";
 
 const InlineChatArtifact = lazy(() =>
   import("../components/artifacts/retained-file-preview").then((module) => ({
@@ -1946,23 +1957,73 @@ function SessionDockPanel(props: SessionDockProps) {
       });
   }, [context.client, props.workspaceId, props.sessionId]);
   const sessionArchived = props.session ? sessionReadOnlyArchive(props.session) !== null : false;
-  const trailingTabs: WorkspaceTab[] = [
-    {
+  const canAskAgent = canControlSession && Boolean(props.session) && !sessionArchived;
+  // The PR tab shows the chat's pull request; Linked keeps everything else
+  // (issues, threads, records) and appears only when there is something.
+  const pullRequestLink = useMemo(
+    () => pullRequestLinkFromLinks(linkState.links),
+    [linkState.links],
+  );
+  const otherLinks = useMemo(
+    () => ({
+      ...linkState,
+      links: linkState.links.filter((link) => link.kind !== "pull_request"),
+    }),
+    [linkState],
+  );
+  const mergePullRequest = useCallback(
+    async (url: string) => {
+      try {
+        await context.client.sendMessage(props.workspaceId, props.sessionId, {
+          text: mergePullRequestMessage(url),
+          clientEventId: crypto.randomUUID(),
+        });
+      } catch (failure) {
+        toast.error(userErrorText(failure, "Try again."));
+        throw failure;
+      }
+    },
+    [context.client, props.workspaceId, props.sessionId],
+  );
+  // A chat that already has a pull request opens on it the first time.
+  const pullRequestTabOpened = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pullRequestLink || pullRequestTabOpened.current === props.sessionId) return;
+    pullRequestTabOpened.current = props.sessionId;
+    if (dockNavigation.activeTab) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: PULL_REQUEST_TAB,
+      requestId: ++tabRequestSeq.current,
+    });
+  }, [pullRequestLink, props.sessionId, dockNavigation.activeTab]);
+  const pullRequestNumberLabel = pullRequestLink ? pullRequestNumber(pullRequestLink) : null;
+  const leadingTabs: WorkspaceTab[] = pullRequestLink
+    ? [
+        {
+          id: PULL_REQUEST_TAB,
+          label: pullRequestNumberLabel ? `PR #${pullRequestNumberLabel}` : "PR",
+          icon: <GitPullRequestIcon />,
+          content: (
+            <SessionPullRequestPanel
+              workspaceId={props.workspaceId}
+              sessionId={props.sessionId}
+              link={pullRequestLink}
+              {...(canAskAgent ? { onMerge: () => mergePullRequest(pullRequestLink.url) } : {})}
+            />
+          ),
+        },
+      ]
+    : [];
+  const trailingTabs: WorkspaceTab[] = [];
+  if (otherLinks.links.length > 0) {
+    trailingTabs.push({
       id: "linked",
       label: "Linked",
       icon: <LinkIcon />,
-      ...(linkState.links.length > 0
-        ? {
-            badge: (
-              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
-                {linkState.links.length}
-              </span>
-            ),
-          }
-        : {}),
       content: (
         <SessionLinkedPanel
-          state={linkState}
+          state={otherLinks}
           canEdit={canControlSession && !sessionArchived}
           connectHref={(connect) =>
             connect.capabilityId
@@ -1971,20 +2032,14 @@ function SessionDockPanel(props: SessionDockProps) {
           }
         />
       ),
-    },
+    });
+  }
+  trailingTabs.push(
     {
       id: "artifacts",
       label: "Artifacts",
       icon: <PanelsTopLeftIcon />,
-      ...(artifactSummaries.length > 0
-        ? {
-            badge: (
-              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
-                {artifactSummaries.length}
-              </span>
-            ),
-          }
-        : {}),
+      ...(artifactSummaries.length > 0 ? {} : { optional: true }),
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
           <LazySessionEditableArtifactsWorkspace
@@ -2016,12 +2071,13 @@ function SessionDockPanel(props: SessionDockProps) {
         </LazyPart>
       ),
     },
-  ];
+  );
   if (props.session) {
     trailingTabs.push({
       id: "agent",
       label: "Settings",
       icon: <SettingsIcon />,
+      optional: true,
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening settings" />}>
           <LazyAgentConfigurationPanel
@@ -2042,6 +2098,7 @@ function SessionDockPanel(props: SessionDockProps) {
       id: "debug",
       label: "Debug",
       icon: <BugIcon />,
+      optional: true,
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
@@ -2099,11 +2156,10 @@ function SessionDockPanel(props: SessionDockProps) {
         </ArtifactLinkBoundary>
       }
       openTabRequest={currentTabRequest}
+      leadingTabs={leadingTabs}
       trailingTabs={trailingTabs}
       pullRequest={linkedPullRequest}
-      {...(canControlSession && props.session && !sessionArchived
-        ? { onOpenPullRequest: openPullRequest }
-        : {})}
+      {...(canAskAgent ? { onOpenPullRequest: openPullRequest } : {})}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
       {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}

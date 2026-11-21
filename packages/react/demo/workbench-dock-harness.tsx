@@ -4,10 +4,13 @@ import { Markdown, OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 import { enableWorkbenchDemoPeers } from "./workbench-peers";
 
-// The demo ships the optional @pierre/diffs peer.
-enablePierreDiffs();
+// The demo ships the optional @pierre/diffs peer. `?worker=0` keeps
+// highlighting on the main thread (the before-timings baseline).
+const diffsWorker = new URLSearchParams(location.search).get("worker") !== "0";
+enablePierreDiffs(diffsWorker ? { worker: () => new DiffsWorker() } : undefined);
 enableWorkbenchDemoPeers();
 
 /* ----------------------------------------------------------------------------
@@ -26,8 +29,17 @@ const params = new URLSearchParams(window.location.search);
 const stateKey = params.get("state") ?? "warm-live";
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const tabParam = params.get("tab") ?? undefined;
+const sizeParam = Number(params.get("size") ?? 52);
 const state = DOCK_STATES[stateKey] ?? DOCK_STATES["warm-live"]!;
 const client = new DockStateMockClient(state);
+// `&stream=1`: the agent is writing, so the chat's event log grows ten times
+// a second, as it does during a turn (profiling the dock under live events).
+if (params.get("stream") === "1") {
+  let index = 0;
+  setInterval(() => {
+    client.bus(DOCK_SESSION_ID).append("agent.message.delta", { delta: `word ${index++} ` });
+  }, 100);
+}
 
 /** A calm, neutral primary pane so the dock reads in a real session context
  *  without pulling in the scripted manager narrative. The dock is the subject. */
@@ -123,7 +135,7 @@ function Harness() {
             sessionId={DOCK_SESSION_ID}
             events={events}
             autoSaveId={`og.m7.${stateKey}`}
-            defaultSize={52}
+            defaultSize={sizeParam}
             openFileRequest={openFileRequest}
             {...(tabParam ? { initialTab: tabParam } : {})}
             primary={

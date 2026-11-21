@@ -8,7 +8,11 @@
  */
 export type PierreDiffsLoader = () => Promise<unknown>;
 
+/** Creates one highlighter worker (`@pierre/diffs/worker/worker.js`). */
+export type PierreDiffsWorkerFactory = () => Worker;
+
 let loader: PierreDiffsLoader | null = null;
+let workerFactory: PierreDiffsWorkerFactory | null = null;
 let loaded: Promise<unknown> | null = null;
 let revision = 0;
 const listeners = new Set<() => void>();
@@ -18,12 +22,24 @@ const listeners = new Set<() => void>();
  * Views already on screen retry with the new loader, so a host may register
  * lazily (for example from the route that renders diffs).
  */
-export function registerPierreDiffs(next: PierreDiffsLoader | null): void {
+export function registerPierreDiffs(
+  next: PierreDiffsLoader | null,
+  options?: { worker?: PierreDiffsWorkerFactory | null | undefined },
+): void {
+  // A worker moves Shiki highlighting off the main thread: diffs paint as
+  // plain text at once and pick up colors when the worker answers.
+  if (options && "worker" in options) workerFactory = next ? (options.worker ?? null) : null;
+  if (!next) workerFactory = null;
   if (next === loader) return;
   loader = next;
   loaded = null;
   revision += 1;
   for (const listener of listeners) listener();
+}
+
+/** The registered highlighter worker factory, if the host provided one. */
+export function pierreDiffsWorkerFactory(): PierreDiffsWorkerFactory | null {
+  return workerFactory;
 }
 
 /** Changes whenever the registered loader changes (for `useSyncExternalStore`). */

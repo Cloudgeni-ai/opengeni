@@ -3,7 +3,9 @@
 // viewer and code editor load their peers only here, in the lazy session
 // route, so they stay out of the initial graph.
 import { enableWorkbench } from "@opengeni/react/workbench";
+import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 
-enableWorkbench();
+// Diffs highlight in a worker so switching files never blocks the page.
+enableWorkbench({ diffsWorker: () => new DiffsWorker() });
 
 export { SessionRoute } from "@opengeni/react/app/routes/session";

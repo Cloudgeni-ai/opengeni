@@ -9,7 +9,7 @@ import {
   RotateCwIcon,
   SettingsIcon,
 } from "lucide-react";
-import { lazy, useEffect, useRef, useState } from "react";
+import { lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "../../../ui/button";
 import { useWorkspacePanelOwnsExpand } from "../../../components/workspace-dock";
@@ -125,6 +125,11 @@ export function SessionEditableArtifactsWorkspace({
     status,
   ]);
 
+  // Back from an artifact returns to where the list was scrolled.
+  const listScrollTop = useRef(0);
+  const restoreListScroll = useCallback((node: HTMLDivElement | null) => {
+    if (node && listScrollTop.current > 0) node.scrollTop = listScrollTop.current;
+  }, []);
   const artifact =
     artifacts.find((candidate) => matchesArtifact(candidate, selectedArtifactId)) ?? artifacts[0];
   const listShown = browsing && catalogItems.length > 0;
@@ -134,7 +139,13 @@ export function SessionEditableArtifactsWorkspace({
   useWorkspacePanelOwnsExpand(!listShown && artifact?.modality === "site" && !settingsOpen);
   if (listShown) {
     return (
-      <div className="@container h-full min-h-0 overflow-y-auto bg-bg p-3 text-fg">
+      <div
+        ref={restoreListScroll}
+        onScroll={(event) => {
+          listScrollTop.current = event.currentTarget.scrollTop;
+        }}
+        className="@container h-full min-h-0 overflow-y-auto bg-bg p-3 text-fg"
+      >
         <div className="mb-4 flex min-h-10 items-center justify-between gap-2">
           <h2 className="text-sm font-medium">Session artifacts</h2>
           <Button asChild variant="ghost" size="sm">

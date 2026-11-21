@@ -63,6 +63,11 @@ enableCodeEditor({
 Include only the setup entries and grammar loaders for packages you installed.
 For direct VNC, use `enableDesktopViewer()` from `@opengeni/react/desktop`.
 Highlighted diffs use `enablePierreDiffs()` from `@opengeni/react/diffs`.
+Pass `enablePierreDiffs({ worker: () => new Worker(...) })` (or
+`enableWorkbench({ diffsWorker })`) to highlight diffs in web workers, so
+switching files stays responsive on large diffs; with Vite,
+`import DiffsWorker from "@pierre/diffs/worker/worker.js?worker"` and pass
+`() => new DiffsWorker()`. Without it, highlighting runs on the main thread.
 Optional terminal WebGL uses
 `enableSandboxTerminal({ webgl: () => import("@xterm/addon-webgl") })`;
 without that addon, the DOM renderer remains available. Root component imports
@@ -206,6 +211,7 @@ being observed.
 | `openTabRequest` | a host request `{ tab, requestId }` that selects an available built-in or host-injected tab and expands the dock. Change `requestId` to repeat an open; ordinary rerenders do not steal the user's selection. Unknown tab IDs are ignored. This is presentation state, not artifact or compute authority. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 | `pullRequest` / `onOpenPullRequest` | optional. `pullRequest: { url, number? }` shows **View on GitHub** in the Changes summary bar; otherwise `onOpenPullRequest` shows **Open PR** (the host decides how to ask for one; `apps/web` asks the agent). Omit both and the bar is unchanged. Every embedder gets the collapsible per-file headers. See [session-status-and-links.md](session-status-and-links.md). |
+| `tabVisibility` | `"all"` (default) shows every allowed surface as a tab. `"relevant"` shows Changes only when there are changes, and keeps Files, Terminal, Browser and Computer under **+** until the person opens one. Every surface stays reachable either way. |
 
 For chat or timeline Markdown, wire `Markdown.onSandboxFile` to
 `SandboxWorkspace.openFileRequest`. `sandbox:` is an application protocol, not a
@@ -213,10 +219,14 @@ browser URL: the callback receives its percent-decoded path unchanged. A request
 without a line opens the top of the file. Publication and download remain
 separate, explicit retained-artifact actions.
 
-Workspace surfaces use a vertical, keyboard-navigable activity rail. Up/Down
-move between panels and Home/End jump to the ends. The rail becomes icon-first
-when a desktop split is narrow, with accessible names and tooltips, and keeps
-readable labels in overlays and maximized views. Visited panels stay mounted.
+Workspace surfaces use a keyboard-navigable tab strip across the top of the
+dock. Left/Right move between tabs and Home/End jump to the ends. A
+`WorkspaceTab` with `optional: true` waits under **+** until it is opened (or
+selected by a request), then shows a close button and returns to **+** when
+closed (Delete or Backspace also closes it). Opened tabs are remembered per
+`tabScope` (`SandboxWorkspace` uses the session id). Tabs without `optional`
+always show, so embedders passing their own tabs keep today's behaviour.
+Visited panels stay mounted.
 
 The machine-state chip is rendered in the dock header automatically. Managed
 cold compute reads `Sleeping` with saved-workspace freshness, for example
