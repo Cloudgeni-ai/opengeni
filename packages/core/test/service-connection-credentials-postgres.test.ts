@@ -134,6 +134,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
             serverId: "example",
             toolName: "list_items",
             destinationUrl: "https://mcp.example.test/mcp",
+            onBehalfOf: { subjectId: w.subjectId, sessionId: "session-1", turnId: "turn-1" },
           },
         );
 
@@ -208,6 +209,9 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         principalKind: "service_connection",
         connectionId,
         count: 2,
+        // Who caused the use, for the audit only; the vault reach stays the
+        // connection's own.
+        onBehalfOf: { subjectId: w.subjectId, sessionId: "session-1", turnId: "turn-1" },
       });
       const audit = JSON.stringify(rows);
       for (const value of ["team-synthetic", "org-synthetic", "mine-synthetic"])

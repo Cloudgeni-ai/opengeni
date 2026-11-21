@@ -69,6 +69,24 @@ test("API-key tools: a shared key for admins, ask an admin for everyone else", (
   expect(siteConnectionStatus(items).needed[0]).not.toHaveProperty("sharedKey");
 });
 
+test("API-key tools: each person's own Connect stays next to a shared sync's shared key", () => {
+  const own = { ...items[0]!, key: "connect:Stripe:own", connector: "Stripe" };
+  const shared = {
+    ...own,
+    key: "connect:Stripe:shared",
+    shared: true,
+    sharedKey: "ask_admin" as const,
+  };
+  expect(siteConnectCardLabel(own)).toBe("Connect Stripe");
+  expect(siteConnectCardItemActionable(own)).toBe(true);
+  const status = siteConnectionStatus([own, shared]);
+  expect(status.ready).toBe(false);
+  expect(status.needed.map((item) => item.label)).toEqual([
+    "Connect Stripe",
+    "Ask an admin to connect Stripe",
+  ]);
+});
+
 function memoryStorageImpl() {
   const values = new Map<string, string>();
   return {

@@ -47,6 +47,7 @@ import {
   type AppSyncDeps,
   type AppSyncToolCaller,
 } from "../src/app-sync/service";
+import { readSiteSharedSyncTools } from "../src/workspace-tool-target";
 
 // App data sync against PostgreSQL as the restricted application role. The
 // connected tool is a fake; everything else (automations, run history, Site
@@ -1018,6 +1019,11 @@ test("a shared sync runs on the workspace's shared service connection", async ()
   );
   expect(served).toEqual(["account-workspace"]);
   expect(run.lastRun.status).toBe("succeeded");
+  // The connect card reads the shared sync's tool to offer a shared key for it.
+  expect(await readSiteSharedSyncTools(f.deps.db, f.owner.grant, f.siteId)).toContainEqual({
+    serverId: "orders",
+    toolName: "list_orders",
+  });
 });
 
 test("an exported sync runs on the installer's own account in another workspace", async () => {
