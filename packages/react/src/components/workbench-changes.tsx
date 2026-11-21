@@ -890,7 +890,7 @@ function DiffFileHeader({
     </>
   );
   const className =
-    "group/file sticky top-0 z-10 flex min-h-9 w-full items-center gap-2 bg-[color-mix(in_oklch,var(--og-diff-header,var(--og-color-bg))_88%,transparent)] px-3.5 py-1.5 text-og-sm text-og-fg shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_60%,transparent)] backdrop-blur-md";
+    "group/file sticky top-0 z-10 flex min-h-9 w-full items-center gap-2 bg-[color-mix(in_oklch,var(--og-diff-header,var(--og-color-bg))_96%,transparent)] px-3.5 py-1.5 text-og-sm text-og-fg shadow-[inset_0_-1px_0_color-mix(in_oklch,var(--og-color-border)_60%,transparent)]";
   if (!onToggle) return <header className={className}>{body}</header>;
   return (
     <button
