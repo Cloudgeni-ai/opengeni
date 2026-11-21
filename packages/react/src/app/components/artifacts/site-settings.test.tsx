@@ -96,13 +96,15 @@ async function renderSettings({
     statusBusy: false,
     setSiteStatus: async () => true,
   } as unknown as SiteManagement;
+  // One value per render, as a provider above the panel would hold it.
+  const contexts = { app: appContext };
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await React.act(async () =>
     root.render(
       <AppHostProvider host={host}>
-        <AppContext.Provider value={appContext}>
+        <AppContext.Provider value={contexts.app}>
           <settings.SiteSettings
             workspaceId={workspaceId}
             artifact={artifact}

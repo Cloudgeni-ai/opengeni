@@ -1202,24 +1202,14 @@ test("the Site view starts below the desktop window bar", async () => {
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
     // Only the Site's own column: previews in its chat keep their spacing.
     expect(await page.locator("[data-site-column] [aria-label='Chat']").count()).toBe(0);
-    // The Site's header row starts the column; in the macOS app its controls
-    // join the window bar and the Site itself starts the column.
-    const first = await (
-      desktop === "macos"
-        ? page.locator("[data-site-column] iframe").first()
-        : page.locator("[data-site-column] [data-site-header] > *").first()
-    ).boundingBox();
+    // The Site's header row starts its column (this page has no window-bar
+    // row to lift it into).
+    const first = await page
+      .locator("[data-site-column] [data-site-header] > *")
+      .first()
+      .boundingBox();
     expect(first).not.toBeNull();
     await expectWindowTop(page, desktop);
-    if (desktop === "macos") {
-      // The bar's title line stops before the Site's controls at the bar's
-      // right end, so a long title truncates instead of running under them.
-      const title = await page.locator("[data-window-bar-title]").first().boundingBox();
-      const controls = await page.locator("[data-window-bar-end]").boundingBox();
-      expect(title).not.toBeNull();
-      expect(controls).not.toBeNull();
-      expect(title!.x + title!.width).toBeLessThanOrEqual(controls!.x);
-    }
     return first!;
   };
 
@@ -1266,8 +1256,7 @@ test("the Site publish form starts below the desktop window bar in a narrow Site
       dispatchEvent(new PopStateEvent("popstate"));
     }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
-    // The Site's header: in its column, or in the macOS app's window bar.
-    await page.locator("[data-site-header]").getByRole("button", { name: "Publish" }).click();
+    await page.locator("[data-site-column] [data-site-header]").getByRole("button", { name: "Publish" }).click();
     const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
     const header = form.locator(":scope > header");
     const back = header.getByRole("button").first();
