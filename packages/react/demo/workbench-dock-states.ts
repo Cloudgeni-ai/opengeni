@@ -693,17 +693,6 @@ export const DOCK_STATES: Record<string, DockState> = {
     tree: treeReview,
     announceFileCount: 3,
   },
-  // Warm box, nothing changed yet (or every change reverted).
-  empty: {
-    label: "Warm · no changes",
-    capabilities: caps("warm"),
-    capture: captureNone,
-    machines: fleet(machine({ state: "online" })),
-    gitStatus: statusClean,
-    gitDiff: [],
-    tree: treeReview,
-    announceFileCount: 0,
-  },
   // Warm box, a real-sized branch review (nine files, long hunks).
   "branch-review": {
     label: "Warm · branch review",

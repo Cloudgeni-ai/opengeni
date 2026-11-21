@@ -255,4 +255,33 @@ describe("a linked pull request's detail", () => {
       }),
     ).rejects.toThrow("rate limited");
   });
+
+  test("one caller skips the cache at most every few seconds, across pull requests", async () => {
+    let reads = 0;
+    const reader = async () => {
+      reads += 1;
+      return null;
+    };
+    const linkFor = (n: number) =>
+      ({
+        id: `fresh-${n}`,
+        url: `https://github.com/acme/api/pull/${n}`,
+        provider: "github",
+        kind: "pull_request",
+      }) as never;
+    await cachedSessionPullRequestDetail("ws-g", linkFor(1), reader);
+    await cachedSessionPullRequestDetail("ws-g", linkFor(2), reader);
+    expect(reads).toBe(2);
+    // Both cached entries are under 5 s old, so fresh alone wouldn't re-read;
+    // age them past the fresh interval by asking right after, as one caller.
+    const options = { fresh: true, caller: "ws-g:user:ada" };
+    await cachedSessionPullRequestDetail("ws-g", linkFor(3), reader, options);
+    await cachedSessionPullRequestDetail("ws-g", linkFor(4), reader, options);
+    // A new PR is always read; the second fresh request is treated as a
+    // normal read, which also misses for an unseen PR.
+    expect(reads).toBe(4);
+    await cachedSessionPullRequestDetail("ws-g", linkFor(3), reader, options);
+    expect(reads).toBe(4);
+  });
 });
+

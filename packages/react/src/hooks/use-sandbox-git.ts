@@ -606,9 +606,9 @@ export function useSandboxGit(
   ]);
 }
 
-const NO_DIFF: SandboxGitFileDiff[] = [];
+const NO_DIFF = Object.freeze([]) as unknown as SandboxGitFileDiff[];
 
 function sameStrings(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
-const NO_ROOTS: string[] = [];
+const NO_ROOTS = Object.freeze([]) as unknown as string[];

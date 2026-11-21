@@ -12,7 +12,7 @@ import {
   ImageIcon,
   PaletteIcon,
 } from "lucide-react";
-import { memo, type ReactNode, useMemo, useState } from "react";
+import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
 import { cn } from "../lib/cn";
 import { useOpenGeniText } from "../messages/runtime";
@@ -171,6 +171,18 @@ export function buildChangesTree(files: readonly SandboxGitFileDiff[]): TreeNode
   return { ...root, dirs: root.dirs.map(fold) };
 }
 
+/** The files in the tree's top-to-bottom order: each folder's subfolders,
+ *  then its files. */
+export function changesTreeOrder(files: readonly SandboxGitFileDiff[]): SandboxGitFileDiff[] {
+  const ordered: SandboxGitFileDiff[] = [];
+  const walk = (node: TreeNode) => {
+    for (const dir of node.dirs) walk(dir);
+    for (const { file } of node.files) ordered.push(file);
+  };
+  walk(buildChangesTree(files));
+  return ordered;
+}
+
 /** A quiet tree of the changed files: folders, glyphs and change bars, no boxes. */
 export const ChangesTree = memo(function ChangesTree({
   files,
@@ -186,6 +198,18 @@ export const ChangesTree = memo(function ChangesTree({
   const t = useOpenGeniText();
   const tree = useMemo(() => buildChangesTree(files), [files]);
   const [closed, setClosed] = useState<ReadonlySet<string>>(() => new Set());
+  // The selected file's folders open, so its row is always visible.
+  const activePath = files[activeIndex]?.path;
+  useEffect(() => {
+    if (!activePath) return;
+    setClosed((current) => {
+      const shut = [...current].filter((dir) => activePath.startsWith(`${dir}/`));
+      if (shut.length === 0) return current;
+      const next = new Set(current);
+      for (const dir of shut) next.delete(dir);
+      return next;
+    });
+  }, [activePath]);
   const toggle = (path: string) =>
     setClosed((current) => {
       const next = new Set(current);

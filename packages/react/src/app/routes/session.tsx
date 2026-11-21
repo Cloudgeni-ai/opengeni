@@ -2133,7 +2133,8 @@ function SessionDockPanel(props: SessionDockProps) {
   useEffect(() => {
     if (!pullRequestLink || pullRequestTabOpened.current === props.sessionId) return;
     pullRequestTabOpened.current = props.sessionId;
-    if (dockNavigation.activeTab) return;
+    // The person's latest tab choice wins, read now rather than at mount.
+    if (readSessionDockNavigation(dockLayoutStorageId).activeTab) return;
     setTabRequest({
       sessionId: props.sessionId,
       tab: PULL_REQUEST_TAB,
@@ -2141,7 +2142,7 @@ function SessionDockPanel(props: SessionDockProps) {
       // Select it, but don't open a closed panel in the middle of reading.
       expand: false,
     });
-  }, [pullRequestLink, props.sessionId, dockNavigation.activeTab]);
+  }, [pullRequestLink, props.sessionId, dockLayoutStorageId]);
   // Something new in a closed panel (the first change, a pull request or the
   // first artifact) puts a small dot on the header toggle until it's opened.
   const hasChanges = useMemo(

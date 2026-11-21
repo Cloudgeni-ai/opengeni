@@ -54,6 +54,7 @@ export function registerSessionLinkPullRequestRoutes(
       try {
         const pullRequest = await cachedSessionPullRequestDetail(workspaceId, link, reader, {
           fresh: c.req.query("fresh") === "true",
+          caller: `${workspaceId}:${grant.subjectId}`,
           viewer: viewerGrant
             ? {
                 subjectId: viewerGrant.subjectId,

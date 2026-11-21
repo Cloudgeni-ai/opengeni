@@ -89,6 +89,9 @@ export type WorkspaceDockProps = {
    * menu. The phone overlay keeps its close button.
    */
   essentials?: boolean | undefined;
+  /** With `essentials`, keep the header accessory in the header rather than
+   *  the menu (e.g. a machine that is waking or offline). */
+  headerAccessoryPinned?: boolean | undefined;
   /** Remembers which optional tabs the person opened, per value (e.g. the
    *  chat's id). Omitted: the dock remembers them while it is mounted. */
   tabScope?: string | undefined;
@@ -221,6 +224,7 @@ export function WorkspaceDock({
   headerAccessory,
   mobileLeadingControl,
   essentials = false,
+  headerAccessoryPinned = false,
   tabScope,
   landing = false,
   onStripEmptied,
@@ -300,23 +304,22 @@ export function WorkspaceDock({
   const firstTabId = tabs[0]?.id ?? "";
   const requestedTabIsValid = tabIds.includes(requestedTab);
   const current = requestedTabIsValid ? requestedTab : firstTabId;
+  // Optional tabs live in the "+" menu until the person opens one; an opened
+  // tab stays on the strip (remembered per scope) until they close it. Only
+  // the person's own picks are remembered; a tab the dock lands on by itself
+  // shows while it's selected.
+  const [opened, setOpened] = useOpenedTabs(tabScope);
   const setTab = useCallback(
     (id: string) => {
       setInternalTab(id);
+      if (tabs.some((tab) => tab.id === id && tab.optional))
+        setOpened((ids) => (ids.includes(id) ? ids : [...ids, id]));
       onActiveTabChange?.(id);
     },
-    [onActiveTabChange],
+    [onActiveTabChange, setOpened, tabs],
   );
-  // Optional tabs live in the "+" menu until the person opens one; an opened
-  // tab stays on the strip (remembered per scope) until they close it.
-  const [opened, setOpened] = useOpenedTabs(tabScope);
-  const currentIsOptional = tabs.some((tab) => tab.id === current && tab.optional);
   const showLanding =
     landing && opened.length === 0 && tabs.length > 0 && tabs.every((tab) => tab.optional);
-  useEffect(() => {
-    if (currentIsOptional && !landing)
-      setOpened((ids) => (ids.includes(current) ? ids : [...ids, current]));
-  }, [current, currentIsOptional, landing, setOpened]);
   const shownTabs = useMemo(
     () =>
       showLanding
@@ -549,7 +552,7 @@ export function WorkspaceDock({
             onExpandClaim={claimExpand}
             leading={mobileLeadingControl}
             accessory={headerAccessory}
-            accessoryInMenu={essentials}
+            accessoryInMenu={essentials && !headerAccessoryPinned}
             controls={
               <ChromeButton
                 onClick={collapse}
@@ -614,7 +617,7 @@ export function WorkspaceDock({
       onClose={closeTab}
       onExpandClaim={claimExpand}
       accessory={headerAccessory}
-      accessoryInMenu={essentials}
+      accessoryInMenu={essentials && !headerAccessoryPinned}
       menuActions={essentials ? menuActions : undefined}
       controls={
         essentials ? null : (
@@ -864,6 +867,7 @@ function DockChrome({
   // One pill slides under the selected tab. It's positioned directly (no
   // state), so a switch costs no extra render.
   const stripRef = useRef<HTMLDivElement | null>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pillRef = useRef<HTMLSpanElement | null>(null);
   const shownKey = shownTabs.map((tab) => tab.id).join("\u0000");
   useLayoutEffect(() => {
@@ -875,9 +879,20 @@ function DockChrome({
         `[data-dock-tab-item="${CSS.escape(current)}"]`,
       );
       pill.style.opacity = node ? "1" : "0";
+      // Tabs that don't fit scroll; a soft edge shows there are more.
+      const overflow = strip.scrollWidth > strip.clientWidth + 1;
+      if (overflow) strip.setAttribute("data-overflow", "");
+      else strip.removeAttribute("data-overflow");
       if (!node) return;
       pill.style.width = `${node.offsetWidth}px`;
       pill.style.transform = `translateX(${node.offsetLeft}px)`;
+      if (overflow) {
+        const left = node.offsetLeft;
+        const right = left + node.offsetWidth;
+        if (left < strip.scrollLeft) strip.scrollLeft = left - 8;
+        else if (right > strip.scrollLeft + strip.clientWidth)
+          strip.scrollLeft = right - strip.clientWidth + 24;
+      }
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -934,7 +949,7 @@ function DockChrome({
         {shownTabs.length > 0 ? (
           <div
             ref={stripRef}
-            className="relative flex min-w-0 items-center gap-0.5 overflow-x-auto py-1.5 [scrollbar-width:none]"
+            className="relative flex min-w-0 items-center gap-0.5 overflow-x-auto py-1.5 [scrollbar-width:none] data-[overflow]:[mask-image:linear-gradient(to_right,black_calc(100%-24px),transparent)]"
             role="tablist"
             aria-label={msg("workspaceDock.workspacePanels")}
             aria-orientation="horizontal"
@@ -1000,7 +1015,17 @@ function DockChrome({
                       type="button"
                       aria-label={msg("workspaceDock.closeTab", { name: tabName(tab) })}
                       title={msg("workspaceDock.closeTab", { name: tabName(tab) })}
-                      onClick={() => onClose(tab.id)}
+                      onClick={() => {
+                        onClose(tab.id);
+                        // Keep focus in the strip: the selected tab, else "+".
+                        requestAnimationFrame(() => {
+                          const strip = stripRef.current;
+                          const target =
+                            strip?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ??
+                            menuTriggerRef.current;
+                          target?.focus();
+                        });
+                      }}
                       data-dock-tab-close={tab.id}
                       className={cn(
                         "mr-1.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full text-og-fg-subtle transition-opacity hover:bg-og-surface-3 hover:text-og-fg focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent group-hover/tab:opacity-100 max-[1023px]:size-8 pointer-coarse:size-8 pointer-coarse:opacity-100",
@@ -1019,6 +1044,7 @@ function DockChrome({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
+                ref={menuTriggerRef}
                 type="button"
                 title={msg("workspaceDock.more")}
                 aria-label={msg("workspaceDock.more")}

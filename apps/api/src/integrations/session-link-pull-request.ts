@@ -88,12 +88,56 @@ const DETAIL_TTL_MS = 30_000;
 const FRESH_MIN_INTERVAL_MS = 5_000;
 /** A failed read is retried soon, not held for the full TTL. */
 const FAILURE_TTL_MS = 5_000;
-const CACHE_MAX = 20;
+/** Pull requests kept per API instance, bounded by count and by size. */
+const CACHE_MAX = 200;
+const CACHE_MAX_BYTES = 32_000_000;
+/** One caller may skip the cache at most this often, whatever the PR. */
+const FRESH_PER_CALLER_MS = 2_000;
+const FRESH_CALLERS_MAX = 1_000;
 
-const detailCache = new Map<
-  string,
-  { at: number; failed?: boolean; detail: Promise<SessionPullRequestDetail | null> }
->();
+type CacheEntry = {
+  at: number;
+  failed?: boolean;
+  /** Approximate size once read (patch and comment text dominate). */
+  bytes: number;
+  detail: Promise<SessionPullRequestDetail | null>;
+};
+const detailCache = new Map<string, CacheEntry>();
+let cacheBytes = 0;
+const freshByCaller = new Map<string, number>();
+
+function detailBytes(detail: SessionPullRequestDetail | null): number {
+  // UTF-16 in memory; JSON length is close enough and read once per fill.
+  return detail ? JSON.stringify(detail).length * 2 : 0;
+}
+
+function evict(): void {
+  while (detailCache.size > CACHE_MAX || (cacheBytes > CACHE_MAX_BYTES && detailCache.size > 1)) {
+    const oldest = detailCache.keys().next().value!;
+    cacheBytes -= detailCache.get(oldest)?.bytes ?? 0;
+    detailCache.delete(oldest);
+  }
+}
+
+/** Whether this caller may skip the cache now (and records it if so). */
+function allowFresh(caller: string | undefined): boolean {
+  if (!caller) return true;
+  const now = Date.now();
+  const last = freshByCaller.get(caller);
+  if (last !== undefined && now - last < FRESH_PER_CALLER_MS) return false;
+  freshByCaller.delete(caller);
+  freshByCaller.set(caller, now);
+  while (freshByCaller.size > FRESH_CALLERS_MAX)
+    freshByCaller.delete(freshByCaller.keys().next().value!);
+  return true;
+}
+
+/** For tests: start with an empty cache. */
+export function resetSessionPullRequestCache(): void {
+  detailCache.clear();
+  freshByCaller.clear();
+  cacheBytes = 0;
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -401,14 +445,24 @@ async function cachedRead(
   const cached = detailCache.get(key);
   const maxAge = cached?.failed ? FAILURE_TTL_MS : fresh ? FRESH_MIN_INTERVAL_MS : DETAIL_TTL_MS;
   if (cached && Date.now() - cached.at < maxAge) return await cached.detail;
-  const entry: { at: number; failed?: boolean; detail: Promise<SessionPullRequestDetail | null> } =
-    { at: Date.now(), detail: read() };
-  entry.detail.catch(() => {
-    entry.failed = true;
-  });
-  detailCache.delete(key);
+  const entry: CacheEntry = { at: Date.now(), bytes: 0, detail: read() };
+  entry.detail.then(
+    (detail) => {
+      if (detailCache.get(key) !== entry) return;
+      entry.bytes = detailBytes(detail);
+      cacheBytes += entry.bytes;
+      evict();
+    },
+    () => {
+      entry.failed = true;
+    },
+  );
+  if (cached) {
+    cacheBytes -= cached.bytes;
+    detailCache.delete(key);
+  }
   detailCache.set(key, entry);
-  while (detailCache.size > CACHE_MAX) detailCache.delete(detailCache.keys().next().value!);
+  evict();
   return await entry.detail;
 }
 
@@ -422,9 +476,14 @@ export async function cachedSessionPullRequestDetail(
   workspaceId: string,
   link: SessionLink,
   reader: SessionPullRequestReader,
-  options: { fresh?: boolean; viewer?: SessionPullRequestViewer | null } = {},
+  options: {
+    fresh?: boolean;
+    viewer?: SessionPullRequestViewer | null;
+    /** Who is asking (workspace and subject); limits how often they skip the cache. */
+    caller?: string;
+  } = {},
 ): Promise<SessionPullRequestDetail | null> {
-  const fresh = options.fresh === true;
+  const fresh = options.fresh === true && allowFresh(options.caller);
   const viewer = options.viewer ?? null;
   const viewerRead = () =>
     cachedRead(

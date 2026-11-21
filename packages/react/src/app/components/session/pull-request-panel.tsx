@@ -326,7 +326,7 @@ export function PullRequestView({
             {canMerge || onRemove ? <DropdownMenuSeparator /> : null}
             {canMerge ? (
               <DropdownMenuItem asChild>
-                <a href={detail.url} target="_blank" rel="noreferrer noopener" data-pr-github="">
+                <a href={safeHref(detail.url)} target="_blank" rel="noreferrer noopener" data-pr-github="">
                   View on GitHub
                   <ArrowUpRightIcon aria-hidden className="ml-auto size-3.5" />
                 </a>
@@ -495,7 +495,7 @@ function PullRequestTabBody({ tab, detail }: { tab: SubTab; detail: SessionPullR
         <Empty>
           Files couldn't be read here.{" "}
           <a
-            href={`${detail.url}/files`}
+            href={safeHref(`${detail.url}/files`)}
             target="_blank"
             rel="noreferrer noopener"
             className="font-medium text-fg underline-offset-2 hover:underline"
@@ -513,7 +513,7 @@ function PullRequestTabBody({ tab, detail }: { tab: SubTab; detail: SessionPullR
           <p className="shrink-0 px-4 pt-2 text-xs text-fg-muted" data-pr-files-truncated="">
             {files.length} of {detail.changedFiles} files.{" "}
             <a
-              href={`${detail.url}/files`}
+              href={safeHref(`${detail.url}/files`)}
               target="_blank"
               rel="noreferrer noopener"
               className="font-medium text-fg underline-offset-2 hover:underline"
@@ -631,9 +631,10 @@ function CheckRow({ run }: { run: SessionPullRequestDetail["checkRuns"][number] 
     </>
   );
   const className = "flex min-w-0 items-center gap-2 px-4 py-1.5";
-  return run.url ? (
+  const href = safeHref(run.url);
+  return href ? (
     <a
-      href={run.url}
+      href={href}
       target="_blank"
       rel="noreferrer noopener"
       className={cn(className, "hover:bg-surface-2")}
@@ -656,10 +657,22 @@ function Person({ person }: { person: { login: string; avatarUrl: string | null 
   );
 }
 
+/** Only http(s) links leave the panel; anything else (javascript:, data:)
+ *  renders as plain text. Check-run links come from third-party apps. */
+export function safeHref(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function GitHubLink({ url }: { url: string }) {
   return (
     <a
-      href={url}
+      href={safeHref(url)}
       target="_blank"
       rel="noreferrer noopener"
       data-pr-github=""

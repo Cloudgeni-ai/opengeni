@@ -33,6 +33,7 @@ import { PierreDiff } from "./pierre-diff";
 import {
   ChangeBar,
   ChangesTree,
+  changesTreeOrder,
   FileChangeWords,
   FileGlyph,
   type WorkbenchChangesNavigation,
@@ -396,7 +397,15 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   );
   useUnicodeFallbackFonts(unicodeFontPaths);
 
-  const { orderedFiles, rows, grouped } = useMemo(() => buildRail(t, diff), [diff, t]);
+  // The tree lists files folder by folder; the diff pane follows the same order
+  // so scrolling one moves the other in step.
+  const { orderedFiles, rows, grouped } = useMemo(
+    () =>
+      navigation === "tree"
+        ? { orderedFiles: changesTreeOrder(diff), rows: [] as RailRow[], grouped: false }
+        : buildRail(t, diff),
+    [diff, navigation, t],
+  );
   const selectedIndex = orderedFiles.findIndex((file) => file.path === activePath);
   const activeIndex = selectedIndex >= 0 ? selectedIndex : 0;
 

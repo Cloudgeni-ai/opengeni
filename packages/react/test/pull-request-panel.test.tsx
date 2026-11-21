@@ -7,7 +7,7 @@ registerDom();
 mock.module("../src/ui/dropdown-menu", dropdownMenuStub);
 
 const { act } = await import("react");
-const { PullRequestView, pullRequestLinkFromLinks } =
+const { PullRequestView, pullRequestLinkFromLinks, safeHref } =
   await import("../src/app/components/session/pull-request-panel");
 
 const LINK = {
@@ -163,5 +163,14 @@ describe("the PR tab", () => {
     expect(unread.container.textContent).toContain("Files couldn't be read here.");
     expect(unread.container.textContent).not.toContain("No file changes.");
     await unread.unmount();
+  });
+
+  test("only http(s) links leave the panel", () => {
+    expect(safeHref("https://ci.example.com/run/1")).toBe("https://ci.example.com/run/1");
+    expect(safeHref("http://ci.example.com/")).toBe("http://ci.example.com/");
+    expect(safeHref("javascript:alert(1)")).toBeUndefined();
+    expect(safeHref("data:text/html,hi")).toBeUndefined();
+    expect(safeHref("not a url")).toBeUndefined();
+    expect(safeHref(null)).toBeUndefined();
   });
 });

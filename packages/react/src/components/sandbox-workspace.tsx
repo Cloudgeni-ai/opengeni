@@ -717,6 +717,12 @@ export function useSandboxWorkspaceTabs(
   }, [terminalEnabled]);
 
   const dirtyCount = git.diff.length;
+  // Live Git reads only while Changes is open, so a chat that opens on another
+  // tab learns about its changes from the session's own events.
+  const eventsShowChanges = useMemo(
+    () => relevantOnly && initialWorkspaceTab(events) === WORKBENCH_TAB_CHANGES,
+    [events, relevantOnly],
+  );
 
   // The one truthful machine indicator, derived from the live capability/liveness
   // surface + the active machine's connection state + the latest capture time.
@@ -812,6 +818,7 @@ export function useSandboxWorkspaceTabs(
         ...(relevantOnly &&
         dirtyCount === 0 &&
         !captureHasChanges &&
+        !eventsShowChanges &&
         !(storedChangesComparison?.sessionId === sessionId && storedChangesComparison.picked)
           ? { optional: true }
           : {}),
@@ -1013,6 +1020,7 @@ export function useSandboxWorkspaceTabs(
     captureState.degradedReason,
     dirtyCount,
     captureHasChanges,
+    eventsShowChanges,
     storedChangesComparison,
     relevantOnly,
     warmTerminal,
@@ -1385,6 +1393,8 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       activeTab !== WORKBENCH_TAB_DESKTOP
         ? {
             headerAccessory: <MachineStateChip chip={machine.chip} />,
+            // Waking or offline is worth seeing without opening the menu.
+            headerAccessoryPinned: machine.chip.state !== "live",
           }
         : {})}
       {...(mobileLeadingControl !== undefined ? { mobileLeadingControl } : {})}

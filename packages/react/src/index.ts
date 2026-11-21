@@ -838,6 +838,7 @@ export type {
   WorkbenchChangesProps,
   WorkbenchPullRequest,
 } from "./components/workbench-changes";
+export type { WorkbenchChangesNavigation } from "./components/workbench-changes-nav";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
 export { PierreDiff } from "./components/pierre-diff";
@@ -884,6 +885,7 @@ export {
 } from "./components/sandbox-workspace";
 export type {
   SandboxWorkspaceSurface,
+  SandboxWorkspaceTabVisibility,
   SandboxWorkspaceProps,
   UseSandboxWorkspaceTabsOptions,
   UseSandboxWorkspaceTabsResult,

@@ -1523,5 +1523,5 @@ export function useSandboxFiles(
   );
 }
 
-const NO_TREE: FileTreeNode[] = [];
+const NO_TREE = Object.freeze([]) as unknown as FileTreeNode[];
 const NO_PATHS = new Set<string>();
