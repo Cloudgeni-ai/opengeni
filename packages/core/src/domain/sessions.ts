@@ -1440,13 +1440,13 @@ export async function createAndStartSessionWithOutcome(input: {
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
           ...(input.boundAgentId
-          ? {
-              agent: {
-                id: input.boundAgentId,
-                ...(input.boundAgentSubjectId ? { subjectId: input.boundAgentSubjectId } : {}),
-              },
-            }
-          : {}),
+            ? {
+                agent: {
+                  id: input.boundAgentId,
+                  ...(input.boundAgentSubjectId ? { subjectId: input.boundAgentSubjectId } : {}),
+                },
+              }
+            : {}),
           ...(input.boundOrgAgent ? { orgAgent: input.boundOrgAgent } : {}),
           ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
