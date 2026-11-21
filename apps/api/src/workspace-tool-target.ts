@@ -1073,7 +1073,14 @@ export async function describeWorkspaceSiteToolConsent(
     ),
     selected: choices.selected,
     review,
-    connect: choices.connect,
+    // The consent answer's connect contract: the connector, not how it signs in.
+    connect: choices.connect
+      ? {
+          capabilityId: choices.connect.capabilityId,
+          name: choices.connect.name,
+          providerDomain: choices.connect.providerDomain,
+        }
+      : null,
   });
 }
 

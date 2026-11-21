@@ -97,4 +97,38 @@ describe("the App connect card", () => {
     ).toBe(false);
     expect(seen).toHaveLength(2);
   });
+
+  test("an API-key tool: admins add a shared key, others are told to ask an admin", async () => {
+    const addKey = { ...connect, key: "connect:Stripe:", connector: "Stripe", sharedKey: "add" as const };
+    const askAdmin = { ...addKey, key: "connect:Linear:", connector: "Linear", sharedKey: "ask_admin" as const };
+    const clicked: string[] = [];
+    const view = await renderComponent(
+      <AppConnectCardView
+        items={[addKey, askAdmin]}
+        onConnect={(key) => clicked.push(key)}
+        onDismiss={() => undefined}
+      />,
+    );
+    const card = document.body.querySelector<HTMLElement>("[data-app-connect-card]")!;
+    const buttons = [...card.querySelectorAll("button")].map((button) => button.textContent);
+    expect(buttons).toEqual(["Add a shared key for Stripe", ""]);
+    expect(card.textContent).toContain("Ask an admin to connect Linear");
+    await actRun(() => card.querySelectorAll("button")[0]!.click());
+    expect(clicked).toEqual([addKey.key]);
+    await view.unmount();
+
+    // Nothing to run for someone who has to ask an admin.
+    let opened = 0;
+    const consent = {
+      connectForToolCall: async () => {
+        opened += 1;
+        return true;
+      },
+      recoverToolCall: async () => true,
+    };
+    expect(
+      await runSiteConnectCardItem(consent, "workspace", askAdmin, new AbortController().signal),
+    ).toBe(false);
+    expect(opened).toBe(0);
+  });
 });

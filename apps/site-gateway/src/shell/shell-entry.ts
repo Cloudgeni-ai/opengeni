@@ -31,6 +31,7 @@ import {
 import {
   SiteBridgeHost,
   siteConnectCardDismissals,
+  siteConnectCardItemActionable,
   siteConnectCardLabel,
   type OpenGeniSiteDataChange,
   openGeniSiteLocationHref,
@@ -307,8 +308,11 @@ function createConnectCard(onReturn: () => void) {
           {},
           signal ?? new AbortController().signal,
         );
-        // Only items this page can act on: each opens the App in Opengeni.
-        items = response.items.filter((item) => typeof item.openUrl === "string");
+        // Items this page can act on (each opens the App in Opengeni), and
+        // shared keys only a workspace admin can add, shown as plain text.
+        items = response.items.filter(
+          (item) => typeof item.openUrl === "string" || !siteConnectCardItemActionable(item),
+        );
       } catch {
         items = null;
       }
@@ -326,6 +330,13 @@ function createConnectCard(onReturn: () => void) {
     card.setAttribute("aria-label", "Connect tools for this app");
     const list = document.createElement("div");
     for (const item of visible) {
+      if (!siteConnectCardItemActionable(item)) {
+        const note = document.createElement("span");
+        note.className = "og-connect-note";
+        note.textContent = siteConnectCardLabel(item);
+        list.append(note);
+        continue;
+      }
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = siteConnectCardLabel(item);
