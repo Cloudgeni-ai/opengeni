@@ -3818,6 +3818,8 @@ export const englishMessages = {
   "native.timeline.imageViewer.couldnTShareThisImage": "Couldn't share this image.",
   "native.timeline.imageViewer.doubleTapToZoom": "Double-tap to zoom",
   "native.timeline.imageViewer.share": "Share",
+  "native.timeline.inChatConnect.askedAgain":
+    "The agent asked to connect {name}. It asked again below.",
   "native.timeline.inChatConnect.close": "Close",
   "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
   "native.timeline.landmarks.earlier": "+{count} earlier",

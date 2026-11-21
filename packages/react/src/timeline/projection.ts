@@ -2269,7 +2269,7 @@ export function buildTimeline(
     }
   }
   if (pendingTurnSteps) items.push(pendingTurnSteps);
-  markRepeatedMachineRequests(items);
+  markRepeatedCapabilityRequests(items);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2661,23 +2661,30 @@ function mergeToolCallRaw(existingValue: unknown, nextValue: unknown): unknown {
   };
 }
 
-const CONNECTED_MACHINE_CARD_ID = "api:connected-machine";
-
 /**
- * An agent that is refused a machine often asks again in later turns. Only the
- * newest Connected Machine card for the same request stays a full card; earlier
- * ones become a short note, so a chat never piles up copies of the same card.
- * Cards that name different machines, or ask for Chrome rather than a machine,
- * are separate requests.
+ * An agent that is still waiting for a connection often asks for it again, in
+ * the same turn or a later one. Only the newest card for the same request
+ * stays a full card; earlier ones become a short note, so a chat never piles
+ * up copies of the same card. Cards for different connections, Connected
+ * Machine cards that name different machines, and Chrome rather than a machine
+ * are separate requests. A proposed custom setup is never folded. Within one
+ * turn a request shows once: earlier copies there are left out altogether.
  */
-function markRepeatedMachineRequests(items: TimelineItem[]): void {
-  const seen = new Set<string>();
+function markRepeatedCapabilityRequests(items: TimelineItem[]): void {
+  // The turn of each request's latest card or note kept so far.
+  const kept = new Map<string, string | null>();
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
-    if (item.kind !== "auth-needed" || item.capability?.id !== CONNECTED_MACHINE_CARD_ID) continue;
-    const key = `${item.purpose ?? ""}:${item.requestedSandboxId ?? ""}`;
-    if (seen.has(key)) item.askedAgainLater = true;
-    else seen.add(key);
+    if (item.kind !== "auth-needed" || !item.capability || item.setupRequest) continue;
+    const key = `${item.capability.id}:${item.purpose ?? ""}:${item.requestedSandboxId ?? ""}`;
+    if (!kept.has(key)) {
+      kept.set(key, item.turnId);
+    } else if (item.turnId !== null && kept.get(key) === item.turnId) {
+      items.splice(index, 1);
+    } else {
+      item.askedAgainLater = true;
+      kept.set(key, item.turnId);
+    }
   }
 }
 

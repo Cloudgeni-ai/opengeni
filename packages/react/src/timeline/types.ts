@@ -694,8 +694,8 @@ export type AuthNeededItem = {
   /** `chrome`: the Connected Machine card is for the person's own Chrome. */
   purpose?: "chrome" | undefined;
   /**
-   * A later Connected Machine card in this chat asks for the same thing, so
-   * this one is shown as a short note instead of a second full card.
+   * A later card in this chat asks for the same connection, so this one is
+   * shown as a short note instead of a second full card.
    */
   askedAgainLater?: boolean | undefined;
   occurredAt: string;

@@ -15,7 +15,7 @@ import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
 import { SessionIntegrationCapabilityCard } from "../../../components/session-integration-capability-card";
 import "../../../../styles/connect.css";
 import type { AuthNeededItem } from "../../../timeline";
-import { CheckIcon, Loader2Icon } from "lucide-react";
+import { CheckIcon, Loader2Icon, PlugIcon } from "lucide-react";
 import { useAppContext } from "../../app-context";
 import { CodexSubscriptionsSurface } from "../../lib/app-surfaces";
 import { Button } from "../../../ui/button";
@@ -71,6 +71,19 @@ type SessionCapabilityCardProps = {
   /** What a composer Send would carry now, for cards that send a human message. */
   sendContext?: (() => ChatSendContext) | undefined;
 };
+
+/**
+ * An earlier card for a connection the agent asked for again further down.
+ * The newer card is the live one, so this stays a single quiet line.
+ */
+export function RepeatedCapabilityRequestNote({ name }: { name: string }) {
+  return (
+    <p className="flex items-center gap-2 text-xs text-fg-muted">
+      <PlugIcon aria-hidden className="size-3.5 shrink-0" />
+      {`The agent asked to connect ${name}. It asked again below.`}
+    </p>
+  );
+}
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const page = usePage();
@@ -154,6 +167,9 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       />
     );
   }
+  // The same connection was asked for again further down, where its card is live.
+  if (capability && item.askedAgainLater)
+    return <RepeatedCapabilityRequestNote name={capability.name} />;
   if (capability?.id === "api:github-app") {
     return (
       <SessionGitHubCapabilityCard
