@@ -8,6 +8,8 @@ export type {
   AppPackageUpgradePlan,
   AppPackageUpgradeRequest,
   AppPackageUpgradeResponse,
+  AppTemplate,
+  ListAppTemplatesResponse,
 } from "@opengeni/contracts";
 export type {
   ModelDecisionRequest,
@@ -1460,6 +1462,7 @@ export type {
   InstalledSkill,
   InstalledSkillSummary,
   ListInstalledSkillsResponse,
+  ListLibrarySkillsResponse,
   Document,
   DocumentAuthorityKind,
   DocumentBase,

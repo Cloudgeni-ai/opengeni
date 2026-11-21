@@ -209,6 +209,15 @@ failed delete keeps the row with its error and retries later with backoff
 (from a minute, doubling, up to a day). Deleting a workspace deletes its
 recorded export objects.
 
+## Ready-made apps
+
+`GET /v1/workspaces/:workspaceId/app-templates` (`artifacts:read`; SDK
+`listAppTemplates`) lists ready-made apps: content files in
+`packages/core/src/app-templates/*.app.json` (schema `AppTemplate`: `key`,
+`name`, `description`, `team` and a `package`). A file that isn't a valid
+package, or whose package has problems, is skipped. Capabilities **Ready-made**
+adds one by installing its `package` through the ordinary install above.
+
 ## Self-hosting
 
 - Site SQL needs the Cloudflare Sites gateway. Without it, exports have no SQL

@@ -11,6 +11,8 @@ import type {
   AppPackageInstallResponse,
   AppPackageUpgradeRequest,
   AppPackageUpgradeResponse,
+  AppTemplate,
+  ListAppTemplatesResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -622,6 +624,7 @@ import type {
   InstallLibrarySkillRequest,
   InstalledSkill,
   ListInstalledSkillsResponse,
+  ListLibrarySkillsResponse,
   CreateBillingPortalRequest,
   BillingSubscriptionCatalog,
   BillingAutoTopUpSettings,
@@ -10456,6 +10459,21 @@ export class OpenGeniClient {
     );
   }
 
+  /** Ready-made apps; add one with `installAppPackage` and its `package`. */
+  async listAppTemplates(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppTemplate[]> {
+    const response = await this.requestJson<ListAppTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-templates`,
+      undefined,
+      undefined,
+      options,
+    );
+    return response.templates;
+  }
+
   async setWorkspaceArtifactStatus(
     workspaceId: string,
     artifactId: string,
@@ -11750,6 +11768,15 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/skills`,
     );
+  }
+
+  /** Reviewed library skills to add with `installLibrarySkill`; `enabled` once added. */
+  async listLibrarySkills(workspaceId: string): Promise<CapabilityCatalogItem[]> {
+    const response = await this.requestJson<ListLibrarySkillsResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/skills/library`,
+    );
+    return response.skills;
   }
 
   /** Shared authored/installed catalog metadata. File bodies are read on demand. */

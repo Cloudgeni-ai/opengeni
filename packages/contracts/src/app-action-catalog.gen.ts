@@ -2958,6 +2958,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/app-templates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/app-templates",
+    "request": [],
+    "response": [],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
@@ -3326,6 +3334,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/skills/library",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/skills/library",
+    "request": [],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/slack-task-policy",

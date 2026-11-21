@@ -2,6 +2,7 @@
   "key": "pr-reviewer",
   "name": "PR reviewer",
   "description": "Reviews pull requests for correctness, risk and tests, and says clearly what must change.",
+  "team": "Engineering",
   "avatar": {
     "kind": "icon",
     "icon": "code",

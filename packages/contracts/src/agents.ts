@@ -648,6 +648,9 @@ export const AgentTemplateTrigger = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentTemplateTrigger = z.output<typeof AgentTemplateTrigger>;
 
+/** The team a piece of ready-made content is for, as people say it: "Engineering", "Sales". */
+export const ReadyMadeTeam = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(60));
+
 /** A ready-made agent people can add from the "Add an agent" gallery. Content, not code. */
 export const AgentTemplate = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -657,6 +660,8 @@ export const AgentTemplate = /* @__PURE__ */ defineSchema(() =>
       .max(AGENT_TEMPLATE_KEY_MAX_LENGTH),
     name: AgentName,
     description: AgentDescription,
+    /** The team it is for ("Engineering"); Ready-made groups by it. */
+    team: ReadyMadeTeam.nullish(),
     avatar: SessionAvatar.nullable().default(null),
     instructions: AgentInstructions,
     memoryEnabled: z.boolean().default(true),
