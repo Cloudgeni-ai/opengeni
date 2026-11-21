@@ -1,9 +1,15 @@
 // The chat's Linked panel: what this chat works on (issues, pull requests,
 // Slack threads, App records, any URL), each with its live status where the
-// deployment can read it. The agent adds items with session_links_add; a pull
+// deployment can read it (Linear and Slack through the viewer's own
+// connection, with a quiet Connect when they have none). The agent adds items with session_links_add; a pull
 // request the chat opens is added by itself. One quiet row per item: icon,
 // title, and a short status line. No stages, no pipeline.
-import type { SessionEvent, SessionLinkLiveStatus, SessionLinkWithStatus } from "@opengeni/sdk";
+import type {
+  SessionEvent,
+  SessionLinkConnect,
+  SessionLinkLiveStatus,
+  SessionLinkWithStatus,
+} from "@opengeni/sdk";
 import {
   CircleDotIcon,
   FileTextIcon,
@@ -14,6 +20,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { formatRelativeTime, inSentence } from "../../../ui/time-format";
 import { useAppContext } from "../../app-context";
 import { cn } from "../../lib/utils";
 
@@ -132,14 +139,28 @@ const REVIEW_WORDS: Record<NonNullable<SessionLinkLiveStatus["review"]>, string 
   none: null,
 };
 
+/** "3 replies · last reply 2 hours ago" for a thread; null when the status has no reply count. */
+function repliesWords(status: SessionLinkLiveStatus, now: Date): string | null {
+  if (status.replies === undefined || status.replies === null) return null;
+  if (status.replies === 0) return "No replies";
+  const count = `${status.replies} ${status.replies === 1 ? "reply" : "replies"}`;
+  if (!status.lastReplyAt) return count;
+  return `${count} · last reply ${inSentence(formatRelativeTime(status.lastReplyAt, { now }))}`;
+}
+
 /** The short status line for a link, or null for title only. */
-export function sessionLinkStatusLine(status: SessionLinkLiveStatus | null): {
+export function sessionLinkStatusLine(
+  status: SessionLinkLiveStatus | null,
+  now: Date = new Date(),
+): {
   text: string;
   tone: "good" | "bad" | "pending" | "neutral";
 } | null {
   if (!status) return null;
   const words = [
     status.label ?? STATE_WORDS[status.state],
+    status.assignee ?? null,
+    repliesWords(status, now),
     status.checks ? CHECK_WORDS[status.checks] : null,
     status.review ? REVIEW_WORDS[status.review] : null,
   ].filter((word): word is string => Boolean(word));
@@ -189,10 +210,13 @@ export function LinkedList({
   links,
   status,
   onRemove,
+  connectHref,
 }: {
   links: readonly SessionLinkWithStatus[];
   status: LinksState["status"];
   onRemove?: ((linkId: string) => void) | undefined;
+  /** Where Connect goes for a link the viewer can't read yet; without it no Connect shows. */
+  connectHref?: ((connect: SessionLinkConnect) => string) | undefined;
 }) {
   if (links.length === 0) {
     return (
@@ -246,6 +270,15 @@ export function LinkedList({
                 ) : null}
               </span>
             </a>
+            {link.connect && connectHref ? (
+              <a
+                href={connectHref(link.connect)}
+                data-session-link-connect={link.connect.name}
+                className="og-link mb-1 ml-9 block w-fit text-xs text-fg-muted"
+              >
+                Connect {link.connect.name}
+              </a>
+            ) : null}
             {onRemove ? (
               <button
                 type="button"
@@ -268,9 +301,11 @@ export function LinkedList({
 export function SessionLinkedPanel({
   state,
   canEdit,
+  connectHref,
 }: {
   state: ReturnType<typeof useSessionLinks>;
   canEdit: boolean;
+  connectHref?: ((connect: SessionLinkConnect) => string) | undefined;
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-session-linked-panel="">
@@ -278,6 +313,7 @@ export function SessionLinkedPanel({
         links={state.links}
         status={state.status}
         onRemove={canEdit ? (id) => void state.remove(id) : undefined}
+        connectHref={connectHref}
       />
     </div>
   );

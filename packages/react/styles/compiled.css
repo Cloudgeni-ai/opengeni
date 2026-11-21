@@ -1454,6 +1454,9 @@
 :where(.og-root).ml-7,:where(.og-root) .ml-7 {
     margin-left: calc(var(--spacing) * 7);
   }
+:where(.og-root).ml-9,:where(.og-root) .ml-9 {
+    margin-left: calc(var(--spacing) * 9);
+  }
 :where(.og-root).ml-\[2\.125rem\],:where(.og-root) .ml-\[2\.125rem\] {
     margin-left: 2.125rem;
   }
@@ -17359,6 +17362,9 @@
 :where(.og-root).og-tc-card-foot > p[data-complete],:where(.og-root) .og-tc-card-foot > p[data-complete] {
   color: var(--og-color-status-idle);
   font-weight: 500;
+}
+:where(.og-root).og-tc-card-foot > p.og-tc-card-ready,:where(.og-root) .og-tc-card-foot > p.og-tc-card-ready {
+  flex-basis: 100%;
 }
 :where(.og-root).og-tc-card-foot > :is(button, a),:where(.og-root) .og-tc-card-foot > :is(button, a) {
   display: inline-flex;

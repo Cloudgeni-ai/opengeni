@@ -1679,6 +1679,7 @@ export type {
   SessionLinkKind,
   SessionLinkProvider,
   SessionLinkLiveStatus,
+  SessionLinkConnect,
   SessionLinkWithStatus,
   SessionLinksResponse,
   AddSessionLinkRequest,

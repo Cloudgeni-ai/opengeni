@@ -11,7 +11,10 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 import type { ResolvedSidebarChild, ResolvedSidebarItem, SidebarLayoutChange } from "@opengeni/sdk";
-import { flattenSidebarItemsForMobile } from "@opengeni/contracts/sidebar-layout";
+import {
+  flattenSidebarItemsForMobile,
+  sidebarItemsShown,
+} from "@opengeni/contracts/sidebar-layout";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { cn } from "@opengeni/react/app/lib/utils";
 import {
@@ -183,8 +186,8 @@ function ChildRows({
         {menu}
       </div>
     );
-  // A live list: its label, then its apps. An empty list keeps its label so
-  // it can be found again once it fills.
+  // A live list: its label, then its apps. An empty list isn't shown (see
+  // sidebarItemsShown); the Sidebar page still lists it.
   return (
     <div className="grid gap-0.5">
       <div className="group/row relative">
@@ -218,7 +221,8 @@ export function SidebarLayoutSection() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { layout, update } = useSidebarLayout(rail.workspaceId);
   const [openGroups, setOpenGroups] = useState(readOpenGroups);
-  if (rail.collapsed || !layout || layout.items.length === 0) return null;
+  const shownItems = layout ? sidebarItemsShown(layout.items) : [];
+  if (rail.collapsed || !layout || shownItems.length === 0) return null;
   const canChange = layout.personal.available;
   const change = (changes: SidebarLayoutChange[]) =>
     void update({ scope: "personal", changes }).catch((error: unknown) =>
@@ -234,7 +238,7 @@ export function SidebarLayoutSection() {
     }
   };
   if (rail.isMobile) {
-    const items = flattenSidebarItemsForMobile(layout.items);
+    const items = flattenSidebarItemsForMobile(shownItems);
     const actions: RowActions = { siblings: [], change, canChange: false };
     return (
       <nav aria-label="Workspace links" className="mt-2 grid gap-0.5 px-2" data-sidebar-layout>
@@ -250,10 +254,10 @@ export function SidebarLayoutSection() {
       </nav>
     );
   }
-  const rootIds = layout.items.map((item) => item.id);
+  const rootIds = shownItems.map((item) => item.id);
   return (
     <nav aria-label="Workspace links" className="mt-2 grid gap-0.5 px-2" data-sidebar-layout>
-      {layout.items.map((item) => {
+      {shownItems.map((item) => {
         const actions: RowActions = { siblings: rootIds, change, canChange };
         if (item.type !== "group")
           return (

@@ -30840,6 +30840,16 @@
         "$": "enum=[\"\\\"agent\\\"\",\"\\\"automatic\\\"\",\"\\\"person\\\"\"]"
       }
     },
+    "SessionLinkConnect": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilityId": "string! null",
+        "$.name": "string!"
+      }
+    },
     "SessionLinkKind": {
       "io": [
         "input",
@@ -30855,8 +30865,11 @@
       ],
       "shape": {
         "$": "object",
+        "$.assignee": "string? null",
         "$.checks": "enum! null=[\"\\\"failing\\\"\",\"\\\"none\\\"\",\"\\\"passing\\\"\",\"\\\"pending\\\"\"]",
         "$.label": "string! null",
+        "$.lastReplyAt": "string? null",
+        "$.replies": "integer? null",
         "$.review": "enum! null=[\"\\\"approved\\\"\",\"\\\"changes_requested\\\"\",\"\\\"none\\\"\",\"\\\"review_required\\\"\"]",
         "$.state": "ref(SessionLinkState)!",
         "$.title": "string! null"
@@ -30886,6 +30899,7 @@
         "$": "object",
         "$.addedAt": "string!",
         "$.addedBy": "ref(SessionLinkAddedBy)!",
+        "$.connect": "ref(SessionLinkConnect)? null",
         "$.id": "string!",
         "$.kind": "ref(SessionLinkKind)!",
         "$.provider": "ref(SessionLinkProvider)!",
@@ -39875,6 +39889,7 @@
       "SessionInboxMute": "type",
       "SessionLineageResponse": "type",
       "SessionLink": "type",
+      "SessionLinkConnect": "type",
       "SessionLinkKind": "type",
       "SessionLinkLiveStatus": "type",
       "SessionLinkProvider": "type",

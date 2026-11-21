@@ -3,14 +3,17 @@
 //   ?theme=light|dark  ?view=board|setup|web  ?state=<preset>  ?grant=auto|manual
 //   view=web: the conversation card outside the desktop app, as an embedding
 //   host shows it, including a ready computer next to the host's connect path.
+//   ?device=windows: the web cards as a Windows browser sees them.
 import type { MachineView } from "@opengeni/sdk";
 import {
   ThisComputerCard,
   ThisComputerOffer,
   ThisComputerPanel,
   ThisComputerSetup,
+  defaultThisComputerLabels,
   useThisComputer,
   type ThisComputerHost,
+  type ThisComputerLabels,
   type ThisComputerPermissionId,
   type ThisComputerStatus,
 } from "@opengeni/react/this-computer";
@@ -25,6 +28,25 @@ const view = params.get("view") ?? "board";
 const preset = params.get("state") ?? "off";
 const autoGrant = params.get("grant") !== "manual";
 const platform = (params.get("platform") ?? "macos") as "macos" | "linux" | "windows";
+if (params.get("device") === "windows") {
+  Object.defineProperty(navigator, "userAgent", {
+    get: () =>
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+  });
+}
+
+// A host with no desktop app for this device says so in its own words.
+const elsewhereLabels: ThisComputerLabels = (() => {
+  const labels = defaultThisComputerLabels();
+  return {
+    ...labels,
+    card: {
+      ...labels.card,
+      getApp: (productName: string) =>
+        `${productName} for desktop isn't available for this computer yet.`,
+    },
+  };
+})();
 
 const APP_ICON =
   "data:image/svg+xml;utf8," +
@@ -147,13 +169,14 @@ const agentMark = (
   </svg>
 );
 
-function machine(state: MachineView["state"]): MachineView {
+function machine(state: MachineView["state"], name = "Kari's MacBook Air", os = ""): MachineView {
   return {
     sandboxId: "m1",
     enrollmentId: "e1",
     scope: "user",
-    name: "Kari's MacBook Air",
+    name,
     state,
+    os,
   } as MachineView;
 }
 
@@ -323,6 +346,22 @@ function WebCards() {
           rationale={rationale}
           downloads={[{ label: "Download Acme for Windows", url: "https://example.com/acme.exe" }]}
           openAppUrl="acme://connect"
+        />
+      </Tile>
+      <Tile title="web: a Mac is ready, the host can't connect this device">
+        <ThisComputerCard
+          productName="Acme"
+          machines={[machine("online", "Mac mini", "macos")]}
+          rationale="Work in your browser on this computer."
+          labels={elsewhereLabels}
+        />
+      </Tile>
+      <Tile title="web: a Mac is ready, host callback">
+        <ThisComputerCard
+          productName="Acme"
+          machines={[machine("online", "Mac mini", "macos")]}
+          rationale="Work in your browser on this computer."
+          onConnect={async () => {}}
         />
       </Tile>
     </div>
