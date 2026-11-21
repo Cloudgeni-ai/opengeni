@@ -181,6 +181,17 @@ export class ComputerDriver implements ComputerInteractionDriver {
             );
           }
           return frame.frameId;
+        }).catch((error: unknown) => {
+          // A window whose picture cannot be taken now still has elements to
+          // read and use; its observation goes without a frame fence, and
+          // only pointer actions need one.
+          if (
+            error instanceof ComputerBackendError &&
+            !error.dispatched &&
+            error.code === "unsupported"
+          )
+            return null;
+          throw error;
         });
         return { ...observed, frameId };
       });
