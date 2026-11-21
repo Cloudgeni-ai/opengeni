@@ -464,7 +464,7 @@ async function inbox(f: Fixture, subjectId: string) {
 const deliverNotice = "opengeni_private.deliver_app_notification_v1(uuid)";
 
 test("site.notify is refused, storing nothing, until the runtime may deliver it", async () => {
-  // The runtime role's EXECUTE on delivery is withheld for one release (1539).
+  // The runtime role's EXECUTE on delivery is withheld for one release (1543).
   const f = await fixture();
   const sent = await f.request(f.alice, "POST", `/${f.siteId}/notify`, { title: "Saved" });
   expect(sent.status, JSON.stringify(sent.json)).toBe(403);

@@ -1,4 +1,4 @@
-// Shared service connections against PostgreSQL (migration 1540): a shared
+// Shared service connections against PostgreSQL (migration 1544): a shared
 // key resolves with the connection's own vault reach (the workspace's vaults
 // and organization vaults that work here, never an Only me vault), each use
 // is audited with the connection id and no value, and every failure is a
