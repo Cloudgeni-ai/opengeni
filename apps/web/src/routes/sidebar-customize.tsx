@@ -125,10 +125,13 @@ function itemDetail(item: ResolvedSidebarItem): string | null {
 /** An item's name, edited in place: Enter or leaving the field saves, Escape cancels. */
 export function RenameField({
   label,
+  group = true,
   onSave,
   onDone,
 }: {
   label: string;
+  /** A group's name (the default) or another item's. */
+  group?: boolean;
   onSave: (label: string) => void;
   onDone: () => void;
 }) {
@@ -155,7 +158,7 @@ export function RenameField({
   return (
     <TextInput
       ref={input}
-      aria-label="Name"
+      aria-label={group ? "Group name" : "Name"}
       value={value}
       maxLength={SIDEBAR_LABEL_MAX_CHARS}
       onChange={(event) => setValue(event.target.value)}
@@ -212,6 +215,7 @@ function ItemRow({
         <div className="min-w-0 flex-1">
           <RenameField
             label={item.label}
+            group={item.type === "group"}
             onSave={(label) => onChange([{ op: "update", itemId: item.id, label }])}
             onDone={() => setRenaming(false)}
           />
