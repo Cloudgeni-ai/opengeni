@@ -1,0 +1,49 @@
+name: Windows agent WSS comparison
+
+on:
+  push:
+    branches: [investigate/windows-wss-0170]
+
+permissions:
+  contents: read
+
+jobs:
+  signed-agent:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            digest: fd0104ad95c1824f2391f925ed4d5033d800e46397002fb0b38f689772dfde5b
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            digest: 7a63dae6856e60cac225e1bc47ed25a4d898ea52d00c4d0a972ea7527be3675e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-agent-test-nats
+      - run: bun install --frozen-lockfile --production --filter @opengeni/events
+      - name: Download and verify released bytes
+        env:
+          TARGET: ${{ matrix.target }}
+          EXPECTED_SHA256: ${{ matrix.digest }}
+        shell: pwsh
+        run: |
+          $name = "opengeni-agent-$env:TARGET.exe"
+          $exe = Join-Path $env:RUNNER_TEMP $name
+          curl.exe --fail --location --retry 3 --output $exe "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.170/$name"
+          if ($LASTEXITCODE -ne 0) { throw "Release download failed" }
+          if ((Get-FileHash $exe).Hash -ne $env:EXPECTED_SHA256) { throw "Release digest mismatch" }
+          "PROBE_AGENT_EXE=$exe" >> $env:GITHUB_ENV
+      - name: Exercise published agent through authenticated WSS
+        shell: pwsh
+        run: |
+          $git = Get-Command git.exe
+          $gitRoot = Split-Path (Split-Path $git.Source)
+          $env:PATH = "$gitRoot\usr\bin;$env:PATH"
+          bun scripts/probe-windows-agent-wss.ts
