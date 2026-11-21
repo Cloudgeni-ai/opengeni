@@ -563,6 +563,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // holding EXECUTE.
   "stamp_subscription_connection_sign_in()",
   "subscription_connection_relogin_notice()",
+  // Migration 1524: delivers an app's notification to inboxes and phones as
+  // the tables' owner; the trigger fires without the inserting role holding EXECUTE.
+  "deliver_app_notification()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -2049,8 +2052,10 @@ export const FORCE_RLS_TABLES = [
   "agent_workspace_access",
   "agents",
   "api_keys",
+  "app_notifications",
   "app_sync_queue",
   "app_sync_subscriptions",
+  "app_webhooks",
   "attached_browser_devices",
   "attached_browser_inventories",
   "audit_events",
@@ -2657,6 +2662,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   // 1520_app_data_sync: App data sync executor queue and personal opt-ins.
   "app_sync_queue",
   "app_sync_subscriptions",
+  // 1524_app_webhooks_and_notifications: an app's inbound webhook addresses.
+  "app_webhooks",
   "audit_events",
   "auth_identities",
   "auth_passkeys",
@@ -3044,6 +3051,8 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 export const RUNTIME_READ_INSERT_TABLES = [
   // 1243_agents: immutable agent revisions.
   "agent_revisions",
+  // 1524_app_webhooks_and_notifications: app notifications, delivered by an owner trigger.
+  "app_notifications",
   "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",

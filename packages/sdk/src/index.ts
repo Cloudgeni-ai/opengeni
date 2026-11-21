@@ -157,6 +157,16 @@ export type {
   AppSyncUpdateRequest,
 } from "@opengeni/contracts";
 export type {
+  AppNotifyRequest,
+  AppNotifyResponse,
+  AppWebhook,
+  AppWebhookCreateRequest,
+  AppWebhookListResponse,
+  AppWebhookSaveResponse,
+  AppWebhookStatus,
+  AppWebhookUpdateRequest,
+} from "@opengeni/contracts";
+export type {
   SiteDataAccessMode,
   SiteDataCollectionDefinitionRequest,
   SiteDataCollectionResponse,

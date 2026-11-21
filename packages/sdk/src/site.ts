@@ -30,6 +30,8 @@ import {
   type OpenGeniSiteData,
   type OpenGeniSiteDataChange,
   type OpenGeniSiteFiles,
+  type OpenGeniSiteNotifyInput,
+  type OpenGeniSiteNotifyResult,
 } from "./site-data";
 import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
 import { createOpenGeniSiteAi, type OpenGeniSiteAi } from "./site-ai";
@@ -79,6 +81,8 @@ export {
   type OpenGeniSiteDataWriteResult,
   type OpenGeniSiteFile,
   type OpenGeniSiteFiles,
+  type OpenGeniSiteNotifyInput,
+  type OpenGeniSiteNotifyResult,
 } from "./site-data";
 export {
   isSiteHttpRequest,
@@ -471,6 +475,16 @@ export type OpenGeniSiteClient = {
     /** Call `listener` when what the viewer has connected may have changed. Returns a stop function. */
     onChange(listener: () => void): () => void;
   };
+  /**
+   * Send a normal Opengeni notification (inbox and phone, following each
+   * person's settings) that opens this app at `path`. Signed-in workspace
+   * members only. To the viewer by default; to another member (`to`: email
+   * or subject id) who can open the app and allows other members to notify
+   * them; to `"workspace"` (everyone else who can open the app and allows
+   * it) only for the app's managers. Rate limited per sender and app; the
+   * same `key` updates the notification in place.
+   */
+  notify(input: OpenGeniSiteNotifyInput): Promise<OpenGeniSiteNotifyResult>;
   readonly auth: {
     /**
      * Ask the host to sign the viewer in. On a published Site the host
@@ -596,6 +610,7 @@ export function createOpenGeniSiteClient(
       showCard: () => transport.connectionsShow(),
       onChange: onReadinessChange,
     },
+    notify: siteData.notify,
     auth: { signIn: () => transport.signIn() },
     close: () => transport.close(),
   };

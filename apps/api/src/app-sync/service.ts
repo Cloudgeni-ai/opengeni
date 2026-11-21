@@ -161,7 +161,7 @@ export function readPath(value: unknown, path: string): unknown {
   return current;
 }
 
-function writePath(target: Record<string, unknown>, path: string, value: unknown): void {
+export function writePath(target: Record<string, unknown>, path: string, value: unknown): void {
   const segments = pathSegments(path).filter((segment) => !UNSAFE.has(segment));
   if (segments.length === 0) return;
   let current = target;

@@ -201,6 +201,7 @@ import {
   type SiteRuntimeViewer,
 } from "../site-publishing/viewer";
 import { runSiteSqlQuery } from "../site-sql/service";
+import { notifyFromApp } from "../app-notify/service";
 import { siteDataHttpError } from "./site-data";
 import { runSiteSqlRoute } from "./site-sql";
 
@@ -1225,6 +1226,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return await siteData(request, host, viewer, limits.guestWritesPerMinute);
       case "sql.run":
         return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
+      case "site.notify":
+        // Members only: notifyFromApp refuses guests and invited viewers.
+        return context.json(
+          await runSiteData(() =>
+            notifyFromApp(
+              deps,
+              publishedViewer(host, viewer),
+              host.site.id,
+              parseJson(request.body, z.unknown()),
+              { frameSiteId: host.site.id },
+            ),
+          ),
+        );
       default:
         if (id.startsWith("sessions.")) {
           const assistant = await agentViewing(host, viewer, limits);

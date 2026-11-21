@@ -111,6 +111,8 @@ export const SITE_OPERATIONS: readonly SiteOperation[] = Object.freeze([
     pattern: /^\/published-artifacts\/current\/sql\/queries\/[A-Za-z][A-Za-z0-9_-]{0,63}$/u,
   },
   { id: "site.report", method: "POST", pattern: /^\/site\/reports$/u },
+  // site.notify: a normal Opengeni notification from the App's page.
+  { id: "site.notify", method: "POST", pattern: /^\/published-artifacts\/current\/notify$/u },
 ] satisfies SiteOperation[]);
 
 /**

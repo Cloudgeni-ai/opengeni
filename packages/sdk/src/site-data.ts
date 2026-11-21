@@ -230,6 +230,33 @@ export type OpenGeniSiteFiles = {
   delete(fileId: string): Promise<void>;
 };
 
+/** What `site.notify` sends: a normal Opengeni notification linking back into the app. */
+export type OpenGeniSiteNotifyInput = {
+  /** What happened, in a few words. */
+  title: string;
+  /** One or two short sentences. */
+  body?: string;
+  /**
+   * Who gets it. Omitted: the viewer. A member's email or subject id: that
+   * member, when they can open the app and allow other members to notify
+   * them. `"workspace"`: everyone else who can open the app and allows it
+   * (the app's managers only).
+   */
+  to?: string;
+  /** The app's own address the notification opens (`/tasks/42`); its root when omitted. */
+  path?: string;
+  /** Sending the same key again updates the person's notification in place. */
+  key?: string;
+};
+
+export type OpenGeniSiteNotifyResult = {
+  key: string;
+  /** People it reached. */
+  delivered: number;
+  /** For `"workspace"`: members left out because they don't allow it. */
+  skipped: number;
+};
+
 /** Path prefix the host rewrites to its pinned Site; Site code never names a Site id. */
 export const SITE_DATA_PATH_PREFIX = "/v1/workspaces/site-host/published-artifacts/current";
 
@@ -244,7 +271,11 @@ export function createOpenGeniSiteData(
   ready: () => Promise<boolean>,
   subscribeChanges: (listener: (change: OpenGeniSiteDataChange) => void) => () => void = () => () =>
     undefined,
-): { data: OpenGeniSiteData; files: OpenGeniSiteFiles } {
+): {
+  data: OpenGeniSiteData;
+  files: OpenGeniSiteFiles;
+  notify: (input: OpenGeniSiteNotifyInput) => Promise<OpenGeniSiteNotifyResult>;
+} {
   const send = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
     if (!(await ready()))
       throw new OpenGeniSiteDataError(
@@ -400,7 +431,9 @@ export function createOpenGeniSiteData(
       await send(`/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
     },
   };
-  return { data, files };
+  const notify = async (input: OpenGeniSiteNotifyInput): Promise<OpenGeniSiteNotifyResult> =>
+    await send<OpenGeniSiteNotifyResult>("/notify", json(input));
+  return { data, files, notify };
 }
 
 function refFields(ref: OpenGeniSiteDataRef): RefFields {

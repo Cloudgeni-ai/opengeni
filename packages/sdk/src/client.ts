@@ -162,6 +162,14 @@ import type {
   AppSyncUpdateRequest,
 } from "@opengeni/contracts";
 import type {
+  AppNotifyRequest,
+  AppNotifyResponse,
+  AppWebhookCreateRequest,
+  AppWebhookListResponse,
+  AppWebhookSaveResponse,
+  AppWebhookUpdateRequest,
+} from "@opengeni/contracts";
+import type {
   SiteDataCollectionDefinitionRequest,
   SiteDataCollectionResponse,
   SiteDataDescribeResponse,
@@ -10612,6 +10620,86 @@ export class OpenGeniClient {
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data/syncs`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** The app's inbound webhooks, with their addresses. Needs a manager of the app. */
+  async listAppWebhooks(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookListResponse> {
+    return await this.requestJson<AppWebhookListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create an inbound webhook; the response carries its secret, shown once. */
+  async createAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    request: AppWebhookCreateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change a webhook; `rotateSecret: true` returns a new secret, shown once. */
+  async updateAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    request: AppWebhookUpdateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "PATCH",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a webhook; its address stops accepting deliveries. */
+  async deleteAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Send a notification from the app as the caller (what `site.notify` does from its page). */
+  async notifyFromApp(
+    workspaceId: string,
+    siteId: string,
+    request: AppNotifyRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppNotifyResponse> {
+    return await this.requestJson<AppNotifyResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/notify`,
+      request,
       undefined,
       options,
     );

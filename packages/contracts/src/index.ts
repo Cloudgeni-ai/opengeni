@@ -76,6 +76,7 @@ export * from "./app-shot";
 import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
 export * from "./app-sync";
+export * from "./app-webhook";
 import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
 export * from "./site-sql";
@@ -1322,6 +1323,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "app_sync_delete",
   "app_sync_run",
   "app_sync_opt_in",
+  "app_webhook_save",
+  "app_webhook_list",
+  "app_webhook_delete",
   "app_files_list",
   "app_files_upload",
   "app_files_delete",
