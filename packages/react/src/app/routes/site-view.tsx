@@ -486,7 +486,7 @@ export function SiteViewRoute({
         className="relative flex min-h-0 min-w-0 flex-1 flex-col"
       >
         {publishing || fullScreen ? null : (
-          <SiteHeader inWindowBar={titleInWindowBar} column={siteColumn}>
+          <SiteHeader inWindowBar={titleInWindowBar} column={siteColumn} side={layout.position}>
             {/* In the macOS app the bar's own "Artifacts › title" is the way
                 back, and these controls sit on the bar's right. */}
             {titleInWindowBar ? null : (
@@ -642,10 +642,13 @@ function SiteTitleMenu({
 function SiteHeader({
   inWindowBar,
   column,
+  side,
   children,
 }: {
   inWindowBar: boolean;
   column: RefObject<HTMLElement | null>;
+  /** The chat's side: moving it moves the column without resizing it. */
+  side: SiteChatPanelLayout["position"];
   children: ReactNode;
 }) {
   const [right, setRight] = useState<number | null>(null);
@@ -662,7 +665,7 @@ function SiteHeader({
       window.removeEventListener("resize", update);
       observer?.disconnect();
     };
-  }, [column, inWindowBar]);
+  }, [column, inWindowBar, side]);
   if (inWindowBar) {
     if (typeof document === "undefined") return null;
     // In the bar's host, so they come in the bar's tab order;
@@ -999,10 +1002,12 @@ function SiteChatPanel({
   const panelId = useId();
   const panel = useRef<HTMLElement>(null);
   const list = useSiteConversations(workspaceId, siteId);
-  const hasConversations = list.loaded && list.sessions.length > 0;
+  // Opened from one of its chats, or one it has: open unless the person
+  // closed it. Known at once for a chat in the address, so it doesn't open late.
+  const chatted = Boolean(conversation) || (list.loaded && list.sessions.length > 0);
   useEffect(() => {
-    if (list.loaded) onHasConversations(hasConversations);
-  }, [hasConversations, list.loaded, onHasConversations]);
+    if (list.loaded || chatted) onHasConversations(chatted);
+  }, [chatted, list.loaded, onHasConversations]);
   const left = layout.position === "left";
   const maxWidth = useAvailableWidth(panel);
   const width = Math.min(layout.width, maxWidth);
@@ -1029,7 +1034,9 @@ function SiteChatPanel({
   // ends composing and shows a hidden panel: the sidebar is where
   // conversations are chosen, so choosing one must show it. Returning to the
   // Site itself, as its rail row does, opens its newest.
-  const previousConversation = useRef<string | undefined>(undefined);
+  // Arriving with one (a link, Back, a reload) is the default above, not a
+  // choice, so a chat the person closed stays closed.
+  const previousConversation = useRef(conversation);
   const startingNew = useRef(false);
   useEffect(() => {
     const previous = previousConversation.current;

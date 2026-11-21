@@ -848,11 +848,21 @@ test("arriving from a chat, or choosing one, shows a hidden chat", async () => {
   );
   await rerender(undefined);
   expect(panel(container).hidden).toBe(true);
-  // Opened from one of its chats, it shows that chat.
+  // Opened from one of its chats by someone who never chose, it shows that chat…
   act(() => root?.unmount());
+  localStorage.clear();
+  conversations = [];
   const arrived = await render(id(1));
   expect(panel(arrived.container).hidden).toBe(false);
   expect(openConversation(arrived.container)).toBe(id(1));
+  // Unless the person closed it: a reload or Back keeps it closed.
+  await act(async () =>
+    arrived.container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
+  );
+  act(() => root?.unmount());
+  const reloaded = await render(id(1));
+  expect(panel(reloaded.container).hidden).toBe(true);
+  expect(openChoices()).toEqual({ [siteId]: false });
 });
 
 test("the chat never takes the room the app needs, unless the window is narrower still", async () => {
