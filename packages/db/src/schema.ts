@@ -10481,11 +10481,7 @@ export const sessionHumanInputRequests = pgTable(
     response: jsonb("response").$type<HumanInputResponse>(),
     respondedBy: text("responded_by"),
     skillReviewHumanAuthorized: boolean("skill_review_human_authorized").notNull().default(false),
-    /**
-     * A sub-agent's question that went first to the agent that started it
-     * (1545). Person-facing surfaces leave it out until that agent's turn
-     * that received it ends with it still open; then it is cleared.
-     */
+    /** With the agent that started this sub-agent, not yet the person (1545). */
     heldForAgent: boolean("held_for_agent").notNull().default(false),
     respondedAt: timestamp("responded_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),

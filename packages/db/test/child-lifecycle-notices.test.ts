@@ -8,6 +8,7 @@ import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
+  appendSessionEvents,
   armSubscriptionCoreCapacityWait,
   reconcileSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
@@ -2335,6 +2336,57 @@ describe("a sub-agent's question goes to the agent that started it first", () =>
     expect(answered.action).toBe("accepted");
     await settleIdle(grant, { session: parent.session, turn: claim.turn, attemptId });
     expect(await inboxQuestions(child.session.id)).toEqual([]);
+  });
+
+  test("a question reaches the person when its agent fails before answering", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await freezeChild(grant, child);
+    const row = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: child.session.id,
+        turnId: child.turn.id,
+        turnGeneration: child.turn.executionGeneration,
+      }),
+    ))!;
+    const delivered = await deliver(row);
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    expect(await held(child.session.id)).toEqual([true]);
+    const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      turnId: parent.turn.id,
+      triggerEventId: parent.turn.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { error: "boom" } },
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+  });
+
+  test("a held question reaches the person once the same sub-agent's pause asks the person too", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await freezeChild(grant, child);
+    expect(await held(child.session.id)).toEqual([true]);
+    await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
+      {
+        type: "session.requiresAction",
+        turnId: child.turn.id,
+        payload: { approvals: [{ id: "tool-call-2", rawItem: { name: "write_file" } }] },
+      },
+    ]);
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
   });
 
   test("a question only a person can answer, or an approval, reaches the person at once", async () => {

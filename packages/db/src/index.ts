@@ -37133,13 +37133,10 @@ async function sessionIdsWithHandledFailure(
 }
 
 /**
- * Whether everything a session waits on is a question it put to the agent
- * that started it (`held_for_agent`), and that agent still has it: the
- * notice is on its way, queued, or in a turn that has not ended, and the
- * agent's session has not failed or been cancelled. Such a session does not
- * wait on a person, so person-facing attention leaves it out. The inbox
- * trigger clears the hold when that turn ends; this check also covers a
- * notice that can no longer reach an agent. Viewer-independent.
+ * Whether a session waits only on questions still with the agent that
+ * started it (`held_for_agent`, see migration 1545): their notice is on its
+ * way, queued, or in a turn that has not ended, and that agent can act.
+ * Person-facing attention leaves such a session out.
  */
 function sessionQuestionsWithAgentSql(workspaceId: string | SQL, sessionId: SQL): SQL {
   return sql`(exists (
@@ -37169,7 +37166,7 @@ function sessionQuestionsWithAgentSql(workspaceId: string | SQL, sessionId: SQL)
               sql`asked.turn_id`,
               sql`asked.turn_generation`,
             )}
-            and agent.status not in ('failed', 'cancelled')
+            and agent.status not in ('failed', 'cancelled', 'waiting_capacity')
             and (
               received.state = 'pending'
               or (received.id is null and notice.status = 'pending')
@@ -37508,8 +37505,6 @@ export async function sessionTreeStatsForSessions(
                 sql`numbered.id`,
                 sql`numbered.parent_session_id`,
               )} else false end as failure_handled,
-            -- A question still with the agent that started this descendant
-            -- does not wait on the person; see sessionQuestionsWithAgentSql.
             case when numbered.status = 'requires_action' then not ${sessionQuestionsWithAgentSql(
               workspaceId,
               sql`numbered.id`,
@@ -95206,8 +95201,8 @@ async function enqueueChildRequiresActionOutboxTx(
     turnId: string;
     turnGeneration: number;
     humanInputRequests: Parameters<typeof buildChildRequiresActionPayload>[0]["humanInputRequests"];
-    /** Requests this freeze created; earlier ones keep whether they were held. */
-    newHumanInputRequestIds?: readonly string[];
+    /** Requests this freeze created; only these can be held. */
+    newHumanInputRequestIds: readonly string[];
     pendingApprovals: readonly unknown[];
   },
 ): Promise<boolean> {
@@ -95243,62 +95238,30 @@ async function enqueueChildRequiresActionOutboxTx(
     lineage: { turnId: input.turnId },
     route,
   });
-  await holdChildQuestionsForAgentTx(tx, workspaceId, session.id, {
-    turnId: input.turnId,
-    requests: input.humanInputRequests,
-    newRequestIds: input.newHumanInputRequestIds ?? [],
-    // The agent gets the whole pause or none of it: an approval, a question
-    // only a person can answer, or a notice that could not carry every
-    // question (or an earlier notice of this turn) leaves all of it with the
-    // person.
-    hold:
-      enqueued &&
-      route.targetCanAct &&
-      !payload.truncated &&
-      payload.requests.length === input.humanInputRequests.length &&
-      input.humanInputRequests.every((request) =>
-        request.questions.every((question) => !humanInputQuestionIsPersonOnly(question)),
-      ),
-  });
-  return enqueued;
-}
-
-/**
- * Hold a sub-agent's questions for the agent that receives its
- * child_requires_action notice, so they reach that agent first. Runs before
- * the pause's `session.humanInput.requested` events are inserted: the inbox
- * and push triggers leave a held question out. The inbox trigger clears the
- * hold, and tells the person, when the agent's turn that received the notice
- * ends with the question still open. Only requests this freeze created are
- * held, so one already shown to the person is never hidden again.
- */
-async function holdChildQuestionsForAgentTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-  input: {
-    turnId: string;
-    requests: ReadonlyArray<{ id: string }>;
-    newRequestIds: readonly string[];
-    hold: boolean;
-  },
-): Promise<void> {
-  if (!input.hold) return;
-  const requestIds = new Set(input.requests.map((request) => request.id));
-  const newIds = input.newRequestIds.filter((id) => requestIds.has(id));
-  if (newIds.length === 0) return;
-  await tx
-    .update(schema.sessionHumanInputRequests)
-    .set({ heldForAgent: true })
-    .where(
-      and(
-        eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
-        eq(schema.sessionHumanInputRequests.sessionId, sessionId),
-        eq(schema.sessionHumanInputRequests.turnId, input.turnId),
-        eq(schema.sessionHumanInputRequests.status, "pending"),
-        inArray(schema.sessionHumanInputRequests.id, newIds),
-      ),
+  // The agent gets the whole pause or none of it.
+  const hold =
+    enqueued &&
+    route.targetCanAct &&
+    !payload.truncated &&
+    payload.requests.length === input.humanInputRequests.length &&
+    input.humanInputRequests.every((request) =>
+      request.questions.every((question) => !humanInputQuestionIsPersonOnly(question)),
     );
+  if (hold && input.newHumanInputRequestIds.length > 0) {
+    // Before the pause's request events: the inbox and push triggers skip a
+    // held question, and release it when the agent no longer has it (1545).
+    await tx
+      .update(schema.sessionHumanInputRequests)
+      .set({ heldForAgent: true })
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, session.id),
+          inArray(schema.sessionHumanInputRequests.id, [...input.newHumanInputRequestIds]),
+        ),
+      );
+  }
+  return enqueued;
 }
 
 async function enqueueChildRequiresActionResolvedOutboxTx(

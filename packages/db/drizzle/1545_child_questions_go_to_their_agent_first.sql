@@ -1,35 +1,14 @@
 -- deployment-mode: rolling
 -- A sub-agent's question goes first to the agent that started it.
 --
--- When a sub-agent pauses on questions and its child_requires_action notice
--- goes to an agent that can answer (child-outbox-authority.ts), the worker
--- marks those requests held_for_agent in the same transaction, before the
--- pause's session.humanInput.requested events are inserted. Nothing in the
--- pause is held when it also has an approval, a question only a person can
--- answer (a secret, a Skill review) or a notice too large to carry every
--- question.
---
---   1. session_human_input_requests.held_for_agent (default false).
---   2. enqueue_native_push_for_session_event_v1 sends no phone push for a
---      held question.
---   3. project_inbox_for_session_event_v1 opens no inbox item for a held
---      question. When the agent's turn that received the notice ends
---      (turn.completed, turn.failed, turn.cancelled, turn.superseded) with
---      the question still open, it clears the hold and does then what the
---      question's own event would have done: the inbox item and the push,
---      and a session-list hint so lists re-read it.
---
--- Session lists, tree counts and Needs you leave out a session whose open
--- questions are all held while the agent still has them (packages/db
--- sessionQuestionsWithAgentSql).
---
--- The bodies are copied from 1289, their latest definitions, with only these
--- additions. Same signatures, so owners and grants stay; search paths are
--- pinned again below as 1289 had them.
---
--- Rolling: adding a column with a constant default rewrites nothing. The
--- previous release never sets held_for_agent, so with it false both
--- functions behave exactly as before.
+-- The worker marks a pause's new requests held_for_agent when their
+-- child_requires_action notice goes to an agent that can answer and nothing
+-- in the pause needs the person (packages/db enqueueChildRequiresActionOutboxTx).
+-- The push and inbox triggers skip a held question; the inbox trigger
+-- releases it to the person (inbox item, push, list hint) when the agent no
+-- longer has it. Bodies are 1289's plus the 1545 hunks; same signatures, so
+-- owners and grants stay. Rolling: a constant-default column rewrites
+-- nothing, and the previous release never sets it.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
 
@@ -173,39 +152,54 @@ DECLARE
   v_held_sequence integer;
 BEGIN
   -- 1545: a sub-agent's question goes first to the agent that started it
-  -- (held_for_agent). When that agent's turn that received the question ends
-  -- with it still open, it reaches the person: its inbox item and phone push.
-  IF NEW.type IN ('turn.completed', 'turn.failed', 'turn.cancelled', 'turn.superseded')
-    AND NEW.turn_id IS NOT NULL THEN
+  -- (held_for_agent). It reaches the person (inbox item and phone push) when
+  -- the agent's turn that received it ends with it still open, when an agent
+  -- turn fails or is cancelled before seeing it, or when the same sub-agent's
+  -- pause also asks the person something.
+  IF (NEW.type IN ('turn.completed', 'turn.failed', 'turn.cancelled', 'turn.superseded')
+      AND NEW.turn_id IS NOT NULL)
+    OR NEW.type IN ('session.requiresAction', 'session.humanInput.requested') THEN
     BEGIN
       FOR v_held IN
         UPDATE session_human_input_requests request
         SET held_for_agent = false, updated_at = now()
-        FROM (
-          -- The notice's key names the question's exact pause:
-          -- child-requires-action:<session>:<turn>:<generation>.
-          SELECT
-            CASE WHEN keyed.parts THEN split_part(keyed.dedupe_key, ':', 2)::uuid END AS session_id,
-            CASE WHEN keyed.parts THEN split_part(keyed.dedupe_key, ':', 3)::uuid END AS turn_id,
-            CASE WHEN keyed.parts THEN split_part(keyed.dedupe_key, ':', 4)::integer END
-              AS turn_generation
-          FROM (
-            SELECT notice.dedupe_key, notice.dedupe_key ~
-                '^child-requires-action:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9]{1,9}$' AS parts
-            FROM session_system_updates notice
-            WHERE notice.workspace_id = NEW.workspace_id
-              AND notice.session_id = NEW.session_id
-              AND notice.delivered_turn_id = NEW.turn_id
-              AND notice.kind = 'child_requires_action'
-            OFFSET 0
-          ) keyed
-        ) received
         WHERE request.workspace_id = NEW.workspace_id
-          AND request.session_id = received.session_id
-          AND request.turn_id = received.turn_id
-          AND request.turn_generation = received.turn_generation
           AND request.status = 'pending'
           AND request.held_for_agent
+          AND (
+            -- The agent this event is about received the question: the
+            -- notice's key names its exact pause,
+            -- child-requires-action:<session>:<turn>:<generation>.
+            (request.session_id, request.turn_id, request.turn_generation) IN (
+              SELECT
+                split_part(keyed.dedupe_key, ':', 2)::uuid,
+                split_part(keyed.dedupe_key, ':', 3)::uuid,
+                split_part(keyed.dedupe_key, ':', 4)::integer
+              FROM (
+                SELECT notice.dedupe_key
+                FROM session_system_updates notice
+                WHERE notice.workspace_id = NEW.workspace_id
+                  AND notice.session_id = NEW.session_id
+                  AND notice.kind = 'child_requires_action'
+                  AND NEW.type LIKE 'turn.%'
+                  AND (notice.delivered_turn_id = NEW.turn_id
+                    OR (NEW.type IN ('turn.failed', 'turn.cancelled') AND notice.state = 'pending'))
+                  AND notice.dedupe_key ~
+                    '^child-requires-action:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9]{1,9}$'
+                OFFSET 0
+              ) keyed
+            )
+            -- This sub-agent's pause asks the person too: the whole pause goes to them.
+            OR (NEW.type IN ('session.requiresAction', 'session.humanInput.requested')
+              AND request.session_id = NEW.session_id
+              AND NOT EXISTS (
+                SELECT 1 FROM session_human_input_requests asked
+                WHERE asked.workspace_id = NEW.workspace_id
+                  AND asked.session_id = NEW.session_id
+                  AND asked.id::text = NEW.payload #>> '{request,id}'
+                  AND asked.held_for_agent
+              ))
+          )
         RETURNING request.id, request.session_id, request.turn_id, request.questions
       LOOP
         SELECT opengeni_private.session_person_v1(session.workspace_id, session.id,
