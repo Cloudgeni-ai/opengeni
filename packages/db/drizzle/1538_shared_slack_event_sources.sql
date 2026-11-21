@@ -11,11 +11,14 @@
 -- list_shared_slack_event_sources_v1 runs in the home workspace's RLS
 -- context, as the callback does. It returns nothing unless the home bot is
 -- still the active, verified install and its sharing is enabled; then, for
--- each other workspace of the organization the live sharing covers (all, or
--- the saved allowlist), it reads that workspace's Slack source for the team
--- under that workspace's own RLS context and restores the caller's workspace
--- setting, as list_organization_slack_bots (0977) and 1475 do. One call per
--- callback, an index probe per workspace (event_sources_app_uq).
+-- each other workspace of the organization the live sharing covers (the saved
+-- allowlist, probed by id, or all of them), it reads that workspace's Slack
+-- source for the team under that workspace's own RLS context and restores
+-- the caller's workspace setting, as list_organization_slack_bots (0977) and
+-- 1475 do. It returns each source's status with it, so the caller records
+-- deliveries without reading the sources again. One call per callback, an
+-- index probe per covered workspace (event_sources_app_uq); the callback
+-- runs it after acknowledging Slack.
 --
 -- It is SECURITY INVOKER: it reads only what the runtime could read by
 -- setting each workspace's context itself, and the sharing row only through
@@ -32,7 +35,7 @@ BEGIN
   EXECUTE pg_catalog.format($create$
     CREATE FUNCTION opengeni_private.list_shared_slack_event_sources_v1(
       p_account uuid, p_home uuid, p_connection uuid, p_external_key text)
-    RETURNS TABLE(workspace_id uuid, source_id uuid)
+    RETURNS TABLE(workspace_id uuid, source_id uuid, status text, status_reason text)
     LANGUAGE plpgsql
     STABLE
     SECURITY INVOKER
@@ -40,7 +43,8 @@ BEGIN
     AS $body$
     DECLARE
       access record;
-      target record;
+      targets uuid[];
+      target uuid;
       prior_workspace text;
     BEGIN
       IF p_account IS NULL OR p_home IS NULL OR p_connection IS NULL OR p_external_key IS NULL
@@ -59,16 +63,21 @@ BEGIN
       SELECT shared.enabled, shared.workspace_ids INTO access
         FROM opengeni_private.read_slack_bot_workspace_access(p_account, p_home, p_connection) shared;
       IF access.enabled IS DISTINCT FROM true THEN RETURN; END IF;
+      -- A saved allowlist is probed by id; only sharing with every workspace
+      -- visits all of the organization's.
+      IF access.workspace_ids IS NULL THEN
+        targets := ARRAY(SELECT w.id FROM workspaces w
+          WHERE w.account_id = p_account AND w.id <> p_home ORDER BY w.id);
+      ELSE
+        targets := ARRAY(SELECT w.id FROM workspaces w
+          WHERE w.id = ANY(access.workspace_ids) AND w.account_id = p_account AND w.id <> p_home
+          ORDER BY w.id);
+      END IF;
       prior_workspace := pg_catalog.current_setting('opengeni.workspace_id', true);
-      FOR target IN
-        SELECT w.id FROM workspaces w
-        WHERE w.account_id = p_account AND w.id <> p_home
-          AND (access.workspace_ids IS NULL OR w.id = ANY(access.workspace_ids))
-        ORDER BY w.id
-      LOOP
-        PERFORM pg_catalog.set_config('opengeni.workspace_id', target.id::text, true);
-        RETURN QUERY SELECT s.workspace_id, s.id FROM event_sources s
-          WHERE s.workspace_id = target.id AND s.account_id = p_account
+      FOREACH target IN ARRAY targets LOOP
+        PERFORM pg_catalog.set_config('opengeni.workspace_id', target::text, true);
+        RETURN QUERY SELECT s.workspace_id, s.id, s.status, s.status_reason FROM event_sources s
+          WHERE s.workspace_id = target AND s.account_id = p_account
             AND s.kind = 'slack' AND s.external_key = p_external_key;
       END LOOP;
       PERFORM pg_catalog.set_config('opengeni.workspace_id', coalesce(prior_workspace, ''), true);

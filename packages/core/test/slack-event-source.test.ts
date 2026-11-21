@@ -5,6 +5,7 @@ import {
   chooseSlackSourceTeam,
   forEachSlackSource,
   recordSlackEvent,
+  SHARED_SLACK_DELIVERY_CONCURRENCY,
   slackTeamSourceKey,
 } from "../src/domain/event-triggers/slack-source";
 
@@ -63,6 +64,29 @@ describe("recording a Slack callback into several workspaces", () => {
     expect(failed).toEqual(["broken"]);
   });
 
+  test("shared workspaces are written a few at a time, each once", async () => {
+    let running = 0;
+    let peak = 0;
+    const recorded: string[] = [];
+    const names = Array.from({ length: 10 }, (_, index) => `shared-${index}`);
+    await forEachSlackSource(
+      names.map(source),
+      async (entry) => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        recorded.push(entry.workspaceId);
+        running -= 1;
+      },
+      () => {
+        throw new Error("no failure expected");
+      },
+      SHARED_SLACK_DELIVERY_CONCURRENCY,
+    );
+    expect(peak).toBe(SHARED_SLACK_DELIVERY_CONCURRENCY);
+    expect(recorded.toSorted()).toEqual(names.toSorted());
+  });
+
   test("nothing is read while event triggers are off", async () => {
     const db = new Proxy(
       {},
@@ -72,7 +96,7 @@ describe("recording a Slack callback into several workspaces", () => {
         },
       },
     ) as Database;
-    await recordSlackEvent({
+    const recorded = await recordSlackEvent({
       db,
       settings: { eventTriggersEnabled: false } as Settings,
       accountId: "account",
@@ -81,5 +105,6 @@ describe("recording a Slack callback into several workspaces", () => {
       teamId: "T0123",
       body: new Uint8Array(),
     });
+    await recorded.shared;
   });
 });

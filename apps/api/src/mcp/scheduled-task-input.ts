@@ -164,6 +164,25 @@ export type ScheduledTaskAgentResolution =
   | { ok: false; message: string };
 
 /**
+ * Why `agentConfig.agentName` named no agent the person this chat acts for
+ * can use, or several, worded for scheduling. Null for any other refusal,
+ * whose own message stands.
+ */
+export function scheduledTaskAgentNameRefusal(
+  ref: string,
+  refusal: { code: string; agentIds?: readonly string[] | undefined },
+): string | null {
+  const name = ref.trim();
+  if (refusal.code === "agent_name_ambiguous") {
+    return `More than one agent is named "${name}". Give agentConfig.agentId instead, one of: ${(refusal.agentIds ?? []).join(", ")}.`;
+  }
+  if (refusal.code === "agent_not_found") {
+    return `No agent named "${name}" is available here to the person this chat acts for. Check the agent's name, or give agentConfig.agentId; leave out agentConfig.agentName to schedule without an agent.`;
+  }
+  return null;
+}
+
+/**
  * Replace `agentConfig.agentName` with the agentId it names. Input without
  * one is returned as it is.
  */

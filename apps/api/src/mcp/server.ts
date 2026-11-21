@@ -239,6 +239,7 @@ import {
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
   scheduledTaskOverlapPolicyToolInput,
+  scheduledTaskAgentNameRefusal,
   withResolvedScheduledTaskAgent,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
@@ -2646,7 +2647,10 @@ export function buildOpenGeniMcpServer(
           const resolved = await resolveDelegationAgent(deps, grant, grant.workspaceId, ref);
           return resolved.ok
             ? { ok: true, agentId: resolved.agent.id }
-            : { ok: false, message: resolved.message };
+            : {
+                ok: false,
+                message: scheduledTaskAgentNameRefusal(ref, resolved) ?? resolved.message,
+              };
         });
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
         await requireLimit(deps, {
