@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { browserDevice } from "../src/components/this-computer/this-computer-card";
+import { browserDevice } from "../src/components/this-computer/browser-device";
 import {
   ThisComputerCard,
   defaultThisComputerLabels,
