@@ -1,9 +1,9 @@
 // Sidebar: the links and groups above your chats (docs/sidebar-layout.md).
 // "Yours" is the workspace default with your own changes (add, hide,
 // reorder, reset); admins also edit the "Workspace default" everyone starts
-// from. Items you can change are renamed in place and take an icon. Under
-// Navigation: whether apps are rows in the Sessions list, and which built-in
-// rail entries show.
+// from. Items you can change are renamed in place and take an icon. The
+// header's More holds the rest: whether chats group under their app in the
+// Sessions list, which menu entries show, and Reset.
 import {
   AppWindowIcon,
   ArrowDownIcon,
@@ -50,6 +50,7 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -62,8 +63,6 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { Section } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
-import { SettingRow } from "@opengeni/react/ui/setting-row";
-import { Switch } from "@opengeni/react/ui/switch";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
 import { IconMenu, SidebarIcon } from "@/components/sidebar-layout/sidebar-icons";
@@ -679,67 +678,60 @@ const NAV_ENTRY_LABELS: Record<SidebarNavEntry, string> = {
 };
 
 /**
- * The rest of the navigation, for the scope shown: apps as rows of their own
- * in the Sessions list, and which built-in rail entries show.
+ * The page's More, for the scope shown: chats grouped under their app in the
+ * Sessions list, which built-in menu entries show, and Reset for your own.
  */
-function NavigationSection({
+function PageMoreMenu({
   options,
   onChange,
+  onReset,
 }: {
   options: { sessionsShowApps: boolean; hiddenNavEntries: string[] };
   onChange: (changes: SidebarLayoutChange[]) => void;
+  onReset: (() => void) | null;
 }) {
   const hidden = new Set(options.hiddenNavEntries);
   return (
-    <Section title="Navigation" variant="group">
-      <SettingRow
-        label="Apps in Sessions"
-        control={
-          <Switch
-            aria-label="Apps in Sessions"
-            checked={options.sessionsShowApps}
-            onCheckedChange={(checked) => onChange([{ op: "options", sessionsShowApps: checked }])}
-          />
-        }
-      />
-      <SettingRow
-        label="Rail entries"
-        control={
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="outline" size="sm">
-                {hidden.size === 0
-                  ? "All shown"
-                  : `${SIDEBAR_NAV_ENTRIES.length - hidden.size} of ${SIDEBAR_NAV_ENTRIES.length} shown`}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {SIDEBAR_NAV_ENTRIES.map((entry) => (
-                <DropdownMenuCheckboxItem
-                  key={entry}
-                  checked={!hidden.has(entry)}
-                  onSelect={(event) => {
-                    event.preventDefault();
-                    const next = SIDEBAR_NAV_ENTRIES.filter((each) =>
-                      each === entry ? !hidden.has(entry) : hidden.has(each),
-                    );
-                    onChange([{ op: "options", hiddenNavEntries: next }]);
-                  }}
-                >
-                  {NAV_ENTRY_LABELS[entry]}
-                </DropdownMenuCheckboxItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        }
-      />
-    </Section>
+    <MoreMenu label="More sidebar options">
+      <DropdownMenuCheckboxItem
+        checked={options.sessionsShowApps}
+        onSelect={() => onChange([{ op: "options", sessionsShowApps: !options.sessionsShowApps }])}
+      >
+        Group chats under their app
+      </DropdownMenuCheckboxItem>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger>Menu entries</DropdownMenuSubTrigger>
+        <DropdownMenuSubContent className="min-w-40">
+          {SIDEBAR_NAV_ENTRIES.map((entry) => (
+            <DropdownMenuCheckboxItem
+              key={entry}
+              checked={!hidden.has(entry)}
+              onSelect={(event) => {
+                event.preventDefault();
+                const next = SIDEBAR_NAV_ENTRIES.filter((each) =>
+                  each === entry ? !hidden.has(entry) : hidden.has(each),
+                );
+                onChange([{ op: "options", hiddenNavEntries: next }]);
+              }}
+            >
+              {NAV_ENTRY_LABELS[entry]}
+            </DropdownMenuCheckboxItem>
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      {onReset ? (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onReset}>Reset to workspace default</DropdownMenuItem>
+        </>
+      ) : null}
+    </MoreMenu>
   );
 }
 
 export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
-  const { layout, failed, update } = useSidebarLayout(workspaceId);
+  const { layout, failed, update, reload } = useSidebarLayout(workspaceId);
   const [scope, setScope] = useState<Scope>("personal");
   const [adding, setAdding] = useState<AddKind | null>(null);
   const canEditWorkspace = layout?.workspace.canEdit === true;
@@ -794,7 +786,26 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
             ? "What everyone in this workspace starts with."
             : "Links and groups above your chats."
         }
-        actions={addMenu}
+        actions={
+          <div className="flex items-center gap-2">
+            {addMenu}
+            {layout && (effectiveScope === "workspace" || personalAvailable) ? (
+              <PageMoreMenu
+                options={
+                  effectiveScope === "workspace"
+                    ? readResolvedSidebarOptions(layout.workspace.options)
+                    : readResolvedSidebarOptions(layout.options)
+                }
+                onChange={onChange}
+                onReset={
+                  effectiveScope === "personal" && layout.personal.customized
+                    ? () => onChange([{ op: "reset" }])
+                    : null
+                }
+              />
+            ) : null}
+          </div>
+        }
       />
       {canEditWorkspace && personalAvailable ? (
         <SegmentedControl
@@ -841,7 +852,12 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
             </p>
           )
         ) : failed ? (
-          <p className="text-sm text-fg-muted">Couldn't load the sidebar. Try again shortly.</p>
+          <p className="text-sm text-fg-muted">
+            {"Couldn't load the sidebar. "}
+            <button type="button" className="og-link" onClick={reload}>
+              Try again
+            </button>
+          </p>
         ) : null}
         {effectiveScope === "personal" && layout && layout.hidden.length > 0 ? (
           <Section title="Hidden" variant="group">
@@ -857,23 +873,6 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
               </div>
             ))}
           </Section>
-        ) : null}
-        {layout && (effectiveScope === "workspace" || personalAvailable) ? (
-          <NavigationSection
-            options={
-              effectiveScope === "workspace"
-                ? readResolvedSidebarOptions(layout.workspace.options)
-                : readResolvedSidebarOptions(layout.options)
-            }
-            onChange={onChange}
-          />
-        ) : null}
-        {effectiveScope === "personal" && layout?.personal.customized ? (
-          <div>
-            <RowButton onClick={() => onChange([{ op: "reset" }])}>
-              Reset to workspace default
-            </RowButton>
-          </div>
         ) : null}
       </div>
     </ContentPage>

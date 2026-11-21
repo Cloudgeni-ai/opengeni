@@ -209,8 +209,9 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   see), a **Link**, a **Group** or a **List**; a group's menu has Rename (inline: Enter or
   leaving the field saves, Escape cancels) for your own groups, and for the
   default's groups under Workspace default; rows also have Icon and, for
-  lists, Show. Its Navigation section switches the options above (Apps in
-  Sessions and each rail entry), for you and, for admins, as the default.
+  lists, Show. The page's More (next to Add) switches the options above
+  (Group chats under their app, and Menu entries for each rail entry) and
+  holds Reset to workspace default; for you and, for admins, as the default.
   A settings entry's menu has **Move to More** or **Show at top**. Groups
   remember open or closed per browser. The icon-only rail
   leaves the section out. Changes made elsewhere (an agent's tool call,

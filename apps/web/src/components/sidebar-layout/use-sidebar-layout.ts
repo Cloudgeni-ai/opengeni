@@ -140,7 +140,8 @@ export function useSidebarLayout(workspaceId: string, enabled = true) {
     },
     [client, key, workspaceId],
   );
-  return { ...entry, update };
+  const reload = useCallback(() => void load(client, key, workspaceId), [client, key, workspaceId]);
+  return { ...entry, update, reload };
 }
 
 /** For tests: forget every cached layout. */
