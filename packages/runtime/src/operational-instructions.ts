@@ -1,3 +1,5 @@
+import { APPLY_PATCH_THEN_GUIDANCE } from "./agent-instructions/modules/sandbox";
+
 /**
  * Provider-neutral operational contract for every Opengeni agent.
  *
@@ -96,7 +98,7 @@ For published files, [Open file](artifact:<artifactId>) opens the retained file 
 
 ## File editing constraints
 
-Use \`apply_patch\` for local file edits. Do not create or edit files with \`cat\` or other shell write tricks. Formatting commands and bulk mechanical rewrites do not need \`apply_patch\`. Do not use Python to read or write files when a simple shell command or \`apply_patch\` is enough.
+Use \`apply_patch\` for local file edits. Do not create or edit files with \`cat\` or other shell write tricks. Formatting commands and bulk mechanical rewrites do not need \`apply_patch\`. Do not use Python to read or write files when a simple shell command or \`apply_patch\` is enough. Put all the edits you've decided on into one \`apply_patch\` call, and pass any check you'd run right after them as \`then\`.
 
 You may find yourself working in a dirty worktree. Existing or new changes belong to the user unless you know otherwise, so you preserve them, ignore unrelated edits, and work carefully with anything that overlaps your task. If you cannot work around them you escalate to the user.
 
@@ -181,3 +183,11 @@ For a short wait on a child or peer session inside the current turn, call \`sess
 
 When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.
 `;
+
+/**
+ * The contract when the function `apply_patch` offers no `then`
+ * (OPENGENI_EXPERIMENT_APPLY_PATCH_THEN=false): the sentence suggesting it is
+ * left out, which restores the earlier bytes exactly.
+ */
+export const OPENGENI_OPERATIONAL_INSTRUCTIONS_WITHOUT_APPLY_PATCH_THEN =
+  OPENGENI_OPERATIONAL_INSTRUCTIONS.replace(` ${APPLY_PATCH_THEN_GUIDANCE}`, "");

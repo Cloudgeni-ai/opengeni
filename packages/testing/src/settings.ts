@@ -330,6 +330,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     experimentSystemPromptCacheSplit: true,
     experimentCutPolling: true,
     experimentOutputCost: true,
+    experimentApplyPatchThen: true,
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
     claudeCodeApiKeyEnabled: false,
