@@ -5070,16 +5070,27 @@ async function openComputer(
       ),
       sourceSessionId,
     );
-    session = reusable
-      ? reusable
-      : (
-          await transport.createComputerSession(workspaceId, {
-            operationId: context.operationId,
-            sessionId: sourceSessionId,
-            ...(value.name ? { name: value.name } : {}),
-            ...(value.placement ? { placement: value.placement } : {}),
-          })
-        ).session;
+    if (reusable) session = reusable;
+    else {
+      const created = await transport.createComputerSession(workspaceId, {
+        operationId: context.operationId,
+        sessionId: sourceSessionId,
+        ...(value.name ? { name: value.name } : {}),
+        ...(value.placement ? { placement: value.placement } : {}),
+      });
+      session = created.session;
+      // A computer that failed to start is not a result to act on: report
+      // why, as browser_open does, instead of an opened computer without
+      // screens.
+      const startError = created.operation?.error;
+      if (startError && session.lifecycle === "failed") {
+        throw new OpenGeniApiError(
+          startError.code === "unsupported" ? 422 : 502,
+          `ComputerSession ${session.id} did not start: ${startError.message}`,
+          { code: startError.code, retryable: startError.retryable },
+        );
+      }
+    }
   }
   if (session.lifecycle !== "active") return { session, targets: [] };
   try {
