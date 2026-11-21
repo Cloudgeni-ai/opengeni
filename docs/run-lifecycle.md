@@ -3213,12 +3213,6 @@ small tool-efficiency changes:
 - Requests ask for parallel tool calls (`parallel_tool_calls`; dropped for a
   Chat Completions request without tools), and the parallel-calls rule in the
   system prompt gives an example.
-- A test or build command that exited 0 with more than 4,000 bytes of output
-  shows its head and tail; the whole output is stored like an oversized result,
-  with the exact `tool_result_read` call that reads the rest, and the lines of
-  the hidden part that mention a warning, error, failure or skip are listed.
-  It applies only when the session can read the stored result back. See
-  `passing-check-output.ts`.
 - A session's first turn reads the workspace root's Git status, a short
   top-level listing and its AGENTS.md once, before the first model request,
   and stores them as one `<opengeni_starting_context>` developer history item

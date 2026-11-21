@@ -4505,9 +4505,7 @@ export function buildOpenGeniAgent(
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     installRepeatedToolCallGuard(agent);
     if (options.modelToolResultStore) {
-      installModelToolResultStore(agent, options.modelToolResultStore, {
-        trimPassingChecks: settings.experimentToolEfficiency,
-      });
+      installModelToolResultStore(agent, options.modelToolResultStore);
     }
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
@@ -4683,9 +4681,7 @@ export function buildOpenGeniAgent(
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   installRepeatedToolCallGuard(agent);
   if (options.modelToolResultStore) {
-    installModelToolResultStore(agent, options.modelToolResultStore, {
-      trimPassingChecks: settings.experimentToolEfficiency,
-    });
+    installModelToolResultStore(agent, options.modelToolResultStore);
   }
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);

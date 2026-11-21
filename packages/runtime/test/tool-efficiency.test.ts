@@ -20,17 +20,6 @@ import {
   minifyJsonBody,
   stripAnsi,
 } from "../src/command-output-compaction";
-import {
-  installModelToolResultStore,
-  storeOversizedFunctionToolOutput,
-  type ModelToolResultStore,
-} from "../src/model-tool-result-store";
-import {
-  PASSING_CHECK_TRIM_MIN_BYTES,
-  isCheckCommand,
-  passingCheckOutput,
-  passingCheckView,
-} from "../src/passing-check-output";
 import { repositorySkillsContextInputFilter } from "../src/repository-skills-context";
 import { renderStartingContext, STARTING_CONTEXT_PROBE } from "../src/starting-context";
 import {
@@ -68,91 +57,6 @@ describe("command output compaction", () => {
     const file = compactCommandOutput(`${banner(0)}{\n  "k": 1\n}\n`, { command: "cat a.json" });
     expect(file.applied).toEqual([]);
     expect(compactCommandOutput("exec refused").text).toBe("exec refused");
-  });
-});
-
-function passingTest(lines: number): string {
-  const body = Array.from({ length: lines }, (_, index) => `tests/test_m.py::test_${index} PASSED`);
-  body.splice(Math.floor(lines / 2), 0, "tests/test_m.py:12: DeprecationWarning: old api");
-  return `${banner(0)}${body.join("\n")}\n===== ${lines} passed in 1.2s =====\n`;
-}
-
-describe("passing check trim", () => {
-  test("recognises tests and builds that passed with long output", () => {
-    expect(isCheckCommand("cd /app && python -m pytest -q")).toBe(true);
-    expect(isCheckCommand("cargo build --release")).toBe(true);
-    expect(isCheckCommand("grep -rn foo .")).toBe(false);
-    const long = passingTest(300);
-    expect(
-      passingCheckOutput("exec_command", JSON.stringify({ cmd: "pytest" }), long),
-    ).not.toBeNull();
-    const failed = long.replace("code 0", "code 1");
-    expect(
-      passingCheckOutput("exec_command", JSON.stringify({ cmd: "pytest" }), failed),
-    ).toBeNull();
-    expect(passingCheckOutput("exec_command", JSON.stringify({ cmd: "cat log" }), long)).toBeNull();
-    expect(
-      passingCheckOutput("exec_command", JSON.stringify({ cmd: "pytest" }), passingTest(5)),
-    ).toBeNull();
-    const then = `Success. Updated: a.py\n\nthen:\n${long}`;
-    const check = passingCheckOutput(
-      "apply_patch",
-      JSON.stringify({ patch: "x", then: "pytest" }),
-      then,
-    );
-    expect(check?.prefix).toBe("Success. Updated: a.py\n\nthen:\n");
-  });
-
-  test("the view keeps head, tail and flagged lines, and points at the exact stored range", () => {
-    const text = passingTest(300);
-    const check = passingCheckOutput("exec_command", JSON.stringify({ cmd: "pytest" }), text)!;
-    const view = passingCheckView({
-      check,
-      readInstruction: (offset) => `Read on from ${offset}.`,
-      storedOffset: 0,
-    })!;
-    expect(view.text.length).toBeLessThan(text.length / 2);
-    expect(view.text).toStartWith(banner(0));
-    expect(view.text).toEndWith("===== 300 passed in 1.2s =====\n");
-    expect(view.text).toContain("DeprecationWarning: old api");
-    const bytes = Buffer.from(text, "utf8");
-    const shown = view.text.split("[Opengeni:")[0]!;
-    expect(bytes.subarray(0, view.hiddenFrom).toString("utf8")).toBe(shown);
-    expect(view.text).toContain(`Read on from ${view.hiddenFrom}.`);
-  });
-
-  test("the store trims only when enabled and the result can be read back", async () => {
-    const text = passingTest(300);
-    expect(Buffer.byteLength(text)).toBeGreaterThan(PASSING_CHECK_TRIM_MIN_BYTES);
-    const saved: string[] = [];
-    const make = (reader: "searchable" | "none"): ModelToolResultStore => ({
-      store: async ({ text: stored }) => {
-        saved.push(stored);
-        return { resultId: "r1", byteSize: Buffer.byteLength(stored), sandboxPath: null };
-      },
-      inlineMaxBytes: () => 100_000,
-      readers: () => ({ reader, shell: false }),
-    });
-    const call = (store: ModelToolResultStore) =>
-      storeOversizedFunctionToolOutput({
-        toolName: "exec_command",
-        callId: "call_1",
-        output: text,
-        store,
-        toolInput: JSON.stringify({ cmd: "pytest -q" }),
-      });
-    const off = make("searchable");
-    expect(await call(off)).toBe(text);
-    const on = make("searchable");
-    installModelToolResultStore({ getAllTools: async () => [] }, on, { trimPassingChecks: true });
-    const view = (await call(on)) as string;
-    expect(view).toContain('tool_result_read {"resultId":"r1"');
-    expect(saved.at(-1)).toBe(text);
-    const unreadable = make("none");
-    installModelToolResultStore({ getAllTools: async () => [] }, unreadable, {
-      trimPassingChecks: true,
-    });
-    expect(await call(unreadable)).toBe(text);
   });
 });
 
