@@ -24,6 +24,7 @@ const client = {
   updateScheduledTask,
   getSession: async (_workspace: string, id: string) => chats.find((chat) => chat.id === id)!,
   listSessions: async () => chats,
+  listSessionPage: async () => ({ pinned: [], sessions: chats, nextCursor: null }),
   getSessionTenancyCreateCapabilities: async () => ({
     activated: true,
     canCreatePrivate: privateAllowed,
@@ -161,12 +162,16 @@ mock.module("@opengeni/react/ui/select-menu", () => ({
     onValueChange,
   }: {
     value: string;
-    options: { value: string; label: string }[];
+    options: { value: string; label: string; disabled?: boolean; disabledReason?: string }[];
     onValueChange: (value: string) => void;
   }) => (
     <select value={value} onChange={(event) => onValueChange(event.target.value)}>
       {options.map((option) => (
-        <option key={option.value} value={option.value}>
+        <option
+          key={option.value}
+          value={option.value}
+          data-locked={option.disabled ? option.disabledReason : undefined}
+        >
           {option.label}
         </option>
       ))}
@@ -516,4 +521,81 @@ test("a new schedule starts with the organization's default audience; an existin
   const edited = await render();
   expect(audienceOption(edited.container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
   await act(async () => edited.root.unmount());
+});
+
+const AGENT = "aaaaaaaa-0000-4000-8000-000000000001";
+
+test("an agent's automation can use its own chat or one of the agent's chats", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render();
+  const option = (label: string) =>
+    [...container.querySelectorAll("option")].find((entry) => entry.textContent === label);
+  // Both chat choices are open to an agent's automation.
+  expect(option("Use an existing chat")!.dataset.locked).toBeUndefined();
+  expect(option("Create a chat for this automation")!.dataset.locked).toBeUndefined();
+  // Only the agent's chats are offered.
+  expect(option("Source chat")!.dataset.locked).toBeUndefined();
+  expect(option("Destination chat")).toBeUndefined();
+  await act(async () => root.unmount());
+});
+
+test("an agent's automation aimed at another chat says it isn't the agent's", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "destination-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render();
+  const option = (label: string) =>
+    [...container.querySelectorAll("option")].find((entry) => entry.textContent === label);
+  expect(option("Destination chat")!.dataset.locked).toBe("Not a chat with this agent.");
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>("[data-submit]")!.click();
+    await flush();
+  });
+  expect(updateScheduledTask).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Not a chat with this agent.");
+  await act(async () => root.unmount());
+});
+
+test("an agent's chats that can't be read show an error, not an empty list", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  const listSessionPage = client.listSessionPage;
+  client.listSessionPage = async () => {
+    throw Object.assign(new Error("Opengeni API 500: down"), { status: 500 });
+  };
+  try {
+    const { container, root } = await render();
+    expect(container.textContent).toContain("Chats couldn't load");
+    await act(async () => root.unmount());
+  } finally {
+    client.listSessionPage = listSessionPage;
+  }
+});
+
+test("an agent's own chat says when a change of agent started a new one", async () => {
+  task = {
+    ...task,
+    runMode: "reusable_session",
+    reusableSessionId: null,
+    metadata: {
+      _opengeniAgentChatChange: { sessionId: "source-chat", agentId: null, changedAt: "now" },
+    },
+  };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT };
+  const { container, root } = await render();
+  expect(container.textContent).toContain("Its agent changed, so it has a new chat.");
+  expect(container.textContent).toContain("Previous chat");
+  await act(async () => root.unmount());
+});
+
+test("a new automation opened from an agent's page goes back there on Cancel and Save", async () => {
+  const { scheduleFormReturnAgent } = await import("./schedule-form-page");
+  expect(
+    scheduleFormReturnAgent({ kind: "create", agentId: "agent-example", returnTo: "agent" }),
+  ).toBe("agent-example");
+  expect(scheduleFormReturnAgent({ kind: "create", agentId: "agent-example" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "create", returnTo: "agent" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "edit", scheduleId: "task-example" })).toBeUndefined();
 });

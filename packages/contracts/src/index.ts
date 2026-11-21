@@ -13650,6 +13650,14 @@ export const ScheduledTaskMetadataInput =
     "scheduled task metadata",
   );
 
+/**
+ * Task metadata the server writes when an automation's agent changes while it
+ * has its own chat: that chat stays with the agent it began with, so the next
+ * run starts a new chat with the new agent. The value is `{ sessionId,
+ * agentId, changedAt }`: the previous chat, its agent (null: none) and when.
+ */
+export const SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY = "_opengeniAgentChatChange";
+
 /** A Slack public or private channel ID. Direct messages are not destinations. */
 export const ScheduledTaskSlackChannelId = /* @__PURE__ */ defineSchema(() =>
   primitives.string.regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789"),
@@ -13696,7 +13704,8 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
      * The workspace agent each run's chat is with (an agent's "Starts when"):
      * it runs with that agent's Instructions, Memory and Can use. Checked
      * against the task owner's access when the task is saved and at each
-     * run. Only for a task that starts its own chat.
+     * run. An existing chat must be bound to the agent; the automation's own
+     * chat is replaced when the agent changes.
      */
     agentId: primitives.uuid.optional(),
     bundledSkillIds: BundledSkillSelection.optional(),

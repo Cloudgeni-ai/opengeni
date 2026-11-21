@@ -271,6 +271,7 @@ export type {
 } from "./artifact-catalog";
 export type {
   NewSidebarItem,
+  ResolvedSidebarAgentLink,
   ResolvedSidebarAppLink,
   ResolvedSidebarChild,
   ResolvedSidebarExternalLink,

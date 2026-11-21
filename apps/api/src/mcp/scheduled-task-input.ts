@@ -142,6 +142,68 @@ export const SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG = {
   firstPartyMcpPermissions: true,
 } as const;
 
+/**
+ * The agent each run's chat is with, by name or id, as session_create's
+ * agentName takes it. The tool resolves it to the contract's agentId before
+ * the request is parsed, so the REST shape is unchanged.
+ */
+function scheduledTaskAgentNameToolInput() {
+  return z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      'Name or id of an agent in this workspace (for example "Triage"): each run\'s chat is with that agent, with its Instructions, Memory and Can use. Use instead of agentId.',
+    );
+}
+
+export type ScheduledTaskAgentResolution =
+  | { ok: true; agentId: string }
+  | { ok: false; message: string };
+
+/**
+ * Why `agentConfig.agentName` named no agent the person this chat acts for
+ * can use, or several, worded for scheduling. Null for any other refusal,
+ * whose own message stands.
+ */
+export function scheduledTaskAgentNameRefusal(
+  ref: string,
+  refusal: { code: string; agentIds?: readonly string[] | undefined },
+): string | null {
+  const name = ref.trim();
+  if (refusal.code === "agent_name_ambiguous") {
+    return `More than one agent is named "${name}". Give agentConfig.agentId instead, one of: ${(refusal.agentIds ?? []).join(", ")}.`;
+  }
+  if (refusal.code === "agent_not_found") {
+    return `No agent named "${name}" is available here to the person this chat acts for. Check the agent's name, or give agentConfig.agentId; leave out agentConfig.agentName to schedule without an agent.`;
+  }
+  return null;
+}
+
+/**
+ * Replace `agentConfig.agentName` with the agentId it names. Input without
+ * one is returned as it is.
+ */
+export async function withResolvedScheduledTaskAgent(
+  input: Record<string, unknown>,
+  resolve: (ref: string) => Promise<ScheduledTaskAgentResolution>,
+): Promise<Record<string, unknown>> {
+  const agentConfig = input.agentConfig;
+  if (typeof agentConfig !== "object" || agentConfig === null || Array.isArray(agentConfig))
+    return input;
+  const { agentName, ...rest } = agentConfig as Record<string, unknown>;
+  if (agentName === undefined) return input;
+  if (typeof agentName !== "string" || agentName.trim() === "")
+    throw new ToolArgumentError("agentConfig.agentName must name an agent");
+  if (rest.agentId !== undefined)
+    throw new ToolArgumentError("Give agentConfig.agentName or agentConfig.agentId, not both");
+  const resolved = await resolve(agentName);
+  if (!resolved.ok) throw new ToolArgumentError(resolved.message);
+  return { ...input, agentConfig: { ...rest, agentId: resolved.agentId } };
+}
+
 export function scheduledTaskCreateToolInput(options: { events: boolean } = { events: false }) {
   return (
     z
@@ -166,6 +228,7 @@ export function scheduledTaskCreateToolInput(options: { events: boolean } = { ev
         agentConfig: z
           .object(ScheduledTaskAgentConfigInput.shape)
           .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
+          .extend({ agentName: scheduledTaskAgentNameToolInput() })
           .strict()
           .optional()
           .describe(

@@ -179,6 +179,10 @@ rendered like other "This workspace" events: summary `Record added in
 <App> / <collection>`, the App's console address, `data.appId`,
 `data.appTitle`, `data.writtenByYou`, and the fields above. Filter on
 `data.appId` and `data.collection` to listen to one collection.
+These events, not the page's `onChange`, are how an app gets work done while
+nobody has it open (for example a chat with an agent for each new record);
+the bundled apps Skill tells building agents so
+(`packages/runtime/src/bundled_site_skills/sites/references/site-data.md`).
 
 A [data sync](app-sync.md) writes through the same path, so its changes send
 these events with the sync run's chain depth. They are not marked as

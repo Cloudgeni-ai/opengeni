@@ -27,7 +27,7 @@ export function agentRefToolInput() {
 
 export type DelegationAgentOutcome =
   | { ok: true; agent: AgentRecord }
-  | { ok: false; code: AgentErrorCode; message: string };
+  | { ok: false; code: AgentErrorCode; message: string; agentIds?: string[] };
 
 /**
  * The calling chat's privacy. The delegated chat inherits the session row's
@@ -89,6 +89,7 @@ export async function resolveDelegationAgent(
     return {
       ok: false,
       code: "agent_name_ambiguous",
+      agentIds: outcome.agentIds,
       message: `More than one agent is named "${ref.trim()}". Use one of these ids: ${outcome.agentIds.join(", ")}.`,
     };
   }

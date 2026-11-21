@@ -218,6 +218,11 @@ has.
     follows the workspace's GitHub connection: its routes, one per bound
     installation, are recomputed whenever a binding changes or the source is
     added again (which repairs lost routes).
+  - Adding it needs that connection. Without one, the web app's add form
+    says GitHub isn't connected and offers **Connect GitHub** (the workspace's
+    GitHub connection in Connected tools, the same Connect flow), instead of
+    the server's "Connect GitHub to this workspace first" error
+    (`apps/web/src/components/schedules/event-source-connect-first.tsx`).
   - The route table has no tenant RLS, so a GitHub route keeps no
     installation id: its key is an HMAC-SHA-256 of the installation under a
     route secret derived from the deployment's encryption key. A deployment
@@ -239,11 +244,17 @@ has.
     deployment's own Apps (`<slug>[bot]`) mark own events.
 - **Slack**: the existing Slack events receiver keeps its conversational
   behaviour and additionally records the callback for the workspace the Slack
-  team is installed in, when that workspace has a Slack source. The receiver's
-  installation routing already names that workspace, so the source needs no
-  ingress route.
-  - One Slack source per workspace, shared with the workspace like the channels
-    the app is in.
+  team is installed in (the bot's home), when that workspace has a Slack
+  source. The receiver's installation routing already names that workspace,
+  so the source needs no ingress route.
+  - A workspace the organization shares the bot with (Slack bot availability,
+    see [Slack](../slack-bot.md#slack-events-for-automations)) can add a Slack
+    source too, and the same callback is recorded there as well, for as long
+    as the share covers that workspace. One SQL call per callback finds those
+    sources under each workspace's own RLS context (migration 1530); turning
+    sharing off or narrowing it stops delivery at the next callback.
+  - One Slack source per Slack team in a workspace, shared with the workspace
+    like the channels the app is in.
   - Types: `message.posted` (messages and thread replies), `message.edited`,
     `message.deleted`, `reaction.added`, `member.joined_channel`,
     `member.left_channel`. Data carries the channel id and type, the Slack user
@@ -254,7 +265,8 @@ has.
   - Own events are read from the callback itself (its `api_app_id` and the
     authorized bot user), so a stored delivery reads the same on replay.
   - Recording never affects the conversation: a failure is logged and the
-    callback is handled as before.
+    callback is handled as before. A failure for one workspace never stops
+    the others.
 - **Gmail**: one person's mailbox, read with the Gmail connection their chats
   use. Gmail only pushes changes through an operator-owned Pub/Sub topic, so
   instead of depending on that setup the source has a **feed**: Opengeni reads
@@ -693,19 +705,25 @@ the thread delivery from the wake; recurring ones don't. See [../session-status-
 ## Agent triggers
 
 An agent's **Starts when** (docs/agents.md) is a list of ordinary
-automations whose `agentConfig.agentId` names the agent. Each run starts a
-new chat bound to that agent, so it runs with the agent's Instructions,
+automations whose `agentConfig.agentId` names the agent. A chat the
+scheduler starts for it (each run, or the first run of the automation's own
+chat) is bound to that agent, so it runs with the agent's Instructions,
 Memory and Can use; the run is created as the task, with the task owner's
-access to the agent. Every trigger type the catalog offers works, including
+access to the agent. An existing chat must already be bound to the same
+agent. Every trigger type the catalog offers works, including
 types added later, because the trigger is the automation's own: nothing is
 agent-specific in intake or delivery. The runs keep every automation limit:
 the chain limit on event-started chats, the storm guard (`maxRunsPerHour`)
 and usage limits. Saving checks the agent is one the owner can use, for the
-automation as it will be after the edit (agent, run mode and visibility),
-and that each run starts a new chat (an `existing_session` or
-`reusable_session` task with an agent is refused). The automation form takes `?agent=<id>` (and `?agentTrigger=<n>`
-for a ready-made agent's suggestion) and binds the new automation to the
-agent. A ready-made agent's suggested triggers are never created on their
+automation as it will be after the edit (agent, run mode, chat and
+visibility); changing the agent of an automation with its own chat starts a
+new chat with the new agent (see `docs/agents.md`). The agent page's **Add
+trigger** and **Set up** open a small dialog that saves such an automation
+directly, shared like the agent (see `docs/agents.md`). The automation form
+takes `?agent=<id>` (and `?agentTrigger=<n>` for a ready-made agent's
+suggestion) and binds the new automation to the agent; the dialog's **Open
+full form** opens it with `?returnTo=agent`, so Cancel and Save return to
+the agent's page. A ready-made agent's suggested triggers are never created on their
 own: each waits until the person picks its source and saves.
 
 ## Templates

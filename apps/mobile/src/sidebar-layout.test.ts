@@ -87,6 +87,47 @@ test("groups are headed sections; top-level links share one; lists show at most 
   });
 });
 
+test("agents are rows with their avatar, at the top level and in groups", () => {
+  const avatar = { kind: "letters", letters: "RH", hue: 40 };
+  const agent = (id: string, agentId: string) => ({
+    id,
+    origin: "workspace",
+    type: "agent",
+    agentId,
+    label: `Agent ${id}`,
+    avatar,
+  });
+  const sections = sidebarMenuSections(
+    readSidebarLayout(
+      layout([
+        agent("helper", A),
+        link("status"),
+        {
+          id: "team",
+          origin: "workspace",
+          type: "group",
+          label: "Team",
+          collapsed: false,
+          items: [agent("reviewer", B)],
+        },
+      ]),
+    ).items,
+  );
+  expect(sections.map((section) => [section.heading, section.rows.map((row) => row.kind)])).toEqual(
+    [
+      [null, ["agent", "link"]],
+      ["Team", ["agent"]],
+    ],
+  );
+  expect(sections[0]!.rows[0]).toEqual({
+    key: "helper",
+    kind: "agent",
+    agentId: A,
+    label: "Agent helper",
+    avatar,
+  });
+});
+
 test("empty lists and groups, unknown types and non-https links are left out", () => {
   const sections = sidebarMenuSections(
     readSidebarLayout(

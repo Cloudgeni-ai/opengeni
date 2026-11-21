@@ -10,6 +10,7 @@ import {
   mergeResourceRefs,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES,
+  SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
   resolveSessionFirstPartyMcpTools,
@@ -81,6 +82,7 @@ import {
   getAgent,
   manualScheduledTaskRunBillingOrigin,
   markScheduledTaskApiBilled,
+  recordAuditEvent,
   type Database,
   type ScheduledTaskCreatorPolicy,
   type SessionCommandActor,
@@ -206,10 +208,12 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
 /**
  * Only the message survives. The destination chat owns execution: its
  * connectors, and the owner's current accounts resolved at each run. An
- * existing-chat schedule never saves account choices of its own.
+ * existing-chat schedule never saves account choices of its own. An agent's
+ * automation keeps its agent, which the chat must be bound to.
  */
 function scheduledSessionMessageConfig(config: ScheduledTaskAgentConfig): ScheduledTaskAgentConfig {
   return {
+    ...(config.agentId !== undefined ? { agentId: config.agentId } : {}),
     prompt: config.prompt,
     resources: config.resources,
     tools: [],
@@ -661,6 +665,7 @@ export async function createValidatedScheduledTask(input: {
     grant: input.grant,
     agentId: agentConfig.agentId,
     runMode: input.payload.runMode,
+    targetSession: target,
     ownerSubjectId: ownerSubjectId ?? input.grant.subjectId ?? null,
     privateTask: visibility === "user_private" || (visibility as string) === "private",
   });
@@ -1485,7 +1490,9 @@ export async function validatedScheduledTaskUpdate(
   const targetSessionId =
     runMode === "existing_session"
       ? (update.targetSessionId ?? input.existing.targetSessionId)
-      : runMode === "reusable_session" && input.existing.runMode === "reusable_session"
+      : runMode === "reusable_session" &&
+          input.existing.runMode === "reusable_session" &&
+          update.reusableSessionId !== null
         ? input.existing.reusableSessionId
         : null;
   const visibility = await resolveScheduledTaskVisibility({
@@ -1504,17 +1511,27 @@ export async function validatedScheduledTaskUpdate(
   if (
     nextAgentId !== input.existing.agentConfig.agentId ||
     runMode !== input.existing.runMode ||
-    visibility !== current
+    visibility !== current ||
+    (runMode === "existing_session" && targetSessionId !== input.existing.targetSessionId)
   ) {
+    const targetSession =
+      nextAgentId && runMode === "existing_session" && targetSessionId
+        ? await getSession(input.db, input.existing.workspaceId, targetSessionId)
+        : null;
     await validateScheduledTaskAgent(input.db, {
       grant: input.grant,
       agentId: nextAgentId,
       runMode,
+      targetSession,
       ownerSubjectId: input.existing.ownerSubjectId ?? input.grant.subjectId ?? null,
       privateTask: visibility === "user_private",
     });
   }
-  const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
+  const audited = withScheduledTaskAgentChatChangeAudit(
+    input.grant,
+    input.existing,
+    withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update),
+  );
   const withEvents = await withScheduledTaskEventsUpdate(input, audited);
   return visibility === current ? withEvents : { ...withEvents, visibility };
 }
@@ -1572,6 +1589,38 @@ async function withScheduledTaskEventsUpdate(
       else if (statusChanges) {
         await wakeScheduledTaskEventSubscriptions(tx, existing.workspaceId, existing.id);
       }
+    },
+  };
+}
+
+/** The audit action written when an agent change replaces an automation's own chat. */
+export const SCHEDULED_TASK_AGENT_CHAT_CHANGE_AUDIT_ACTION = "scheduled_task.agent_chat_changed";
+
+function withScheduledTaskAgentChatChangeAudit(
+  grant: AccessGrant,
+  existing: ScheduledTask,
+  update: UpdateScheduledTaskInput,
+): UpdateScheduledTaskInput {
+  if (update.reusableSessionId !== null || existing.reusableSessionId === null) return update;
+  const prior = update.beforeUpdateCommit;
+  return {
+    ...update,
+    beforeUpdateCommit: async (tx) => {
+      await prior?.(tx);
+      await recordAuditEvent(tx, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        action: SCHEDULED_TASK_AGENT_CHAT_CHANGE_AUDIT_ACTION,
+        targetType: "scheduled_task",
+        targetId: existing.id,
+        metadata: {
+          principalKind: grant.principalKind ?? null,
+          previousSessionId: existing.reusableSessionId,
+          previousAgentId: existing.agentConfig.agentId ?? null,
+          agentId: update.agentConfig?.agentId ?? null,
+        },
+      });
     },
   };
 }
@@ -1753,10 +1802,19 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
   const existingTarget = input.existing.targetSessionId;
   const nextRunMode = input.payload.runMode ?? input.existing.runMode;
+  // A chat's agent never changes, so a change of agent on an automation with
+  // its own chat starts a new one with the new agent at the next run.
+  const nextAgentId = (input.payload.agentConfig ?? input.existing.agentConfig).agentId ?? null;
+  const replacesAgentChat =
+    input.existing.runMode === "reusable_session" &&
+    nextRunMode === "reusable_session" &&
+    input.existing.reusableSessionId !== null &&
+    nextAgentId !== (input.existing.agentConfig.agentId ?? null);
   const materializedReusable =
     input.existing.runMode === "reusable_session" &&
     nextRunMode === "reusable_session" &&
-    input.existing.reusableSessionId !== null;
+    input.existing.reusableSessionId !== null &&
+    !replacesAgentChat;
   let reusableTarget: Session | null = null;
   const nextTargetSessionId =
     input.payload.targetSessionId !== undefined
@@ -1856,7 +1914,9 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
         targetSessionId:
           nextRunMode === "existing_session"
             ? nextTargetSessionId
-            : input.existing.reusableSessionId,
+            : replacesAgentChat
+              ? null
+              : input.existing.reusableSessionId,
       },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
       ...(materializedReusable ? { retainedCreationConfig: input.existing.agentConfig } : {}),
@@ -1945,7 +2005,9 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     next: nextAgentConfig,
     runMode: nextRunMode,
     reusableSessionCanPost:
-      input.existing.runMode === "reusable_session" && input.existing.reusableSessionId !== null
+      input.existing.runMode === "reusable_session" &&
+      input.existing.reusableSessionId !== null &&
+      !replacesAgentChat
         ? async () => {
             const chat = await getSession(
               input.db,
@@ -2197,6 +2259,18 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     (input.existing.runMode === "reusable_session" && nextRunMode !== "reusable_session")
   ) {
     update.targetSessionId = nextTargetSessionId;
+  }
+  if (replacesAgentChat) {
+    // The next run starts the new chat; the task records the one it left.
+    update.reusableSessionId = null;
+    update.metadata = {
+      ...(update.metadata ?? input.existing.metadata),
+      [SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY]: {
+        sessionId: input.existing.reusableSessionId,
+        agentId: input.existing.agentConfig.agentId ?? null,
+        changedAt: new Date().toISOString(),
+      },
+    };
   }
   Object.assign(update, scheduledTaskAuthorityUpdateForGrant(input.grant));
   const linkCapture = prepareExternalLinkTaskAdmission(
@@ -2821,8 +2895,10 @@ function trimmedScheduledTaskName(name: string): string {
 
 /**
  * An automation that starts chats with an agent (its "Starts when"): the
- * agent must be one of this workspace's that the task's owner can use, and
- * the task must start its own chats. Checked again when each run binds.
+ * agent must be one of this workspace's that the task's owner can use, and an
+ * automation that posts into an existing chat must use a chat bound to that
+ * agent (the chat itself is checked as the owner's by the target check).
+ * Checked again when each run binds.
  */
 async function validateScheduledTaskAgent(
   db: Database,
@@ -2830,16 +2906,19 @@ async function validateScheduledTaskAgent(
     grant: AccessGrant;
     agentId: string | undefined;
     runMode: ScheduledTask["runMode"];
+    /** The chat an existing-chat automation posts into. */
+    targetSession: Pick<Session, "agentId"> | null;
     ownerSubjectId: string | null;
     privateTask: boolean;
   },
 ): Promise<void> {
   if (!input.agentId) return;
-  // Each run starts a new chat with the agent, so a change of agent applies
-  // from the next run; a kept chat would stay with the agent it began with.
-  if (input.runMode !== "new_session_per_run") {
+  // A chat's agent never changes, so an existing chat must already be the
+  // agent's. A reusable chat is started with the agent and replaced when the
+  // automation's agent changes.
+  if (input.runMode === "existing_session" && input.targetSession?.agentId !== input.agentId) {
     throw new HTTPException(422, {
-      message: "An automation with an agent starts its own chats. Choose a new chat for each run.",
+      message: "That chat isn't with this agent. Choose one of the agent's chats.",
     });
   }
   const agent = await getAgent(

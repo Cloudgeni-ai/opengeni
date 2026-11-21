@@ -141,6 +141,7 @@ export const SECTION_KEYS = [
   "page-models-sharing",
   "page-schedules",
   "page-schedule-form",
+  "page-agent-trigger",
   "page-meetings",
   "page-meeting-reminders",
   "page-dictation",
@@ -152,6 +153,7 @@ export const SECTION_KEYS = [
   "page-sign-out-recordings",
   "page-admin-step-up",
   "page-github-integration",
+  "page-sidebar",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -1041,6 +1043,24 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Production Models components with an in-memory API fixture.",
     usedOn: "Settings > Models",
     load: () => import("./page-models-cache"),
+  },
+  {
+    key: "page-sidebar",
+    group: "Pages",
+    title: "Sidebar",
+    purpose:
+      "The rail's links and groups and the Sidebar page, with an in-memory layout: agent links, renaming a group, and Customize.",
+    usedOn: "Rail > links above the chats; Sidebar page",
+    load: () => import("./page-sidebar"),
+  },
+  {
+    key: "page-agent-trigger",
+    group: "Pages",
+    title: "Agent: Add trigger",
+    purpose:
+      "Production Starts when section and its Add trigger dialog with an in-memory API fixture.",
+    usedOn: "Agents > agent > Starts when",
+    load: () => import("./page-agent-trigger"),
   },
   {
     key: "page-models-sharing",
