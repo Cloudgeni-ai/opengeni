@@ -543,17 +543,30 @@ whole.
   Codex Apps calls carry no provider domain: rules name them by the
   `codex_apps` server id or `*`. A rule a release can't fully read (such as
   a permission added later) asks first rather than being ignored. The
-  page lists the workspace's enabled connections plus a **GitHub** row for
-  Opengeni's own GitHub tools (rules on `github.com`, the same rules the
-  ready-made agents use), unless a listed connection already covers
-  `github.com`. Rules for connections not listed still show and can be
+  page lists only the connections that have a rule, each with the logo the
+  chat composer's Connectors picker shows (`connectionLogoResolver`: the
+  catalog entry's logo, else one filed under its provider's domain, else the
+  name's initial), with its all-tools choice and any tool set on its own;
+  **Choose per tool** lists the rest of its tools, and choosing the reset
+  option removes a rule. **Add rule** picks a connection from a searchable
+  list with logos (the workspace's enabled connections, one per rule key,
+  plus **GitHub** for Opengeni's own GitHub tools, rules on `github.com`,
+  unless a connection already covers it), then all its tools or one tool,
+  then Allow, Ask first or Block. Rules for connections not listed (another
+  person's, or not set up yet) still show, named by their key, and can be
   changed or removed.
 - **Learns**: **Remember across chats** plus the entries of the agent's
   Memory collection, each editable and removable (Knowledge entry save and
   archive).
-- **Skills**: a short list of the Skills it relies on, by name, linked to
-  each Skill. It is a note for the people setting the agent up: every Skill
-  stays available to every chat, so there are no per-Skill switches.
+- **Skills**: a short list of the Skills it relies on, each shown by its
+  name and short description and linked to the Skill's page. One searchable
+  list adds another (name and short description; ones already chosen are not
+  offered). A chosen Skill is saved by its key and shown from the workspace's
+  Skill catalog (matched by key, then by title), so a Skill written in
+  Opengeni shows its name, never its generated `authored-<id>` key; a
+  reference no Skill here matches says so. It is a note for the people
+  setting the agent up: every Skill stays available to every chat, so there
+  are no per-Skill switches.
 
 Not in self-hosted deployments without these pieces: Codex Apps rules need
 the Codex Apps deployment flag, Slack lines need the Opengeni Slack app, and

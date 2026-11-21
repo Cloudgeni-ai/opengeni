@@ -6,6 +6,24 @@ import { capabilityLogoSource } from "../components/capabilities/capability-logo
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
 
 /**
+ * A connection's logo, the one the Connectors picker shows: its catalog
+ * entry's own logo, else any entry filed under its provider's domain. Null
+ * when there is none, so callers fall back to a monogram.
+ */
+export function connectionLogoResolver(
+  items: readonly CapabilityCatalogItem[],
+  assetUrl: (path: string | null) => string | null,
+): (item: CapabilityCatalogItem | undefined, domain?: string | null) => string | null {
+  let domains: ReadonlyMap<string, string> | null = null;
+  return (item, domain) => {
+    const own = item ? capabilityLogoSource(item, assetUrl) : null;
+    if (own || !domain) return own;
+    domains ??= connectorLogoIndex(items, (path) => assetUrl(path ?? null));
+    return connectorLogo(domains, domain);
+  };
+}
+
+/**
  * Each server's real logo from the workspace catalog: its own logo, else the
  * catalog entry it comes from (by capability id, then by MCP server id), else
  * any entry filed under its provider's domain. Servers with none are left out,
@@ -22,17 +40,13 @@ export function connectorLogoSources(
     const id = item.runtime?.mcpServerId;
     if (id && !byServerId.has(id)) byServerId.set(id, item);
   }
-  let domains: ReadonlyMap<string, string> | null = null;
+  const resolve = connectionLogoResolver(items, assetUrl);
   const logos = new Map<string, string>();
   for (const server of servers) {
     const item =
       (server.capabilityId ? byId.get(server.capabilityId) : undefined) ??
       byServerId.get(server.id);
-    let logo = server.logoSrc || (item ? capabilityLogoSource(item, assetUrl) : null);
-    if (!logo && server.providerDomain) {
-      domains ??= connectorLogoIndex(items, (path) => assetUrl(path ?? null));
-      logo = connectorLogo(domains, server.providerDomain);
-    }
+    const logo = server.logoSrc || resolve(item, server.providerDomain);
     if (logo) logos.set(server.id, logo);
   }
   return logos;

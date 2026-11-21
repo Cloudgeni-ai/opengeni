@@ -211,6 +211,9 @@ export function fakeAgentsClient(
       calls.push(["listEventSources", workspaceId]);
       return options.eventSources ?? [];
     },
+    catalogAssetUrl(path: string | null) {
+      return path ? `/assets/${path}` : null;
+    },
     async listCapabilities(workspaceId: string) {
       calls.push(["listCapabilities", workspaceId]);
       return { items: options.capabilities ?? [] };
@@ -244,7 +247,15 @@ export function fakeAgentsClient(
     },
     async listWorkspaceSkills(workspaceId: string, request: unknown) {
       calls.push(["listWorkspaceSkills", workspaceId, request]);
-      return { skills: (options.skills ?? []).map((stableKey) => ({ stableKey })) };
+      return {
+        skills: (options.skills ?? []).map((stableKey) => ({
+          id: `skill-${stableKey}`,
+          stableKey,
+          title: null,
+          description: null,
+        })),
+        nextCursor: null,
+      };
     },
     async listAgentChats(workspaceId: string, id: string, request: Record<string, unknown>) {
       calls.push(["listAgentChats", workspaceId, id, request]);
