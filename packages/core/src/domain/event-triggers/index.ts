@@ -2,6 +2,7 @@ export * from "./automation-events";
 export * from "./event-source-feeds";
 export * from "./event-type-catalog";
 export * from "./github-events";
+export * from "./github-personal-source";
 export * from "./github-source";
 export * from "./gmail-events";
 export * from "./gmail-source";

@@ -117,6 +117,41 @@ test("targets are current, batched, workspace scoped and independent of creation
   expect(index?.indexdef).toContain("deleted_at IS NULL");
 }, 60_000);
 
+test("the list filters by the agent whose chats an automation starts", async () => {
+  const session = await fixture();
+  const agentId = crypto.randomUUID();
+  const create = (name: string, agentConfig: Record<string, unknown>) =>
+    createScheduledTask(client.db, {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      name,
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Review", resources: [], tools: [], metadata: {}, ...agentConfig },
+      createdBy: { kind: "service", subjectId: "scheduler" },
+      metadata: {},
+    });
+  const mine = await create("Mine", { agentId });
+  await create("Another agent", { agentId: crypto.randomUUID() });
+  await create("No agent", {});
+  const listed = await listScheduledTasks(
+    client.db,
+    session.workspaceId,
+    100,
+    0,
+    undefined,
+    undefined,
+    { agentId },
+  );
+  expect(listed.map((task) => task.id)).toEqual([mine.id]);
+  expect(
+    (await listScheduledTasks(client.db, session.workspaceId, 100, 0)).length,
+  ).toBeGreaterThanOrEqual(3);
+}, 60_000);
+
 test("upcoming targets exclude paused, past one-time, ended and manual schedules", async () => {
   const session = await fixture();
   const now = new Date();

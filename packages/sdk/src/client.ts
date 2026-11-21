@@ -3351,7 +3351,13 @@ export class OpenGeniClient {
 
   async listScheduledTasks(
     workspaceId: string,
-    options: { limit?: number; offset?: number; sessionId?: string } = {},
+    options: {
+      limit?: number;
+      offset?: number;
+      sessionId?: string;
+      /** Only automations whose runs are chats with this agent. */
+      agentId?: string;
+    } = {},
   ): Promise<ScheduledTask[]> {
     return await this.requestJson<ScheduledTask[]>(
       "GET",
@@ -3360,6 +3366,7 @@ export class OpenGeniClient {
       {
         ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
         ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+        ...(options.agentId ? { agentId: options.agentId } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );

@@ -7,6 +7,7 @@ import {
   toolReviewContextFromSchema,
   type ToolReviewContext,
   type ToolReviewReasonCode,
+  ToolReviewAgentRule,
   toolReviewAction,
   toolReviewDetails,
   toolReviewFields,
@@ -421,7 +422,7 @@ export async function getToolActionReview(
         }
       : {}),
     ...toolReviewFields(args, context, request.toolName),
-    ...toolReviewReason(status, request.policySource),
+    ...toolReviewReason(status, request.policySource, request.agentRule),
     createdAt: request.createdAt.toISOString(),
     updatedAt: (operation?.updatedAt ?? request.updatedAt).toISOString(),
     availableActions: waiting
@@ -445,7 +446,23 @@ export async function getToolActionReview(
 function toolReviewReason(
   status: ToolReviewStatus,
   policySource: string,
-): { reason: string; reasonCode: ToolReviewReasonCode } {
+  agentRule?: ToolReviewAgentRule | null,
+): { reason: string; reasonCode: ToolReviewReasonCode; agentRule?: ToolReviewAgentRule } {
+  // An agent's Can use rule decided: name the agent; the code stays the
+  // default one for hosts that don't read `agentRule`.
+  if (agentRule && policySource === "default") {
+    const parsed = ToolReviewAgentRule.safeParse(agentRule);
+    if (parsed.success) {
+      const blocked = status === "blocked";
+      return {
+        reason: blocked
+          ? `The agent ${parsed.data.agentName} blocks this action.`
+          : `The agent ${parsed.data.agentName} asks first for this action.`,
+        reasonCode: blocked ? "blocked_by_default" : "asks_by_default",
+        agentRule: parsed.data,
+      };
+    }
+  }
   if (status === "blocked")
     return policySource === "explicit"
       ? { reason: "Your permission settings block this action.", reasonCode: "blocked_by_setting" }

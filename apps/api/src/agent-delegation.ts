@@ -42,11 +42,28 @@ export type DelegationCallerChat = {
 };
 
 /**
+ * Whose agents a delegated chat may run: the owner of an Only me calling chat
+ * (its child is the same owner's Only me chat, whoever runs the turn, such as
+ * an Only me automation's run), otherwise the person the grant acts for.
+ */
+export function delegationAgentSubject(
+  grant: Pick<AccessGrant, "subjectId">,
+  caller?: DelegationCallerChat | null,
+): string | null {
+  if (caller && (caller.onlyMe ?? caller.private) && caller.ownerSubjectId) {
+    return caller.ownerSubjectId;
+  }
+  return grant.subjectId ?? null;
+}
+
+/**
  * The agent a delegation names, as the person the grant acts for may use it.
  * An open Slack chat acts for someone outside the workspace: only agents
  * anyone in the organization can use are reachable from it. A shared calling
  * chat makes a shared child, which can't run an Only me agent, so only shared
- * agents are considered (and an ambiguous name never lists Only me ones).
+ * agents are considered (and an ambiguous name never lists Only me ones). An
+ * Only me calling chat considers its owner's agents (see
+ * delegationAgentSubject).
  */
 export async function resolveDelegationAgent(
   deps: Pick<ApiRouteDeps, "db">,
@@ -62,7 +79,7 @@ export async function resolveDelegationAgent(
     { accountId: grant.accountId, workspaceId },
     {
       ref,
-      viewerSubjectId: openUse || sharedChild ? null : (grant.subjectId ?? null),
+      viewerSubjectId: openUse || sharedChild ? null : delegationAgentSubject(grant, caller),
       // Filtered before the ambiguity check, so an outsider never sees ids
       // of agents they can't use.
       ...(openUse ? { organizationAccessOnly: true } : {}),

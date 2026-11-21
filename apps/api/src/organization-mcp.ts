@@ -224,7 +224,13 @@ export type OrganizationActionContext = {
    * Per-connection rate limit: seconds until the named tool may run again, or
    * 0 to run it now. Absent means no limit (in-process callers).
    */
-  admit?: (toolName: string) => number;
+  admit?: (toolName: string) => number | Promise<number>;
+  /**
+   * Reads every Skill folder of a GitHub repository at one commit, for
+   * `skills_sync` with `direction: "repository"`. Absent: that direction is
+   * unavailable.
+   */
+  readSkillRepository?: (url: string) => Promise<import("@opengeni/core").SkillRepositorySnapshot>;
 };
 
 export function buildOrganizationMcpServer(input: OrganizationActionContext): Server {
@@ -253,7 +259,7 @@ export function buildOrganizationMcpServer(input: OrganizationActionContext): Se
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
     const args = request.params.arguments ?? {};
-    const wait = input.admit?.(request.params.name) ?? 0;
+    const wait = (await input.admit?.(request.params.name)) ?? 0;
     if (wait > 0)
       return failure(
         `Too many calls from this connection: try again in ${wait} seconds. Nothing was run, so retrying is safe.`,

@@ -249,6 +249,24 @@ export const ToolReviewReasonCode = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type ToolReviewReasonCode = z.infer<typeof ToolReviewReasonCode>;
+/**
+ * The agent whose Can use rule made a call ask or blocked it, with that rule
+ * (docs/agents.md). Absent when the connection's own settings decided. The
+ * `reasonCode` stays `asks_by_default` or `blocked_by_default` for hosts that
+ * don't read it.
+ */
+export const ToolReviewAgentRule = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      agentId: z.string().max(256),
+      agentName: z.string().max(256),
+      connector: z.string().max(512),
+      tool: z.string().max(256),
+      permission: z.enum(["ask", "block"]),
+    })
+    .strict(),
+);
+export type ToolReviewAgentRule = z.infer<typeof ToolReviewAgentRule>;
 export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -273,6 +291,7 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       moreFields: primitives.nonnegativeInteger,
       reason: primitives.string,
       reasonCode: ToolReviewReasonCode.optional(),
+      agentRule: ToolReviewAgentRule.optional(),
       createdAt: primitives.string,
       updatedAt: primitives.string,
       approveLabel: primitives.string,

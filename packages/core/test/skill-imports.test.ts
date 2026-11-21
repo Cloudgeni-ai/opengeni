@@ -8,6 +8,7 @@ import {
 
 import {
   parseSkillSource,
+  readSkillRepository,
   resolveSkillImport,
   type GitHubSkillSourceClient,
   type GitHubSkillTreeEntry,
@@ -386,5 +387,51 @@ describe("remote Skill source resolution", () => {
     ).rejects.toThrow("metadata is too large");
     // Eight reads can already be in flight when one detects the limit.
     expect(reads).toBeLessThanOrEqual(13);
+  });
+});
+
+describe("Skill repository sync", () => {
+  test("reads every Skill folder under a folder at one commit, nested ones apart", async () => {
+    const blob = (path: string, sha: string, mode = "100644"): GitHubSkillTreeEntry => ({
+      path,
+      type: "blob",
+      mode,
+      sha,
+      size: 10,
+    });
+    const client = sourceClient(
+      [
+        blob("README.md", "readme"),
+        blob("skills/release/SKILL.md", "release"),
+        blob("skills/release/notes.md", "notes"),
+        blob("skills/release/check/SKILL.md", "check"),
+        blob("skills/linked/SKILL.md", "linked"),
+        blob("skills/linked/run.sh", "link", "120000"),
+        blob("other/SKILL.md", "other"),
+      ],
+      {
+        release: skillMarkdown,
+        notes: "notes",
+        check: skillMarkdown,
+        linked: skillMarkdown,
+        link: "x",
+        other: skillMarkdown,
+      },
+    );
+    const snapshot = await readSkillRepository(
+      "https://github.com/acme/skills/tree/main/skills",
+      client,
+    );
+    expect(snapshot.commit).toBe(commit);
+    expect(
+      snapshot.skills.map((skill) => [skill.path, skill.files.map((file) => file.path)]),
+    ).toEqual([
+      ["skills/release", ["SKILL.md", "notes.md"]],
+      ["skills/release/check", ["SKILL.md"]],
+    ]);
+    expect(snapshot.skipped).toEqual([
+      { path: "skills/linked", reason: "It has a symbolic link or submodule." },
+    ]);
+    expect(snapshot.truncated).toBe(false);
   });
 });

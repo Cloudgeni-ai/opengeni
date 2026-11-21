@@ -1179,6 +1179,12 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
     </AgentsTestHost>,
   );
   // Only this agent's automations are its triggers, and a set-up suggestion isn't offered again.
+  // The server filters them by agent.
+  expect(client.calls).toContainEqual([
+    "listScheduledTasks",
+    WORKSPACE_ID,
+    { agentId: agent.id, limit: 200 },
+  ]);
   expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
   const suggested = [...container.querySelectorAll("[data-agent-suggested-trigger]")];
   expect(suggested.map((row) => row.textContent)).toEqual([
