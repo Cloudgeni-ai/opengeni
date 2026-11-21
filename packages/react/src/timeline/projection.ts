@@ -2675,7 +2675,15 @@ function markRepeatedCapabilityRequests(items: TimelineItem[]): void {
   const kept = new Map<string, string | null>();
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
-    if (item.kind !== "auth-needed" || !item.capability || item.setupRequest) continue;
+    // Cards with inputs stay: two of them can ask for different sites or
+    // instances, and one being filled in must not fold away.
+    if (
+      item.kind !== "auth-needed" ||
+      !item.capability ||
+      item.setupRequest ||
+      item.capability.inputs?.length
+    )
+      continue;
     const key = `${item.capability.id}:${item.purpose ?? ""}:${item.requestedSandboxId ?? ""}`;
     if (!kept.has(key)) {
       kept.set(key, item.turnId);

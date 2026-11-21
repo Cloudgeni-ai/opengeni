@@ -4431,6 +4431,43 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("connection cards with inputs are never folded", () => {
+    reset();
+    const card = (turnId: string, rationale: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "mcp:jira",
+            name: "Jira",
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale,
+            requiredVariables: [],
+            inputs: [{ id: "site", label: "Site" }],
+          },
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "Connect the first site."),
+      card("turn-1", "Connect the second site."),
+      card("turn-2", "Connect the third site."),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.capability?.rationale, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["Connect the first site.", false],
+      ["Connect the second site.", false],
+      ["Connect the third site.", false],
+    ]);
+  });
+
   test("a Chrome setup card keeps its purpose and repeats separately from machine requests", () => {
     reset();
     const card = (turnId: string, purpose?: "chrome") =>

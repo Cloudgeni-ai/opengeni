@@ -26,6 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import { pathHasAppPage } from "@/lib/onboarding-return";
 import { appPageLocation, appPagePathname } from "./app-page-location";
 import { inAppLinkPath } from "./in-app-link";
 import { useSidebarLayout } from "./use-sidebar-layout";
@@ -158,6 +159,7 @@ function ChildRows({
   actions: RowActions;
   indent?: boolean;
 }) {
+  const router = useRouter();
   const menu = <RowMenu item={item} actions={actions} />;
   if (item.type === "app")
     return (
@@ -172,7 +174,9 @@ function ChildRows({
       />
     );
   if (item.type === "link") {
-    const inApp = inAppLinkPath(item.url, window.location.origin);
+    const inApp = inAppLinkPath(item.url, window.location.origin, (path) =>
+      pathHasAppPage(router, path),
+    );
     if (inApp !== null)
       return (
         <InAppLinkRow
@@ -279,6 +283,7 @@ function InAppLinkRow({
 
 export function SidebarLayoutSection() {
   const rail = useRail();
+  const router = useRouter();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { layout, update } = useSidebarLayout(rail.workspaceId);
   const [openGroups, setOpenGroups] = useState(readOpenGroups);
@@ -335,7 +340,9 @@ export function SidebarLayoutSection() {
             (child.type === "app" &&
               pathname.startsWith(appPagePathname(rail.workspaceId, child.appId))) ||
             (child.type === "link" &&
-              inAppLinkPath(child.url, window.location.origin)?.split(/[?#]/)[0] === pathname),
+              inAppLinkPath(child.url, window.location.origin, (path) =>
+                pathHasAppPage(router, path),
+              )?.split(/[?#]/)[0] === pathname),
         );
         const open = holdsActive || (openGroups[item.id] ?? !item.collapsed);
         const childIds = item.items.map((child) => child.id);
