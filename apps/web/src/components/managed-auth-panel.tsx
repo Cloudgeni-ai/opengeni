@@ -186,8 +186,8 @@ export function ManagedAuthPanel(props: {
   }, [ownsLocationLinkError]);
   const [signupChallengeToken, setSignupChallengeToken] = useState<string>();
   const [challengeReset, setChallengeReset] = useState(0);
-  const challengeRequired =
-    mode === "signup" && !emailOnlyMode && Boolean(props.signupChallengeSiteKey);
+  // Email sign-in carries the same challenge as sign-up while it is enabled.
+  const challengeRequired = !emailOnlyMode && Boolean(props.signupChallengeSiteKey);
   // Google or GitHub may sign someone in or create their account, so a click
   // on either tab carries a challenge token while new accounts are open.
   const socialChallenge = useSocialSignupChallenge(
@@ -264,7 +264,11 @@ export function ManagedAuthPanel(props: {
     setVerificationEmail(null);
     if (Object.keys(validationErrors).length > 0) return;
     if (challengeRequired && !signupChallengeToken) {
-      setFormError("Complete the signup verification.");
+      setFormError(
+        mode === "signin"
+          ? "Complete the verification to sign in."
+          : "Complete the signup verification.",
+      );
       return;
     }
     setBusy(true);
@@ -373,7 +377,7 @@ export function ManagedAuthPanel(props: {
     setFormError(null);
     setFormActionMode(null);
     setSuccessMessage(null);
-    // The Sign up tab may already hold a solved token; it is used up here.
+    // The email form's visible widget may already hold a solved token; it is used up here.
     let token = challengeRequired ? signupChallengeToken : undefined;
     if (token) {
       setSignupChallengeToken(undefined);

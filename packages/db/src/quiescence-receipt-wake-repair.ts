@@ -1,5 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withSessionActivityRlsContext, type Database } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import {
   lockSessionEventWriteRows,
   registerSessionWorkflowWakeInTransaction,
@@ -8,6 +9,32 @@ import * as schema from "./schema";
 
 export type QuiescenceReceiptWakeRepairCursor = { workspaceId: string; sessionId: string };
 type Candidate = QuiescenceReceiptWakeRepairCursor & { accountId: string };
+
+/**
+ * Why one candidate's repair failed, without its IDs or error message (a
+ * PostgreSQL message can quote row values): the error's class name and the
+ * SQLSTATE found on it or its causes, with the SQLSTATE's two-character class.
+ */
+export type QuiescenceReceiptWakeRepairFailure = {
+  errorName: string;
+  sqlState: string | null;
+  sqlStateClass: string | null;
+};
+
+const ERROR_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
+
+/** The SQLSTATE may sit under drizzle's wrapper; transport codes are not SQLSTATEs. */
+export function classifyQuiescenceReceiptWakeRepairFailure(
+  error: unknown,
+): QuiescenceReceiptWakeRepairFailure {
+  const name = error instanceof Error ? error.name : null;
+  const sqlState = nestedPostgresSqlState(error);
+  return {
+    errorName: name && ERROR_NAME.test(name) ? name : error instanceof Error ? "Error" : "NonError",
+    sqlState,
+    sqlStateClass: sqlState ? sqlState.slice(0, 2) : null,
+  };
+}
 
 /**
  * How long after its attempt closed a recovering session becomes a repair
@@ -199,6 +226,8 @@ export async function repairMissingQuiescenceReceiptWakesWith(
   examined: number;
   registered: number;
   failed: number;
+  /** One entry per failed candidate, in inventory order. */
+  failures: QuiescenceReceiptWakeRepairFailure[];
   cursor: QuiescenceReceiptWakeRepairCursor | null;
 }> {
   const batchLimit = Math.max(1, Math.min(100, Math.floor(limit)));
@@ -209,7 +238,7 @@ export async function repairMissingQuiescenceReceiptWakesWith(
       ${batchLimit}, ${after?.workspaceId ?? null}::uuid, ${after?.sessionId ?? null}::uuid)`,
   );
   let registered = 0;
-  let failed = 0;
+  const failures: QuiescenceReceiptWakeRepairFailure[] = [];
   for (const row of rows) {
     try {
       if (
@@ -223,14 +252,16 @@ export async function repairMissingQuiescenceReceiptWakesWith(
     } catch (error) {
       // Lock conflicts are safely retryable on the next lap; anything else
       // stays visible to the caller.
-      if ((error as { code?: string }).code !== "55P03") failed++;
+      const failure = classifyQuiescenceReceiptWakeRepairFailure(error);
+      if (failure.sqlState !== "55P03") failures.push(failure);
     }
   }
   const last = rows.at(-1);
   return {
     examined: rows.length,
     registered,
-    failed,
+    failed: failures.length,
+    failures,
     cursor:
       rows.length === batchLimit && last
         ? { workspaceId: last.workspace_id, sessionId: last.session_id }

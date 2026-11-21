@@ -143,3 +143,43 @@ describe("a sign-in lost while the app is open", () => {
     }
   });
 });
+
+describe("email sign-in", () => {
+  test("forwards the sign-in form's challenge token, and sends none without one", async () => {
+    for (const token of ["signin-token", undefined]) {
+      const fixture = host([null, signedIn]);
+      const calls: Array<Record<string, unknown>> = [];
+      const appHost: AppStateHost = {
+        ...fixture.appHost,
+        signInEmail: async (input) => {
+          calls.push(input);
+        },
+      };
+      const rendered = await renderHook(
+        () => useAppState(appHost, { bootstrapSuspended: false }),
+        undefined,
+      );
+      try {
+        for (let i = 0; i < 40 && fixture.sessionReads() < 1; i++) await flush(10);
+        await actRun(() =>
+          rendered.result.current.handleManagedAuth("signin", {
+            name: "person@example.test",
+            email: "person@example.test",
+            password: "any-password",
+            ...(token ? { signupChallengeToken: token } : {}),
+          }),
+        );
+        expect(calls).toEqual([
+          {
+            email: "person@example.test",
+            password: "any-password",
+            rememberMe: true,
+            ...(token ? { signupChallengeToken: token } : {}),
+          },
+        ]);
+      } finally {
+        await rendered.unmount();
+      }
+    }
+  });
+});
