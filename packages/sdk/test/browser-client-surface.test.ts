@@ -136,6 +136,7 @@ const integrationMethods = [
   // app_sync_* tools and Apps read status through the Site runtime.
   "createAppSync",
   "deleteAppSync",
+  "getAppSyncOptInReview",
   "getAppSyncStatus",
   "listAppSyncs",
   "runAppSync",

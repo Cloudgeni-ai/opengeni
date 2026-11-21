@@ -86,6 +86,7 @@ import {
 import {
   deleteSiteSqlRowsForSync,
   requireSiteSqlForSync,
+  SiteSqlError,
   upsertSiteSqlRowsForSync,
 } from "../site-sql/service";
 import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
@@ -605,18 +606,19 @@ function tableWriter(
 ): SyncWriter {
   const others = Object.keys(target.columns).filter((column) => column !== target.keyColumn);
   return {
-    write: async (records) =>
-      (
-        await upsertSiteSqlRowsForSync(deps, access, siteId, {
-          table: target.table,
-          keyColumn: target.keyColumn,
-          columns: [target.keyColumn, ...others],
-          rows: records.map((record) => [
-            record.key,
-            ...others.map((column) => sqlValue(readPath(record.data, target.columns[column]!))),
-          ]),
-        })
-      ).rowsWritten,
+    // Counts records, not the database's row writes (an index write counts there too).
+    write: async (records) => {
+      await upsertSiteSqlRowsForSync(deps, access, siteId, {
+        table: target.table,
+        keyColumn: target.keyColumn,
+        columns: [target.keyColumn, ...others],
+        rows: records.map((record) => [
+          record.key,
+          ...others.map((column) => sqlValue(readPath(record.data, target.columns[column]!))),
+        ]),
+      });
+      return records.length;
+    },
     remove: async (keys) => {
       await deleteSiteSqlRowsForSync(deps, access, siteId, {
         table: target.table,
@@ -1165,7 +1167,13 @@ async function requireTargetFor(
       );
     if (!Object.keys(where.target.columns).some((column) => column !== where.target!.keyColumn))
       throw invalid("Map at least one column besides the key column in target.columns.");
-    await requireSiteSqlForSync(deps, access, siteId);
+    try {
+      await requireSiteSqlForSync(deps, access, siteId);
+    } catch (error) {
+      // Saving a sync answers in Site Data terms: what is missing, readably.
+      if (error instanceof SiteSqlError) throw invalid(error.message);
+      throw error;
+    }
     return;
   }
   if (!where.collection)

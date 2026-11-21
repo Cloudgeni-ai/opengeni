@@ -144,10 +144,24 @@ so it is cheaper, faster and gives the same result every run. Steps:
 4. `app_sync_run` to try it; fix settings from its error. `app_sync_list`,
    `app_sync_delete` manage them.
 
+When the tool returns one page at a time, add `paging`:
+`{"mode":"cursor","cursorPath":"nextCursor","cursorArgument":"cursor"}` or
+`{"mode":"page","pageArgument":"page"}` (`maxPages` defaults to 10;
+`maxRecords` caps a run). `removeMissing: true` deletes records the sync wrote
+that a complete run no longer returns. A shared sync can fill an app SQL table
+instead of a collection: `target: {table, keyColumn, columns: {column:
+"dot.path"}}`, where `keyColumn` is the table's primary key or unique. If you
+have several accounts of the tool's connector, pass `account` (the error lists
+them). `events` may use workspace event sources or your own.
+
 `mode: "shared"` (default) runs on the saving person's connection and fills
 data everyone shares. `mode: "personal"` fills only each opted-in person's own
-records from their own account; people opt in with `app_sync_opt_in` (only
-when they ask). Changing a personal sync's tool, arguments, collection or mode
+records from their own account. In the page, `await
+site.data.syncs.optIn(id)` asks Opengeni to confirm with the person (tool,
+account, collection) and resolves `{ optedIn }`; `optOut(id)` leaves. The page
+can't opt anyone in by itself, and Opengeni also offers members the personal
+syncs they haven't joined. Agents use `app_sync_opt_in` only when the person
+asks. Changing a personal sync's tool, arguments, collection or mode
 clears the opt-ins, so people opt in again. Tools that ask for approval first can't run unattended, so
 their runs fail with a readable error. In the page, `await site.data.syncs()`
 returns each sync's `lastRun` (`at`, `status`, `error`) and, for personal

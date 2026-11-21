@@ -10,7 +10,9 @@ import {
 import { APP_PACKAGE_SYNC_HOOKS } from "../src/app-sync/package-hooks";
 import {
   claimAppSyncRun,
+  claimEventTriggerDispatch,
   createDb,
+  createEventSource,
   createOrganizationApiKey,
   createScheduledTask,
   createScheduledTaskRun,
@@ -21,8 +23,10 @@ import {
   createWorkspace,
   enqueueAppSyncRun,
   ensureExternalIdentity,
+  eventOccurrenceProducerKey,
   getScheduledTask,
   listScheduledTaskRuns,
+  recordEventDelivery,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -1092,4 +1096,456 @@ test("an archived App's syncs stop", async () => {
   expect(run.lastRun.status).toBe("failed");
   expect(run.lastRun.error).toContain("archived");
   expect(fake.calls).toHaveLength(0);
+});
+
+// --- round two: paging, bounds, removeMissing, leases, accounts, opt-in, events ---
+
+async function readKeys(f: Fixture, who: Who, collection: string): Promise<string[]> {
+  const read = await f.request(who, "POST", `/${f.siteId}/data/query`, { collection });
+  expect(read.status, JSON.stringify(read.json)).toBe(200);
+  return (read.json.records as Array<{ key: string }>).map((record) => record.key).sort();
+}
+
+test("a sync pages through the tool by cursor or page number, within its bounds", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const pages: Record<string, { items: Array<{ id: string }>; next: string | null }> = {
+    start: { items: [{ id: "a" }, { id: "b" }], next: "c2" },
+    c2: { items: [{ id: "c" }], next: "c3" },
+    c3: { items: [{ id: "d" }], next: null },
+  };
+  const fake = fakeTool((_subject, args) => pages[String(args.after ?? "start")]);
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool,
+    arguments: { status: "open" },
+    recordsPath: "items",
+    key: "id",
+    paging: { mode: "cursor", cursorPath: "next", cursorArgument: "after" },
+    schedule: { type: "manual" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  expect(created.json.paging).toEqual({
+    mode: "cursor",
+    cursorPath: "next",
+    cursorArgument: "after",
+  });
+  const syncId = String(created.json.id);
+  const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(run.lastRun).toMatchObject({
+    status: "succeeded",
+    summary: { received: 4, written: 4, pages: 3, truncated: false, removed: 0 },
+  });
+  // Each call carries the fixed arguments and the cursor of the page before.
+  expect(fake.calls.map((call) => call.args)).toEqual([
+    { status: "open" },
+    { status: "open", after: "c2" },
+    { status: "open", after: "c3" },
+  ]);
+  expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "b", "c", "d"]);
+
+  // At most maxPages pages: the run says it was cut short.
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    paging: { mode: "cursor", cursorPath: "next", cursorArgument: "after", maxPages: 2 },
+  });
+  const capped = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(capped.lastRun.summary).toMatchObject({ pages: 2, received: 3, truncated: true });
+
+  // At most maxRecords records per run.
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    paging: { mode: "cursor", cursorPath: "next", cursorArgument: "after" },
+    maxRecords: 2,
+  });
+  fake.calls.length = 0;
+  const limited = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(limited.lastRun.summary).toMatchObject({ received: 2, written: 2, truncated: true });
+  expect(fake.calls).toHaveLength(1);
+
+  // Page numbers: count up from firstPage until a page brings nothing new.
+  const numbered = fakeTool((_subject, args) => {
+    const page = Number(args.page);
+    return page <= 3 ? [{ id: `p${page}` }] : [];
+  });
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    recordsPath: null,
+    paging: { mode: "page", pageArgument: "page" },
+    maxRecords: null,
+  });
+  const byPage = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, numbered.callTool);
+  expect(byPage.lastRun.summary).toMatchObject({ received: 3, pages: 4, truncated: false });
+  expect(numbered.calls.map((call) => call.args.page)).toEqual([1, 2, 3, 4]);
+
+  // A cursor that comes back again stops the run as cut short, not a loop.
+  const stuck = fakeTool(() => ({ items: [{ id: "a" }], next: "same" }));
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    recordsPath: "items",
+    paging: { mode: "cursor", cursorPath: "next", cursorArgument: "after" },
+  });
+  const looped = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, stuck.callTool);
+  expect(looped.lastRun.summary?.truncated).toBe(true);
+  expect(stuck.calls.length).toBeLessThanOrEqual(3);
+});
+
+test("removeMissing deletes only what this sync wrote, and only after a complete run", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  let items: Array<{ id: string } | Error> = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const fake = fakeTool((_subject, args) => {
+    const page = Number(args.page ?? 1);
+    const value = items[page - 1];
+    if (value instanceof Error) return value;
+    return value ? [value] : [];
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool,
+    key: "id",
+    paging: { mode: "page", pageArgument: "page" },
+    removeMissing: true,
+    schedule: { type: "manual" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  expect(created.json.removeMissing).toBe(true);
+  const syncId = String(created.json.id);
+  // A record someone else wrote is never the sync's to remove.
+  const manual = await f.request(f.owner, "POST", `/${f.siteId}/data/write`, {
+    operations: [{ op: "put", collection: "orders", key: "manual", data: { id: "manual" } }],
+  });
+  expect(manual.status, JSON.stringify(manual.json)).toBe(200);
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "b", "c", "manual"]);
+
+  // "b" is gone from the tool: a complete run removes it and says so.
+  items = [{ id: "a" }, { id: "c" }];
+  const removed = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(removed.lastRun.summary).toMatchObject({ removed: 1, truncated: false });
+  expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "c", "manual"]);
+
+  // A run cut short (maxPages) removes nothing.
+  items = [{ id: "a" }, { id: "x" }];
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    paging: { mode: "page", pageArgument: "page", maxPages: 1 },
+  });
+  const short = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(short.lastRun.summary).toMatchObject({ truncated: true, removed: 0 });
+  expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "c", "manual"]);
+
+  // A failed run removes nothing either, though its first page was written.
+  items = [{ id: "a" }, new Error("The orders service is down")];
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    paging: { mode: "page", pageArgument: "page" },
+  });
+  const failed = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(failed.lastRun.status).toBe("failed");
+  expect(failed.lastRun.summary).toMatchObject({ removed: 0, written: 1 });
+  expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "c", "manual"]);
+});
+
+test("removeMissing in a personal sync removes only that person's own records", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+    privateRecords: true,
+  });
+  const lists: Record<string, string[]> = {
+    [f.alice.subjectId]: ["a1", "a2"],
+    [f.bob.subjectId]: ["b1", "b2"],
+  };
+  const fake = fakeTool((subject) => (lists[subject] ?? []).map((id) => ({ id })));
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Mine",
+    collection: "mine",
+    mode: "personal",
+    tool,
+    key: "id",
+    removeMissing: true,
+    schedule: { type: "manual" },
+  });
+  const syncId = String(created.json.id);
+  for (const who of [f.alice, f.bob])
+    await f.request(who, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`);
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  lists[f.alice.subjectId] = ["a1"];
+  const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(run.lastRun.summary).toMatchObject({ removed: 1 });
+  expect(await readKeys(f, f.alice, "mine")).toEqual(["a1"]);
+  expect(await readKeys(f, f.bob, "mine")).toEqual(["b1", "b2"]);
+});
+
+test("a run that loses its lease stops calling and writing; the new holder settles it", async () => {
+  const f = await fixture();
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool,
+    key: "id",
+    paging: { mode: "page", pageArgument: "page" },
+    schedule: { type: "manual" },
+  });
+  const syncId = String(created.json.id);
+  const run = await createScheduledTaskRun(f.deps.db, {
+    workspaceId: f.workspace.id,
+    taskId: syncId,
+    triggerType: "manual",
+    producerKey: `lease:${crypto.randomUUID()}`,
+  });
+  await enqueueAppSyncRun(f.deps.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    taskId: syncId,
+    runId: run.id,
+  });
+  const fake = fakeTool((_subject, args) => [{ id: `p${String(args.page)}` }]);
+  let taken: { lease_token: string; attempts: number } | undefined;
+  const callTool: AppSyncToolCaller = async (input) => {
+    const answer = await fake.callTool(input);
+    // While the first call runs, its lease ends and another executor claims the run.
+    [taken] = await shared.admin<{ lease_token: string; attempts: number }[]>`
+      update app_sync_queue set lease_token = gen_random_uuid(), attempts = attempts + 1,
+        lease_until = now() + interval '5 minutes'
+      where run_id = ${run.id} returning lease_token, attempts`;
+    return answer;
+  };
+  const drained = await drainAppSyncRuns(f.deps, { limit: 50, callTool });
+  expect(drained.claimed).toBe(0);
+  // One call, nothing written after the lease was lost, and the run is not settled.
+  expect(fake.calls).toHaveLength(1);
+  expect(await readKeys(f, f.owner, "orders")).toEqual([]);
+  const [open] = await syncRuns(f, syncId);
+  expect(open?.status).not.toBe("succeeded");
+  expect(open?.status).not.toBe("failed");
+  // The run's current holder settles it; the stale lease can't.
+  expect(
+    await finishAppSyncRun(f.deps.db, {
+      workspaceId: f.workspace.id,
+      runId: run.id,
+      status: "succeeded",
+      error: null,
+      summary: null,
+      lease: { leaseToken: crypto.randomUUID(), attempts: taken!.attempts },
+    }),
+  ).toBe(false);
+  expect(
+    await finishAppSyncRun(f.deps.db, {
+      workspaceId: f.workspace.id,
+      runId: run.id,
+      status: "succeeded",
+      error: null,
+      summary: null,
+      lease: { leaseToken: taken!.lease_token, attempts: taken!.attempts },
+    }),
+  ).toBe(true);
+  expect((await syncRuns(f, syncId))[0]?.status).toBe("succeeded");
+});
+
+test("a shared sync's owner picks one of several accounts; every run checks it is still theirs", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.owner.subjectId]: [{ serverId: "account-owner" }, { serverId: "account-owner-2" }],
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const body = {
+    name: "Orders",
+    collection: "orders",
+    tool: { serverId: "orders", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "manual" },
+  };
+  const unchosen = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, body);
+  expect(unchosen.status).toBe(422);
+  expect(
+    unchosen.json.error.details.accounts.map((choice: { id: string }) => choice.id).sort(),
+  ).toEqual(["account-owner", "account-owner-2"]);
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    ...body,
+    account: "account-owner-2",
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  expect(created.json.account).toBe("account-owner-2");
+  const syncId = String(created.json.id);
+  const servers: string[] = [];
+  const fake = fakeTool(() => [{ id: "x" }]);
+  const callTool: AppSyncToolCaller = async (input) => {
+    servers.push(input.identity.serverId);
+    return await fake.callTool(input);
+  };
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, callTool);
+  expect(servers).toEqual(["account-owner-2"]);
+
+  // The chosen account is disconnected: the run fails readably, on no other account.
+  inventories(f, { [f.owner.subjectId]: [{ serverId: "account-owner" }] });
+  const gone = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, callTool);
+  expect(gone.lastRun.status).toBe("failed");
+  expect(gone.lastRun.error).toMatch(/account/i);
+  expect(servers).toEqual(["account-owner-2"]);
+});
+
+test("the opt-in review names the tool, accounts and collection, and a framed opt-in is refused", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.alice.subjectId]: [{ serverId: "account-alice" }, { serverId: "account-alice-2" }],
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+    privateRecords: true,
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Mine",
+    collection: "mine",
+    mode: "personal",
+    tool: { serverId: "orders", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const syncId = String(created.json.id);
+  const review = await f.request(f.alice, "GET", `/${f.siteId}/syncs/${syncId}/opt-in`);
+  expect(review.status, JSON.stringify(review.json)).toBe(200);
+  expect(review.json).toMatchObject({
+    syncId,
+    name: "Mine",
+    mode: "personal",
+    collection: "mine",
+    tool: { toolName: "list_orders", connector: "Orders" },
+    account: null,
+    optedIn: false,
+    blocked: null,
+  });
+  expect(review.json.accounts.map((choice: { id: string }) => choice.id).sort()).toEqual([
+    "account-alice",
+    "account-alice-2",
+  ]);
+  // From inside the app's frame neither the review nor the opt-in answers.
+  const framed = { ...f.alice, headers: { ...f.alice.headers, "x-opengeni-site-id": f.siteId } };
+  const framedReview = await f.request(framed, "GET", `/${f.siteId}/syncs/${syncId}/opt-in`);
+  expect([403, 404]).toContain(framedReview.status);
+  const framedJoin = await f.request(framed, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`, {
+    account: "account-alice",
+  });
+  expect([403, 404]).toContain(framedJoin.status);
+  expect(
+    (await f.request(f.alice, "GET", `/${f.siteId}/syncs/${syncId}/opt-in`)).json.optedIn,
+  ).toBe(false);
+  // From Opengeni, with the chosen account.
+  const joined = await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`, {
+    account: "account-alice",
+  });
+  expect(joined.json).toEqual({ syncId, optedIn: true, account: "account-alice" });
+  const after = await f.request(f.alice, "GET", `/${f.siteId}/syncs/${syncId}/opt-in`);
+  expect(after.json).toMatchObject({ optedIn: true, account: "account-alice" });
+});
+
+test("a sync hears its owner's own event sources; a personal run from one is only for its owner", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.owner.subjectId]: [{ serverId: "account-owner" }],
+    [f.alice.subjectId]: [{ serverId: "account-alice" }],
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/mine`, {
+    accessMode: "per_viewer",
+    privateRecords: true,
+  });
+  const source = async (owner: Who, visibility: "private" | "workspace") =>
+    (
+      await createEventSource(f.deps.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        createdBySubjectId: owner.subjectId,
+        kind: "webhook",
+        adapter: "standard",
+        name: `Deploys ${visibility}`,
+        ownerSubjectId: owner.subjectId,
+        visibility,
+        secretEncrypted: "encrypted-secret",
+      })
+    ).source;
+  const ownerPrivate = await source(f.owner, "private");
+  const alicePrivate = await source(f.alice, "private");
+  const body = (sourceId: string) => ({
+    name: "Mine",
+    collection: "mine",
+    mode: "personal",
+    tool: { serverId: "orders", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "manual" },
+    events: { triggers: [{ sourceId, eventTypes: ["deploy.finished"] }] },
+  });
+  // Someone else's private source can't start the owner's sync.
+  const refused = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, body(alicePrivate.id));
+  expect(refused.status, JSON.stringify(refused.json)).toBeGreaterThanOrEqual(400);
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, body(ownerPrivate.id));
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const syncId = String(created.json.id);
+  for (const who of [f.owner, f.alice])
+    expect((await f.request(who, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`)).status).toBe(
+      200,
+    );
+
+  const payload = new TextEncoder().encode("{}");
+  const delivered = await recordEventDelivery(f.deps.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    sourceId: ownerPrivate.id,
+    status: "accepted",
+    reason: null,
+    dedupeKey: `webhook-id:${crypto.randomUUID()}`,
+    body: payload,
+    bodyBytes: payload.byteLength,
+    bodySha256: createHash("sha256").update(payload).digest("hex"),
+    headers: {},
+    events: [
+      {
+        externalId: null,
+        streamKey: "",
+        type: "deploy.finished",
+        occurredAt: new Date(),
+        subject: "deploy-1",
+        summary: "Deploy finished",
+        url: null,
+        actor: { kind: "person", name: "Ada" },
+        data: { id: "deploy-1" },
+        dataTruncated: false,
+        gapBefore: false,
+      },
+    ],
+    match: (candidate, trigger) => trigger.eventTypes.includes(candidate.type),
+    settleMs: 0,
+  });
+  // The owner's private source reaches the sync.
+  expect(delivered.matchedTaskIds).toContain(syncId);
+  const dispatch = await claimEventTriggerDispatch(f.deps.db, f.workspace.id, syncId);
+  expect(dispatch.start).toHaveLength(1);
+  const run = await createScheduledTaskRun(f.deps.db, {
+    workspaceId: f.workspace.id,
+    taskId: syncId,
+    triggerType: "event",
+    producerKey: eventOccurrenceProducerKey(dispatch.start[0]!.id),
+  });
+  await enqueueAppSyncRun(f.deps.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    taskId: syncId,
+    runId: run.id,
+  });
+  const fake = fakeTool((subject) => [{ id: subject.slice(-6) }]);
+  await drainAppSyncRuns(f.deps, { limit: 50, callTool: fake.callTool });
+  // Only the person whose source fired runs.
+  expect(fake.calls.map((call) => call.subjectId)).toEqual([f.owner.subjectId]);
+
+  // A manual run is for everyone opted in.
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(new Set(fake.calls.slice(1).map((call) => call.subjectId))).toEqual(
+    new Set([f.owner.subjectId, f.alice.subjectId]),
+  );
 });
