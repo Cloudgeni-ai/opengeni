@@ -1,3 +1,4 @@
+import { AppWindowIcon, GraduationCapIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -168,7 +169,7 @@ export function ReadyMadeSection({
         name: template.name,
         description: template.description,
         team: template.team,
-        icon: <LogoTile name={template.name} />,
+        icon: <LogoTile name={template.name} icon={<AppWindowIcon />} />,
         added: addedApps.has(template.key),
         unavailable: canAddApps ? undefined : "Ask an admin to add apps",
       })),
@@ -178,7 +179,7 @@ export function ReadyMadeSection({
         name: item.name,
         description: item.description ?? "",
         team: metadataString(item.metadata.team),
-        icon: <LogoTile name={item.name} />,
+        icon: <LogoTile name={item.name} icon={<GraduationCapIcon />} />,
         added: item.enabled,
         unavailable: canInstallSkills ? undefined : "Ask an admin to add skills",
       })),

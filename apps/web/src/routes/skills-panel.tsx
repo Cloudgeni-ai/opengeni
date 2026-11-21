@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { LinkIcon, PlusIcon } from "lucide-react";
+import { GraduationCapIcon, LinkIcon, PlusIcon } from "lucide-react";
 import { ConnectionInstalled } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import type {
@@ -723,7 +723,7 @@ export function SkillsPanelContent({
             return {
               id: skill.id,
               name,
-              icon: <LogoTile name={name} />,
+              icon: <LogoTile name={name} icon={<GraduationCapIcon />} />,
               status: `${skill.availableHere === false ? "Not used here" : skillStatus(skill)} · ${SKILL_SCOPE_LABEL[skill.scope]}`,
               needsAttention: Boolean(skill.pendingRevisionIds.length),
               disabled: busy,
