@@ -1,0 +1,31 @@
+name: Windows ARM64 release proof
+on:
+  push:
+    branches: [verify/windows-arm64-interaction-runtime]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+      - name: Verify native Bun and Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun -e 'if (process.platform !== "win32" || process.arch !== "arm64") throw new Error(`${process.platform}/${process.arch}`)'
+          rustc -vV
+          rustc -vV | grep -Fx 'host: aarch64-pc-windows-msvc'
+      - name: Install locked workspace dependencies
+        run: bun install --frozen-lockfile
+      - name: Stage pinned native CUA worker and SDK
+        run: bun packages/browserd/scripts/stage-cua-runtime.ts arm64
+      - name: Test the packaged CUA runtime
+        env:
+          OPENGENI_CUA_PACKAGING_E2E: '1'
+        run: bun test packages/browserd/test/cua-runtime-packaging.e2e.test.ts
