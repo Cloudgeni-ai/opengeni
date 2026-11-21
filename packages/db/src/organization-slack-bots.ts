@@ -87,6 +87,30 @@ export async function availableSlackBotConnectionMetadata(
 }
 
 /**
+ * The Slack event sources, for one Slack team, of the other workspaces the
+ * organization currently shares this home bot with (migration 1530). Empty
+ * unless the bot is the active verified install and its sharing is enabled;
+ * the saved workspace allowlist applies. Ids only, in one statement.
+ */
+export async function sharedSlackEventSourceIds(
+  db: Database,
+  scope: { accountId: string; homeWorkspaceId: string; connectionId: string; externalKey: string },
+): Promise<{ workspaceId: string; sourceId: string }[]> {
+  const rows = await withRlsContext(
+    db,
+    { accountId: scope.accountId, workspaceId: scope.homeWorkspaceId },
+    async (tx) =>
+      rawRows<{ workspace_id: string; source_id: string }>(
+        tx,
+        sql`select workspace_id, source_id from opengeni_private.list_shared_slack_event_sources_v1(
+          ${scope.accountId}::uuid, ${scope.homeWorkspaceId}::uuid, ${scope.connectionId}::uuid,
+          ${scope.externalKey}::text)`,
+      ),
+  );
+  return rows.map((row) => ({ workspaceId: row.workspace_id, sourceId: row.source_id }));
+}
+
+/**
  * Whether the workspace has an Opengeni Slack bot to use, in one statement:
  * an active install here verified at its current version, or one its
  * organization shares with it (the share function applies the same checks

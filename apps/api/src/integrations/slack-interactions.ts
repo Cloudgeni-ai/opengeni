@@ -855,13 +855,16 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
-    // The workspace's Slack event source, when it has one, records channel
-    // activity for automations. Conversations below never depend on it.
+    // The Slack event sources of the bot's home workspace and of the
+    // workspaces its organization shares it with record channel activity for
+    // automations. Conversations below never depend on them.
     try {
       await recordSlackEvent({
         db: deps.db,
         settings: deps.settings,
+        accountId: installation.accountId,
         workspaceId: installation.workspaceId,
+        connectionId: installation.connectionId,
         teamId,
         body: signed.rawBytes,
       });

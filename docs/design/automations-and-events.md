@@ -239,11 +239,17 @@ has.
     deployment's own Apps (`<slug>[bot]`) mark own events.
 - **Slack**: the existing Slack events receiver keeps its conversational
   behaviour and additionally records the callback for the workspace the Slack
-  team is installed in, when that workspace has a Slack source. The receiver's
-  installation routing already names that workspace, so the source needs no
-  ingress route.
-  - One Slack source per workspace, shared with the workspace like the channels
-    the app is in.
+  team is installed in (the bot's home), when that workspace has a Slack
+  source. The receiver's installation routing already names that workspace,
+  so the source needs no ingress route.
+  - A workspace the organization shares the bot with (Slack bot availability,
+    see [Slack](../slack-bot.md#slack-events-for-automations)) can add a Slack
+    source too, and the same callback is recorded there as well, for as long
+    as the share covers that workspace. One SQL call per callback finds those
+    sources under each workspace's own RLS context (migration 1530); turning
+    sharing off or narrowing it stops delivery at the next callback.
+  - One Slack source per Slack team in a workspace, shared with the workspace
+    like the channels the app is in.
   - Types: `message.posted` (messages and thread replies), `message.edited`,
     `message.deleted`, `reaction.added`, `member.joined_channel`,
     `member.left_channel`. Data carries the channel id and type, the Slack user
@@ -254,7 +260,8 @@ has.
   - Own events are read from the callback itself (its `api_app_id` and the
     authorized bot user), so a stored delivery reads the same on replay.
   - Recording never affects the conversation: a failure is logged and the
-    callback is handled as before.
+    callback is handled as before. A failure for one workspace never stops
+    the others.
 - **Gmail**: one person's mailbox, read with the Gmail connection their chats
   use. Gmail only pushes changes through an operator-owned Pub/Sub topic, so
   instead of depending on that setup the source has a **feed**: Opengeni reads
