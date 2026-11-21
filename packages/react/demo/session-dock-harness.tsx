@@ -5,6 +5,7 @@
 //   ?pr=1          the chat has a linked pull request (PR tab first)
 //   ?state=<key>   a workbench dock state (default branch-review)
 //   ?theme=light   light theme (default dark)
+//   ?nav=<kind>    how Changes moves between files: rail, focus, stream, tree
 import type { SessionLinkWithStatus, SessionPullRequestDetail } from "@opengeni/sdk";
 import { GitPullRequestIcon } from "lucide-react";
 import { createRoot } from "react-dom/client";
@@ -14,6 +15,10 @@ import { PullRequestView } from "@opengeni/react/app/components/session/pull-req
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import { enableWorkbenchDemoPeers } from "./workbench-peers";
+import {
+  WorkbenchChangesNavigationContext,
+  type WorkbenchChangesNavigation,
+} from "../src/components/workbench-changes-nav";
 import "./agent-settings.css";
 
 enableWorkbenchDemoPeers();
@@ -22,6 +27,7 @@ enablePierreDiffs({ worker: () => new DiffsWorker() });
 const params = new URLSearchParams(window.location.search);
 const withPr = params.get("pr") === "1";
 const light = params.get("theme") === "light";
+const nav = (params.get("nav") ?? undefined) as WorkbenchChangesNavigation | undefined;
 const state = DOCK_STATES[params.get("state") ?? "branch-review"] ?? DOCK_STATES["branch-review"]!;
 const client = new DockStateMockClient(state);
 document.documentElement.setAttribute("data-og-theme", light ? "light" : "dark");
@@ -137,6 +143,8 @@ function Harness() {
 
 createRoot(document.getElementById("root")!).render(
   <OpenGeniProvider client={client as never} workspaceId="11111111-2222-4333-8444-555555555555">
-    <Harness />
+    <WorkbenchChangesNavigationContext.Provider value={nav}>
+      <Harness />
+    </WorkbenchChangesNavigationContext.Provider>
   </OpenGeniProvider>,
 );

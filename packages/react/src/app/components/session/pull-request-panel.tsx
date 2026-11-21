@@ -8,7 +8,11 @@ import type { SessionLinkWithStatus, SessionPullRequestDetail } from "@opengeni/
 import {
   ArrowUpRightIcon,
   CheckIcon,
+  CircleCheckIcon,
+  CircleDashedIcon,
   CircleDotIcon,
+  CircleXIcon,
+  GitBranchIcon,
   EllipsisIcon,
   GitMergeIcon,
   LoaderCircleIcon,
@@ -115,19 +119,6 @@ const STATE_WORD: Record<PullRequestState, string> = {
   closed: "Closed",
 };
 
-/** Checks, review and conflicts in a few words ("Checks passed · Approved"). */
-function statusSummary(detail: SessionPullRequestDetail): string | null {
-  const words: string[] = [];
-  if (detail.checks === "passing") words.push("Checks passed");
-  if (detail.checks === "failing") words.push("Checks failing");
-  if (detail.checks === "pending") words.push("Checks running");
-  if (detail.review === "approved") words.push("Approved");
-  if (detail.review === "changes_requested") words.push("Changes requested");
-  if (detail.review === "review_required") words.push("Review requested");
-  if (detail.state === "open" && detail.mergeable === false) words.push("Conflicts");
-  return words.length > 0 ? words.join(" · ") : null;
-}
-
 type SubTab = "changes" | "description" | "discussion" | "commits" | "checks";
 
 const VIEW_LABEL: Record<SubTab, string> = {
@@ -223,7 +214,6 @@ export function PullRequestView({
     );
   }
 
-  const summary = statusSummary(detail);
   const canMerge = Boolean(onMerge) && detail.state === "open";
   const merge = async () => {
     if (!onMerge || merging !== "idle") return;
@@ -240,32 +230,17 @@ export function PullRequestView({
     commits: detail.commitCount,
     checks: detail.checkRuns.length,
   };
-  const meta = [
-    STATE_WORD[detail.state],
-    `${detail.owner}/${detail.repo}#${detail.number}`,
-    `${detail.base} ← ${detail.head}`,
-    summary,
-  ].filter(Boolean);
-
   return (
     <div className="flex h-full min-h-0 flex-col" data-session-pr-panel="">
-      <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-2.5">
+      <header className="flex shrink-0 items-start gap-2 px-4 pb-2 pt-3">
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-sm font-semibold leading-snug text-fg" title={detail.title}>
+          <h2
+            className="truncate text-[15px] font-semibold leading-snug tracking-[-0.01em] text-fg"
+            title={detail.title}
+          >
             {detail.title}
           </h2>
-          <p
-            className={cn(
-              "mt-0.5 truncate text-xs",
-              detail.checks === "failing" || detail.review === "changes_requested"
-                ? "text-status-failed"
-                : "text-fg-muted",
-            )}
-            data-pr-state={detail.state}
-            title={meta.join(" · ")}
-          >
-            {meta.join(" · ")}
-          </p>
+          <PullRequestFacts detail={detail} />
         </div>
         {canMerge ? (
           <Button
@@ -330,7 +305,7 @@ export function PullRequestView({
         </DropdownMenu>
       </header>
       {view === "changes" ? null : (
-        <div className="flex shrink-0 items-center gap-1 px-4 pt-2 text-xs text-fg-muted">
+        <div className="flex shrink-0 items-center gap-1 px-4 pb-1 text-xs text-fg-muted">
           <button
             type="button"
             onClick={() => setView("changes")}
@@ -346,6 +321,65 @@ export function PullRequestView({
       <div className="min-h-0 flex-1">
         <PullRequestTabBody tab={view} detail={detail} />
       </div>
+    </div>
+  );
+}
+
+const STATE_TONE: Record<PullRequestState, { dot: string; text: string }> = {
+  open: { dot: "bg-status-success", text: "text-status-success" },
+  draft: { dot: "bg-fg-subtle", text: "text-fg-muted" },
+  merged: { dot: "bg-og-accent", text: "text-og-accent" },
+  closed: { dot: "bg-status-failed", text: "text-status-failed" },
+};
+
+/** The status line under the title: state, branch and checks, each with its
+ *  own small mark rather than one string of words. */
+function PullRequestFacts({ detail }: { detail: SessionPullRequestDetail }) {
+  const tone = STATE_TONE[detail.state];
+  const checks =
+    detail.checks === "passing"
+      ? { Icon: CircleCheckIcon, text: "Checks passed", className: "text-status-success" }
+      : detail.checks === "failing"
+        ? { Icon: CircleXIcon, text: "Checks failing", className: "text-status-failed" }
+        : detail.checks === "pending"
+          ? { Icon: CircleDashedIcon, text: "Checks running", className: "text-fg-muted" }
+          : null;
+  const review =
+    detail.review === "approved"
+      ? { text: "Approved", className: "text-status-success" }
+      : detail.review === "changes_requested"
+        ? { text: "Changes requested", className: "text-status-failed" }
+        : detail.review === "review_required"
+          ? { text: "Review requested", className: "text-fg-muted" }
+          : null;
+  return (
+    <div
+      className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted"
+      data-pr-state={detail.state}
+    >
+      <span className={cn("inline-flex items-center gap-1.5 font-medium", tone.text)}>
+        <span aria-hidden className={cn("size-1.5 rounded-full", tone.dot)} />
+        {STATE_WORD[detail.state]}
+      </span>
+      <span
+        className="inline-flex min-w-0 items-center gap-1 font-mono text-[11px]"
+        title={`${detail.head} into ${detail.base}`}
+      >
+        <GitBranchIcon aria-hidden className="size-3 shrink-0 text-fg-subtle" />
+        <span className="truncate text-fg">{detail.head}</span>
+        <span aria-hidden className="text-fg-subtle">→</span>
+        <span className="truncate">{detail.base}</span>
+      </span>
+      {checks ? (
+        <span className={cn("inline-flex items-center gap-1", checks.className)}>
+          <checks.Icon aria-hidden className="size-3.5" />
+          {checks.text}
+        </span>
+      ) : null}
+      {review ? <span className={review.className}>{review.text}</span> : null}
+      {detail.state === "open" && detail.mergeable === false ? (
+        <span className="text-status-failed">Conflicts</span>
+      ) : null}
     </div>
   );
 }

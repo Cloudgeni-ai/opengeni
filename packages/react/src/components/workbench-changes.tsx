@@ -12,9 +12,11 @@ import {
 } from "lucide-react";
 import {
   Component,
+  type KeyboardEvent as ReactKeyboardEvent,
   memo,
   type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -30,6 +32,15 @@ import { formatAsOf } from "../hooks/use-machine-chip";
 import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
 import { useWindowedSections } from "../hooks/use-windowed-sections";
 import { PierreDiff } from "./pierre-diff";
+import {
+  ChangeBar,
+  ChangesTree,
+  FileGlyph,
+  FocusFileSwitcher,
+  StreamOutline,
+  type WorkbenchChangesNavigation,
+  WorkbenchChangesNavigationContext,
+} from "./workbench-changes-nav";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import {
   DropdownMenu,
@@ -110,6 +121,10 @@ export type WorkbenchChangesProps = {
   /** Leave out the summary row (view menu and pull-request action), for a host
    *  that draws its own header above the changes. */
   hideSummary?: boolean | undefined;
+  /** How the person moves between files: a file rail (default), one file at
+   *  a time with a jump menu ("focus"), one continuous diff with a slim
+   *  outline ("stream"), or a quiet tree ("tree"). */
+  navigation?: WorkbenchChangesNavigation | undefined;
   className?: string | undefined;
 };
 
@@ -359,9 +374,12 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   onOpenPullRequest,
   comparison,
   hideSummary = false,
+  navigation: navigationProp,
   className,
 }: WorkbenchChangesProps) {
   const t = useOpenGeniText();
+  const contextNavigation = useContext(WorkbenchChangesNavigationContext);
+  const navigation = navigationProp ?? contextNavigation ?? "rail";
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [compact, setCompact] = useState(false);
   const [coarsePointer, setCoarsePointer] = useState(false);
@@ -511,19 +529,43 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   const sourceBadge = describeSource(t, source, capturedAt, captureRevision ?? null);
   const activeFile = orderedFiles[activeIndex] ?? orderedFiles[0];
   const onToggle = toggleCollapsed;
+  // One file at a time: the focus navigation, and any narrow surface.
+  const single = compact || navigation === "focus";
+  const focusNav = navigation === "focus";
+  const selectIndex = useCallback(
+    (index: number) => setActivePath(layoutRef.current.orderedFiles[index]?.path ?? null),
+    [],
+  );
+  const onFocusKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!single || !focusNav) return;
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, select, [contenteditable=true], [role=menu]")) return;
+    if (event.key !== "[" && event.key !== "]") return;
+    const next = activeIndex + (event.key === "]" ? 1 : -1);
+    if (next < 0 || next >= orderedFiles.length) return;
+    event.preventDefault();
+    selectIndex(next);
+  };
 
   return (
     <div
       ref={rootRef}
       className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
       data-workbench-changes-layout={compact ? "compact" : "rail"}
+      data-workbench-changes-navigation={navigation}
+      onKeyDown={onFocusKey}
     >
       <span role="status" aria-atomic="true" aria-live="polite" className="sr-only">
         {t("workbenchChanges.filesChanged", { count: diff.length })} +{additions} −{deletions}
       </span>
       {/* One quiet row: the view menu, then the one pull-request action. */}
       {hideSummary ? null : (
-        <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-og-border px-2 py-1">
+        <div
+          className={cn(
+            "flex min-h-9 shrink-0 items-center gap-2 px-2 py-1",
+            navigation === "rail" && "border-b border-og-border",
+          )}
+        >
           <WorkbenchChangesViewMenu
             comparison={comparison}
             layout={layout}
@@ -538,7 +580,35 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
         </div>
       )}
 
-      {compact ? (
+      {single && focusNav ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex shrink-0 items-center px-2 pb-1">
+            <FocusFileSwitcher files={orderedFiles} index={activeIndex} onSelect={selectIndex} />
+          </div>
+          <div
+            aria-label={t("workbenchChanges.changedFileDiff")}
+            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+            data-opengeni-changes-pane
+            role="region"
+            tabIndex={0}
+          >
+            {activeFile ? (
+              <div
+                key={activeFile.path}
+                className="animate-in fade-in-0 slide-in-from-bottom-1 duration-150 motion-reduce:animate-none"
+              >
+                <DiffSection
+                  file={activeFile}
+                  layout={compact ? "unified" : layout}
+                  themeType={resolvedTheme}
+                  hideHeader
+                  {...(onOpenFile ? { onOpenFile } : {})}
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : single ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="shrink-0 border-b border-og-border p-2">
             <label className="sr-only" htmlFor={pickerId}>
@@ -582,8 +652,16 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
         </div>
       ) : (
         <div className="flex min-h-0 flex-1">
+          {navigation === "tree" ? (
+            <ChangesTree
+              files={orderedFiles}
+              activeIndex={activeIndex}
+              onSelect={jumpTo}
+              className="w-[clamp(12rem,32%,18rem)] shrink-0 bg-og-surface-1/60"
+            />
+          ) : null}
           {/* File rail — virtualized (virtua): a dense change set is fine. */}
-          {compact ? null : (
+          {navigation !== "rail" ? null : (
             <ChangesRailVList
               rowCount={rows.length}
               coarsePointer={coarsePointer}
@@ -616,10 +694,13 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
           {/* Diff pane — windowed file sections. Only the sections inside the
             visible window ± overscan are in the DOM; the container reserves the
             full scroll height so scrolling + the rail-jump stay accurate. */}
+          <div className="relative flex min-h-0 min-w-0 flex-1">
           <div
             ref={windowed.scrollRef}
             aria-label={t("workbenchChanges.changedFilesDiff")}
-            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+            className={cn(
+              "min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+            )}
             data-opengeni-changes-pane
             role="region"
             tabIndex={0}
@@ -646,6 +727,16 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
                 );
               })}
             </div>
+          </div>
+          {navigation === "stream" ? (
+            <StreamOutline
+              files={orderedFiles}
+              offsets={windowed.offsets}
+              totalHeight={windowed.totalHeight}
+              activeIndex={activeIndex}
+              onSelect={jumpTo}
+            />
+          ) : null}
           </div>
         </div>
       )}
@@ -779,10 +870,12 @@ const DiffSection = memo(function DiffSection({
   collapsed = false,
   onToggle,
   onOpenFile,
+  hideHeader = false,
 }: {
   file: GitFileDiff;
   layout: "unified" | "split";
   themeType: "dark" | "light";
+  hideHeader?: boolean | undefined;
   collapsed?: boolean | undefined;
   onToggle?: ((path: string) => void) | undefined;
   onOpenFile?: ((path: string) => void) | undefined;
@@ -799,7 +892,9 @@ const DiffSection = memo(function DiffSection({
       {...(guarded || empty || collapsed ? {} : { "data-pierre-section": "" })}
       className={cn(!collapsed && "pb-2")}
     >
-      <DiffFileHeader file={file} collapsed={collapsed} onToggle={onToggle} />
+      {hideHeader ? null : (
+        <DiffFileHeader file={file} collapsed={collapsed} onToggle={onToggle} />
+      )}
       {collapsed ? null : guarded ? (
         <GuardBody file={file} {...(onOpenFile ? { onOpenFile } : {})} />
       ) : empty ? (
@@ -832,20 +927,32 @@ function DiffFileHeader({
   const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
   const body = (
     <>
-      {onToggle ? <Chevron className="size-3.5 shrink-0 text-og-fg-subtle" aria-hidden /> : null}
+      {onToggle ? (
+        <Chevron
+          className="size-3 shrink-0 text-og-fg-subtle opacity-60 transition-opacity group-hover/file:opacity-100"
+          aria-hidden
+        />
+      ) : null}
+      <FileGlyph path={file.path} />
       <span className="min-w-0 flex-1 truncate text-left" title={label}>
-        <span className={cn("font-medium text-og-fg", file.status === "deleted" && "line-through")}>
+        <span
+          className={cn(
+            "font-og-mono text-[12px] font-medium text-og-fg",
+            file.status === "deleted" && "line-through",
+          )}
+        >
           {name}
         </span>
-        {dir ? <span className="ml-1.5 text-og-xs text-og-fg-subtle">{dir}</span> : null}
+        {dir ? <span className="ml-2 text-og-xs text-og-fg-subtle">{dir}</span> : null}
         {renamed ? (
-          <span className="ml-1.5 text-og-xs text-og-fg-subtle">← {file.oldPath}</span>
+          <span className="ml-2 text-og-xs text-og-fg-subtle">← {file.oldPath}</span>
         ) : null}
       </span>
+      <ChangeBar additions={file.additions} deletions={file.deletions} />
     </>
   );
   const className =
-    "sticky top-0 z-10 flex w-full items-center gap-2 border-b border-og-border bg-og-bg px-3 py-1.5 text-og-sm text-og-fg";
+    "group/file sticky top-0 z-10 flex w-full items-center gap-2 bg-og-bg/95 px-3 py-1.5 text-og-sm text-og-fg shadow-[inset_0_-1px_0_var(--og-color-border)] backdrop-blur-sm";
   if (!onToggle) return <header className={className}>{body}</header>;
   return (
     <button
@@ -854,7 +961,7 @@ function DiffFileHeader({
       onClick={() => onToggle(file.path)}
       className={cn(
         className,
-        "hover:bg-og-surface-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
+        "hover:bg-og-surface-1/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
       )}
     >
       {body}
