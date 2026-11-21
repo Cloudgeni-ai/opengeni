@@ -17,6 +17,7 @@ import {
 import { createContext, memo, type ReactNode, useMemo, useState } from "react";
 import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
 import { cn } from "../lib/cn";
+import { useOpenGeniText } from "../messages/runtime";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,7 +40,8 @@ export function splitFilePath(path: string): { name: string; dir: string } {
     : { name: path, dir: "" };
 }
 
-const CODE = /\.(tsx?|jsx?|mjs|cjs|py|go|rs|rb|java|kt|swift|c|cc|cpp|h|hpp|cs|php|sh|sql|vue|svelte|css|scss|html)$/i;
+const CODE =
+  /\.(tsx?|jsx?|mjs|cjs|py|go|rs|rb|java|kt|swift|c|cc|cpp|h|hpp|cs|php|sh|sql|vue|svelte|css|scss|html)$/i;
 const CONFIG = /(\.(ya?ml|toml|ini|tf|tfvars|env|lock|conf)|Dockerfile|Makefile)$/i;
 const IMAGE = /\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)$/i;
 
@@ -91,6 +93,34 @@ export const ChangeBar = memo(function ChangeBar({
   );
 });
 
+/** The file's change in words, for screen readers (the bar and strikethrough
+ *  carry it visually): "Deleted, 0 added, 12 removed". */
+export function FileChangeWords({
+  file,
+}: {
+  file: Pick<SandboxGitFileDiff, "status" | "additions" | "deletions">;
+}) {
+  const t = useOpenGeniText();
+  const status =
+    file.status === "added" || file.status === "untracked"
+      ? t("workbenchChanges.statusAdded")
+      : file.status === "deleted"
+        ? t("workbenchChanges.statusDeleted")
+        : file.status === "renamed" || file.status === "copied"
+          ? t("workbenchChanges.statusRenamed")
+          : t("workbenchChanges.statusModified");
+  return (
+    <span className="sr-only">
+      {", "}
+      {t("workbenchChanges.fileChange", {
+        status,
+        additions: file.additions,
+        deletions: file.deletions,
+      })}
+    </span>
+  );
+}
+
 /* ------------------------------------------------------------------ focus */
 
 /** One file at a time: the file's name opens a jump menu of every file, and a
@@ -132,11 +162,15 @@ export function FocusFileSwitcher({
             >
               {name}
             </span>
+            <FileChangeWords file={file} />
             {dir ? <span className="truncate text-og-xs text-og-fg-subtle">{dir}</span> : null}
             <ChevronDownIcon aria-hidden className="size-3 shrink-0 text-og-fg-subtle" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="max-h-[60vh] w-[min(26rem,90vw)] overflow-y-auto">
+        <DropdownMenuContent
+          align="start"
+          className="max-h-[60vh] w-[min(26rem,90vw)] overflow-y-auto"
+        >
           {files.map((each, position) => {
             const parts = splitFilePath(each.path);
             return (
@@ -156,6 +190,7 @@ export function FocusFileSwitcher({
                   >
                     {parts.name}
                   </span>
+                  <FileChangeWords file={each} />
                   {parts.dir ? (
                     <span className="ml-2 text-og-xs text-og-fg-subtle">{parts.dir}</span>
                   ) : null}
@@ -377,13 +412,18 @@ export const ChangesTree = memo(function ChangesTree({
           >
             {name}
           </span>
+          <FileChangeWords file={file} />
           <ChangeBar additions={file.additions} deletions={file.deletions} className="w-5" />
         </button>
       );
     }),
   ];
   return (
-    <nav aria-label="Changed files" data-changes-tree="" className={cn("overflow-y-auto py-1.5", className)}>
+    <nav
+      aria-label="Changed files"
+      data-changes-tree=""
+      className={cn("overflow-y-auto py-1.5", className)}
+    >
       {render(tree, 0)}
     </nav>
   );

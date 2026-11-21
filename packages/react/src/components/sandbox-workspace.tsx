@@ -647,6 +647,8 @@ export function useSandboxWorkspaceTabs(
   const [storedChangesComparison, setStoredChangesComparison] = useState<{
     sessionId: string;
     value: SandboxGitComparison;
+    /** The person chose it (not the automatic Branch fallback). */
+    picked: boolean;
   } | null>(null);
   const captureSupportsBranch =
     captureState.capture !== null &&
@@ -662,7 +664,7 @@ export function useSandboxWorkspaceTabs(
         ? "branch"
         : "working";
   const setChangesComparison = useCallback(
-    (value: SandboxGitComparison) => setStoredChangesComparison({ sessionId, value }),
+    (value: SandboxGitComparison) => setStoredChangesComparison({ sessionId, value, picked: true }),
     [sessionId],
   );
   const git = useSandboxGit(sessionId, {
@@ -694,7 +696,7 @@ export function useSandboxWorkspaceTabs(
       // live default must not strand the whole Changes surface when its ordinary
       // working-tree comparison is still valid. Fall back once; an explicit
       // user-selected Branch view remains selected and surfaces its real error.
-      setStoredChangesComparison({ sessionId, value: "working" });
+      setStoredChangesComparison({ sessionId, value: "working", picked: false });
     }
   }, [changesComparison, git.error, sessionId, storedChangesComparison?.sessionId]);
   // Token-derived xterm theme; re-derive on a `data-og-theme` flip. Generic — it
@@ -808,7 +810,7 @@ export function useSandboxWorkspaceTabs(
         ...(relevantOnly &&
         dirtyCount === 0 &&
         !captureHasChanges &&
-        storedChangesComparison?.sessionId !== sessionId
+        !(storedChangesComparison?.sessionId === sessionId && storedChangesComparison.picked)
           ? { optional: true }
           : {}),
         content: (

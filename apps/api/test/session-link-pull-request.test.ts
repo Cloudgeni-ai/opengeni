@@ -195,4 +195,64 @@ describe("a linked pull request's detail", () => {
       detail.files.slice(kept).every((file) => file.truncated && file.hunks.length === 0),
     ).toBe(true);
   });
+
+  test("each person's own reads stay theirs, and never fill the shared cache", async () => {
+    const link = {
+      id: "l3",
+      url: "https://github.com/acme/secret/pull/5",
+      provider: "github",
+      kind: "pull_request",
+    } as never;
+    let appReads = 0;
+    const app = async () => {
+      appReads += 1;
+      return null;
+    };
+    const reads: string[] = [];
+    const viewer = (subjectId: string) => ({
+      subjectId,
+      read: async () => {
+        reads.push(subjectId);
+        return subjectId === "user:ada" ? ({ title: "Ada's view" } as never) : null;
+      },
+    });
+    const ada = await cachedSessionPullRequestDetail("ws-e", link, app, {
+      viewer: viewer("user:ada"),
+    });
+    const bo = await cachedSessionPullRequestDetail("ws-e", link, app, {
+      viewer: viewer("user:bo"),
+    });
+    const again = await cachedSessionPullRequestDetail("ws-e", link, app, {
+      viewer: viewer("user:ada"),
+    });
+    // No viewer: only the shared (App) result, which stays null.
+    const anonymous = await cachedSessionPullRequestDetail("ws-e", link, app);
+    expect(ada).toMatchObject({ title: "Ada's view" });
+    expect(bo).toBeNull();
+    expect(again).toMatchObject({ title: "Ada's view" });
+    expect(anonymous).toBeNull();
+    expect(reads).toEqual(["user:ada", "user:bo"]);
+    expect(appReads).toBe(1);
+  });
+
+  test("a failed App read still tries the person's own GitHub", async () => {
+    const link = {
+      id: "l4",
+      url: "https://github.com/acme/api/pull/11",
+      provider: "github",
+      kind: "pull_request",
+    } as never;
+    const failing = async () => {
+      throw new Error("rate limited");
+    };
+    const detail = await cachedSessionPullRequestDetail("ws-f", link, failing, {
+      viewer: { subjectId: "user:ada", read: async () => ({ title: "Mine" }) as never },
+    });
+    expect(detail).toMatchObject({ title: "Mine" });
+    await expect(
+      cachedSessionPullRequestDetail("ws-f", link, failing, {
+        viewer: { subjectId: "user:bo", read: async () => null },
+      }),
+    ).rejects.toThrow("rate limited");
+  });
 });

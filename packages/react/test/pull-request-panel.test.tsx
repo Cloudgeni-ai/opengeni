@@ -139,4 +139,29 @@ describe("the PR tab", () => {
     expect(pullRequestLinkFromLinks([gitlab])).toBeNull();
     expect(pullRequestLinkFromLinks([gitlab, LINK])?.id).toBe("pr-1");
   });
+
+  test("an unreadable pull request can still be unlinked; unread files are never 'none'", async () => {
+    let removed = 0;
+    const unreadable = await renderComponent(
+      <PullRequestView
+        link={LINK}
+        state={{ status: "ready", detail: null }}
+        onRemove={() => {
+          removed += 1;
+        }}
+      />,
+    );
+    await click(unreadable.container.querySelector("[data-pr-remove]"));
+    expect(removed).toBe(1);
+    await unreadable.unmount();
+    const unread = await renderComponent(
+      <PullRequestView
+        link={LINK}
+        state={{ status: "ready", detail: { ...detail("open"), changedFiles: 4 } }}
+      />,
+    );
+    expect(unread.container.textContent).toContain("Files couldn't be read here.");
+    expect(unread.container.textContent).not.toContain("No file changes.");
+    await unread.unmount();
+  });
 });

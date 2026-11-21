@@ -185,6 +185,26 @@ export function PullRequestView({
         <header className="flex shrink-0 items-start gap-2 px-4 pt-3">
           <h2 className="min-w-0 flex-1 text-sm font-semibold leading-snug text-fg">{title}</h2>
           <GitHubLink url={link.url} />
+          {onRemove ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="More"
+                  title="More"
+                  data-pr-menu=""
+                  className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-surface-2"
+                >
+                  <EllipsisIcon aria-hidden className="size-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={onRemove} data-pr-remove="">
+                  Remove link
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
         </header>
         <p className="px-4 pt-1 text-xs text-fg-muted">
           {state.status === "loading" ? (
@@ -241,6 +261,21 @@ export function PullRequestView({
             {detail.title}
           </h2>
           <PullRequestFacts detail={detail} />
+          {state.status === "error" ? (
+            <p className="mt-1 text-xs text-fg-muted" data-pr-refresh-error="">
+              Couldn't refresh.{" "}
+              {onRetry ? (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  data-pr-retry=""
+                  className="font-medium text-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                >
+                  Retry
+                </button>
+              ) : null}
+            </p>
+          ) : null}
         </div>
         {canMerge ? (
           <Button
@@ -367,7 +402,9 @@ function PullRequestFacts({ detail }: { detail: SessionPullRequestDetail }) {
       >
         <GitBranchIcon aria-hidden className="size-3 shrink-0 text-fg-subtle" />
         <span className="truncate text-fg">{detail.head}</span>
-        <span aria-hidden className="text-fg-subtle">→</span>
+        <span aria-hidden className="text-fg-subtle">
+          →
+        </span>
         <span className="truncate">{detail.base}</span>
       </span>
       {checks ? (
@@ -387,7 +424,24 @@ function PullRequestFacts({ detail }: { detail: SessionPullRequestDetail }) {
 function PullRequestTabBody({ tab, detail }: { tab: SubTab; detail: SessionPullRequestDetail }) {
   const files = useMemo(() => detail.files, [detail.files]);
   if (tab === "changes") {
-    if (files.length === 0) return <Empty>No file changes.</Empty>;
+    if (files.length === 0) {
+      // GitHub listed changed files we couldn't read: never claim there are none.
+      return detail.changedFiles > 0 ? (
+        <Empty>
+          Files couldn't be read here.{" "}
+          <a
+            href={`${detail.url}/files`}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="font-medium text-fg underline-offset-2 hover:underline"
+          >
+            View on GitHub
+          </a>
+        </Empty>
+      ) : (
+        <Empty>No file changes.</Empty>
+      );
+    }
     return (
       <div className="flex h-full min-h-0 flex-col">
         {detail.filesTruncated ? (

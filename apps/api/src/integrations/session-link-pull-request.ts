@@ -9,6 +9,7 @@ import {
 } from "@opengeni/contracts";
 import { personalGitHubReader, type ApiRouteDeps } from "@opengeni/core";
 import {
+  FAILED_CHECK_CONCLUSIONS,
   type GitHubRead,
   summarizeGitHubChecks,
   summarizeGitHubReviews,
@@ -87,7 +88,7 @@ const DETAIL_TTL_MS = 30_000;
 const FRESH_MIN_INTERVAL_MS = 5_000;
 /** A failed read is retried soon, not held for the full TTL. */
 const FAILURE_TTL_MS = 5_000;
-const CACHE_MAX = 50;
+const CACHE_MAX = 20;
 
 const detailCache = new Map<
   string,
@@ -119,7 +120,7 @@ function list(value: unknown): Record<string, unknown>[] {
 }
 
 const BINARY_PATH =
-  /\.(png|jpe?g|gif|webp|ico|bmp|avif|tiff?|pdf|zip|gz|tgz|bz2|xz|7z|jar|wasm|woff2?|ttf|otf|eot|mp3|mp4|mov|webm|wav|ogg|exe|dll|so|dylib|bin|class|pyc)$/i;
+  /\.(png|jpe?g|gif|webp|ico|bmp|avif|tiff?|pdf|zip|gz|tgz|bz2|xz|7z|jar|wasm|woff2?|ttf|otf|eot|mp3|mp4|mov|webm|wav|ogg|exe|dll|so|dylib|bin|class|pyc|docx?|xlsx?|pptx?|sqlite3?|db|psd|heic|heif|mkv|flac)$/i;
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 
@@ -211,18 +212,10 @@ function checkRunState(run: Record<string, unknown>): SessionPullRequestCheckRun
   if (run.status !== "completed") return "pending";
   const conclusion = String(run.conclusion ?? "");
   // Matches summarizeGitHubChecks: only these conclusions fail.
-  if (FAILED_CONCLUSIONS.has(conclusion)) return "failing";
+  if (FAILED_CHECK_CONCLUSIONS.has(conclusion)) return "failing";
   if (conclusion === "skipped") return "skipped";
   return "passing";
 }
-
-const FAILED_CONCLUSIONS = new Set([
-  "failure",
-  "timed_out",
-  "cancelled",
-  "action_required",
-  "startup_failure",
-]);
 
 function reviewState(state: unknown): SessionPullRequestComment["reviewState"] {
   if (state === "APPROVED") return "approved";
@@ -432,16 +425,24 @@ export async function cachedSessionPullRequestDetail(
   options: { fresh?: boolean; viewer?: SessionPullRequestViewer | null } = {},
 ): Promise<SessionPullRequestDetail | null> {
   const fresh = options.fresh === true;
-  const shared = await cachedRead(
-    `${workspaceId}:${link.url}`,
-    () => reader(workspaceId, link),
-    fresh,
-  );
-  if (shared || !options.viewer) return shared;
-  const viewer = options.viewer;
-  return await cachedRead(
-    `${workspaceId}:viewer:${viewer.subjectId}:${link.url}`,
-    () => viewer.read(workspaceId, link),
-    fresh,
-  );
+  const viewer = options.viewer ?? null;
+  const viewerRead = () =>
+    cachedRead(
+      `${workspaceId}:viewer:${viewer!.subjectId}:${link.url}`,
+      () => viewer!.read(workspaceId, link),
+      fresh,
+    );
+  let shared: SessionPullRequestDetail | null;
+  try {
+    shared = await cachedRead(`${workspaceId}:${link.url}`, () => reader(workspaceId, link), fresh);
+  } catch (failure) {
+    // The App read failed (rate limit, outage): the person's own GitHub may
+    // still read it. Without one, or when it can't either, the failure stands.
+    if (!viewer) throw failure;
+    const own = await viewerRead().catch(() => null);
+    if (own) return own;
+    throw failure;
+  }
+  if (shared || !viewer) return shared;
+  return await viewerRead();
 }

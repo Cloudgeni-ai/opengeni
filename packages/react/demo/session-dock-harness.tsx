@@ -77,7 +77,12 @@ const detail: SessionPullRequestDetail = {
   filesTruncated: false,
   commits: [
     { sha: "a1b2c3d", message: "Lock CORS to an allowlist", author: "opengeni-agent", date: null },
-    { sha: "d4e5f6a", message: "Add helmet and rate limiting", author: "opengeni-agent", date: null },
+    {
+      sha: "d4e5f6a",
+      message: "Add helmet and rate limiting",
+      author: "opengeni-agent",
+      date: null,
+    },
     { sha: "b7c8d9e", message: "Enable instance monitoring", author: "opengeni-agent", date: null },
   ],
   comments: [

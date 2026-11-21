@@ -35,6 +35,7 @@ import { PierreDiff } from "./pierre-diff";
 import {
   ChangeBar,
   ChangesTree,
+  FileChangeWords,
   FileGlyph,
   FocusFileSwitcher,
   StreamOutline,
@@ -695,48 +696,48 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
             visible window ± overscan are in the DOM; the container reserves the
             full scroll height so scrolling + the rail-jump stay accurate. */}
           <div className="relative flex min-h-0 min-w-0 flex-1">
-          <div
-            ref={windowed.scrollRef}
-            aria-label={t("workbenchChanges.changedFilesDiff")}
-            className={cn(
-              "min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
-            )}
-            data-opengeni-changes-pane
-            role="region"
-            tabIndex={0}
-          >
-            <div style={{ position: "relative", height: windowed.totalHeight }}>
-              {orderedFiles.map((file, index) => {
-                if (index < windowed.range.start || index >= windowed.range.end) return null;
-                return (
-                  <MeasuredSection
-                    key={file.path}
-                    index={index}
-                    top={windowed.offsets[index] ?? 0}
-                    onMeasure={windowed.measure}
-                  >
-                    <DiffSection
-                      file={file}
-                      layout={layout}
-                      themeType={resolvedTheme}
-                      collapsed={collapsedPaths.has(file.path)}
-                      onToggle={onToggle}
-                      {...(onOpenFile ? { onOpenFile } : {})}
-                    />
-                  </MeasuredSection>
-                );
-              })}
+            <div
+              ref={windowed.scrollRef}
+              aria-label={t("workbenchChanges.changedFilesDiff")}
+              className={cn(
+                "min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+              )}
+              data-opengeni-changes-pane
+              role="region"
+              tabIndex={0}
+            >
+              <div style={{ position: "relative", height: windowed.totalHeight }}>
+                {orderedFiles.map((file, index) => {
+                  if (index < windowed.range.start || index >= windowed.range.end) return null;
+                  return (
+                    <MeasuredSection
+                      key={file.path}
+                      index={index}
+                      top={windowed.offsets[index] ?? 0}
+                      onMeasure={windowed.measure}
+                    >
+                      <DiffSection
+                        file={file}
+                        layout={layout}
+                        themeType={resolvedTheme}
+                        collapsed={collapsedPaths.has(file.path)}
+                        onToggle={onToggle}
+                        {...(onOpenFile ? { onOpenFile } : {})}
+                      />
+                    </MeasuredSection>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-          {navigation === "stream" ? (
-            <StreamOutline
-              files={orderedFiles}
-              offsets={windowed.offsets}
-              totalHeight={windowed.totalHeight}
-              activeIndex={activeIndex}
-              onSelect={jumpTo}
-            />
-          ) : null}
+            {navigation === "stream" ? (
+              <StreamOutline
+                files={orderedFiles}
+                offsets={windowed.offsets}
+                totalHeight={windowed.totalHeight}
+                activeIndex={activeIndex}
+                onSelect={jumpTo}
+              />
+            ) : null}
           </div>
         </div>
       )}
@@ -821,6 +822,7 @@ const RailFileRow = memo(function RailFileRow({
     >
       <span className="min-w-0 flex-1 truncate">
         <span className={cn(file.status === "deleted" && "line-through")}>{name}</span>
+        <FileChangeWords file={file} />
         {dir ? <span className="ml-1.5 text-og-xs text-og-fg-subtle">{dir}</span> : null}
       </span>
     </button>
@@ -892,9 +894,7 @@ const DiffSection = memo(function DiffSection({
       {...(guarded || empty || collapsed ? {} : { "data-pierre-section": "" })}
       className={cn(!collapsed && "pb-2")}
     >
-      {hideHeader ? null : (
-        <DiffFileHeader file={file} collapsed={collapsed} onToggle={onToggle} />
-      )}
+      {hideHeader ? null : <DiffFileHeader file={file} collapsed={collapsed} onToggle={onToggle} />}
       {collapsed ? null : guarded ? (
         <GuardBody file={file} {...(onOpenFile ? { onOpenFile } : {})} />
       ) : empty ? (
@@ -943,6 +943,7 @@ function DiffFileHeader({
         >
           {name}
         </span>
+        <FileChangeWords file={file} />
         {dir ? <span className="ml-2 text-og-xs text-og-fg-subtle">{dir}</span> : null}
         {renamed ? (
           <span className="ml-2 text-og-xs text-og-fg-subtle">← {file.oldPath}</span>
@@ -1074,7 +1075,9 @@ export function WorkbenchChangesViewMenu({
         <button
           type="button"
           data-changes-view-menu
-          aria-label={current ? undefined : t("workbenchChanges.view")}
+          aria-label={
+            current ? `${current.label}, ${t("workbenchChanges.view")}` : t("workbenchChanges.view")
+          }
           title={t("workbenchChanges.view")}
           className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:bg-og-surface-2 pointer-coarse:min-h-11"
         >

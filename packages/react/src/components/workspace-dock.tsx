@@ -955,7 +955,9 @@ function DockChrome({
               <div
                 key={tab.id}
                 id={`${tabsetId}-panel-${index}`}
-                aria-labelledby={`${tabsetId}-tab-${index}`}
+                {...(shownTabs.includes(tab)
+                  ? { "aria-labelledby": `${tabsetId}-tab-${index}` }
+                  : { "aria-label": tabName(tab) })}
                 className="h-full min-h-0 min-w-0 overflow-hidden"
                 hidden={!selected}
                 role="tabpanel"

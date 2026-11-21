@@ -1,9 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Hono } from "hono";
 
-// The route's own checks: the link must be one of the chat's pull requests,
-// `fresh` reaches the cache, a person falls back to their own GitHub, and a
-// failed GitHub read answers 502. Access checks are stubbed to pass.
+// The route's own checks: the link must be one of the chat's pull requests
+// (as a session read), and a failed GitHub read answers 502. Access checks are
+// stubbed to pass with a service grant; the per-person fallback and its cache
+// isolation are covered in session-link-pull-request.test.ts.
 const realCore = await import("@opengeni/core");
 const realDb = await import("@opengeni/db");
 const authorizationCalls: string[] = [];
