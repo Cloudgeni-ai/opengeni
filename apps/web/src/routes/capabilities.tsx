@@ -2457,7 +2457,6 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
                         workspaceId={workspaceId}
                         query={query}
                         kind={readyMadeKind}
-                        items={items}
                         canInstallSkills={canManageSkills}
                         onSkillAdded={async () => {
                           setSkillsRevision((value) => value + 1);

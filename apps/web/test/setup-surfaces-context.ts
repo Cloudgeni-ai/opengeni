@@ -241,7 +241,10 @@ const appTemplates = [
 
 const served: Record<string, (...args: unknown[]) => unknown> = {
   listCapabilities: async () => ({
-    items: structuredClone(capabilities),
+    // Like production, the catalog lists only added library skills.
+    items: structuredClone(
+      capabilities.filter((item) => item.source !== "library" || item.enabled),
+    ),
     memberIntegrationSetup: null,
   }),
   connectTransport: () => ({ catalog: async () => [] }),
@@ -255,6 +258,8 @@ const served: Record<string, (...args: unknown[]) => unknown> = {
   getWorkspaceState: async () => structuredClone(workspaceState),
   listAgentTemplates: async () => structuredClone(agentTemplates),
   listAppTemplates: async () => structuredClone(appTemplates),
+  listLibrarySkills: async () =>
+    structuredClone(capabilities.filter((item) => item.source === "library")),
   listAgents: async () => [],
 };
 

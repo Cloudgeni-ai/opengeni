@@ -3,7 +3,7 @@ import { AppTemplate, parseAppPackage } from "@opengeni/contracts";
 import decisionLog from "./decision-log.app.json";
 
 /**
- * Ready-made apps people add from the gallery. Each is a content file: an app
+ * Ready-made apps people add in Capabilities. Each is a content file: an app
  * package (docs/app-packages.md) with a name, a line about it and its team.
  * Adding one installs the package as a new app.
  */
@@ -11,7 +11,7 @@ const APP_TEMPLATE_FILES: readonly unknown[] = [decisionLog];
 
 let parsed: readonly AppTemplate[] | undefined;
 
-/** Every ready-made app, in gallery order. A malformed file is skipped. */
+/** Every ready-made app, in listing order. A malformed file is skipped. */
 export function appTemplates(): readonly AppTemplate[] {
   parsed ??= APP_TEMPLATE_FILES.flatMap((file) => {
     const template = AppTemplate.safeParse(file);

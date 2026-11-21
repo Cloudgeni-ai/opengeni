@@ -840,11 +840,15 @@ glyph unless they need attention (`ConnectionInstalled`).
 
 **Ready-made** lists ready-made agents (`packages/core/src/agent-templates`),
 apps (`packages/core/src/app-templates`, [app packages](app-packages.md#ready-made-apps))
-and reviewed library skills, grouped by each item's own `team` (agent and app
+and reviewed library skills (`GET /v1/workspaces/:workspaceId/skills/library`,
+SDK `listLibrarySkills`, every installable library skill with `enabled` once
+added; the capability catalog lists only added ones), grouped by each item's own `team` (agent and app
 templates' `team`, a library skill's `metadata.team`), alphabetically, with
 items without one under **More**. One click adds an item through the same
 paths as elsewhere: `createAgentFromTemplate`, `installAppPackage` with the
-template's package, and `installLibrarySkill`. An added item opens instead.
+template's package (one idempotency key per ready-made app, so adding it
+again opens the same app), and `installLibrarySkill`. An added item opens
+instead.
 
 The **Capabilities** view has exactly three top-level sections, in this order:
 **Integrations**, **Connectors**, and **Bundles**. The first two are

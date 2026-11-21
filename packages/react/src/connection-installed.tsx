@@ -50,7 +50,6 @@ export function ConnectionInstalled({
             onOpen={item.onOpen}
             disabled={item.disabled}
             title={item.status}
-            aria-label={`${item.name} · ${item.status}`}
           />
         ))}
       </div>

@@ -44,7 +44,7 @@ export type SkillLibraryEntry = Readonly<{
   version: string;
   description: string;
   category: string;
-  /** The team it is for ("Engineering"); the gallery groups by it. */
+  /** The team it is for ("Engineering"); Ready-made groups by it. */
   team?: string;
   tags: readonly string[];
   /** SHA-256 over the complete canonical artifact manifest, not just SKILL.md. */

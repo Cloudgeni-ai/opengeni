@@ -1444,6 +1444,7 @@ export type {
   InstalledSkill,
   InstalledSkillSummary,
   ListInstalledSkillsResponse,
+  ListLibrarySkillsResponse,
   Document,
   DocumentAuthorityKind,
   DocumentBase,

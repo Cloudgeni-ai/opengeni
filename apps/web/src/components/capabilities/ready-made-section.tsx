@@ -77,7 +77,6 @@ export function ReadyMadeSection({
   workspaceId,
   query,
   kind,
-  items,
   canInstallSkills,
   onSkillAdded,
 }: {
@@ -85,8 +84,6 @@ export function ReadyMadeSection({
   query: string;
   /** Only this kind (`?kind=` of the tab), for example agents from the Agents page. */
   kind?: ReadyMadeKind | undefined;
-  /** The capability catalog, for the reviewed library skills. */
-  items: readonly CapabilityCatalogItem[];
   canInstallSkills: boolean;
   onSkillAdded: () => Promise<void>;
 }) {
@@ -98,6 +95,9 @@ export function ReadyMadeSection({
   const [loadRevision, setLoadRevision] = useState(0);
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[] | null>(null);
   const [appTemplates, setAppTemplates] = useState<AppTemplate[] | null>(null);
+  const [librarySkills, setLibrarySkills] = useState<CapabilityCatalogItem[] | null>(null);
+  // Whether the workspace's agents loaded, so an added agent isn't offered again.
+  const [agentsKnown, setAgentsKnown] = useState(true);
   // Ready-made agents already added here, to the agent they became.
   const [addedAgents, setAddedAgents] = useState<ReadonlyMap<string, string>>(new Map());
   // Apps added from here, to the app they became. Adding again replays the
@@ -110,16 +110,21 @@ export function ReadyMadeSection({
     setLoadError(null);
     void Promise.all([
       client.listAgentTemplates(workspaceId),
-      // Only marks what is already added; without it every row offers Add.
-      client.listAgents(workspaceId).catch(() => []),
+      // Only marks what is already added.
+      client.listAgents(workspaceId).catch(() => null),
       client.listAppTemplates(workspaceId),
+      client.listLibrarySkills(workspaceId),
     ]).then(
-      ([templates, agents, apps]) => {
+      ([templates, agents, apps, skills]) => {
         if (!live) return;
         setAgentTemplates(templates);
+        setAgentsKnown(agents !== null);
+        setLibrarySkills(skills);
         setAddedAgents(
           new Map(
-            agents.flatMap((agent) => (agent.templateKey ? [[agent.templateKey, agent.id]] : [])),
+            (agents ?? []).flatMap((agent) =>
+              agent.templateKey ? [[agent.templateKey, agent.id]] : [],
+            ),
           ),
         );
         setAppTemplates(apps);
@@ -133,11 +138,6 @@ export function ReadyMadeSection({
     };
   }, [client, workspaceId, loadRevision]);
 
-  const librarySkills = useMemo(
-    () => items.filter((item) => item.kind === "skill" && item.source === "library"),
-    [items],
-  );
-
   const entries: ReadyMadeEntry[] = useMemo(
     () => [
       ...(agentTemplates ?? []).map((template) => ({
@@ -145,7 +145,7 @@ export function ReadyMadeSection({
         kind: "agent" as const,
         name: template.name,
         description: template.description,
-        team: template.team,
+        team: template.team ?? null,
         icon: (
           <SessionAvatar
             avatar={template.avatar ?? agentInitialsAvatar(template.name, template.key)}
@@ -156,7 +156,11 @@ export function ReadyMadeSection({
           />
         ),
         added: addedAgents.has(template.key),
-        unavailable: canAddAgents ? undefined : "Ask an admin to add agents",
+        unavailable: !canAddAgents
+          ? "Ask an admin to add agents"
+          : agentsKnown
+            ? undefined
+            : "Couldn't check your agents. Reload to add.",
       })),
       ...(appTemplates ?? []).map((template) => ({
         key: `app:${template.key}`,
@@ -168,7 +172,7 @@ export function ReadyMadeSection({
         added: addedApps.has(template.key),
         unavailable: canAddApps ? undefined : "Ask an admin to add apps",
       })),
-      ...librarySkills.map((item) => ({
+      ...(librarySkills ?? []).map((item) => ({
         key: `skill:${item.id}`,
         kind: "skill" as const,
         name: item.name,
@@ -188,6 +192,7 @@ export function ReadyMadeSection({
       canInstallSkills,
       canAddAgents,
       canAddApps,
+      agentsKnown,
       workspaceId,
     ],
   );
@@ -236,6 +241,12 @@ export function ReadyMadeSection({
           idempotencyKey: `ready-made:${template.key}`,
         });
         setAddedApps((current) => new Map(current).set(key, installed.app.id));
+        if (installed.notInstalled.length > 0) {
+          toast.warning(`${entry.name} was added without some parts`, {
+            description: installed.notInstalled.map((problem) => problem.reason).join(" "),
+          });
+          return;
+        }
         if (installed.replayed) {
           void navigate({
             to: "/workspaces/$workspaceId/artifacts/$artifactId",
@@ -244,7 +255,7 @@ export function ReadyMadeSection({
           return;
         }
       } else {
-        const item = librarySkills.find((each) => each.id === key);
+        const item = librarySkills?.find((each) => each.id === key);
         const libraryId = metadataString(item?.metadata.libraryId);
         const expectedVersion = metadataString(item?.metadata.version);
         const expectedContentSha256 = metadataString(item?.metadata.contentSha256);
@@ -256,6 +267,10 @@ export function ReadyMadeSection({
           expectedContentSha256,
         });
         await onSkillAdded();
+        setLibrarySkills(
+          (current) =>
+            current?.map((each) => (each.id === key ? { ...each, enabled: true } : each)) ?? null,
+        );
         if (installed.skillReceipt?.outcome === "pending") {
           toast.message(`${entry.name} is waiting for review`);
           return;
@@ -278,7 +293,7 @@ export function ReadyMadeSection({
       />
     );
   }
-  if (agentTemplates === null || appTemplates === null) {
+  if (agentTemplates === null || appTemplates === null || librarySkills === null) {
     return (
       <p role="status" className="text-sm text-fg-muted">
         Loading…

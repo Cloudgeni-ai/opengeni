@@ -6283,6 +6283,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listLibrarySkills",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/skills/library",
+    "request": [],
+    "response": [
+      "CapabilityCatalogItem",
+      "ListLibrarySkillsResponse"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "listMachines",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/machines",

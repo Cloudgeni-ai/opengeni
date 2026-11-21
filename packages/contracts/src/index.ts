@@ -16321,6 +16321,12 @@ export const ListInstalledSkillsResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
 
+/** GET /v1/workspaces/:workspaceId/skills/library: reviewed library skills, `enabled` once added. */
+export const ListLibrarySkillsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ skills: z.array(CapabilityCatalogItem).max(1000) }).strict(),
+);
+export type ListLibrarySkillsResponse = z.infer<typeof ListLibrarySkillsResponse>;
+
 export const SkillUninstallPreview = /* @__PURE__ */ defineSchema(() =>
   z.object({
     capabilityId: primitives.nonEmptyString,
