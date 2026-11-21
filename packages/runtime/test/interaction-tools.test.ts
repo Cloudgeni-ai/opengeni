@@ -6459,6 +6459,95 @@ describe("interaction attempt tools", () => {
     expect(mac.structuredContent).not.toHaveProperty("existing");
   });
 
+  test("computer_open on macOS uses a running app's window when macOS cannot launch it", async () => {
+    // An app run from a folder macOS does not know: listed, not installed.
+    const vm: ComputerTarget = {
+      ...computerTarget(),
+      id: "cua:window:74:2838",
+      applicationId: "UTM",
+      title: "Windows",
+      focused: false,
+    };
+    const other: ComputerTarget = {
+      ...computerTarget(),
+      id: "cua:window:51:12",
+      applicationId: "iPhone Mirroring",
+      title: "iPhone Mirroring",
+      current: true,
+    };
+    const session = { ...activeComputerSession(), platform: "macos" as const };
+    const observed: string[] = [];
+    const captured: string[] = [];
+    let targets = [other, vm];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets,
+        }),
+        observeComputerTarget: async (_w, _s, targetId) => {
+          observed.push(targetId);
+          return computerObservation(targets.find((target) => target.id === targetId)!);
+        },
+        captureComputerTarget: async (_w, _s, targetId) => {
+          captured.push(targetId);
+          return {
+            frameId: "frame-1",
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            targetId,
+            targetGeneration: vm.targetGeneration,
+            sequence: 0,
+            mediaType: "image/jpeg" as const,
+            width: 640,
+            height: 400,
+            capturedAt: now,
+            sha256: "0".repeat(64),
+            data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+          };
+        },
+        actInComputer: async (_w, _s, value) => ({
+          ...computerReceipt(value.operationId, computerObservation(other)),
+          state: "failed",
+          observation: null,
+          error: {
+            code: "invalid_action",
+            message:
+              "CUA launch_app refused the operation: No installed macOS app found for bundle_id 'com.utmapp.UTM'.",
+            retryable: false,
+          },
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const open = async (applicationId: string) =>
+      await definitions[0]!.execute(
+        { computerSessionId, applicationId, includeScreenshot: true },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+
+    const found = await open("UTM");
+    expect(observed).toEqual([vm.id]);
+    expect(found.structuredContent).toMatchObject({ existing: { target: { id: vm.id } } });
+    expect(captured).toEqual([vm.id]);
+
+    // With no window of the app, another app's window is never captured.
+    targets = [other];
+    captured.length = 0;
+    const missing = await open("UTM");
+    expect(missing.structuredContent).toMatchObject({ launch: { state: "failed" } });
+    expect(captured).toEqual([]);
+    expect(missing.content.at(-1)).toEqual({
+      type: "text",
+      text: "No screenshot: no window of UTM was observed. Check computer_targets for its window.",
+    });
+  });
+
   test("computer_open never reports a launch that ran, or may have run, as failed", async () => {
     const screen: ComputerTarget = {
       ...computerTarget(),
