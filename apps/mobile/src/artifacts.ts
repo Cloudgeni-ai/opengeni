@@ -127,7 +127,7 @@ export function nativeViewPath(
   const ws = encodeURIComponent(workspaceId);
   const id = encodeURIComponent(item.id);
   if (item.kind === "site") {
-    const at = page && page.startsWith("/") && page !== "/" ? page : null;
+    const at = typeof page === "string" && page.startsWith("/") && page !== "/" ? page : null;
     return `/native-view/workspaces/${ws}/sites/${id}${at ? `?page=${encodeURIComponent(at)}` : ""}`;
   }
   if (isEditableKind(item.kind)) return `/native-view/workspaces/${ws}/artifacts/editable/${id}`;

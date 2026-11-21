@@ -220,13 +220,57 @@ test("people only see and add Apps they can open; gone Apps drop out of storage"
     "open",
     "old",
   ]);
-  // A deleted App's link is dropped on the next write.
-  await shared.admin`delete from workspace_artifacts where id = ${old}::uuid`;
+  // A link to an App that no longer exists is dropped on the next write.
+  const gone = crypto.randomUUID();
+  await shared.admin`update sidebar_layouts
+    set layout = jsonb_set(layout, '{items}', layout->'items' || ${JSON.stringify([
+      { id: "gone", type: "app", appId: gone },
+    ])}::jsonb)
+    where workspace_id = ${ws.workspaceId}::uuid and subject_id is null`;
+  expect(await storedIds()).toEqual(["pinned-apps", "open", "old", "s", "gone"]);
   await updateSidebarLayoutForGrant(deps, ws.admin, {
     scope: "workspace",
     changes: [{ op: "update", itemId: "s", label: "Status" }],
   });
-  expect(await storedIds()).toEqual(["pinned-apps", "open", "s"]);
+  expect(await storedIds()).toEqual(["pinned-apps", "open", "old", "s"]);
+});
+
+test("links to archived Apps make room when a change would go over a limit", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  const old = await app(ws, null);
+  await shared.admin`update workspace_artifacts set status = 'archived' where id = ${old}::uuid`;
+  const links = Array.from({ length: 49 }, (_, index) => ({
+    id: `l${index}`,
+    type: "link",
+    url: `https://l${index}.example.com`,
+    label: `L${index}`,
+  }));
+  await shared.admin`insert into sidebar_layouts (account_id, workspace_id, subject_id, layout, revision)
+    values (${ws.accountId}::uuid, ${ws.workspaceId}::uuid, null,
+      ${JSON.stringify({ version: 1, items: [{ id: "old", type: "app", appId: old }, ...links] })}::jsonb, 1)`;
+  const after = await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    changes: [
+      { op: "add", item: { id: "more", type: "link", url: "https://m.example.com", label: "M" } },
+    ],
+  });
+  expect((after.workspace.items ?? []).at(-1)?.id).toBe("more");
+  const [stored] = await shared.admin`select layout from sidebar_layouts
+    where workspace_id = ${ws.workspaceId}::uuid and subject_id is null`;
+  const ids = (stored!.layout as { items: { id: string }[] }).items.map((item) => item.id);
+  expect(ids).toHaveLength(50);
+  expect(ids).not.toContain("old");
+  // Without an archived link to drop, the limit holds.
+  expect(
+    await status(() =>
+      updateSidebarLayoutForGrant(deps, ws.admin, {
+        scope: "workspace",
+        changes: [{ op: "add", item: { type: "link", url: "https://n.example.com", label: "N" } }],
+      }),
+    ),
+  ).toBe(422);
 });
 
 test("a person's own link to an App that became someone else's Only me is dropped", async () => {

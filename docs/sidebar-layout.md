@@ -33,12 +33,16 @@ is left out too (admins still see it, to fill it). On the next change to the
 layout that holds them, links are also dropped from storage, so they don't
 count toward the limits, when:
 
-- the app was deleted (in the default or a person's own items);
+- the app no longer exists in the workspace (in the default or a person's own
+  items; apps are removed only with their workspace, so this is mostly links
+  written by hand or by an integration to an id that isn't an app here);
 - the app became someone else's Only me (a person's own items; in the
   default it stays, for the people who can open it).
 
 Links to an archived app are kept, hidden while it's archived, so restoring
-the app brings them back.
+the app brings them back. They still count toward the limits, except that a
+change that would go over a limit drops them first to make room (those links
+don't come back on restore).
 
 The built-in default is one **Pinned apps** live list (`pinned_apps`, id
 `pinned-apps`). A live list with no apps is left out of the sidebar, as is a
@@ -102,9 +106,10 @@ Where `add` and `move` put an item:
 2. The level is the group named by `groupId` (`null` is the top level). Without
    `groupId`, `add` uses the top level and `move` the item's current level.
 3. A neighbour must be in that level, or the change is refused (422).
-4. `index` counts the stored level, including items the caller can't see
-   (apps they can't open), and past the end means the end. Prefer a
-   neighbour, which is exact.
+4. `index` counts the level including items the caller can't see (apps they
+   can't open or that are archived): for the default, its stored level; for a
+   person's own changes, the default's items they haven't hidden plus their
+   own. Past the end means the end. Prefer a neighbour, which is exact.
 5. In a person's own changes, a default item stays in the group the admin
    put it in (moving it elsewhere is refused); their own items can move
    between groups and the top level.
@@ -112,7 +117,9 @@ Where `add` and `move` put an item:
 Clients keep the newest answer: each scope's `revision` only grows, so when
 two reads or updates overlap and finish out of order, an answer with a lower
 `personal` or `workspace` revision than the one shown is ignored
-(`sidebarLayoutIsOlder` in `@opengeni/contracts/sidebar-layout`).
+(`sidebarLayoutIsOlder` in `@opengeni/contracts/sidebar-layout`). In the rare
+case where each answer is newer in a different scope, the one shown stays
+until the next read.
 
 The SDK has `client.getSidebarLayout(workspaceId)` and
 `client.updateSidebarLayout(workspaceId, request)`. Both routes are app

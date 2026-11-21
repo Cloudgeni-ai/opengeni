@@ -180,20 +180,21 @@ export async function readSidebarApps(
 }
 
 /**
- * Which of `appIds` a sidebar keeps links to: apps of this workspace that
- * still exist, archived ones included (restoring an app brings its links
- * back). With `viewer`, for a person's own links, only apps they could open
- * apart from archiving: shared ones and their own, not someone else's Only
- * me. A sidebar write drops links to the rest.
+ * Which of `appIds` a sidebar keeps links to (`kept`): apps of this workspace
+ * that still exist, archived ones included, so restoring an app brings its
+ * links back. With `viewer`, for a person's own links, only apps they could
+ * open apart from archiving: shared ones and their own, not someone else's
+ * Only me. A sidebar write drops links to the rest. `archived` is the kept
+ * ones that are archived now.
  */
-export async function readKeptSidebarAppIds(
+export async function readSidebarLinkedApps(
   db: Database,
   scope: SidebarLayoutScopeKey,
   appIds: readonly string[],
   viewer?: WorkspaceArtifactViewer,
-): Promise<Set<string>> {
+): Promise<{ kept: Set<string>; archived: Set<string> }> {
   const ids = [...new Set(appIds.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()))];
-  if (!ids.length) return new Set();
+  if (!ids.length) return { kept: new Set(), archived: new Set() };
   const viewerSubject = viewer?.subjectId ?? null;
   const openable = !viewer
     ? sql``
@@ -204,10 +205,15 @@ export async function readKeptSidebarAppIds(
     db,
     scope,
     async (tx) => {
-      const result = await tx.execute(sql`select a.id::text as id from workspace_artifacts a
+      const result =
+        await tx.execute(sql`select a.id::text as id, a.status from workspace_artifacts a
         where a.account_id = ${scope.accountId}::uuid and a.workspace_id = ${scope.workspaceId}::uuid
           and a.id = any(${`{${ids.join(",")}}`}::uuid[])${openable}`);
-      return new Set(rows<{ id: string }>(result).map((row) => row.id));
+      const found = rows<{ id: string; status: string }>(result);
+      return {
+        kept: new Set(found.map((row) => row.id)),
+        archived: new Set(found.filter((row) => row.status !== "active").map((row) => row.id)),
+      };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
