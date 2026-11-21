@@ -6,13 +6,13 @@ import { createDb, rawRows, withRlsContext } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { createConnection, createEventSource, nestedPostgresSqlState } from "../src";
-import { sharedSlackEventSourceIds } from "../src/organization-slack-bots";
+import { sharedSlackEventSources } from "../src/organization-slack-bots";
 
 const postgresTest = process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? test : test.skip;
 const signature = "list_shared_slack_event_sources_v1(uuid, uuid, uuid, text)";
 
 postgresTest(
-  "1537 lists the Slack sources of the workspaces a bot is live-shared with, as the runtime",
+  "1538 lists the Slack sources of the workspaces a bot is live-shared with, as the runtime",
   async () => {
     const owned = await acquireOwnerMigratedTestDatabase("shared-slack-event-sources");
     if (!owned) throw new Error("PostgreSQL required");
@@ -89,7 +89,7 @@ postgresTest(
         externalKey: "team:T0OTHER01",
       });
       const list = async () =>
-        await sharedSlackEventSourceIds(db, {
+        await sharedSlackEventSources(db, {
           accountId,
           homeWorkspaceId: home.workspaceId,
           connectionId: bot.id,
@@ -99,6 +99,8 @@ postgresTest(
         {
           workspaceId: target.workspaceId,
           sourceId: sources[target.workspaceId]!,
+          status: "active",
+          statusReason: null,
         },
       ];
 
@@ -116,6 +118,28 @@ postgresTest(
       await owned.admin`update opengeni_private.organization_slack_bot_access
         set workspace_ids = ${[target.workspaceId, foreign.workspaceId]}::uuid[]
         where connection_id = ${bot.id}`;
+      expect(await list()).toEqual(shareTarget);
+      // A saved selection naming the home workspace or another organization's
+      // never reaches them, and nothing outside it is visited.
+      await owned.admin`update opengeni_private.organization_slack_bot_access
+        set workspace_ids = ${[home.workspaceId, foreign.workspaceId]}::uuid[]
+        where connection_id = ${bot.id}`;
+      expect(await list()).toEqual([]);
+      await owned.admin`update opengeni_private.organization_slack_bot_access
+        set workspace_ids = ${[target.workspaceId]}::uuid[] where connection_id = ${bot.id}`;
+      // Each source comes with its status, so recording reads nothing else.
+      await withRlsContext(db, target, async (tx) => {
+        await tx.execute(sql`update event_sources
+          set status = 'disabled', status_reason = 'Turned off'
+          where id = ${sources[target.workspaceId]!}::uuid`);
+      });
+      expect(await list()).toEqual([
+        { ...shareTarget[0]!, status: "disabled", statusReason: "Turned off" },
+      ]);
+      await withRlsContext(db, target, async (tx) => {
+        await tx.execute(sql`update event_sources set status = 'active', status_reason = null
+          where id = ${sources[target.workspaceId]!}::uuid`);
+      });
       expect(await list()).toEqual(shareTarget);
       // Revoked: nothing.
       await owned.admin`update opengeni_private.organization_slack_bot_access

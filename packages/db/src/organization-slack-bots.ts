@@ -1,3 +1,4 @@
+import type { EventSourceStatus } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { getConnectionMetadata, listConnectionsMetadata } from "./connection-metadata";
@@ -86,28 +87,48 @@ export async function availableSlackBotConnectionMetadata(
   return [...local, ...shared.filter((row) => row !== null)];
 }
 
+/** A shared workspace's Slack source, with what recording a delivery into it needs. */
+export type SharedSlackEventSource = {
+  workspaceId: string;
+  sourceId: string;
+  status: EventSourceStatus;
+  statusReason: string | null;
+};
+
 /**
  * The Slack event sources, for one Slack team, of the other workspaces the
- * organization currently shares this home bot with (migration 1530). Empty
+ * organization currently shares this home bot with (migration 1538). Empty
  * unless the bot is the active verified install and its sharing is enabled;
- * the saved workspace allowlist applies. Ids only, in one statement.
+ * the saved workspace allowlist applies. In one statement, with each source's
+ * status, so recording needs no further read.
  */
-export async function sharedSlackEventSourceIds(
+export async function sharedSlackEventSources(
   db: Database,
   scope: { accountId: string; homeWorkspaceId: string; connectionId: string; externalKey: string },
-): Promise<{ workspaceId: string; sourceId: string }[]> {
+): Promise<SharedSlackEventSource[]> {
   const rows = await withRlsContext(
     db,
     { accountId: scope.accountId, workspaceId: scope.homeWorkspaceId },
     async (tx) =>
-      rawRows<{ workspace_id: string; source_id: string }>(
+      rawRows<{
+        workspace_id: string;
+        source_id: string;
+        status: EventSourceStatus;
+        status_reason: string | null;
+      }>(
         tx,
-        sql`select workspace_id, source_id from opengeni_private.list_shared_slack_event_sources_v1(
-          ${scope.accountId}::uuid, ${scope.homeWorkspaceId}::uuid, ${scope.connectionId}::uuid,
-          ${scope.externalKey}::text)`,
+        sql`select workspace_id, source_id, status, status_reason
+          from opengeni_private.list_shared_slack_event_sources_v1(
+            ${scope.accountId}::uuid, ${scope.homeWorkspaceId}::uuid, ${scope.connectionId}::uuid,
+            ${scope.externalKey}::text)`,
       ),
   );
-  return rows.map((row) => ({ workspaceId: row.workspace_id, sourceId: row.source_id }));
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sourceId: row.source_id,
+    status: row.status,
+    statusReason: row.status_reason,
+  }));
 }
 
 /**

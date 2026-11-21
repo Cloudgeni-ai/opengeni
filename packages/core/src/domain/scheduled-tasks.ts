@@ -1593,11 +1593,6 @@ async function withScheduledTaskEventsUpdate(
   };
 }
 
-/**
- * Record the edit's account and connector choice changes in the transaction
- * that commits it. Every update writer (form, API, agent tool, access
- * refresh) commits through the validated update.
- */
 /** The audit action written when an agent change replaces an automation's own chat. */
 export const SCHEDULED_TASK_AGENT_CHAT_CHANGE_AUDIT_ACTION = "scheduled_task.agent_chat_changed";
 
@@ -1630,6 +1625,11 @@ function withScheduledTaskAgentChatChangeAudit(
   };
 }
 
+/**
+ * Record the edit's account and connector choice changes in the transaction
+ * that commits it. Every update writer (form, API, agent tool, access
+ * refresh) commits through the validated update.
+ */
 function withScheduledTaskAccountChoiceAudit(
   grant: AccessGrant,
   existing: ScheduledTask,

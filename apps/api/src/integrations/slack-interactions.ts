@@ -857,9 +857,10 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       });
     // The Slack event sources of the bot's home workspace and of the
     // workspaces its organization shares it with record channel activity for
-    // automations. Conversations below never depend on them.
+    // automations. Conversations below never depend on them, and Slack's
+    // acknowledgement never waits on the shared workspaces' deliveries.
     try {
-      await recordSlackEvent({
+      const recorded = await recordSlackEvent({
         db: deps.db,
         settings: deps.settings,
         accountId: installation.accountId,
@@ -868,6 +869,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         teamId,
         body: signed.rawBytes,
       });
+      void recorded.shared;
     } catch (error) {
       console.error("[slack-interactions] recording the Slack event failed", {
         workspaceId: installation.workspaceId,

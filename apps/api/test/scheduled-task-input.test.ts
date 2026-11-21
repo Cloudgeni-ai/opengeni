@@ -3,6 +3,7 @@ import { CreateScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengen
 import { contractToolInput } from "../src/mcp/contract-input";
 import {
   resolveScheduledTaskCreateInput,
+  scheduledTaskAgentNameRefusal,
   scheduledTaskCreateToolInput,
   scheduledTaskCreateToolValidation,
   withResolvedScheduledTaskAgent,
@@ -60,6 +61,23 @@ describe("conversational scheduling input", () => {
         async () => ({ ok: false, message: 'No agent named "Nobody"' }),
       ),
     ).rejects.toThrow('No agent named "Nobody"');
+  });
+
+  test("an agent name that names no agent, or several, is refused in scheduling words", () => {
+    const missing = scheduledTaskAgentNameRefusal(" Nobody ", { code: "agent_not_found" });
+    expect(missing).toBe(
+      'No agent named "Nobody" is available here to the person this chat acts for. Check the agent\'s name, or give agentConfig.agentId; leave out agentConfig.agentName to schedule without an agent.',
+    );
+    expect(missing).not.toContain("do the work yourself");
+    expect(
+      scheduledTaskAgentNameRefusal("Triage", {
+        code: "agent_name_ambiguous",
+        agentIds: ["a1", "a2"],
+      }),
+    ).toBe(
+      'More than one agent is named "Triage". Give agentConfig.agentId instead, one of: a1, a2.',
+    );
+    expect(scheduledTaskAgentNameRefusal("Triage", { code: "agent_archived" })).toBeNull();
   });
 
   test("published MCP schema admits the minimal call without injecting separate-agent defaults", () => {

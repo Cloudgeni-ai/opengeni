@@ -32,6 +32,7 @@ import {
   resolveTurnBillingOrigin,
   scheduledTaskViewerForGrant,
   updateEventSourceForViewer,
+  withSlackSourceSharing,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -277,11 +278,19 @@ export function registerEventTools(
         });
       }
       const [sources, ready] = await Promise.all([
-        listEventSources(deps.db, grant.workspaceId, reader.subjectId).then((all) =>
-          all
-            .filter((source) => eventSourceAccess(reader, source) !== "none")
-            .map((source) => sourceForModel(source)),
-        ),
+        listEventSources(deps.db, grant.workspaceId, reader.subjectId)
+          .then((all) =>
+            withSlackSourceSharing(
+              deps.db,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId },
+              all,
+            ),
+          )
+          .then((all) =>
+            all
+              .filter((source) => eventSourceAccess(reader, source) !== "none")
+              .map((source) => sourceForModel(source)),
+          ),
         canAddSources
           ? listReadyEventSources(network, {
               accountId: grant.accountId,

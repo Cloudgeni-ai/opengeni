@@ -34,6 +34,7 @@ import {
   scheduledTaskViewerForGrant,
   sendTestEvent,
   updateEventSourceForViewer,
+  withSlackSourceSharing,
   type ApiRouteDeps,
   type EventSourceViewer,
 } from "@opengeni/core";
@@ -95,8 +96,12 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   }
 
   app.get("/v1/workspaces/:workspaceId/event-sources", async (c) => {
-    const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
-    const sources = await listEventSources(db, workspaceId, viewer.subjectId);
+    const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
+    const sources = await withSlackSourceSharing(
+      db,
+      { accountId: grant.accountId, workspaceId },
+      await listEventSources(db, workspaceId, viewer.subjectId),
+    );
     return c.json(
       ListEventSourcesResponse.parse({
         sources: sources
@@ -149,9 +154,11 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.get("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
-    const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
-    const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "use");
-    return c.json(EventSource.parse(forViewer(viewer, eventSourceForClient(source, baseUrl(c)))));
+    const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
+    const [source] = await withSlackSourceSharing(db, { accountId: grant.accountId, workspaceId }, [
+      await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "use"),
+    ]);
+    return c.json(EventSource.parse(forViewer(viewer, eventSourceForClient(source!, baseUrl(c)))));
   });
 
   app.patch("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {
