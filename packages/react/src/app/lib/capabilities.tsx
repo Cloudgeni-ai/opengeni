@@ -36,7 +36,7 @@ export function capabilityKindLabel(kind: CapabilityKind): string {
 
 export function capabilityItemKindLabel(item: CapabilityCatalogItem): string {
   return item.surfaceType === "provider_integration"
-    ? "Integration"
+    ? "Connected tool"
     : capabilityKindLabel(item.kind);
 }
 
@@ -173,7 +173,7 @@ export function capabilityErrorToast(
   if (isMissingCredentialsError(error)) {
     return {
       title: "Credentials needed",
-      description: "This integration needs to be connected before it can be enabled.",
+      description: "This connected tool needs to be connected before it can be enabled.",
     };
   }
   const serverMessage = cleanApiErrorMessage(apiErrorFacts(error).serverMessage ?? "");
@@ -448,7 +448,7 @@ const CATEGORY_LABELS: Readonly<Record<string, string>> = {
   "developer-tools": "Developer tools",
   files: "Files",
   finance: "Finance",
-  integrations: "Integrations",
+  integrations: "Connected tools",
   marketing: "Marketing",
   productivity: "Productivity",
   "project-management": "Project management",

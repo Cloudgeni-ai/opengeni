@@ -545,7 +545,7 @@ type SiteLocationTransport = {
 function readinessUnsupported(): OpenGeniSiteBridgeError {
   return new OpenGeniSiteBridgeError(
     "readiness_unsupported",
-    "This Site host doesn't report tool readiness; call the tool and handle its result",
+    "This app host doesn't report tool readiness; call the tool and handle its result",
   );
 }
 
@@ -582,7 +582,7 @@ function notifyLocationListeners(
 function invalidLocation(): OpenGeniSiteBridgeError {
   return new OpenGeniSiteBridgeError(
     "invalid_location",
-    "Navigate only to addresses of this Site; open other addresses with a link or window.open",
+    "Navigate only to addresses of this app; open other addresses with a link or window.open",
   );
 }
 
@@ -697,7 +697,7 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport, SiteL
       typeof envelope.code === "string" ? envelope.code : "local_codemode_error",
       typeof envelope.message === "string"
         ? envelope.message
-        : `Local Site tool request failed with HTTP ${response.status}`,
+        : `Local app tool request failed with HTTP ${response.status}`,
       envelope.retryable === true,
       envelope.outcomeUnknown === true,
     );
@@ -748,7 +748,7 @@ function watchLocalLocation(listener: (location: OpenGeniSiteLocationValue) => v
 function siteLocationUnsupported(): OpenGeniSiteBridgeError {
   return new OpenGeniSiteBridgeError(
     "location_unsupported",
-    "This Site host does not support navigation",
+    "This app host does not support navigation",
   );
 }
 
@@ -800,7 +800,7 @@ function localCodemodeSuffix(method: string, path: string): string {
   if (method === "POST" && path.endsWith("/tools/resolve")) return "/resolve";
   if (method === "POST" && path.endsWith("/tools/invoke")) return "/invoke";
   if (method === "POST" && path.endsWith("/tools/readiness")) throw readinessUnsupported();
-  throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported Site tool request");
+  throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported app tool request");
 }
 
 export function isOpenGeniSiteBridgeConnectMessage(
@@ -972,7 +972,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
       event.preventDefault();
       this.navigate(to, false).catch((error: unknown) => {
         // A refused address (for example under /_og) keeps the Site where it is.
-        console.warn("Opengeni Site link was not followed", error);
+        console.warn("Opengeni app link was not followed", error);
       });
     };
     linkTarget.addEventListener("click", onClick);
@@ -996,7 +996,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
     if (!isOpenGeniSiteViewer(value))
       throw new OpenGeniSiteBridgeError(
         "invalid_viewer",
-        "The Site host returned an invalid viewer",
+        "The app host returned an invalid viewer",
       );
     return value;
   }
@@ -1095,7 +1095,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
     if (!location)
       throw new OpenGeniSiteBridgeError(
         "invalid_location",
-        "The Site host returned an invalid location",
+        "The app host returned an invalid location",
       );
     return location;
   }
@@ -1112,9 +1112,9 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
       if (!this.targetTools)
         throw new OpenGeniSiteBridgeError(
           "target_tools_unsupported",
-          "Upgrade the Site host to use targeted tools",
+          "Upgrade the app host to use targeted tools",
         );
-      if (!isRecord(body)) throw new TypeError("Site target payload is required");
+      if (!isRecord(body)) throw new TypeError("App target payload is required");
       const request = body as ToolGatewayInvokeRequest;
       return (await this.request(
         path.endsWith("/tools/resolve")
@@ -1127,7 +1127,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
       await this.connect();
       if (!this.toolReadiness) throw readinessUnsupported();
       if (!isRecord(body) || !Array.isArray(body.targets))
-        throw new TypeError("Site readiness targets are required");
+        throw new TypeError("App readiness targets are required");
       // The host supplies the Site and version; nothing else crosses.
       return (await this.request(
         { method: "readiness", payload: { targets: body.targets as ToolGatewayTarget[] } },
@@ -1141,7 +1141,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
       return (await this.request({ method: "declarations" }, requestOptions)) as T;
     }
     if (method === "POST" && path.endsWith("/tools/calls")) {
-      if (!isRecord(body)) throw new TypeError("Site tool call payload is required");
+      if (!isRecord(body)) throw new TypeError("App tool call payload is required");
       return (await this.request(
         {
           method: "call",
@@ -1150,7 +1150,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         requestOptions,
       )) as T;
     }
-    throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported Site bridge request");
+    throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported app bridge request");
   }
 
   close(): void {
@@ -1203,11 +1203,11 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
           request.method === "call" || request.method === "invoke"
             ? new OpenGeniSiteBridgeError(
                 "timeout",
-                "Site tool request timed out after execution may have started",
+                "App tool request timed out after execution may have started",
                 false,
                 true,
               )
-            : new OpenGeniSiteBridgeError("timeout", "Site tool request timed out", true),
+            : new OpenGeniSiteBridgeError("timeout", "App tool request timed out", true),
         );
       }, timeoutMs);
       const abort = () => {
@@ -1235,7 +1235,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         reject(
           new OpenGeniSiteBridgeError(
             typeof error.code === "string" ? error.code : "bridge_error",
-            typeof error.message === "string" ? error.message : "Site tool request failed",
+            typeof error.message === "string" ? error.message : "App tool request failed",
             error.retryable === true,
             error.outcomeUnknown === true,
             isRecord(error.details) && typeof error.details.code === "string"
@@ -1265,7 +1265,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
   }
 
   private async connect(): Promise<MessagePort> {
-    if (this.closed) throw new OpenGeniSiteBridgeError("closed", "Site bridge is closed");
+    if (this.closed) throw new OpenGeniSiteBridgeError("closed", "App bridge is closed");
     if (this.port) return this.port;
     if (this.connecting) return await this.connecting;
     const channel = (this.options.createMessageChannel ?? (() => new MessageChannel()))();
@@ -1275,7 +1275,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
       const timeout = setTimeout(() => {
         cleanup();
         channel.port1.close();
-        reject(new OpenGeniSiteBridgeError("host_timeout", "The Site host did not respond"));
+        reject(new OpenGeniSiteBridgeError("host_timeout", "The app host did not respond"));
       }, timeoutMs);
       const onMessage = (event: MessageEvent<unknown>) => {
         const message = event.data;
@@ -1325,7 +1325,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport, SiteLocation
         .port()
         .then((bootstrapPort) => {
           if (!active) return;
-          if (this.closed) throw new OpenGeniSiteBridgeError("closed", "Site bridge is closed");
+          if (this.closed) throw new OpenGeniSiteBridgeError("closed", "App bridge is closed");
           bootstrapPort.postMessage(
             {
               type: OPENGENI_SITE_BRIDGE_CONNECT,
@@ -1365,7 +1365,7 @@ function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBrid
       port: async () => {
         throw new OpenGeniSiteBridgeError(
           "host_unavailable",
-          "The Site client must run inside a hosted iframe",
+          "The app client must run inside a hosted iframe",
         );
       },
       close: () => undefined,
@@ -1406,7 +1406,7 @@ function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBrid
     port: async () => await port,
     close: () => {
       cleanup();
-      rejectBootstrap?.(new OpenGeniSiteBridgeError("closed", "Site bridge is closed"));
+      rejectBootstrap?.(new OpenGeniSiteBridgeError("closed", "App bridge is closed"));
       resolveBootstrap = null;
       rejectBootstrap = null;
     },

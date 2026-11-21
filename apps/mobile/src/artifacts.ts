@@ -22,7 +22,7 @@ export type ArtifactKindFilter = "all" | Exclude<ArtifactCatalogKind, "file">;
 /** The type chips, in the web library's order. Files show under All. */
 export const ARTIFACT_KIND_FILTERS: readonly { kind: ArtifactKindFilter; label: string }[] = [
   { kind: "all", label: "All" },
-  { kind: "site", label: "Sites" },
+  { kind: "site", label: "Apps" },
   { kind: "document", label: "Documents" },
   { kind: "presentation", label: "Presentations" },
   { kind: "spreadsheet", label: "Spreadsheets" },
@@ -30,7 +30,7 @@ export const ARTIFACT_KIND_FILTERS: readonly { kind: ArtifactKindFilter; label: 
 ];
 
 export const ARTIFACT_KIND_LABEL: Record<ArtifactCatalogKind, string> = {
-  site: "Site",
+  site: "App",
   document: "Document",
   presentation: "Presentation",
   spreadsheet: "Spreadsheet",
@@ -79,7 +79,7 @@ export function emptyListWords(
   if (query.trim()) return { title: `No ${noun} match “${query.trim()}”`, body: "" };
   return {
     title: kind === "all" ? "No artifacts yet" : `No ${noun} yet`,
-    body: "Sites, documents, presentations and files your agents make show up here.",
+    body: "Apps, documents, presentations and files your agents make show up here.",
   };
 }
 

@@ -112,7 +112,7 @@ export const siteToolNotAvailableForViewer = () =>
   new ApiHttpError(404, {
     code: "not_found",
     message:
-      "This Site uses an account that isn't yours, so it can't run this for you. Ask the Site's owner to publish it again so it can use your own account.",
+      "This app uses an account that isn't yours, so it can't run this for you. Ask the app's owner to publish it again so it can use your own account.",
     retryable: false,
     outcomeUnknown: false,
     details: { code: "site_tool_not_available_for_viewer" },
@@ -431,7 +431,7 @@ export async function declareSiteToolsForEveryViewer(
       claims.turnId,
     ).catch((error: unknown) => {
       throw new WorkspaceArtifactOperationError(
-        "Couldn't read this turn's connected accounts, so the Site's tools couldn't be shared with other viewers. Nothing was published; publish again.",
+        "Couldn't read this turn's connected accounts, so the app's tools couldn't be shared with other viewers. Nothing was published; publish again.",
         { cause: error },
       );
     });

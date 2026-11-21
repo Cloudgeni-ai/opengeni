@@ -63,7 +63,7 @@ export const SITE_FRAME_PIECE_CHARS = 1024 * 1024;
 /** Thrown into the stream when the page grows past SITE_FRAME_MAX_BYTES. */
 export class SiteFrameTooLargeError extends Error {
   constructor() {
-    super("Site page exceeds the gateway's size limit");
+    super("App page exceeds the gateway's size limit");
     this.name = "SiteFrameTooLargeError";
   }
 }

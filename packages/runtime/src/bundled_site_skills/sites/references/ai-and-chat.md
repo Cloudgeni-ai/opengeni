@@ -1,16 +1,16 @@
-# AI, conversations and Opengeni UI in a Site
+# AI, conversations and Opengeni UI in an app
 
 ## Prefer Opengeni's UI and typed client
 
 - Prefer `@opengeni/react` components and compiled CSS for Opengeni-native
   session, timeline, composer, queue, approval, and human-input experiences.
-- Use custom React only where the Site has a genuinely different product need.
+- Use custom React only where the app has a genuinely different product need.
 - Inside the published opaque-origin iframe, create the workspace-bound client
   with `@opengeni/sdk/site`. The parent host owns credentials and workspace
-  identity; Site code receives neither.
+  identity; app code receives neither.
 
-Published Sites have no browser localStorage/sessionStorage. Do not rely on
-them for startup or session selection; use React state, Site Data for anything
+Published apps have no browser localStorage/sessionStorage. Do not rely on
+them for startup or session selection; use React state, app data for anything
 that must persist, and the SDK's durable session/draft APIs. A sandbox-local
 page having storage does not prove the published iframe does.
 
@@ -40,14 +40,14 @@ permissions, tool selection, approvals, metering and outsider caps. Aborting the
 observation does not cancel the task. `site.ai.result(id, { turnId })` replays
 without creating more work. Supplying `after` returns subsequent text only;
 retain earlier text or omit it for a full replay. Keep retry keys stable per
-action and handles in viewer-private state/storage, not shared Site Data.
+action and handles in viewer-private state/storage, not shared app data.
 
-Site AI is private per viewer by default and does not clutter the workspace
+App AI is private per viewer by default and does not clutter the workspace
 sidebar or ordinary search. Signed-in members use their real human identity;
 guests use existing cookie/visitor continuity, not a shared anonymous chat.
 If organization policy disallows private execution, surface its explicit
 refusal; never fall back to shared sessions. Privacy does not automatically
-extend to separately published artifacts or shared Site Data.
+extend to separately published artifacts or shared app data.
 
 ### Optional conversation UI
 
@@ -79,19 +79,19 @@ then mount `SessionConversation` with the returned id. Do not send that first
 message a second time after creation. A useful default list is
 `site.client.listSessionPage(site.workspaceId, { originSiteId: "current" })`;
 render returned `pinned` and `sessions` (deduplicated by id) and use `nextCursor`
-for older results. Published calls automatically record their Site origin—do not
+for older results. Published calls automatically record their app origin—do not
 write origin metadata yourself. The local preview has no published identity, so
-this filter returns no Site history there; test newly created/current conversations
+this filter returns no app history there; test newly created/current conversations
 locally and the selector after publication.
 
-Do not automatically create a project just to group Site chats. Site execution
+Do not automatically create a project just to group app chats. App execution
 does not appear in ordinary workspace discovery, even for its owner. The host
-Site page provides a viewer-scoped Conversations panel independently of app
+app page provides a viewer-scoped Conversations panel independently of app
 navigation. Opening existing sessions never changes their origin or audience.
-Page code cannot widen the Site boundary by supplying project, visibility,
+Page code cannot widen the app boundary by supplying project, visibility,
 tools or credential fields; use ordinary authoring tools for project management.
 
-Per-Site AI costs are in Insights: actual credit charges are distinct from
+Per-app AI costs are in Insights: actual credit charges are distinct from
 API-equivalent subscription/own-key estimates and unbilled platform counters.
 Usage is for limits. Do not build private transcript or viewer analytics into
 shared dashboards just because aggregate costs are visible there.
@@ -104,7 +104,7 @@ Use the lower-level hooks/components only for intentionally custom behavior.
 
 The host owns the chat's available space; `SessionConversation` fills it.
 The SDK defaults to dark colors. On a light panel, set `data-og-theme="light"`
-on its wrapper; changing the Site's body background does not select the SDK
+on its wrapper; changing the app's body background does not select the SDK
 theme, and the outer app's theme does not cross the iframe. Keep
 foreground and background on the same SDK tokens rather than overriding
 message/button colors individually. Check a real assistant reply, expanded
@@ -123,7 +123,7 @@ composer drafts, Send/Steer and queue/control use this client. The same local
 Bun preview handler (`createCodemodeSiteRequestHandler()`, see "Use normal
 Bun + React" in `references/build-and-preview.md`) forwards them using the
 agent's current Codemode token;
-published Sites use the viewing user's host auth. Agent authority remains
+published apps use the viewing user's host auth. Agent authority remains
 agent authority: testing cannot approve on a human's behalf. Where preview access
 permits, test a real Send
 and streamed reply, not just a successful page load. Also pause, queue two
@@ -131,7 +131,7 @@ messages, edit/delete a queued message, and resume; verify pending messages
 remain visible and are not duplicated in the timeline.
 
 The optional `@pierre/diffs` peer brings a large syntax-language bundle. For
-a small self-contained Site that does not need highlighted diffs, exclude
+a small self-contained app that does not need highlighted diffs, exclude
 `@pierre/diffs` and `@pierre/diffs/react` with Bun's `--external` build flags;
 the React renderer already provides a plain-diff fallback. Do not externalize
 the Opengeni SDK, React, or other required runtime imports.

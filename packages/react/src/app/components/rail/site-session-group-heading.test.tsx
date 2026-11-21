@@ -141,7 +141,7 @@ async function renderRow({
   };
 }
 
-test("a Site row's menu offers its own actions before the sidebar's Move", async () => {
+test("an app row's menu offers its own actions before the sidebar's Move", async () => {
   const row = await renderRow({ permissions: ["artifacts:publish"] });
   try {
     await row.openMenu();
@@ -150,12 +150,12 @@ test("a Site row's menu offers its own actions before the sidebar's Move", async
       "Copy title",
       "Pin",
       "Duplicate",
-      "Site details",
+      "App details",
       "Archive",
       "Default",
       "Bugfixes",
     ]);
-    const details = row.items().find((item) => item.textContent === "Site details")!;
+    const details = row.items().find((item) => item.textContent === "App details")!;
     expect(details.getAttribute("href")).toBe(
       `/workspaces/${workspaceId}/artifacts/${origin.siteId}?tab=settings`,
     );
@@ -180,7 +180,7 @@ test("a Site row's menu offers its own actions before the sidebar's Move", async
   }
 });
 
-test("people who can't publish get no Duplicate; a published Site opens on the web", async () => {
+test("people who can't publish get no Duplicate; a published app opens on the web", async () => {
   const row = await renderRow({
     permissions: ["artifacts:read"],
     publication: {
@@ -195,13 +195,13 @@ test("people who can't publish get no Duplicate; a published Site opens on the w
       "Copy link",
       "Copy title",
       "Pin",
-      "Site details",
+      "App details",
       "Archive",
-      "Open published Site",
+      "Open published app",
       "Default",
       "Bugfixes",
     ]);
-    const open = row.items().find((item) => item.textContent === "Open published Site")!;
+    const open = row.items().find((item) => item.textContent === "Open published app")!;
     expect(open.getAttribute("href")).toBe("https://usage-4k9x.sites.example/");
     expect(open.getAttribute("target")).toBe("_blank");
   } finally {

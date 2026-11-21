@@ -226,7 +226,7 @@ export async function withSiteSqlDatabaseLock<T>(
 ): Promise<T> {
   return scoped(db, scope, async (tx) => {
     const [row] = await rawRows<DatabaseRow>(tx, selectDatabase(scope, true));
-    if (!row) throw new SiteSqlStoreError("not_found", "Site SQL is not set up for this Site");
+    if (!row) throw new SiteSqlStoreError("not_found", "App SQL is not set up for this app");
     return fn(tx, toDatabase(row));
   });
 }
@@ -261,7 +261,7 @@ export function siteSqlMigrationQuotaError(): SiteSqlStoreError {
   const limit = SITE_SQL_HARD_LIMITS.migrationBytesPerSite;
   return new SiteSqlStoreError(
     "quota_exceeded",
-    `A Site's migrations hold at most ${limit / (1024 * 1024)} MiB of SQL together; load data with site_sql_import instead of a migration, or reset with schema "drop" and start from one consolidated migration`,
+    `An app's migrations hold at most ${limit / (1024 * 1024)} MiB of SQL together; load data with app_sql_import instead of a migration, or reset with schema "drop" and start from one consolidated migration`,
     { quota: "migration_bytes_per_site", limit },
   );
 }
@@ -298,7 +298,7 @@ export async function appendSiteSqlMigration(
       where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}
       returning migration_count`,
   );
-  if (!counter) throw new SiteSqlStoreError("not_found", "Site SQL is not set up for this Site");
+  if (!counter) throw new SiteSqlStoreError("not_found", "App SQL is not set up for this app");
   const [row] = await rawRows<MigrationRow>(
     tx,
     sql`insert into site_sql_migrations

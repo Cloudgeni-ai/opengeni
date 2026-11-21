@@ -37,7 +37,7 @@ describe("provider-neutral operational instructions", () => {
       "check whether the workspace already provides the capability natively",
     );
     expect(guidance).toContain(
-      "a Site reaches the model and workspace tools through the host bridge",
+      "an app reaches the model and workspace tools through the host bridge",
     );
     expect(guidance).toContain(
       "Follow the project's established architecture and choices the user has already authorized or delegated",

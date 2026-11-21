@@ -114,10 +114,10 @@ export async function requireServedSiteRuntimeHost(
 ): Promise<SiteRuntimeHost & { versionId: string }> {
   const found = await findSiteRuntimeHost(deps, domain, host);
   if (!found)
-    throw sitePublishingError(404, "not_found", "site_not_found", "This Site does not exist");
+    throw sitePublishingError(404, "not_found", "site_not_found", "This app does not exist");
   const { publication, site } = found;
   if (publication.status !== "active" || !siteServable(site) || !site.currentVersionId)
-    throw sitePublishingError(410, "not_found", "site_unavailable", "This Site is not available", {
+    throw sitePublishingError(410, "not_found", "site_unavailable", "This app is not available", {
       status: publication.status === "suspended" ? "suspended" : "unpublished",
     });
   return { ...found, versionId: site.currentVersionId };
@@ -152,7 +152,7 @@ export async function resolveSiteRuntimeViewer(
       403,
       "forbidden",
       "site_access_denied",
-      "You do not have access to this Site",
+      "You do not have access to this app",
     );
   const access = effectiveSiteAccess(publication.access, deps.settings);
   if (fields.session) {
@@ -224,7 +224,7 @@ export async function resolveSiteRuntimeViewer(
     401,
     "unauthenticated",
     "site_sign_in_required",
-    "Sign in to view this Site",
+    "Sign in to view this app",
   );
 }
 
@@ -410,8 +410,8 @@ export { SITE_RUNTIME_AGENT_PERMISSIONS };
 
 /** A short display label for the viewer, recorded as the end user of the agent's work. */
 export function siteRuntimeViewerLabel(viewer: SiteRuntimeViewer): string {
-  if (viewer.kind === "guest") return "Site guest";
-  const who = viewer.name?.trim() || viewer.email || "Site viewer";
+  if (viewer.kind === "guest") return "App guest";
+  const who = viewer.name?.trim() || viewer.email || "App viewer";
   return who.slice(0, 120);
 }
 
@@ -468,10 +468,10 @@ export async function resolveSiteAgentViewer(
 }
 
 const AGENT_REFUSAL_MESSAGES: Record<string, string> = {
-  agent_disabled: "This Site's assistant is not available to you",
-  usage_limits_disabled: "This Site's assistant is not available to you",
-  guest_agents_disabled: "Sign in to use this Site's assistant",
-  public_agents_disabled: "This Site's assistant is only available to invited people",
+  agent_disabled: "This app's assistant is not available to you",
+  usage_limits_disabled: "This app's assistant is not available to you",
+  guest_agents_disabled: "Sign in to use this app's assistant",
+  public_agents_disabled: "This app's assistant is only available to invited people",
 };
 
 export function requireSiteAgent(
@@ -484,13 +484,13 @@ export function requireSiteAgent(
   if (reason)
     throw siteNotAvailableForViewer(
       "agent",
-      AGENT_REFUSAL_MESSAGES[reason] ?? "This Site's assistant is not available to you",
+      AGENT_REFUSAL_MESSAGES[reason] ?? "This app's assistant is not available to you",
       { reason },
     );
 }
 
 /** What someone outside the workspace is told when the workspace can't pay for their turn. */
-export const SITE_AGENT_UNFUNDED_MESSAGE = "This Site's assistant isn't available right now";
+export const SITE_AGENT_UNFUNDED_MESSAGE = "This app's assistant isn't available right now";
 
 /** The refusal for someone outside the workspace whose turn the workspace can't pay for. */
 export function siteAgentUnfunded(reason: SiteAgentUnfundedReason = "no_credits") {
@@ -538,17 +538,16 @@ function budgetExhausted(budget: string, message: string) {
 
 const BUDGET_MESSAGES: Record<SiteRuntimeBudget, string> = {
   conversations_per_visitor_per_day:
-    "You have started as many conversations as this Site allows today",
+    "You have started as many conversations as this app allows today",
   conversations_per_site_per_day:
-    "This Site's assistant has started as many conversations as it allows today",
+    "This app's assistant has started as many conversations as it allows today",
   turns_per_conversation: "This conversation has reached its message limit; start a new one",
   agent_micros_per_conversation: "This conversation has reached its budget; start a new one",
-  agent_micros_per_visitor_per_day:
-    "You have used this Site's assistant as much as it allows today",
+  agent_micros_per_visitor_per_day: "You have used this app's assistant as much as it allows today",
   agent_micros_per_visitor_per_month:
-    "You have used this Site's assistant as much as it allows this month",
-  agent_micros_per_site_per_day: "This Site's assistant has reached its limit for today",
-  agent_micros_per_site_per_month: "This Site's assistant has reached its limit for this month",
+    "You have used this app's assistant as much as it allows this month",
+  agent_micros_per_site_per_day: "This app's assistant has reached its limit for today",
+  agent_micros_per_site_per_month: "This app's assistant has reached its limit for this month",
 };
 
 /** The 429 for a refused reservation. */
@@ -569,7 +568,7 @@ export function siteBudgetBusy(budget: SiteRuntimeBudget) {
     429,
     "limit_exceeded",
     "site_budget_busy",
-    "This Site's assistant is busy right now; try again in a moment",
+    "This app's assistant is busy right now; try again in a moment",
     { budget, retryAfterSeconds: SITE_BUDGET_BUSY_RETRY_SECONDS },
   );
 }

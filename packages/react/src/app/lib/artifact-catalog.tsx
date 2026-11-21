@@ -20,7 +20,7 @@ export const defaultArtifactFilters: ArtifactCatalogFilters = {
 };
 export const artifactKinds = [
   ["all", "All"],
-  ["site", "Sites"],
+  ["site", "Apps"],
   ["image", "Images"],
   ["document", "Documents"],
   ["spreadsheet", "Spreadsheets"],
@@ -28,7 +28,7 @@ export const artifactKinds = [
   ["file", "Other"],
 ] as const;
 export const artifactKindLabel: Record<ArtifactKind, string> = {
-  site: "Site",
+  site: "App",
   image: "Image",
   document: "Document",
   spreadsheet: "Spreadsheet",

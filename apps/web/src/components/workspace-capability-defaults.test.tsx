@@ -179,7 +179,7 @@ test("switching to an exact connector list starts from current apps without touc
     expect(view.host.textContent).not.toContain("Slack connection");
     await view.click("Edit selection");
     const automatic = [...view.host.querySelectorAll("label")]
-      .find((label) => label.textContent === "Use connected apps automatically")!
+      .find((label) => label.textContent === "Use connected tools automatically")!
       .querySelector<HTMLInputElement>("input")!;
     await act(async () => automatic.click());
     expect(view.host.textContent).toContain("New Linear connection");

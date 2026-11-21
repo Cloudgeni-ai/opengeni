@@ -962,7 +962,7 @@ function siteRowSummaries(
     const current = rows.get(key);
     if (!current) {
       // A Site this viewer cannot read and that kept no label still needs a name.
-      const origin = { siteId, title: title.trim() || "Untitled Site" };
+      const origin = { siteId, title: title.trim() || "Untitled app" };
       rows.set(key, { origin, channelId, summary: { ...summary } });
       continue;
     }

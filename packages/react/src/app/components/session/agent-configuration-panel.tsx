@@ -532,7 +532,7 @@ function ConnectedApps({ session }: { session: Session }) {
   const nameOf = (id: string) =>
     session.mcpServers.find((server) => server.id === id)?.name ??
     context.toolMcpServers.find((server) => server.id === id)?.name ??
-    "Custom app";
+    "Custom tool";
   const names = (capability: "product" | "workspaceConnectors") =>
     servers
       .filter((server) => server.capability === capability)
@@ -544,7 +544,7 @@ function ConnectedApps({ session }: { session: Session }) {
   return (
     <section aria-labelledby="agent-connected-apps" className="min-w-0">
       <h3 id="agent-connected-apps" className="pb-1 text-xs leading-4.5 font-medium text-fg-subtle">
-        Connected apps
+        Connected tools
       </h3>
       <dl className="m-0 flex min-w-0 flex-col gap-2 text-sm leading-5">
         {own.length > 0 ? (

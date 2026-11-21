@@ -2173,7 +2173,7 @@ export function SessionList() {
         announcePinResult(`${nextPinned ? "Pinned" : "Unpinned"} ${origin.title}.`);
       } catch (pinError) {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
-        toast.error(nextPinned ? "Couldn't pin the Site." : "Couldn't unpin the Site.", {
+        toast.error(nextPinned ? "Couldn't pin the app." : "Couldn't unpin the app.", {
           description: userErrorText(pinError),
         });
       } finally {
@@ -2238,7 +2238,7 @@ export function SessionList() {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         await refreshSessionPages();
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
-        toast.success(archived ? "Site archived" : "Site restored", {
+        toast.success(archived ? "App archived" : "App restored", {
           ...(archived
             ? {
                 // The Site stays published; only this sidebar changes.
@@ -2258,7 +2258,7 @@ export function SessionList() {
       } catch (archiveError) {
         if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
         setArchived(!archived);
-        toast.error(archived ? "Couldn't archive the Site." : "Couldn't restore the Site.", {
+        toast.error(archived ? "Couldn't archive the app." : "Couldn't restore the app.", {
           description: userErrorText(archiveError),
         });
       } finally {
@@ -2297,7 +2297,7 @@ export function SessionList() {
       } catch (moveError) {
         // Says why, for example that an Only me project takes only Only me Sites.
         if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition))
-          toast.error("Couldn't move the Site. Its previous project was restored.", {
+          toast.error("Couldn't move the app. Its previous project was restored.", {
             description: userErrorText(moveError),
           });
       }
@@ -4143,7 +4143,7 @@ export function SessionList() {
                 ) : null}
                 {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                    Some older Sites aren&apos;t shown. Find them in{" "}
+                    Some older apps aren&apos;t shown. Find them in{" "}
                     <Link
                       to="/workspaces/$workspaceId/artifacts"
                       params={{ workspaceId: rail.workspaceId }}
@@ -4435,7 +4435,7 @@ export function SessionList() {
               if (!open) setProjectPendingShare(null);
             }}
             title={<>Share “{projectPendingShare?.name}” with the workspace?</>}
-            description="Everyone in this workspace will see the project and can file their chats in it. Your Only me chats and Sites in it stay Only me. A shared project can't be made Only me again."
+            description="Everyone in this workspace will see the project and can file their chats in it. Your Only me chats and apps in it stay Only me. A shared project can't be made Only me again."
             confirmLabel="Share project"
             cancelAutoFocus
             onConfirm={onShareProject}

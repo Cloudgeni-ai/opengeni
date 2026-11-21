@@ -348,7 +348,7 @@ export function useApiIntegrationAccounts({
       toast.success(
         `${attempt.installationTarget?.displayName ?? connectName ?? "Account"} connected`,
       );
-      void refresh?.().catch(() => toast.error("Couldn't refresh integrations"));
+      void refresh?.().catch(() => toast.error("Couldn't refresh connected tools"));
       onRuntimeChanged?.();
     },
     [refresh, onRuntimeChanged, connectName],

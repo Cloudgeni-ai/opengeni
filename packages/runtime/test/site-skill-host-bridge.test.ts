@@ -16,43 +16,43 @@ describe("Sites skill single-file path", () => {
     // The main file is all a single-file Site reads; app material lives in references.
     expect(Buffer.byteLength(skill)).toBeLessThan(16 * 1024);
     expect(skill).toContain(
-      'Follow "Single-file Site" below; nothing else in this Skill is\n  needed.',
+      'Follow "Single-file app" below; nothing else in this Skill is\n  needed.',
     );
   });
 
   test("puts the path choice and the single-file Site before any app material", () => {
     const choice = skill.indexOf("## Pick the path first");
-    const simple = skill.indexOf("## Single-file Site");
-    const apps = skill.indexOf("## Apps");
+    const simple = skill.indexOf("## Single-file app");
+    const apps = skill.indexOf("## Full apps");
     expect(choice).toBeGreaterThan(-1);
     expect(choice).toBeLessThan(simple);
     expect(simple).toBeLessThan(apps);
-    expect(simple).toBeLessThan(skill.indexOf("## Sites have no server"));
-    const section = skill.slice(simple, skill.indexOf("## Make new Sites readable by default"));
+    expect(simple).toBeLessThan(skill.indexOf("## Apps have no server"));
+    const section = skill.slice(simple, skill.indexOf("## Make new apps readable by default"));
     expect(section).toContain("Do not set a goal");
     expect(section).toContain("At most one quick look at phone width");
     expect(section).toContain("`requestedTools: []`");
     expect(section).toContain("ask before making it public");
     expect(skill.slice(choice, simple)).toContain(
-      "A Site you can finish in this turn needs no goal.",
+      "An app you can finish in this turn needs no goal.",
     );
   });
 
   test("covers a personal tracker with saved entries without the app path", () => {
     const choice = skill.slice(
       skill.indexOf("## Pick the path first"),
-      skill.indexOf("## Single-file Site"),
+      skill.indexOf("## Single-file app"),
     );
     expect(choice).toContain("keeps the viewer's own entries");
     expect(choice).toContain("Build what the person asked for.");
     expect(choice).toContain("instead of building them");
     const section = skill.slice(
-      skill.indexOf("## Single-file Site"),
-      skill.indexOf("## Make new Sites readable by default"),
+      skill.indexOf("## Single-file app"),
+      skill.indexOf("## Make new apps readable by default"),
     );
     expect(section).toContain('<script src="/__opengeni/site-tools/client.js"></script>');
     expect(section).toContain('.data.collection("entries")');
-    expect(section).toContain("`opengeni__site_data_define_collection`");
+    expect(section).toContain("`opengeni__app_data_define_collection`");
     expect(section).toContain("`per_viewer`");
     expect(section).toContain("preview servers and test harnesses");
     expect(section).toContain("Reply with the link as soon as it is saved");
@@ -62,13 +62,13 @@ describe("Sites skill single-file path", () => {
   test("scopes the heavy checks to apps", () => {
     expect(skill).not.toContain("## Completion gate");
     const build = reference("build-and-preview.md");
-    expect(build).toContain("## Completion gate (apps)");
-    expect(build).toContain("This gate applies to apps.");
+    expect(build).toContain("## Completion gate (full apps)");
+    expect(build).toContain("This gate applies to full apps.");
     const readable = skill.slice(
-      skill.indexOf("## Make new Sites readable by default"),
-      skill.indexOf("## Edit an existing Site"),
+      skill.indexOf("## Make new apps readable by default"),
+      skill.indexOf("## Edit an existing app"),
     );
-    expect(readable).toContain("For an app, before publishing");
+    expect(readable).toContain("For a full app, before publishing");
     expect(readable).toContain("text enlarged to 200%");
   });
 
@@ -82,8 +82,8 @@ describe("Sites skill single-file path", () => {
   });
 
   test("explains a login-only deployment's sign-in page instead of calling sharing broken", () => {
-    const web = skill.slice(skill.indexOf("## Publish to the web"), skill.indexOf("## Apps"));
-    expect(web).toContain("Ask before making a Site public");
+    const web = skill.slice(skill.indexOf("## Publish to the web"), skill.indexOf("## Full apps"));
+    expect(web).toContain("Ask before making an app public");
     expect(web).toContain("`public_sign_in_required`");
     expect(web).toContain("not a broken link");
   });
@@ -104,14 +104,14 @@ describe("Sites skill single-file path", () => {
 
 describe("Sites skill host-bridge rule", () => {
   test("states up front that a Site never needs its own server for Opengeni AI", () => {
-    const rule = skill.indexOf("## Sites have no server; AI comes from the host");
-    const durable = skill.indexOf("## Start from the durable Site");
+    const rule = skill.indexOf("## Apps have no server; AI comes from the host");
+    const durable = skill.indexOf("## Start from the durable app");
     expect(rule).toBeGreaterThan(-1);
     expect(rule).toBeLessThan(durable);
     expect(reference("ai-and-chat.md")).toContain("## Prefer Opengeni's UI and typed client");
 
     const section = skill.slice(rule, durable);
-    expect(section).toContain("A Site never needs its own server, API key, or hosting provider");
+    expect(section).toContain("An app never needs its own server, API key, or hosting provider");
     expect(section).toContain("`createOpenGeniSiteClient` from `@opengeni/sdk/site`");
     expect(section).toContain("`@opengeni/react/session-ui`");
     expect(section).toContain(
@@ -139,18 +139,18 @@ describe("Sites skill host-bridge rule", () => {
   });
 
   test("points persistent data at Site Data instead of a separate server", () => {
-    const rule = skill.indexOf("## Sites have no server; AI comes from the host");
-    const durable = skill.indexOf("## Start from the durable Site");
+    const rule = skill.indexOf("## Apps have no server; AI comes from the host");
+    const durable = skill.indexOf("## Start from the durable app");
     const section = skill.slice(rule, durable);
     expect(section).toContain("Saved data needs no server either");
     expect(section).not.toContain("a persistent database, or scheduled jobs");
     expect(skill).toContain("`references/site-data.md`");
     const guide = reference("site-data.md");
-    expect(guide).toContain("## Save data with Site Data");
+    expect(guide).toContain("## Save data with app data");
     for (const mode of ["`shared`", "`shared_read`", "`per_viewer`", "`append_only`"])
       expect(guide).toContain(mode);
     expect(guide).toContain("never `innerHTML`");
     expect(guide).toContain("`quota_exceeded`");
-    expect(guide).toContain("`opengeni__site_data_define_collection`");
+    expect(guide).toContain("`opengeni__app_data_define_collection`");
   });
 });

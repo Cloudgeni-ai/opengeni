@@ -1913,7 +1913,7 @@ function SessionDockPanel(props: SessionDockProps) {
           ? "Image"
           : currentArtifactRequest.artifactKind === "file"
             ? "File"
-            : "Site",
+            : "App",
     });
   }
   const linkState = useSessionLinks({

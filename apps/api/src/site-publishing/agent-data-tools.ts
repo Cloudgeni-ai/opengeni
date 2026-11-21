@@ -28,22 +28,22 @@ import { effectiveSiteAccess, signedInSiteViewerKind, siteGuestsAllowed } from "
  * `signed_in` or `managers`). Site management tools (publication, migrate,
  * define, reset, import, export, enable, files and so on) are never given.
  *
- * - `site_data_query`, `site_data_write`: the Site's collections under the
+ * - `app_data_query`, `app_data_write`: the Site's collections under the
  *   viewer's access rules (guests only what each collection's guest rule allows).
- * - `site_sql_run`: the Site's named queries, when Site SQL is on.
+ * - `app_sql_run`: the Site's named queries, when Site SQL is on.
  * Workspace members use ordinary native tools, not this visitor profile.
  */
 export const SITE_AGENT_DATA_TOOLS = Object.freeze([
-  "site_data_query",
-  "site_data_write",
+  "app_data_query",
+  "app_data_write",
 ] as const satisfies readonly FirstPartyMcpToolName[]);
 export const SITE_AGENT_SQL_TOOLS = Object.freeze([
-  "site_sql_run",
+  "app_sql_run",
 ] as const satisfies readonly FirstPartyMcpToolName[]);
 
-export const SITE_AGENT_OTHER_SITE_MESSAGE = "This Site's assistant can only use this Site's data";
+export const SITE_AGENT_OTHER_SITE_MESSAGE = "This app's assistant can only use this app's data";
 export const SITE_AGENT_MANAGEMENT_MESSAGE =
-  "This Site's assistant can use the Site's data, not manage the Site";
+  "This app's assistant can use the app's data, not manage the app";
 
 /**
  * The data tools one visitor's Site agent conversation gets, within the
@@ -113,8 +113,8 @@ export function sitePublishedDataViewer(
 }
 
 const VIEWER_WORDS: Record<SiteRuntimeConversationViewerKind, string> = {
-  member: "a member of the workspace that owns this Site",
-  invited: "a person invited to this Site from outside the workspace",
+  member: "a member of the workspace that owns this app",
+  invited: "a person invited to this app from outside the workspace",
   user: "a signed-in visitor from outside the workspace",
   guest: "an anonymous visitor",
 };
@@ -131,12 +131,12 @@ export function siteAgentInstructions(
 ): string {
   if (viewer.kind === "member") return ownerInstructions?.trim() ?? "";
   const lines = [
-    `You are the assistant on the published Site "${host.site.title}" (Site id ${host.site.id}). You are talking with ${VIEWER_WORDS[viewer.kind]}.`,
+    `You are the assistant on the published app "${host.site.title}" (App id ${host.site.id}). You are talking with ${VIEWER_WORDS[viewer.kind]}.`,
     dataTools.length > 0
-      ? `Your tools (${dataTools.join(", ")}) work only on this Site: always pass siteId ${host.site.id}. They act as this person, so they see and change only what this person may on the page. When a tool refuses (for example sign_in_required or not_available_for_viewer), tell the person plainly what can't be done here and why.`
+      ? `Your tools (${dataTools.join(", ")}) work only on this app: always pass siteId ${host.site.id}. They act as this person, so they see and change only what this person may on the page. When a tool refuses (for example sign_in_required or not_available_for_viewer), tell the person plainly what can't be done here and why.`
       : "You have no tools: answer from the conversation.",
-    "This person is outside the workspace: you can only use this Site's own data for them, never workspace tools or files. If they ask for something else, say plainly that you can't do it here.",
-    "You cannot change the Site, its settings, or how its data is defined, and you have no shell or workspace files.",
+    "This person is outside the workspace: you can only use this app's own data for them, never workspace tools or files. If they ask for something else, say plainly that you can't do it here.",
+    "You cannot change the app, its settings, or how its data is defined, and you have no shell or workspace files.",
   ];
   const own = ownerInstructions?.trim();
   return own ? `${lines.join("\n")}\n\n${own}` : lines.join("\n");
@@ -177,7 +177,7 @@ export async function resolveSiteAgentDataContext(
   if (!found.siteAgent) return { kind: "ordinary" };
   const refused = (message: string): SiteAgentDataResolution => ({ kind: "refused", message });
   const conversation = found.conversation;
-  if (!conversation) return refused("This Site's assistant could not confirm its conversation");
+  if (!conversation) return refused("This app's assistant could not confirm its conversation");
   // Member conversations use ordinary native session authorization and data
   // roles, regardless of the surface that admitted a turn.
   if (conversation.viewerKind === "member") return { kind: "ordinary" };
@@ -186,7 +186,7 @@ export async function resolveSiteAgentDataContext(
     getPublishedSite(deps.db, scope, conversation.siteId),
   ]);
   if (!publication || !site || publication.status !== "active" || !siteServable(site))
-    return refused("This Site is not available");
+    return refused("This app is not available");
   const subjectId = conversation.viewerPrincipal.startsWith("user:")
     ? conversation.viewerPrincipal.slice("user:".length)
     : null;
@@ -196,7 +196,7 @@ export async function resolveSiteAgentDataContext(
   let email: string | null = null;
   if (conversation.viewerKind === "guest") {
     if (!siteGuestsAllowed(publication.access, deps.settings))
-      return refused("This conversation's viewer no longer has access to this Site");
+      return refused("This conversation's viewer no longer has access to this app");
   } else {
     email = await siteRuntimeConversationViewerEmail(deps.db, scope, conversation.sessionId);
     const kind =
@@ -207,7 +207,7 @@ export async function resolveSiteAgentDataContext(
         email,
         invitedEmails: publication.invitedEmails,
       });
-    if (!kind) return refused("This conversation's viewer no longer has access to this Site");
+    if (!kind) return refused("This conversation's viewer no longer has access to this app");
     access = kind;
   }
   const domain = deps.settings.sitesDomain ?? "";

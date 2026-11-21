@@ -88,7 +88,7 @@ export default function InboxApprovalsSection() {
         <StateCell label="Outlook draft" align="stretch">
           <Row item={approval("a2", "Save a draft email", "Outlook Mail")} />
         </StateCell>
-        <StateCell label="Several accounts of one integration" align="stretch">
+        <StateCell label="Several accounts of one connected tool" align="stretch">
           <Row item={approval("a3", "Create issue", "Linear · Product team")} />
         </StateCell>
         <StateCell label="App action" align="stretch">

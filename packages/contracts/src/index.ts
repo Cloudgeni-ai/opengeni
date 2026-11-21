@@ -2,6 +2,11 @@ export * from "./model-inference";
 export type * from "./decision-types";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
+import {
+  FIRST_PARTY_MCP_TOOL_ALIASES,
+  FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
+  firstPartyMcpToolAliasTarget,
+} from "./first-party-tool-aliases";
 import * as primitives from "./primitives";
 import {
   WORKSPACE_CONTROL_REASON_MAX_BYTES,
@@ -1302,6 +1307,41 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_rollback",
   "artifacts_archive",
   "artifacts_restore",
+  "app_data_describe",
+  "app_data_define_collection",
+  "app_data_query",
+  "app_data_write",
+  "app_data_import",
+  "app_data_export",
+  "app_data_reset",
+  "app_files_list",
+  "app_files_upload",
+  "app_files_delete",
+  "app_publication_get",
+  "app_publication_update",
+  "app_publication_apply_fix",
+  "app_hostname_check",
+  "app_sql_inspect",
+  "app_sql_enable",
+  "app_sql_migrate",
+  "app_sql_define_query",
+  "app_sql_query",
+  "app_sql_run",
+  "app_sql_execute",
+  "app_sql_export",
+  "app_sql_import",
+  "app_sql_reset",
+  "sandbox_file_publish",
+  "editable_artifact_list",
+  "editable_artifact_create",
+  "editable_artifact_import",
+  "editable_artifact_get",
+  "editable_artifact_inspect",
+  "editable_artifact_apply",
+  "editable_artifact_export",
+  "editable_artifact_export_status",
+  // Former names of the app_* tools (FIRST_PARTY_MCP_TOOL_ALIASES): stored
+  // selections and callers built before the rename still parse and run them.
   "site_data_describe",
   "site_data_define_collection",
   "site_data_query",
@@ -1326,15 +1366,6 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_sql_export",
   "site_sql_import",
   "site_sql_reset",
-  "sandbox_file_publish",
-  "editable_artifact_list",
-  "editable_artifact_create",
-  "editable_artifact_import",
-  "editable_artifact_get",
-  "editable_artifact_inspect",
-  "editable_artifact_apply",
-  "editable_artifact_export",
-  "editable_artifact_export_status",
 ] as const;
 export const FirstPartyMcpToolName = /* @__PURE__ */ defineSchema(() =>
   z.enum(FIRST_PARTY_MCP_TOOL_NAMES),
@@ -1424,6 +1455,19 @@ export const RETIRED_SESSION_TOOL_NAMES = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredSessionTools = new Set<FirstPartyMcpToolName>(RETIRED_SESSION_TOOL_NAMES);
 
+export {
+  FIRST_PARTY_MCP_TOOL_ALIASES,
+  FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
+  currentFirstPartyToolIdentity,
+  currentFirstPartyToolReference,
+  firstPartyMcpToolAliasTarget,
+  firstPartyMcpToolAliasesOf,
+} from "./first-party-tool-aliases";
+// Every alias and its successor are first-party tool names.
+void (FIRST_PARTY_MCP_TOOL_ALIASES satisfies Partial<
+  Record<FirstPartyMcpToolName, FirstPartyMcpToolName>
+>);
+
 const RETIRED_TOOL_SUCCESSORS = {
   variable_set_list: "secret_search",
   environment_list: "secret_search",
@@ -1431,8 +1475,11 @@ const RETIRED_TOOL_SUCCESSORS = {
   variable_set_set_variable: "secret_save",
   environment_set_variable: "secret_save",
   session_send_message: "session_queue_message",
+  ...FIRST_PARTY_MCP_TOOL_ALIASES,
 } as const satisfies Record<
-  (typeof RETIRED_SECRET_TOOL_NAMES)[number] | (typeof RETIRED_SESSION_TOOL_NAMES)[number],
+  | (typeof RETIRED_SECRET_TOOL_NAMES)[number]
+  | (typeof RETIRED_SESSION_TOOL_NAMES)[number]
+  | keyof typeof FIRST_PARTY_MCP_TOOL_ALIASES,
   FirstPartyMcpToolName
 >;
 
@@ -1481,7 +1528,8 @@ export function currentAgentLearningToolSelection(
       name === "remember_confirm" ||
       (!retiredLearningTools.has(name) &&
         !retiredSecretTools.has(name) &&
-        !retiredSessionTools.has(name)),
+        !retiredSessionTools.has(name) &&
+        firstPartyMcpToolAliasTarget(name) === undefined),
   );
 }
 
@@ -1494,6 +1542,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
   ...RETIRED_SECRET_TOOL_NAMES,
   ...RETIRED_SESSION_TOOL_NAMES,
+  ...FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1568,6 +1617,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !retiredLearningTools.has(name) &&
     !retiredSecretTools.has(name) &&
     !retiredSessionTools.has(name) &&
+    firstPartyMcpToolAliasTarget(name) === undefined &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&

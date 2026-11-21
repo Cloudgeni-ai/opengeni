@@ -61,7 +61,7 @@ describe("artifact labels", () => {
     ]) {
       expect(html).toContain(text);
     }
-    for (const english of ["Live", "Close", "Reload Site", "Try again", "Reference:"]) {
+    for (const english of ["Live", "Close", "Reload app", "Try again", "Reference:"]) {
       expect(html).not.toContain(english);
     }
   });

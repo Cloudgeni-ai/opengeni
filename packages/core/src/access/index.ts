@@ -458,7 +458,7 @@ export function stampWorkspacePersonAuthorization(
         .regex(/^external_user:[^\s\u0000-\u001f\u007f]+$/),
     })
     .parse({ ...input, workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] } });
-  if (parsed.workspaceScope.kind !== "selected") throw new Error("Site workspace scope required");
+  if (parsed.workspaceScope.kind !== "selected") throw new Error("App workspace scope required");
   Object.freeze(parsed.permissions);
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);

@@ -97,14 +97,14 @@ export function SiteVersionMenu({
       await client.rollbackWorkspaceArtifact(workspaceId, siteId, {
         versionId: version.id,
         expectedCurrentVersionId: current.id,
-        reason: `${how === "undo" ? "Undone" : "Restored"} from the Site view by ${authSession?.user?.name ?? "a workspace member"}`,
+        reason: `${how === "undo" ? "Undone" : "Restored"} from the app view by ${authSession?.user?.name ?? "a workspace member"}`,
         idempotencyKey: crypto.randomUUID(),
       });
       invalidateArtifactCatalog(client, workspaceId);
       toast.success(`Version ${version.revision} is live again`);
     } catch (error) {
       if (error instanceof OpenGeniApiError && error.status === 409)
-        toast.error("The Site changed meanwhile", { description: "Showing its latest version." });
+        toast.error("The app changed meanwhile", { description: "Showing its latest version." });
       else toast.error("Couldn't restore that version", { description: userErrorText(error) });
     } finally {
       setBusy(null);

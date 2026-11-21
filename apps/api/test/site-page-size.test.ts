@@ -7,7 +7,7 @@ import {
   withSitePageSizeWarnings,
 } from "../src/site-publishing/page-size";
 
-describe("Site page size warnings", () => {
+describe("App page size warnings", () => {
   test("an ordinary page has none, and its publish result is unchanged", () => {
     expect(sitePageSizeWarnings(40_000)).toEqual([]);
     expect(sitePageSizeWarnings(SITE_PAGE_HEAVY_BYTES)).toEqual([]);
@@ -26,7 +26,7 @@ describe("Site page size warnings", () => {
     expect(warning?.suggestion).toContain("link video");
     // Shared Site files reach every visitor, guests of a public Site included: the advice says so.
     expect(warning?.suggestion).toContain("upload them as shared files");
-    expect(warning?.suggestion).toContain("signed-out guests of a public Site included");
+    expect(warning?.suggestion).toContain("signed-out guests of a public app included");
     expect(warning?.suggestion).not.toContain("can't read");
     expect(sitePageSizeWarnings(SITE_PAGE_HEAVY_BYTES + 1)[0]?.message).toContain("5.0 MB");
   });
@@ -35,7 +35,7 @@ describe("Site page size warnings", () => {
     const [warning] = sitePageSizeWarnings(SITE_PAGE_SERVED_MAX_BYTES + 1);
     expect(warning?.code).toBe("page_too_large");
     expect(warning?.message).toContain("256 MB");
-    expect(warning?.message).toContain("Site too large");
+    expect(warning?.message).toContain("App too large");
     expect(sitePageSizeWarnings(SITE_PAGE_SERVED_MAX_BYTES)[0]?.code).toBe("page_heavy");
   });
 

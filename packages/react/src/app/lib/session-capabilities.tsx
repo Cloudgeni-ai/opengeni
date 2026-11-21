@@ -163,7 +163,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     id: "workspace",
     name: "Workspace operations",
     description:
-      "Use sandboxes, sandbox environments, variables, automations and their event sources, artifacts, and Site Data.",
+      "Use sandboxes, sandbox environments, variables, automations and their event sources, artifacts, and app data.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("sandbox") ||
@@ -178,6 +178,11 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "events_get" ||
       tool.startsWith("artifacts_") ||
       tool.startsWith("editable_artifact_") ||
+      tool.startsWith("app_data_") ||
+      tool.startsWith("app_files_") ||
+      tool.startsWith("app_publication_") ||
+      tool === "app_hostname_check" ||
+      tool.startsWith("app_sql_") ||
       tool.startsWith("site_data_") ||
       tool.startsWith("site_files_") ||
       tool.startsWith("site_publication_") ||

@@ -2034,6 +2034,22 @@ describe("sandbox preparation profiles", () => {
     ).toThrow("must be a subset");
   });
 
+  test("a former first-party tool name counts as its current name in the ceiling", () => {
+    for (const [defaults, allowed] of [
+      ["session_get,app_data_query", "session_get,site_data_query"],
+      ["session_get,site_data_query", "session_get,app_data_query"],
+    ])
+      expect(() =>
+        withEnv(
+          {
+            OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: defaults,
+            OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: allowed,
+          },
+          () => getSettings(),
+        ),
+      ).not.toThrow();
+  });
+
   test("does not duplicate a custom files MCP profile", () => {
     withEnv(
       {

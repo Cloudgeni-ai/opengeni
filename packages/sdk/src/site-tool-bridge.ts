@@ -7,6 +7,7 @@ import {
   siteFrameOperation,
   siteRequestHeaders,
 } from "@opengeni/contracts/site-session-http";
+import { currentFirstPartyToolIdentity } from "@opengeni/contracts/first-party-tool-aliases";
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
@@ -111,7 +112,7 @@ function siteToolNotAvailableForViewer(error: unknown): unknown {
       return null;
     }
   })();
-  return Object.assign(new Error(decoded ?? "This tool isn't available to you on this Site."), {
+  return Object.assign(new Error(decoded ?? "This tool isn't available to you on this app."), {
     name: "SiteToolNotAvailableForViewerError",
     code: "site_tool_not_available_for_viewer",
     retryable: false,
@@ -125,7 +126,7 @@ function siteToolRefusal(message: string, code: string, retryable: boolean): Err
 }
 /** The Site calls a tool its pinned version doesn't declare. */
 const undeclaredTool = () =>
-  siteToolRefusal("This tool is not available to the Site", "site_tool_not_declared", false);
+  siteToolRefusal("This tool is not available to the app", "site_tool_not_declared", false);
 
 export type SiteToolFailure = {
   code: SiteToolFailureCode;
@@ -399,7 +400,14 @@ export type CreateSiteToolBridgeOptions = {
  * frame: it mints a frame id, so a frame without a published Site reaches only
  * the sessions it started. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
-  const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
+  // A version declaring a first-party tool by its former name (site_*) is
+  // answered by the current tool (app_*): both names count as declared.
+  const declaredTools = input.requestedTools?.flatMap((identity) => [
+    identity,
+    currentFirstPartyToolIdentity(identity),
+  ]);
+  const allowed = declaredTools ? new Set(declaredTools.map(identityKey)) : null;
+  // Matched by name for a routed connector only: never widened by aliases.
   const allowedTools = new Set(input.requestedTools?.map((identity) => identity.toolName));
   const frameId = crypto.randomUUID();
   const targeted =
@@ -422,9 +430,10 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     }
   };
   const resolve = async (
-    request: ToolGatewayResolveRequest,
+    requested: ToolGatewayResolveRequest,
     { signal }: { signal: AbortSignal },
   ) => {
+    const request = { ...requested, target: currentTarget(requested.target) };
     if (
       allowed &&
       "identity" in request.target &&
@@ -588,7 +597,11 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     }
     return await invokeOnce(routed, signal, approvalToken);
   };
-  const invoke = async (request: ToolGatewayInvokeRequest, { signal }: { signal: AbortSignal }) => {
+  const invoke = async (
+    requested: ToolGatewayInvokeRequest,
+    { signal }: { signal: AbortSignal },
+  ) => {
+    const request = { ...requested, target: currentTarget(requested.target) };
     if (
       allowed &&
       "identity" in request.target &&
@@ -611,7 +624,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     async (refresh, signal) => {
       if (targeted && input.requestedTools) {
         const manifest = await input.workspaceTools.$manifest!(
-          { identities: [...input.requestedTools], ...context },
+          { identities: input.requestedTools.map(currentFirstPartyToolIdentity), ...context },
           { signal },
         );
         signal.throwIfAborted();
@@ -630,7 +643,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         ...(refresh ? { refresh } : {}),
       });
       if (current.workspaceId !== input.workspaceId)
-        throw new Error("Site catalog workspace mismatch");
+        throw new Error("App catalog workspace mismatch");
       return {
         version: current.version,
         generation: current.generation,
@@ -720,7 +733,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         }
       : {}),
     catalog: async ({ signal }) => await loadCatalog({ signal }),
-    call: async (request, { signal }) => {
+    call: async (requested, { signal }) => {
+      const request = { ...requested, identity: currentFirstPartyToolIdentity(requested.identity) };
       if (allowed && !allowed.has(identityKey(request.identity))) throw undeclaredTool();
       if (targeted && input.requestedTools) {
         const tool = manifests
@@ -993,7 +1007,7 @@ function legacySiteToolResult(
         message:
           "message" in error && typeof error.message === "string"
             ? error.message
-            : "Site tool execution failed",
+            : "App tool execution failed",
         retryable: false,
         outcomeUnknown: "outcomeUnknown" in error && error.outcomeUnknown === true,
         providerError: error,
@@ -1018,6 +1032,13 @@ function staleRetryVetoed(error: unknown): boolean {
       ("retryable" in error && error.retryable === false))
   );
 }
+/** A target naming a first-party tool by its former name, with the current name. */
+function currentTarget<T extends ToolGatewayResolveRequest["target"]>(target: T): T {
+  return "identity" in target
+    ? { ...target, identity: currentFirstPartyToolIdentity(target.identity) }
+    : target;
+}
+
 function identityKey(identity: ToolGatewayIdentity): string {
   return `${identity.serverId}\u0000${identity.toolName}`;
 }
@@ -1050,7 +1071,7 @@ function siteFrameBodyFieldRefusal(
         status: 403,
         code: "forbidden",
         message:
-          "A Site page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
+          "An app page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
         retryable: false,
         details: { code: "site_frame_field_forbidden", field },
       },

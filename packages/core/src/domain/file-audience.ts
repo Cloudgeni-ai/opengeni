@@ -83,7 +83,7 @@ export async function audienceAccessFor(
     workspace: Pick<Workspace, "name" | "kind">;
     visibility: WorkspaceArtifactVisibility;
     ownerSubjectId: string | null;
-    noun: "file" | "Site";
+    noun: "file" | "app";
   },
 ): Promise<FileAccess> {
   const { visibility, noun } = input;

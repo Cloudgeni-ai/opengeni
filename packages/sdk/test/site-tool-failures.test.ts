@@ -88,7 +88,7 @@ function harness(
   return { invoke, invokes, prompts };
 }
 
-describe("Site tool failures reach the viewer as clear states", () => {
+describe("App tool failures reach the viewer as clear states", () => {
   test("an expired connection offers Reconnect for that same account, then runs again", async () => {
     const h = harness([
       apiError(409, {
@@ -228,7 +228,7 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(h.invokes).toHaveLength(2);
   });
 
-  test("without host UI the Site still gets a typed, plain error", async () => {
+  test("without host UI the app still gets a typed, plain error", async () => {
     const h = harness([apiError(404, { code: "not_found", message: "tool_unavailable" })], {
       host: false,
     });
@@ -292,11 +292,11 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(h.invokes).toHaveLength(1);
   });
 
-  test("a tool the Site can't offer this viewer says to ask the owner, without Try again", async () => {
+  test("a tool the app can't offer this viewer says to ask the owner, without Try again", async () => {
     const h = harness([
       apiError(404, {
         code: "not_found",
-        message: "This Site was published with another member's account.",
+        message: "This app was published with another member's account.",
         details: { code: "site_tool_not_available_for_viewer" },
       }),
     ]);
@@ -304,7 +304,7 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(error).toMatchObject({
       code: "site_tool_not_available_for_viewer",
       retryable: false,
-      message: "This Site was published with another member's account.",
+      message: "This app was published with another member's account.",
     });
     expect(h.invokes).toHaveLength(1);
   });
@@ -389,7 +389,7 @@ describe("typed answers and readiness", () => {
     expect(error).toMatchObject({
       code: "site_tool_open_in_opengeni",
       retryable: false,
-      message: "Open this Site in Opengeni to do this.",
+      message: "Open this app in Opengeni to do this.",
     });
   });
 
@@ -415,7 +415,7 @@ describe("typed answers and readiness", () => {
     expect(second).not.toBe("op-1");
   });
 
-  test("an unreachable server without host UI is a typed error the Site can retry", async () => {
+  test("an unreachable server without host UI is a typed error the app can retry", async () => {
     const h = harness(
       [
         apiError(503, {
@@ -475,7 +475,7 @@ describe("typed answers and readiness", () => {
     });
   });
 
-  test("readiness asks the host for the pinned Site and passes on the host's change events", async () => {
+  test("readiness asks the host for the pinned app and passes on the host's change events", async () => {
     const bodies: unknown[] = [];
     const hostListeners = new Set<() => void>();
     const bridge = createSiteToolBridge({

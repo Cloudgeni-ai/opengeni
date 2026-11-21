@@ -591,7 +591,7 @@ export function compileSiteSql(sql: string, profile: SiteSqlProfile): SiteSqlCom
       if (profile === "agent" && classified.kind === "schema")
         return refuse(
           "statement_not_allowed",
-          "Change the schema with a migration (site_sql_migrate) so the database can be rebuilt",
+          "Change the schema with a migration (app_sql_migrate) so the database can be rebuilt",
         );
       return refuse(
         "statement_not_allowed",
@@ -740,7 +740,7 @@ export const SiteSqlQueryAudience = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteSqlQueryAudience = z.infer<typeof SiteSqlQueryAudience>;
 
-/** site_sql_define_query and PUT .../sql/queries/:name. */
+/** app_sql_define_query and PUT .../sql/queries/:name. */
 export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     sql: primitives.nonEmptyString
@@ -749,7 +749,7 @@ export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
         "Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement (WITH allowed, not recursive). Use :name parameters; :viewer, :viewer_kind, :viewer_signed_in, :viewer_access (member, invited, user or guest) and :viewer_email (verified, lowercase, or NULL) are bound by Opengeni from the signed-in viewer.",
       ),
     audience: SiteSqlQueryAudience.optional().describe(
-      "everyone (including anonymous guests of public Sites), signed_in (default: viewers signed in as a person) or managers.",
+      "everyone (including anonymous guests of public apps), signed_in (default: viewers signed in as a person) or managers.",
     ),
     description: z.string().max(2000).optional().describe("What the query is for."),
     maxRows: z
@@ -758,7 +758,7 @@ export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
       .min(1)
       .max(SITE_SQL_HARD_LIMITS.maxRowsPerCall)
       .optional()
-      .describe("Most rows one call returns (capped by the Site's limits)."),
+      .describe("Most rows one call returns (capped by the app's limits)."),
   }),
 );
 export type SiteSqlQueryDefinitionRequest = z.infer<typeof SiteSqlQueryDefinitionRequest>;
@@ -782,7 +782,7 @@ export const SiteSqlStatementRequest = /* @__PURE__ */ defineSchema(() =>
       .min(1)
       .max(SITE_SQL_HARD_LIMITS.maxRowsPerCall)
       .optional()
-      .describe("Most rows to return (capped by the Site's limits)."),
+      .describe("Most rows to return (capped by the app's limits)."),
   }),
 );
 export type SiteSqlStatementRequest = z.infer<typeof SiteSqlStatementRequest>;

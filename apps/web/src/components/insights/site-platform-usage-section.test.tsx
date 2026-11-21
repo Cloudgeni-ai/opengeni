@@ -92,7 +92,7 @@ test("usage_only shows plain values like the KPI tiles, with no bars or limits",
   const text = container.textContent ?? "";
   expect(text).toContain("Platform activity this month. Not charged.");
   expect(text).not.toContain("included");
-  expect(text).not.toContain("Sites are paused");
+  expect(text).not.toContain("Apps are paused");
   await view.unmount();
 });
 
@@ -117,7 +117,7 @@ test("credits mode shows what's included and charged, and an engaged brake expla
   ]);
   const text = view.container.textContent ?? "";
   expect(text).toContain("Use above what's included is paid with credits; $1.50 charged so far.");
-  expect(text).toContain("Sites are paused");
+  expect(text).toContain("Apps are paused");
   await view.unmount();
 });
 

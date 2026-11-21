@@ -1,0 +1,53 @@
+name: Build Windows ARM64 agent
+
+# Safe to dispatch by itself: this builds and tests, but cannot sign or publish.
+on:
+  workflow_call:
+    outputs:
+      artifact-id:
+        value: ${{ jobs.build.outputs.artifact-id }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    timeout-minutes: 75
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: agent
+          key: aarch64-pc-windows-msvc
+          cache-on-failure: true
+      - name: Install agent build and smoke dependencies
+        # Do not install unrelated apps (e.g. the site gateway's x64-only workerd).
+        run: >-
+          bun install --frozen-lockfile --production
+          --filter @opengeni/browserd --filter @opengeni/agent-proto --filter @opengeni/events
+      - name: Build the Windows ARM64 agent and interaction runtime
+        shell: bash
+        run: bash scripts/build-windows-agent-release.sh arm64
+      - name: Install the native transport test broker
+        uses: ./.github/actions/setup-agent-test-nats
+      - name: Start the runtime from the standalone agent
+        run: bun scripts/check-windows-arm64-agent-runtime.ts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: agent-windows-arm64-unsigned-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+          path: |
+            opengeni-agent-aarch64-pc-windows-msvc.exe
+            opengeni-browserd-aarch64-pc-windows-msvc.exe
+            opengeni-computer-native-aarch64-pc-windows-msvc.exe

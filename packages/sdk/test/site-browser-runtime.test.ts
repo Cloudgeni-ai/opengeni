@@ -98,9 +98,9 @@ function fixture(transport: "console" | "preview", response?: () => Response) {
   };
 }
 
-describe.each(["console", "preview"] as const)("shipped Site runtime via %s", (transport) => {
+describe.each(["console", "preview"] as const)("shipped app runtime via %s", (transport) => {
   for (const filter of ["siteAccessId", "originSiteId"] as const) {
-    test(`${filter}=current reaches only the host-bound Site`, async () => {
+    test(`${filter}=current reaches only the host-bound app`, async () => {
       const f = fixture(transport);
       try {
         const page = await f.site.client.listSessionPage(f.site.workspaceId, {
@@ -191,7 +191,7 @@ describe.each(["console", "preview"] as const)("shipped Site runtime via %s", (t
     try {
       await expect(
         f.site.client.listSessionPage(f.site.workspaceId, { siteAccessId: "current" }),
-      ).rejects.toThrow("Site access-filtered session lists");
+      ).rejects.toThrow("app access-filtered session lists");
       expect(f.requests).toHaveLength(1);
     } finally {
       f.close();

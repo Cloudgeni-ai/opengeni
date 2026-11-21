@@ -72,6 +72,7 @@ import {
   type CompatibleModelReasoning,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  firstPartyMcpToolAliasTarget,
   normalizeSitesDomain,
   OpenGeniSlackBotDisplayName,
   SandboxBackend,
@@ -13770,11 +13771,13 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   validateRecordingTranscriptionSettings(settings);
+  // A former first-party name (site_*) is the same tool as its successor (app_*).
+  const currentToolName = (tool: string) => firstPartyMcpToolAliasTarget(tool) ?? tool;
   const allowedFirstPartyMcpTools = new Set(
-    settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
+    (settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES).map(currentToolName),
   );
   const disallowedDefaults = (settings.defaultFirstPartyMcpTools ?? []).filter(
-    (tool) => !allowedFirstPartyMcpTools.has(tool),
+    (tool) => !allowedFirstPartyMcpTools.has(currentToolName(tool)),
   );
   if (disallowedDefaults.length > 0) {
     throw new Error(

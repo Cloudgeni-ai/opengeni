@@ -228,7 +228,7 @@ export function createOpenGeniSiteData(
     if (!(await ready()))
       throw new OpenGeniSiteDataError(
         "site_data_unsupported",
-        "This Site host does not provide Site Data",
+        "This app host does not provide app data",
         0,
       );
     const response = await fetchSite(`${SITE_DATA_PATH_PREFIX}${path}`, init);
@@ -253,7 +253,7 @@ export function createOpenGeniSiteData(
   const one = async (operation: OpenGeniSiteDataOperation) => {
     const [result] = await write([operation]);
     if (!result || !("record" in result))
-      throw new OpenGeniSiteDataError("request_failed", "Unexpected Site Data response", 200);
+      throw new OpenGeniSiteDataError("request_failed", "Unexpected app data response", 200);
     return result.record;
   };
   const count = async (
@@ -423,6 +423,6 @@ function siteDataErrorFromResponse(status: number, value: unknown): OpenGeniSite
   const message =
     typeof record.message === "string" && record.message
       ? record.message
-      : `Site Data request failed with HTTP ${status}`;
+      : `App data request failed with HTTP ${status}`;
   return new OpenGeniSiteDataError(code, message, status, details);
 }

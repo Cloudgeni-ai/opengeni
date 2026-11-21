@@ -81,7 +81,7 @@ managers. The Site must be shared with the workspace, not "Only me".
 | `PATCH /reports/:reportId` | 200 | 404 `site_report_not_found` |
 
 Every changing route (`PUT`, `DELETE`, takedown, restore, report status and
-`PUT site-limit-profile`), and the `site_publication_update` tool, refuses
+`PUT site-limit-profile`), and the `app_publication_update` tool, refuses
 a request made from a Site page (403 `site_page_forbidden`). Agents use ordinary
 owner authorization regardless of where their turn started.
 
@@ -147,8 +147,8 @@ Takedown:
   running conversations end on their caps and site-runtime refuses them
   further work.
 
-Agent tools: `site_publication_get`, `site_publication_update` and
-`site_hostname_check` call the same service with the person's authority.
+Agent tools: `app_publication_get`, `app_publication_update` and
+`app_hostname_check` call the same service with the person's authority.
 The artifact tools (`artifacts_publish`, `artifacts_rollback`,
 `artifacts_archive`, `artifacts_restore`) run the same publication hook as
 the API routes: a published Site's generation advances, the edge resyncs,
@@ -295,8 +295,8 @@ Operations:
       (`sandboxBackend: "none"`; a publication has no sandbox setting).
     - Their only first-party tools are the Site's own data tools, pinned on
       the server to this Site and acting as the conversation's viewer (the
-      same audience checks and row binding as the page): `site_data_query`
-      and `site_data_write`, plus `site_sql_run` when Site SQL is on. A call
+      same audience checks and row binding as the page): `app_data_query`
+      and `app_data_write`, plus `app_sql_run` when Site SQL is on. A call
       for another Site, or any Site management tool, is refused. Platform
       instructions tell the agent whom it is talking with and that it can
       only use this Site's own data.
