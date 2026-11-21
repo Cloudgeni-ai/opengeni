@@ -1,5 +1,6 @@
 import { useOptionalAppContext } from "../../app-context";
 import { archiveActionLabel } from "../../lib/archive-session";
+import { useWaitingOnLabel } from "../../lib/waiting-on";
 // The session header bar — the slim canvas top strip's contents on a session
 // route. Split out of the session shell as a PURE, presentational component: it takes
 // plain session data + callbacks and renders the two-line identity block
@@ -242,6 +243,12 @@ export function SessionHeader({
   // Archiving stops the chat's work, which also pauses it and settles its waits:
   // the header names the archive, not a pause or a wait.
   const waiting = archived ? null : sessionInputWait({ ...session, status });
+  // "Waiting on <person>": an open question or approval, or the agent's own
+  // set_waiting_on. Live status wins over an older projection.
+  const waitingOnLabel = useWaitingOnLabel(
+    session.workspaceId,
+    displayStatus !== "idle" && displayStatus !== "requires_action" ? null : session.waitingOn,
+  );
   const paused = !archived && sessionControlPaused(session);
   const startup = useSessionStartup({ ...session, status });
   const startupLabel = archived
@@ -427,7 +434,8 @@ export function SessionHeader({
               dot beside the title. */}
           <CompactSessionStatus
             paused={paused}
-            waiting={Boolean(waiting)}
+            waiting={Boolean(waiting) || waitingOnLabel !== null}
+            waitingLabel={waitingOnLabel}
             status={displayStatus}
             label={startupLabel}
             always={inMenu("status")}
@@ -557,7 +565,19 @@ export function SessionHeader({
                 paused, admission is the headline — hide lifecycle so we don't
                 imply the session is still "Running"/"Idle" under a pause gate. */}
             {!paused ? (
-              waiting ? (
+              waitingOnLabel ? (
+                <StatusPill
+                  className="max-w-56 border-status-waiting/35 bg-status-waiting/10 text-status-waiting"
+                  data-session-waiting-on=""
+                  title={
+                    session.waitingOn?.reason
+                      ? `${waitingOnLabel}: ${session.waitingOn.reason}`
+                      : waitingOnLabel
+                  }
+                >
+                  <span className="truncate">{waitingOnLabel}</span>
+                </StatusPill>
+              ) : waiting ? (
                 <StatusPill
                   className="border-border bg-surface text-fg-muted"
                   data-session-wait-badge=""
@@ -947,12 +967,14 @@ function AutomationWaitMenuItem({ session, onOpen }: { session: Session; onOpen:
 function CompactSessionStatus({
   paused,
   waiting,
+  waitingLabel = null,
   status,
   label,
   always = false,
 }: {
   paused: boolean;
   waiting: boolean;
+  waitingLabel?: string | null | undefined;
   status: SessionDisplayStatus;
   label?: string | undefined;
   always?: boolean | undefined;
@@ -968,9 +990,13 @@ function CompactSessionStatus({
   }
   if (waiting) {
     return (
-      <span data-compact-session-status="waiting" title="Waiting" className={className}>
+      <span
+        data-compact-session-status="waiting"
+        title={waitingLabel ?? "Waiting"}
+        className={className}
+      >
         <span aria-hidden className="size-2 rounded-full bg-status-waiting" />
-        <span className="sr-only">Waiting</span>
+        <span className="sr-only">{waitingLabel ?? "Waiting"}</span>
       </span>
     );
   }

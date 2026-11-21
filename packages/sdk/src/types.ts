@@ -403,6 +403,28 @@ export type ToolGatewaySiteReadinessResponse = {
   /** One entry per requested target, in order. */
   tools: ToolGatewaySiteReadinessTool[];
 };
+/**
+ * One item of an App's (Site's) connect card: a connector the viewer has no
+ * account for yet (`connect`), or an account of theirs that must sign in
+ * again or allow more access (`reconnect`). Host data: Site code receives
+ * `OpenGeniSiteConnectionNeed` instead, without ids or addresses.
+ */
+export type ToolGatewaySiteSetupItem = {
+  /** Stable for this viewer, connector and account (the card's dismissal key). */
+  key: string;
+  action: "connect" | "reconnect";
+  connector: string;
+  capabilityId: string | null;
+  connectionId: string | null;
+  account: string | null;
+  shared: boolean;
+  /** The App's declared tools that wait on it. */
+  tools: ToolGatewayIdentity[];
+  /** On a published App: the App in Opengeni with this connect dialog open. */
+  openUrl: string | null;
+};
+export type ToolGatewaySiteSetupRequest = { siteArtifactId: string; siteVersionId: string };
+export type ToolGatewaySiteSetupResponse = { version: 1; items: ToolGatewaySiteSetupItem[] };
 /** Remove every "Always allow for this Site" choice the caller made on one Site (host code only). */
 export type ToolGatewaySiteAllowancesResetRequest = {
   siteArtifactId: string;
@@ -1947,6 +1969,50 @@ export type SessionShareLink = {
   updatedAt: string;
 };
 
+/**
+ * Who a chat waits on. `agent`: the agent said so (`set_waiting_on`);
+ * `input`: an open question or approval, which waits on the person the turn
+ * works for (`subjectId`). `person` is the name to show when known.
+ */
+export type SessionWaitingOn = {
+  source: "agent" | "input";
+  person: string | null;
+  subjectId: string | null;
+  reason: string | null;
+  since: string;
+};
+
+export type SessionLinkKind = "pull_request" | "issue" | "thread" | "record" | "link";
+export type SessionLinkProvider = "github" | "linear" | "slack" | "opengeni" | "other";
+
+/** Something a chat works on, shown in its Linked panel. */
+export type SessionLink = {
+  id: string;
+  url: string;
+  title: string | null;
+  kind: SessionLinkKind;
+  provider: SessionLinkProvider;
+  /** `owner/repo#number` for GitHub, the issue key for Linear, `channel/ts` for Slack. */
+  ref: string | null;
+  addedBy: "agent" | "person" | "automatic";
+  addedAt: string;
+};
+
+/** A link's live state as the viewer can read it; null status shows the title only. */
+export type SessionLinkLiveStatus = {
+  state: "open" | "draft" | "merged" | "closed" | "done" | "unknown";
+  label: string | null;
+  title: string | null;
+  checks: "passing" | "failing" | "pending" | "none" | null;
+  review: "approved" | "changes_requested" | "review_required" | "none" | null;
+};
+
+export type SessionLinkWithStatus = SessionLink & { status: SessionLinkLiveStatus | null };
+
+export type SessionLinksResponse = { links: SessionLinkWithStatus[] };
+
+export type AddSessionLinkRequest = { url: string; title?: string; kind?: SessionLinkKind };
+
 /** Whether the person can share a chat here, and their live link. */
 export type SessionShareLinkState = {
   /** False when this deployment has turned share links off. */
@@ -2187,6 +2253,8 @@ export type Session = {
   effectiveControl: EffectiveSessionControl;
   /** Current durable input wait; an elapsed deadline does not prove a new turn started. */
   inputWait?: { deadlineAt: string; reason: string } | null | undefined;
+  /** Who the chat waits on: the agent said so, or an open question or approval. */
+  waitingOn?: SessionWaitingOn | null | undefined;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -2322,6 +2390,7 @@ export type SessionListEntry = Pick<
   | "rootSessionId"
   | "effectiveControl"
   | "inputWait"
+  | "waitingOn"
   | "lastSequence"
   | "pinned"
   | "pinnedAt"
@@ -3039,6 +3108,8 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.exited",
   "session.title_set",
   "session.profile_set",
+  "session.waiting_on.changed",
+  "session.links.changed",
   "session.visibility.changed",
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
@@ -3999,6 +4070,12 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  /**
+   * The workspace agent each run's chat is with (an agent's "Starts when"):
+   * its Instructions, Memory and Can use apply. Only for a task that starts
+   * its own chats.
+   */
+  agentId?: string | undefined;
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
   /**
@@ -4086,6 +4163,20 @@ export type ScheduledTaskAction =
       initiatingSubjectId: string;
       allDescendants: boolean;
       limits: KnowledgeSourceSyncLimits;
+    }
+  | {
+      /** An App data sync (see the App sync methods); no model runs. */
+      kind: "app_sync";
+      siteId: string;
+      collection: string;
+      mode: "shared" | "personal";
+      ownerSubjectId: string;
+      tool: { serverId: string; toolName: string };
+      declaredTools: Array<{ serverId: string; toolName: string }>;
+      arguments: Record<string, unknown>;
+      recordsPath: string | null;
+      key: string;
+      fields: string[] | null;
     };
 
 export type ScheduledTask = {
@@ -4502,6 +4593,9 @@ export type FirstPartyMcpToolName =
   | "instruction_policy_save"
   | "instruction_policy_get"
   | "set_session_title"
+  | "set_waiting_on"
+  | "session_links_add"
+  | "session_links_remove"
   | "notify_user"
   | "notification_withdraw"
   | "inbox_tidy"
@@ -4550,6 +4644,8 @@ export type FirstPartyMcpToolName =
   | "project_reorder"
   | "project_delete"
   | "session_set_project"
+  | "sidebar_layout_get"
+  | "sidebar_layout_update"
   | "admin_actions_search"
   | "admin_action_describe"
   | "admin_action_call"
@@ -4692,6 +4788,30 @@ export type FirstPartyMcpToolName =
   | "artifacts_rollback"
   | "artifacts_archive"
   | "artifacts_restore"
+  | "app_data_describe"
+  | "app_data_define_collection"
+  | "app_data_query"
+  | "app_data_write"
+  | "app_data_import"
+  | "app_data_export"
+  | "app_data_reset"
+  | "app_files_list"
+  | "app_files_upload"
+  | "app_files_delete"
+  | "app_publication_get"
+  | "app_publication_update"
+  | "app_publication_apply_fix"
+  | "app_hostname_check"
+  | "app_sql_inspect"
+  | "app_sql_enable"
+  | "app_sql_migrate"
+  | "app_sql_define_query"
+  | "app_sql_query"
+  | "app_sql_run"
+  | "app_sql_execute"
+  | "app_sql_export"
+  | "app_sql_import"
+  | "app_sql_reset"
   | "site_data_describe"
   | "site_data_define_collection"
   | "site_data_query"
@@ -4699,6 +4819,11 @@ export type FirstPartyMcpToolName =
   | "site_data_import"
   | "site_data_export"
   | "site_data_reset"
+  | "app_sync_save"
+  | "app_sync_list"
+  | "app_sync_delete"
+  | "app_sync_run"
+  | "app_sync_opt_in"
   | "site_files_list"
   | "site_files_upload"
   | "site_files_delete"
@@ -4716,6 +4841,8 @@ export type FirstPartyMcpToolName =
   | "site_sql_export"
   | "site_sql_import"
   | "site_sql_reset"
+  | "app_export"
+  | "app_install"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -7468,6 +7595,13 @@ export type OrganizationMcpConnection = {
   connectedBy: { subjectId: string; name: string };
   /** What it can do and where. The person's own live access still caps it. */
   policy: OrganizationAccessPolicy;
+  /**
+   * App data: "viewer" (the default) reads and writes like a viewer of each
+   * app; "manager" manages it. Only the person, in a browser, sets manager.
+   */
+  appDataAccess?: "viewer" | "manager";
+  /** The workspace its tools use when a call names none, or null. */
+  defaultWorkspaceId?: string | null;
   createdAt: string;
   lastUsedAt: string | null;
   expiresAt: string;
@@ -7492,7 +7626,9 @@ export type OrganizationMcpConnectionList = {
 };
 
 export type UpdateOrganizationMcpConnectionRequest = {
-  access: OrganizationAccessPolicy;
+  access?: OrganizationAccessPolicy;
+  appDataAccess?: "viewer" | "manager";
+  defaultWorkspaceId?: string | null;
 };
 
 // --- Personal API keys ---------------------------------------------------------------------------
@@ -8651,6 +8787,12 @@ export type SaveNewSessionDraftRequest = Omit<
 /** Input shape for agent config on create/update (server applies defaults). */
 export type ScheduledTaskAgentConfigInput = {
   /**
+   * The workspace agent each run's chat is with (an agent's "Starts when"):
+   * it runs with that agent's Instructions, Memory and Can use. Only for a
+   * task that starts a new chat each run. Older servers ignore it.
+   */
+  agentId?: string | undefined;
+  /**
    * Agent configuration frozen into the schedule and used by every run;
    * omitted runs follow the workspace's agent defaults.
    */
@@ -8894,9 +9036,20 @@ export type ScheduledTaskRun = {
   firedAt: string;
   sessionId: string | null;
   triggerEventId: string | null;
-  actionKind: "agent_turn" | "knowledge_source_sync";
+  actionKind: "agent_turn" | "knowledge_source_sync" | "app_sync";
   knowledgeSyncRunId: string | null;
   knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
+  /** App data sync runs: what the run read and wrote. */
+  syncSummary?:
+    | {
+        received: number;
+        written: number;
+        skipped: number;
+        truncated: boolean;
+        people: { total: number; failed: number } | null;
+      }
+    | null
+    | undefined;
   completedAt: string | null;
   error: string | null;
   admissionDiagnostic?:

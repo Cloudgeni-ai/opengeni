@@ -25,6 +25,7 @@ import {
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
   describeWorkspaceSiteToolReadiness,
+  describeWorkspaceSiteToolSetup,
   resetWorkspaceSiteToolAllowances,
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
@@ -105,6 +106,7 @@ import {
   ToolGatewayTargetApprovalRequest,
   ToolGatewaySiteConsentRequest,
   ToolGatewaySiteReadinessRequest,
+  ToolGatewaySiteSetupRequest,
   ToolGatewaySiteAllowancesResetRequest,
   ToolGatewayManifestRequest,
   type AccessGrant,
@@ -146,6 +148,9 @@ import {
   withSubscriptionAccountAdministrators,
   ambientBillingOrigin,
   withBillingOriginOverride,
+  getOrganizationMcpConnectionSettings,
+  updateOrganizationMcpConnectionSettings,
+  type OrganizationMcpConnectionSettings,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -324,6 +329,8 @@ import {
   resolveOrganizationMcpOAuthAccess,
 } from "./mcp-oauth";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
+import { claimsStoredApproval } from "./mcp/stored-approval-claim";
+import { createConnectionRateLimiter } from "./mcp/connection-rate-limit";
 import type { ActionAuditProvenance } from "./http/disconnect-audit-actor";
 import {
   CodemodeAuthorityError,
@@ -418,6 +425,7 @@ import { registerInteractionResourceRoutes } from "./routes/interaction-resource
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
+import { registerSidebarLayoutRoutes } from "./routes/sidebar-layout";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerEventSourceRoutes } from "./routes/event-sources";
@@ -427,6 +435,7 @@ import { registerBotTemplateRoutes } from "./routes/bot-templates";
 import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSessionShareLinkRoutes } from "./routes/session-share-links";
+import { registerSessionLinkRoutes } from "./routes/session-links";
 import {
   archivedSessionImportErrorResponse,
   isSessionHistoryImportRequest,
@@ -447,11 +456,15 @@ import { registerSlackAgentUpdateRoutes } from "./routes/slack-agent-updates";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
+import { registerAppSyncRoutes } from "./routes/app-sync";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerSiteSqlRoutes } from "./routes/site-sql";
+import { registerAppPackageRoutes } from "./routes/app-packages";
+import { setAppSyncHooks } from "./app-packages/syncs";
+import { APP_PACKAGE_SYNC_HOOKS } from "./app-sync/package-hooks";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
@@ -1980,6 +1993,15 @@ export function createAppComposition(
     );
   });
 
+  // Per connection: calls in general, and new delegated chats.
+  const organizationMcpCallLimiter = createConnectionRateLimiter({
+    capacity: 120,
+    refillPerSecond: 2,
+  });
+  const organizationMcpDelegateLimiter = createConnectionRateLimiter({
+    capacity: 20,
+    refillPerSecond: 1 / 30,
+  });
   // The organization MCP server: every public action, as a person who signed
   // in (capped by their connection's access setting) or as an organization
   // API key. Each action runs the real route in this process.
@@ -2001,6 +2023,17 @@ export function createAppComposition(
     let caller: OrganizationMcpCaller;
     let auditProvenance: ActionAuditProvenance | undefined;
     let organizationKeyAccountId: string | null = null;
+    let connectionSettings:
+      | {
+          id: string;
+          accountId: string;
+          subjectId: string;
+          settings: OrganizationMcpConnectionSettings;
+        }
+      | undefined;
+    // Who the per-connection rate limit counts: the connection, the person's
+    // key, or the organization key.
+    let rateKey: string;
     try {
       const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
       const personalKey = connection
@@ -2020,6 +2053,17 @@ export function createAppComposition(
           via: "organization_mcp",
           organizationMcpConnectionId: connection.refreshFamilyId,
         };
+        connectionSettings = {
+          id: connection.refreshFamilyId,
+          accountId: connection.accountId,
+          subjectId: connection.subjectId,
+          settings: await getOrganizationMcpConnectionSettings(routeDeps.db, {
+            accountId: connection.accountId,
+            connectionId: connection.refreshFamilyId,
+            subjectId: connection.subjectId,
+          }),
+        };
+        rateKey = `connection:${connection.refreshFamilyId}`;
       } else if (personalKey) {
         // A personal API key: the person who created it, with its access.
         // Each action rechecks their live access, exactly as for sign-in.
@@ -2039,6 +2083,7 @@ export function createAppComposition(
           principalKind: "personal_api_key",
           via: "organization_mcp",
         };
+        rateKey = `person:${personalKey.organizationId}:${personalKey.subjectId}`;
       } else {
         const context = await requireAccessContext(c, routeDeps);
         const authorization = c.req.header("authorization");
@@ -2055,6 +2100,7 @@ export function createAppComposition(
           authorization,
           accessKey: c.req.header("x-opengeni-access-key") ?? null,
         };
+        rateKey = `key:${organizationKeyAccountId}:${context.subjectId}`;
       }
     } catch (error) {
       if (error instanceof HTTPException && error.status === 401) challenge();
@@ -2093,6 +2139,37 @@ export function createAppComposition(
       origin: new URL(c.req.url).origin,
       publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       // Sign-in, personal and organization keys over MCP are API use.
+      // A coding agent on someone's computer (a connection or a personal key)
+      // reads app data as a viewer unless its connection may manage it, and
+      // reaches only members-only apps.
+      ...(caller.kind === "person"
+        ? {
+            outsideAgent: {
+              appData: connectionSettings?.settings.appDataAccess ?? "viewer",
+            },
+          }
+        : {}),
+      ...(connectionSettings
+        ? {
+            connection: {
+              id: connectionSettings.id,
+              settings: connectionSettings.settings,
+              setDefaultWorkspace: async (workspaceId: string) => {
+                await updateOrganizationMcpConnectionSettings(routeDeps.db, {
+                  accountId: connectionSettings!.accountId,
+                  connectionId: connectionSettings!.id,
+                  subjectId: connectionSettings!.subjectId,
+                  defaultWorkspaceId: workspaceId,
+                });
+              },
+            },
+          }
+        : {}),
+      admit: (toolName) =>
+        Math.max(
+          organizationMcpCallLimiter.admit(rateKey),
+          toolName === "delegate" ? organizationMcpDelegateLimiter.admit(rateKey) : 0,
+        ),
       dispatch: async (request) => {
         stampRequestBillingOrigin(
           request,
@@ -2393,6 +2470,7 @@ export function createAppComposition(
     "target-approvals",
     "manifest",
     "readiness",
+    "site-setup",
   ] as const) {
     app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
@@ -2405,6 +2483,9 @@ export function createAppComposition(
       let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
+        ...(operation === "invoke" && claimsStoredApproval(c.req.raw)
+          ? { claimStoredApproval: true }
+          : {}),
         reauthorize: freshToolCaller(c, workspaceId, authorization),
         onFence: (created: TargetAuthorityFence) => {
           fence = created;
@@ -2420,7 +2501,9 @@ export function createAppComposition(
               ? ToolGatewayManifestRequest
               : operation === "readiness"
                 ? ToolGatewaySiteReadinessRequest
-                : ToolGatewayTargetApprovalRequest;
+                : operation === "site-setup"
+                  ? ToolGatewaySiteSetupRequest
+                  : ToolGatewayTargetApprovalRequest;
       parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
@@ -2455,12 +2538,19 @@ export function createAppComposition(
                       ToolGatewaySiteReadinessRequest.parse(body),
                       options,
                     )
-                  : await approveWorkspaceToolTarget(
-                      routeDeps,
-                      authorization,
-                      ToolGatewayTargetApprovalRequest.parse(body),
-                      options,
-                    );
+                  : operation === "site-setup"
+                    ? await describeWorkspaceSiteToolSetup(
+                        routeDeps,
+                        authorization,
+                        ToolGatewaySiteSetupRequest.parse(body),
+                        options,
+                      )
+                    : await approveWorkspaceToolTarget(
+                        routeDeps,
+                        authorization,
+                        ToolGatewayTargetApprovalRequest.parse(body),
+                        options,
+                      );
         c.header(
           "server-timing",
           `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"` +
@@ -2501,7 +2591,7 @@ export function createAppComposition(
     const body = parseRequestBody(
       ToolGatewaySiteConsentRequest,
       await c.req.json().catch(() => null),
-      { status: 400, message: "Invalid Site consent request" },
+      { status: 400, message: "Invalid app consent request" },
     );
     c.header("cache-control", "no-store");
     return c.json(
@@ -2526,7 +2616,7 @@ export function createAppComposition(
     const body = parseRequestBody(
       ToolGatewaySiteAllowancesResetRequest,
       await c.req.json().catch(() => null),
-      { status: 400, message: "Invalid Site allowances request" },
+      { status: 400, message: "Invalid app allowances request" },
     );
     c.header("cache-control", "no-store");
     return c.json(
@@ -2789,10 +2879,13 @@ export function createAppComposition(
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
+  registerAppSyncRoutes(app, routeDeps);
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
   registerSiteSqlRoutes(app, routeDeps);
+  setAppSyncHooks(APP_PACKAGE_SYNC_HOOKS);
+  registerAppPackageRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
@@ -2815,6 +2908,7 @@ export function createAppComposition(
   registerVaultRoutes(app, routeDeps);
   registerCredentialProfileRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
+  registerSidebarLayoutRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
@@ -2826,6 +2920,8 @@ export function createAppComposition(
   // After the session module, so its fail-closed middleware authorizes the
   // per-chat share-link routes like every other session route.
   registerSessionShareLinkRoutes(app, routeDeps);
+  // The Linked panel, after the session module for the same reason.
+  registerSessionLinkRoutes(app, routeDeps);
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);

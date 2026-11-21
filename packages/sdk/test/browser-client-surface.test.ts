@@ -132,6 +132,15 @@ const integrationMethods = [
   "querySiteSql",
   "resetSiteSql",
   "runSiteSqlQuery",
+  // App data sync management for hosts and scripts; agents use the
+  // app_sync_* tools and Apps read status through the Site runtime.
+  "createAppSync",
+  "deleteAppSync",
+  "getAppSyncStatus",
+  "listAppSyncs",
+  "runAppSync",
+  "setAppSyncOptIn",
+  "updateAppSync",
   // The workspace default limit profile for published Sites, for hosts and
   // admin scripts; the web console sets limits per Site.
   "getSiteLimitProfile",
@@ -231,6 +240,10 @@ const retiredLegacyAgentScreenMethods = [
 // person's links is offered to the agent and SDK callers, not a web screen yet.
 const chatShareLinkMethods = ["getSharedSession", "listSessionShareLinks"];
 
+// A chat's Linked items: agents add them with a tool and API callers with the
+// SDK; the web panel only lists and removes them.
+const sessionLinkApiMethods = ["addSessionLink"];
+
 // #6256 deleted the unreachable web components that called these (the Atlassian
 // source dialog, schedule Slack posting and sandbox artifact download). The
 // public SDK methods stay for existing callers.
@@ -320,6 +333,7 @@ describe("browser client runtime surface", () => {
         ...alwaysAvailableAgentSlackMethods,
         ...retiredLegacyAgentScreenMethods,
         ...chatShareLinkMethods,
+        ...sessionLinkApiMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
     );

@@ -332,6 +332,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import {
+  firstPartyAliasModelToolName,
   isFormerMcpToolName,
   keepsServerPrefixedToolNames,
   mcpServerNamespace,
@@ -2590,6 +2591,11 @@ export type ConnectorActionToolCall = {
   approvalMode?: "session_mcp" | "connector_write";
   defaultDecision?: "allow" | "ask";
   actionName?: string;
+  /**
+   * Ask, or block, even when the connection's settings allow: an agent's Can
+   * use rule. Never loosens a decision; added by the worker's policy hooks.
+   */
+  minimumDecision?: "ask" | "block";
   /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation); the ledger admits it once
@@ -5380,11 +5386,7 @@ function installMcpApprovalPolicy(
       }
       // Opengeni's own servers have no workspace connector policy: only a tool
       // they ask approval for goes through the ledger, as on the gateway path.
-      if (
-        !policy.connectorBacked &&
-        !legacyApproval &&
-        attemptToolSource(policy.serverId) !== "mcp"
-      ) {
+      if (!policy.connectorBacked && !legacyApproval && !connectorPolicyGoverns(policy.serverId)) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -5832,7 +5834,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
-        attemptToolSource(server.id) === "mcp" ||
+        connectorPolicyGoverns(server.id) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -8053,7 +8055,7 @@ function installAttemptConnectorActionGatewayLifecycle(
     const legacyMcpApproval =
       Boolean(config) && !config!.connectionRef && definition.approval === "human";
     const workspaceConnectorPolicy = Boolean(
-      connectorActionPolicy && config && attemptToolSource(config.id) === "mcp",
+      connectorActionPolicy && config && connectorPolicyGoverns(config.id),
     );
     if (!binding && !config?.connectionRef && !legacyMcpApproval && !workspaceConnectorPolicy)
       return definition;
@@ -8593,6 +8595,17 @@ function configureMcpOperationRecovery(
 function configuredMcpOperationRecovery(server: PrefixedMcpServer, toolName: string) {
   const recovery = mcpOperationRecoveryByServer.get(server);
   return recovery && Object.hasOwn(recovery.policy, toolName) ? recovery : undefined;
+}
+
+/**
+ * Whether a server's tool calls go through the workspace connector policy
+ * (tool permissions, an agent's Can use, approvals): every third-party MCP
+ * server, and the Codex Apps gateway, whose connectors are third-party too.
+ * Codex Apps defaults to Allow, so only a person's or agent's rule changes it.
+ */
+function connectorPolicyGoverns(serverId: string): boolean {
+  const source = attemptToolSource(serverId);
+  return source === "mcp" || source === "codex_apps";
 }
 
 function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
@@ -13136,6 +13149,49 @@ async function resolveBareFirstPartyToolCall(
 }
 
 /**
+ * A call to a first-party tool by its hidden alias (a former name kept so
+ * saved references keep working, e.g. `site_data_query` or
+ * `opengeni__site_data_query` for `app_data_query`) runs the current tool.
+ * Like a bare-name call, the call is renamed to the current model name before
+ * dispatch, so history, events, display and approvals show the tool that runs.
+ * With `keepName` (a stored call bound under its original name) the tool is
+ * returned under the alias instead.
+ */
+async function resolveFirstPartyAliasToolCall(
+  agent: Agent<any, any>,
+  input: { name: string; toolCall?: unknown },
+  resolveCurrent: ReturnType<typeof createResolveMissingFunctionTool> | null,
+  keepName: boolean,
+) {
+  const modelName = firstPartyAliasModelToolName(input.name);
+  if (modelName === undefined) return null;
+  const tool = resolveCurrent
+    ? await resolveCurrent({ name: modelName })
+    : (await agent.getMcpTools(new RunContext())).find(
+        (candidate) => candidate.type === "function" && candidate.name === modelName,
+      );
+  if (!tool || tool.type !== "function" || tool.name !== modelName) return null;
+  if (keepName) return { ...tool, name: input.name };
+  const call = input.toolCall;
+  if (
+    call &&
+    typeof call === "object" &&
+    (call as { type?: unknown }).type === "function_call" &&
+    (call as { name?: unknown }).name === input.name
+  ) {
+    const record = call as Record<string, unknown>;
+    record.name = modelName;
+    delete record.namespace;
+    const runtime = lazyToolRuntimeForAgent(agent);
+    if (runtime) {
+      const restored = restoreDirectDeferredCallArgumentTypes(record, runtime);
+      if (restored !== record) record.arguments = restored.arguments;
+    }
+  }
+  return tool;
+}
+
+/**
  * Two servers offering one model name must never fail the run. The first
  * owner keeps the name; the later tool is unavailable this attempt.
  */
@@ -13212,6 +13268,17 @@ function mcpToolResolverForAgent(
     if (current) return current;
     const bare = await resolveBareFirstPartyToolCall(agent, input, resolveCurrent);
     if (bare) return bare;
+    try {
+      const alias = await resolveFirstPartyAliasToolCall(
+        agent,
+        input,
+        resolveCurrent,
+        formerNames === "bind",
+      );
+      if (alias) return alias as FunctionTool<any, any, any>;
+    } catch {
+      // The current tool cannot be listed; keep the not-found result.
+    }
     let renamed: string | undefined;
     try {
       renamed = await currentNameOfFormerMcpTool(agent, input.name);

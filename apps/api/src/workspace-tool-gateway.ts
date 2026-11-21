@@ -1,4 +1,8 @@
-import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
+import {
+  isVerifiedDelegatedHumanAuthorization,
+  knowledgeContextForGateway,
+  outsideAgentReach,
+} from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -32,6 +36,9 @@ import {
   type ToolReviewContext,
   type ToolRef,
   type ToolGatewayTarget,
+  currentFirstPartyToolIdentity,
+  currentFirstPartyToolReference,
+  firstPartyMcpToolAliasTarget,
 } from "@opengeni/contracts";
 import {
   availableMcpAccountBindings,
@@ -241,6 +248,14 @@ export function requireWorkspaceToolApprovalAuthorization(
   ) {
     throw new HTTPException(403, { message: "tool approval requires a person" });
   }
+  // A coding agent connected as the person asks; the person decides, in the
+  // Opengeni app. Its retry then claims the stored approval.
+  if (outsideAgentReach(grant)) {
+    throw new HTTPException(403, {
+      message:
+        "Connected agents can't approve tool calls. The person approves this call in Opengeni, from the link tool_call returned.",
+    });
+  }
   return grant;
 }
 
@@ -259,13 +274,20 @@ export async function prepareWorkspaceToolGateway(
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
   if (isPublishedSiteToolAuthorization(authorization)) {
     const site = publishedSiteToolAuthority(authorization);
-    const same = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) =>
-      left.serverId === right.serverId && left.toolName === right.toolName;
-    const allowed = site.requestedTools.filter(
-      (identity) =>
-        !options.allowedIdentities ||
-        options.allowedIdentities.some((item) => same(item, identity)),
-    );
+    // A former first-party name (site_*) stands for the current tool (app_*),
+    // whether the page declared it, targets it or lists it.
+    const same = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) => {
+      const a = currentFirstPartyToolIdentity(left);
+      const b = currentFirstPartyToolIdentity(right);
+      return a.serverId === b.serverId && a.toolName === b.toolName;
+    };
+    const allowed = site.requestedTools
+      .map(currentFirstPartyToolIdentity)
+      .filter(
+        (identity) =>
+          !options.allowedIdentities ||
+          options.allowedIdentities.some((item) => same(item, identity)),
+      );
     // A declared canonical identity runs on the viewer's own account route.
     const route = options.siteRoute;
     if (
@@ -280,15 +302,7 @@ export async function prepareWorkspaceToolGateway(
     // Targeted preparation replaces its allowlist with the target. It must be
     // an exact declared identity first; paths are resolved by the Site adapter.
     const target = options.target;
-    if (
-      target &&
-      (!("identity" in target) ||
-        !allowed.some(
-          (item) =>
-            item.serverId === target.identity.serverId &&
-            item.toolName === target.identity.toolName,
-        ))
-    )
+    if (target && (!("identity" in target) || !allowed.some((item) => same(item, target.identity))))
       throw new HTTPException(403, { message: "site_tool_not_authorized" });
     await site.reauthorize();
     const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
@@ -442,7 +456,7 @@ export async function prepareAttestedWorkspaceToolGateway(
 export async function callWorkspaceToolGatewayForCaller(
   routeDeps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
-  request: ToolGatewayCallRequest,
+  requested: ToolGatewayCallRequest,
   options: {
     attestations?: WorkspaceToolGatewayCatalogAttestations;
     observability?: Observability;
@@ -461,6 +475,11 @@ export async function callWorkspaceToolGatewayForCaller(
   // attestation lookup below grants nothing and reveals nothing to a caller
   // that preparation then rejects.
   const grant = authorization.grant;
+  // A first-party tool's hidden alias names the same tool as its current name.
+  const request = {
+    ...requested,
+    identity: currentFirstPartyToolIdentity(requested.identity),
+  };
   const prepare = options.prepare ?? prepareWorkspaceToolGateway;
   const callGateway = (
     prepared: PreparedWorkspaceToolGateway,
@@ -1304,11 +1323,21 @@ export function workspaceToolGatewayDefinitionFilter(
   /** The provider's own Ask/Allow recommendation, before saved choices. */
   recommendedApproval?: (identity: ToolGatewayIdentity) => "ask" | "allow" | undefined,
 ): (definition: ToolGatewayDefinition) => boolean {
-  const allowedFirstPartyTools: ReadonlySet<string> = new Set(
+  const allowedFirstPartyTools = new Set<string>(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
   );
+  // A deployment allowlist written with a hidden alias allows the current tool.
+  for (const name of [...allowedFirstPartyTools]) {
+    const current = firstPartyMcpToolAliasTarget(name);
+    if (current !== undefined) allowedFirstPartyTools.add(current);
+  }
+  // An identity frozen under a former first-party name keeps the current tool.
   const frozenIdentityKeys = allowedIdentities
-    ? new Set(allowedIdentities.map(workspaceToolGatewayIdentityKey))
+    ? new Set(
+        allowedIdentities.map((identity) =>
+          workspaceToolGatewayIdentityKey(currentFirstPartyToolIdentity(identity)),
+        ),
+      )
     : null;
   return (definition) => {
     if (
@@ -1392,7 +1421,17 @@ export function buildWorkspaceToolGatewayMcpServer(
     };
   });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
+    // A first-party tool's hidden alias (its former name) calls the same tool.
+    const name = request.params.name;
+    const current = currentFirstPartyToolReference(name);
+    const entry =
+      callableEntries.find((candidate) => candidate.modelName === name) ??
+      (current === undefined
+        ? undefined
+        : callableEntries.find(
+            (candidate) =>
+              candidate.modelName === current && candidate.identity.serverId === "opengeni",
+          ));
     if (!entry) throw new ToolGatewayToolNotFoundError();
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",
@@ -1433,7 +1472,9 @@ export async function callWorkspaceToolGateway(
   authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
   resolveOrigin: typeof resolveSiteSessionOrigin = resolveSiteSessionOrigin,
 ) {
-  const request = ToolGatewayCallRequest.parse(input);
+  const parsed = ToolGatewayCallRequest.parse(input);
+  // A first-party tool's hidden alias names the same tool as its current name.
+  const request = { ...parsed, identity: currentFirstPartyToolIdentity(parsed.identity) };
   const operationId = request.operationId ?? crypto.randomUUID();
   const entry = prepared.toolGatewayCatalog.entries.find(
     (candidate) =>
@@ -1781,11 +1822,13 @@ export async function requireWorkspaceSiteToolAuthorization(
       context.siteArtifactId,
       context.siteVersionId,
     );
-    const declared = context.declaredIdentity ?? context.identity;
-    const requested = version.requestedTools.some(
-      (identity) =>
-        identity.serverId === declared.serverId && identity.toolName === declared.toolName,
-    );
+    const declared = currentFirstPartyToolIdentity(context.declaredIdentity ?? context.identity);
+    const requested = version.requestedTools
+      .map(currentFirstPartyToolIdentity)
+      .some(
+        (identity) =>
+          identity.serverId === declared.serverId && identity.toolName === declared.toolName,
+      );
     if (status !== "active" || version.id !== context.siteVersionId || !requested) {
       throw new HTTPException(403, { message: "site_tool_not_authorized" });
     }

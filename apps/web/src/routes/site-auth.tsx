@@ -141,7 +141,7 @@ export function SiteAuthorizePage({
           variant="page"
           icon={<LockKeyholeIcon />}
           title="Open this page in its own tab"
-          description="For your safety, sign-in to a Site can't be shown inside another page."
+          description="For your safety, sign-in to an app can't be shown inside another page."
         />
       </ConsentFrame>
     );
@@ -155,7 +155,7 @@ export function SiteAuthorizePage({
           variant="page"
           icon={<GlobeIcon />}
           title="Nothing to sign in to here"
-          description="Open this page from Sign in on a published Site."
+          description="Open this page from Sign in on a published app."
         />
       </ConsentFrame>
     );
@@ -166,8 +166,8 @@ export function SiteAuthorizePage({
         <EmptyState
           variant="page"
           icon={<GlobeIcon />}
-          title="This Site isn't available"
-          description={`There is no published Site at ${request.host}.`}
+          title="This app isn't available"
+          description={`There is no published app at ${request.host}.`}
         />
       </ConsentFrame>
     );
@@ -185,9 +185,9 @@ export function SiteAuthorizePage({
       <ConsentFrame>
         <FormPage
           leading={<LogoTile icon={<LockKeyholeIcon />} />}
-          title="You can't open this Site"
-          description={`${email} doesn't have access to ${request.host}. Ask the Site's owner to invite this email, or use another account.`}
-          submitLabel="Back to the Site"
+          title="You can't open this app"
+          description={`${email} doesn't have access to ${request.host}. Ask the app's owner to invite this email, or use another account.`}
+          submitLabel="Back to the app"
           submitDisabled={!back}
           cancelLabel={null}
           footerStart={anotherAccount}
@@ -205,7 +205,7 @@ export function SiteAuthorizePage({
       <FormPage
         leading={<LogoTile icon={<GlobeIcon />} />}
         title={`Continue to ${request.host}`}
-        description="The Site sees your name and email. It can't use your account anywhere else."
+        description="The app sees your name and email. It can't use your account anywhere else."
         submitLabel="Continue"
         pendingLabel="Continuing…"
         pending={phase.kind === "continuing"}
@@ -225,7 +225,7 @@ export function SiteAuthorizePage({
           const target = safeSiteRedirect(next.redirectTo, request, domain.domain);
           if (!target) {
             setPhase({ kind: "idle" });
-            throw new Error("The Site's sign-in link isn't valid. Open the Site again.");
+            throw new Error("The app's sign-in link isn't valid. Open the app again.");
           }
           navigate(target);
           return false;
@@ -235,7 +235,7 @@ export function SiteAuthorizePage({
           <Notice tone="failed">{phase.message}</Notice>
         ) : (
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-3 text-sm">
-            <dt className="text-fg-muted">Site</dt>
+            <dt className="text-fg-muted">App</dt>
             <dd className="truncate text-fg">{request.host}</dd>
             <dt className="text-fg-muted">Account</dt>
             <dd className="truncate text-fg">{email}</dd>
@@ -259,6 +259,6 @@ async function authorize(
     const { status, code } = apiErrorFacts(error);
     if (code === "site_access_denied" || status === 403) return { kind: "denied" };
     if (code === "site_not_found" || status === 404) return { kind: "unavailable" };
-    return { kind: "failed", message: userErrorText(error, "Couldn't reach the Site. Try again.") };
+    return { kind: "failed", message: userErrorText(error, "Couldn't reach the app. Try again.") };
   }
 }

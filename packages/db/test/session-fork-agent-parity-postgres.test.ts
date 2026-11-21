@@ -155,6 +155,8 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   site_viewer_principal: { why: "derived for a Site conversation", expected: fresh(null) },
   site_owner_subject_id: { why: "derived for a Site conversation", expected: fresh(null) },
   parent_session_id: { why: "a fork is a root", expected: fresh(null) },
+  waiting_on: { why: "who the source chat waits on is its own state", expected: fresh(null) },
+  links: { why: "the source chat's Linked items stay with it", expected: fresh(null) },
   parent_turn_id: { why: "a fork is a root", expected: fresh(null) },
   root_session_id: { why: "a fork is a root", expected: equalsForkId },
   nested_agent_depth: { why: "a fork is a root", expected: fresh(0) },

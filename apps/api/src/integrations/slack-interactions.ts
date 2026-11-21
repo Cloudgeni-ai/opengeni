@@ -8099,6 +8099,8 @@ async function deliverSlackSessionEvents(
       ...interaction,
       claimHolderId,
       sequence: lastSequence,
+      // A wake marked meanwhile for a later turn keeps the thread open.
+      settledTurn: true,
       state: terminal,
     });
   } else {

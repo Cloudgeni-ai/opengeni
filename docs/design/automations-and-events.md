@@ -476,7 +476,10 @@ and the person's sources page shows only what they use.
 An event run is a scheduled-task run with `triggerType: "event"` and producer
 key `scheduled-task-event:<occurrenceId>`, started as the same Temporal fire
 workflow with that key as its workflow id, so a retried start is one run. It
-acts with the automation's own authority, like a scheduled fire.
+acts with the automation's own authority, like a scheduled fire. An App data
+sync (action `app_sync`, [app-sync.md](../app-sync.md)) takes event triggers
+from workspace sources the same way: the fire queues the run for the sync
+executor, no chat is created and the events are not passed to the tool.
 
 Its `scheduled_occurrence` chat update carries an `events` field: the
 occurrence id, how many events the batch accounts for, whether events may have
@@ -591,6 +594,14 @@ Runs inherit access like scheduled runs: they follow the destination chat, or
 the workspace defaults and the owner's own access for a separate agent, unless
 the owner explicitly narrows them.
 
+### Linked pull request wakes
+
+`session_links_add` with `wakeWhen` creates a one-time event automation on the
+current chat for a linked GitHub pull request's merge or its repository's next
+release, through the ordinary `scheduled_tasks_create` path (no second engine).
+A one-time event automation's wake of a chat that started in Slack reopens
+the thread delivery from the wake; recurring ones don't. See [../session-status-and-links.md](../session-status-and-links.md).
+
 ## Surfaces
 
 - **HTTP and SDK.** Scheduled task create and update take `events:
@@ -642,6 +653,24 @@ the owner explicitly narrows them.
   generated from the event's JSON Schema, with JSON as the fallback. The web
   app's form and the panel share the "When" field and the automation model.
 - **Agent tools.** See [Agent tools](#agent-tools).
+
+## Agent triggers
+
+An agent's **Starts when** (docs/agents.md) is a list of ordinary
+automations whose `agentConfig.agentId` names the agent. Each run starts a
+new chat bound to that agent, so it runs with the agent's Instructions,
+Memory and Can use; the run is created as the task, with the task owner's
+access to the agent. Every trigger type the catalog offers works, including
+types added later, because the trigger is the automation's own: nothing is
+agent-specific in intake or delivery. The runs keep every automation limit:
+the chain limit on event-started chats, the storm guard (`maxRunsPerHour`)
+and usage limits. Saving checks the agent is one the owner can use, for the
+automation as it will be after the edit (agent, run mode and visibility),
+and that each run starts a new chat (an `existing_session` or
+`reusable_session` task with an agent is refused). The automation form takes `?agent=<id>` (and `?agentTrigger=<n>`
+for a ready-made agent's suggestion) and binds the new automation to the
+agent. A ready-made agent's suggested triggers are never created on their
+own: each waits until the person picks its source and saves.
 
 ## Templates
 

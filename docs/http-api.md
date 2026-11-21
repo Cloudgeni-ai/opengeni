@@ -77,6 +77,7 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream` (SSE; backfills from Postgres by event sequence)
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
+- `GET /v1/workspaces/:workspaceId/sessions/:sessionId/links` (`?fresh=true` skips the status cache), `POST .../links` and `DELETE .../links/:linkId`: the chat's Linked items with live status ([session-status-and-links.md](session-status-and-links.md))
 
 `GET /v1/workspaces/:workspaceId/sessions?view=page&sessionIds=<id>,<id>`
 selects up to 200 known sessions (SDK: `listSessionSummaryPage(workspaceId,

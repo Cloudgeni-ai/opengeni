@@ -100,3 +100,31 @@ test("a call never resolves a plain name: it names the tool's server and is told
   );
   expect(path("other.orders_swap_item", false)).toMatchObject({ error: "unknown" });
 });
+
+test("a first-party tool's hidden alias (its former name) resolves to the current tool", () => {
+  const firstParty = {
+    entries: [
+      entry(
+        "opengeni",
+        "app_data_query",
+        ["opengeni", "app_data_query"],
+        "opengeni__app_data_query",
+      ),
+      entry("other", "site_data_query", ["other", "site_data_query"], "other__site_data_query"),
+    ],
+  };
+  const resolve = (reference: string, allowPlainName?: boolean) => {
+    const resolution = resolveCatalogTool(
+      firstParty,
+      reference,
+      allowPlainName === undefined ? {} : { allowPlainName },
+    );
+    return "entry" in resolution ? resolution.entry.codemodePath.join(".") : resolution;
+  };
+  for (const reference of ["opengeni.site_data_query", "opengeni__site_data_query"]) {
+    expect(resolve(reference)).toBe("opengeni.app_data_query");
+    expect(resolve(reference, false)).toBe("opengeni.app_data_query");
+  }
+  // Another server's own tool of that name is still that tool.
+  expect(resolve("other.site_data_query")).toBe("other.site_data_query");
+});

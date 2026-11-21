@@ -660,8 +660,8 @@ function SessionDefaultsSection({ onConnectGateway }: { onConnectGateway: () => 
     off: "Video generation is off for new sessions",
   });
   const apps = useSavedSwitch(sessionDefaults.useConnectedAppsAutomatically, {
-    on: "New sessions start with your connected apps",
-    off: "New sessions start without connected apps",
+    on: "New sessions start with your connected tools",
+    off: "New sessions start without connected tools",
   });
   const providers = useSavedSwitch(false, {
     on: "Codex chats can switch providers",
@@ -830,8 +830,8 @@ function SessionDefaultsSection({ onConnectGateway }: { onConnectGateway: () => 
 
       <SettingRow
         variant={picks.settingRow}
-        label="Use connected apps automatically"
-        description="New sessions start with your connected apps. People can still turn them off in a session."
+        label="Use connected tools automatically"
+        description="New sessions start with your connected tools. People can still turn them off in a session."
         control={<SavedSwitch state={apps} />}
       />
 

@@ -53,7 +53,7 @@ const WORKSPACE_ROLES: RoleOption<WorkspaceRole>[] = workspaceRoles.map((role) =
   ...role,
   escalation:
     role.id === "workspace_admin"
-      ? "They'll be able to change this workspace's settings, integrations and who has access."
+      ? "They'll be able to change this workspace's settings, connected tools and who has access."
       : undefined,
 }));
 

@@ -62,12 +62,12 @@ export function SiteAiUsageTable({ usage }: { usage: InsightsSiteUsageResponse }
   if (usage.rows.length === 0) {
     return (
       <p className="py-6 text-center text-sm text-fg-muted">
-        No model usage attributed to Sites in this period.
+        No model usage attributed to apps in this period.
       </p>
     );
   }
   return (
-    <RowList variant="table" label="Model costs by Site" nameLabel="Site" columns={SITE_COLUMNS}>
+    <RowList variant="table" label="Model costs by app" nameLabel="App" columns={SITE_COLUMNS}>
       {usage.rows.map((row, index) => (
         <ListRow
           key={row.siteId ?? `${row.kind}-${index}`}

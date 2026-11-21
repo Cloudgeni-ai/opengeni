@@ -25,7 +25,7 @@ import { signedApiRequest } from "./signing";
 import { requiresSignIn, siteCaller, type SiteContext } from "./site-context";
 
 const SHELL_STYLE =
-  "html,body{margin:0;height:100%;background:#fff}body{display:flex;flex-direction:column}#og-site{flex:1;width:100%;border:0;display:block}#og-footer{display:flex;justify-content:flex-end;gap:12px;padding:2px 10px;font:11px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;background:#f6f6f6;border-top:1px solid #e3e3e3}#og-footer a{color:#666;text-decoration:none}#og-footer a:hover{text-decoration:underline}#og-preview{margin-right:auto;color:#7a4b00}#og-preview a{color:#7a4b00;text-decoration:underline}#og-footer.og-previewing{background:#fff4dc;border-top-color:#f0d9a8}#og-human{position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.45)}#og-human[hidden]{display:none}#og-human>div{background:#fff;color:#111;padding:20px;border-radius:8px;font:14px system-ui,sans-serif;text-align:center}";
+  "html,body{margin:0;height:100%;background:#fff}body{display:flex;flex-direction:column}#og-site{flex:1;width:100%;border:0;display:block}#og-footer{display:flex;justify-content:flex-end;gap:12px;padding:2px 10px;font:11px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;background:#f6f6f6;border-top:1px solid #e3e3e3}#og-footer a{color:#666;text-decoration:none}#og-footer a:hover{text-decoration:underline}#og-preview{margin-right:auto;color:#7a4b00}#og-preview a{color:#7a4b00;text-decoration:underline}#og-footer.og-previewing{background:#fff4dc;border-top-color:#f0d9a8}#og-human{position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.45)}#og-human[hidden]{display:none}#og-human>div{background:#fff;color:#111;padding:20px;border-radius:8px;font:14px system-ui,sans-serif;text-align:center}#og-connect{position:fixed;right:12px;bottom:32px;z-index:10;display:flex;align-items:flex-start;gap:4px;max-width:min(22rem,calc(100% - 24px));padding:6px;background:#fff;border:1px solid #e3e3e3;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.14);font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}#og-connect>div{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}#og-connect button{cursor:pointer;border:0;border-radius:6px;font:inherit;font-weight:500}#og-connect>div>button{background:#111;color:#fff;padding:6px 12px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#og-connect>div>button:hover{background:#333}#og-connect .og-connect-close{background:transparent;color:#666;width:28px;height:28px;font-size:18px;line-height:1}#og-connect .og-connect-close:hover{color:#111;background:#f2f2f2}";
 
 const VIEW_AS_LABEL: Record<SiteViewAs, string> = {
   public: "a public visitor",
@@ -56,7 +56,7 @@ export function shellHtml(init: {
   /** Set while a member previews the Site as a visitor: shows the banner with Exit preview. */
   preview?: { viewAs: SiteViewAs; exitHref: string } | null;
 }): string {
-  const title = escapeHtml(init.title || "Site");
+  const title = escapeHtml(init.title || "App");
   const preview = init.preview
     ? `<span id="og-preview">Viewing as ${VIEW_AS_LABEL[init.preview.viewAs]} · <a href="${escapeHtml(
         init.preview.exitHref,
@@ -120,8 +120,8 @@ async function handleViewAs(
       site,
       403,
       "Preview not available",
-      "Only workspace members can preview this Site as a visitor.",
-      { href: back, label: "Back to the Site" },
+      "Only workspace members can preview this app as a visitor.",
+      { href: back, label: "Back to the app" },
     );
     for (const cookie of cookies) page.headers.append("Set-Cookie", cookie);
     return page;
@@ -173,14 +173,14 @@ export async function handleShell(site: SiteContext): Promise<Response> {
             site,
             403,
             "Not available to this visitor",
-            "People in the role you are previewing as can't open this Site.",
+            "People in the role you are previewing as can't open this app.",
             { href: exitPreviewHref(site.url), label: "Exit preview" },
           )
         : messagePage(
             site,
             403,
             "No access",
-            "You are signed in, but this Site is not shared with your account.",
+            "You are signed in, but this app is not shared with your account.",
             { href: "/_og/auth/logout", label: "Sign out" },
           );
       for (const cookie of cookies) response.headers.append("Set-Cookie", cookie);

@@ -330,7 +330,7 @@ describe("internal Site database route", () => {
       await run(SITE, "CREATE TABLE sneaky (a)", {}, { profile: "agent" }),
     );
     expect(schemaChange).toMatchObject({ status: 422, code: "validation" });
-    expect(schemaChange.message).toContain("site_sql_migrate");
+    expect(schemaChange.message).toContain("app_sql_migrate");
     expect(
       await failure(
         await call(SITE, "script", {

@@ -1,5 +1,21 @@
 # opengeni
 
+## 6.35.0
+
+### Minor Changes
+
+- fa938cd: `npx opengeni connect` adds the Opengeni MCP server and a short `opengeni` skill to Claude Code, Codex, Cursor and VS Code with Copilot. The organization MCP server lists named tools for connected agents (`delegate`, `wait_for`, session, app, tool, Skill and Knowledge tools). `updateOrganizationMcpConnection` accepts `appDataAccess` and `defaultWorkspaceId`, and `access` is now optional.
+
+### Patch Changes
+
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [8bf1ec2]
+  - @opengeni/contracts@6.35.0
+
 ## 6.34.0
 
 ### Patch Changes

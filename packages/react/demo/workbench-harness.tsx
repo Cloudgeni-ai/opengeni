@@ -20,6 +20,7 @@ enableWorkbenchDemoPeers();
    review passes + the D2 real-browser windowing proof need. Driven by query
    params so Playwright can select a state:
      ?view=changes-large | changes-small | changes-guard | files-dense | files-residue
+     &pr=view|open (changes-small: the pull request action)
      &theme=dark|light
    -------------------------------------------------------------------------- */
 
@@ -161,6 +162,14 @@ function filesResult(tree: FileTreeNode[], source: "live" | "capture"): UseSandb
 const params = new URLSearchParams(window.location.search);
 const view = params.get("view") ?? "changes-large";
 const theme = params.get("theme") === "light" ? "light" : "dark";
+// ?pr=view shows View on GitHub, ?pr=open shows Open PR (changes-small).
+const prAction = params.get("pr");
+const pullRequestProps =
+  prAction === "view"
+    ? { pullRequest: { url: "https://github.com/acme/api/pull/412", number: 412 } }
+    : prAction === "open"
+      ? { onOpenPullRequest: () => undefined }
+      : {};
 const capturedAt = new Date(Date.now() - 6 * 60_000).toISOString();
 
 function App() {
@@ -173,6 +182,7 @@ function App() {
           source="capture"
           capturedAt={capturedAt}
           captureRevision={12}
+          {...pullRequestProps}
         />
       );
       break;

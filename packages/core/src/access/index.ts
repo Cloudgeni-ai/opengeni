@@ -268,6 +268,43 @@ const delegatedHumanAuthorizationSchema = z.object({
 
 const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>();
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
+/**
+ * Proofs dispatched for an outside agent (a coding agent connected to the
+ * organization MCP server, or a personal API key used there), with the app
+ * data reach its connection allows. Grants resolved from such a proof carry
+ * {@link OUTSIDE_AGENT_GRANT_METADATA_KEY}.
+ */
+const outsideAgentProofs = new WeakMap<DelegatedHumanAuthorization, OutsideAgentReach>();
+
+/** What an outside agent may do with app data: read like a viewer, or manage. */
+export type OutsideAgentReach = Readonly<{ appData: "viewer" | "manager" }>;
+
+/** Grant metadata key naming an outside agent's reach (see {@link outsideAgentReach}). */
+export const OUTSIDE_AGENT_GRANT_METADATA_KEY = "outsideAgent";
+
+/**
+ * The outside-agent reach a grant was resolved with, or null for every other
+ * caller. Only narrows: a grant that claims it is treated as an outside agent.
+ */
+export function outsideAgentReach(
+  grant: { metadata?: Record<string, unknown> | undefined } | null | undefined,
+): OutsideAgentReach | null {
+  const value = grant?.metadata?.[OUTSIDE_AGENT_GRANT_METADATA_KEY];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  return { appData: (value as { appData?: unknown }).appData === "manager" ? "manager" : "viewer" };
+}
+
+function withOutsideAgentMetadata<T extends { metadata?: Record<string, unknown> | undefined }>(
+  grant: T,
+  proof: DelegatedHumanAuthorization,
+): T {
+  const reach = outsideAgentProofs.get(proof);
+  if (!reach) return grant;
+  return {
+    ...grant,
+    metadata: { ...grant.metadata, [OUTSIDE_AGENT_GRANT_METADATA_KEY]: { appData: reach.appData } },
+  };
+}
 /** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
 const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
 /** The verified Better Auth session (its id and user) behind a canonical managed-cookie context. */
@@ -333,6 +370,7 @@ const verifiedDelegatedHumanAuthorizations = new WeakMap<
 export function stampDelegatedHumanAuthorization(
   request: Request,
   input: DelegatedHumanAuthorization,
+  options: { outsideAgent?: OutsideAgentReach } = {},
 ): void {
   if (delegatedHumanRequests.has(request) || accessResolvedRequests.has(request)) {
     throw new HTTPException(403, { message: "request access authorization already resolved" });
@@ -355,6 +393,8 @@ export function stampDelegatedHumanAuthorization(
     workspaceScope,
   };
   Object.freeze(proof.permissions);
+  if (options.outsideAgent)
+    outsideAgentProofs.set(proof, Object.freeze({ appData: options.outsideAgent.appData }));
   delegatedHumanRequests.set(request, Object.freeze(proof));
 }
 
@@ -395,12 +435,17 @@ export function stampWorkspacePersonAuthorization(
     subjectId: string;
     permissions: Permission[];
   },
+  options: { outsideAgent?: OutsideAgentReach } = {},
 ): void {
   if (input.subjectId.startsWith("user:")) {
-    stampDelegatedHumanAuthorization(request, {
-      ...input,
-      workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
-    });
+    stampDelegatedHumanAuthorization(
+      request,
+      {
+        ...input,
+        workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
+      },
+      options,
+    );
     return;
   }
   if (delegatedHumanRequests.has(request) || accessResolvedRequests.has(request))
@@ -413,11 +458,13 @@ export function stampWorkspacePersonAuthorization(
         .regex(/^external_user:[^\s\u0000-\u001f\u007f]+$/),
     })
     .parse({ ...input, workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] } });
-  if (parsed.workspaceScope.kind !== "selected") throw new Error("Site workspace scope required");
+  if (parsed.workspaceScope.kind !== "selected") throw new Error("App workspace scope required");
   Object.freeze(parsed.permissions);
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);
   const proof = Object.freeze(parsed);
+  if (options.outsideAgent)
+    outsideAgentProofs.set(proof, Object.freeze({ appData: options.outsideAgent.appData }));
   workspaceExternalPersonProofs.add(proof);
   delegatedHumanRequests.set(request, proof);
 }
@@ -2463,7 +2510,7 @@ async function resolveDelegatedHumanAccessContext(
     if (!grant || grant.accountId !== proof.organizationId)
       throw new HTTPException(403, { message: "this person can no longer use this workspace" });
     const bounded = Object.freeze({
-      ...grant,
+      ...withOutsideAgentMetadata(grant, proof),
       permissionMode: "explicit" as const,
       permissions: Object.freeze(
         explicitPermissions(
@@ -2555,7 +2602,7 @@ async function resolveDelegatedHumanAccessContext(
         delegatedHumanWorkspaceAllowed(proof, grant.workspaceId),
     )
     .map((grant) => ({
-      ...grant,
+      ...withOutsideAgentMetadata(grant, proof),
       permissions: intersectWorkspacePermissions(grant.permissions),
       permissionMode: "explicit" as const,
     }));

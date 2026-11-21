@@ -70,7 +70,7 @@ const COPY = {
       "Indexes repositories so agents search large codebases faster. Default follows this server's setting.",
   },
   apps: {
-    label: "Use connected apps automatically",
+    label: "Use connected tools automatically",
     description: `New sessions can use ${connectedAppNames.slice(0, -1).join(", ")} and ${
       connectedAppNames.at(-1) ?? ""
     } without adding them first.`,

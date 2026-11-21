@@ -246,10 +246,10 @@ function option(title: string): HTMLElement {
   return match;
 }
 
-test("the field says Sites are searched too", async () => {
+test("the field says apps are searched too", async () => {
   await openMenu();
-  expect(input().getAttribute("aria-label")).toBe("Search chats, Sites and actions");
-  expect(input().placeholder).toBe("Search chats and Sites, or run an action…");
+  expect(input().getAttribute("aria-label")).toBe("Search chats, apps and actions");
+  expect(input().placeholder).toBe("Search chats and apps, or run an action…");
 });
 
 test("chat title search uses summaries without requesting full session configuration", async () => {
@@ -408,17 +408,17 @@ test("late summary answers cannot replace results for a newer query", async () =
   expect(option("Usage report follow-up")).toBeTruthy();
 });
 
-test("before anything is typed, a few recent Sites show without asking the server", async () => {
+test("before anything is typed, a few recent apps show without asking the server", async () => {
   currentEnv = env({ currentSiteId: sites.usage });
   await openMenu();
-  const recent = groups().find((group) => group.label === "Recent Sites");
+  const recent = groups().find((group) => group.label === "Recent apps");
   // The Site on screen is left out; at most three, most recent first.
   expect(recent?.options).toEqual(["Pricing calculator", "Roadmap", "Status page"]);
   expect(groups().map((group) => group.label)).toContain("Go to");
   expect(catalogCalls).toEqual([]);
 });
 
-test("typing still lists chats first, then matching Sites in their own group, with the server's matches", async () => {
+test("typing still lists chats first, then matching apps in their own group, with the server's matches", async () => {
   catalog = async () => ({
     items: [
       {
@@ -455,8 +455,8 @@ test("typing still lists chats first, then matching Sites in their own group, wi
   ]);
   const listed = groups();
   // Chats keep coming first, even when a Site matches better; Sites follow them.
-  expect(listed.map((group) => group.label).slice(0, 2)).toEqual(["Chats", "Sites"]);
-  expect(listed.find((group) => group.label === "Sites")?.options).toEqual([
+  expect(listed.map((group) => group.label).slice(0, 2)).toEqual(["Chats", "Apps"]);
+  expect(listed.find((group) => group.label === "Apps")?.options).toEqual([
     "Usage dashboard",
     "Usage launch checklist",
   ]);
@@ -478,10 +478,10 @@ test("a chat with an avatar shows it, the way its sidebar row does", async () =>
   expect(row.querySelector("svg.lucide-message-square")).toBeNull();
 });
 
-test("with no matching chats, Sites lead; Enter opens one in the app, the way its sidebar row does", async () => {
+test("with no matching chats, apps lead; Enter opens one in the app, the way its sidebar row does", async () => {
   await openMenu();
   await type("pricing");
-  expect(groups()[0]).toEqual({ label: "Sites", options: ["Pricing calculator"] });
+  expect(groups()[0]).toEqual({ label: "Apps", options: ["Pricing calculator"] });
   await act(async () => {
     input().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   });
@@ -489,7 +489,7 @@ test("with no matching chats, Sites lead; Enter opens one in the app, the way it
   expect(closes).toEqual([false]);
 });
 
-test("⌘ and a click open a Site in a new browser tab on the web", async () => {
+test("⌘ and a click open an app in a new browser tab on the web", async () => {
   const originalOpen = window.open;
   window.open = ((url: string) => {
     newTabs.push(url);
@@ -508,7 +508,7 @@ test("⌘ and a click open a Site in a new browser tab on the web", async () => 
   }
 });
 
-test("the desktop app opens Sites in the app even with ⌘", async () => {
+test("the desktop app opens apps in the app even with ⌘", async () => {
   currentEnv = env({ surface: "desktop" });
   await openMenu();
   await type("roadmap");
@@ -518,22 +518,22 @@ test("the desktop app opens Sites in the app even with ⌘", async () => {
   expect(opened).toEqual([sites.roadmap]);
 });
 
-test("a failing Site search leaves chats, actions and known Sites working", async () => {
+test("a failing app search leaves chats, actions and known apps working", async () => {
   catalog = async () => {
     throw Object.assign(new Error("API 500"), { status: 500 });
   };
   await openMenu();
   await type("usage");
   const listed = groups();
-  expect(listed.map((group) => group.label).slice(0, 2)).toEqual(["Chats", "Sites"]);
-  expect(listed.find((group) => group.label === "Sites")?.options).toEqual(["Usage dashboard"]);
+  expect(listed.map((group) => group.label).slice(0, 2)).toEqual(["Chats", "Apps"]);
+  expect(listed.find((group) => group.label === "Apps")?.options).toEqual(["Usage dashboard"]);
   expect(listed.find((group) => group.label === "Chats")?.options).toEqual([
     "Usage report follow-up",
   ]);
   expect(listed.at(-1)?.label).toBe("Messages");
 });
 
-test("a workspace that refuses Site access is not asked again while the menu stays open", async () => {
+test("a workspace that refuses app access is not asked again while the menu stays open", async () => {
   catalog = async () => {
     throw Object.assign(new Error("API 403"), { status: 403 });
   };
@@ -541,7 +541,7 @@ test("a workspace that refuses Site access is not asked again while the menu sta
   await type("usage");
   await type("usage d");
   expect(catalogCalls).toHaveLength(1);
-  expect(groups().find((group) => group.label === "Sites")?.options).toEqual(["Usage dashboard"]);
+  expect(groups().find((group) => group.label === "Apps")?.options).toEqual(["Usage dashboard"]);
 });
 
 function catalogSite(id: string, title: string) {
@@ -555,7 +555,7 @@ function catalogSite(id: string, title: string) {
   };
 }
 
-test("a Site only the server found stays listed while the next answer loads", async () => {
+test("an app only the server found stays listed while the next answer loads", async () => {
   catalog = async (options) =>
     options.q === "usage"
       ? { items: [catalogSite(sites.launch, "Usage launch checklist")], nextCursor: null }
@@ -564,7 +564,7 @@ test("a Site only the server found stays listed while the next answer loads", as
   await type("usage");
   await type("usage l");
   expect(catalogCalls.map((call) => call.options.q)).toEqual(["usage", "usage l"]);
-  expect(groups().find((group) => group.label === "Sites")?.options).toEqual([
+  expect(groups().find((group) => group.label === "Apps")?.options).toEqual([
     "Usage launch checklist",
   ]);
 });
@@ -604,14 +604,14 @@ test("a slow answer to an earlier query never shows under a later one", async ()
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
   });
-  expect(groups().find((group) => group.label === "Sites")?.options).toEqual(["Usage dashboard"]);
+  expect(groups().find((group) => group.label === "Apps")?.options).toEqual(["Usage dashboard"]);
 });
 
-test("one letter matches the sidebar's Sites without asking the server", async () => {
+test("one letter matches the sidebar's apps without asking the server", async () => {
   await openMenu();
   await type("r");
   expect(catalogCalls).toEqual([]);
-  expect(groups().find((group) => group.label === "Sites")?.options).toContain("Roadmap");
+  expect(groups().find((group) => group.label === "Apps")?.options).toContain("Roadmap");
 });
 
 test("Start recording is a general action where meetings record, and finds by meeting", async () => {
@@ -708,7 +708,7 @@ test("where meetings exist, the menu lists the newest and goes to Meetings", asy
   );
   currentEnv = env({ meetingPages: pages });
   await openMenu();
-  expect(input().placeholder).toBe("Search chats, Sites and meetings, or run an action…");
+  expect(input().placeholder).toBe("Search chats, apps and meetings, or run an action…");
   expect(calls).toEqual([{ limit: 4, signal: expect.objectContaining({ aborted: false }) }]);
   expect(groups().find((group) => group.label === "Recent meetings")?.options).toEqual([
     "Pricing workshop",

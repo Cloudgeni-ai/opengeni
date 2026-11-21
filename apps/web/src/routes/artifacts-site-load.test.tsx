@@ -28,7 +28,7 @@ const snapshot = {
       id: siteId,
       workspaceId,
       title: "Café menu",
-      description: "An interactive workspace Site.",
+      description: "An interactive workspace app.",
       status: "active" as const,
       visibility: "private" as const,
       ownerSubjectId: "user:owner",
@@ -178,7 +178,7 @@ function hasAction(container: HTMLElement, label: string) {
   });
 }
 
-test("loaded Site keeps Archive and Edit with Opengeni behind permission checks", async () => {
+test("loaded app keeps Archive and Edit with Opengeni behind permission checks", async () => {
   loadError = null;
   const { container, root } = await renderDetail();
   try {
@@ -196,7 +196,7 @@ test("loaded Site keeps Archive and Edit with Opengeni behind permission checks"
 
 const sitePath = (id = siteId) => `/workspaces/${workspaceId}/sites/${id}`;
 
-test("a link to the Site, or the Artifacts list's old one, opens the Site view in its place", async () => {
+test("a link to the app, or the Artifacts list's old one, opens the app view in its place", async () => {
   loadError = null;
   for (const entry of ["/", "/?browse=true", "/?fromSession=s1"]) {
     const { container, root, router } = await renderDetail(entry);
@@ -212,12 +212,12 @@ test("a link to the Site, or the Artifacts list's old one, opens the Site view i
   }
 });
 
-test("the Site tab and Edit with Opengeni open the Site view; Edit starts a new conversation there", async () => {
+test("the app tab and Edit with Opengeni open the app view; Edit starts a new conversation there", async () => {
   loadError = null;
   const tab = await renderDetail("/?tab=versions");
   try {
     const site = [...tab.container.querySelectorAll('[role="tab"]')].find(
-      (element) => element.textContent?.trim() === "Site",
+      (element) => element.textContent?.trim() === "App",
     ) as HTMLElement;
     await act(async () => {
       site.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
@@ -243,12 +243,12 @@ test("the Site tab and Edit with Opengeni open the Site view; Edit starts a new 
   }
 });
 
-test("an archived Site's details say so and offer no edit", async () => {
+test("an archived app's details say so and offer no edit", async () => {
   loadError = null;
   snapshot.detail.artifact.status = "archived" as "active";
   const archived = await renderDetail();
   try {
-    expect(archived.container.textContent).toContain("This Site is archived");
+    expect(archived.container.textContent).toContain("This app is archived");
     expect(hasAction(archived.container, "Edit with Opengeni")).toBe(false);
   } finally {
     snapshot.detail.artifact.status = "active";
@@ -257,13 +257,13 @@ test("an archived Site's details say so and offer no edit", async () => {
   }
 });
 
-test("missing Site hides Archive and Edit with Opengeni", async () => {
+test("missing app hides Archive and Edit with Opengeni", async () => {
   loadError = new OpenGeniApiError(404, "", { correlationId: "corr-missing-site" });
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
-    expect(container.textContent).toContain("This Site isn't available");
+    expect(container.textContent).toContain("This app isn't available");
     // The reference sits behind a quiet Copy details, not in the text.
     expect(container.textContent).toContain("Copy details");
     expect(container.textContent).not.toContain("corr-missing-site");
@@ -274,7 +274,7 @@ test("missing Site hides Archive and Edit with Opengeni", async () => {
   }
 });
 
-test("read-only Site hides mutation actions but keeps its details", async () => {
+test("read-only app hides mutation actions but keeps its details", async () => {
   loadError = null;
   const permissions = accessContext.workspaceGrants[0]!.permissions;
   accessContext.workspaceGrants[0]!.permissions = [];
@@ -291,34 +291,34 @@ test("read-only Site hides mutation actions but keeps its details", async () => 
   }
 });
 
-test("malformed Site id hides mutation actions", async () => {
+test("malformed app id hides mutation actions", async () => {
   loadError = new OpenGeniApiError(422, "", { correlationId: "corr-malformed-site" });
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
-    expect(container.textContent).toContain("This Site link isn't valid");
+    expect(container.textContent).toContain("This app link isn't valid");
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
 });
 
-test("transient Site load failure offers retry without mutation actions", async () => {
+test("transient app load failure offers retry without mutation actions", async () => {
   loadError = new OpenGeniApiError(503, "", { correlationId: "corr-transient-site" });
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Retry")).toBe(true);
-    expect(container.textContent).toContain("Couldn't load this Site");
+    expect(container.textContent).toContain("Couldn't load this app");
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
 });
 
-test("Site read refusal explains missing artifact access instead of removal", async () => {
+test("App read refusal explains missing artifact access instead of removal", async () => {
   const permissions = accessContext.workspaceGrants[0]!.permissions;
   for (const [error, grant] of [
     // The server refused the read.
@@ -330,7 +330,7 @@ test("Site read refusal explains missing artifact access instead of removal", as
     accessContext.workspaceGrants[0]!.permissions = [...grant];
     const { container, root } = await renderDetail();
     try {
-      expect(container.textContent).toContain("You can't open this Site");
+      expect(container.textContent).toContain("You can't open this app");
       expect(container.textContent).toContain(
         "You need access to artifacts in this workspace. Ask a workspace admin.",
       );
@@ -345,13 +345,13 @@ test("Site read refusal explains missing artifact access instead of removal", as
   }
 });
 
-test("Site without an openable version still shows its details instead of loading forever", async () => {
+test("App without an openable version still shows its details instead of loading forever", async () => {
   loadError = null;
   withoutContent = true;
   const { container, root } = await renderDetail();
   try {
     expect(container.textContent).toContain("Café menu");
-    expect(container.textContent).not.toContain("Loading Site");
+    expect(container.textContent).not.toContain("Loading app");
     expect(container.querySelector('[aria-busy="true"]')).toBeNull();
     expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
   } finally {
@@ -361,7 +361,7 @@ test("Site without an openable version still shows its details instead of loadin
   }
 });
 
-test("Duplicate in Settings copies the Site and opens the copy in the Site view", async () => {
+test("Duplicate in Settings copies the app and opens the copy in the app view", async () => {
   loadError = null;
   withoutContent = false;
   siteClient.duplicateWorkspaceArtifact.mockClear();

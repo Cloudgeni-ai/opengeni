@@ -6,6 +6,7 @@ export default defineConfig({
   entry: [
     "src/browser-response-headers.ts",
     "src/html-frame-host.ts",
+    "src/sidebar-layout.ts",
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
     "src/billing-credit-notifications.ts",
@@ -73,6 +74,7 @@ export default defineConfig({
     "src/session-history.ts",
     "src/message-time-zone.ts",
     "src/site-session-http.ts",
+    "src/first-party-tool-aliases.ts",
     "src/slack-bot-scopes.ts",
     "src/slack-rest-mcp.ts",
     "src/microsoft-dynamics.ts",

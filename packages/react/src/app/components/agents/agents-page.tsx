@@ -3,9 +3,15 @@
  * shared. Bot templates and Slack agents became agents, so their old pages
  * land here, with a one-time note saying so.
  */
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { BotIcon, PlusIcon, UploadIcon } from "lucide-react";
-import type { AgentListFilter, AgentSummary } from "@opengeni/contracts";
+import {
+  agentInitialsAvatar,
+  type Agent,
+  type AgentListFilter,
+  type AgentSummary,
+  type AgentTemplate,
+} from "@opengeni/contracts";
 
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
@@ -17,6 +23,7 @@ import { ListRow, ListRowSkeleton, RowList } from "../../../ui/list-row";
 import { LogoTile } from "../../../ui/logo-tile";
 import { MetaChip } from "../../../ui/meta-chip";
 import { Notice } from "../../../ui/notice";
+import { RowButton } from "../../../ui/page-actions";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
@@ -254,7 +261,104 @@ export function AgentsPage({
           )}
         </DetailSection>
       )}
+      {state.supported ? (
+        <AgentGallery
+          workspaceId={workspaceId}
+          added={
+            new Set(
+              (agents ?? []).flatMap((agent) => (agent.templateKey ? [agent.templateKey] : [])),
+            )
+          }
+          onAdded={(agent) => {
+            state.replace((current) => [agent, ...current]);
+            open(agent);
+          }}
+        />
+      ) : null}
       {after}
     </DetailPage>
+  );
+}
+
+/**
+ * "Add an agent": ready-made agents, each added as an ordinary agent the
+ * person then sets up on its page. One already added here is not offered.
+ */
+function AgentGallery({
+  workspaceId,
+  added,
+  onAdded,
+}: {
+  workspaceId: string;
+  added: ReadonlySet<string>;
+  onAdded: (agent: Agent) => void;
+}) {
+  const { client } = useAppContext();
+  const [templates, setTemplates] = useState<AgentTemplate[] | null>(null);
+  // Ready-made agents anyone here already added, whatever the list's filter.
+  const [addedHere, setAddedHere] = useState<ReadonlySet<string>>(new Set());
+  const [adding, setAdding] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    Promise.all([
+      client.listAgentTemplates(workspaceId),
+      client.listAgents(workspaceId).catch(() => []),
+    ]).then(
+      ([list, agents]) => {
+        if (!live) return;
+        setAddedHere(
+          new Set(agents.flatMap((agent) => (agent.templateKey ? [agent.templateKey] : []))),
+        );
+        setTemplates(list);
+      },
+      () => live && setTemplates([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId]);
+  const offered = (templates ?? []).filter(
+    (template) => !added.has(template.key) && !addedHere.has(template.key),
+  );
+  if (offered.length === 0) return null;
+  const add = async (template: AgentTemplate) => {
+    setAdding(template.key);
+    try {
+      const agent = await client.createAgentFromTemplate(workspaceId, template.key);
+      toast.success(`Added ${agent.name}`);
+      onAdded(agent);
+    } catch (error) {
+      toast.error(`Couldn't add ${template.name}`, { description: userErrorText(error) });
+    } finally {
+      setAdding(null);
+    }
+  };
+  return (
+    <DetailSection title="Add an agent">
+      <RowList label="Ready-made agents" variant="catalog">
+        {offered.map((template) => (
+          <ListRow
+            key={template.key}
+            data-agent-template={template.key}
+            leading={
+              <SessionAvatar
+                avatar={template.avatar ?? agentInitialsAvatar(template.name, template.key)}
+                name={template.name}
+                workspaceId={workspaceId}
+                seed={template.key}
+                size="md"
+              />
+            }
+            title={template.name}
+            description={template.description}
+            control={
+              <RowButton disabled={adding !== null} onClick={() => void add(template)}>
+                {adding === template.key ? "Adding…" : "Add"}
+              </RowButton>
+            }
+          />
+        ))}
+      </RowList>
+    </DetailSection>
   );
 }

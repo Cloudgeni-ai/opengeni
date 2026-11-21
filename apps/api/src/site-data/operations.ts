@@ -1,4 +1,4 @@
-import type { ApiRouteDeps } from "@opengeni/core";
+import { outsideAgentReach, type ApiRouteDeps } from "@opengeni/core";
 import type {
   SiteDataCollectionDefinitionRequest,
   SiteDataDescribeResponse,
@@ -22,6 +22,7 @@ import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { requireSitePlatformQuota } from "../site-publishing/platform-usage";
 import {
   assertSiteDataSchema,
+  isPublishedViewer,
   meterSiteData,
   publicSiteDataLimits,
   resolveSiteDataAccess,
@@ -200,9 +201,23 @@ export async function describeSiteData(
   grant: SiteDataAuthority,
   siteId: string,
 ): Promise<SiteDataDescribeResponse> {
-  const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
+  // An outside agent with viewer reach (the default for connected agents)
+  // still needs the collections to read and write them; it gets the same
+  // description, marked as a viewer's.
+  const outsideViewer = !isPublishedViewer(grant) && outsideAgentReach(grant)?.appData === "viewer";
+  const access = await resolveSiteDataAccess(
+    deps,
+    grant,
+    siteId,
+    outsideViewer ? {} : { management: true },
+  );
   const described = await access.store.describe(access.caller);
-  return { siteId, ...described, limits: publicSiteDataLimits(access.limits) };
+  return {
+    siteId,
+    ...described,
+    limits: publicSiteDataLimits(access.limits),
+    ...(access.caller.role === "viewer" ? { access: "viewer" as const } : {}),
+  };
 }
 
 export async function defineSiteDataCollection(
@@ -306,7 +321,11 @@ export async function getSiteDataRecord(
   deps: SiteDataDeps,
   grant: SiteDataAuthority,
   siteId: string,
-  request: { collection: string; id?: string | undefined; key?: string | undefined },
+  request: {
+    collection: string;
+    id?: string | undefined;
+    key?: string | undefined;
+  },
   surface: SiteDataSurface = {},
 ): Promise<SiteDataRecord | null> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
@@ -326,6 +345,19 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  return await writeSiteDataWithAccess(deps, access, operations);
+}
+
+/**
+ * Write with an access the caller already resolved: the same quota, rate
+ * window, validation and metering as `writeSiteData`. App data syncs use it
+ * to write as their own principal (see app-sync/service.ts).
+ */
+export async function writeSiteDataWithAccess(
+  deps: SiteDataDeps,
+  access: SiteDataAccess,
+  operations: SiteDataWriteOperation[],
+) {
   await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),

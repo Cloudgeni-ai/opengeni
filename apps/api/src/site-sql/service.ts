@@ -33,6 +33,8 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   appendSiteSqlMigration,
+  recordAppSqlChange,
+  siteDataActorKind,
   clearSiteSqlDefinitions,
   consumeSiteSqlRate,
   deleteSiteSqlQuery,
@@ -191,7 +193,7 @@ export function toSiteSqlError(error: unknown): unknown {
     return new SiteSqlError(error.code, error.message, error.details);
   if (error instanceof SiteDbCallError) {
     if (error.code === "replayed")
-      return new SiteSqlError("unavailable", "The Site database saw this request already", {
+      return new SiteSqlError("unavailable", "The app database saw this request already", {
         retryable: true,
       });
     const code = DB_CODES[error.code] ?? "unavailable";
@@ -359,7 +361,7 @@ async function resolve(
 }
 
 function unavailable(): SiteSqlError {
-  return new SiteSqlError("unavailable", "Site SQL is not available on this deployment");
+  return new SiteSqlError("unavailable", "App SQL is not available on this deployment");
 }
 
 /**
@@ -387,8 +389,8 @@ async function requireDatabase(
     throw new SiteSqlError(
       "disabled",
       database
-        ? "Site SQL is turned off for this Site"
-        : "Site SQL is not turned on for this Site; turn it on first",
+        ? "App SQL is turned off for this app"
+        : "App SQL is not turned on for this app; turn it on first",
     );
   return database;
 }
@@ -410,12 +412,12 @@ async function consume(deps: SiteSqlDeps, resolved: Resolved, limits: SiteSqlLim
           [
             "manager:*",
             SITE_SQL_MANAGER_CALLS_PER_MINUTE,
-            "This Site's managers are calling too fast.",
+            "This app's managers are calling too fast.",
           ],
         ]
       : [
           [caller.principal, limits.callsPerMinutePerViewer, "Too many database calls."],
-          ["*", limits.callsPerMinutePerSite, "This Site is receiving too many database calls."],
+          ["*", limits.callsPerMinutePerSite, "This app is receiving too many database calls."],
         ];
   await consumeSiteSqlRate(deps.db, resolved.scope, windows);
 }
@@ -430,7 +432,7 @@ function checkMonthly(
     limits.rowsReadPerSitePerMonth !== null &&
     database.rowsReadThisMonth >= limits.rowsReadPerSitePerMonth
   )
-    throw new SiteSqlError("quota_exceeded", "This Site has read all the rows it may this month", {
+    throw new SiteSqlError("quota_exceeded", "This app has read all the rows it may this month", {
       quota: "rows_read_per_month",
       limit: limits.rowsReadPerSitePerMonth,
     });
@@ -441,7 +443,7 @@ function checkMonthly(
   )
     throw new SiteSqlError(
       "quota_exceeded",
-      "This Site has written all the rows it may this month",
+      "This app has written all the rows it may this month",
       { quota: "rows_written_per_month", limit: limits.rowsWrittenPerSitePerMonth },
     );
 }
@@ -557,7 +559,7 @@ export function siteSqlAudienceRefusal(
 ): SiteSqlError | null {
   if (caller.manager) return null;
   if (audience === "managers")
-    return new SiteSqlError("forbidden", "Only the Site's managers can run this query");
+    return new SiteSqlError("forbidden", "Only the app's managers can run this query");
   if (audience === "signed_in" && (caller.guest || !caller.person))
     return new SiteSqlError("forbidden", "Sign in to use this", { reason: "sign_in_required" });
   return null;
@@ -1021,7 +1023,7 @@ function bindParams(
     if (isSiteSqlPrincipalParam(key))
       throw new SiteSqlError(
         "validation",
-        `:${key} is set by the Site host from the signed-in viewer; do not send it`,
+        `:${key} is set by the app host from the signed-in viewer; do not send it`,
         { param: key },
       );
     if (!known.has(key))
@@ -1031,7 +1033,7 @@ function bindParams(
   for (const name of names) {
     if (isSiteSqlPrincipalParam(name)) {
       if (!Object.hasOwn(principal, name))
-        throw new SiteSqlError("validation", `:${name} is reserved for the Site host`, {
+        throw new SiteSqlError("validation", `:${name} is reserved for the app host`, {
           param: name,
         });
       bound[name] = principal[name]!;
@@ -1041,6 +1043,32 @@ function bindParams(
     else bound[name] = null;
   }
   return bound;
+}
+
+/**
+ * An App change event (app.sql.changed) for a committed write. The App's
+ * database commits outside Postgres, so this is best effort after it.
+ */
+async function recordSqlChange(
+  deps: SiteSqlDeps,
+  resolved: Resolved,
+  query: string | null,
+  response: SiteDbRunResponse,
+): Promise<void> {
+  if (!(response.rowsWritten > 0)) return;
+  const { caller } = resolved.access;
+  await recordAppSqlChange(
+    deps.db,
+    resolved.scope,
+    {
+      principal: caller.principal,
+      writerKind: siteDataActorKind(caller),
+      automationId: caller.automationId ?? null,
+      automationRunId: caller.automationRunId ?? null,
+      chainDepth: caller.chainDepth ?? 0,
+    },
+    { query, rowsWritten: response.rowsWritten },
+  );
 }
 
 function runResponse(response: SiteDbRunResponse): SiteSqlRunResponse {
@@ -1126,6 +1154,7 @@ export async function runSiteSqlQuery(
     const usage = newUsage();
     addUsage(usage, response);
     await meter(deps, resolved, usage, { countTowardCaps: true });
+    if (query.mode === "write") await recordSqlChange(deps, resolved, query.name, response);
     return runResponse(response);
   });
 }
@@ -1157,7 +1186,7 @@ export async function runSiteSqlStatement(
   return guarded(async () => {
     const asSiteMember = options.asSiteMember === true;
     if (asSiteMember && mode !== "read")
-      throw new SiteSqlError("forbidden", "Only the Site's managers can change its data with SQL");
+      throw new SiteSqlError("forbidden", "Only the app's managers can change its data with SQL");
     const resolved = await resolve(
       deps,
       authority,
@@ -1165,7 +1194,7 @@ export async function runSiteSqlStatement(
       asSiteMember ? { frameSiteId: siteId, management: false } : { management: true },
     );
     if (asSiteMember && (resolved.guest || resolved.access.subjectId === null))
-      throw new SiteSqlError("forbidden", "Only workspace members can query this Site's database");
+      throw new SiteSqlError("forbidden", "Only workspace members can query this app's database");
     const gateway = requireGateway(resolved);
     const database = await requireDatabase(deps, resolved, { enabled: true });
     const compiled = compileOrThrow(request.sql, "agent");
@@ -1173,15 +1202,15 @@ export async function runSiteSqlStatement(
     if (statement.kind === "schema")
       throw new SiteSqlError(
         "validation",
-        "Change the schema with a migration (site_sql_migrate) so the database can be rebuilt",
+        "Change the schema with a migration (app_sql_migrate) so the database can be rebuilt",
         { problem: "statement_not_allowed" },
       );
     if (mode === "read" && statement.kind === "write")
       throw new SiteSqlError(
         "validation",
         asSiteMember
-          ? "This statement writes; this Site's assistant can only read with SQL"
-          : "This statement writes; use site_sql_execute",
+          ? "This statement writes; this app's assistant can only read with SQL"
+          : "This statement writes; use app_sql_execute",
         { problem: "statement_not_allowed" },
       );
     if (statement.kind === "write") await requireSitePlatformOpen(deps, "sql_write");
@@ -1218,6 +1247,7 @@ export async function runSiteSqlStatement(
     const usage = newUsage();
     addUsage(usage, response);
     await meter(deps, resolved, usage, { countTowardCaps: asSiteMember });
+    if (statement.kind === "write") await recordSqlChange(deps, resolved, null, response);
     return runResponse(response);
   });
 }
@@ -1327,7 +1357,7 @@ export async function exportSiteSql(
           schema = siteSqlSchemaEntries(page.schema, request.table);
           if (!resumed) {
             if (request.format === "sql") {
-              push(`-- Opengeni Site SQL export of Site ${siteId}, ${json.exportedAt}`);
+              push(`-- Opengeni app SQL export of app ${siteId}, ${json.exportedAt}`);
               push("-- Schema");
               for (const statement of siteSqlSchemaStatements(
                 schema.filter((entry) => entry.type !== "trigger"),
@@ -1639,7 +1669,7 @@ export async function siteSqlSitesOfWorkspace(
   try {
     return await listSiteSqlSiteIds(deps.db, scope);
   } catch (error) {
-    console.warn("[site-sql] could not list a workspace's Site databases before deleting it", {
+    console.warn("[site-sql] could not list a workspace's app databases before deleting it", {
       workspaceId: scope.workspaceId,
       error: errorMessage(error),
     });
@@ -1696,7 +1726,7 @@ export async function dropSiteSqlDatabases(
   };
   await Promise.all(Array.from({ length: Math.min(DROP_CONCURRENCY, siteIds.length) }, worker));
   if (result.failed.length > 0 || result.skipped.length > 0)
-    console.warn("[site-sql] Site databases left in Durable Objects after workspace deletion", {
+    console.warn("[site-sql] app databases left in Durable Objects after workspace deletion", {
       workspaceId: context.workspaceId ?? null,
       failedSiteIds: result.failed,
       skippedSiteIds: result.skipped,

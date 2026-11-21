@@ -2,6 +2,11 @@ export * from "./model-inference";
 export type * from "./decision-types";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
+import {
+  FIRST_PARTY_MCP_TOOL_ALIASES,
+  FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
+  firstPartyMcpToolAliasTarget,
+} from "./first-party-tool-aliases";
 import * as primitives from "./primitives";
 import {
   WORKSPACE_CONTROL_REASON_MAX_BYTES,
@@ -31,6 +36,8 @@ import { CONNECTION_LABEL_MAX_LENGTH } from "./connection-account-label";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
+export * from "./session-links";
+import { SessionWaitingOn } from "./session-links";
 export * from "./turn-serving-policy";
 import {
   AzureOpenAIEndpoint,
@@ -68,8 +75,12 @@ import { FileAccess } from "./file-access";
 export * from "./app-shot";
 import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
+export * from "./app-sync";
+import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
 export * from "./site-sql";
+export * from "./app-package";
+export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
 export * from "./claude-subscription-oauth";
@@ -1092,6 +1103,9 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
  */
 export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
+  "set_waiting_on",
+  "session_links_add",
+  "session_links_remove",
   "notify_user",
   "notification_withdraw",
   "inbox_tidy",
@@ -1153,6 +1167,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "sidebar_layout_get",
+  "sidebar_layout_update",
   "admin_actions_search",
   "admin_action_describe",
   "admin_action_call",
@@ -1294,6 +1310,48 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_rollback",
   "artifacts_archive",
   "artifacts_restore",
+  "app_data_describe",
+  "app_data_define_collection",
+  "app_data_query",
+  "app_data_write",
+  "app_data_import",
+  "app_data_export",
+  "app_data_reset",
+  "app_sync_save",
+  "app_sync_list",
+  "app_sync_delete",
+  "app_sync_run",
+  "app_sync_opt_in",
+  "app_files_list",
+  "app_files_upload",
+  "app_files_delete",
+  "app_publication_get",
+  "app_publication_update",
+  "app_publication_apply_fix",
+  "app_hostname_check",
+  "app_sql_inspect",
+  "app_sql_enable",
+  "app_sql_migrate",
+  "app_sql_define_query",
+  "app_sql_query",
+  "app_sql_run",
+  "app_sql_execute",
+  "app_sql_export",
+  "app_sql_import",
+  "app_sql_reset",
+  "app_export",
+  "app_install",
+  "sandbox_file_publish",
+  "editable_artifact_list",
+  "editable_artifact_create",
+  "editable_artifact_import",
+  "editable_artifact_get",
+  "editable_artifact_inspect",
+  "editable_artifact_apply",
+  "editable_artifact_export",
+  "editable_artifact_export_status",
+  // Former names of the app_* tools (FIRST_PARTY_MCP_TOOL_ALIASES): stored
+  // selections and callers built before the rename still parse and run them.
   "site_data_describe",
   "site_data_define_collection",
   "site_data_query",
@@ -1318,15 +1376,6 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_sql_export",
   "site_sql_import",
   "site_sql_reset",
-  "sandbox_file_publish",
-  "editable_artifact_list",
-  "editable_artifact_create",
-  "editable_artifact_import",
-  "editable_artifact_get",
-  "editable_artifact_inspect",
-  "editable_artifact_apply",
-  "editable_artifact_export",
-  "editable_artifact_export_status",
 ] as const;
 export const FirstPartyMcpToolName = /* @__PURE__ */ defineSchema(() =>
   z.enum(FIRST_PARTY_MCP_TOOL_NAMES),
@@ -1416,6 +1465,19 @@ export const RETIRED_SESSION_TOOL_NAMES = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredSessionTools = new Set<FirstPartyMcpToolName>(RETIRED_SESSION_TOOL_NAMES);
 
+export {
+  FIRST_PARTY_MCP_TOOL_ALIASES,
+  FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
+  currentFirstPartyToolIdentity,
+  currentFirstPartyToolReference,
+  firstPartyMcpToolAliasTarget,
+  firstPartyMcpToolAliasesOf,
+} from "./first-party-tool-aliases";
+// Every alias and its successor are first-party tool names.
+void (FIRST_PARTY_MCP_TOOL_ALIASES satisfies Partial<
+  Record<FirstPartyMcpToolName, FirstPartyMcpToolName>
+>);
+
 const RETIRED_TOOL_SUCCESSORS = {
   variable_set_list: "secret_search",
   environment_list: "secret_search",
@@ -1423,8 +1485,11 @@ const RETIRED_TOOL_SUCCESSORS = {
   variable_set_set_variable: "secret_save",
   environment_set_variable: "secret_save",
   session_send_message: "session_queue_message",
+  ...FIRST_PARTY_MCP_TOOL_ALIASES,
 } as const satisfies Record<
-  (typeof RETIRED_SECRET_TOOL_NAMES)[number] | (typeof RETIRED_SESSION_TOOL_NAMES)[number],
+  | (typeof RETIRED_SECRET_TOOL_NAMES)[number]
+  | (typeof RETIRED_SESSION_TOOL_NAMES)[number]
+  | keyof typeof FIRST_PARTY_MCP_TOOL_ALIASES,
   FirstPartyMcpToolName
 >;
 
@@ -1473,7 +1538,8 @@ export function currentAgentLearningToolSelection(
       name === "remember_confirm" ||
       (!retiredLearningTools.has(name) &&
         !retiredSecretTools.has(name) &&
-        !retiredSessionTools.has(name)),
+        !retiredSessionTools.has(name) &&
+        firstPartyMcpToolAliasTarget(name) === undefined),
   );
 }
 
@@ -1486,6 +1552,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
   ...RETIRED_SECRET_TOOL_NAMES,
   ...RETIRED_SESSION_TOOL_NAMES,
+  ...FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1560,6 +1627,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !retiredLearningTools.has(name) &&
     !retiredSecretTools.has(name) &&
     !retiredSessionTools.has(name) &&
+    firstPartyMcpToolAliasTarget(name) === undefined &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -13217,7 +13285,7 @@ export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSc
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
 export const ScheduledTaskActionKind = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["agent_turn", "knowledge_source_sync"]),
+  z.enum(["agent_turn", "knowledge_source_sync", "app_sync"]),
 );
 export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
 
@@ -13294,6 +13362,7 @@ export const ScheduledTaskAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
   z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("agent_turn") }).strict(),
     KnowledgeSourceSyncAction,
+    AppSyncAction,
   ]),
 );
 export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
@@ -13613,6 +13682,13 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     })
     .strict();
   return {
+    /**
+     * The workspace agent each run's chat is with (an agent's "Starts when"):
+     * it runs with that agent's Instructions, Memory and Can use. Checked
+     * against the task owner's access when the task is saved and at each
+     * run. Only for a task that starts its own chat.
+     */
+    agentId: primitives.uuid.optional(),
     bundledSkillIds: BundledSkillSelection.optional(),
     /** @deprecated Integration Knowledge sync was removed; a request carrying it returns 410. */
     knowledgeSource: KnowledgeSourceSyncAction.optional(),
@@ -14512,6 +14588,8 @@ export const ScheduledTaskRun = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() 
     actionKind: ScheduledTaskActionKind.default("agent_turn"),
     knowledgeSyncRunId: KnowledgeSourceSyncUuid.nullable().default(null),
     knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
+    /** App data sync runs: what the run read and wrote. */
+    syncSummary: AppSyncRunSummary.nullable().optional(),
     completedAt: primitives.nullableString.default(null),
     error: primitives.nullableString,
     admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
@@ -14816,6 +14894,87 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */ define
   ]),
 );
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+/**
+ * An App data sync as a plain, portable definition: what App export writes
+ * and install reads. It names the tool but no account or person; an installed
+ * sync starts paused until someone confirms the account it runs on.
+ */
+export const AppSyncDefinition = /* @__PURE__ */ defineSchema(() =>
+  AppSyncSettings.extend({
+    name: z.string().trim().min(1).max(200),
+    schedule: ScheduledTaskScheduleSpec.describe(
+      "When it runs: manual, once, interval (everySeconds, at least 300) or calendar.",
+    ),
+    events: ScheduledTaskEventsInput.optional().describe(
+      "Event triggers that also start a run, like any automation.",
+    ),
+  }),
+);
+export type AppSyncDefinition = z.infer<typeof AppSyncDefinition>;
+export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
+
+/** Create a sync. */
+export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
+  AppSyncDefinition.extend({ status: ScheduledTaskStatus.default("active") }),
+);
+export type AppSyncCreateRequest = z.input<typeof AppSyncCreateRequest>;
+
+/** Change a sync: only the fields given change. */
+export const AppSyncUpdateRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      collection: AppSyncSettings.shape.collection,
+      mode: z.enum(["shared", "personal"]),
+      tool: AppSyncSettings.shape.tool,
+      arguments: AppSyncSettings.shape.arguments.unwrap(),
+      recordsPath: AppSyncSettings.shape.recordsPath.unwrap(),
+      key: AppSyncSettings.shape.key,
+      fields: AppSyncSettings.shape.fields.unwrap(),
+      schedule: ScheduledTaskScheduleSpec,
+      events: ScheduledTaskEventsInput,
+      status: ScheduledTaskStatus,
+    })
+    .partial(),
+);
+export type AppSyncUpdateRequest = z.input<typeof AppSyncUpdateRequest>;
+
+/** A sync as its App's managers see it. */
+export const AppSync = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    siteId: primitives.uuid,
+    name: z.string(),
+    status: ScheduledTaskStatus,
+    mode: z.enum(["shared", "personal"]),
+    collection: z.string(),
+    tool: AppSyncSettings.shape.tool,
+    arguments: z.record(z.string(), z.unknown()),
+    recordsPath: z.string().nullable(),
+    key: z.string(),
+    fields: z.array(z.string()).nullable(),
+    schedule: ScheduledTaskScheduleSpec,
+    events: ScheduledTaskEvents.nullable(),
+    ownerSubjectId: z.string(),
+    /** Personal syncs: how many people opted in. */
+    subscribers: z.number().int().nonnegative().nullable(),
+    lastRun: AppSyncLastRun.nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
+export type AppSync = z.infer<typeof AppSync>;
+
+export const AppSyncListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ syncs: z.array(AppSync) }),
+);
+export type AppSyncListResponse = z.infer<typeof AppSyncListResponse>;
+
+export const AppSyncRunResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ syncId: primitives.uuid, lastRun: AppSyncLastRun }),
+);
+export type AppSyncRunResponse = z.infer<typeof AppSyncRunResponse>;
 
 /** Reviewable access consequences of moving a schedule to another chat. */
 export const ScheduledTaskTargetAccessChange = /* @__PURE__ */ defineSchema(() =>
@@ -17398,6 +17557,9 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
       })
       .nullable()
       .optional(),
+    /** Who the chat waits on: the agent said so, or an open question or
+     * approval. Omitted by older servers. See ./session-links.ts. */
+    waitingOn: SessionWaitingOn.nullable().optional(),
     lastSequence: primitives.nonnegativeInteger,
     // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
     // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -17667,6 +17829,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     rootSessionId: true,
     effectiveControl: true,
     inputWait: true,
+    waitingOn: true,
     lastSequence: true,
     pinned: true,
     pinnedAt: true,
@@ -17930,6 +18093,10 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "session.title_set",
     // A chat's description or avatar changed (display metadata only).
     "session.profile_set",
+    // Who the chat waits on, or that it no longer waits (./session-links.ts).
+    "session.waiting_on.changed",
+    // The chat's Linked items changed; the payload carries the whole list.
+    "session.links.changed",
     "session.model_settings.updated",
     // An authorized person or host changed the task root's usage limit.
     "session.usage_limit.updated",

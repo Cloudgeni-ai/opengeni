@@ -4,6 +4,11 @@ An account's explicit Allow, Ask or Block choice wins over a tool's recommended
 default. This is one policy decision, independent of access to the workspace,
 account, provider scopes and current execution attempt. An approval never repairs
 missing access. There is no additional host, embedder or organization policy floor.
+The one floor is an agent's Can use ([agents](agents.md)): in that agent's
+chats, its Ask first or Block raises the resolved decision (`minimumDecision`
+on the connector action ledger) and never lowers it; its Allow follows the
+connection's choice. A chat under several agents (one delegated to another)
+takes the strictest of their choices.
 
 ## Ownership and compatibility
 
@@ -15,6 +20,7 @@ missing access. There is no additional host, embedder or organization policy flo
 | `requireApproval`, `approvalMode`, provider annotations | Compatibility inputs and recommended defaults, never an extra gate after an explicit choice. |
 | API Integration `autoApprovedTools` | Compatibility adapter to common preferences. Omission preserves choices. Explicit values replace applicable legacy exemptions. Changed account or executable meaning resets prior Allow to Ask with a visible notice; harmless description changes preserve it. |
 | Model MCP and Codemode | The same attempt environment and connector preparation/begin/completion lifecycle. Standalone adapters without the lifecycle retain their safe approval-required failure. |
+| Codex Apps | Its connector tools go through the same lifecycle under the session-MCP identity of the Codex Apps server, with a recommended Allow, so only an explicit choice or an agent's Can use changes them. |
 | Workspace HTTP gateway | The same decision resolver; existing one-use approval capability stays bound to exact caller, payload and authority. |
 | Personal GitHub gateway | `gh` and Git requests as the person map to the same `github_personal` action choices as the tools; deleting or force-updating a branch other than the default branch follows the person's policy, other destructive and unrecognised requests follow the person's Settings and deletions choice (`github_sensitive_request`, Ask by default; writes the gateway can't scope still ask unless All my repositories is at write), and an approval runs the exact same request once when it is sent again. See [personal GitHub](personal-github.md#approvals). |
 | External MCP | Tools that might ask remain unavailable without a verified human approval round trip. No blanket approval token is synthesized. |

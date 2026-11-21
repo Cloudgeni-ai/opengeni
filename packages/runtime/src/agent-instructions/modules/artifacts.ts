@@ -8,13 +8,13 @@ import {
 } from "../types";
 
 /**
- * Documents, published files, Sites, and inline visuals. With the markdown
+ * Documents, published files, apps, and inline visuals. With the markdown
  * renderer only the delivery rules remain: `artifact:` links, inline HTML, and
  * image embedding need Opengeni's timeline. Clauses naming the goal report
  * tools or `sandbox_file_publish` render unless the attempt proved them absent.
  * Clauses about sandbox files, publishing new files, workspace file links and
- * sandbox paths need attached compute and render only with it. Sites are
- * created from inline HTML by the Site tools, so their guidance stays.
+ * sandbox paths need attached compute and render only with it. Apps are
+ * created from inline HTML by the app tools, so their guidance stays.
  */
 export const artifactsModule: AgentPromptModule = {
   id: "artifacts",
@@ -55,9 +55,9 @@ export const artifactsModule: AgentPromptModule = {
           "Publish files you deliberately deliver so they are retained and discoverable in Artifacts; do not publish every temporary file.",
         "Reuse retained references for unchanged outputs.",
         opengeni && sandbox && "Source-code navigation may still use workspace file links.",
-        opengeni && "Inline HTML stays in chat unless explicitly saved as a Site.",
-        "For building, publishing, or embedding a saved Site, read the sites Skill when available.",
-        "Sites and native documents keep their tool-returned canonical links.",
+        opengeni && "Inline HTML stays in chat unless explicitly saved as an app.",
+        "For building, publishing, or embedding a saved app, read the sites Skill when available.",
+        "Apps and native documents keep their tool-returned canonical links.",
         sandbox
           ? "Never substitute a storage URL or a sandbox path for a published artifact reference."
           : "Never substitute a storage URL for a published artifact reference.",

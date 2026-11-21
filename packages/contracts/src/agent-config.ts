@@ -331,6 +331,12 @@ export function isDerivedAgentToolOwner(
  */
 export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
+  // Tracking multi-turn work: who the chat waits on and the things it works
+  // on (its Linked panel, with merge wakes). Not runtime mechanics, so a
+  // minimal "none" agent carries no extra tools.
+  set_waiting_on: "goals",
+  session_links_add: "goals",
+  session_links_remove: "goals",
   wait_for_input: "runtime",
   capability_authorization_request: "runtime",
   // Reaching the person: a push to the phones of whoever started the session.
@@ -401,6 +407,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   project_reorder: "workspaceAdmin",
   project_delete: "workspaceAdmin",
   session_set_project: "workspaceAdmin",
+  sidebar_layout_get: "workspaceAdmin",
+  sidebar_layout_update: "workspaceAdmin",
   // App actions: run as the person in a chat they started; changes ask first.
   admin_actions_search: "workspaceAdmin",
   admin_action_describe: "workspaceAdmin",
@@ -548,6 +556,31 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   artifacts_rollback: "artifacts",
   artifacts_archive: "artifacts",
   artifacts_restore: "artifacts",
+  app_data_describe: "artifacts",
+  app_data_define_collection: "artifacts",
+  app_data_query: "artifacts",
+  app_data_write: "artifacts",
+  app_data_import: "artifacts",
+  app_data_export: "artifacts",
+  app_data_reset: "artifacts",
+  app_files_list: "artifacts",
+  app_files_upload: "artifacts",
+  app_files_delete: "artifacts",
+  app_publication_get: "artifacts",
+  app_publication_update: "artifacts",
+  app_publication_apply_fix: "artifacts",
+  app_hostname_check: "artifacts",
+  app_sql_inspect: "artifacts",
+  app_sql_enable: "artifacts",
+  app_sql_migrate: "artifacts",
+  app_sql_define_query: "artifacts",
+  app_sql_query: "artifacts",
+  app_sql_run: "artifacts",
+  app_sql_execute: "artifacts",
+  app_sql_export: "artifacts",
+  app_sql_import: "artifacts",
+  app_sql_reset: "artifacts",
+  // Former names of the app_* tools (FIRST_PARTY_MCP_TOOL_ALIASES).
   site_data_describe: "artifacts",
   site_data_define_collection: "artifacts",
   site_data_query: "artifacts",
@@ -555,6 +588,11 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   site_data_import: "artifacts",
   site_data_export: "artifacts",
   site_data_reset: "artifacts",
+  app_sync_save: "artifacts",
+  app_sync_list: "artifacts",
+  app_sync_delete: "artifacts",
+  app_sync_run: "artifacts",
+  app_sync_opt_in: "artifacts",
   site_files_list: "artifacts",
   site_files_upload: "artifacts",
   site_files_delete: "artifacts",
@@ -562,6 +600,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   site_publication_update: "artifacts",
   site_publication_apply_fix: "artifacts",
   site_hostname_check: "artifacts",
+  app_export: "artifacts",
+  app_install: "artifacts",
   site_sql_inspect: "artifacts",
   site_sql_enable: "artifacts",
   site_sql_migrate: "artifacts",
@@ -901,7 +941,10 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
     label: "Skills",
     description: "Read installed Skills; with manage, also save, install, and publish them.",
   },
-  goals: { label: "Goals", description: "Work toward a goal across many turns until it is done." },
+  goals: {
+    label: "Goals",
+    description: "Work toward a goal across many turns, and track linked work and who it waits on.",
+  },
   subagents: {
     label: "Subagents",
     description: "Start, message, and follow other sessions; see available models.",
@@ -912,8 +955,8 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   },
   schedules: { label: "Automations", description: "Create and manage automations." },
   artifacts: {
-    label: "Artifacts and Sites",
-    description: "Publish files, documents, and Sites people can open.",
+    label: "Artifacts and apps",
+    description: "Publish files, documents, and apps people can open.",
   },
   browser: { label: "Browser and computer", description: "Use a browser or desktop computer." },
   secrets: {

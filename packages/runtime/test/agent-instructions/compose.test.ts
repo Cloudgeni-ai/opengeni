@@ -86,7 +86,8 @@ const MARKERS: Record<string, RegExp> = {
     /goal_(?:set|complete|update|pause|resume)|goal pause|active goal|goal is active|goal tools|goal\.completed|completing a goal/u,
   knowledge: /knowledge_|instruction_policy|task_note|Knowledge|durable storage/u,
   subagents: /session_(?:events|wait|get|send_message)|child worker|Session coordination|a child,/u,
-  artifacts: /documents|visualize|sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
+  artifacts:
+    /documents|visualize|sites|document Artifact|an app reaches|saved as an app|a saved app|Apps and native|documents, apps|artifact:<|Visuals in chat/u,
   repositories: /repos\/<host>|pull request|git reset|dirty worktree|gh, glab/u,
   machines: /Connected Machine|\/home\/u\/proj|C:\/repo/u,
   admin: /capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get/u,
@@ -454,7 +455,7 @@ describe("modular composer: renderer (AC15)", () => {
     // Delivery rules that do not depend on the renderer stay.
     expect(markdown.composed).toContain("Create a document Artifact only when");
     expect(markdown.composed).toContain(
-      "Sites and native documents keep their tool-returned canonical links.",
+      "Apps and native documents keep their tool-returned canonical links.",
     );
 
     const opengeni = compose(allAgentCapabilities(), ALL_RESOURCES, "opengeni");
@@ -468,7 +469,7 @@ describe("modular composer: text that needs attached compute", () => {
   const MACHINE: AgentPromptResources = { ...NO_RESOURCES, connectedMachine: true };
   // Sandbox files, publishing new files, workspace file links, sandbox paths,
   // background commands and CLI lists exist only with a sandbox or machine.
-  // Sites are created from inline HTML by the Site tools, so they stay.
+  // Apps are created from inline HTML by the app tools, so they stay.
   const COMPUTE_ONLY = [
     "edited in the sandbox with ordinary tools",
     "do not write a sandbox Markdown report first",
@@ -492,11 +493,11 @@ describe("modular composer: text that needs attached compute", () => {
     "Create a document Artifact only when",
     "## Visuals in chat",
     "Never substitute a storage URL",
-    "Inline HTML stays in chat unless explicitly saved as a Site.",
+    "Inline HTML stays in chat unless explicitly saved as an app.",
     "read the sites Skill",
-    "Sites and native documents keep their tool-returned canonical links.",
-    "documents, Sites, and visuals",
-    "a Site reaches the model and workspace tools",
+    "Apps and native documents keep their tool-returned canonical links.",
+    "documents, apps, and visuals",
+    "an app reaches the model and workspace tools",
     "# Session coordination",
     "Decide the design before building it.",
     "# Images and video",
@@ -541,7 +542,7 @@ describe("modular composer: text that needs attached compute", () => {
     const markdown = compose(allAgentCapabilities(), NO_RESOURCES, "markdown").composed;
     for (const text of COMPUTE_ONLY) expect(markdown).not.toContain(text);
     expect(markdown).toContain(
-      "Sites and native documents keep their tool-returned canonical links.",
+      "Apps and native documents keep their tool-returned canonical links.",
     );
     expect(markdown).not.toContain("Inline HTML stays in chat");
   });

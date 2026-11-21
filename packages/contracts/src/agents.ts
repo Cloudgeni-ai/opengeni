@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar } from "./bots";
+import { AutomationTemplateSchedule, AutomationTemplateTrigger } from "./automation-templates";
 import {
   SlackAgentChannelListResponse,
   SlackAgentIntroRequest,
@@ -118,8 +119,18 @@ export const AGENT_ERROR_CODES = [
   "agent_not_found",
   /** `POST /sessions`: an Only me agent's chats are Only me. */
   "agent_requires_private_chat",
-  /** `POST /sessions`: a chat started from another chat cannot start an agent. */
+  /**
+   * @deprecated Never returned: a chat started from another chat can start an
+   * agent (delegation, see `session_create`'s `agent`). Kept so the exported
+   * type does not narrow within a major.
+   */
   "agent_child_chat",
+  /** A Can use rule or Skill list is malformed; `details.problem` says how. */
+  "agent_setup_invalid",
+  /** `POST /agent-templates/:key/agents`: no ready-made agent has this key. */
+  "agent_template_not_found",
+  /** Two agents the caller can use share this name: use the agent's id. */
+  "agent_name_ambiguous",
 ] as const;
 export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number];
 
@@ -224,6 +235,110 @@ export const AgentSlackAvailability = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentSlackAvailability = z.infer<typeof AgentSlackAvailability>;
 
+export const AGENT_TOOL_PERMISSIONS_MAX = 200;
+export const AGENT_SKILLS_MAX = 50;
+export const AGENT_TEMPLATE_KEY_MAX_LENGTH = 120;
+
+/**
+ * One Can use choice for a tool in an agent's chats. `allow` follows the
+ * connection's own setting; `ask` asks the person first; `block` refuses the
+ * call. Agent rules only make chats stricter than the connection's settings.
+ */
+export const AgentToolPermission = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["allow", "ask", "block"]),
+);
+export type AgentToolPermission = z.infer<typeof AgentToolPermission>;
+
+/**
+ * One Can use rule. `connector` is a connection's server id (as the
+ * tool-permissions API lists it), a provider domain such as `github.com`
+ * (what ready-made agents use, matching any connection to that provider), or
+ * `*` for every connection. `tool` is one tool name, or `*` for all of the
+ * connector's tools. See {@link agentToolPermissionFor}.
+ */
+export const AgentToolPermissionRule = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connector: z.string().trim().min(1).max(512),
+    tool: z.string().trim().min(1).max(256).default("*"),
+    permission: AgentToolPermission,
+  }),
+);
+export type AgentToolPermissionRule = z.output<typeof AgentToolPermissionRule>;
+export type AgentToolPermissionRuleInput = z.input<typeof AgentToolPermissionRule>;
+
+const AgentToolPermissions = /* @__PURE__ */ defineSchema(() =>
+  z.array(AgentToolPermissionRule).max(AGENT_TOOL_PERMISSIONS_MAX, {
+    message: `An agent keeps at most ${AGENT_TOOL_PERMISSIONS_MAX} Can use rules.`,
+  }),
+);
+
+/** A Skill the agent relies on, by name. Display only: Skills stay available to every chat. */
+export const AgentSkillRef = /* @__PURE__ */ defineSchema(() =>
+  z.object({ name: z.string().trim().min(1).max(200) }),
+);
+export type AgentSkillRef = z.infer<typeof AgentSkillRef>;
+
+const AgentSkills = /* @__PURE__ */ defineSchema(() =>
+  z.array(AgentSkillRef).max(AGENT_SKILLS_MAX, {
+    message: `List at most ${AGENT_SKILLS_MAX} Skills.`,
+  }),
+);
+
+/** The tool call a Can use choice is looked up for. */
+export interface AgentToolPermissionTarget {
+  /** The connection's canonical server id. */
+  serverId: string;
+  /** The provider's domain, such as `github.com`, when known. */
+  providerDomain?: string | null | undefined;
+  toolName: string;
+}
+
+function ruleConnectorRank(
+  connector: string,
+  target: AgentToolPermissionTarget,
+): number | undefined {
+  if (connector === target.serverId) return 3;
+  const domain = target.providerDomain?.trim().toLowerCase();
+  if (domain && connector.toLowerCase() === domain) return 2;
+  if (connector === "*") return 1;
+  return undefined;
+}
+
+const PERMISSION_STRICTNESS: Record<AgentToolPermission, number> = {
+  allow: 0,
+  ask: 1,
+  block: 2,
+};
+
+/**
+ * The agent's Can use choice for one tool call, or null when no rule names
+ * it. The most specific rule wins: a server id beats a provider domain,
+ * which beats `*`; at the same connector an exact tool beats `*`. Rules
+ * equally specific resolve to the strictest.
+ */
+export function agentToolPermissionFor(
+  rules: readonly AgentToolPermissionRuleInput[],
+  target: AgentToolPermissionTarget,
+): AgentToolPermission | null {
+  let best: { rank: number; permission: AgentToolPermission } | null = null;
+  for (const rule of rules) {
+    const connectorRank = ruleConnectorRank(rule.connector.trim(), target);
+    if (connectorRank === undefined) continue;
+    const tool = (rule.tool ?? "*").trim();
+    if (tool !== "*" && tool !== target.toolName) continue;
+    const rank = connectorRank * 2 + (tool === "*" ? 0 : 1);
+    if (
+      best === null ||
+      rank > best.rank ||
+      (rank === best.rank &&
+        PERMISSION_STRICTNESS[rule.permission] > PERMISSION_STRICTNESS[best.permission])
+    ) {
+      best = { rank, permission: rule.permission };
+    }
+  }
+  return best?.permission ?? null;
+}
+
 /** What the reader may do with an agent. */
 export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -265,6 +380,12 @@ export const AgentSummary = /* @__PURE__ */ defineSchema(() =>
     /** Always false: agents no longer have a First message. Kept for older clients. */
     hasFirstMessage: z.boolean(),
     memory: AgentMemory,
+    /** Can use: per tool Allow, Ask first or Block in its chats. Absent from older servers. */
+    toolPermissions: z.array(AgentToolPermissionRule).default([]),
+    /** The Skills it relies on, listed on its page. Absent from older servers. */
+    skills: z.array(AgentSkillRef).default([]),
+    /** The ready-made agent it was added from, if any. Absent from older servers. */
+    templateKey: z.string().nullable().default(null),
     /** Slack workspaces it is available in. The app is always on. */
     slack: z.array(AgentSlackAvailability),
     viewer: AgentViewerAccess,
@@ -317,6 +438,8 @@ export const CreateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       memoryEnabled: z.boolean().default(false),
       /** A chat in this workspace the caller can open ("Make this an agent"). */
       sourceSessionId: Uuid.nullable().default(null),
+      toolPermissions: AgentToolPermissions.default([]),
+      skills: AgentSkills.default([]),
     })
     .strict(),
 );
@@ -336,6 +459,10 @@ export const UpdateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.optional(),
       memoryEnabled: z.boolean().optional(),
+      /** Replaces every Can use rule. */
+      toolPermissions: AgentToolPermissions.optional(),
+      /** Replaces the Skills list. */
+      skills: AgentSkills.optional(),
     })
     .strict(),
 );
@@ -483,3 +610,56 @@ export const AgentSlackIntroRequest = SlackAgentIntroRequest;
 export type AgentSlackIntroRequest = z.infer<typeof AgentSlackIntroRequest>;
 export const AgentSlackIntroResponse = SlackAgentIntroResponse;
 export type AgentSlackIntroResponse = z.infer<typeof AgentSlackIntroResponse>;
+
+/**
+ * A trigger a ready-made agent suggests. Nothing is created until the person
+ * opens it, picks the repository, channel or source, and saves: it becomes
+ * an ordinary automation that starts a chat with the agent.
+ */
+export const AgentTemplateTrigger = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Short, for the agent page: "When a pull request opens". */
+    name: z.string().min(1).max(120),
+    /** What each run asks the agent to do. */
+    instructions: z.string().min(1).max(AGENT_INSTRUCTIONS_MAX_LENGTH),
+    /** Null: it runs only on its events. */
+    schedule: AutomationTemplateSchedule.nullable().default(null),
+    triggers: z.array(AutomationTemplateTrigger).default([]),
+  }),
+);
+export type AgentTemplateTrigger = z.output<typeof AgentTemplateTrigger>;
+
+/** A ready-made agent people can add from the "Add an agent" gallery. Content, not code. */
+export const AgentTemplate = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    key: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]{0,63}$/u)
+      .max(AGENT_TEMPLATE_KEY_MAX_LENGTH),
+    name: AgentName,
+    description: AgentDescription,
+    avatar: SessionAvatar.nullable().default(null),
+    instructions: AgentInstructions,
+    memoryEnabled: z.boolean().default(true),
+    toolPermissions: AgentToolPermissions.default([]),
+    skills: AgentSkills.default([]),
+    suggestedTriggers: z.array(AgentTemplateTrigger).max(10).default([]),
+  }),
+);
+export type AgentTemplate = z.output<typeof AgentTemplate>;
+
+export const ListAgentTemplatesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ templates: z.array(AgentTemplate) }),
+);
+export type ListAgentTemplatesResponse = z.output<typeof ListAgentTemplatesResponse>;
+
+/** Add a ready-made agent. Optional overrides; everything else comes from the template. */
+export const CreateAgentFromTemplateRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: AgentName.optional(),
+      visibility: AgentVisibility.optional(),
+    })
+    .strict(),
+);
+export type CreateAgentFromTemplateRequest = z.input<typeof CreateAgentFromTemplateRequest>;

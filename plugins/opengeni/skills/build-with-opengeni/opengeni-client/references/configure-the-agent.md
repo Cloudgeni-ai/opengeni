@@ -30,7 +30,7 @@ needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists.
 | `skills`              | `"read"` Skills (default in `"none"`), or `"manage"`    |
 | `webSearch`           | search the web                                          |
 | `knowledge`           | search and save workspace Knowledge                     |
-| `artifacts`           | publish files, documents, and Sites                     |
+| `artifacts`           | publish files, documents, and apps                     |
 | `media`               | generate images and video                               |
 | `goals`               | work toward a goal across many turns                    |
 | `subagents`           | start and follow other sessions                         |

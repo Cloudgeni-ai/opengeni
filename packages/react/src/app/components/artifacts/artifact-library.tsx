@@ -1054,7 +1054,7 @@ export function ArtifactLibrary({
         variant={compact ? "inline" : "page"}
         icon={<PanelsTopLeftIcon />}
         title="No artifacts yet"
-        description={`Sites, images, documents, spreadsheets and presentations ${productName} makes show up here.`}
+        description={`Apps, images, documents, spreadsheets and presentations ${productName} makes show up here.`}
         action={emptyAction}
       />
     );
@@ -1066,7 +1066,7 @@ export function ArtifactLibrary({
           searching
             ? `No ${kindLabel} match "${filters.q.trim()}".`
             : filters.status === "archived"
-              ? `No archived ${kindLabel}. Archived Sites keep their versions and can be restored.`
+              ? `No archived ${kindLabel}. Archived apps keep their versions and can be restored.`
               : `No ${kindLabel} yet.`
         }
         action={
@@ -1193,7 +1193,7 @@ export function ArtifactLibrary({
         ) : null}
       </div>
       {hiddenKindsNotice ? (
-        <Notice title="Sites and documents are hidden">{ARTIFACT_ACCESS_REQUIRED}</Notice>
+        <Notice title="Apps and documents are hidden">{ARTIFACT_ACCESS_REQUIRED}</Notice>
       ) : null}
       <div className="min-w-0">{body}</div>
       {viewing ? (

@@ -103,7 +103,7 @@ describe("Site conversation navigation", () => {
           document.documentElement.style.colorScheme = selectedTheme;
         }, theme);
         const originLinks = page.getByRole("link", {
-          name: "Created through Product analytics. Open Site",
+          name: "Created through Product analytics. Open app",
         });
         expect(await originLinks.count()).toBe(2);
         expect(await originLinks.first().getAttribute("href")).toContain(
@@ -124,7 +124,7 @@ describe("Site conversation navigation", () => {
         await page.getByRole("link", { name: "Review conversion trends" }).waitFor();
         await page.getByRole("button", { name: "Load older conversations" }).click();
         await page.getByRole("link", { name: "Investigate onboarding drop-off" }).waitFor();
-        await page.getByRole("searchbox", { name: "Search Site conversations" }).fill("conversion");
+        await page.getByRole("searchbox", { name: "Search app conversations" }).fill("conversion");
         await page
           .getByRole("link", { name: "Explain last week’s activity" })
           .waitFor({ state: "hidden" });

@@ -914,10 +914,10 @@ describe("rail effective state and deep-path presentation", () => {
   test("does not claim an idle exception is running", () => {
     expect(
       sessionStateLabel(session({ status: "idle", effectiveControl: activeControl(true) })),
-    ).toBe("Idle · Resumed workstream");
+    ).toBe("Done · Resumed workstream");
     expect(
       sessionStateLabel(session({ status: "running", effectiveControl: activeControl(true) })),
-    ).toBe("Running · Resumed workstream");
+    ).toBe("Working · Resumed workstream");
     expect(
       sessionStateLabel(
         session({

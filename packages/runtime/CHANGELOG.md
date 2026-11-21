@@ -1,5 +1,37 @@
 # @opengeni/runtime
 
+## 6.35.0
+
+### Patch Changes
+
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [e7eb28c]
+- Updated dependencies [5c3c4e6]
+- Updated dependencies [8bf1ec2]
+- Updated dependencies [227502b]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/sdk@6.35.0
+  - @opengeni/codemode@6.35.0
+  - @opengeni/xai-subscription@6.35.0
+  - @opengeni/capabilities@6.35.0
+  - @opengeni/codex@6.35.0
+  - @opengeni/config@6.35.0
+  - @opengeni/decisions@6.35.0
+  - @opengeni/interaction@6.35.0
+  - @opengeni/observability@6.35.0
+  - @opengeni/tool-gateway@6.35.0
+  - @opengeni/vaults@6.35.0
+  - @opengeni/jev@6.35.0
+  - @opengeni/agent-proto@6.35.0
+  - @opengeni/network@6.35.0
+
 ## 6.34.0
 
 ### Patch Changes

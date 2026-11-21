@@ -100,7 +100,7 @@ export async function getWorkspaceSiteSessionOrigin(
         ),
       )
       .limit(1);
-    if (!origin) throw new WorkspaceArtifactNotFoundError("Site origin not found");
+    if (!origin) throw new WorkspaceArtifactNotFoundError("App origin not found");
     return origin;
   });
 }
@@ -158,7 +158,7 @@ async function retainArtifactUpload(tx: Database, input: PublishMetadata) {
       ),
     )
     .returning();
-  if (!row) throw new WorkspaceArtifactOperationError("Site upload expired or unavailable");
+  if (!row) throw new WorkspaceArtifactOperationError("App upload expired or unavailable");
 }
 
 /** Claim expired uploads before deleting blobs; publication takes the same row lock. */
@@ -185,7 +185,8 @@ type ArtifactMutationToolName =
   | "artifacts_publish"
   | "artifacts_rollback"
   | "artifacts_archive"
-  | "artifacts_restore";
+  | "artifacts_restore"
+  | "app_install";
 
 export class WorkspaceArtifactNotFoundError extends Error {
   readonly name = "WorkspaceArtifactNotFoundError";
@@ -217,7 +218,7 @@ export async function recordSiteOpened(
         ),
       )
       .limit(1);
-    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    if (!site) throw new WorkspaceArtifactNotFoundError("App not found");
     const [row] = await scoped
       .insert(schema.siteOpens)
       .values({
@@ -287,7 +288,7 @@ export async function setSiteSidebarState(
         ),
       )
       .limit(1);
-    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    if (!site) throw new WorkspaceArtifactNotFoundError("App not found");
     const stamp = (next: boolean | undefined, column: "pinned_at" | "archived_at") =>
       next === undefined
         ? sql.raw(`site_sidebar_states.${column}`)
@@ -844,20 +845,54 @@ async function assertAttemptAuthority(
   }
 }
 
+type AttemptToolCatalogScope = Pick<
+  PublishMetadata,
+  | "accountId"
+  | "workspaceId"
+  | "sourceSessionId"
+  | "sourceTurnId"
+  | "sourceAttemptId"
+  | "sourceExecutionGeneration"
+>;
+
 async function assertArtifactRequestedToolsInAttemptCatalog(
   scopedDb: any,
-  input: Pick<
-    PublishMetadata,
-    | "accountId"
-    | "workspaceId"
-    | "sourceSessionId"
-    | "sourceTurnId"
-    | "sourceAttemptId"
-    | "sourceExecutionGeneration"
-  >,
+  input: AttemptToolCatalogScope,
   requestedTools: readonly ToolGatewayIdentity[],
 ): Promise<void> {
-  if (input.sourceAttemptId === null || requestedTools.length === 0) return;
+  const missing = await requestedToolsMissingFromAttemptCatalog(scopedDb, input, requestedTools);
+  if (missing.length > 0)
+    throw new WorkspaceArtifactOperationError(
+      "Artifact requested tools must be present in the exact attempt tool catalog",
+    );
+}
+
+/**
+ * The requested tools an agent attempt may not declare: neither in its exact
+ * tool catalog nor a connector identity paired with one of its own account
+ * routes. Empty for a caller that is not an attempt. Throws when the
+ * attempt's catalog can't be read.
+ */
+export async function artifactRequestedToolsMissingFromAttemptCatalog(
+  db: Database,
+  input: AttemptToolCatalogScope,
+  requestedTools: readonly ToolGatewayIdentity[],
+): Promise<ToolGatewayIdentity[]> {
+  if (input.sourceAttemptId === null || requestedTools.length === 0) return [];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await requestedToolsMissingFromAttemptCatalog(scopedDb, input, requestedTools),
+  );
+}
+
+async function requestedToolsMissingFromAttemptCatalog(
+  scopedDb: any,
+  input: AttemptToolCatalogScope,
+  requestedTools: readonly ToolGatewayIdentity[],
+): Promise<ToolGatewayIdentity[]> {
+  if (input.sourceAttemptId === null || requestedTools.length === 0) return [];
   if (
     input.sourceSessionId === null ||
     input.sourceTurnId === null ||
@@ -894,7 +929,7 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     );
   }
   const missing = requestedTools.filter((identity) => !allowed.has(toolIdentityKey(identity)));
-  if (missing.length === 0) return;
+  if (missing.length === 0) return [];
   // A connector identity paired with one of the attempt's own account routes
   // (`account-<hash>`, which is all an agent sees) is the same tool: the
   // turn's frozen account bindings name the connector behind each route.
@@ -921,11 +956,7 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
         binding.canonicalServerId === identity.serverId &&
         allowed.has(toolIdentityKey({ serverId: binding.serverId, toolName: identity.toolName })),
     );
-  if (!missing.every(paired)) {
-    throw new WorkspaceArtifactOperationError(
-      "Artifact requested tools must be present in the exact attempt tool catalog",
-    );
-  }
+  return missing.filter((identity) => !paired(identity));
 }
 
 function toolIdentityKey(identity: ToolGatewayIdentity): string {
@@ -1750,7 +1781,7 @@ export async function updateWorkspaceArtifactVisibility(
     if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
     if (input.viewer.subjectId === null || artifact.ownerSubjectId !== input.viewer.subjectId)
       throw new WorkspaceArtifactOwnerRequiredError(
-        "Only the person who owns this Site can change who can see it",
+        "Only the person who owns this app can change who can see it",
       );
     const [updated] =
       artifact.visibility === input.visibility

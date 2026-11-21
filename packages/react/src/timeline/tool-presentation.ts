@@ -945,6 +945,8 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   setGoal: "target",
   noteProgress: "target",
   completeGoal: "target",
+  setWaitingOn: "wait",
+  updateLinks: "share",
   pauseGoal: "target",
   resumeGoal: "target",
   wait: "wait",
@@ -1000,6 +1002,8 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Projects, other chats and helpers
   checkProjects: "folder",
   organizeProjects: "folder",
+  checkSidebar: "folder",
+  updateSidebar: "folder",
   checkChats: "sessions",
   chooseChat: "sessions",
   checkProgress: "progress",

@@ -1,0 +1,208 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import type { AccessGrant, Permission, ResolvedSidebarItem } from "@opengeni/contracts";
+import { createDb, createWorkspace, createWorkspaceArtifact, type DbClient } from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { HTTPException } from "hono/http-exception";
+import {
+  readSidebarLayoutForGrant,
+  updateSidebarLayoutForGrant,
+} from "../src/application/sidebar-layout";
+
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+let shared: SharedTestDatabase | null = null;
+let client: DbClient | null = null;
+
+beforeAll(async () => {
+  shared = await acquireSharedTestDatabase("core-sidebar-layout");
+  if (!shared && requireRealDatabase) throw new Error("sidebar layout requires PostgreSQL");
+  if (shared) client = createDb(shared.appUrl, { max: 2 });
+}, 180_000);
+
+afterAll(async () => {
+  await client?.close().catch(() => undefined);
+  await shared?.release();
+}, 180_000);
+
+const MEMBER: Permission[] = ["workspace:read", "artifacts:read"];
+
+async function workspace() {
+  const [account] = await shared!
+    .admin`insert into managed_accounts (name) values ('Sidebar core') returning id`;
+  const accountId = String(account!.id);
+  const workspaceId = (await createWorkspace(client!.db, { accountId, name: "Sidebar core" })).id;
+  const grant = (subjectId: string, permissions: Permission[]): AccessGrant => ({
+    accountId,
+    workspaceId,
+    subjectId,
+    permissions,
+    principalKind: "human_session",
+  });
+  return {
+    accountId,
+    workspaceId,
+    admin: grant("user:admin", [...MEMBER, "workspace:admin"]),
+    ada: grant("user:ada", MEMBER),
+    bob: grant("user:bob", MEMBER),
+  };
+}
+
+async function app(scope: { accountId: string; workspaceId: string }, owner: string | null) {
+  const created = await createWorkspaceArtifact(client!.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    artifactId: crypto.randomUUID(),
+    slug: `sidebar-${crypto.randomUUID().slice(0, 8)}`,
+    title: "App",
+    description: null,
+    visibility: owner ? "user_private" : "workspace_shared",
+    ownerSubjectId: owner,
+    contentKey: `sites/${crypto.randomUUID()}.html`,
+    contentSha256: "a".repeat(64),
+    sizeBytes: 16,
+    sourceKey: null,
+    sourceSha256: null,
+    sourceSizeBytes: null,
+    operationKey: crypto.randomUUID(),
+    actorSubjectId: owner ?? "user:admin",
+    sourceSessionId: null,
+    sourceTurnId: null,
+    sourceAttemptId: null,
+    sourceExecutionGeneration: null,
+    sourceToolName: null,
+    persistContent: async () => undefined,
+    discardContent: async () => undefined,
+  });
+  return created.artifact.id;
+}
+
+async function status(work: () => Promise<unknown>): Promise<number | "ok"> {
+  try {
+    await work();
+    return "ok";
+  } catch (error) {
+    if (error instanceof HTTPException) return error.status;
+    throw error;
+  }
+}
+
+function shape(items: readonly ResolvedSidebarItem[]): unknown[] {
+  return items.map((item) =>
+    item.type === "group" ? [item.id, item.items.map((child) => child.id)] : item.id,
+  );
+}
+
+test("an admin's default reaches everyone; a member's own changes reach only them", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  const [a, b, c] = [await app(ws, null), await app(ws, null), await app(ws, null)];
+  // Members can't change the default.
+  expect(
+    await status(() =>
+      updateSidebarLayoutForGrant(deps, ws.ada, {
+        scope: "workspace",
+        changes: [{ op: "reset" }],
+      }),
+    ),
+  ).toBe(403);
+  await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    expectedRevision: 0,
+    changes: [
+      {
+        op: "add",
+        item: {
+          id: "eng",
+          type: "group",
+          label: "Engineering",
+          items: [
+            { id: "a", type: "app", appId: a, path: "/releases" },
+            { id: "b", type: "app", appId: b },
+            { id: "c", type: "app", appId: c },
+            { id: "s", type: "link", url: "https://status.example.com", label: "Status" },
+          ],
+        },
+      },
+    ],
+  });
+  // A stale revision is refused instead of overwritten.
+  expect(
+    await status(() =>
+      updateSidebarLayoutForGrant(deps, ws.admin, {
+        scope: "workspace",
+        expectedRevision: 0,
+        changes: [{ op: "reset" }],
+      }),
+    ),
+  ).toBe(409);
+  const mine = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [
+      { op: "remove", itemId: "b" },
+      {
+        op: "add",
+        item: { id: "docs", type: "link", url: "https://docs.example.com", label: "D" },
+      },
+    ],
+  });
+  expect(shape(mine.items)).toEqual([["eng", ["a", "c", "s"]], "my-docs"]);
+  expect(mine.personal.customized).toBe(true);
+  const bob = await readSidebarLayoutForGrant(deps, ws.bob);
+  expect(shape(bob.items)).toEqual([["eng", ["a", "b", "c", "s"]]]);
+  expect(bob.workspace.canEdit).toBe(false);
+  expect(bob.workspace.items).toBeUndefined();
+});
+
+test("people only see and add Apps they can open; gone Apps drop out of storage", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  const open = await app(ws, null);
+  const bobs = await app(ws, "user:bob");
+  const old = await app(ws, null);
+  expect(
+    await status(() =>
+      updateSidebarLayoutForGrant(deps, ws.ada, {
+        scope: "personal",
+        changes: [{ op: "add", item: { type: "app", appId: bobs } }],
+      }),
+    ),
+  ).toBe(422);
+  await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    changes: [
+      { op: "add", item: { id: "open", type: "app", appId: open } },
+      { op: "add", item: { id: "old", type: "app", appId: old } },
+    ],
+  });
+  await updateSidebarLayoutForGrant(deps, ws.bob, {
+    scope: "personal",
+    changes: [{ op: "add", item: { id: "theirs", type: "app", appId: bobs } }],
+  });
+  // Bob's private App is in his own sidebar only.
+  expect(shape((await readSidebarLayoutForGrant(deps, ws.bob)).items)).toEqual([
+    "open",
+    "old",
+    "my-theirs",
+  ]);
+  await shared.admin`update workspace_artifacts set status = 'archived' where id = ${old}::uuid`;
+  expect(shape((await readSidebarLayoutForGrant(deps, ws.ada)).items)).toEqual(["open"]);
+  // The next write drops the archived App's link, and Ada's move lands next
+  // to the item she sees even though the stored level held another.
+  const after = await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    changes: [
+      { op: "add", item: { id: "s", type: "link", url: "https://s.example.com", label: "S" } },
+    ],
+  });
+  expect(shape(after.workspace.items ?? [])).toEqual(["open", "s"]);
+  const [stored] = await shared.admin`select layout from sidebar_layouts
+    where workspace_id = ${ws.workspaceId}::uuid and subject_id is null`;
+  const storedIds = (stored!.layout as { items: { id: string }[] }).items.map((item) => item.id);
+  expect(storedIds).toEqual(["open", "s"]);
+  const moved = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [{ op: "move", itemId: "s", beforeId: "open" }],
+  });
+  expect(shape(moved.items)).toEqual(["s", "open"]);
+});

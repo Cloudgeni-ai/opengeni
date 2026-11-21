@@ -203,6 +203,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "addSessionLink",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links",
+    "request": [
+      "AddSessionLinkRequest"
+    ],
+    "response": [
+      "SessionLink"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "addWorkspaceMember",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/members",
@@ -525,6 +537,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -1002,6 +1015,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createAgentFromTemplate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
+    "request": [
+      "CreateAgentFromTemplateRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "createApiKey",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/api-keys",
@@ -1013,6 +1038,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "secretFields": [
       "response.token"
+    ]
+  },
+  {
+    "id": "createAppSync",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs",
+    "request": [
+      "AppSyncCreateRequest"
+    ],
+    "response": [
+      "AppSync"
     ]
   },
   {
@@ -1804,6 +1840,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "request": [],
+    "response": [
+      "AppSyncSubscriptionResponse"
+    ]
+  },
+  {
     "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
@@ -1904,6 +1949,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ApiKey"
     ]
+  },
+  {
+    "id": "deleteAppSync",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId",
+    "request": [],
+    "response": []
   },
   {
     "id": "deleteAutomationTemplate",
@@ -2500,6 +2552,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SiteSqlStatementRequest"
     ],
     "response": []
+  },
+  {
+    "id": "exportAppPackage",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/package",
+    "request": [
+      "AppPackageExportRequest"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
   },
   {
     "id": "exportCompanyBrainOkf",
@@ -3514,6 +3576,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningSettingsRecord"
+    ]
+  },
+  {
+    "id": "getAppSyncStatus",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/syncs",
+    "request": [],
+    "response": [
+      "AppSyncStatusResponse"
     ]
   },
   {
@@ -4677,6 +4748,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSidebarLayout",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [],
+    "response": [
+      "SidebarLayoutResponse"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "getSiteAuthConnection",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
@@ -5315,6 +5396,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
+    "id": "installAppPackage",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/app-packages/install",
+    "request": [
+      "AppPackageInstallRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "installFikenConnection",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connections/fiken/install",
@@ -5488,6 +5578,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAgentTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-templates",
+    "request": [],
+    "response": [
+      "AgentTemplate",
+      "ListAgentTemplatesResponse"
+    ]
+  },
+  {
     "id": "listAgentTopology",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-topology",
@@ -5517,6 +5617,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "listAppSyncs",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs",
+    "request": [],
+    "response": [
+      "AppSyncListResponse"
     ]
   },
   {
@@ -6727,6 +6836,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "artifacts:read"
   },
   {
+    "id": "listSessionLinks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links",
+    "request": [],
+    "query": [
+      "fresh"
+    ],
+    "response": [
+      "SessionLinksResponse"
+    ],
+    "permission": "sessions:read"
+  },
+  {
     "id": "listSessionPage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions",
@@ -7935,6 +8057,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7953,6 +8076,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7978,6 +8102,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -8018,6 +8143,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/tools/site-setup",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/site-setup",
+    "request": [],
+    "response": [
+      "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
+      "ToolGatewayTargetApprovalResponse"
+    ],
+    "permission": "workspace:read",
+    "secretFields": [
+      "response.approvalToken"
+    ]
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/tools/target-approvals",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/target-approvals",
@@ -8028,6 +8169,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -8580,6 +8722,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "request": [],
+    "response": [
+      "AppSyncSubscriptionResponse"
+    ]
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
@@ -9033,6 +9184,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "removeSessionLink",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links/:linkId",
+    "request": [],
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "removeSessionResources",
@@ -9530,6 +9689,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "secretFields": [
       "response.secret"
+    ]
+  },
+  {
+    "id": "runAppSync",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/run",
+    "request": [],
+    "response": [
+      "AppSyncRunResponse"
     ]
   },
   {
@@ -10512,6 +10680,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateAppSync",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId",
+    "request": [
+      "AppSyncUpdateRequest"
+    ],
+    "response": [
+      "AppSync"
+    ]
+  },
+  {
     "id": "updateArtifactPin",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
@@ -11288,6 +11467,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UpdateSessionVisibilityResponse"
     ]
+  },
+  {
+    "id": "updateSidebarLayout",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [
+      "UpdateSidebarLayoutRequest"
+    ],
+    "response": [
+      "SidebarLayoutResponse"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "updateSiteAuthConnection",

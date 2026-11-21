@@ -31,8 +31,9 @@ test("1133 lists turn.superseded wherever the turn types are listed", () => {
   const workspaceCheck = /workspace_webhooks_event_types_chk CHECK \(([\s\S]*?)\) NOT VALID/u.exec(
     migration,
   )?.[1];
+  // App data types came later (1519_app_change_events, its own test).
   for (const type of WORKSPACE_WEBHOOK_EVENT_TYPES) {
-    expect(workspaceCheck).toContain(`'${type}'`);
+    if (!type.startsWith("app.")) expect(workspaceCheck).toContain(`'${type}'`);
   }
   const triggers = [
     ...migration.matchAll(/CREATE TRIGGER (session_events_\w+_webhook_enqueue_v1)[\s\S]*?\)\)/gu),

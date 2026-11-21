@@ -226,7 +226,7 @@ describe("limits", () => {
     expect(legacy.agentMicrosPerSitePerMonth).toBe(7_000_000);
   });
 
-  test("the Site profile wins over the workspace default", () => {
+  test("the app profile wins over the workspace default", () => {
     const site = effectiveSiteLimits(
       settings,
       { kind: "custom", overrides: { turnsPerConversation: 3, bogus: 1 } },
@@ -331,7 +331,7 @@ describe("limits per viewer", () => {
     null,
   );
 
-  test("members are never capped by the Site and keep its agent when outsiders lose it", () => {
+  test("members are never capped by the app and keep its agent when outsiders lose it", () => {
     const member = siteViewerLimits(limits, "member");
     expect(member.agentsEnabled).toBe(true);
     expect(member.guestAgentsEnabled).toBe(true);
@@ -352,7 +352,7 @@ describe("limits per viewer", () => {
     );
   });
 
-  test("invited and signed-in people share the Site limit and their per-person limit", () => {
+  test("invited and signed-in people share the app limit and their per-person limit", () => {
     for (const kind of ["invited", "user"] as const) {
       const viewer = siteViewerLimits(limits, kind);
       expect(viewer.agentsEnabled).toBe(false);
@@ -479,7 +479,7 @@ describe("readiness", () => {
     expect(warnings[0]!.message).toContain("public visitors");
   });
 
-  test("invited Sites skip the guest rules and members-only Sites have no warnings", () => {
+  test("invited apps skip the guest rules and members-only apps have no warnings", () => {
     const invited = siteReadinessWarnings({ ...base, access: "invited", guestsAllowed: false });
     expect(invited.map((warning) => warning.code)).toEqual([
       "workspace_tools_members_only",
@@ -489,15 +489,15 @@ describe("readiness", () => {
     expect(siteReadinessWarnings({ ...base, access: "members" })).toEqual([]);
   });
 
-  test("a public Site on a login-only deployment says visitors sign in first", () => {
+  test("a public app on a login-only deployment says visitors sign in first", () => {
     const plain = { ...base, page: null, agent: { enabled: false, tools: null } };
     const loginOnly = siteReadinessWarnings({ ...plain, guestsAllowed: false });
     expect(loginOnly).toEqual([
       {
         code: "public_sign_in_required",
-        message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+        message: "On this deployment, public apps still ask visitors to sign in to Opengeni.",
         suggestion:
-          "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the Site or its link.",
+          "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the app or its link.",
         fix: null,
       },
     ]);
@@ -522,7 +522,7 @@ describe("readiness", () => {
     );
     // The sign-in line stays when there is also something to fix.
     expect(publicationAnswer(both as unknown as SitePublication).nextStep).toContain(
-      "\nVisitors sign in before the Site opens",
+      "\nVisitors sign in before the app opens",
     );
     expect(
       publicationAnswer({
@@ -628,7 +628,7 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
     for (const kind of ["guest", "user", "invited"] as const) {
       const translated = await siteOutsiderUnfundedRefusal({ kind }, refusal(noCredits));
       expect(translated?.status).toBe(403);
-      expect(translated!.message).toBe("This Site's assistant isn't available right now");
+      expect(translated!.message).toBe("This app's assistant isn't available right now");
       expect(translated!.details).toMatchObject({
         code: "not_available_for_viewer",
         feature: "agent",
@@ -738,7 +738,7 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
       expect(insufficientCreditsHttpError(other)).toBeNull();
   });
 
-  test("members, other refusals and the Site's own budgets pass through unchanged", async () => {
+  test("members, other refusals and the app's own budgets pass through unchanged", async () => {
     expect(await siteOutsiderUnfundedRefusal({ kind: "member" }, refusal(noCredits))).toBeNull();
     // Only a 402 that says why: an unexplained payment_required is not
     // assumed to be the workspace's credits.
@@ -754,7 +754,7 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
         refusal({
           error: {
             code: "payment_required",
-            message: "Site usage",
+            message: "App usage",
             details: { code: "site_platform_quota_exhausted" },
           },
         }),
@@ -778,13 +778,13 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
   });
 });
 
-describe("Site agent instructions", () => {
+describe("App agent instructions", () => {
   test("name the viewer and say plainly what a person outside the workspace can't get", () => {
     const host = { site: { id: "site-1", title: "Shop" } } as never;
     const tools = ["site_data_query", "site_data_write"];
     const guest = siteAgentInstructions(host, { kind: "guest" }, tools, "Be brief.");
     expect(guest).toContain("an anonymous visitor");
-    expect(guest).toContain("only use this Site's own data");
+    expect(guest).toContain("only use this app's own data");
     expect(guest).toContain("say plainly that you can't do it here");
     expect(guest.endsWith("\n\nBe brief.")).toBe(true);
     const member = siteAgentInstructions(host, { kind: "member" }, tools, null);
@@ -857,7 +857,7 @@ describe("viewer access", () => {
     expect(signedInSiteViewerKind({ ...base, access: "public", invitedEmails: [] })).toBe("user");
   });
 
-  test("guests only on public Sites of deployments that allow them", () => {
+  test("guests only on public apps of deployments that allow them", () => {
     expect(siteGuestsAllowed("public", open)).toBe(true);
     expect(siteGuestsAllowed("invited", open)).toBe(false);
     expect(siteGuestsAllowed("public", { ...open, sitesLoginOnly: true })).toBe(false);
@@ -960,8 +960,8 @@ describe("content scanner", () => {
   });
 });
 
-describe("Site agents", () => {
-  test("viewers stop when a Site is unpublished, its access narrows or its agent turns off", () => {
+describe("App agents", () => {
+  test("viewers stop when an app is unpublished, its access narrows or its agent turns off", () => {
     const base = {
       status: "active" as const,
       access: "invited" as const,
@@ -984,7 +984,7 @@ describe("Site agents", () => {
   });
 });
 
-describe("Site-safe session events", () => {
+describe("App-safe session events", () => {
   const SECRET = "sk-live-secret-argument";
   const base = {
     id: "5b0d6f8e-0d37-4b8f-9c43-0f1c6c1f7a01",
@@ -1171,7 +1171,7 @@ describe("Site-safe session events", () => {
   });
 });
 
-describe("Site-safe session views", () => {
+describe("App-safe session views", () => {
   const WORKSPACE = "0e4c3a4d-6c50-4d1b-8f4e-2a5d8f1c9b11";
   const SECRET = "vault-item-secret-name";
   const control = {

@@ -238,7 +238,7 @@ describe("Session rail row metadata in Chromium", () => {
     expect(text).toContain("Created");
     expect(text).toContain("Updated");
     expect(text).toContain("3 sub-agents");
-    expect(text).toContain("Idle");
+    expect(text).toContain("Done");
     expect(text).not.toContain("Read");
 
     const rowBox = await row.boundingBox();

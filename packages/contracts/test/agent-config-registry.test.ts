@@ -77,7 +77,8 @@ describe("agent capability registry", () => {
       ) {
         expect(owner[tool]).toBe("workspaceAdmin");
       }
-      if (/^(sessions_list|session_(?!set_project))/.test(tool)) {
+      // session_links_* belong to goals: the chat's Linked items and merge wakes.
+      if (/^(sessions_list|session_(?!set_project|links_))/.test(tool)) {
         expect(owner[tool]).toBe("subagents");
       }
     }

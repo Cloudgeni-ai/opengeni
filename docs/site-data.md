@@ -118,11 +118,67 @@ others write (activity timing, never content); readable collections are fixed
 per connection until it reconnects. Without `OPENGENI_SITES_LIVE_ENABLED` and the `SITE_LIVE` gateway binding the live routes answer 404
 and pages keep their timed checks.
 
-Not covered: Site SQL writes (the Durable Object commit is not atomic with
-Postgres, so no event is published), and workspace webhooks or the "This
-workspace" automation source. `site_data_changes` with its listener flag is
-the seam for those: a consumer would keep `live_until` fresh and read rows by
-`change_seq`.
+Live hints do not cover Site SQL writes (the Durable Object commit is not
+atomic with Postgres, so no hint is published).
+
+### App change events for automations and webhooks
+
+Automations and workspace webhooks hear about app data changes through the
+same vocabulary as Opengeni's other events (migration `1519`,
+`packages/db/src/app-activity-events.ts`):
+
+- `app.record.added`, `app.record.changed`, `app.record.removed`: one fact per
+  record a write transaction inserted (`insert`, a new `put` key, an
+  `increment` that created the record), changed (`put`, `patch`, `increment`)
+  or deleted. A `put` or `patch` that leaves the stored data unchanged sends
+  nothing, so a sync that refreshes the same data stays quiet. Imports,
+  collection resets and collection deletes send none.
+- `app.sql.changed`: a Site SQL write (a saved write query or
+  `app_sql_execute`) that wrote rows. The app's database commits in its
+  Durable Object, outside Postgres, so the API records this fact right after
+  the call returns, best effort: a crash in between loses the event, never
+  the write.
+
+Facts go to `workspace_activity_events` (the 1105 facts table) with the app's
+id, in the write's own transaction, and only while someone listens: an active
+"This workspace" event source or an enabled workspace webhook subscribed to an
+app type. Otherwise the write pays one indexed lookup. A fact carries the
+collection, record id, key, version, the record owner's subject, the writer's
+kind and the record's data when it is at most 4 KB (`recordTruncated`
+otherwise), plus the automation run that caused the write and its chain depth:
+an agent's write is traced to the run behind its turn the way chat facts are
+(the turn's run, the automation's own chat, or up to eight parent chats), so
+a loop of automations stops at the chain limit (depth 3) and the storm guard
+applies. A fact that cannot be written is logged and never fails the write.
+
+Who sees a fact is decided by row security, as the "This workspace" source
+reads as its owner:
+
+- The person must be able to open the app: it is shared with the workspace,
+  or it is their own Only me app.
+- In a collection where viewers read only their own records (`per_viewer`,
+  `append_only`), the record's owner sees it, and so do the app's managers
+  (members who may publish apps, and workspace administrators) unless the
+  records are private (`privateRecords`), when only the owner does.
+
+Workspace webhooks receive every app fact of the workspace, but without the
+record's data, key and owner when only some people may read it
+(`recordWithheld: true`): a
+record in a collection where people read only their own, or any record of an
+app that isn't shared with the workspace (an Only me app).
+Organization webhooks don't offer app types. Events for automations are
+rendered like other "This workspace" events: summary `Record added in
+<App> / <collection>`, the App's console address, `data.appId`,
+`data.appTitle`, `data.writtenByYou`, and the fields above. Filter on
+`data.appId` and `data.collection` to listen to one collection.
+
+A [data sync](app-sync.md) writes through the same path, so its changes send
+these events with the sync run's chain depth. They are not marked as
+Opengeni's own (a sync runs no model), so a trigger hears them without
+"include Opengeni's own events".
+
+Self-hosted: record events work wherever Site Data does. `app.sql.changed`
+needs Site SQL, which runs only on the hosted Cloudflare gateway.
 
 ## Access rules
 
@@ -138,6 +194,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   (for example a person-less scheduled task) is a viewer, whatever credential
   started it. Managers define collections and read everything except
   `privateRecords`. Everyone else who can view the Site is a **viewer**.
+- Agents outside Opengeni (connected agents and personal API keys on the
+  [organization MCP server](mcp-surfaces.md#named-tools-for-connected-agents))
+  are **viewers** unless the person set the connection's app data to Manager
+  (`outside_agent_viewer`), and reach only members-only or unpublished Sites
+  (`outside_agent_members_only`): text from outside visitors must not reach an
+  agent that picks up work. Describe answers them with `access: "viewer"`.
 - Requests from Site HTML always get **viewer** reach, whoever is viewing:
   Site HTML is untrusted (any member with `artifacts:publish` can publish a
   new version of a Site), so the owner's own Site page reads only their own
@@ -342,16 +404,20 @@ CORS policy allows `X-OpenGeni-Site-Frame`, `X-OpenGeni-Site-Id` and
 `X-OpenGeni-Site-Version`, so cross-origin hosts can send bridged requests.
 Stored records are untrusted; the Sites skill requires rendering them as text.
 
-**Agent tools** (MCP and Codemode, family `artifacts`; `site_data_describe`,
-`site_data_query`, `site_data_export` and `site_files_list` need
-`artifacts:read`, the rest `artifacts:publish`): `site_data_describe`,
-`site_data_define_collection` (create, change or delete), `site_data_query`,
-`site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset`
-(needs `confirm: true`), `site_files_list`, `site_files_upload` and
-`site_files_delete`. They run with the attempt's authority, so scheduled tasks
+**Agent tools** (MCP and Codemode, family `artifacts`; `app_data_describe`,
+`app_data_query`, `app_data_export` and `app_files_list` need
+`artifacts:read`, the rest `artifacts:publish`): `app_data_describe`,
+`app_data_define_collection` (create, change or delete), `app_data_query`,
+`app_data_write`, `app_data_import`, `app_data_export`, `app_data_reset`
+(needs `confirm: true`), `app_files_list`, `app_files_upload` and
+`app_files_delete`. They run with the attempt's authority, so scheduled tasks
 use the schedule's. Site-origin agents use the same native role as console agents.
 
 
+
+**Syncs.** An app data sync keeps a collection filled from a connected tool on
+a schedule without a model run; the page reads each sync's last run with
+`site.data.syncs()` (`GET /data/syncs`). See [app-sync.md](app-sync.md).
 
 **Web.** The Site page's Data tab (`packages/react/src/app/components/artifacts/site-data.tsx`)
 is shown to likely managers and trusts the API's answer: collections with
@@ -484,7 +550,7 @@ profiles decide the rest:
 | Profile  | Used for                  | Rules                                                                 |
 | -------- | ------------------------- | --------------------------------------------------------------------- |
 | `named`  | named queries Sites call  | exactly one SELECT/INSERT/UPDATE/DELETE/REPLACE (WITH allowed, not recursive: no `RECURSIVE`, and no WITH table that names itself or uses UNION, INTERSECT or EXCEPT, at any nesting level); no schema changes, PRAGMA or EXPLAIN; 16K characters |
-| `agent`  | `site_sql_query`/`execute` | exactly one read or write statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration) here and in the Durable Object; 64K characters |
+| `agent`  | `app_sql_query`/`execute` | exactly one read or write statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration) here and in the Durable Object; 64K characters |
 | `script` | migrations and SQL imports | up to 2,000 statements, run in one transaction; schema changes allowed; 2M characters |
 
 Statement boundaries are never guessed. A `CREATE TRIGGER` body starts at
@@ -531,7 +597,7 @@ visitor binds that role with their own email. A request that supplies one is ref
 a Site cannot impersonate another viewer:
 
 ```sql
--- define with site_sql_define_query, audience signed_in
+-- define with app_sql_define_query, audience signed_in
 INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
 ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
 ```
@@ -652,22 +718,25 @@ PUT `/settings`, POST|PUT|DELETE `/queries/:name`, POST `/migrations`, `/query`,
 
 | Tool                    | Does                                                                  |
 | ----------------------- | --------------------------------------------------------------------- |
-| `site_sql_inspect`      | settings, limits, usage, tables, migrations, pending migrations, queries |
-| `site_sql_enable`       | turn the Site's database on or off                                     |
-| `site_sql_migrate`      | append a named schema migration and apply every missing one            |
-| `site_sql_define_query` | create, replace or delete a named query                                |
-| `site_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
-| `site_sql_run`          | one named query with params, as a Site page runs it (`site.sql.run`)    |
-| `site_sql_execute`      | one write statement (schema changes go through migrations)             |
-| `site_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
-| `site_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
-| `site_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
+| `app_sql_inspect`      | settings, limits, usage, tables, migrations, pending migrations, queries |
+| `app_sql_enable`       | turn the Site's database on or off                                     |
+| `app_sql_migrate`      | append a named schema migration and apply every missing one            |
+| `app_sql_define_query` | create, replace or delete a named query                                |
+| `app_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
+| `app_sql_run`          | one named query with params, as a Site page runs it (`site.sql.run`)    |
+| `app_sql_execute`      | one write statement (schema changes go through migrations)             |
+| `app_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
+| `app_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
+| `app_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
 
-Ordinary authoring routes and tools except `site_sql_run` need the manager role on the
+Ordinary authoring routes and tools except `app_sql_run` need the manager role on the
 Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
-`site_sql_run` needs `artifacts:read` and applies the query's audience to the
+`app_sql_run` needs `artifacts:read` and applies the query's audience to the
 agent as to a page viewer (managers run every query). The tools are only
 registered when the gateway origin and secret are configured.
+
+To move an app with its migrations, named queries and collection definitions
+to another workspace, export it as a package ([App packages](app-packages.md)).
 
 Site and console agents use identical native Site SQL authorization. Members
 are not pinned to the originating Site. Outside-workspace visitor conversations
@@ -684,7 +753,7 @@ and the tool returns `nextCursor`: pass it back as `cursor` and append the
 pieces in order. Only the first piece holds the header (the SQL schema, the
 CSV header row, the JSON schema) and only the last SQL piece holds the
 triggers, so the pieces of a SQL export re-import one after another
-(`site_sql_import` takes at most 2 MB per call). SQL and JSON exports keep
+(`app_sql_import` takes at most 2 MB per call). SQL and JSON exports keep
 every value (JSON writes blobs as `{ "$base64": "..." }`, which JSON imports
 cannot load back yet, so SQL is the lossless round trip); CSV turns every
 value into text (an empty cell imports as NULL) and blobs into base64. SQL
@@ -694,7 +763,7 @@ single row larger than that needs a JSON export and import.
 
 An export is not a point-in-time snapshot: each piece reads the database as
 it is then, so writes between pieces can show up in later pieces only. For a
-consistent copy, turn Site SQL off (`site_sql_enable` with `enabled: false`;
+consistent copy, turn Site SQL off (`app_sql_enable` with `enabled: false`;
 export keeps working) before a full export and back on afterwards.
 
 To restore a SQL export into the same or another Site, reset with `schema:
@@ -806,8 +875,9 @@ answered; a metering failure is logged and does not fail the call.
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
   principals.
-- Site Data change events to workspace webhooks and the "This workspace"
-  automation source (read `site_data_changes`); Site SQL change events.
+- App change events for imports, resets and file uploads; Site SQL change
+  events that name the tables a statement wrote; a durable outbox for Site
+  SQL change events instead of the best-effort write after the call.
 
 
 - Site SQL: per-call CPU time is bounded only by the Durable Object's own

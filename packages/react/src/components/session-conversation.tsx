@@ -1109,7 +1109,7 @@ function useDefaultInteractiveBlock(
       getWorkspaceArtifactHtml: (...args) => get().getWorkspaceArtifactHtml(...args),
       getWorkspaceArtifactContent: (...args) => {
         const target = get();
-        if (!target.getWorkspaceArtifactContent) throw new Error("Site version unavailable");
+        if (!target.getWorkspaceArtifactContent) throw new Error("App version unavailable");
         return target.getWorkspaceArtifactContent(...args);
       },
     };

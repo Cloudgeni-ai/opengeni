@@ -21,7 +21,7 @@ function megabytes(bytes: number): string {
 }
 
 const SUGGESTION =
-  "Shrink or move the media: resize and compress images to the size they are shown (WebP or JPEG), and link video or large images from where they are hosted instead of embedding them. Site files can hold them too (at most 10 MB each): upload them as shared files, which every visitor of the Site can open, signed-out guests of a public Site included. Keep the page itself under 5 MB.";
+  "Shrink or move the media: resize and compress images to the size they are shown (WebP or JPEG), and link video or large images from where they are hosted instead of embedding them. App files can hold them too (at most 10 MB each): upload them as shared files, which every visitor of the app can open, signed-out guests of a public app included. Keep the page itself under 5 MB.";
 
 /** The warnings for a published page of this size (empty for an ordinary page). */
 export function sitePageSizeWarnings(sizeBytes: number): SitePageSizeWarning[] {
@@ -29,7 +29,7 @@ export function sitePageSizeWarnings(sizeBytes: number): SitePageSizeWarning[] {
     return [
       {
         code: "page_too_large",
-        message: `This Site's page is ${megabytes(sizeBytes)}, more than the ${megabytes(SITE_PAGE_SERVED_MAX_BYTES)} a published Site page can be, so its link shows "Site too large" instead of the page.`,
+        message: `This app's page is ${megabytes(sizeBytes)}, more than the ${megabytes(SITE_PAGE_SERVED_MAX_BYTES)} a published app page can be, so its link shows "App too large" instead of the page.`,
         suggestion: SUGGESTION,
       },
     ];
@@ -37,7 +37,7 @@ export function sitePageSizeWarnings(sizeBytes: number): SitePageSizeWarning[] {
     return [
       {
         code: "page_heavy",
-        message: `This Site's page is ${megabytes(sizeBytes)}, so it loads slowly: visitors download all of it before anything shows. Images or video embedded as data URLs are the usual cause.`,
+        message: `This app's page is ${megabytes(sizeBytes)}, so it loads slowly: visitors download all of it before anything shows. Images or video embedded as data URLs are the usual cause.`,
         suggestion: SUGGESTION,
       },
     ];

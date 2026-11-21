@@ -91,7 +91,7 @@ async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z
 
 function siteId(context: Context): string {
   const parsed = SiteId.safeParse(context.req.param("artifactId"));
-  if (!parsed.success) throw siteDataHttpError(new SiteDataError("not_found", "Site not found"));
+  if (!parsed.success) throw siteDataHttpError(new SiteDataError("not_found", "App not found"));
   return parsed.data;
 }
 
@@ -178,7 +178,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/data`, async (context) => {
     const grant = await grantFor(context, "artifacts:read");
-    if (framed(context)) throw invalid("Use site.data from a Site");
+    if (framed(context)) throw invalid("Use site.data from an app");
     return context.json(await run(() => describeSiteData(deps, grant, siteId(context))));
   });
 
@@ -186,7 +186,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, SiteDataCollectionDefinitionRequest);
     if (framed(context))
-      throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot define collections"));
+      throw siteDataHttpError(new SiteDataError("forbidden", "An app cannot define collections"));
     const result = await run(() =>
       defineSiteDataCollection(deps, grant, siteId(context), context.req.param("name")!, request),
     );
@@ -198,7 +198,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (context.req.query("confirm") !== "true")
       throw invalid("Deleting a collection needs confirm=true");
     if (framed(context))
-      throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot delete collections"));
+      throw siteDataHttpError(new SiteDataError("forbidden", "An app cannot delete collections"));
     return context.json(
       await run(() =>
         deleteSiteDataCollection(deps, grant, siteId(context), context.req.param("name")!),
@@ -210,7 +210,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:publish");
     await body(context, SiteDataConfirmRequest);
     if (framed(context))
-      throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot clear collections"));
+      throw siteDataHttpError(new SiteDataError("forbidden", "An app cannot clear collections"));
     return context.json(
       await run(() =>
         resetSiteDataCollection(deps, grant, siteId(context), context.req.param("name")!),
@@ -222,7 +222,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, SiteDataImportRequest);
     if (framed(context))
-      throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot import records"));
+      throw siteDataHttpError(new SiteDataError("forbidden", "An app cannot import records"));
     return context.json(
       await run(() =>
         importSiteData(deps, grant, siteId(context), context.req.param("name")!, request),
@@ -234,7 +234,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:read");
     const format = context.req.query("format") === "csv" ? "csv" : "json";
     if (framed(context))
-      throw siteDataHttpError(new SiteDataError("forbidden", "A Site cannot export records"));
+      throw siteDataHttpError(new SiteDataError("forbidden", "An app cannot export records"));
     const name = context.req.param("name")!;
     const exported = await run(() => exportSiteData(deps, grant, siteId(context), name, format));
     return new Response(exported.content, {
@@ -257,7 +257,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await grantFor(context, "artifacts:read");
     if (framed(context))
       throw siteDataHttpError(
-        new SiteDataError("forbidden", "A Site cannot open the console's live connection"),
+        new SiteDataError("forbidden", "An app cannot open the console's live connection"),
       );
     const id = siteId(context);
     const url = siteLiveConsoleUrl(deps.settings);

@@ -19,7 +19,7 @@
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source)
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger)
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
@@ -182,6 +182,10 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "IntegrationsReturnRoute",
 );
+const LazySidebarCustomizeRoute = lazyRouteComponent(
+  () => import("@/routes/sidebar-customize"),
+  "SidebarCustomizeRoute",
+);
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyTeamsConnectRoute = lazyRouteComponent(
   () => import("@/routes/teams-connect"),
@@ -192,6 +196,10 @@ const LazyConnectAgentRoute = lazyRouteComponent(
   "ConnectAgentRoute",
 );
 const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
+const LazyToolApprovalRoute = lazyRouteComponent(
+  () => import("@/routes/tool-approval"),
+  "ToolApprovalRoute",
+);
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyComputerUseRoute = lazyRouteComponent(
   () => import("@/routes/computer-use"),
@@ -884,6 +892,12 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+// A connected agent's link for approving one tool call (organization MCP tool_call).
+const workspaceToolApprovalRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "tool-approval",
+  component: ToolApproval,
+});
 const workspaceComputerUseRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "computer-use",
@@ -971,6 +985,10 @@ type NewAutomationSearch = {
   sourceSessionId?: string;
   /** Start with a trigger on this event source. */
   source?: string;
+  /** Each run is a chat with this agent (its "Starts when"). */
+  agent?: string;
+  /** Start from this one of the agent's suggested triggers. */
+  agentTrigger?: number;
 };
 function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
   return {
@@ -988,6 +1006,14 @@ function newAutomationSearch(search: Record<string, unknown>): NewAutomationSear
       : {}),
     ...(typeof search.source === "string" && AUTOMATIONS_SEARCH_UUID.test(search.source)
       ? { source: search.source }
+      : {}),
+    ...(typeof search.agent === "string" && AUTOMATIONS_SEARCH_UUID.test(search.agent)
+      ? { agent: search.agent }
+      : {}),
+    ...(Number.isInteger(Number(search.agentTrigger)) &&
+    Number(search.agentTrigger) >= 0 &&
+    Number(search.agentTrigger) < 10
+      ? { agentTrigger: Number(search.agentTrigger) }
       : {}),
   };
 }
@@ -1210,6 +1236,22 @@ const workspaceSiteViewRoute = createRoute({
   validateSearch: siteViewSearch,
   component: SiteViewPage,
 });
+// An app opened from the sidebar, as a page: its own address after `apps/<id>/`
+// (its query and fragment, rarely, in `?at=`). The app itself is drawn by
+// `AppPages` in the rail shell, which keeps the last few open.
+const workspaceAppPageRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "apps/$appId/$",
+  validateSearch: (search: Record<string, unknown>): { at?: string } =>
+    typeof search.at === "string" && /^[?#]/u.test(search.at) ? { at: search.at } : {},
+  component: AppPageOutlet,
+});
+// The sidebar's links and groups: your own, and the workspace default for admins.
+const workspaceSidebarRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "sidebar",
+  component: SidebarCustomize,
+});
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
@@ -1388,6 +1430,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     workspaceRigsRoute,
     workspaceRigDetailRoute,
+    workspaceToolApprovalRoute,
     workspaceReadOnlyChatsRoute,
     workspaceLegacyReadOnlyChatsRoute,
     workspaceInboxRoute,
@@ -1424,6 +1467,8 @@ const routeTree = rootRoute.addChildren([
     workspaceRetainedArtifactRoute,
     workspaceArtifactDetailRoute,
     workspaceSiteViewRoute,
+    workspaceAppPageRoute,
+    workspaceSidebarRoute,
     workspaceEditableArtifactRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
@@ -1557,6 +1602,11 @@ function Secrets() {
   );
 }
 
+function ToolApproval() {
+  const { workspaceId } = workspaceToolApprovalRoute.useParams();
+  return <LazyToolApprovalRoute workspaceId={workspaceId} />;
+}
+
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
   const { view } = workspaceRigsRoute.useSearch();
@@ -1637,11 +1687,20 @@ function Automations() {
 
 function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source } = workspaceAutomationNewRoute.useSearch();
+  const { template, from, sourceSessionId, source, agent, agentTrigger } =
+    workspaceAutomationNewRoute.useSearch();
   return (
     <LazyAutomationFormRoute
       workspaceId={workspaceId}
-      mode={{ kind: "create", template, from, sourceSessionId, eventSourceId: source }}
+      mode={{
+        kind: "create",
+        template,
+        from,
+        sourceSessionId,
+        eventSourceId: source,
+        agentId: agent,
+        agentTrigger,
+      }}
     />
   );
 }
@@ -1891,8 +1950,18 @@ function SiteViewPage() {
       startNew={search.new === true}
       page={search.page}
       artifactsReturn={siteViewArtifactsReturn(search)}
+      connect={search.connect}
     />
   );
+}
+
+function AppPageOutlet() {
+  return null;
+}
+
+function SidebarCustomize() {
+  const { workspaceId } = workspaceSidebarRoute.useParams();
+  return <LazySidebarCustomizeRoute workspaceId={workspaceId} />;
 }
 
 function EditableArtifact() {

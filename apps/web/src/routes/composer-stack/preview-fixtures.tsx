@@ -19,7 +19,7 @@ import {
 
 export type StackPreviewState = "idle" | "running" | "paused" | "waiting" | "all";
 
-const WAIT_REASON = "Waiting for the Site sidebar and Site panel workers to finish.";
+const WAIT_REASON = "Waiting for the app sidebar and app panel workers to finish.";
 
 // A 1x1 neutral PNG keeps the attachment thumbnail deterministic.
 const THUMB =

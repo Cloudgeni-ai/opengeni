@@ -33,7 +33,9 @@ test("1212 lists every non-usage webhook type for organization endpoints", () =>
     migration,
   )?.[0];
   for (const type of WORKSPACE_WEBHOOK_EVENT_TYPES) {
-    if (type.startsWith("usage.")) expect(check).not.toContain(`'${type}'`);
+    // Usage and app data types (1519_app_change_events) stay workspace-only.
+    if (type.startsWith("usage.") || type.startsWith("app."))
+      expect(check).not.toContain(`'${type}'`);
     else expect(check).toContain(`'${type}'`);
     if (type.startsWith("turn.") || type.startsWith("session.")) {
       expect(trigger).toContain(`'${type}'`);

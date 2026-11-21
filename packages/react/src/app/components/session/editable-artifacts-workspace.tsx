@@ -30,7 +30,7 @@ const ArtifactDetailRoute = lazy(() =>
 );
 
 /** The panel's one expand for a Site, named for what it does. */
-const EXPAND_SITE = "Expand Site to full window";
+const EXPAND_SITE = "Expand app to full window";
 
 export type SessionEditableArtifactSummary = Readonly<{
   id: string;
@@ -195,7 +195,7 @@ export function SessionEditableArtifactsWorkspace({
               ? "Opening the shared workspace."
               : failed
                 ? "The shared workspace could not be loaded."
-                : "Ask the agent to create or import a Site, image, document, spreadsheet, or presentation."}
+                : "Ask the agent to create or import an app, image, document, spreadsheet, or presentation."}
           </p>
           {failed ? (
             <Button type="button" variant="outline" size="sm" className="mt-4" onClick={onRetry}>
@@ -207,7 +207,7 @@ export function SessionEditableArtifactsWorkspace({
     );
   }
 
-  const settingsLabel = settingsOpen ? "Back to Site" : "Site settings";
+  const settingsLabel = settingsOpen ? "Back to app" : "App settings";
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-fg">
       <ArtifactViewerHeader
@@ -250,8 +250,8 @@ export function SessionEditableArtifactsWorkspace({
                   variant="ghost"
                   size="icon-sm"
                   className="shrink-0"
-                  aria-label="Reload Site"
-                  title="Reload Site"
+                  aria-label="Reload app"
+                  title="Reload app"
                   onClick={() => setSiteReload((value) => value + 1)}
                 >
                   <RotateCwIcon className="size-4" />
