@@ -234,6 +234,12 @@ function createFixture() {
     listArtifactCatalog: async () => ({
       items: APPS.map((app) => ({ id: app.appId, title: app.title })),
     }),
+    // The Add app form's Page picker reads the app's links from its current HTML.
+    getWorkspaceArtifactCurrent: async (_workspaceId: string, appId: string) => ({
+      artifact: { id: appId, currentVersion: { id: `${appId}-v1` } },
+    }),
+    getWorkspaceArtifactHtml: async () =>
+      `<nav><a href="/">Home</a><a href="/releases">Releases</a><a href="/roadmap">Roadmap</a><a href="#/changelog">Changelog</a></nav>`,
   };
   return {
     context: {

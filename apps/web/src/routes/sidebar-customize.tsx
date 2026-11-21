@@ -67,6 +67,7 @@ import { Switch } from "@opengeni/react/ui/switch";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
 import { IconMenu, SidebarIcon } from "@/components/sidebar-layout/sidebar-icons";
+import { appPagePaths, typedPagePath } from "@/components/sidebar-layout/app-pages";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 
 type Scope = "personal" | "workspace";
@@ -374,6 +375,81 @@ function useAppOptions(workspaceId: string, query: string) {
   return { options, loading };
 }
 
+/** The pages the chosen app's current version links to, for the Page picker. */
+function useAppPages(workspaceId: string, appId: string | null) {
+  const { client } = useAppContext();
+  const [pages, setPages] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    setPages([]);
+    if (!appId) return;
+    const abort = new AbortController();
+    setLoading(true);
+    void client
+      .getWorkspaceArtifactCurrent(workspaceId, appId, { signal: abort.signal })
+      .then(({ artifact }) => {
+        const versionId = artifact.currentVersion?.id;
+        return versionId
+          ? client.getWorkspaceArtifactHtml(workspaceId, appId, {
+              versionId,
+              signal: abort.signal,
+            })
+          : "";
+      })
+      .then((html) => {
+        if (!abort.signal.aborted) setPages(appPagePaths(html));
+      })
+      // The list is a convenience; typing a page still works without it.
+      .catch(() => undefined)
+      .finally(() => {
+        if (!abort.signal.aborted) setLoading(false);
+      });
+    return () => abort.abort();
+  }, [appId, client, workspaceId]);
+  return { pages, loading };
+}
+
+const HOME_PAGE = "/";
+
+/** One control for an app's page: its known pages, or any typed path. Home is the app's start. */
+function AppPagePicker({
+  pages,
+  loading,
+  value,
+  onChange,
+  disabled,
+}: {
+  pages: string[];
+  loading: boolean;
+  value: string;
+  onChange: (path: string) => void;
+  disabled: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const typed = typedPagePath(query);
+  const listed = new Set([HOME_PAGE, ...pages]);
+  const extra = [value, typed].filter(
+    (path): path is string => !!path && !listed.has(path) && path !== HOME_PAGE,
+  );
+  const options = [
+    { value: HOME_PAGE, label: "Home", meta: HOME_PAGE },
+    ...[...pages, ...new Set(extra)].map((path) => ({ value: path, label: path })),
+  ];
+  return (
+    <SelectMenu
+      variant="combobox"
+      options={options}
+      value={value || HOME_PAGE}
+      onValueChange={(next) => onChange(next === HOME_PAGE ? "" : next)}
+      searchPlaceholder="Search or type a page"
+      onSearchChange={setQuery}
+      searching={loading}
+      disabled={disabled}
+      emptyMessage="Type a page, such as /releases"
+    />
+  );
+}
+
 /** The agents this person can see, to link one. */
 function useAgentOptions(workspaceId: string, enabled: boolean) {
   const { client } = useAppContext();
@@ -437,6 +513,7 @@ export function AddForm({
   const apps = useAppOptions(workspaceId, appQuery);
   const agents = useAgentOptions(workspaceId, kind === "agent");
   const [appId, setAppId] = useState<string | null>(null);
+  const appPages = useAppPages(workspaceId, kind === "app" ? appId : null);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [path, setPath] = useState("");
   const [label, setLabel] = useState("");
@@ -483,7 +560,7 @@ export function AddForm({
   return (
     <form
       onSubmit={submit}
-      className="grid gap-4 rounded-[14px] border border-border bg-surface px-5 py-4"
+      className="grid max-w-[32rem] gap-4 py-2"
       aria-label={`Add ${ADD_LABELS[kind].toLowerCase()}`}
     >
       {kind === "app" ? (
@@ -493,7 +570,10 @@ export function AddForm({
               variant="combobox"
               options={apps.options}
               value={appId}
-              onValueChange={setAppId}
+              onValueChange={(next) => {
+                setAppId(next);
+                setPath("");
+              }}
               placeholder="Choose an app"
               searchPlaceholder="Search apps"
               onSearchChange={setAppQuery}
@@ -502,16 +582,13 @@ export function AddForm({
               emptyMessage="No apps found"
             />
           </Field>
-          <Field
-            label="Page"
-            optional
-            hint="A page inside the app, such as /releases"
-            error={pathError}
-          >
-            <TextInput
+          <Field label="Page" optional error={pathError}>
+            <AppPagePicker
+              pages={appPages.pages}
+              loading={appPages.loading}
               value={path}
-              onChange={(event) => setPath(event.target.value)}
-              placeholder="/"
+              onChange={setPath}
+              disabled={!appId}
             />
           </Field>
         </>
