@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Arch, ControlRequest, ControlResponse, Hello, Os } from "@opengeni/agent-proto";
-import { connect } from "@opengeni/events";
+import { Arch, ControlRequest, ControlResponse, Hello, Os } from "../packages/agent-proto/src";
+import { connect } from "../packages/events/src";
 
 assert.equal(process.platform, "win32");
 assert.equal(process.arch, "arm64");
