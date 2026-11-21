@@ -1059,6 +1059,13 @@ export class BrowserControlServer {
                   // but ignore unknown headers.
                   { "x-opengeni-browser-frame-note": "inexact-scrollbars" }
                 : {}),
+              ...(frame.hiddenScrolledHeight
+                ? {
+                    "x-opengeni-browser-frame-hidden-scrolled-height": String(
+                      frame.hiddenScrolledHeight,
+                    ),
+                  }
+                : {}),
             },
           }),
       );

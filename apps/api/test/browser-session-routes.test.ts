@@ -1497,6 +1497,23 @@ describe("BrowserSession route discipline", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
+  test("browser screenshot response relays what a full-page capture left out", async () => {
+    const frame = {
+      data: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+      mediaType: "image/jpeg" as const,
+      metadataHeader: "frame-metadata",
+    };
+    const full = browserScreenshotResponse({
+      ...frame,
+      inexactScrollbars: true,
+      hiddenScrolledHeight: 1604,
+    });
+    expect(full.headers.get("x-opengeni-browser-frame-note")).toBe("inexact-scrollbars");
+    expect(full.headers.get("x-opengeni-browser-frame-hidden-scrolled-height")).toBe("1604");
+    const viewport = browserScreenshotResponse(frame);
+    expect(viewport.headers.get("x-opengeni-browser-frame-hidden-scrolled-height")).toBeNull();
+  });
+
   test("registers the complete lifecycle, semantic control, diagnostics, and frame surface", async () => {
     const source = await readFile(routeUrl, "utf8");
     for (const route of [

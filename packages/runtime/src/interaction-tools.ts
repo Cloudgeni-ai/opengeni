@@ -311,6 +311,21 @@ const BrowserScreenshotInput = z
 // space; static, so it never changes text already sent.
 const INEXACT_SCROLLBARS_NOTE =
   "Some scrollbars could not be kept for this full-page capture, so content beside them may be offset by up to a scrollbar's width.";
+// Shown only on a full-page capture of a page that scrolls content inside its
+// own areas (an app's main pane, a table), which the document's size and so
+// the image leave out.
+function hiddenScrolledContentNote(hidden: number): string {
+  return `This image leaves out content that scrolls inside the page's own areas: one holds ${hidden} CSS px below what it shows. To capture it, scroll within that area and take more screenshots, or, if the area grows with the window, set the viewport ${hidden} px taller and capture again.`;
+}
+function screenshotNote(frame: { inexactScrollbars?: true; hiddenScrolledHeight?: number }): {
+  note?: string;
+} {
+  const notes = [
+    ...(frame.hiddenScrolledHeight ? [hiddenScrolledContentNote(frame.hiddenScrolledHeight)] : []),
+    ...(frame.inexactScrollbars ? [INEXACT_SCROLLBARS_NOTE] : []),
+  ];
+  return notes.length > 0 ? { note: notes.join(" ") } : {};
+}
 const BrowserScreenshotOutput = z
   .object({
     kind: z.literal("browser_screenshot"),
@@ -2314,7 +2329,7 @@ export function createInteractionAttemptToolDefinitions(
             scrollY: frame.scrollY,
             capturedAt: frame.capturedAt,
             fullPage: value.fullPage ?? false,
-            ...(frame.inexactScrollbars ? { note: INEXACT_SCROLLBARS_NOTE } : {}),
+            ...screenshotNote(frame),
           },
           [browserToolImageContent(frame.data, frame.mediaType)],
         );
