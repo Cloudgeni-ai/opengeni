@@ -150,12 +150,14 @@ export async function freezeSiteAssets(
     throw new Error("Object storage cannot freeze app assets");
   const head = await storage.headObject(keys.upload);
   if (!head) return null;
-  if ((head.ContentLength ?? 0) > SITE_ASSET_BUNDLE_MAX_BYTES)
+  const tooLarge = () =>
     refuse(
       `The app assets upload is over ${SITE_ASSET_BUNDLE_MAX_BYTES / MB} MB. Link large media from app files or where it is hosted.`,
     );
+  if ((head.ContentLength ?? 0) > SITE_ASSET_BUNDLE_MAX_BYTES) tooLarge();
   const object = await retryWhileMissing(() => storage.getObjectBytes(keys.upload));
   if (!object) refuse("App assets are not available yet. Retry publication with the same upload.");
+  if (object.bytes.byteLength > SITE_ASSET_BUNDLE_MAX_BYTES) tooLarge();
   const manifest = await storeSiteAssetBundle(storage, workspaceId, object.bytes);
   const body = new TextEncoder().encode(JSON.stringify(manifest));
   const created = await storage.putObjectStreamIfAbsent({

@@ -107,6 +107,10 @@ describe("injectSiteAssetBase", () => {
     expect(
       injectSiteAssetBase("\ufeff<p>x</p>", base).startsWith(`\ufeff<base href="${base}">`),
     ).toBe(true);
+    // Lowercasing can change the length of earlier text.
+    expect(injectSiteAssetBase("<!-- İİ --><!doctype html><p>", base)).toContain(
+      `<!doctype html><base href="${base}">`,
+    );
   });
 
   test("escapes the base", () => {

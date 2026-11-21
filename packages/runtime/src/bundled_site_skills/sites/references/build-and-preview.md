@@ -146,7 +146,7 @@ await Bun.write("assets.json", JSON.stringify({ files }));
 Keep using the host's address API for pages (below), not `window.location`.
 Bare `#section` links keep working. The page's base is the files' folder, so
 move between pages with `site.navigate` or hash routes, never a path router or
-`history.pushState()`, and use absolute paths in `fetch()`. Inline web workers
+`history.pushState()`, and give `fetch()` full `https://` URLs. Inline web workers
 (Vite `?worker&inline`, or a `blob:` URL): the app's frame can't start a
 worker from a file.
 

@@ -66,16 +66,16 @@ export async function handleAsset(site: SiteContext, pathname: string): Promise<
     address.path,
   ]);
   const hit = cache ? await cache.match(key) : undefined;
-  if (hit?.body) {
+  if (hit) {
     const etag = hit.headers.get("ETag");
     if (etag) headers.set("ETag", etag);
     headers.set("X-OpenGeni-Site-Cache", "HIT");
     if (etag && etagMatches(site.request.headers.get("if-none-match"), etag)) {
-      await hit.body.cancel();
+      await hit.body?.cancel();
       return new Response(null, { status: 304, headers });
     }
     if (method === "HEAD") {
-      await hit.body.cancel();
+      await hit.body?.cancel();
       return new Response(null, { status: 200, headers });
     }
     return new Response(hit.body, { status: 200, headers });

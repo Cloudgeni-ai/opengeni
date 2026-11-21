@@ -14,11 +14,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 /**
  * Manifests of recently loaded versions. A version row never changes, so a
- * page's chunks need one database read, not one per file. Unknown versions
- * are not kept.
+ * page's chunks need one database read, not one per file. Bounded by listed
+ * files, not versions; unknown versions are not kept.
  */
-const MANIFEST_CACHE_MAX = 512;
+const MANIFEST_CACHE_MAX_FILES = 20_000;
 const manifests = new Map<string, SiteAssetManifest>();
+let cachedFiles = 0;
 
 async function versionManifest(
   deps: ApiRouteDeps,
@@ -34,8 +35,14 @@ async function versionManifest(
   }
   const manifest = await getSiteVersionAssetManifest(deps.db, workspaceId, versionId);
   if (!manifest) return null;
+  if (manifests.has(key)) return manifest;
   manifests.set(key, manifest);
-  if (manifests.size > MANIFEST_CACHE_MAX) manifests.delete(manifests.keys().next().value!);
+  cachedFiles += manifest.files.length;
+  while (cachedFiles > MANIFEST_CACHE_MAX_FILES && manifests.size > 1) {
+    const [oldest, evicted] = manifests.entries().next().value!;
+    manifests.delete(oldest);
+    cachedFiles -= evicted.files.length;
+  }
   return manifest;
 }
 

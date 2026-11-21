@@ -194,7 +194,6 @@ function escapeAttribute(value: string): string {
 }
 
 function leadingDoctypeEnd(html: string): number {
-  const lower = html.toLowerCase();
   let cursor = html.charCodeAt(0) === 0xfeff ? 1 : 0;
   while (cursor < html.length) {
     while (/\s/u.test(html[cursor] ?? "")) cursor += 1;
@@ -203,7 +202,7 @@ function leadingDoctypeEnd(html: string): number {
     if (commentEnd < 0) return -1;
     cursor = commentEnd + 3;
   }
-  if (!lower.startsWith("<!doctype", cursor)) return -1;
+  if (html.slice(cursor, cursor + 9).toLowerCase() !== "<!doctype") return -1;
   return html.indexOf(">", cursor + 9);
 }
 
