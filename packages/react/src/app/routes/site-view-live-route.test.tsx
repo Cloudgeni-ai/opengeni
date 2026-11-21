@@ -102,6 +102,8 @@ mock.module("../lib/navigation", () => ({
   useStringifySearch: () => () => "",
   // Copy link reads the page's origin only when clicked.
   usePage: () => ({ origin: () => "https://console.example.test" }),
+  useRouter: () => ({ state: { location: { pathname: "/", state: {} } } }),
+  useRouterState: () => undefined,
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("../lib/console-site", () => ({

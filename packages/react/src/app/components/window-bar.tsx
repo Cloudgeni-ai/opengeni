@@ -75,7 +75,8 @@ export function WindowBarControls({ children }: { children: ReactNode }) {
   );
 }
 
-function windowBarHost(): HTMLElement {
+/** The host the window bar's controls render into, first in the body. */
+export function windowBarHost(): HTMLElement {
   let host = document.querySelector<HTMLElement>("body > [data-window-bar-host]");
   if (!host) {
     host = document.createElement("div");
