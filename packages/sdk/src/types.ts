@@ -2077,7 +2077,11 @@ export type SessionPullRequestDetail = {
     createdAt: string | null;
     url: string | null;
   }[];
-  checkRuns: { name: string; state: "passing" | "failing" | "pending" | "skipped"; url: string | null }[];
+  checkRuns: {
+    name: string;
+    state: "passing" | "failing" | "pending" | "skipped";
+    url: string | null;
+  }[];
 };
 
 /** `pullRequest` is null when the workspace cannot read the pull request. */

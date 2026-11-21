@@ -383,9 +383,10 @@ export function SiteViewRoute({
   // address in, so it lives here, starting at `page`.
   const [embeddedLocation, setEmbeddedLocation] = useState(page ?? "/");
   const onEmbeddedLocationChange = useCallback((href: string) => setEmbeddedLocation(href), []);
-  const backControl = back && !(barCarriesBack && !fullScreen) ? (
-    <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
-  ) : undefined;
+  const backControl =
+    back && !(barCarriesBack && !fullScreen) ? (
+      <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
+    ) : undefined;
   const { layout, update: updateLayout } = useSiteChatPanelLayout(accessContext.subjectId);
   // Open or closed per person and app; see `useSiteChatOpen` for the default.
   const chat = useSiteChatOpen(accessContext.subjectId, siteId);

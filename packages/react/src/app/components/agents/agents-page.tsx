@@ -376,10 +376,7 @@ function AddAgentMenu({
           <FilePlusIcon />
           Blank agent
         </DropdownMenuItem>
-        <DropdownMenuItem
-          onSelect={onImport}
-          title="Import an .agent.json or .bot.json file"
-        >
+        <DropdownMenuItem onSelect={onImport} title="Import an .agent.json or .bot.json file">
           <UploadIcon />
           Import from file
         </DropdownMenuItem>

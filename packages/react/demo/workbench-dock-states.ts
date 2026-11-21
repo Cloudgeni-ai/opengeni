@@ -224,7 +224,7 @@ function codeFile(
   path: string,
   adds: number,
   dels: number,
-  status: GitFileDiff["status"] = "modified",
+  fileStatus: GitFileDiff["status"] = "modified",
 ): GitFileDiff {
   const hunks: GitDiffHunk[] = [];
   let remainingAdds = adds;
@@ -239,7 +239,7 @@ function codeFile(
     remainingDels -= d;
     start += 190 + d;
   }
-  return file(path, adds, dels, hunks, { status });
+  return file(path, adds, dels, hunks, { status: fileStatus });
 }
 
 /**

@@ -23,7 +23,10 @@ export type EnablePierreDiffsOptions = {
  * skip it build without `@pierre/diffs` and render plain-text diffs.
  */
 export function enablePierreDiffs(options?: EnablePierreDiffsOptions): void {
-  registerPierreDiffs(loadPierreDiffsModule, options?.worker ? { worker: options.worker } : undefined);
+  registerPierreDiffs(
+    loadPierreDiffsModule,
+    options?.worker ? { worker: options.worker } : undefined,
+  );
 }
 
 // One stable loader identity, so repeated enable calls are no-ops.

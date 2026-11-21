@@ -3,6 +3,8 @@
 // viewer and code editor load their peers only here, in the lazy session
 // route, so they stay out of the initial graph.
 import { enableWorkbench } from "@opengeni/react/workbench";
+// Vite's `?worker` transform synthesizes this default export.
+// oxlint-disable-next-line import/default
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 
 // Diffs highlight in a worker so switching files never blocks the page.
