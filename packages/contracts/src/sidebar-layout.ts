@@ -1,11 +1,13 @@
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
+import { SessionAvatar } from "./bots";
 
 /**
  * The customizable sidebar (docs/sidebar-layout.md): a workspace default that
  * admins set, plus each person's own changes on top (hide, add, reorder,
  * reset). Items are groups, links to an app (optionally one of its pages),
- * https links, and live lists such as pinned or recent apps.
+ * links to an agent's page, https links, and live lists such as pinned or
+ * recent apps.
  *
  * Mixed versions: readers ignore item types they don't know, and writers
  * keep stored items they don't know untouched, so web, desktop and phone
@@ -121,6 +123,20 @@ export const SidebarExternalLinkItem = /* @__PURE__ */ defineSchema(() =>
 );
 export type SidebarExternalLinkItem = z.infer<typeof SidebarExternalLinkItem>;
 
+/** A link to an agent's page; it shows the agent's name and avatar. */
+export const SidebarAgentLinkItem = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: SidebarItemId,
+      type: z.literal("agent"),
+      agentId: z.string().uuid(),
+      /** Shown instead of the agent's own name. */
+      label: Label.optional(),
+    })
+    .strict(),
+);
+export type SidebarAgentLinkItem = z.infer<typeof SidebarAgentLinkItem>;
+
 /** A list the sidebar fills in itself, such as pinned or recent apps. */
 export const SidebarLiveListItem = /* @__PURE__ */ defineSchema(() =>
   z
@@ -136,7 +152,12 @@ export const SidebarLiveListItem = /* @__PURE__ */ defineSchema(() =>
 export type SidebarLiveListItem = z.infer<typeof SidebarLiveListItem>;
 
 export const SidebarChildItem = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("type", [SidebarAppLinkItem, SidebarExternalLinkItem, SidebarLiveListItem]),
+  z.discriminatedUnion("type", [
+    SidebarAppLinkItem,
+    SidebarExternalLinkItem,
+    SidebarLiveListItem,
+    SidebarAgentLinkItem,
+  ]),
 );
 export type SidebarChildItem = z.infer<typeof SidebarChildItem>;
 
@@ -161,13 +182,20 @@ export const SidebarItem = /* @__PURE__ */ defineSchema(() =>
     SidebarAppLinkItem,
     SidebarExternalLinkItem,
     SidebarLiveListItem,
+    SidebarAgentLinkItem,
   ]),
 );
 export type SidebarItem = z.infer<typeof SidebarItem>;
 export type SidebarItemType = SidebarItem["type"];
 
 /** Built-in item types; anything else is an item from a newer version. */
-export const SIDEBAR_ITEM_TYPES: readonly SidebarItemType[] = ["group", "app", "link", "live_list"];
+export const SIDEBAR_ITEM_TYPES: readonly SidebarItemType[] = [
+  "group",
+  "app",
+  "link",
+  "live_list",
+  "agent",
+];
 
 /**
  * Stored items as JSON. Known types are validated on write; unknown ones
@@ -291,9 +319,11 @@ function knownFields(item: StoredSidebarItem): StoredSidebarItem {
         ? SidebarExternalLinkItem.shape
         : item.type === "live_list"
           ? SidebarLiveListItem.shape
-          : item.type === "group"
-            ? SidebarGroupItem.shape
-            : null;
+          : item.type === "agent"
+            ? SidebarAgentLinkItem.shape
+            : item.type === "group"
+              ? SidebarGroupItem.shape
+              : null;
   if (!shape) return item;
   return Object.fromEntries(
     Object.entries(item).filter(([key]) => Object.hasOwn(shape, key)),
@@ -444,6 +474,7 @@ export const NewSidebarItem = /* @__PURE__ */ defineSchema(() =>
               SidebarAppLinkItem.extend({ id: NewItemId }),
               SidebarExternalLinkItem.extend({ id: NewItemId }),
               SidebarLiveListItem.extend({ id: NewItemId }),
+              SidebarAgentLinkItem.extend({ id: NewItemId }),
             ]),
           )
           .max(SIDEBAR_GROUP_MAX_ITEMS)
@@ -453,6 +484,7 @@ export const NewSidebarItem = /* @__PURE__ */ defineSchema(() =>
     SidebarAppLinkItem.extend({ id: NewItemId }),
     SidebarExternalLinkItem.extend({ id: NewItemId }),
     SidebarLiveListItem.extend({ id: NewItemId }),
+    SidebarAgentLinkItem.extend({ id: NewItemId }),
   ]),
 );
 export type NewSidebarItem = z.infer<typeof NewSidebarItem>;
@@ -723,9 +755,19 @@ function checkLimits(items: StoredSidebarItem[]) {
 
 /** App ids linked anywhere in `items` (lowercase). */
 export function sidebarLinkedAppIds(items: readonly StoredSidebarItem[]): string[] {
+  return linkedIds(items, "app", "appId");
+}
+
+/** Agent ids linked anywhere in `items` (lowercase). */
+export function sidebarLinkedAgentIds(items: readonly StoredSidebarItem[]): string[] {
+  return linkedIds(items, "agent", "agentId");
+}
+
+function linkedIds(items: readonly StoredSidebarItem[], type: string, field: string): string[] {
   const ids = new Set<string>();
   const visit = (item: StoredSidebarItem) => {
-    if (item.type === "app" && typeof item.appId === "string") ids.add(item.appId.toLowerCase());
+    const id = item[field];
+    if (item.type === type && typeof id === "string") ids.add(id.toLowerCase());
     if (item.type === "group" && Array.isArray(item.items))
       for (const child of item.items as StoredSidebarItem[]) visit(child);
   };
@@ -738,8 +780,27 @@ export function withoutGoneSidebarApps(
   items: readonly StoredSidebarItem[],
   live: ReadonlySet<string>,
 ): StoredSidebarItem[] {
-  const keep = (item: StoredSidebarItem) =>
-    item.type !== "app" || typeof item.appId !== "string" || live.has(item.appId.toLowerCase());
+  return withoutGone(items, "app", "appId", live);
+}
+
+/** `items` without links to agents that are gone (`live` holds the lowercase ids still there). */
+export function withoutGoneSidebarAgents(
+  items: readonly StoredSidebarItem[],
+  live: ReadonlySet<string>,
+): StoredSidebarItem[] {
+  return withoutGone(items, "agent", "agentId", live);
+}
+
+function withoutGone(
+  items: readonly StoredSidebarItem[],
+  type: string,
+  field: string,
+  live: ReadonlySet<string>,
+): StoredSidebarItem[] {
+  const keep = (item: StoredSidebarItem) => {
+    const id = item[field];
+    return item.type !== type || typeof id !== "string" || live.has(id.toLowerCase());
+  };
   return items
     .filter(keep)
     .map((item) =>
@@ -1014,11 +1075,24 @@ export const ResolvedSidebarLiveList = /* @__PURE__ */ defineSchema(() =>
     apps: z.array(SidebarLayoutApp),
   }),
 );
+/** A link to an agent's page, for people who can see the agent. */
+export const ResolvedSidebarAgentLink = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ...ResolvedBase,
+    type: z.literal("agent"),
+    agentId: z.string().uuid(),
+    /** Its own label, else the agent's name. */
+    label: z.string(),
+    /** The agent's avatar, or its initials when it has none. */
+    avatar: SessionAvatar,
+  }),
+);
 export const ResolvedSidebarChild = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("type", [
     ResolvedSidebarAppLink,
     ResolvedSidebarExternalLink,
     ResolvedSidebarLiveList,
+    ResolvedSidebarAgentLink,
   ]),
 );
 export type ResolvedSidebarChild = z.infer<typeof ResolvedSidebarChild>;
@@ -1037,6 +1111,7 @@ export const ResolvedSidebarItem = /* @__PURE__ */ defineSchema(() =>
     ResolvedSidebarAppLink,
     ResolvedSidebarExternalLink,
     ResolvedSidebarLiveList,
+    ResolvedSidebarAgentLink,
   ]),
 );
 export type ResolvedSidebarItem = z.infer<typeof ResolvedSidebarItem>;

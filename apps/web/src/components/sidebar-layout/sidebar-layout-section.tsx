@@ -1,6 +1,7 @@
 // The rail's customizable part (docs/sidebar-layout.md): the workspace's
 // default links and groups, with each person's own changes on top. Phones
 // show groups flattened and live lists shortened; the icon rail leaves it out.
+// A quiet Customize row under it opens the Sidebar page.
 import { Link, useNavigate, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   AppWindowIcon,
@@ -17,6 +18,7 @@ import {
   sidebarItemsShown,
 } from "@opengeni/contracts/sidebar-layout";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
+import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { cn } from "@opengeni/react/app/lib/utils";
 import {
   DropdownMenu,
@@ -146,6 +148,54 @@ function AppRow({
   );
 }
 
+/** An agent's page, with its avatar; opens in place. */
+function AgentRow({
+  workspaceId,
+  agentId,
+  avatar,
+  label,
+  pathname,
+  menu,
+  indent,
+}: {
+  workspaceId: string;
+  agentId: string;
+  avatar: Extract<ResolvedSidebarChild, { type: "agent" }>["avatar"];
+  label: string;
+  pathname: string;
+  menu?: React.ReactNode;
+  indent?: boolean;
+}) {
+  const rail = useRail();
+  const active = pathname.startsWith(agentPagePathname(workspaceId, agentId));
+  return (
+    <div className="relative">
+      <Link
+        to="/workspaces/$workspaceId/agents/$agentId"
+        params={{ workspaceId, agentId }}
+        data-active={active ? "true" : undefined}
+        className={cn(ROW, menu && "pr-8", indent && "pl-4")}
+        onClick={() => rail.setDrawerOpen(false)}
+      >
+        <SessionAvatar
+          avatar={avatar}
+          name={label}
+          workspaceId={workspaceId}
+          seed={agentId}
+          size="xs"
+        />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+      </Link>
+      {menu}
+    </div>
+  );
+}
+
+/** An agent page's path, without a trailing slash. */
+export function agentPagePathname(workspaceId: string, agentId: string): string {
+  return `/workspaces/${workspaceId}/agents/${agentId}`;
+}
+
 function ChildRows({
   item,
   workspaceId,
@@ -167,6 +217,18 @@ function ChildRows({
         workspaceId={workspaceId}
         appId={item.appId}
         path={item.path}
+        label={item.label}
+        pathname={pathname}
+        menu={menu}
+        indent={indent}
+      />
+    );
+  if (item.type === "agent")
+    return (
+      <AgentRow
+        workspaceId={workspaceId}
+        agentId={item.agentId}
+        avatar={item.avatar}
         label={item.label}
         pathname={pathname}
         menu={menu}
@@ -281,6 +343,30 @@ function InAppLinkRow({
   );
 }
 
+/**
+ * Opens the Sidebar page from the section itself: quiet until the pointer is
+ * over the section (always shown on touch screens and to the keyboard).
+ */
+function CustomizeRow() {
+  const navigate = useNavigate();
+  const rail = useRail();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        rail.setDrawerOpen(false);
+        void navigate({
+          to: "/workspaces/$workspaceId/sidebar",
+          params: { workspaceId: rail.workspaceId },
+        });
+      }}
+      className="flex h-6 items-center self-start rounded-md px-2.5 text-xs text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover/layout:opacity-100 group-focus-within/layout:opacity-100 pointer-coarse:opacity-100"
+    >
+      Customize
+    </button>
+  );
+}
+
 export function SidebarLayoutSection() {
   const rail = useRail();
   const router = useRouter();
@@ -322,7 +408,11 @@ export function SidebarLayoutSection() {
   }
   const rootIds = shownItems.map((item) => item.id);
   return (
-    <nav aria-label="Workspace links" className="mt-2 grid gap-0.5 px-2" data-sidebar-layout>
+    <nav
+      aria-label="Workspace links"
+      className="group/layout mt-2 grid gap-0.5 px-2"
+      data-sidebar-layout
+    >
       {shownItems.map((item) => {
         const actions: RowActions = { siblings: rootIds, change, canChange };
         if (item.type !== "group")
@@ -339,6 +429,8 @@ export function SidebarLayoutSection() {
           (child) =>
             (child.type === "app" &&
               pathname.startsWith(appPagePathname(rail.workspaceId, child.appId))) ||
+            (child.type === "agent" &&
+              pathname.startsWith(agentPagePathname(rail.workspaceId, child.agentId))) ||
             (child.type === "link" &&
               inAppLinkPath(child.url, window.location.origin, (path) =>
                 pathHasAppPage(router, path),
@@ -378,6 +470,7 @@ export function SidebarLayoutSection() {
           </div>
         );
       })}
+      {canChange || layout.workspace.canEdit ? <CustomizeRow /> : null}
     </nav>
   );
 }

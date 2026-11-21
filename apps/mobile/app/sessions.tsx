@@ -35,6 +35,7 @@ import {
   subscribeSidebarLayout,
 } from "@/sidebar-layout";
 import { SidebarLayoutSection } from "@/sidebar-layout-section";
+import { openOnWeb, webPaths } from "@/web-links";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
 
@@ -267,6 +268,11 @@ function Sessions() {
         {searching || !workspaceId ? null : (
           <SidebarLayoutSection
             sections={sidebarSections}
+            workspaceId={workspaceId}
+            client={client}
+            onOpenAgent={(row) => {
+              if (account) openOnWeb(account.baseUrl, webPaths.agent(workspaceId, row.agentId));
+            }}
             onOpenApp={(row) =>
               router.push(
                 viewerPath({

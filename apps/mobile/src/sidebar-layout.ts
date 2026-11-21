@@ -14,12 +14,20 @@ import type {
  * The sidebar's links and groups (docs/sidebar-layout.md) in the side menu:
  * the same layout the web rail shows, read only here (it's changed on the web
  * Sidebar page or by agents). Groups are headed sections, like the menu's
- * projects, and live lists show at most 3 apps.
+ * projects, and live lists show at most 3 apps. An agent opens its page on
+ * the web, where agents are managed.
  */
 
 export type SidebarMenuRow =
   | { key: string; kind: "app"; appId: string; path: string | null; label: string }
-  | { key: string; kind: "link"; url: string; label: string };
+  | { key: string; kind: "link"; url: string; label: string }
+  | {
+      key: string;
+      kind: "agent";
+      agentId: string;
+      label: string;
+      avatar: Extract<ResolvedSidebarChild, { type: "agent" }>["avatar"];
+    };
 
 export type SidebarMenuSection = {
   key: string;
@@ -37,6 +45,16 @@ function childRows(item: ResolvedSidebarChild): SidebarMenuRow[] {
       return /^https:\/\//iu.test(item.url)
         ? [{ key: item.id, kind: "link", url: item.url, label: item.label }]
         : [];
+    case "agent":
+      return [
+        {
+          key: item.id,
+          kind: "agent",
+          agentId: item.agentId,
+          label: item.label,
+          avatar: item.avatar,
+        },
+      ];
     case "live_list":
       return item.apps
         .slice(0, Math.min(item.limit, SIDEBAR_LIVE_LIST_MOBILE_LIMIT))
@@ -59,7 +77,7 @@ export function sidebarMenuSections(
   const sections: SidebarMenuSection[] = [];
   let loose: SidebarMenuSection | null = null;
   for (const item of sidebarItemsShown(items ?? [])) {
-    if (item.type === "app" || item.type === "link") {
+    if (item.type === "app" || item.type === "link" || item.type === "agent") {
       // Consecutive top-level links share one unheaded section.
       if (!loose) {
         loose = { key: `links/${item.id}`, heading: null, rows: [] };

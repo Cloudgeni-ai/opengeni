@@ -1,6 +1,14 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { AccessGrant, Permission, ResolvedSidebarItem } from "@opengeni/contracts";
-import { createDb, createWorkspace, createWorkspaceArtifact, type DbClient } from "@opengeni/db";
+import {
+  createAgent,
+  createDb,
+  createWorkspace,
+  createWorkspaceArtifact,
+  deleteAgent,
+  readSidebarLayouts,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -333,4 +341,111 @@ test("the built-in default is the Pinned apps list until an admin saves another"
   expect(removed.workspace.revision).toBe(1);
   expect(removed.workspace.items).toEqual([]);
   expect((await readSidebarLayoutForGrant(deps, ws.bob)).items).toEqual([]);
+});
+
+async function agent(
+  scope: { accountId: string; workspaceId: string },
+  name: string,
+  owner: string | null,
+) {
+  const created = await createAgent(client!.db, scope, {
+    visibility: owner ? "private" : "workspace",
+    ownerSubjectId: owner,
+    name,
+    description: "",
+    avatar: owner ? null : { kind: "emoji", emoji: "🛠️", hue: 30 },
+    instructions: "",
+    memoryEnabled: false,
+    origin: "app",
+    sourceSessionId: null,
+    createdBySubjectId: owner ?? "user:admin",
+    maxPerWorkspace: 500,
+  });
+  return created.agent.id;
+}
+
+test("agent links show the agent's name and avatar, only to people who can see it", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  const withChats: Permission[] = [...MEMBER, "sessions:read"];
+  const ada = { ...ws.ada, permissions: withChats };
+  const bob = { ...ws.bob, permissions: withChats };
+  const admin = { ...ws.admin, permissions: [...withChats, "workspace:admin" as const] };
+  const shared_ = await agent(ws, "Release helper", null);
+  const adas = await agent(ws, "Ada Lovelace", "user:ada");
+  // Nobody adds an agent they can't see, or one that isn't there.
+  expect(
+    await status(() =>
+      updateSidebarLayoutForGrant(deps, bob, {
+        scope: "personal",
+        changes: [{ op: "add", item: { type: "agent", agentId: adas } }],
+      }),
+    ),
+  ).toBe(422);
+  expect(
+    await status(() =>
+      updateSidebarLayoutForGrant(deps, ws.bob, {
+        scope: "personal",
+        changes: [{ op: "add", item: { type: "agent", agentId: shared_ } }],
+      }),
+    ),
+  ).toBe(403);
+  await updateSidebarLayoutForGrant(deps, admin, {
+    scope: "workspace",
+    changes: [
+      { op: "reset" },
+      {
+        op: "add",
+        item: {
+          id: "team",
+          type: "group",
+          label: "Team",
+          items: [{ id: "helper", type: "agent", agentId: shared_ }],
+        },
+      },
+    ],
+  });
+  const mine = await updateSidebarLayoutForGrant(deps, ada, {
+    scope: "personal",
+    changes: [
+      { op: "add", groupId: "team", item: { id: "me", type: "agent", agentId: adas, label: "Me" } },
+      { op: "update", itemId: "my-me", label: null },
+    ],
+  });
+  const team = mine.items.find((item) => item.id === "team");
+  expect(team?.type === "group" ? team.items : null).toEqual([
+    {
+      id: "helper",
+      origin: "workspace",
+      type: "agent",
+      agentId: shared_,
+      label: "Release helper",
+      avatar: { kind: "emoji", emoji: "🛠️", hue: 30 },
+    },
+    {
+      id: "my-me",
+      origin: "personal",
+      type: "agent",
+      agentId: adas,
+      label: "Ada Lovelace",
+      avatar: { kind: "letters", letters: "AL", hue: expect.any(Number) },
+    },
+  ]);
+  // Bob sees the shared agent; without access to chats, nobody sees agents.
+  expect(shape((await readSidebarLayoutForGrant(deps, bob)).items)).toEqual([["team", ["helper"]]]);
+  expect(shape((await readSidebarLayoutForGrant(deps, ws.bob)).items)).toEqual([]);
+  // A deleted agent drops out of the sidebar, and out of storage on the next change.
+  await deleteAgent(client.db, ws, shared_);
+  expect(shape((await readSidebarLayoutForGrant(deps, bob)).items)).toEqual([]);
+  await updateSidebarLayoutForGrant(deps, admin, {
+    scope: "workspace",
+    changes: [{ op: "update", itemId: "team", label: "Crew" }],
+  });
+  const rows = await readSidebarLayouts(client.db, ws, null);
+  expect(rows.workspace?.layout).toEqual({
+    version: 1,
+    items: [{ id: "team", type: "group", label: "Crew", items: [] }],
+  });
+  expect(shape((await readSidebarLayoutForGrant(deps, ada)).items)).toEqual([["team", ["my-me"]]]);
 });

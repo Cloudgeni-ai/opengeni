@@ -112,6 +112,11 @@ export interface SettingsRailSection {
   /** Which one: "Design preview", "Acme Robotics", the account's email. */
   meta?: string;
   groups: SettingsRailGroup[];
+  /**
+   * Pages outside settings that settings search also finds ("Sidebar"), with
+   * the words people type for them. The rail doesn't list them.
+   */
+  searchOnly?: (SettingsRailItem & { keywords?: readonly string[] })[];
 }
 
 export interface SettingsShellPage {
