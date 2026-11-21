@@ -1128,7 +1128,12 @@ const TRIAGE_TEMPLATE = {
       name: "When a Linear issue is created",
       instructions: "Triage it.",
       schedule: null,
-      triggers: [{ source: { kind: "github" }, eventTypes: ["issues.opened"] }],
+      triggers: [
+        {
+          source: { kind: "webhook", adapter: "custom", preset: "linear" },
+          eventTypes: ["Issue.create"],
+        },
+      ],
     },
   ],
 };
@@ -1193,7 +1198,9 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   expect(dialog.textContent).toContain("When a Linear issue is created");
   await act(async () => button(dialog, "Open full form").click());
   await flush();
-  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1`);
+  expect(path).toBe(
+    `/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1&returnTo=agent`,
+  );
   // Can use lists each connection and Opengeni's own GitHub tools, whose row
   // holds the ready-made agent's github.com rule.
   expect(container.querySelector("[data-agent-can-use='gmail.com']")).not.toBeNull();
@@ -1240,6 +1247,7 @@ async function openAgentTrigger(
     eventSources?: (typeof GITHUB_SOURCE)[];
     createTaskError?: unknown;
     suggestion?: string;
+    githubStatus?: string;
   } = {},
 ) {
   const agent = makeAgent({ name: "Triage", templateKey: "triage", ...options.agent });
@@ -1253,6 +1261,7 @@ async function openAgentTrigger(
     <AgentsTestHost
       context={appContext(client, {
         clientConfig: { eventTriggers: { enabled: options.eventTriggers ?? true } },
+        ...(options.githubStatus ? { githubStatus: { status: options.githubStatus } } : {}),
       })}
       onLocation={(location) => (path = location.href)}
     >
@@ -1310,17 +1319,46 @@ test("a suggested trigger is set up in place: its source is filled in and no mes
   ).toEqual([expect.stringContaining("When a Linear issue is created")]);
 });
 
-test("without a source of the kind a suggestion needs, adding one is the one action", async () => {
-  const { client, dialog, path } = await openAgentTrigger({
+test("a suggestion's GitHub source is added on save once GitHub is connected", async () => {
+  const { client, dialog } = await openAgentTrigger({
     suggestion: "When a GitHub issue opens",
+    githubStatus: "bound",
   });
-  expect(dialog.querySelector("[data-agent-trigger-missing-source]")?.textContent).toContain(
+  expect(dialog.querySelector("[data-agent-trigger-setup='create']")?.textContent).toContain(
     "GitHub",
   );
-  expect(dialog.querySelector("textarea")).toBeNull();
-  await act(async () => button(dialog, "Add GitHub").click());
+  await act(async () => button(dialog, "Add trigger").click());
   await flush();
-  expect(path()).toBe(`/workspaces/${WORKSPACE_ID}/automations/sources/new?kind=github`);
+  const added = client.calls.find((call) => call[0] === "createEventSource");
+  expect(added?.[2]).toEqual({ kind: "github" });
+  expect(createdTask(client)!.events.triggers[0].sourceId).toEqual(expect.any(String));
+});
+
+test("without GitHub connected, connecting it is the one action", async () => {
+  const { client, dialog, path } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "unbound",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='connect_github']")).not.toBeNull();
+  expect(dialog.querySelector("textarea")).toBeNull();
+  await act(async () => button(dialog, "Connect GitHub").click());
+  await flush();
+  expect(decodeURIComponent(path())).toBe(
+    `/workspaces/${WORKSPACE_ID}/plugins?open=integration:github`,
+  );
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("a kind that needs its own setup opens Add a source at that kind", async () => {
+  const { client, dialog, path } = await openAgentTrigger({
+    suggestion: "When a Linear issue is created",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='add_source']")?.textContent).toContain(
+    "Linear",
+  );
+  await act(async () => button(dialog, "Add Linear").click());
+  await flush();
+  expect(path()).toBe(`/workspaces/${WORKSPACE_ID}/automations/sources/new?kind=linear`);
   expect(createdTask(client)).toBeUndefined();
 });
 
@@ -1329,8 +1367,8 @@ test("a blank trigger on a schedule saves with the default message, Only me like
     agent: { visibility: "private", ownerSubjectId: "user-me" },
     eventTriggers: false,
   });
-  expect(dialog.textContent).toContain("Only you see it.");
-  expect(dialog.textContent).not.toContain("On an event");
+  expect(dialog.textContent).toContain("Each run starts a new chat with Triage. Only you see it.");
+  expect(dialog.querySelector("[role='radiogroup']")).toBeNull();
   await act(async () => button(dialog, "Add trigger").click());
   await flush();
   const request = createdTask(client)!;
@@ -1340,13 +1378,53 @@ test("a blank trigger on a schedule saves with the default message, Only me like
   expect(request.name).toStartWith("Triage: ");
 });
 
-test("a blank event trigger asks for a source before saving", async () => {
+function pickTrigger(dialog: HTMLElement, key: string) {
+  const tile = dialog.querySelector<HTMLButtonElement>(`[data-agent-trigger-option='${key}']`);
+  if (!tile) throw new Error(`no trigger option ${key}`);
+  return act(async () => tile.click());
+}
+
+test("the picker lists a schedule, the person's sources and every kind of source", async () => {
   const { client, dialog } = await openAgentTrigger({ eventSources: [GITHUB_SOURCE] });
-  expect(dialog.textContent).toContain("On an event");
+  const options = [...dialog.querySelectorAll<HTMLElement>("[data-agent-trigger-option]")].map(
+    (tile) => tile.dataset.agentTriggerOption,
+  );
+  expect(options[0]).toBe("schedule");
+  expect(options).toContain("source:source-gh");
+  for (const kind of ["slack", "gmail", "linear", "webhook", "mcp"]) {
+    expect(options).toContain(`new:${kind}`);
+  }
+  // Nothing is picked yet; saving says so.
+  expect(dialog.querySelector("textarea")).toBeNull();
   await act(async () => button(dialog, "Add trigger").click());
   await flush();
   expect(createdTask(client)).toBeUndefined();
-  expect(dialog.textContent).toContain("Choose");
+  expect(dialog.textContent).toContain("Choose what starts it.");
+  // A source asks for its events before saving.
+  await pickTrigger(dialog, "source:source-gh");
+  await flush();
+  expect(dialog.querySelector("textarea")?.placeholder).toBe("Handle this event.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("Create a webhook makes its URL right there, then its events start the agent", async () => {
+  const { client, dialog } = await openAgentTrigger({});
+  await pickTrigger(dialog, "new:webhook");
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-setup='create_webhook']")).not.toBeNull();
+  await act(async () => button(dialog, "Create webhook").click());
+  await flush();
+  expect(client.calls.find((call) => call[0] === "createEventSource")?.[2]).toEqual(
+    expect.objectContaining({ kind: "webhook", adapter: "standard", visibility: "workspace" }),
+  );
+  const shown = [
+    ...dialog.querySelectorAll<HTMLInputElement>("[data-agent-trigger-webhook] input"),
+  ].map((input) => input.value);
+  expect(shown).toEqual([expect.stringContaining("https://hooks.example.com/"), "whsec_test"]);
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+  expect(button(dialog, "Add trigger")).toBeTruthy();
 });
 
 test("a shared trigger the person may not add says so in the dialog", async () => {

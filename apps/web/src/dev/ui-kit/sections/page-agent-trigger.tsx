@@ -1,24 +1,29 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { OpenGeniApiError, type Agent, type AgentTemplate } from "@opengeni/sdk";
+import { OpenGeniProvider } from "@opengeni/react";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { AgentStartsWhen } from "@opengeni/react/app/components/agents/agent-setup-sections";
 import { Button } from "@opengeni/react/ui/button";
+import { ScheduleFormPage } from "../../../components/schedules/schedule-form-page";
 import { KitCanvas, KitSection } from "../kit";
 
 /*
  * DEV only. The production Starts when section of an agent's page and its Add
- * trigger dialog, over an in-memory client: which sources exist and whether a
- * shared automation may be added are fixture choices.
+ * trigger dialog, over an in-memory client: which sources exist, whether
+ * GitHub is connected and whether a shared automation may be added are
+ * fixture choices. "Before" is the full New automation form Add trigger used
+ * to open.
  */
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 
-type State = "connected" | "no-source" | "not-allowed";
+type State = "connected" | "no-source" | "not-allowed" | "before";
 
 const STATES: { value: State; label: string }[] = [
   { value: "connected", label: "GitHub connected" },
-  { value: "no-source", label: "No source yet" },
+  { value: "no-source", label: "GitHub not connected" },
   { value: "not-allowed", label: "Shared not allowed" },
+  { value: "before", label: "Before: full form" },
 ];
 
 const TEMPLATE = {
@@ -80,6 +85,15 @@ const GITHUB_SOURCE = {
   updatedAt: "2026-11-01T09:00:00.000Z",
 };
 
+const LINEAR_SOURCE = {
+  ...GITHUB_SOURCE,
+  id: "44444444-4444-4444-8444-444444444444",
+  kind: "webhook",
+  adapter: "custom",
+  format: { preset: "linear" },
+  name: "Product Linear",
+};
+
 const EVENT_TYPES = ["opened", "ready_for_review", "closed", "synchronize"].map((action) => ({
   type: `pull_request.${action}`,
   description: `A pull request was ${action.replace(/_/gu, " ")}.`,
@@ -104,11 +118,42 @@ const REPOSITORIES = ["platform/api", "platform/web"].map((fullName, index) => (
 
 function fixtureClient(state: State) {
   const tasks: unknown[] = [];
-  return {
+  const client = {
     listScheduledTasks: async () => tasks,
-    listEventSources: async () => (state === "no-source" ? [] : [GITHUB_SOURCE]),
+    listEventSources: async () => (state === "no-source" ? [] : [GITHUB_SOURCE, LINEAR_SOURCE]),
     listReadyEventSources: async () => [],
     listEventSourceTypes: async () => EVENT_TYPES,
+    getAgent: async () => AGENT,
+    getAgentTemplate: async () => TEMPLATE,
+    getAgentLearningSettings: async () => ({
+      settings: {},
+      version: 1,
+      ownerKey: `workspace:${WORKSPACE_ID}`,
+    }),
+    listSessions: async () => [],
+    getSessionTenancyCreateCapabilities: async () => ({
+      activated: true,
+      canCreatePrivate: true,
+      reason: "available",
+      defaultVisibility: "private",
+    }),
+    createEventSource: async (_workspaceId: string, request: Record<string, unknown>) => {
+      const id = crypto.randomUUID();
+      return {
+        source: {
+          ...GITHUB_SOURCE,
+          id,
+          kind: request.kind,
+          adapter: request.adapter ?? null,
+          name: request.name ?? "Webhook",
+          webhookUrl:
+            request.kind === "webhook"
+              ? `https://app.opengeni.ai/v1/hooks/${id.slice(0, 8)}`
+              : null,
+        },
+        ...(request.kind === "webhook" ? { signingSecret: "whsec_5f2c9a1e7b" } : {}),
+      };
+    },
     listAgentTemplates: async () => [TEMPLATE],
     catalogAssetUrl: (path: string) => path,
     createScheduledTask: async (_workspaceId: string, request: Record<string, unknown>) => {
@@ -133,20 +178,50 @@ function fixtureClient(state: State) {
     resumeScheduledTask: async () => tasks[0],
     deleteScheduledTask: async () => ({ deleted: true }),
   };
+  // The full form reads more than the dialog; anything else answers empty.
+  return new Proxy(client as Record<string, unknown>, {
+    get(target, key) {
+      if (typeof key !== "string") return undefined;
+      if (key in target) return target[key];
+      if (key === "then") return undefined;
+      // A list reads as empty whether it answers an array, `{ items }` or `{ rigs }`.
+      return async () => (key.startsWith("list") ? Object.assign([], { items: [], rigs: [] }) : {});
+    },
+  });
 }
 
 function Provider({ state, children }: { state: State; children: ReactNode }) {
   const value = useMemo(
     () => ({
       client: fixtureClient(state),
-      clientConfig: { eventTriggers: { enabled: true } },
+      clientConfig: {
+        eventTriggers: { enabled: true },
+        mcpServers: [],
+        defaultSandboxBackend: "none",
+      },
+      model: "default",
+      reasoningEffort: "medium",
+      managedSelfContext: null,
       githubRepos: REPOSITORIES,
+      githubStatus: { status: state === "no-source" ? "unbound" : "bound" },
       workspaceCapabilityCatalog: [],
-      workspaces: [{ id: WORKSPACE_ID, name: "Platform", kind: "shared" }],
+      accessContext: {
+        subjectId: "kit-person",
+        workspaceGrants: [{ workspaceId: WORKSPACE_ID, permissions: ["schedules:manage"] }],
+        accountGrants: [],
+      },
+      selectedCapabilityToolIds: new Set<string>(),
+      workspaceDefaultToolIds: [],
+      toolMcpServers: [],
+      workspaces: [{ id: WORKSPACE_ID, name: "Platform", kind: "shared", settings: {} }],
     }),
     [state],
   );
-  return <AppContext.Provider value={value as never}>{children}</AppContext.Provider>;
+  return (
+    <OpenGeniProvider client={value.client as never} workspaceId={WORKSPACE_ID}>
+      <AppContext.Provider value={value as never}>{children}</AppContext.Provider>
+    </OpenGeniProvider>
+  );
 }
 
 export default function AgentTriggerSection() {
@@ -171,7 +246,14 @@ export default function AgentTriggerSection() {
       <KitCanvas className="min-h-[640px]">
         <div className="mx-auto max-w-[760px]">
           <Provider key={state} state={state}>
-            <AgentStartsWhen agent={AGENT} workspaceId={WORKSPACE_ID} />
+            {state === "before" ? (
+              <ScheduleFormPage
+                workspaceId={WORKSPACE_ID}
+                mode={{ kind: "create", agentId: AGENT.id }}
+              />
+            ) : (
+              <AgentStartsWhen agent={AGENT} workspaceId={WORKSPACE_ID} />
+            )}
           </Provider>
         </div>
       </KitCanvas>

@@ -5,13 +5,20 @@ import {
   AGENT_TRIGGER_SCHEDULE_MESSAGE,
   AGENT_TRIGGER_SHARED_DENIED,
   agentTriggerCreateRequest,
-  agentTriggerDraft,
-  agentTriggerDraftOfKind,
+  agentTriggerDraftForPick,
+  agentTriggerDraftFromSuggestion,
   agentTriggerIssues,
   agentTriggerMissingSource,
+  agentTriggerOptions,
+  agentTriggerPickKey,
+  agentTriggerSourceStep,
   agentTriggerSaveError,
   agentTriggerWithSources,
 } from "../src/app/components/agents/agent-trigger-model";
+import {
+  eventSourceChoices,
+  type EventSourceChoice,
+} from "../src/components/automations/event-source-model";
 import { createOpenGeniText } from "../src/messages";
 import type { AgentTemplateTrigger, EventSource } from "@opengeni/sdk";
 
@@ -40,7 +47,7 @@ const GITHUB = {
 } as unknown as EventSource;
 
 test("a suggestion starts with its events, conditions and message on the person's source", () => {
-  const draft = agentTriggerDraft(SUGGESTION, { eventTriggers: true, sources: [GITHUB] });
+  const draft = agentTriggerDraftFromSuggestion(SUGGESTION, { sources: [GITHUB] });
   expect(draft.instructions).toBe(SUGGESTION.instructions);
   expect(draft.cadence).toBeNull();
   expect(draft.events.triggers).toEqual([
@@ -48,41 +55,111 @@ test("a suggestion starts with its events, conditions and message on the person'
   ]);
   expect(draft.events.triggers[0]!.conditions).toHaveLength(1);
   expect(agentTriggerMissingSource(draft, [GITHUB])).toBeUndefined();
-  // Without a GitHub source it asks for one.
-  const waiting = agentTriggerDraft(SUGGESTION, { eventTriggers: true, sources: [] });
+  // Without a GitHub source it asks for one, and takes it once sources load.
+  const waiting = agentTriggerDraftFromSuggestion(SUGGESTION, {});
   expect(agentTriggerMissingSource(waiting, [])).toEqual({ kind: "github" });
-});
-
-test("a blank trigger starts on one event, or on the default schedule where events don't run", () => {
-  const event = agentTriggerDraft(undefined, { eventTriggers: true, sources: [GITHUB] });
-  expect(event.cadence).toBeNull();
-  expect(event.events.triggers.map((trigger) => trigger.sourceId)).toEqual(["source-gh"]);
-  const schedule = agentTriggerDraft(undefined, { eventTriggers: false, timeZone: "UTC" });
-  expect(schedule.events.triggers).toEqual([]);
-  expect(schedule.cadence?.rule.frequency).toBe("weekdays");
-  // Switching keeps only what the new kind uses.
-  const switched = agentTriggerDraftOfKind("schedule", event, [GITHUB], "UTC");
-  expect(switched.events.triggers).toEqual([]);
-  expect(switched.cadence).not.toBeNull();
-  expect(agentTriggerDraftOfKind("event", switched, [GITHUB]).cadence).toBeNull();
-  // Opened before sources load, a blank event takes the only source once they do.
-  const early = agentTriggerDraft(undefined, { eventTriggers: true });
-  expect(early.events.triggers[0]!.sourceId).toBe("");
-  const filled = agentTriggerWithSources(early.events, [GITHUB]);
+  const filled = agentTriggerWithSources(waiting.events, [GITHUB]);
   expect(filled.triggers[0]!.sourceId).toBe("source-gh");
   expect(agentTriggerWithSources(filled, [GITHUB])).toBe(filled);
+  // GitHub is added here once the workspace has it connected; else connecting comes first.
+  expect(agentTriggerSourceStep({ kind: "github" }, { githubConnected: true })).toBe("create");
+  expect(agentTriggerSourceStep({ kind: "github" }, { githubConnected: null })).toBe("create");
+  expect(agentTriggerSourceStep({ kind: "github" }, { githubConnected: false })).toBe(
+    "connect_github",
+  );
+  expect(
+    agentTriggerSourceStep({ kind: "webhook", adapter: "standard" }, { githubConnected: true }),
+  ).toBe("add_source");
+});
+
+test("the picker offers a schedule, the person's sources and every kind they can still add", () => {
+  const options = agentTriggerOptions(t, {
+    choices: eventSourceChoices(t),
+    sources: [GITHUB],
+    eventTriggers: true,
+    githubConnected: true,
+  });
+  const keys = options.map((option) => option.key);
+  expect(keys[0]).toBe("schedule");
+  expect(keys[1]).toBe("source:source-gh");
+  // GitHub is offered once, as the person's source; every other kind of the catalog follows.
+  expect(keys).not.toContain("new:github");
+  for (const meta of eventSourceChoices(t)) {
+    if (meta.choice !== "github") expect(keys).toContain(`new:${meta.choice}`);
+  }
+  const setupOf = (key: string) => options.find((option) => option.key === key)?.setup;
+  expect(setupOf("new:slack")).toBe("create");
+  expect(setupOf("new:workspace")).toBe("create");
+  expect(setupOf("new:webhook")).toBe("create_webhook");
+  expect(setupOf("new:linear")).toBe("add_source");
+  expect(setupOf("new:gmail")).toBe("add_source");
+  expect(options.find((option) => option.key === "new:webhook")?.label).toBe("Create a webhook");
+  // Without GitHub connected, picking GitHub starts with connecting it.
+  const unconnected = agentTriggerOptions(t, {
+    choices: eventSourceChoices(t),
+    sources: [],
+    eventTriggers: true,
+    githubConnected: false,
+  });
+  expect(unconnected.find((option) => option.key === "new:github")?.setup).toBe("connect_github");
+  // Where events don't run, only a schedule.
+  expect(
+    agentTriggerOptions(t, {
+      choices: eventSourceChoices(t),
+      sources: [GITHUB],
+      eventTriggers: false,
+      githubConnected: true,
+    }).map((option) => option.key),
+  ).toEqual(["schedule"]);
+});
+
+test("a newly registered kind of source shows up in the picker without changes here", () => {
+  const jira = "jira" as EventSourceChoice;
+  const options = agentTriggerOptions(t, {
+    choices: [
+      ...eventSourceChoices(t),
+      {
+        choice: jira,
+        name: "Jira",
+        description: "Issues from Jira.",
+        providerDomain: "atlassian.com",
+        setup: "automatic",
+        audience: "workspace",
+      },
+    ],
+    // And a source of a kind this client doesn't know yet, from a newer server.
+    sources: [
+      { ...GITHUB, id: "source-new", kind: "newkind", name: "New kind" } as unknown as EventSource,
+    ],
+    eventTriggers: true,
+    githubConnected: true,
+  });
+  expect(options.find((option) => option.key === "new:jira")).toEqual(
+    expect.objectContaining({ label: "Jira", setup: "add_source" }),
+  );
+  expect(options.find((option) => option.key === "source:source-new")?.label).toBe("New kind");
+});
+
+test("a pick starts the default schedule or one trigger on its source, keeping the note", () => {
+  const schedule = agentTriggerDraftForPick({ kind: "schedule" }, { note: "Hi", timeZone: "UTC" });
+  expect(schedule.events.triggers).toEqual([]);
+  expect(schedule.cadence?.rule.frequency).toBe("weekdays");
+  expect(schedule.instructions).toBe("Hi");
+  const event = agentTriggerDraftForPick({ kind: "source", sourceId: "source-gh" });
+  expect(event.cadence).toBeNull();
+  expect(event.events.triggers.map((trigger) => trigger.sourceId)).toEqual(["source-gh"]);
+  expect(agentTriggerPickKey({ kind: "new", choice: "webhook" })).toBe("new:webhook");
 });
 
 test("it needs a schedule or an event, never a message", () => {
-  const blank = agentTriggerDraft(undefined, { eventTriggers: true, sources: [] });
-  const none = { ...blank, events: { ...blank.events, triggers: [] } };
+  const none = agentTriggerDraftForPick({ kind: "new", choice: "github" });
   expect(agentTriggerIssues(t, none, [], NOW).when).toBe("Choose when it starts.");
-  const schedule = agentTriggerDraft(undefined, { eventTriggers: false, timeZone: "UTC" });
+  const schedule = agentTriggerDraftForPick({ kind: "schedule" }, { timeZone: "UTC" });
   expect(agentTriggerIssues(t, schedule, [], NOW)).toEqual({});
 });
 
 test("it saves as a new chat with the agent each run, shared like the agent", () => {
-  const draft = agentTriggerDraft(SUGGESTION, { eventTriggers: true, sources: [GITHUB] });
+  const draft = agentTriggerDraftFromSuggestion(SUGGESTION, { sources: [GITHUB] });
   const repository = {
     kind: "repository" as const,
     uri: "https://github.com/acme/app.git",
@@ -117,7 +194,7 @@ test("it saves as a new chat with the agent each run, shared like the agent", ()
   expect(organization.visibility).toBe("workspace");
   expect(organization.agentConfig.prompt).toBe(AGENT_TRIGGER_EVENT_MESSAGE);
   expect(organization.name).toStartWith("Bug fixer: ");
-  const schedule = agentTriggerDraft(undefined, { eventTriggers: false, timeZone: "UTC" });
+  const schedule = agentTriggerDraftForPick({ kind: "schedule" }, { timeZone: "UTC" });
   const personal = agentTriggerCreateRequest(t, {
     agent: { ...AGENT, visibility: "private" },
     draft: schedule,

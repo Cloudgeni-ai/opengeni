@@ -519,19 +519,34 @@ whole.
   Event runs keep the automation limits: the chain limit, the storm guard
   (`maxRunsPerHour`) and usage limits. The page lists the automations with
   an on/off switch (pause/resume) and remove. **Add trigger** opens a small
-  dialog on the page (`agent-trigger-dialog.tsx`, pure parts in
-  `agent-trigger-model.ts`): **On an event** (source, event types, optional
-  conditions) or **On a schedule**, an optional repository for a GitHub
-  event, and an optional Message (default "Handle the event that started
-  this run." or "Do your scheduled work."). It saves through
-  `createScheduledTask` as a new chat per run with `agentConfig.agentId`,
-  named `<agent>: <when>`, and with an explicit `visibility`: `private` for
-  an Only me agent, otherwise `workspace` (never the organization's default
+  dialog on the page (`agent-trigger-dialog.tsx`, the picker in
+  `agent-trigger-picker.tsx`, pure parts in `agent-trigger-model.ts`). Its
+  picker is built from the source catalog the Add a source page uses
+  (`eventSourceChoices`), so it names no kind itself: **Schedule**, each of
+  the person's event sources (and ready ones they can use without adding,
+  such as This workspace), then every kind they can still add, including
+  **Create a webhook**; each shows its app's logo, or its glyph or initial.
+  A kind added to the catalog, or a source of a kind the client doesn't
+  know, shows up with no change here. Picking a source shows its events and
+  optional conditions; picking a kind not added yet shows its setup step in
+  place: Opengeni adds GitHub, Slack or This workspace right there, a
+  webhook is created right there and shows its URL and signing secret,
+  GitHub not yet connected to the workspace makes **Connect GitHub** the
+  one action (Connected tools), and any other kind (a connection to pick or
+  a secret to paste) makes **Add <source>** the one action (the Add a
+  source page). A GitHub event can add one repository. The **Note** is
+  optional: each run gets the event and the agent's Instructions do the
+  rest (an empty note sends "Handle this event." or "Do your scheduled
+  work."). The dialog says each run starts a new chat with the agent; the
+  server refuses any other run mode for an agent's automation. It saves
+  through `createScheduledTask` with `agentConfig.agentId`, named
+  `<agent>: <when>`, and with an explicit `visibility`: `private` for an
+  Only me agent, otherwise `workspace` (never the organization's default
   for new schedules). The server's rules for who may create a shared
-  automation still apply; a refused one says so in the dialog. With no
-  source of the kind needed, the dialog's one action is **Add <source>**
-  (the Add a source page). **Open full form** opens the automation form
-  with `?agent=<id>` for every other setting.
+  automation still apply; a refused one says so in the dialog. **Open full
+  form** opens the automation form with `?agent=<id>&returnTo=agent` for
+  every other setting; its back link, Cancel and Save return to the
+  agent's page.
 - **Can use**: rules `{connector, tool, permission}`. `connector` is a
   connection's server id, a provider domain such as `github.com` (any
   connection to that provider; what ready-made agents use), or `*`; `tool` is
@@ -592,9 +607,10 @@ involve a person only when a decision needs one), suggested Can use rules
 Opengeni's own GitHub tools) and suggested triggers. Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
 opens the same dialog filled in from the suggestion (its events,
-conditions, message and name) so the person only picks the source and,
-for GitHub, a repository, then saves. Its **Open full form** opens the
-automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`). Ready-made agents
+conditions, note and name) so the person only picks the source and, for
+GitHub, a repository, then saves; a GitHub, Slack or This workspace source
+it lacks is added on save. Its **Open full form** opens the automation form
+at the suggestion (`?agent=<id>&agentTrigger=<n>&returnTo=agent`). Ready-made agents
 name no internal Skills.
 
 ### Delegation by name

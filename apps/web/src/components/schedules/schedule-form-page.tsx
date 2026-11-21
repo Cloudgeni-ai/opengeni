@@ -122,6 +122,8 @@ export type ScheduleFormMode =
       agentId?: string;
       /** Start from this one of the agent's suggested triggers. */
       agentTrigger?: number;
+      /** Cancel and Save go back to the agent's page (its "Starts when"). */
+      returnTo?: "agent";
     }
   | { kind: "edit"; scheduleId: string };
 
@@ -166,6 +168,14 @@ type SavedTemplate =
   | { status: "loading" }
   | { status: "error"; error: Error }
   | { status: "ready"; template: AutomationTemplate | undefined };
+
+/**
+ * The agent whose page Cancel and Save go back to: a new automation opened
+ * from an agent's page ("Open full form" on Add trigger) returns there.
+ */
+export function scheduleFormReturnAgent(mode: ScheduleFormMode): string | undefined {
+  return mode.kind === "create" && mode.returnTo === "agent" ? mode.agentId : undefined;
+}
 
 export function ScheduleFormPage({
   workspaceId,
@@ -280,10 +290,16 @@ export function ScheduleFormPage({
     };
   }, [attempt, client, sourceId, workspaceId]);
 
+  const returnAgentId = scheduleFormReturnAgent(mode);
   const back =
     mode.kind === "edit"
       ? { label: "Automation", onClick: () => go.detail(mode.scheduleId) }
-      : { label: "Automations", onClick: go.list };
+      : returnAgentId
+        ? {
+            label: agentBinding.status === "ready" ? agentBinding.agent.name : "Agent",
+            onClick: () => go.agent(returnAgentId),
+          }
+        : { label: "Automations", onClick: go.list };
 
   if (agentBinding.status === "loading" || agentBinding.status === "error") {
     return (
@@ -412,6 +428,7 @@ export function ScheduleFormPage({
       task={task}
       template={template}
       agent={agentBinding.status === "ready" ? agentBinding.agent : undefined}
+      onCreated={returnAgentId ? () => go.agent(returnAgentId, { replace: true }) : undefined}
       back={
         mode.kind === "edit" && task
           ? { label: task.name, onClick: back.onClick }
@@ -495,6 +512,7 @@ function AgentScheduleForm({
   template,
   agent,
   back,
+  onCreated,
 }: {
   workspaceId: string;
   mode: ScheduleFormMode;
@@ -505,6 +523,8 @@ function AgentScheduleForm({
   /** A new automation whose runs are chats with this agent. */
   agent?: Agent | undefined;
   back: { label: string; onClick: () => void };
+  /** Where a created automation goes instead of its own page. */
+  onCreated?: ((task: ScheduledTask) => void) | undefined;
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -1281,7 +1301,8 @@ function AgentScheduleForm({
             }
           : undefined,
     });
-    go.detail(created.id, { replace: true });
+    if (onCreated) onCreated(created);
+    else go.detail(created.id, { replace: true });
     return true;
   };
 

@@ -672,7 +672,8 @@ trigger** and **Set up** open a small dialog that saves such an automation
 directly, shared like the agent (see `docs/agents.md`). The automation form
 takes `?agent=<id>` (and `?agentTrigger=<n>` for a ready-made agent's
 suggestion) and binds the new automation to the agent; the dialog's **Open
-full form** opens it. A ready-made agent's suggested triggers are never created on their
+full form** opens it with `?returnTo=agent`, so Cancel and Save return to
+the agent's page. A ready-made agent's suggested triggers are never created on their
 own: each waits until the person picks its source and saves.
 
 ## Templates

@@ -221,6 +221,25 @@ export function fakeAgentsClient(
       calls.push(["listEventSourceTypes", workspaceId, sourceId]);
       return [];
     },
+    async createEventSource(workspaceId: string, request: Record<string, unknown>) {
+      calls.push(["createEventSource", workspaceId, request]);
+      const id = uuid();
+      const kind = String(request.kind);
+      return {
+        source: {
+          id,
+          workspaceId,
+          kind,
+          adapter: (request.adapter as string | undefined) ?? null,
+          format: null,
+          name: (request.name as string | undefined) ?? kind,
+          status: "active",
+          mcp: null,
+          webhookUrl: kind === "webhook" ? `https://hooks.example.com/${id}` : null,
+        },
+        ...(kind === "webhook" ? { signingSecret: "whsec_test" } : {}),
+      };
+    },
     async createScheduledTask(workspaceId: string, request: Record<string, unknown>) {
       calls.push(["createScheduledTask", workspaceId, request]);
       if (options.createTaskError) throw options.createTaskError;

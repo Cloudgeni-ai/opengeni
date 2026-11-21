@@ -517,3 +517,13 @@ test("a new schedule starts with the organization's default audience; an existin
   expect(audienceOption(edited.container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
   await act(async () => edited.root.unmount());
 });
+
+test("a new automation opened from an agent's page goes back there on Cancel and Save", async () => {
+  const { scheduleFormReturnAgent } = await import("./schedule-form-page");
+  expect(
+    scheduleFormReturnAgent({ kind: "create", agentId: "agent-example", returnTo: "agent" }),
+  ).toBe("agent-example");
+  expect(scheduleFormReturnAgent({ kind: "create", agentId: "agent-example" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "create", returnTo: "agent" })).toBeUndefined();
+  expect(scheduleFormReturnAgent({ kind: "edit", scheduleId: "task-example" })).toBeUndefined();
+});

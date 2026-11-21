@@ -89,7 +89,11 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
     void navigate({
       to: "/workspaces/$workspaceId/automations/new",
       params: { workspaceId },
-      search: { agent: agent.id, ...(agentTrigger !== undefined ? { agentTrigger } : {}) },
+      search: {
+        agent: agent.id,
+        ...(agentTrigger !== undefined ? { agentTrigger } : {}),
+        returnTo: "agent",
+      },
     });
   const addSource = (kind?: string) =>
     void navigate({
