@@ -86,6 +86,10 @@ app); otherwise it is refused with 403 and the reason is kept on the
 webhook's last delivery, so managers see it. A person (or their agent) must
 save a webhook; a manager who saves or rotates it takes it over.
 
+A record a webhook writes is the webhook's from then on: a data sync with
+`removeMissing` never removes it, even when the sync wrote the same key
+before ([app-sync.md](app-sync.md#removing-records-the-tool-no-longer-returns)).
+
 ### Management
 
 Managers of the app (`artifacts:publish`), never from inside the app's frame:

@@ -13,6 +13,7 @@ import {
   type SiteDbMeter,
   type SiteDbMigrateResponse,
   type SiteDbRunResponse,
+  type SiteSqlRow,
   type SiteDbSchemaEntry,
   type SiteSqlDescribeResponse,
   type SiteSqlErrorCode,
@@ -1356,7 +1357,16 @@ export async function deleteSiteSqlRowsForSync(
   deps: SiteSqlDeps,
   access: SiteDataAccess,
   siteId: string,
-  request: { table: string; keyColumn: string; keys: readonly string[] },
+  request: {
+    table: string;
+    keyColumn: string;
+    keys: readonly string[];
+    /**
+     * Delete only rows this returns true for, given the row's key column and
+     * `columns` as read just before the delete.
+     */
+    match?: { columns: readonly string[]; owned: (row: SiteSqlRow) => boolean };
+  },
 ): Promise<number> {
   return guarded(async () => {
     if (request.keys.length === 0) return 0;
@@ -1370,7 +1380,36 @@ export async function deleteSiteSqlRowsForSync(
     let deleted = 0;
     try {
       for (let start = 0; start < request.keys.length; start += SYNC_DELETE_KEYS) {
-        const keys = request.keys.slice(start, start + SYNC_DELETE_KEYS);
+        let keys = request.keys.slice(start, start + SYNC_DELETE_KEYS);
+        if (request.match) {
+          const key = quoteSiteSqlIdentifier(request.keyColumn);
+          const read = await callSiteDb<SiteDbRunResponse>(
+            gateway,
+            siteId,
+            "run",
+            {
+              sql: `SELECT ${[request.keyColumn, ...request.match.columns]
+                .map(quoteSiteSqlIdentifier)
+                .join(", ")} FROM ${quoteSiteSqlIdentifier(request.table)} WHERE ${key} IN (${keys
+                .map((_, index) => `:k${index}`)
+                .join(", ")})`,
+              profile: "agent",
+              params: Object.fromEntries(keys.map((value, index) => [`k${index}`, value])),
+              expect: "read",
+              maxRows: keys.length,
+              maxResponseBytes: limits.maxResponseBytes,
+              maxDatabaseBytes: limits.storageBytesPerSite,
+            },
+            siteSqlTransport.fetch,
+          );
+          addUsage(usage, read);
+          const owned = new Set(
+            read.rows.filter(request.match.owned).map((row) => String(row[request.keyColumn])),
+          );
+          // A row cut off from the answer (too large) is kept.
+          keys = keys.filter((value) => owned.has(value));
+          if (keys.length === 0) continue;
+        }
         const params = Object.fromEntries(keys.map((key, index) => [`k${index}`, key]));
         const response = await callSiteDb<SiteDbRunResponse>(
           gateway,
@@ -1390,7 +1429,8 @@ export async function deleteSiteSqlRowsForSync(
           siteSqlTransport.fetch,
         );
         addUsage(usage, response);
-        deleted += response.rowsWritten;
+        // Matched rows were just read, so each key is one row (row writes count indexes too).
+        deleted += request.match ? keys.length : response.rowsWritten;
       }
     } finally {
       await meter(deps, resolved, usage, { countTowardCaps: false });

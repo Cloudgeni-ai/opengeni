@@ -964,17 +964,29 @@ test("each person's run uses their own account, and a new owner's shared sync us
     schedule: { type: "manual" },
   });
   const personalId = String(personal.json.id);
-  // Alice has two accounts: she picks one at opt-in, and it is kept.
+  // Alice has two accounts. Opting in without choosing works as before (her
+  // first own account) and lists them; she can pick one, and it is kept.
   const unchosen = await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`);
-  expect(unchosen.status).toBe(422);
-  expect(unchosen.json.error.message).toContain("several");
-  expect(
-    unchosen.json.error.details.accounts.map((choice: { id: string }) => choice.id).sort(),
-  ).toEqual(["account-alice", "account-alice-2"]);
+  expect(unchosen.status, JSON.stringify(unchosen.json)).toBe(200);
+  expect(unchosen.json).toMatchObject({ syncId: personalId, optedIn: true, account: null });
+  expect(unchosen.json.accounts.map((choice: { id: string }) => choice.id).sort()).toEqual([
+    "account-alice",
+    "account-alice-2",
+  ]);
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, personalId, callTool);
+  expect(identities.at(-1)).toEqual({ subjectId: f.alice.subjectId, serverId: "account-alice-2" });
   const chosen = await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`, {
+    account: "account-alice",
+  });
+  expect(chosen.json).toEqual({ syncId: personalId, optedIn: true, account: "account-alice" });
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, personalId, callTool);
+  expect(identities.at(-1)).toEqual({ subjectId: f.alice.subjectId, serverId: "account-alice" });
+  // Opting in again without an account keeps her choice, and back to the other.
+  const again = await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`);
+  expect(again.json).toMatchObject({ optedIn: true, account: "account-alice" });
+  await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`, {
     account: "account-alice-2",
   });
-  expect(chosen.json).toEqual({ syncId: personalId, optedIn: true, account: "account-alice-2" });
   const foreign = await f.request(f.bob, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`, {
     account: "account-alice",
   });
@@ -1360,6 +1372,17 @@ test("removeMissing deletes only what this sync wrote, and only after a complete
   const unkeyed = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
   expect(unkeyed.lastRun.summary).toMatchObject({ removed: 0, skipped: 1 });
   expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "c", "manual"]);
+
+  // A record someone changed after the sync wrote it (a person, the app or a
+  // webhook) is theirs now: it stays when the tool stops returning it.
+  const edited = await f.request(f.owner, "POST", `/${f.siteId}/data/write`, {
+    operations: [{ op: "put", collection: "orders", key: "c", data: { id: "c", note: "mine" } }],
+  });
+  expect(edited.status, JSON.stringify(edited.json)).toBe(200);
+  items = [{ id: "x" }];
+  const kept = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(kept.lastRun.summary).toMatchObject({ removed: 1 });
+  expect(await readKeys(f, f.owner, "orders")).toEqual(["c", "manual", "x"]);
 });
 
 test("removeMissing in a personal sync removes only that person's own records", async () => {
@@ -1477,33 +1500,154 @@ test("a shared sync's owner picks one of several accounts; every run checks it i
     key: "id",
     schedule: { type: "manual" },
   };
-  const unchosen = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, body);
-  expect(unchosen.status).toBe(422);
-  expect(
-    unchosen.json.error.details.accounts.map((choice: { id: string }) => choice.id).sort(),
-  ).toEqual(["account-owner", "account-owner-2"]);
-  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
-    ...body,
-    account: "account-owner-2",
-  });
-  expect(created.status, JSON.stringify(created.json)).toBe(201);
-  expect(created.json.account).toBe("account-owner-2");
-  const syncId = String(created.json.id);
   const servers: string[] = [];
   const fake = fakeTool(() => [{ id: "x" }]);
   const callTool: AppSyncToolCaller = async (input) => {
     servers.push(input.identity.serverId);
     return await fake.callTool(input);
   };
+  // Without a choice it saves as before: the owner's first own account, and
+  // the stored action keeps the previous shape (no ownerAccount).
+  const unchosen = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, body);
+  expect(unchosen.status, JSON.stringify(unchosen.json)).toBe(201);
+  expect(unchosen.json.account).toBeNull();
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, String(unchosen.json.id), callTool);
+  expect(servers).toEqual(["account-owner"]);
+  expect(await storedActionKeys(f, String(unchosen.json.id))).toEqual(PREVIOUS_ACTION_KEYS);
+
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    ...body,
+    name: "Orders 2",
+    account: "account-owner-2",
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  expect(created.json.account).toBe("account-owner-2");
+  const syncId = String(created.json.id);
   await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, callTool);
-  expect(servers).toEqual(["account-owner-2"]);
+  expect(servers).toEqual(["account-owner", "account-owner-2"]);
+  // The owner's later edits, even of the tool, keep their choice while it is theirs.
+  const edited = await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    tool: { serverId: "orders", toolName: "list_orders" },
+    schedule: { type: "manual" },
+  });
+  expect(edited.status, JSON.stringify(edited.json)).toBe(200);
+  expect(edited.json.account).toBe("account-owner-2");
+  servers.length = 0;
 
   // The chosen account is disconnected: the run fails readably, on no other account.
   inventories(f, { [f.owner.subjectId]: [{ serverId: "account-owner" }] });
   const gone = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, callTool);
   expect(gone.lastRun.status).toBe("failed");
   expect(gone.lastRun.error).toMatch(/account/i);
-  expect(servers).toEqual(["account-owner-2"]);
+  expect(servers).toEqual([]);
+});
+
+/** The fields of a stored sync action before round two (b38f3336). */
+const PREVIOUS_ACTION_KEYS = [
+  "arguments",
+  "collection",
+  "connectorTool",
+  "declaredTools",
+  "fields",
+  "key",
+  "kind",
+  "mode",
+  "ownerSubjectId",
+  "recordsPath",
+  "siteId",
+  "tool",
+];
+
+async function storedActionKeys(f: Fixture, syncId: string): Promise<string[]> {
+  const task = await getScheduledTask(f.deps.db, f.workspace.id, syncId);
+  return Object.keys((task?.action ?? {}) as Record<string, unknown>).sort();
+}
+
+test("with a workspace shared key and an own account, a shared sync runs on the own one", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.owner.subjectId]: [
+      { serverId: "account-workspace", shared: true },
+      { serverId: "account-owner" },
+    ],
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const created = await f.request(f.owner, "POST", `/${f.siteId}/syncs`, {
+    name: "Orders",
+    collection: "orders",
+    tool: { serverId: "orders", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "manual" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  expect(created.json.account).toBeNull();
+  expect(await storedActionKeys(f, String(created.json.id))).toEqual(PREVIOUS_ACTION_KEYS);
+  const served: string[] = [];
+  const fake = fakeTool(() => [{ id: "1" }]);
+  const callTool: AppSyncToolCaller = async (input) => {
+    served.push(input.identity.serverId);
+    return await fake.callTool(input);
+  };
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, String(created.json.id), callTool);
+  expect(served).toEqual(["account-owner"]);
+  // The shared key is a choice too.
+  const onShared = await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${created.json.id}`, {
+    account: "account-workspace",
+  });
+  expect(onShared.status, JSON.stringify(onShared.json)).toBe(200);
+  await runAppSyncNow(f.deps, f.owner.grant, f.siteId, String(created.json.id), callTool);
+  expect(served).toEqual(["account-owner", "account-workspace"]);
+});
+
+test("install and upgrade work when the installer has several accounts", async () => {
+  const f = await fixture();
+  inventories(f, {
+    [f.owner.subjectId]: [{ serverId: "account-owner" }, { serverId: "account-owner-2" }],
+  });
+  await f.request(f.owner, "PUT", `/${f.siteId}/data/collections/orders`, {
+    accessMode: "shared_read",
+  });
+  const definition = {
+    name: "Orders",
+    collection: "orders",
+    tool: { serverId: "orders", toolName: "list_orders" },
+    key: "id",
+    schedule: { type: "manual" as const },
+  };
+  const input = {
+    deps: f.deps,
+    grant: f.owner.grant,
+    appId: f.siteId,
+    syncs: [definition] as never,
+  };
+  const installed = await APP_PACKAGE_SYNC_HOOKS.createPaused({ ...input, installKey: "i" });
+  expect(installed).toEqual({ created: ["Orders"], notCreated: [] });
+  const listed = (await f.request(f.owner, "GET", `/${f.siteId}/syncs`)).json.syncs as Array<{
+    id: string;
+    status: string;
+  }>;
+  expect(listed).toHaveLength(1);
+  expect(listed[0]!.status).toBe("paused");
+  const syncId = listed[0]!.id;
+  // The owner picks an account; an upgrade that changes the tool keeps it.
+  await f.request(f.owner, "PATCH", `/${f.siteId}/syncs/${syncId}`, {
+    account: "account-owner-2",
+  });
+  const upgraded = await APP_PACKAGE_SYNC_HOOKS.applyUpgrade!({
+    ...input,
+    syncs: [{ ...definition, tool: { serverId: "orders", toolName: "list_orders_v2" } }] as never,
+    upgradeKey: "k",
+  });
+  expect(upgraded).toEqual({ upgraded: ["Orders"], notUpgraded: [] });
+  const after = (await f.request(f.owner, "GET", `/${f.siteId}/syncs`)).json.syncs.find(
+    (sync: { id: string }) => sync.id === syncId,
+  );
+  expect(after).toMatchObject({
+    account: "account-owner-2",
+    tool: { serverId: "account-owner-2", toolName: "list_orders_v2" },
+  });
 });
 
 test("the opt-in review names the tool, accounts and collection, and a framed opt-in is refused", async () => {

@@ -85,16 +85,21 @@ in the automation's run history with its status, error and a `syncSummary`
   a workspace-shared account, so an owner without an account of their own uses
   it, and the key is read from the vault only for each call. Personal syncs
   still need each person's own account.
-- **Choosing the account.** A person with several accounts of the connector
-  picks one: the owner when saving a shared sync (`account`, stored as
-  `ownerAccount` in the action), each person when opting in to a personal one
-  (`account`, stored on their subscription as `account_server_id`). Without a
-  choice the save or opt-in is refused with the choices in
-  `error.details.accounts`; with one account it is chosen for them. The value
-  is the account's route server id, never part of an exported definition.
-  Every run checks the chosen account is still the person's and fails
-  readably ("isn't connected anymore") instead of falling back to another.
-  Syncs saved before the choice existed keep the first own account.
+- **Choosing the account.** A person may pick which of their accounts of the
+  connector a sync uses: the owner when saving a shared sync (`account`,
+  stored as `ownerAccount` in the action), each person when opting in to a
+  personal one (`account`, stored on their subscription as
+  `account_server_id`). Choosing is optional. Without a choice a sync works
+  as before: a shared sync runs on the route it was saved with, else the
+  owner's first own account (own before workspace-shared); a personal run
+  uses the person's first own account. Opting in without a choice keeps an
+  earlier choice while it is still theirs and lists the accounts in
+  `accounts` when there are several; the opt-in review lists them too. The
+  same owner's later saves, package upgrades included, keep their choice. The
+  value is the account's route server id, never part of an exported
+  definition. Every run checks a chosen account is still the person's and
+  fails readably ("isn't connected anymore") instead of falling back to
+  another.
 
 ### Reading records
 
@@ -127,8 +132,13 @@ With `removeMissing: true`, the sync records the keys it writes in
 `app_sync_keys` (per person for a personal sync). After a **complete** run
 (every page read, nothing truncated, no failure) it deletes the records whose
 keys that run didn't see, then forgets them; `summary.removed` counts them.
-Only keys this sync wrote are removed (never records people or the app wrote,
-and for a personal sync only that person's own). A truncated or failed run, a
+Only records this sync wrote and is still the last writer of are removed
+(for a personal sync only that person's own). A record a person, the app or
+an [app webhook](app-webhooks.md#writes-and-change-events) changed after the
+sync wrote it is kept, and each delete is fenced on the version read, so a
+change in between keeps it too. A table row names no writer, so the ledger
+stores a fingerprint of the mapped values the sync wrote, and a row is
+removed only while those columns still hold them. A truncated or failed run, a
 run that skipped any item (no key), and a run that saw no records at all remove
 nothing, so an error body or a renamed key field never empties the target.
 Changing the target, key or mode clears the ledger, and so does opting out
@@ -149,12 +159,11 @@ go through `apps/api/src/site-sql/service.ts` (`upsertSiteSqlRowsForSync`,
 and `removeMissing` work the same. A sync fills either a `collection` or a
 `target`; personal syncs need a collection. Saving a table sync where Site
 SQL isn't available or not turned on for the app is refused readably. Views
-show the table name as `collection` and set `table`. The stored action keeps
-the table name in `collection` too (so the scheduled-task API's `collection`
-stays a string), which is why a sync's table name must start with a letter and
-be at most 64 characters. Older replicas parse the action strictly, so during a
-rolling deploy they fail a sync that has the new fields instead of misreading
-it.
+show the table name as `collection` and set `table`. The stored action and
+exported definitions keep the table name in `collection` too (so
+`collection` stays a string everywhere), which is why a sync's table name
+must start with a letter and be at most 64 characters. Saving may leave
+`collection` out with a `target`.
 
 ### Approvals, access and limits
 
@@ -253,10 +262,18 @@ started by an automation keeps counting toward the chain limit.
 Migration `1522_app_sync_paging_and_leases.sql` (rolling):
 `app_sync_queue.lease_token`, `app_sync_subscriptions.account_server_id` and
 the FORCE RLS table `app_sync_keys` (the keys each sync wrote, for
-`removeMissing`; ids and keys only, no record data). During a rolling deploy
-an older API replica reads a sync that uses the new fields as unreadable and
-fails that one run; its claims leave `lease_token` unchanged, so the new
-release fences on the attempt count as well.
+`removeMissing`; ids, keys and a table sync's value fingerprints, no record
+data). Its claims leave `lease_token` unchanged, so the new release fences on
+the attempt count as well.
+
+Rollback and rolling deploys: the previous release parses a sync's action
+strictly. A sync saved without the new options (`target`, `paging`,
+`maxRecords`, `removeMissing`, an explicit `account`) is stored in exactly
+the previous shape, so the previous release keeps running it. A sync that
+uses one of them is unreadable to the previous release: its runs fail and it
+is left out of that release's lists until the new release is back (nothing
+is deleted). Personal account choices live in a column the previous release
+ignores, so its runs use the person's first own account.
 
 ## Self-hosting
 

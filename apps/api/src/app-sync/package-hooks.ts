@@ -13,6 +13,19 @@ import {
   updateAppSync,
 } from "./service";
 
+/**
+ * A package's sync read as a definition. One that fills a Site SQL table may
+ * leave out `collection`; it is the table's name.
+ */
+function readDefinition(raw: Record<string, unknown>) {
+  const target = raw.target as { table?: unknown } | null | undefined;
+  return AppSyncDefinition.safeParse(
+    raw.collection === undefined && typeof target?.table === "string"
+      ? { ...raw, collection: target.table }
+      : raw,
+  );
+}
+
 function message(error: unknown): string {
   return error instanceof Error && error.message ? error.message.slice(0, 500) : "Unknown error";
 }
@@ -31,7 +44,7 @@ function canManage(grant: AccessGrant): boolean {
  */
 function settingsOf(raw: AppPackageSync): Record<string, unknown> | null {
   const { events: _events, ...withoutEvents } = raw;
-  const parsed = AppSyncDefinition.safeParse(withoutEvents);
+  const parsed = readDefinition(withoutEvents);
   if (!parsed.success) return null;
   const {
     name: _name,
@@ -182,7 +195,7 @@ export const APP_PACKAGE_SYNC_HOOKS: AppSyncHooks = {
     for (const [index, raw] of syncs.entries()) {
       const name = syncName(raw, index);
       const { events: _events, ...withoutEvents } = raw;
-      const parsed = AppSyncDefinition.safeParse(withoutEvents);
+      const parsed = readDefinition(withoutEvents);
       if (!parsed.success) {
         notCreated.push({ name, reason: "This sync isn't in a format this deployment knows" });
         continue;
@@ -216,7 +229,7 @@ export const APP_PACKAGE_SYNC_HOOKS: AppSyncHooks = {
     if (!canManage(grant)) return { upgraded, notUpgraded };
     for (const [name, raw] of plan.additions) {
       const { events: _events, ...withoutEvents } = raw;
-      const parsed = AppSyncDefinition.safeParse(withoutEvents);
+      const parsed = readDefinition(withoutEvents);
       if (!parsed.success) continue;
       try {
         await createAppSyncFromDefinition(deps, grant, appId, parsed.data);

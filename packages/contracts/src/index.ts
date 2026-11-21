@@ -14926,10 +14926,13 @@ export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
 /** Create a sync. */
 export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
   AppSyncDefinition.extend({
+    /** Optional with a Site SQL `target`: it defaults to the table's name. */
+    collection: AppSyncSettings.shape.collection.optional(),
     status: ScheduledTaskStatus.default("active"),
     /**
-     * Shared syncs: the owner's account to run on, when they have several of
-     * the connector (an `id` the error lists). Not part of a definition, so
+     * Shared syncs: the owner's account to run on (an `id` from their
+     * accounts of the connector). Omitted, it runs on the route it was saved
+     * with, else the owner's first own account. Not part of a definition, so
      * packages stay portable.
      */
     account: z.string().min(1).max(256).optional(),

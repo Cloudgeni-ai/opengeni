@@ -9,8 +9,9 @@
 --      when they opted in to a personal sync (their own account route). Every
 --      run checks it is still theirs.
 --   3. app_sync_keys: the keys each sync wrote (per person for a personal
---      sync), so `removeMissing` removes only records this sync wrote. Rows
---      hold ids and keys, never record data.
+--      sync), so `removeMissing` removes only records this sync wrote and
+--      nobody changed since. Rows hold ids, keys and, for a table sync, a
+--      fingerprint of the values written; never record data.
 --
 -- Rolling: the previous release never reads or writes the new columns or the
 -- new table. Its claims leave lease_token unchanged, so the new release
@@ -34,9 +35,14 @@ CREATE TABLE app_sync_keys (
   -- The run pass that last saw the key in the tool's result.
   seen_pass uuid NOT NULL,
   seen_at timestamptz NOT NULL DEFAULT now(),
+  -- A table sync's fingerprint of the values it last wrote for the key, so
+  -- removeMissing keeps a row someone else changed since. Null for a
+  -- collection, whose records name their last writer.
+  written_hash text,
   CONSTRAINT app_sync_keys_pkey PRIMARY KEY (workspace_id, task_id, subject_id, record_key),
   CONSTRAINT app_sync_keys_subject_check CHECK (char_length(subject_id) <= 1024),
   CONSTRAINT app_sync_keys_key_check CHECK (char_length(record_key) BETWEEN 1 AND 256),
+  CONSTRAINT app_sync_keys_hash_check CHECK (written_hash IS NULL OR char_length(written_hash) <= 128),
   CONSTRAINT app_sync_keys_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT app_sync_keys_task_fk FOREIGN KEY (task_id)

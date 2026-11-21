@@ -282,6 +282,29 @@ test("a shared sync upserts rows into an SQL table by key, and removeMissing del
   // The sync shows the table on the app's own status.
   const status = await f.call("GET", `${base}/data/syncs`);
   expect(status.json.syncs[0]).toMatchObject({ collection: "orders", table: "orders" });
+
+  // A row the app changed after the sync wrote it is kept when the tool stops
+  // returning it; a row still as the sync wrote it is removed.
+  items = [
+    { id: "o-1", customer: { name: "Ada L." }, total: 12, tags: ["new"] },
+    { id: "o-3", customer: { name: "Alan" }, total: 7, tags: [] },
+  ];
+  await runAppSyncNow(f.deps, f.grant, f.siteId, syncId, fake.callTool);
+  expect(
+    (
+      await f.call("POST", `${base}/sql/execute`, {
+        sql: "UPDATE orders SET customer = 'Ada Lovelace' WHERE id = 'o-1'",
+      })
+    ).status,
+  ).toBe(200);
+  items = [{ id: "o-4", customer: { name: "Edsger" }, total: 1, tags: [] }];
+  const third = await runAppSyncNow(f.deps, f.grant, f.siteId, syncId, fake.callTool);
+  expect(third.lastRun.summary).toMatchObject({ written: 1, removed: 1 });
+  expect(((await rows()) as Array<{ id: string }>).map((row) => row.id)).toEqual([
+    "manual",
+    "o-1",
+    "o-4",
+  ]);
 });
 
 test("a table sync must be shared and needs a key column the table has", async () => {
@@ -301,7 +324,7 @@ test("a table sync must be shared and needs a key column the table has", async (
   };
   const personal = await f.call("POST", `${base}/syncs`, { ...body, mode: "personal" });
   expect(personal.status).toBe(422);
-  const both = await f.call("POST", `${base}/syncs`, { ...body, collection: "orders" });
+  const both = await f.call("POST", `${base}/syncs`, { ...body, collection: "other" });
   expect(both.status).toBe(422);
   // A key column that isn't unique fails the run readably instead of adding duplicates.
   const wrongKey = await f.call("POST", `${base}/syncs`, {
