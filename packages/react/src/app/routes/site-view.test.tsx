@@ -93,8 +93,9 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({
   useAppApi: () => ({
     request: async (path: string, init?: RequestInit) => {
-      // The App connect card reads its own list; these tests count the rest.
+      // The App connect and sync join cards read their own lists; these tests count the rest.
       if (path.endsWith("/tools/site-setup")) return { version: 1, items: [] };
+      if (path.endsWith("/data/syncs")) return { syncs: [] };
       requests.push({ path, init });
       return { id: id(99) };
     },

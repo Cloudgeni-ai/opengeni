@@ -914,6 +914,8 @@ export function siteDataActorKind(
   if (caller.guest === true || caller.principal.startsWith("guest:")) return "guest";
   if (caller.principal.startsWith("schedule:")) return "schedule";
   const prefix = caller.actor.split(":", 1)[0];
+  // An app webhook (`webhook:<id>`) writes as a service.
+  if (prefix === "webhook") return "service";
   return prefix === "user" || prefix === "agent" || prefix === "service" ? prefix : "other";
 }
 

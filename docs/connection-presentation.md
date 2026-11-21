@@ -40,6 +40,24 @@ dialog. Account choice stays in the call's own confirmation. Apps can read
 and drive it with `site.connections`; see "Connect card" in
 [the published Sites API reference](site-runtime-api.md).
 
+Card states for a declared tool:
+
+- **Ready**: the viewer has an account, or the workspace has a shared one,
+  including a shared service connection (a shared key from a vault). No item.
+- **Connect** / **Reconnect**: one button, as above.
+  A connector that takes an API key keeps this button for each person's own
+  use (their tool calls and personal syncs, which never use a shared key).
+- **Add a shared key for <tool>** (`sharedKey: "add"`): an extra item when the
+  app's shared syncs wait on a connector that takes an API key, and the
+  viewer is a workspace admin who may use secrets. The button opens a dialog
+  to pick a workspace or organization
+  vault and an item (and the header, defaulting to the connector's own or
+  `Authorization: Bearer`), then connects it for the workspace with the
+  item's reference ([Shared service connections](secrets.md#shared-service-connections)).
+- **Ask an admin to connect <tool>** (`sharedKey: "ask_admin"`): the same
+  connector for anyone else, shown as text with nothing to click; on a
+  published app it has no `openUrl`.
+
 ## OAuth details and conversation use
 
 `McpConnectionCard` without a session ID configures only a connection: it never

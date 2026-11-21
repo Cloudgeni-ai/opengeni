@@ -816,6 +816,8 @@ export function vaultRefreshScopeKey(context: VaultDbContext): string {
       return `${principal.accountId}|${principal.workspaceId}|site|${principal.siteId}|${principal.siteVersion}|${principal.subjectId}`;
     case "human":
       return `${principal.accountId}|${principal.workspaceId}|human|${principal.subjectId}|${principal.viaApiKey ? "key" : principal.verifiedHuman ? "verified" : "unverified"}`;
+    case "service_connection":
+      return `${principal.accountId}|${principal.workspaceId}|service_connection|${principal.connectionId ?? ""}`;
   }
 }
 

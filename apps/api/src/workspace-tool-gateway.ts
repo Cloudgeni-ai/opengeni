@@ -2,6 +2,7 @@ import {
   isVerifiedDelegatedHumanAuthorization,
   knowledgeContextForGateway,
   outsideAgentReach,
+  serviceConnectionCredentialReferences,
 } from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -958,7 +959,21 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ? callerSettings
       : gatewaySettings;
   const deps = { ...routeDeps, catalogSourceSettings, settings: firstPartySettings };
-  const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
+  // A shared service connection's vault references resolve with the
+  // connection's own reach, whoever calls (a person, an app, a sync).
+  const nativeResolveConnection = buildConnectionTokenResolver(
+    routeDeps.db,
+    gatewaySettings,
+    undefined,
+    {
+      resolveCredentialReferences: serviceConnectionCredentialReferences({
+        db: routeDeps.db,
+        settings: routeDeps.settings,
+        providers: (workspaceId) =>
+          vaultProviderRegistryFor(routeDeps, { workspaceId, subjectId: null }),
+      }),
+    },
+  );
   // A person's own account may live in the workspace it was added in and be
   // turned on here ("Use it here"). Its credential is read where it lives,
   // exactly as an accepted turn reads it. Only the caller's own routed

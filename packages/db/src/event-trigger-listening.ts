@@ -1,6 +1,18 @@
 import { sql, type SQL } from "drizzle-orm";
 
 /**
+ * Whether the automation `task` may hear the event source `source`: a
+ * workspace source, or a private one of the automation's owner. An App data
+ * sync keeps its owner (the person whose connection a shared sync runs on)
+ * in its action, so its owner's private sources reach it too.
+ */
+export const AUTOMATION_HEARS_SOURCE =
+  sql.raw(`(source.visibility = 'workspace' or source.owner_subject_id is null
+        or source.owner_subject_id = task.owner_subject_id
+        or (task.action ->> 'kind' = 'app_sync'
+          and source.owner_subject_id = task.action ->> 'ownerSubjectId'))`);
+
+/**
  * Whether a runnable automation listens to a source (or, given a stream key,
  * to one stream of it): an active or blocked trigger (a blocked one waits for
  * the source to recover) on an active, undeleted, unfinished automation whose
@@ -25,6 +37,5 @@ export function automationsListenTo(
       and trigger.status in ('active', 'blocked')
       and task.status = 'active' and task.deleted_at is null and settings.completed_at is null
       and source.status = 'active'
-      and (source.visibility = 'workspace' or source.owner_subject_id is null
-        or source.owner_subject_id = task.owner_subject_id))`;
+      and ${AUTOMATION_HEARS_SOURCE})`;
 }

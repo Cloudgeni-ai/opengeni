@@ -144,16 +144,42 @@ so it is cheaper, faster and gives the same result every run. Steps:
 4. `app_sync_run` to try it; fix settings from its error. `app_sync_list`,
    `app_sync_delete` manage them.
 
+When the tool returns one page at a time, add `paging`:
+`{"mode":"cursor","cursorPath":"nextCursor","cursorArgument":"cursor"}` or
+`{"mode":"page","pageArgument":"page"}` (`maxPages` defaults to 10;
+`maxRecords` caps a run). `removeMissing: true` deletes records the sync wrote
+that a complete run no longer returns. A shared sync can fill an app SQL table
+instead of a collection: `target: {table, keyColumn, columns: {column:
+"dot.path"}}`, where `keyColumn` is the table's primary key or unique. If you
+have several accounts of the tool's connector, `account` picks one (else your
+first own account is used). `events` may use workspace event sources or your own.
+
 `mode: "shared"` (default) runs on the saving person's connection and fills
 data everyone shares. `mode: "personal"` fills only each opted-in person's own
-records from their own account; people opt in with `app_sync_opt_in` (only
-when they ask). Changing a personal sync's tool, arguments, collection or mode
+records from their own account. In the page, `await
+site.data.syncs.optIn(id)` asks Opengeni to confirm with the person (tool,
+account, collection) and resolves `{ optedIn }`; `optOut(id)` leaves. The page
+can't opt anyone in by itself, and Opengeni also offers members the personal
+syncs they haven't joined. Agents use `app_sync_opt_in` only when the person
+asks. Changing a personal sync's tool, arguments, collection or mode
 clears the opt-ins, so people opt in again. Tools that ask for approval first can't run unattended, so
 their runs fail with a readable error. In the page, `await site.data.syncs()`
 returns each sync's `lastRun` (`at`, `status`, `error`) and, for personal
 syncs, whether the viewer `optedIn`: show "Updated 5 minutes ago" or the error
 near the data. Use a scheduled agent task only when a run needs judgment
 (summaries, classification, several tools combined).
+
+**Webhooks: data pushed in by another service.** When a service can call a
+URL on events (payments, forms, alerts), save a webhook instead of polling:
+`app_webhook_save` with `siteId`, `name`, a shared `collection` (not
+`per_viewer`), and optionally `recordsPath`, `key` (put by key; without one,
+each delivery inserts) and `fields`. It returns the `url` and a `secret`
+shown once: give both to the user for the sending service (`Authorization:
+Bearer <secret>`, or the `X-Opengeni-Signature` HMAC). `rotateSecret: true`
+replaces it; `status: "paused"` stops deliveries. Pages see the records
+through `onChange` like any other write. It writes on the saving person's
+authority: deliveries are refused once they can no longer manage the app,
+until a manager saves it again.
 
 Agents and scheduled tasks use the tools: `opengeni__app_data_describe`,
 `app_data_query`, `app_data_write` (batches of up to 100), `app_data_import`

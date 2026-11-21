@@ -13,6 +13,7 @@ import {
 import { boundMcpResponseBody, MCP_MAX_RESPONSE_BYTES } from "@opengeni/runtime/mcp-network";
 import { settingsWithMcpCapabilityServers } from "../capabilities";
 import { mcpAccountBindingsFromVisibleConnections } from "../mcp-account-bindings";
+import { serviceConnectionCredentialReferences } from "../vaults/service-connection-credentials";
 import {
   openMcpStreamableHttpSession,
   withMcpStreamableHttpClient,
@@ -164,6 +165,7 @@ export function ownerConnectionHeaders(
       onTransientRefreshFailure: () => {
         transientRefreshFailure = true;
       },
+      resolveCredentialReferences: serviceConnectionCredentialReferences(deps),
     });
     const result = await resolve({
       workspaceId: binding.originWorkspaceId,
