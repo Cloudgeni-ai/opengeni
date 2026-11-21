@@ -60,7 +60,8 @@ Steps, each reported rather than failing the install:
    define the queries. Otherwise every SQL part is listed in `notInstalled`.
 4. Create the syncs, paused, through the syncs hook.
 5. Add the sidebar links for the new app: to the workspace default when the
-   installer is a workspace admin, otherwise to their own sidebar. A link
+   installer is a workspace admin and the app is shared with the workspace,
+   otherwise to their own sidebar. A link
    goes into the group of the same label when there is one, else into a new
    group. Nothing is added when the app already has a link (a replay).
 6. Load demo data (default on when the package has some; `demoData: false`

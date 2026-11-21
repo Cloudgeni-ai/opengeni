@@ -649,7 +649,7 @@ export async function installAppPackage(
 
   // 5. Its links in the sidebar.
   if (pkg.sidebar?.length)
-    installed.sidebar = await installAppSidebar(deps, grant, app.id, pkg.sidebar, notInstalled);
+    installed.sidebar = await installAppSidebar(deps, grant, app, pkg.sidebar, notInstalled);
 
   // 6. Demo data, only into collections and tables that are still empty.
   if (wantsDemo && pkg.demoData) {

@@ -91,7 +91,8 @@ function linksApp(items: readonly ResolvedSidebarItem[], appId: string): boolean
 
 /**
  * Add the package's sidebar links for the new app: to the workspace default
- * when the installer is a workspace admin, otherwise to their own sidebar. A
+ * when the installer is a workspace admin and the app is shared with the
+ * workspace, otherwise to their own sidebar. A
  * link goes into a group with the same name when there is one, else into a
  * new group. Nothing is added when the app already has a link (a replayed
  * install). Returns how many links were added; failures are reported.
@@ -99,12 +100,17 @@ function linksApp(items: readonly ResolvedSidebarItem[], appId: string): boolean
 export async function installAppSidebar(
   deps: ApiRouteDeps,
   grant: AccessGrant,
-  appId: string,
+  app: { id: string; visibility: "private" | "workspace" },
   items: readonly AppPackageSidebarItem[],
   notInstalled: AppPackageProblem[],
 ): Promise<number> {
   if (items.length === 0) return 0;
-  const scope = hasPermission(grant.permissions, "workspace:admin") ? "workspace" : "personal";
+  const appId = app.id;
+  // Only me apps go to the installer's own sidebar: nobody else could open them.
+  const scope =
+    app.visibility === "workspace" && hasPermission(grant.permissions, "workspace:admin")
+      ? "workspace"
+      : "personal";
   try {
     const current = await readSidebarLayoutForGrant(deps, grant);
     if (scope === "personal" && !current.personal.available) {
