@@ -503,6 +503,42 @@ export function githubDeliveryInstallationId(payload: Json): number | null {
   return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+/**
+ * An event read from GitHub's REST API instead of a webhook ("GitHub (your
+ * connection)"), shaped exactly like the webhook delivery GitHub would have
+ * sent, so the same triggers and conditions match it. `payload` holds what
+ * the webhook would carry: `repository`, `pull_request` or `release`, and
+ * `sender`.
+ */
+export function githubReadEvent(input: {
+  event: "pull_request" | "release";
+  action: string;
+  payload: Json;
+  externalId: string;
+  occurredAt: Date;
+}): NormalizedEventInput {
+  const shaped = shape(input.event, input.action, input.payload);
+  return {
+    externalId: input.externalId,
+    type: `${input.event}.${input.action}`,
+    occurredAt: shaped.occurredAt ?? input.occurredAt,
+    subject: shaped.subject,
+    summary: oneLine(shaped.summary, 300),
+    url: shaped.url,
+    actor: { kind: actorKind(input.payload, new Set()), name: login(input.payload.sender) },
+    data: shaped.data,
+  };
+}
+
+/** The event types "GitHub (your connection)" reads: merges and releases. */
+export const GITHUB_READ_EVENT_TYPES = ["pull_request.closed", "release.published"] as const;
+
+/** "GitHub (your connection)"'s event types; see GITHUB_READ_EVENT_TYPES. */
+export function githubReadEventTypeCatalog(): EventTypeDescriptor[] {
+  const wanted = new Set<string>(GITHUB_READ_EVENT_TYPES);
+  return githubEventTypeCatalog([], null).filter((entry) => wanted.has(entry.type));
+}
+
 /** The repository a delivery is about, if any. */
 export function githubDeliveryRepositoryId(payload: Json): number | null {
   const id = readPath(payload, "repository.id");

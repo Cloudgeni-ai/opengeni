@@ -12,7 +12,11 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
-import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
+import {
+  assertGoalResumeAllowed,
+  createGitHubPersonalEventSource,
+  MissingPermissionRefusal,
+} from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { registerSidebarLayoutTools } from "./sidebar-layout-tools";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
@@ -1688,7 +1692,12 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       wake: () => sessionLinkWake,
-      wakeTarget: (link) => sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link),
+      wakeTarget: async (link) =>
+        await sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link, {
+          accountId: grant.accountId,
+          subjectId:
+            (await scheduledTaskViewerForGrant(deps.db, grant, deps.settings)).subjectId ?? "",
+        }),
       json,
     });
   }
@@ -2697,13 +2706,32 @@ export function buildOpenGeniMcpServer(
           return { automationId: pending.id, name: pending.name, once: true, existing: true };
         }
         const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
-        const source = (
+        // The workspace's GitHub App source, or, where only the person's own
+        // GitHub connection can read the repository, their "GitHub (your
+        // connection)" source, added on first use.
+        const kind = wake.via === "personal" ? "github_personal" : "github";
+        let source: { id: string } | undefined = (
           await listSessionLinkEventSources(deps.db, grant.workspaceId, viewer.subjectId)
         ).find(
           (candidate) =>
-            candidate.kind === "github" &&
+            candidate.kind === kind &&
+            (kind === "github" || candidate.ownerSubjectId === viewer.subjectId) &&
             sessionLinkEventSourceAccess(viewer, candidate) !== "none",
         );
+        if (!source && kind === "github_personal" && viewer.subjectId) {
+          source = await createGitHubPersonalEventSource({
+            db: deps.db,
+            settings: deps.settings,
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            createdBySubjectId: grant.subjectId,
+            ownerSubjectId: viewer.subjectId,
+          }).catch((error: unknown) => {
+            throw new ToolArgumentError(
+              `${errorMessage(error)} The link was added without a wake.`,
+            );
+          });
+        }
         if (!source) {
           throw new ToolArgumentError(
             "No GitHub event source is available. A person adds it in Automations (it needs the workspace's GitHub app); the link was added without a wake.",

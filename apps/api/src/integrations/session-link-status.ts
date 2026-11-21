@@ -6,7 +6,7 @@ import {
   type SessionLinkLiveStatus,
   type SessionLinkWithStatus,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { personalGitHubReader, type ApiRouteDeps } from "@opengeni/core";
 import { listGitHubInstallationAccessForWorkspace } from "@opengeni/db";
 import { viewerLinkProvider, type ViewerLinkRead } from "./session-link-viewer-status";
 import {
@@ -291,15 +291,23 @@ async function workspaceGitHubReader(
 
 /**
  * What a merge or release wake for a GitHub link needs: the repository's
- * canonical name (event conditions compare exactly) and, for a pull request,
- * its current state. Null when the workspace's GitHub App cannot read it, so
- * its events would not reach the chat either.
+ * canonical name (event conditions compare exactly), for a pull request its
+ * current state, and which GitHub reads the events: the workspace's GitHub
+ * App (`app`), or, where it can't read the repository and `person` is given,
+ * that person's own GitHub connection (`personal`, a "GitHub (your
+ * connection)" source). Null when neither can read it, so its events would
+ * not reach the chat either.
  */
 export async function sessionLinkGitHubWakeTarget(
-  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  deps: Pick<ApiRouteDeps, "db" | "settings" | "githubPersonalFetch">,
   workspaceId: string,
   link: Pick<SessionLink, "url" | "ref" | "kind">,
-): Promise<{ fullName: string; state: SessionLinkLiveStatus["state"] | null } | null> {
+  person?: { accountId: string; subjectId: string } | null,
+): Promise<{
+  fullName: string;
+  state: SessionLinkLiveStatus["state"] | null;
+  via: "app" | "personal";
+} | null> {
   const ref = classifySessionLinkUrl(link.url)?.github ?? parseGitHubLinkRef(link.ref);
   if (!ref) return null;
   const repository = await resolveWorkspaceGitHubRepository(
@@ -308,17 +316,33 @@ export async function sessionLinkGitHubWakeTarget(
     ref.owner,
     ref.repo,
   ).catch(() => null);
-  if (!repository) return null;
-  let state: SessionLinkLiveStatus["state"] | null = null;
-  if (link.kind === "pull_request") {
-    const read = await workspaceGitHubReader(deps, workspaceId, ref.owner, ref.repo).catch(
-      () => null,
-    );
-    state = read
+  if (repository) {
+    let state: SessionLinkLiveStatus["state"] | null = null;
+    if (link.kind === "pull_request") {
+      const read = await workspaceGitHubReader(deps, workspaceId, ref.owner, ref.repo).catch(
+        () => null,
+      );
+      state = read
+        ? ((await readGitHubPullRequestStatus(read, ref).catch(() => null))?.state ?? null)
+        : null;
+    }
+    return { fullName: repository.fullName, state, via: "app" };
+  }
+  if (!person) return null;
+  const read = await personalGitHubReader(
+    { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+    { ...person, workspaceId, repository: `${ref.owner}/${ref.repo}` },
+  ).catch(() => null);
+  if (!read) return null;
+  const found = (await read(`/repos/${ref.owner}/${ref.repo}`).catch(() => null)) as {
+    full_name?: unknown;
+  } | null;
+  if (typeof found?.full_name !== "string") return null;
+  const state =
+    link.kind === "pull_request"
       ? ((await readGitHubPullRequestStatus(read, ref).catch(() => null))?.state ?? null)
       : null;
-  }
-  return { fullName: repository.fullName, state };
+  return { fullName: found.full_name, state, via: "personal" };
 }
 
 export type SessionLinkStatusReader = (
