@@ -163,43 +163,59 @@ BEGIN
       FOR v_held IN
         UPDATE session_human_input_requests request
         SET held_for_agent = false, updated_at = now()
+        FROM (
+          -- Pauses whose notice the agent this event is about received; the
+          -- key names the exact pause,
+          -- child-requires-action:<session>:<turn>:<generation>.
+          SELECT
+            split_part(keyed.dedupe_key, ':', 2)::uuid AS session_id,
+            split_part(keyed.dedupe_key, ':', 3)::uuid AS turn_id,
+            split_part(keyed.dedupe_key, ':', 4)::integer AS turn_generation
+          FROM (
+            SELECT notice.dedupe_key
+            FROM session_system_updates notice
+            WHERE NEW.type LIKE 'turn.%'
+              AND notice.workspace_id = NEW.workspace_id
+              AND notice.session_id = NEW.session_id
+              AND notice.delivered_turn_id = NEW.turn_id
+              AND notice.kind = 'child_requires_action'
+              AND notice.dedupe_key ~
+                '^child-requires-action:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9]{1,9}$'
+            UNION
+            SELECT notice.dedupe_key
+            FROM session_system_updates notice
+            WHERE NEW.type IN ('turn.failed', 'turn.cancelled')
+              AND notice.workspace_id = NEW.workspace_id
+              AND notice.session_id = NEW.session_id
+              AND notice.state = 'pending'
+              AND notice.kind = 'child_requires_action'
+              AND notice.dedupe_key ~
+                '^child-requires-action:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9]{1,9}$'
+            OFFSET 0
+          ) keyed
+          UNION
+          -- This sub-agent's pause asks the person too: the whole pause goes to them.
+          SELECT asked.session_id, asked.turn_id, asked.turn_generation
+          FROM session_human_input_requests asked
+          WHERE NEW.type IN ('session.requiresAction', 'session.humanInput.requested')
+            AND asked.workspace_id = NEW.workspace_id
+            AND asked.session_id = NEW.session_id
+            AND asked.status = 'pending'
+            AND asked.held_for_agent
+            AND NOT EXISTS (
+              SELECT 1 FROM session_human_input_requests mine
+              WHERE mine.workspace_id = NEW.workspace_id
+                AND mine.session_id = NEW.session_id
+                AND mine.id::text = NEW.payload #>> '{request,id}'
+                AND mine.held_for_agent
+            )
+        ) released
         WHERE request.workspace_id = NEW.workspace_id
+          AND request.session_id = released.session_id
+          AND request.turn_id = released.turn_id
+          AND request.turn_generation = released.turn_generation
           AND request.status = 'pending'
           AND request.held_for_agent
-          AND (
-            -- The agent this event is about received the question: the
-            -- notice's key names its exact pause,
-            -- child-requires-action:<session>:<turn>:<generation>.
-            (request.session_id, request.turn_id, request.turn_generation) IN (
-              SELECT
-                split_part(keyed.dedupe_key, ':', 2)::uuid,
-                split_part(keyed.dedupe_key, ':', 3)::uuid,
-                split_part(keyed.dedupe_key, ':', 4)::integer
-              FROM (
-                SELECT notice.dedupe_key
-                FROM session_system_updates notice
-                WHERE notice.workspace_id = NEW.workspace_id
-                  AND notice.session_id = NEW.session_id
-                  AND notice.kind = 'child_requires_action'
-                  AND NEW.type LIKE 'turn.%'
-                  AND (notice.delivered_turn_id = NEW.turn_id
-                    OR (NEW.type IN ('turn.failed', 'turn.cancelled') AND notice.state = 'pending'))
-                  AND notice.dedupe_key ~
-                    '^child-requires-action:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9]{1,9}$'
-                OFFSET 0
-              ) keyed
-            )
-            -- This sub-agent's pause asks the person too: the whole pause goes to them.
-            OR (NEW.type IN ('session.requiresAction', 'session.humanInput.requested')
-              AND request.session_id = NEW.session_id
-              AND NOT EXISTS (
-                SELECT 1 FROM session_human_input_requests asked
-                WHERE asked.workspace_id = NEW.workspace_id
-                  AND asked.session_id = NEW.session_id
-                  AND asked.id::text = NEW.payload #>> '{request,id}'
-                  AND asked.held_for_agent
-              ))
-          )
         RETURNING request.id, request.session_id, request.turn_id, request.questions
       LOOP
         SELECT opengeni_private.session_person_v1(session.workspace_id, session.id,
