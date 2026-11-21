@@ -6119,11 +6119,12 @@ current authorized metadata and checksum-valid content; compacted attachment
 catalogs remain receipt-only.
 
 Per-turn file attachments never change the system instructions. The modular
-contract has no attachment module, and the SDK-rendered remote mount policy and
-filesystem layout come from the agent's instruction manifest
-(`manifestWithoutFileResourceEntries`), which drops file resource entries,
-including files a resumed sandbox's manifest state still holds from earlier
-turns; the session still materializes the full manifest. Everything the model
+contract has no attachment module, and the SDK renders nothing from the
+sandbox manifest into them (`manifestInstructions: false`), so neither the
+turn's files nor files a resumed sandbox's manifest state still holds from
+earlier turns reach them; the session still materializes the full manifest.
+The workspace filesystem layout history item lists no files either
+(`workspaceFilesystemLayout`). Everything the model
 needs about the turn's files (paths, sizes, read-only handling, contents are
 data, an earlier attachment belongs to a request only when that message refers
 to it) is in the turn's "Attached files are available in the sandbox" notice,

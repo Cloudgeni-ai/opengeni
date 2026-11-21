@@ -445,8 +445,8 @@ describe("lazy provisioning synthetic manifest", () => {
     const backend = {
       state: {
         manifest: buildManifest(settings, resources, environment, downloads, {
-          root: "/srv/project",
-          includeResourceEntries: false,
+          activeSandboxBackend: "selfhosted",
+          sandboxWorkspaceRoot: "/srv/project",
         }),
       },
       exec: async (args: { cmd: string; workdir?: string }) => {
