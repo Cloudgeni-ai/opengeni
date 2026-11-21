@@ -10,11 +10,11 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "c7b34742aa9a4638a4653d14e5569da79e120f8698e14347b907aca7c9b8a37e"
+      "sha256": "0148be10941e38465a0abf0493f3ee9c38b1410682f322fe108948966ce3481a"
     },
     {
       "path": ".github/workflows/agent-windows-arm64.yml",
-      "sha256": "cf84d07d001ab76c9ba449560d8e0cd7973d6c234491bf755a4d87be890d104a"
+      "sha256": "8fbda640c15734baaf23ad10a7d61e45df5030d110429351645784c0ffbf2726"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -542,8 +542,8 @@
     {
       "workflow": ".github/workflows/agent-windows-arm64.yml",
       "job": "build",
-      "step": "Install workspace dependencies",
-      "sha256": "2c62f3a0d4546267463505ebf6c30bfbf087009e1ce1046d1ac82f0fad524261"
+      "step": "Install agent build and smoke dependencies",
+      "sha256": "914bbe5db1704efcee2f5743f04d27a7bb6e56ec17b96bba0a5cbd5e6fccc9ea"
     },
     {
       "workflow": ".github/workflows/agent-windows-arm64.yml",

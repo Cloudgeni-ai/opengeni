@@ -27,8 +27,11 @@ jobs:
         with:
           workspaces: agent
           key: aarch64-pc-windows-msvc
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile
+      - name: Install agent build and smoke dependencies
+        # Do not install unrelated apps (e.g. the site gateway's x64-only workerd).
+        run: >-
+          bun install --frozen-lockfile --production
+          --filter @opengeni/browserd --filter @opengeni/agent-proto --filter @opengeni/events
       - name: Build the Windows ARM64 agent and interaction runtime
         shell: bash
         run: bash scripts/build-windows-agent-release.sh arm64
