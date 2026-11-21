@@ -509,14 +509,23 @@ whole.
 - **Starts when**: the agent's triggers are ordinary automations with
   `agentConfig.agentId` (an agent's `scheduled_tasks_create` call may give
   `agentConfig.agentName`, a name or id, which the tool resolves like
-  `session_create`'s `agentName`). Each run starts a new chat bound to the agent (its
-  Instructions, Memory and Can use), created as the task with the task
-  owner's access to the agent (`agent.subjectId` on session create), so Only
-  me agents work in their owner's Only me automations. Saving checks the
-  agent is one the owner can use, against the automation's agent, run mode
-  and visibility after the edit, and that each run starts a new chat
-  (`existing_session` and `reusable_session` are refused, so a change of
-  agent applies from the next run). Any trigger type in the catalog works,
+  `session_create`'s `agentName`), in any chat mode. A chat the scheduler starts
+  (`new_session_per_run`, or the first run of `reusable_session`) is bound to
+  the agent (its Instructions, Memory and Can use), created as the task with
+  the task owner's access to the agent (`agent.subjectId` on session create),
+  so Only me agents work in their owner's Only me automations. A chat's agent
+  never changes, so changing a `reusable_session` automation's agent clears
+  its chat (`reusableSessionId: null`); the next run starts a new chat with
+  the new agent. The task records the chat it left in
+  `metadata._opengeniAgentChatChange` (`{ sessionId, agentId, changedAt }`,
+  `SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY`), the edit writes the audit
+  event `scheduled_task.agent_chat_changed`, and the automation form says so
+  with a link to the previous chat. `existing_session` keeps the agent and
+  needs a chat bound to that agent (`sessions.agent_id`) that the owner can
+  control; any other chat is refused with 422 "That chat isn't with this
+  agent", and the form marks such chats "Not a chat with this agent". Saving
+  checks the agent is one the owner can use, against the automation's agent,
+  run mode, chat and visibility after the edit. Any trigger type in the catalog works,
   including types added later, because the trigger is the automation's own.
   Event runs keep the automation limits: the chain limit, the storm guard
   (`maxRunsPerHour`) and usage limits. The page lists the automations with
