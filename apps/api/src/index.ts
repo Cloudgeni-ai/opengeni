@@ -949,7 +949,7 @@ export async function startApi(options: StartApiOptions = {}) {
       await httpDrained;
       // Slack callbacks answered during the drain may still be recording into
       // the workspaces their bot is shared with.
-      await settleSlackEventRecordings();
+      await settleSlackEventRecordings(httpDrainDeadline);
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await routeDeps.decisions?.flushUsage().catch(() => {

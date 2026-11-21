@@ -177,7 +177,22 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? { billingOrigin: await resolveTurnBillingOrigin(db, { grant }) }
         : {}),
     });
-    return c.json(EventSource.parse(forViewer(viewer, updated)));
+    // A Slack source whose bot is no longer shared here reads as blocked, as
+    // on GET and in the list.
+    const [shared] = await withSlackSourceSharing(db, { accountId: grant.accountId, workspaceId }, [
+      { ...source, status: updated.status },
+    ]);
+    const shown =
+      shared!.status === updated.status
+        ? updated
+        : {
+            ...updated,
+            status: shared!.status,
+            statusReason: shared!.statusReason,
+            statusReasonCode: shared!.statusReasonCode,
+            statusReasonDetail: shared!.statusReasonDetail,
+          };
+    return c.json(EventSource.parse(forViewer(viewer, shown)));
   });
 
   app.delete("/v1/workspaces/:workspaceId/event-sources/:sourceId", async (c) => {

@@ -243,6 +243,13 @@ export function registerEventTools(
             throw error;
           });
         }
+        source = (
+          await withSlackSourceSharing(
+            deps.db,
+            { accountId: grant.accountId, workspaceId: grant.workspaceId },
+            [source],
+          )
+        )[0]!;
         const eventTypes = await listEventSourceTypes({
           db: deps.db,
           settings: deps.settings,

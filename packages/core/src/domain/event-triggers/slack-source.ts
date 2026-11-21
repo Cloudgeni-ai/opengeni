@@ -207,10 +207,23 @@ const sharedRecordings = new Set<Promise<void>>();
 
 /**
  * Resolves once every shared workspaces' recording started so far has
- * finished, so shutdown can let them land before the database closes.
+ * finished, so shutdown can let them land before the database closes. With
+ * `timeoutMs` it stops waiting after that long, so a stuck write can't hold
+ * up the rest of shutdown.
  */
-export async function settleSlackEventRecordings(): Promise<void> {
-  while (sharedRecordings.size > 0) await Promise.allSettled([...sharedRecordings]);
+export async function settleSlackEventRecordings(timeoutMs?: number): Promise<void> {
+  const settled = (async () => {
+    while (sharedRecordings.size > 0) await Promise.allSettled([...sharedRecordings]);
+  })();
+  if (timeoutMs === undefined) return settled;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    settled,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, Math.max(0, timeoutMs));
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 /** What recording one callback started: the shared workspaces' part runs on. */
