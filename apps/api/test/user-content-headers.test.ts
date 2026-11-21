@@ -73,7 +73,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     why: "published Site version HTML for the gateway (scripts sandboxed in an opaque origin); a header-preserving copy to add Server-Timing",
   },
   "site-sql.ts": { count: 1, userContent: true, why: "Site SQL export download (sql, csv, json)" },
-  "workspace-artifacts.ts": { count: 1, userContent: true, why: "Site HTML (opaque origin)" },
+  "workspace-artifacts.ts": {
+    count: 2,
+    userContent: true,
+    why: "Site HTML (opaque origin), streamed or with its asset base",
+  },
   "workspace-state.ts": { count: 1, userContent: true, why: "workspace state export" },
 };
 
