@@ -537,8 +537,11 @@ whole.
   source page). A GitHub event can add one repository. The **Note** is
   optional: each run gets the event and the agent's Instructions do the
   rest (an empty note sends "Handle this event." or "Do your scheduled
-  work."). The dialog says each run starts a new chat with the agent; the
-  server refuses any other run mode for an agent's automation. It saves
+  work."). **Chat** (`agent-trigger-chat-field.tsx`) says where runs go:
+  **New chat each run** (the default, `new_session_per_run`), **One chat
+  for this trigger** (`reusable_session`) or **An existing chat**
+  (`existing_session` with `targetSessionId`, offering only chats started
+  with this agent); the dialog's description says which. It saves
   through `createScheduledTask` with `agentConfig.agentId`, named
   `<agent>: <when>`, and with an explicit `visibility`: `private` for an
   Only me agent, otherwise `workspace` (never the organization's default

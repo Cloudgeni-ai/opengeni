@@ -290,9 +290,36 @@ export function agentTriggerName(
 }
 
 /**
- * The automation a trigger saves as: a new chat with the agent on every run,
- * shared like the agent (an Only me agent's trigger is Only me, any other is
- * shared with the workspace), with the repositories picked for it.
+ * Where each run goes: a new chat with the agent (the default), one chat
+ * the trigger keeps for all its runs, or an existing chat with the agent.
+ */
+export type AgentTriggerChat =
+  | { mode: "new_session_per_run" }
+  | { mode: "reusable_session" }
+  | { mode: "existing_session"; sessionId: string };
+
+export const AGENT_TRIGGER_NEW_CHAT: AgentTriggerChat = { mode: "new_session_per_run" };
+
+/** The chats a trigger can continue: only chats started with this agent. */
+export function agentTriggerChats<T extends { agentId?: string | null | undefined }>(
+  agent: Pick<Agent, "id">,
+  sessions: readonly T[],
+): T[] {
+  return sessions.filter((session) => session.agentId === agent.id);
+}
+
+/** What the dialog says each run does, for the chat picked. */
+export function agentTriggerChatWords(agent: Pick<Agent, "name">, chat: AgentTriggerChat): string {
+  if (chat.mode === "reusable_session") return `Each run continues one chat with ${agent.name}`;
+  if (chat.mode === "existing_session") return `Each run continues a chat with ${agent.name}`;
+  return `Each run starts a new chat with ${agent.name}`;
+}
+
+/**
+ * The automation a trigger saves as: runs in chats with the agent (a new one
+ * each run unless another chat is picked), shared like the agent (an Only me
+ * agent's trigger is Only me, any other is shared with the workspace), with
+ * the repositories picked for it.
  */
 export function agentTriggerCreateRequest(
   t: OpenGeniText,
@@ -303,6 +330,7 @@ export function agentTriggerCreateRequest(
     resources?: readonly ResourceRef[] | undefined;
     sources: readonly Pick<EventSource, "id" | "name">[];
     now: Date;
+    chat?: AgentTriggerChat | undefined;
   },
 ): CreateScheduledTaskRequest {
   const base = automationCreateRequest(
@@ -312,10 +340,13 @@ export function agentTriggerCreateRequest(
     input.now,
   );
   if (!("agentConfig" in base) || !base.agentConfig) return base;
+  const chat = input.chat ?? AGENT_TRIGGER_NEW_CHAT;
   return {
     ...base,
     name: agentTriggerName(t, input.agent, input.suggestion, base, input.sources, input.now),
     visibility: input.agent.visibility === "private" ? "private" : "workspace",
+    runMode: chat.mode,
+    ...(chat.mode === "existing_session" ? { targetSessionId: chat.sessionId } : {}),
     agentConfig: {
       ...base.agentConfig,
       agentId: input.agent.id,

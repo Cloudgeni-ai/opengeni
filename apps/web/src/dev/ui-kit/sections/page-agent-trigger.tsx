@@ -130,7 +130,10 @@ function fixtureClient(state: State) {
       version: 1,
       ownerKey: `workspace:${WORKSPACE_ID}`,
     }),
-    listSessions: async () => [],
+    listSessions: async () => [
+      { id: "55555555-5555-4555-8555-555555555555", title: "Review queue", agentId: AGENT.id },
+      { id: "66666666-6666-4666-8666-666666666666", title: "Release review", agentId: AGENT.id },
+    ],
     getSessionTenancyCreateCapabilities: async () => ({
       activated: true,
       canCreatePrivate: true,

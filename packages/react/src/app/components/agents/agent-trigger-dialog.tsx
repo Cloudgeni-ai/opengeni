@@ -61,11 +61,15 @@ import {
   agentTriggerSaveError,
   agentTriggerSourceStep,
   agentTriggerWithSources,
+  agentTriggerChatWords,
+  AGENT_TRIGGER_NEW_CHAT,
+  type AgentTriggerChat,
   type AgentTriggerOption,
   type AgentTriggerPick,
   type AgentTriggerSetup,
 } from "./agent-trigger-model";
 import { AgentTriggerPicker } from "./agent-trigger-picker";
+import { AgentTriggerChatField } from "./agent-trigger-chat-field";
 
 const NO_REPOSITORY = "__none__";
 
@@ -175,6 +179,8 @@ function AgentTriggerDialogBody({
     secret?: string | undefined;
   } | null>(null);
   const [issues, setIssues] = useState<ReturnType<typeof agentTriggerIssues>>({});
+  const [chat, setChat] = useState<AgentTriggerChat>(AGENT_TRIGGER_NEW_CHAT);
+  const [chatIssue, setChatIssue] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const update = (patch: Partial<AutomationDraft>) => {
     setDraft((current) => ({ ...current, ...patch }));
@@ -281,7 +287,9 @@ function AgentTriggerDialogBody({
     }
     const now = new Date();
     const found = agentTriggerIssues(t, draft, formSources ?? [], now);
-    if (Object.values(found).some(Boolean)) {
+    const noChat = chat.mode === "existing_session" && !chat.sessionId;
+    if (noChat) setChatIssue("Choose a chat.");
+    if (Object.values(found).some(Boolean) || noChat) {
       setIssues(found);
       if (found.events) setShowEvents(true);
       return false;
@@ -302,6 +310,7 @@ function AgentTriggerDialogBody({
             repository && listensOnGitHub ? [gitHubRepositoryResource(repository, "")] : [],
           sources: formSources ?? [],
           now,
+          chat,
         }),
       );
       onCreated(created);
@@ -351,8 +360,8 @@ function AgentTriggerDialogBody({
       title={suggestion ? suggestion.name : "Add trigger"}
       description={
         visibility === "private"
-          ? `Each run starts a new chat with ${agent.name}. Only you see it.`
-          : `Each run starts a new chat with ${agent.name}, shared with the workspace.`
+          ? `${agentTriggerChatWords(agent, chat)}. Only you see it.`
+          : `${agentTriggerChatWords(agent, chat)}, shared with the workspace.`
       }
       submitLabel={submitLabel}
       pendingLabel={ready ? "Adding…" : "Working…"}
@@ -450,6 +459,19 @@ function AgentTriggerDialogBody({
               placeholder={agentTriggerMessage({ instructions: "", events: draft.events })}
             />
           </Field>
+        ) : null}
+        {picked && ready ? (
+          <AgentTriggerChatField
+            agent={agent}
+            workspaceId={workspaceId}
+            value={chat}
+            onChange={(next) => {
+              setChat(next);
+              setChatIssue(undefined);
+              setError(null);
+            }}
+            error={chatIssue}
+          />
         ) : null}
       </FieldStack>
     </FormDialog>

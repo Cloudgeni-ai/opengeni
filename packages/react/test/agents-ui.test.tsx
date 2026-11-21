@@ -1248,6 +1248,8 @@ async function openAgentTrigger(
     createTaskError?: unknown;
     suggestion?: string;
     githubStatus?: string;
+    /** Chats in the workspace, given the agent's id. */
+    sessions?: (agentId: string) => { id: string; title: string; agentId?: string | null }[];
   } = {},
 ) {
   const agent = makeAgent({ name: "Triage", templateKey: "triage", ...options.agent });
@@ -1255,6 +1257,7 @@ async function openAgentTrigger(
     templates: [TRIAGE_TEMPLATE],
     eventSources: options.eventSources ?? [],
     createTaskError: options.createTaskError,
+    sessions: options.sessions?.(agent.id),
   });
   let path = "";
   const container = await render(
@@ -1425,6 +1428,51 @@ test("Create a webhook makes its URL right there, then its events start the agen
   expect(shown).toEqual([expect.stringContaining("https://hooks.example.com/"), "whsec_test"]);
   expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
   expect(button(dialog, "Add trigger")).toBeTruthy();
+});
+
+async function chooseFrom(dialog: HTMLElement, current: string, option: string) {
+  const trigger = [...dialog.querySelectorAll<HTMLElement>("[role='combobox']")].find((entry) =>
+    entry.textContent?.includes(current),
+  );
+  if (!trigger) throw new Error(`no menu showing ${current}`);
+  await act(async () => trigger.click());
+  await flush();
+  const items = [...document.querySelectorAll<HTMLElement>("[role='option']")];
+  const offered = items.map((entry) => entry.textContent);
+  const item = items.find((entry) => entry.textContent?.includes(option));
+  if (!item) throw new Error(`no option ${option}`);
+  await act(async () => item.click());
+  await flush();
+  return offered;
+}
+
+test("a trigger's runs start a new chat by default, or continue one of this agent's chats", async () => {
+  const { agent, client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessions: (agentId) => [
+      { id: "chat-triage", title: "Weekly triage", agentId },
+      { id: "chat-other", title: "Someone else's agent", agentId: "another-agent" },
+      { id: "chat-plain", title: "Plain chat", agentId: null },
+    ],
+  });
+  expect(dialog.textContent).toContain("Each run starts a new chat with Triage");
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  // Only chats with this agent are offered, and one must be picked.
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).toContain("Choose a chat.");
+  expect(await chooseFrom(dialog, "Choose a chat", "Weekly triage")).toEqual([
+    expect.stringContaining("Weekly triage"),
+  ]);
+  expect(dialog.textContent).toContain("Each run continues a chat with Triage");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.runMode).toBe("existing_session");
+  expect(request.targetSessionId).toBe("chat-triage");
+  expect(request.agentConfig.agentId).toBe(agent.id);
 });
 
 test("a shared trigger the person may not add says so in the dialog", async () => {

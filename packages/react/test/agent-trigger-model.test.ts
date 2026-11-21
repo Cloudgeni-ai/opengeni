@@ -4,6 +4,8 @@ import {
   AGENT_TRIGGER_EVENT_MESSAGE,
   AGENT_TRIGGER_SCHEDULE_MESSAGE,
   AGENT_TRIGGER_SHARED_DENIED,
+  agentTriggerChats,
+  agentTriggerChatWords,
   agentTriggerCreateRequest,
   agentTriggerDraftForPick,
   agentTriggerDraftFromSuggestion,
@@ -204,6 +206,36 @@ test("it saves as a new chat with the agent each run, shared like the agent", ()
   expect(personal.visibility).toBe("private");
   expect(personal.agentConfig.prompt).toBe(AGENT_TRIGGER_SCHEDULE_MESSAGE);
   expect(personal.schedule.type).toBe("calendar");
+});
+
+test("a trigger's runs can keep one chat or continue one of the agent's chats", () => {
+  const draft = agentTriggerDraftFromSuggestion(SUGGESTION, { sources: [GITHUB] });
+  const agent = { ...AGENT, visibility: "workspace" as const };
+  const base = { agent, draft, sources: [GITHUB], now: NOW };
+  const reusable = agentTriggerCreateRequest(t, {
+    ...base,
+    chat: { mode: "reusable_session" },
+  }) as Record<string, any>;
+  expect(reusable.runMode).toBe("reusable_session");
+  expect(reusable.targetSessionId).toBeUndefined();
+  expect(reusable.agentConfig.agentId).toBe(AGENT.id);
+  const existing = agentTriggerCreateRequest(t, {
+    ...base,
+    chat: { mode: "existing_session", sessionId: "chat-1" },
+  }) as Record<string, any>;
+  expect(existing.runMode).toBe("existing_session");
+  expect(existing.targetSessionId).toBe("chat-1");
+  expect(agentTriggerChatWords(AGENT, { mode: "reusable_session" })).toBe(
+    "Each run continues one chat with Bug fixer",
+  );
+  expect(
+    agentTriggerChats(AGENT, [
+      { id: "a", agentId: AGENT.id },
+      { id: "b", agentId: "other" },
+      { id: "c", agentId: null },
+      { id: "d" },
+    ]).map((chat) => chat.id),
+  ).toEqual(["a"]);
 });
 
 test("a refused shared trigger says who can add one", () => {

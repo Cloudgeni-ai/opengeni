@@ -99,6 +99,8 @@ export function fakeAgentsClient(
     eventSources?: { id: string; name: string; kind?: string; status?: string }[];
     /** Makes createScheduledTask fail with this error. */
     createTaskError?: unknown;
+    /** Chats in the workspace, with the agent each was started with. */
+    sessions?: { id: string; title: string; agentId?: string | null }[] | undefined;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
@@ -216,6 +218,10 @@ export function fakeAgentsClient(
     async listReadyEventSources(workspaceId: string) {
       calls.push(["listReadyEventSources", workspaceId]);
       return [];
+    },
+    async listSessions(workspaceId: string) {
+      calls.push(["listSessions", workspaceId]);
+      return options.sessions ?? [];
     },
     async listEventSourceTypes(workspaceId: string, sourceId: string) {
       calls.push(["listEventSourceTypes", workspaceId, sourceId]);
