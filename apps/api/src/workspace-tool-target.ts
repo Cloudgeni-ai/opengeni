@@ -30,14 +30,19 @@ import {
 import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  hasIntegrationAdminPermission,
+  hasPermission,
   isVerifiedDelegatedHumanAuthorization,
   withSiteSessionOrigin,
   siteViewerForGrant,
 } from "@opengeni/core";
 import {
+  appSyncActionOf,
   beginTargetToolGatewayCall,
   clearSiteToolAllowances,
   getWorkspaceArtifactContentRef,
+  getScheduledTask,
+  listAppSyncTaskIds,
   listConnectorToolPermissionPolicies,
   projectConnectorToolPermission,
   hasSiteToolAllowance,
@@ -111,6 +116,8 @@ export type TargetGatewayOptions = {
   readReconnect?: typeof readSiteToolReconnectAccounts;
   /** A connection's saved tool permissions (readiness reads them; calls decide in the gateway). */
   listPolicies?: typeof listConnectorToolPermissionPolicies;
+  /** The tools the Site's shared syncs call (connect card only). */
+  readSharedSyncTools?: typeof readSiteSharedSyncTools;
   /** Observes the request's fence (statistics), never its authority. */
   onFence?: (fence: TargetAuthorityFence) => void;
   /**
@@ -1071,7 +1078,14 @@ export async function describeWorkspaceSiteToolConsent(
     ),
     selected: choices.selected,
     review,
-    connect: choices.connect,
+    // The consent answer's connect contract: the connector, not how it signs in.
+    connect: choices.connect
+      ? {
+          capabilityId: choices.connect.capabilityId,
+          name: choices.connect.name,
+          providerDomain: choices.connect.providerDomain,
+        }
+      : null,
   });
 }
 
@@ -1219,47 +1233,124 @@ export async function describeWorkspaceSiteToolSetup(
   // The console's address, as other console links read it: the public base
   // serves the console unless OPENGENI_WEB_BASE_URL names another origin.
   const base = (deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl ?? "").replace(/\/+$/u, "");
+  // A connector that takes an API key is connected once for the workspace,
+  // with a shared key from a vault: workspace admins add it, others ask one.
+  const mayAddSharedKey =
+    hasIntegrationAdminPermission(grant) &&
+    hasPermission(grant.permissions, "connections:write", grant.permissionMode) &&
+    hasPermission(grant.permissions, "secrets:use", grant.permissionMode);
   const items = new Map<string, ToolGatewaySiteSetupItem>();
-  for (const need of needs) {
-    if (!need.capabilityId) continue;
-    const itemKey = siteToolSetupKey(need);
+  // Shared syncs run for everyone, so an API-key connector they wait on is a
+  // shared need: the workspace adds one shared key from a vault. Each
+  // person's own use (their tool calls, personal syncs) keeps its own
+  // Connect, since personal syncs never run on the shared key.
+  let sharedSyncTools: Promise<ToolGatewayIdentity[]> | undefined;
+  const sharedSyncNeeds = async (need: SiteToolSetupNeed) => {
+    if (!need.apiKey || need.action !== "connect") return false;
+    sharedSyncTools ??= (options.readSharedSyncTools ?? readSiteSharedSyncTools)(
+      deps.db,
+      grant,
+      request.siteArtifactId,
+    ).catch(() => []);
+    return (await sharedSyncTools).some((tool) => sameIdentity(tool, need.identity));
+  };
+  const consoleUrl = (itemKey: string) =>
+    `${base}/workspaces/${encodeURIComponent(grant.workspaceId)}/sites/${encodeURIComponent(
+      request.siteArtifactId,
+    )}?connect=${encodeURIComponent(itemKey)}`;
+  const add = (
+    itemKey: string,
+    item: Omit<ToolGatewaySiteSetupItem, "key" | "tools">,
+    need: SiteToolSetupNeed,
+  ) => {
     const existing = items.get(itemKey);
     if (existing) {
       if (!existing.tools.some((tool) => sameIdentity(tool, need.identity)))
         existing.tools.push(need.identity);
-      continue;
+      return;
     }
-    items.set(itemKey, {
-      key: itemKey,
-      action: need.action,
-      connector: need.connector,
-      capabilityId: need.capabilityId,
-      connectionId: need.connectionId,
-      account: need.account,
-      shared: need.shared,
-      tools: [need.identity],
-      openUrl:
-        published && base
-          ? `${base}/workspaces/${encodeURIComponent(grant.workspaceId)}/sites/${encodeURIComponent(
-              request.siteArtifactId,
-            )}?connect=${encodeURIComponent(itemKey)}`
-          : null,
-    });
+    items.set(itemKey, { key: itemKey, ...item, tools: [need.identity] });
+  };
+  for (const need of needs) {
+    if (!need.capabilityId) continue;
+    const itemKey = siteToolSetupKey(need);
+    add(
+      itemKey,
+      {
+        action: need.action,
+        connector: need.connector,
+        capabilityId: need.capabilityId,
+        connectionId: need.connectionId,
+        account: need.account,
+        shared: need.shared,
+        openUrl: published && base ? consoleUrl(itemKey) : null,
+      },
+      need,
+    );
+    if (!(await sharedSyncNeeds(need))) continue;
+    const sharedKey = mayAddSharedKey ? ("add" as const) : ("ask_admin" as const);
+    const sharedItemKey = siteToolSetupKey({ ...need, sharedKey: true });
+    add(
+      sharedItemKey,
+      {
+        action: "connect",
+        connector: need.connector,
+        capabilityId: need.capabilityId,
+        connectionId: null,
+        account: null,
+        shared: true,
+        sharedKey,
+        openUrl: published && base && sharedKey === "add" ? consoleUrl(sharedItemKey) : null,
+      },
+      need,
+    );
   }
   return ToolGatewaySiteSetupResponse.parse({ version: 1, items: [...items.values()] });
+}
+
+/**
+ * The tools a Site's shared syncs call: each sync's saved route, its
+ * connector's tool and the declared tools of the same name. Read on the
+ * server for the connect card; never sent to the Site.
+ */
+export async function readSiteSharedSyncTools(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+  siteId: string,
+): Promise<ToolGatewayIdentity[]> {
+  const ids = await listAppSyncTaskIds(db, scope, siteId);
+  const tools: ToolGatewayIdentity[] = [];
+  for (const id of ids) {
+    const task = await getScheduledTask(db, scope.workspaceId, id).catch(() => null);
+    const action = task ? appSyncActionOf(task.action) : null;
+    if (!action || action.mode !== "shared") continue;
+    tools.push(
+      action.tool,
+      ...(action.connectorTool ? [action.connectorTool] : []),
+      ...action.declaredTools.filter((tool) => tool.toolName === action.tool.toolName),
+    );
+  }
+  return tools;
 }
 
 /**
  * A card item's key: its action and a digest of the catalog capability and
  * the account's connection, so two connectors that share a display name stay
  * apart. Stable across reloads (dismissals and `?connect=` use it); Site code
- * sees the digest, never the ids behind it.
+ * sees the digest, never the ids behind it. A shared key for the workspace is
+ * its own item, apart from each person's own Connect.
  */
 export function siteToolSetupKey(
-  need: Pick<SiteToolSetupNeed, "action" | "capabilityId" | "connectionId">,
+  need: Pick<SiteToolSetupNeed, "action" | "capabilityId" | "connectionId"> & {
+    sharedKey?: boolean;
+  },
 ) {
   const digest = createHash("sha256")
-    .update(`opengeni.app-connect-card.v1\0${need.capabilityId ?? ""}\0${need.connectionId ?? ""}`)
+    .update(
+      `opengeni.app-connect-card.v1\0${need.capabilityId ?? ""}\0${need.connectionId ?? ""}${
+        need.sharedKey ? "\0shared-key" : ""
+      }`,
+    )
     .digest("hex")
     .slice(0, 24);
   return `${need.action}:${digest}`;
@@ -1278,6 +1369,8 @@ type SiteToolSetupNeed = {
   account: string | null;
   shared: boolean;
   identity: ToolGatewayIdentity;
+  /** The connector takes an API key rather than a sign-in. */
+  apiKey?: boolean;
 };
 
 async function siteToolReadiness(
@@ -1381,6 +1474,7 @@ async function siteToolReadiness(
         account: stale?.account ?? null,
         shared: stale?.shared ?? false,
         identity: routed.declaredIdentity,
+        ...(routed.connect.apiKey ? { apiKey: true } : {}),
       });
       if (stale)
         tools.push(

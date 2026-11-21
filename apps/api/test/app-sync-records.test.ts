@@ -130,3 +130,13 @@ test("a run uses the saved route if it is the person's, else their own account o
     }),
   ).toEqual({ serverId: "orders", toolName: "list" });
 });
+
+test("maxRecords caps one page's records and marks it truncated", () => {
+  const list = [{ id: 1 }, { id: 2 }, { id: 3 }];
+  const capped = appSyncRecords(list, settings, { maxRecords: 2 });
+  expect(capped.records.map((record) => record.key)).toEqual(["1", "2"]);
+  expect(capped.truncated).toBe(true);
+  const whole = appSyncRecords(list, settings);
+  expect(whole.records).toHaveLength(3);
+  expect(whole.truncated).toBe(false);
+});

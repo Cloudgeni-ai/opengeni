@@ -136,11 +136,19 @@ const integrationMethods = [
   // app_sync_* tools and Apps read status through the Site runtime.
   "createAppSync",
   "deleteAppSync",
+  "getAppSyncOptInReview",
   "getAppSyncStatus",
   "listAppSyncs",
   "runAppSync",
   "setAppSyncOptIn",
   "updateAppSync",
+  // App webhook management for hosts and scripts; agents use the
+  // app_webhook_* tools. Apps notify through the Site runtime (site.notify).
+  "createAppWebhook",
+  "deleteAppWebhook",
+  "listAppWebhooks",
+  "notifyFromApp",
+  "updateAppWebhook",
   // The workspace default limit profile for published Sites, for hosts and
   // admin scripts; the web console sets limits per Site.
   "getSiteLimitProfile",

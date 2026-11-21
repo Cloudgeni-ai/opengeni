@@ -226,6 +226,7 @@ import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-er
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
 import { registerAppSyncTools } from "./app-sync-tools";
+import { registerAppWebhookTools } from "./app-webhook-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerAppPackageTools } from "./app-package-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
@@ -1835,6 +1836,16 @@ export function buildOpenGeniMcpServer(
       siteAgent,
     );
     registerAppSyncTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
+    registerAppWebhookTools(
       server,
       deps,
       grant,

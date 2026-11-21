@@ -811,6 +811,26 @@ export async function getSiteDataFileUrl(
   return { file, url: signed.url, expiresAt: signed.expiresAt.toISOString() };
 }
 
+/**
+ * A file's bytes, with the same access as its download link (app packages
+ * read shared files this way). Null when the stored object is gone.
+ */
+export async function readSiteDataFileBytes(
+  deps: SiteDataDeps & Pick<ApiRouteDeps, "objectStorage">,
+  grant: SiteDataAuthority,
+  siteId: string,
+  fileId: string,
+  surface: SiteDataSurface = {},
+): Promise<{ file: SiteDataFile; bytes: Uint8Array } | null> {
+  const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await consume(access, "read", 1);
+  const stored = await access.store.getFile(access.caller, fileId);
+  if (!stored) throw new SiteDataError("not_found", "File not found");
+  const { objectKey, ...file } = stored;
+  const object = await storage(deps).getObjectBytes(objectKey);
+  return object ? { file, bytes: object.bytes } : null;
+}
+
 export async function deleteSiteDataFile(
   deps: SiteDataDeps & Pick<ApiRouteDeps, "objectStorage">,
   grant: SiteDataAuthority,

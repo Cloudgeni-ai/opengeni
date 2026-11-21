@@ -13,6 +13,12 @@
  * button opens the App in Opengeni with that connect dialog open, since this
  * page has no Opengeni frame. It answers the App's `site.connections.*`.
  *
+ * Above it, a card (`#og-syncs`) lists the App's personal syncs the member
+ * hasn't joined. Joining, from there or from the App's
+ * `site.data.syncs.optIn(id)`, opens this page's own confirmation
+ * (`#og-sync-confirm`) naming the tool, account and collection; only this
+ * page posts the opt-in, after the member confirms.
+ *
  * It also keeps one live connection (`/_og/live`) and passes its data hints
  * to the Site as `data_changed` events, and sends small batched speed
  * beacons (`/_og/timing`): app load, first data and each bridge call.
@@ -31,6 +37,7 @@ import {
 import {
   SiteBridgeHost,
   siteConnectCardDismissals,
+  siteConnectCardItemActionable,
   siteConnectCardLabel,
   type OpenGeniSiteDataChange,
   openGeniSiteLocationHref,
@@ -41,7 +48,12 @@ import {
   type SiteBridgeViewerHandlers,
   type SiteHttpRequest,
 } from "@opengeni/sdk/site-bridge-host";
-import type { ToolGatewaySiteSetupItem, ToolGatewaySiteSetupResponse } from "@opengeni/sdk";
+import type {
+  AppSyncOptInReview,
+  AppSyncStatusResponse,
+  ToolGatewaySiteSetupItem,
+  ToolGatewaySiteSetupResponse,
+} from "@opengeni/sdk";
 import {
   SITE_GATEWAY_HUMAN_PATH,
   SITE_HUMAN_CHECK_REQUIRED,
@@ -307,8 +319,11 @@ function createConnectCard(onReturn: () => void) {
           {},
           signal ?? new AbortController().signal,
         );
-        // Only items this page can act on: each opens the App in Opengeni.
-        items = response.items.filter((item) => typeof item.openUrl === "string");
+        // Items this page can act on (each opens the App in Opengeni), and
+        // shared keys only a workspace admin can add, shown as plain text.
+        items = response.items.filter(
+          (item) => typeof item.openUrl === "string" || !siteConnectCardItemActionable(item),
+        );
       } catch {
         items = null;
       }
@@ -326,6 +341,13 @@ function createConnectCard(onReturn: () => void) {
     card.setAttribute("aria-label", "Connect tools for this app");
     const list = document.createElement("div");
     for (const item of visible) {
+      if (!siteConnectCardItemActionable(item)) {
+        const note = document.createElement("span");
+        note.className = "og-connect-note";
+        note.textContent = siteConnectCardLabel(item);
+        list.append(note);
+        continue;
+      }
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = siteConnectCardLabel(item);
@@ -385,8 +407,186 @@ function createConnectCard(onReturn: () => void) {
   };
 }
 
+/**
+ * Personal syncs: the join card and the confirmation. The confirmation is
+ * this page's own DOM, outside the App's frame, so the App can ask but never
+ * opt the member in by itself. Leaving needs no confirmation.
+ */
+function createSyncOptIn() {
+  const dismissals = siteConnectCardDismissals(`${location.host}:syncs`);
+  let joinable: { key: string; id: string; name: string }[] = [];
+  let pending: { resolve: (optedIn: boolean) => void } | null = null;
+  const load = async (): Promise<void> => {
+    try {
+      const known = await currentViewer(new AbortController().signal).catch(() => null);
+      if (!known || known.kind !== "member") {
+        joinable = [];
+        return;
+      }
+      const response = await gatewayFetch(
+        "/published-artifacts/current/data/syncs",
+        { method: "GET", headers: { accept: "application/json" } },
+        new AbortController().signal,
+      );
+      const body = (await response.json().catch(() => null)) as AppSyncStatusResponse | null;
+      joinable =
+        response.ok && Array.isArray(body?.syncs)
+          ? body.syncs
+              .filter((sync) => sync.mode === "personal" && sync.active && sync.optedIn === false)
+              .map((sync) => ({ key: `sync:${sync.id}`, id: sync.id, name: sync.name }))
+          : [];
+    } catch {
+      joinable = [];
+    }
+  };
+  const render = () => {
+    document.getElementById("og-syncs")?.remove();
+    const visible = dismissals.visible(joinable);
+    if (visible.length === 0) return;
+    const card = document.createElement("div");
+    card.id = "og-syncs";
+    card.setAttribute("role", "region");
+    card.setAttribute("aria-label", "Personal syncs for this app");
+    const list = document.createElement("div");
+    for (const sync of visible) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `Join ${sync.name}`;
+      button.addEventListener("click", () => void confirm(sync.id, new AbortController().signal));
+      list.append(button);
+    }
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "og-connect-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", () => {
+      dismissals.dismiss(visible.map((sync) => sync.key));
+      render();
+    });
+    card.append(list, close);
+    // Stack above the connect card when both show.
+    const connect = document.getElementById("og-connect");
+    if (connect) card.style.bottom = `${32 + connect.offsetHeight + 8}px`;
+    document.body.append(card);
+  };
+  const refresh = () => void load().then(render);
+  const element = <K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    text?: string,
+  ): HTMLElementTagNameMap[K] => {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const show = (review: AppSyncOptInReview): Promise<boolean> =>
+    new Promise((resolve) => {
+      pending?.resolve(false);
+      document.getElementById("og-sync-confirm")?.remove();
+      const overlay = element("div");
+      overlay.id = "og-sync-confirm";
+      const dialog = element("div");
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.setAttribute("aria-labelledby", "og-sync-confirm-title");
+      const title = element("h2", `Join ${review.name}?`);
+      title.id = "og-sync-confirm-title";
+      const connector = review.tool.connector;
+      const text = element(
+        "p",
+        `It reads ${review.tool.toolName}${connector ? ` from your ${connector} account` : ""} and fills your own records in ${review.collection}.`,
+      );
+      dialog.append(title, text);
+      let select: HTMLSelectElement | null = null;
+      if (review.accounts.length > 1) {
+        const label = element("label", "Account");
+        select = element("select");
+        for (const choice of review.accounts) {
+          const option = element("option", choice.label);
+          option.value = choice.id;
+          if (choice.id === review.account) option.selected = true;
+          select.append(option);
+        }
+        label.append(select);
+        dialog.append(label);
+      } else if (review.accounts[0]) {
+        dialog.append(element("p", `Account: ${review.accounts[0].label}`));
+      }
+      const note = element("p", review.blocked ?? "");
+      note.className = "og-sync-note";
+      note.setAttribute("role", "alert");
+      const actions = element("div");
+      actions.className = "og-sync-actions";
+      const cancel = element("button", "Cancel");
+      cancel.type = "button";
+      const join = element("button", "Join");
+      join.type = "button";
+      join.className = "og-sync-join";
+      join.disabled = review.blocked !== null;
+      actions.append(cancel, join);
+      dialog.append(note, actions);
+      overlay.append(dialog);
+      const done = (optedIn: boolean) => {
+        if (pending !== entry) return;
+        pending = null;
+        overlay.remove();
+        resolve(optedIn);
+      };
+      const entry = { resolve: done };
+      pending = entry;
+      cancel.addEventListener("click", () => done(false));
+      overlay.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") done(false);
+      });
+      join.addEventListener("click", () => {
+        join.disabled = true;
+        cancel.disabled = true;
+        const account = select?.value ?? review.accounts[0]?.id;
+        timedTool(
+          "sync-opt-in",
+          { syncId: review.syncId, optedIn: true, ...(account ? { account } : {}) },
+          new AbortController().signal,
+        ).then(
+          () => done(true),
+          (error: unknown) => {
+            note.textContent = error instanceof Error ? error.message : "Couldn't join this sync.";
+            join.disabled = false;
+            cancel.disabled = false;
+          },
+        );
+      });
+      document.body.append(overlay);
+      (join.disabled ? cancel : join).focus();
+    });
+  const confirm = async (syncId: string, signal: AbortSignal): Promise<boolean> => {
+    const review = await timedTool<AppSyncOptInReview>("sync-review", { syncId }, signal);
+    if (review.optedIn) return true;
+    const optedIn = await show(review);
+    if (optedIn) refresh();
+    return optedIn;
+  };
+  return {
+    start: refresh,
+    refresh,
+    handlers: {
+      optIn: async ({ syncId, optedIn }, { signal }) => {
+        if (!optedIn) {
+          await timedTool("sync-opt-in", { syncId, optedIn: false }, signal);
+          refresh();
+          return { optedIn: false };
+        }
+        return { optedIn: await confirm(syncId, signal) };
+      },
+    } satisfies NonNullable<SiteBridgeToolHandlers["syncs"]>,
+  };
+}
+
 let notifyConnectionsChanged = () => {};
-const connectCard = createConnectCard(() => notifyConnectionsChanged());
+const syncOptIn = createSyncOptIn();
+const connectCard = createConnectCard(() => {
+  notifyConnectionsChanged();
+  syncOptIn.refresh();
+});
 
 const tools: SiteBridgeToolHandlers = {
   catalog: ({ signal }) => timedTool("catalog", {}, signal),
@@ -401,6 +601,7 @@ const tools: SiteBridgeToolHandlers = {
   // Only Sites that follow data changes open the live connection.
   watchDataChanges: () => live?.start(),
   connections: connectCard.handlers,
+  syncs: syncOptIn.handlers,
 };
 
 /**
@@ -613,4 +814,5 @@ if (frame) {
   live = createLive((change) => host.notifyDataChanged(change));
   notifyConnectionsChanged = () => host.notifyToolReadiness();
   connectCard.start();
+  syncOptIn.start();
 }

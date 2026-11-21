@@ -19,7 +19,16 @@ export type OpenGeniSiteConnectionNeed = {
   connector: string;
   /** The account to sign in again, for `reconnect`. */
   account: string | null;
-  /** The button's words: "Connect Gmail", "Reconnect Gmail". */
+  /**
+   * Set when the connector takes an API key: the workspace adds one shared
+   * key from a vault. `add` for a workspace admin, `ask_admin` for others
+   * (nothing they can click).
+   */
+  sharedKey?: "add" | "ask_admin";
+  /**
+   * The button's words: "Connect Gmail", "Reconnect Gmail", "Add a shared
+   * key for Stripe", or "Ask an admin to connect Stripe".
+   */
   label: string;
   /** The App's declared tools that wait on it. */
   tools: ToolGatewayIdentity[];
@@ -35,8 +44,22 @@ export type OpenGeniSiteConnectionStatus = {
 };
 
 /** The one action of a card item, in plain words. */
-export function siteConnectCardLabel(item: Pick<ToolGatewaySiteSetupItem, "action" | "connector">) {
+export function siteConnectCardLabel(
+  item: Pick<ToolGatewaySiteSetupItem, "action" | "connector"> &
+    Partial<Pick<ToolGatewaySiteSetupItem, "sharedKey">>,
+) {
+  if (item.action === "connect" && item.sharedKey === "add")
+    return `Add a shared key for ${item.connector}`;
+  if (item.action === "connect" && item.sharedKey === "ask_admin")
+    return `Ask an admin to connect ${item.connector}`;
   return `${item.action === "reconnect" ? "Reconnect" : "Connect"} ${item.connector}`;
+}
+
+/** Whether the viewer can act on a card item themselves (not "ask an admin"). */
+export function siteConnectCardItemActionable(
+  item: Partial<Pick<ToolGatewaySiteSetupItem, "sharedKey">>,
+): boolean {
+  return item.sharedKey !== "ask_admin";
 }
 
 /** The host's card items as Site code may see them: no ids, no addresses. */
@@ -49,6 +72,7 @@ export function siteConnectionStatus(
     action: item.action,
     connector: item.connector,
     account: item.account,
+    ...(item.sharedKey ? { sharedKey: item.sharedKey } : {}),
     label: siteConnectCardLabel(item),
     tools: item.tools.map((tool) => ({ serverId: tool.serverId, toolName: tool.toolName })),
   }));

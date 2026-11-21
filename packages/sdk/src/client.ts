@@ -9,6 +9,8 @@ import type {
   AppPackageExportResponse,
   AppPackageInstallRequest,
   AppPackageInstallResponse,
+  AppPackageUpgradeRequest,
+  AppPackageUpgradeResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -156,10 +158,19 @@ import type {
   AppSync,
   AppSyncCreateRequest,
   AppSyncListResponse,
+  AppSyncOptInReview,
   AppSyncRunResponse,
   AppSyncStatusResponse,
   AppSyncSubscriptionResponse,
   AppSyncUpdateRequest,
+} from "@opengeni/contracts";
+import type {
+  AppNotifyRequest,
+  AppNotifyResponse,
+  AppWebhookCreateRequest,
+  AppWebhookListResponse,
+  AppWebhookSaveResponse,
+  AppWebhookUpdateRequest,
 } from "@opengeni/contracts";
 import type {
   SiteDataCollectionDefinitionRequest,
@@ -10425,6 +10436,26 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Upgrades an app from a newer package (docs/app-packages.md#upgrade):
+   * `dryRun` returns the plan; otherwise the package's version becomes the
+   * app's new version and only its new data definitions run.
+   */
+  async upgradeAppPackage(
+    workspaceId: string,
+    appId: string,
+    request: AppPackageUpgradeRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageUpgradeResponse> {
+    return await this.requestJson<AppPackageUpgradeResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(appId)}/package/upgrade`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   async setWorkspaceArtifactStatus(
     workspaceId: string,
     artifactId: string,
@@ -10592,17 +10623,42 @@ export class OpenGeniClient {
     );
   }
 
-  /** Opt the caller in to (or out of) a personal data sync. */
+  /**
+   * Opt the caller in to (or out of) a personal data sync. `account` picks
+   * which of their accounts of the sync's connector it runs on (an id from
+   * `getAppSyncOptInReview`). Without it an earlier choice is kept, else
+   * their first own account is used, and `accounts` lists them when several.
+   */
   async setAppSyncOptIn(
     workspaceId: string,
     siteId: string,
     syncId: string,
     optedIn: boolean,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; account?: string } = {},
   ): Promise<AppSyncSubscriptionResponse> {
+    const { account, ...requestOptions } = options;
     return await this.requestJson<AppSyncSubscriptionResponse>(
       optedIn ? "PUT" : "DELETE",
       `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/subscription`,
+      optedIn && account ? { account } : undefined,
+      undefined,
+      requestOptions,
+    );
+  }
+
+  /**
+   * What the caller confirms before opting in to a personal data sync: the
+   * tool and connector, their accounts of it, and the collection it fills.
+   */
+  async getAppSyncOptInReview(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncOptInReview> {
+    return await this.requestJson<AppSyncOptInReview>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/opt-in`,
       undefined,
       undefined,
       options,
@@ -10619,6 +10675,86 @@ export class OpenGeniClient {
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data/syncs`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** The app's inbound webhooks, with their addresses. Needs a manager of the app. */
+  async listAppWebhooks(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookListResponse> {
+    return await this.requestJson<AppWebhookListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create an inbound webhook; the response carries its secret, shown once. */
+  async createAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    request: AppWebhookCreateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change a webhook; `rotateSecret: true` returns a new secret, shown once. */
+  async updateAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    request: AppWebhookUpdateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "PATCH",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a webhook; its address stops accepting deliveries. */
+  async deleteAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Send a notification from the app as the caller (what `site.notify` does from its page). */
+  async notifyFromApp(
+    workspaceId: string,
+    siteId: string,
+    request: AppNotifyRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppNotifyResponse> {
+    return await this.requestJson<AppNotifyResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/notify`,
+      request,
       undefined,
       options,
     );

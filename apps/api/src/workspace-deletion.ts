@@ -1,5 +1,6 @@
 import {
   deleteWorkspaceIfQuiescent,
+  listAppPackageExportKeys,
   nestedPostgresSqlState,
   safeDatabaseErrorFacts,
 } from "@opengeni/db";
@@ -22,6 +23,10 @@ export async function deleteWorkspaceForRequest(
   // Site SQL rows in Postgres cascade with the workspace; the Durable Objects
   // holding the data do not, so note them first and drop them after.
   const siteSqlSites = await siteSqlSitesOfWorkspace(deps, input);
+  // Stored app package files: their rows cascade too, so note the objects.
+  const packageExports = await listAppPackageExportKeys(deps.db, input.workspaceId).catch(
+    () => [] as string[],
+  );
   let deleted;
   try {
     deleted = await deleteWorkspaceIfQuiescent(deps.db, {
@@ -85,4 +90,14 @@ export async function deleteWorkspaceForRequest(
     deleted.temporalScheduleCleanups,
   );
   await dropSiteSqlDatabases(deps, siteSqlSites, { workspaceId: input.workspaceId });
+  await Promise.all(
+    packageExports.map((key) =>
+      deps.objectStorage?.deleteObject(key).catch((error: unknown) => {
+        deps.observability?.warn?.("A deleted workspace's app package file wasn't removed", {
+          workspaceId: input.workspaceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }),
+    ),
+  );
 }

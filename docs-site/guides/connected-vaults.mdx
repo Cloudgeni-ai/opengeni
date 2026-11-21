@@ -72,6 +72,19 @@ Agents can list without search terms and follow `nextCursor`. They also see
 incomplete discovery and source freshness, so a provider outage does not
 become a request for the person to enter the same secret again.
 
+## Shared keys for tools
+
+A tool that signs in with an API key rather than OAuth can be connected once
+for the whole workspace with a key from a workspace or organization vault,
+hosted or connected. When an app's shared data syncs need such a tool, an admin
+picks **Add a shared key** on its connect card; people still connect their own
+key for their own use (or an admin connects the server for the workspace with a header such as
+`Authorization: Bearer {{secret:Team/Example key}}`). Opengeni stores only the
+reference and reads the value when it calls the tool, for apps, data syncs and
+agents alike; nobody, including the agent, sees the value. Everyone else is
+asked to contact an admin. Keys in someone's Only me vault can't be used this
+way. Tool approvals still apply.
+
 ## Your product as the password manager
 
 Keep the stored items in your backend and implement the signed external-vault

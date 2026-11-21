@@ -16,6 +16,8 @@ import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./app-sync";
+export * from "./app-webhooks";
+export * from "./app-package-exports";
 export * from "./organization-connectors";
 import {
   organizationConnectorLogin,
@@ -102221,6 +102223,7 @@ export {
   type ConnectionStatusGuard,
   type ConnectionTokenRefreshInput,
   type ConnectionTokenResolverOptions,
+  type CredentialReferenceResolution,
   type PermanentConnectionRefreshFailure,
   type RefreshTransportOptions,
   type ResolveConnectionCredentialInput,

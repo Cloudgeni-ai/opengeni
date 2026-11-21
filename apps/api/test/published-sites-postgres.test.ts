@@ -1584,7 +1584,16 @@ test("published page tools: declarations, audiences, live membership and approva
     expect(
       (await f.gateway(f.host, "GET", "/site/config", { session: invited })).json.viewer.kind,
     ).toBe("invited");
-    for (const method of ["catalog", "declarations", "resolve", "call", "invoke"]) {
+    // Hyphenated shell-only methods reach the tools route too (not unsupported).
+    for (const method of [
+      "catalog",
+      "declarations",
+      "resolve",
+      "call",
+      "invoke",
+      "sync-review",
+      "sync-opt-in",
+    ]) {
       expect(
         (await f.gateway(f.host, "POST", `/tools/${method}`, { visitor, body: {} })).status,
       ).toBe(403);

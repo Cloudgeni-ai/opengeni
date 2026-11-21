@@ -20,6 +20,11 @@ import type {
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
 import {
+  containsSecretReference,
+  credentialHeadersHaveSecretReferences,
+  isVaultCredentialConnection,
+} from "@opengeni/contracts";
+import {
   isNangoConnectionCredential,
   isNangoProviderDomain,
   nangoAuthHeaders,
@@ -563,6 +568,34 @@ export type ConnectionTokenResolverOptions = {
    * status race never calls it, so the owner can be told exactly once.
    */
   onConnectionNeedsReauth?: (broken: ConnectionNeedsReauth) => void | Promise<void>;
+  /**
+   * Swaps the vault values into a shared service connection's stored headers
+   * (its credential holds `{{secret:…}}` references, see docs/secrets.md)
+   * for one request. Runs with the connection's own vault reach, records the
+   * use, and throws when a reference can't be resolved. Without it such a
+   * connection never resolves: the result is auth_needed, and no reference
+   * text is ever sent to the tool.
+   */
+  resolveCredentialReferences?: (
+    input: CredentialReferenceResolution,
+  ) => Promise<Record<string, string>>;
+};
+
+/** One request's shared-key resolution (see `resolveCredentialReferences`). */
+export type CredentialReferenceResolution = {
+  connection: {
+    id: string;
+    accountId: string;
+    workspaceId: string;
+    providerDomain: string;
+  };
+  /** The stored headers, references and all. */
+  headers: Record<string, string>;
+  serverId: string;
+  toolName?: string;
+  destinationUrl: string;
+  /** Who and what caused this request, for the vault audit entry only. */
+  onBehalfOf?: { subjectId?: string; sessionId?: string; turnId?: string };
 };
 
 /** A connection this resolve just found broken: only reconnecting fixes it. */
@@ -647,6 +680,11 @@ export function buildConnectionTokenResolver(
     connectionUseAttribution?: ConnectionUseAttribution,
     recordUsage = true,
     acceptedTransports: readonly string[] = [],
+    use: {
+      serverId: string;
+      toolName?: string;
+      onBehalfOf?: CredentialReferenceResolution["onBehalfOf"];
+    } = { serverId: "" },
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
@@ -690,12 +728,57 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
+    let headers = material.headers;
+    if (!isVaultCredentialConnection(cred.metadata)) {
+      // A reference stored without the shared-key marker (for example a key
+      // saved by an older replica during a rolling deploy) is never sent as
+      // text and never resolved: only a connection set up as a shared key may
+      // read a vault. Fail closed and send nothing.
+      if (
+        credentialHeadersHaveSecretReferences(material.headers) ||
+        material.placements?.some((placement) => containsSecretReference(placement.value))
+      )
+        return authNeeded(ref, "designated_credential_unavailable", cred.id);
+    } else {
+      // A shared service connection: its headers hold vault references. Only
+      // a workspace-owned header key qualifies, and the values are read only
+      // for a real request; the credential-free preflight sends nothing.
+      if (cred.subjectId !== null || cred.kind !== "api_key" || material.placements)
+        return authNeeded(ref, "unsupported_auth", cred.id);
+      if (!recordUsage) headers = {};
+      else {
+        if (!options.resolveCredentialReferences)
+          return authNeeded(ref, "designated_credential_unavailable", cred.id);
+        try {
+          headers = normalizedCredentialHeaders(
+            await options.resolveCredentialReferences({
+              connection: {
+                id: cred.id,
+                accountId: cred.accountId,
+                workspaceId: cred.workspaceId,
+                providerDomain: cred.providerDomain,
+              },
+              headers: material.headers,
+              serverId: use.serverId,
+              ...(use.toolName ? { toolName: use.toolName } : {}),
+              ...(use.onBehalfOf ? { onBehalfOf: use.onBehalfOf } : {}),
+              destinationUrl,
+            }),
+          );
+        } catch {
+          // Missing item, no access, provider down: fail closed. The reason
+          // tells the person an admin must fix the shared key; nothing about
+          // the item or its value leaves here.
+          return authNeeded(ref, "designated_credential_unavailable", cred.id);
+        }
+      }
+    }
     if (recordUsage) {
       await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
     }
     return {
       status: "ok",
-      headers: material.headers,
+      headers,
       ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
@@ -1008,6 +1091,19 @@ export function buildConnectionTokenResolver(
       connectionUseAttribution,
       credentialResolutionMode === "execution",
       input.acceptedTransports ?? [],
+      {
+        serverId: input.serverId,
+        ...((input.toolName ?? input.toolId) ? { toolName: input.toolName ?? input.toolId } : {}),
+        onBehalfOf: {
+          ...((subjectId ?? input.subjectId) ? { subjectId: (subjectId ?? input.subjectId)! } : {}),
+          ...(input.connectionUseContext
+            ? {
+                sessionId: input.connectionUseContext.sessionId,
+                turnId: input.connectionUseContext.turnId,
+              }
+            : {}),
+        },
+      },
     );
   };
 }

@@ -37,6 +37,18 @@ export type SecretPrincipal =
       subjectId: string;
       verifiedHuman: boolean;
       viaApiKey: boolean;
+    }
+  /**
+   * A shared service connection's own authority: workspace and organization
+   * vaults that reach the workspace, never an Only me vault or a task vault,
+   * and no person to ask. `connectionId` is the workspace-owned connection
+   * the key is for; null only while an admin sets one up.
+   */
+  | {
+      kind: "service_connection";
+      accountId: string;
+      workspaceId: string;
+      connectionId: string | null;
     };
 
 export const SECRET_USE_SURFACES = [
@@ -69,6 +81,11 @@ export interface SecretUseContext {
    * host). Called only when a use must ask for approval; failures are ignored.
    */
   lookupDestination?: () => Promise<string | null>;
+  /**
+   * Who and what caused a use when the principal isn't a person (a shared
+   * service connection): recorded on the audit entry only, never authority.
+   */
+  onBehalfOf?: { subjectId?: string; sessionId?: string; turnId?: string };
 }
 
 export type SecretMaterial =
