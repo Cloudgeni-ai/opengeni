@@ -617,6 +617,8 @@ function ConversationView({
   );
   const renderStockAuthNeeded = (item: AuthNeededItem) => {
     if (!sessionId || importedArchive) return undefined;
+    // A request asked again further down shows as one line here.
+    if (item.askedAgainLater && item.capability) return <AuthNeededRow item={item} />;
     const decision = inChatConnectDecision(item, connectSupport, config.chatConnections);
     if (decision.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
     if (decision.kind === "integration") {

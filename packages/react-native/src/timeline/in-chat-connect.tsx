@@ -46,6 +46,7 @@ import { SecureValueInput } from "./secret-field";
 import { defaultSecretFieldMessages, secretInputTraits } from "./secret-field-model";
 import {
   NativeMachineRequestCard,
+  NativeRepeatedCapabilityRequestNote,
   NativeRepeatedMachineRequestNote,
   type NativeMachineRequestClient,
 } from "./machine-request-card";
@@ -227,6 +228,9 @@ export function useNativeInChatConnect({
           />
         );
       }
+      // The same connection was asked for again further down, where its card is live.
+      if (item.capability && item.askedAgainLater && !item.setupRequest)
+        return <NativeRepeatedCapabilityRequestNote name={item.capability.name} />;
       if (!client || !host || !chatConnections) return <NativeAuthNeededRow item={item} />;
       const key = `${workspaceId}:${sessionId}:${item.id}`;
       // A failed read says nothing about this person's access: offer to try

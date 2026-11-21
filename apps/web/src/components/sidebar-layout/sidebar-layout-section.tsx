@@ -1,11 +1,12 @@
 // The rail's customizable part (docs/sidebar-layout.md): the workspace's
 // default links and groups, with each person's own changes on top. Phones
 // show groups flattened and live lists shortened; the icon rail leaves it out.
-import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Link, useNavigate, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   AppWindowIcon,
   ArrowUpRightIcon,
   ChevronRightIcon,
+  LinkIcon,
   MoreHorizontalIcon,
 } from "lucide-react";
 import { useState } from "react";
@@ -25,7 +26,9 @@ import {
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import { pathHasAppPage } from "@/lib/onboarding-return";
 import { appPageLocation, appPagePathname } from "./app-page-location";
+import { inAppLinkPath } from "./in-app-link";
 import { useSidebarLayout } from "./use-sidebar-layout";
 
 const GROUPS_OPEN_KEY = "opengeni.rail.sidebar-groups";
@@ -156,6 +159,7 @@ function ChildRows({
   actions: RowActions;
   indent?: boolean;
 }) {
+  const router = useRouter();
   const menu = <RowMenu item={item} actions={actions} />;
   if (item.type === "app")
     return (
@@ -169,7 +173,20 @@ function ChildRows({
         indent={indent}
       />
     );
-  if (item.type === "link")
+  if (item.type === "link") {
+    const inApp = inAppLinkPath(item.url, window.location.origin, (path) =>
+      pathHasAppPage(router, path),
+    );
+    if (inApp !== null)
+      return (
+        <InAppLinkRow
+          path={inApp}
+          label={item.label}
+          pathname={pathname}
+          menu={menu}
+          indent={indent}
+        />
+      );
     return (
       <div className="relative">
         <a
@@ -186,6 +203,7 @@ function ChildRows({
         {menu}
       </div>
     );
+  }
   // A live list: its label, then its apps. An empty list isn't shown (see
   // sidebarItemsShown); the Sidebar page still lists it.
   return (
@@ -216,8 +234,56 @@ function ChildRows({
   );
 }
 
+/** A link to a page of this Opengeni: opens in place, like the rail's own links. */
+function InAppLinkRow({
+  path,
+  label,
+  pathname,
+  menu,
+  indent,
+}: {
+  path: string;
+  label: string;
+  pathname: string;
+  menu: React.ReactNode;
+  indent?: boolean;
+}) {
+  const router = useRouter();
+  const rail = useRail();
+  const active = pathname === new URL(path, window.location.origin).pathname;
+  return (
+    <div className="relative">
+      <a
+        href={path}
+        data-active={active ? "true" : undefined}
+        aria-current={active ? "page" : undefined}
+        className={cn(ROW, "pr-8", indent && "pl-4")}
+        onClick={(event) => {
+          // Let the browser open a new tab or window when asked to.
+          if (
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          )
+            return;
+          event.preventDefault();
+          rail.setDrawerOpen(false);
+          router.history.push(path);
+        }}
+      >
+        <LinkIcon aria-hidden="true" className="size-4 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+      </a>
+      {menu}
+    </div>
+  );
+}
+
 export function SidebarLayoutSection() {
   const rail = useRail();
+  const router = useRouter();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { layout, update } = useSidebarLayout(rail.workspaceId);
   const [openGroups, setOpenGroups] = useState(readOpenGroups);
@@ -271,8 +337,12 @@ export function SidebarLayoutSection() {
           );
         const holdsActive = item.items.some(
           (child) =>
-            child.type === "app" &&
-            pathname.startsWith(appPagePathname(rail.workspaceId, child.appId)),
+            (child.type === "app" &&
+              pathname.startsWith(appPagePathname(rail.workspaceId, child.appId))) ||
+            (child.type === "link" &&
+              inAppLinkPath(child.url, window.location.origin, (path) =>
+                pathHasAppPage(router, path),
+              )?.split(/[?#]/)[0] === pathname),
         );
         const open = holdsActive || (openGroups[item.id] ?? !item.collapsed);
         const childIds = item.items.map((child) => child.id);

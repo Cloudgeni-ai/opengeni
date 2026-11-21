@@ -15,7 +15,7 @@ in Artifacts. The sidebar shows those pins through a **Pinned apps** list.
 | ----------- | ---------------------------------------------------------------------- |
 | `group`     | A named, collapsible group of the items below. Groups don't nest.      |
 | `app`       | An App, optionally one of its pages (`path: "/releases"`). Its own title unless `label` is set. |
-| `link`      | An outside `https://` link with a `label`. It opens in a new tab and is marked external. |
+| `link`      | An `https://` link with a `label`. An outside link opens in a new tab and is marked external; a link to a page of this Opengeni opens in place. |
 | `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (Apps this person opened last), `limit` 1 to 20 (default 5). |
 
 Item ids are 1 to 64 letters, digits, `-` or `_`; the server makes one when a
