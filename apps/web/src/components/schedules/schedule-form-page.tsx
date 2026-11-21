@@ -7,6 +7,7 @@ import { Link } from "@tanstack/react-router";
  * -> an optional Name -> one closed Settings section.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY } from "@opengeni/contracts";
 import type { Agent, AgentTemplate } from "@opengeni/sdk";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
@@ -427,6 +428,16 @@ export function ScheduleFormPage({
    The agent schedule form.
    -------------------------------------------------------------------------- */
 
+const NOT_AGENT_CHAT = "Not a chat with this agent.";
+
+/** The chat an automation left when its agent changed, as the server recorded it. */
+function agentChatChangeOf(task: ScheduledTask | null | undefined): { sessionId: string } | null {
+  const value = task?.metadata[SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY];
+  if (!value || typeof value !== "object") return null;
+  const sessionId = (value as { sessionId?: unknown }).sessionId;
+  return typeof sessionId === "string" ? { sessionId } : null;
+}
+
 function scheduledLearningScope(
   form: ScheduleDraft,
   sessions: Session[],
@@ -657,6 +668,7 @@ function AgentScheduleForm({
     editing && task?.runMode === "reusable_session" ? task.reusableSessionId : null;
   const materializedSessionId =
     draft.runMode === "reusable_session" ? savedReusableSessionId : null;
+  const agentChatChange = editing ? agentChatChangeOf(task) : null;
   const inheritsChatSettings =
     draft.runMode === "existing_session" || Boolean(materializedSessionId);
   const [errors, setErrors] = useState<FormErrors>({});
@@ -1151,6 +1163,12 @@ function AgentScheduleForm({
     }
     if (draft.runMode === "existing_session" && !draft.targetSessionId) {
       next.target = "Pick the chat each run posts into.";
+    } else if (
+      draft.runMode === "existing_session" &&
+      draft.agentId &&
+      sessions.find((session) => session.id === draft.targetSessionId)?.agentId !== draft.agentId
+    ) {
+      next.target = NOT_AGENT_CHAT;
     }
     if (!inheritsChatSettings && draft.executionTarget === "machine" && !draft.machineSandboxId) {
       next.machine = "Pick a connected machine.";
@@ -1349,6 +1367,10 @@ function AgentScheduleForm({
       value: session.id,
       label: sessionDisplayTitle(session),
       meta: session.status,
+      // An agent's automation posts only into that agent's chats.
+      ...(draft.agentId && session.agentId !== draft.agentId
+        ? { disabled: true, disabledReason: NOT_AGENT_CHAT }
+        : {}),
     })),
   ];
 
@@ -1408,10 +1430,8 @@ function AgentScheduleForm({
                   value: "existing_session",
                   label: "Use an existing chat",
                   description: "Continue a conversation with its current settings.",
-                  disabled: Boolean(draft.agentId) || !access.canTargetSessions,
-                  disabledReason: draft.agentId
-                    ? "An agent's automation starts a new chat each run."
-                    : "You need permission to open chats in this workspace.",
+                  disabled: !access.canTargetSessions,
+                  disabledReason: "You need permission to open chats in this workspace.",
                 },
                 {
                   value: "reusable_session",
@@ -1419,8 +1439,6 @@ function AgentScheduleForm({
                     ? "Use this automation's chat"
                     : "Create a chat for this automation",
                   description: "Keep the results together in one conversation.",
-                  disabled: Boolean(draft.agentId),
-                  disabledReason: "An agent's automation starts a new chat each run.",
                 },
                 {
                   value: "new_session_per_run",
@@ -1444,6 +1462,20 @@ function AgentScheduleForm({
                   "Open this automation's chat"
                 )}{" "}
                 to change its model, tools or machine.
+              </p>
+            ) : null}
+            {eachRun === "reusable_session" && agentChatChange ? (
+              <p className="m-0 text-xs leading-4.5 text-fg-muted">
+                Its agent changed, so it has a new chat.{" "}
+                {access.canTargetSessions ? (
+                  <Link
+                    className="underline underline-offset-2"
+                    to="/workspaces/$workspaceId/sessions/$sessionId"
+                    params={{ workspaceId, sessionId: agentChatChange.sessionId }}
+                  >
+                    Previous chat
+                  </Link>
+                ) : null}
               </p>
             ) : null}
           </Field>

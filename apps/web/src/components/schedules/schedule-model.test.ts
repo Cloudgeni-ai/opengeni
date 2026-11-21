@@ -408,6 +408,37 @@ describe("schedule requests", () => {
     expect("rigId" in request).toBe(false);
   });
 
+  test("an agent's existing-chat automation names its agent and nothing else", () => {
+    const agentId = "00000000-0000-4000-8000-000000000042";
+    const request = createRequestFromDraft(
+      {
+        ...base(),
+        agentId,
+        runMode: "existing_session",
+        targetSessionId: "00000000-0000-4000-8000-000000000099",
+        rigId: "stale-environment",
+      },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect(request).toMatchObject({
+      runMode: "existing_session",
+      targetSessionId: "00000000-0000-4000-8000-000000000099",
+      agentConfig: {
+        agentId,
+        prompt: "Summarize open incidents.",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+    });
+    expect("rigId" in request).toBe(false);
+    const ownChat = createRequestFromDraft(
+      { ...base(), agentId, runMode: "reusable_session" },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect(ownChat).toMatchObject({ runMode: "reusable_session", agentConfig: { agentId } });
+  });
+
   test("moving a schedule sends only its new destination and changed message", () => {
     const initial = base();
     const stored = task();
