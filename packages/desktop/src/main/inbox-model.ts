@@ -1,7 +1,7 @@
 // What the desktop shows for the person's inbox. Pure, so it is tested without
 // Electron.
 
-import type { InboxItem, ListInboxResponse } from "@opengeni/sdk";
+import type { InboxEntry, ListInboxResponse } from "@opengeni/sdk";
 import { OPENGENI_WEB_PATHS, type AppWebPaths } from "@opengeni/sdk/app-links";
 
 export type InboxAction =
@@ -29,7 +29,7 @@ export function plainText(markdown: string): string {
     .trim();
 }
 
-export function notificationPlan(item: InboxItem, accountLabel: string | null): NotificationPlan {
+export function notificationPlan(item: InboxEntry, accountLabel: string | null): NotificationPlan {
   const context = [item.sender?.label, item.sessionTitle, accountLabel].filter(Boolean).join(" · ");
   const plan: NotificationPlan = {
     title: item.title,
@@ -70,13 +70,13 @@ export function bannerText(
   return { body: plan.body ? `${plan.subtitle}\n${plan.body}` : plan.subtitle };
 }
 
-function snoozed(item: InboxItem, now: number): boolean {
+function snoozed(item: InboxEntry, now: number): boolean {
   return item.snoozedUntil !== null && Date.parse(item.snoozedUntil) > now;
 }
 
 export interface InboxDiff {
   /** Items to announce now. */
-  announce: InboxItem[];
+  announce: InboxEntry[];
   /** Item ids whose banners should leave Notification Center. */
   retract: string[];
   /** What was seen, to diff the next reading against. */
@@ -95,8 +95,9 @@ export function diffInbox(
   now: number,
 ): InboxDiff {
   const seen = new Map<string, string>();
-  const announce: InboxItem[] = [];
-  for (const item of inbox.items) {
+  const announce: InboxEntry[] = [];
+  // Notices about something other than a chat are announced like items.
+  for (const item of [...inbox.items, ...(inbox.notices ?? [])]) {
     if (item.status !== "open") continue;
     seen.set(item.id, item.updatedAt);
     if (!previous || !item.unread || snoozed(item, now)) continue;
@@ -106,8 +107,23 @@ export function diffInbox(
   return { announce, retract, seen };
 }
 
+/** A notice link's path in the web app (its links are this deployment's own pages). */
+function appLinkPath(url: string): string | null {
+  if (/^\/(?![/\\])/u.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:"
+      ? `${parsed.pathname}${parsed.search}${parsed.hash}`
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The in-app path that shows an item: its session at the moment it came from. */
-export function inboxItemPath(item: InboxItem, paths: AppWebPaths = OPENGENI_WEB_PATHS): string {
+export function inboxItemPath(item: InboxEntry, paths: AppWebPaths = OPENGENI_WEB_PATHS): string {
+  // A notice about something other than a chat opens its link in the app.
+  if (item.sessionId === null) return appLinkPath(item.link.url) ?? paths.inbox(item.workspaceId);
   if (!item.sessionAvailable) return paths.inbox(item.workspaceId);
   return paths.session(item.workspaceId, item.sessionId, item.eventSequence || null);
 }

@@ -15,6 +15,9 @@
 {{- $providerTtftRecentMinSamples := int (default 30 ((.Values.observability).prometheusRule).providerTtftRecentMinSamples) }}
 {{- $providerTtftBaselineMinSamples := int (default 200 ((.Values.observability).prometheusRule).providerTtftBaselineMinSamples) }}
 {{- $sessionEventMinSamples := int (default 100 ((.Values.observability).prometheusRule).sessionEventMinSamples) }}
+{{- $apiEventLoopBlockedSeconds := float64 (default 5 ((.Values.observability).prometheusRule).apiEventLoopBlockedSeconds) }}
+{{- $apiEventLoopBlockedMinBlocks := int (default 2 ((.Values.observability).prometheusRule).apiEventLoopBlockedMinBlocks) }}
+{{- $scrapeInterval := ((.Values.observability).serviceMonitor).interval | default "30s" }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
 {{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
@@ -30,6 +33,9 @@
 {{- end }}
 {{- if le $sessionEventMinSamples 0 }}
 {{- fail "observability.prometheusRule.sessionEventMinSamples must be positive" }}
+{{- end }}
+{{- if or (le $apiEventLoopBlockedSeconds 0.0) (le $apiEventLoopBlockedMinBlocks 0) }}
+{{- fail "observability.prometheusRule.apiEventLoopBlockedSeconds and apiEventLoopBlockedMinBlocks must be positive" }}
 {{- end }}
 {{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must cover at least three sandbox reaper periods" }}
@@ -709,6 +715,27 @@ spec:
             user_impact: 'Opening workspaces and session lists feels slow in the app.'
             next_step: 'Check database CPU and slow queries before adding API pods.'
             description: Workspace or session reads have stayed slow (p95 over 2 seconds in every 5-minute window for 10 minutes) and degrade the interactive control plane. A few-second burst, such as one page load during a slow query or pod start, does not page. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
+        # Requests that hang on a blocked event loop are often cut off by a
+        # liveness restart before they complete, so the latency histogram above
+        # never records them. The event-loop delay gauge reports the worst
+        # block since the previous scrape, so count blocked scrapes per pod.
+        - alert: OpenGeniApiEventLoopBlocked
+          expr: |
+            max by (pod) (
+              count_over_time(
+                (max by (pod) (opengeni_nodejs_eventloop_lag_max_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}) > {{ $apiEventLoopBlockedSeconds }})[10m:{{ $scrapeInterval }}]
+              )
+            ) >= {{ $apiEventLoopBlockedMinBlocks }}
+          labels:
+            severity: warning
+          annotations:
+            summary: 'API pod {{ "{{ $labels.pod }}" }} froze for more than {{ $apiEventLoopBlockedSeconds }} seconds at least {{ $apiEventLoopBlockedMinBlocks }} times in 10 minutes.'
+            headline: 'API freezing'
+            value: '{{ "{{ printf `%.0f` $value }}" }} freezes over {{ $apiEventLoopBlockedSeconds }}s (10 min)'
+            user_impact: 'Every request on that pod waits while it is frozen; pages and chats hang for seconds, and the pod may fail its health checks and restart.'
+            next_step: 'Find what blocks the API on that pod (a large response, parse or synchronous work) from its logs and traces around the freezes; check whether it began with a deploy.'
+            description: opengeni_nodejs_eventloop_lag_max_seconds is the longest event-loop delay since the previous scrape. Repeated multi-second blocks stall every in-flight request on the pod and its liveness probe, and requests killed by the resulting restart never reach opengeni_http_request_duration_seconds, so the latency alerts stay quiet. Correlate the freeze times with API logs, traces and request routes.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # Product-level failure safety net: a route whose refusals (401/403/409/422)
         # jump against its own one-day baseline, or that refuses most of its
         # traffic. Use the classified rejection counter so an ended attempt's
@@ -1508,6 +1535,32 @@ spec:
             user_impact: 'If this is the API or web service, users may be unable to use the app; if it is a worker, agent turns may stall.'
             next_step: 'Check the {{ "{{ $labels.job }}" }} pods (crash, OOM, failed deploy) and their health endpoint; roll back if it followed a deploy.'
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        # A liveness kill or crash restarts the container in place, so the pod
+        # keeps its Service endpoint and OpenGeniServiceDown never fires. Turn
+        # workers have their own restart alerts above; Job pods report through
+        # KubeJobFailed.
+        - alert: OpenGeniServiceRestarted
+          expr: |
+            max by (pod, container) (
+              increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }}}[10m])
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (
+                kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component!="",label_app_kubernetes_io_component!="worker-turns"}
+              )
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (kube_pod_owner{namespace={{ .Release.Namespace | quote }},owner_kind!="Job"})
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Container {{ "{{ $labels.container }}" }} in {{ "{{ $labels.pod }}" }} restarted in the last 10 minutes.'
+            headline: '{{ "{{ $labels.container }}" }} restarted'
+            value: '{{ "{{ printf `%.0f` $value }}" }} restart(s) in 10 min'
+            user_impact: 'Requests on that pod failed or hung until it came back; if it is the API, users saw stalled pages or chats.'
+            next_step: 'Check the container''s last termination reason (liveness probe failure, OOMKilled, crash) and its logs just before the restart.'
+            description: The container restarted in place, which a liveness probe failure, an out-of-memory kill or a crash causes. A liveness restart usually follows a blocked event loop or a hung dependency, so check OpenGeniApiEventLoopBlocked and the pod's previous logs. Deploy rollouts replace pods instead of restarting them and do not trigger this.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # ── Worker memory headroom ───────────────────────────────────────────
         - alert: OpenGeniTurnWorkerMemoryHeadroomLow
           expr: |
@@ -1638,7 +1691,7 @@ spec:
         - alert: OpenGeniNodeContainerRuntimeErrors
           expr: |
             sum by (node, operation_type) (
-              increase(kubelet_runtime_operations_errors_total[5m])
+              increase(kubelet_runtime_operations_errors_total{operation_type!="exec_sync"}[5m])
               * on (job, instance) group_left (node)
               opengeni:kubelet_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             ) > 0
@@ -1653,7 +1706,7 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} error(s) (5 min)'
             user_impact: 'Pods on this server may fail to start or restart, making services look down.'
             next_step: 'Check the operation type and node health; confirm affected pods before replacing the node.'
-            description: Runtime errors have kept recurring on this node for at least 10 minutes. Persistent runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting. A single burst, such as kubelet retrying the removal of a container the runtime is already removing during a rollout, does not page.
+            description: Runtime errors have kept recurring on this node for at least 10 minutes. Persistent runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting. A single burst, such as kubelet retrying the removal of a container the runtime is already removing during a rollout, does not page. Exec probe failures (exec_sync) are excluded because they follow the container's own lifecycle (probes against containers that are starting or stopping during rollouts) and probe failures are already visible as readiness and restart signals; a broken runtime also fails the other operations.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeNotReady
           expr: |
@@ -1912,6 +1965,76 @@ spec:
             user_impact: 'No user impact; we cannot measure Codex cache efficiency.'
             next_step: 'Not urgent: an engineer should check whether the Codex usage format changed.'
             description: For 15m, at least 3 Codex-subscription calls and over 5% of those reporting usage in 30m have omitted cached-token fields, or active HTTP-success traffic has produced no call that reported usage. Calls without any usage count as status="no_usage", not missing. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
+        # ── Prompt-cache prefix stability ───────────────────────────────────
+        # A cache hit ratio cannot see a defect that rewrites a session's
+        # prefix once: the median call stays warm. These read the per-call
+        # warm-miss classification instead (opengeni_model_prompt_cache_*),
+        # which compares each call with the previous call of the same model in
+        # the same session.
+        - alert: OpenGeniPromptCachePrefixChanged
+          # Within one deployment a session's tools and system prompt must not
+          # change: every transition (goals, compute, connectors, Skills, ...)
+          # is designed to keep them byte-identical. A release that edits
+          # model-facing text is classed release_changed and never counts here.
+          # Five in a day is far above noise and catches a defect that hits
+          # only some sessions once each.
+          expr: |
+            sum by (provider, model) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},class=~"tools_changed|system_changed"}[24h])) >= 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Sessions on {{ "{{ $labels.model }}" }} are changing their tools or system prompt mid-session.'
+            headline: 'Prompt cache prefix changing'
+            value: '{{ "{{ $value | humanize }}" }} misses in 24h'
+            user_impact: 'Affected turns re-send their whole prompt uncached: slower replies and higher model cost.'
+            next_step: 'Find the calls whose prompt_cache_diagnostics warmMiss class is tools_changed or system_changed and diff their requests; the prompt prefix invariant test should reproduce the transition.'
+            description: At least 5 model calls in 24h read much less prompt cache than the previous call of the same model in the same session made warm, and their request fingerprints prove the tools or system prompt changed within one deployment. That is a prompt-cache stability defect, not provider behaviour. Inspect model_call_facts.prompt_cache_diagnostics for the affected sessions.
+        - alert: OpenGeniPromptCacheHistoryRewriteLossHigh
+          # Rewritten history (an item an earlier request already sent changed,
+          # or signed thinking newly dropped) has a known baseline, so it alerts
+          # on its share of prompt tokens the cache served rather than a count.
+          expr: |
+            (
+              sum by (provider) (increase(opengeni_model_prompt_cache_missed_tokens_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},class=~"history_rewritten|thinking_dropped"}[6h]))
+              /
+              clamp_min(sum by (provider) (increase(opengeni_model_cached_tokens_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[6h])), 1)
+            ) > 0.02
+            and
+            sum by (provider) (increase(opengeni_model_cached_tokens_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[6h])) >= 10000000
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Rewritten history is costing {{ "{{ $labels.provider }}" }} over 2% of its cached prompt tokens.'
+            headline: 'Prompt cache lost to history rewrites'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of cached tokens'
+            user_impact: 'Affected turns re-send part of their history uncached: slower replies and higher model cost.'
+            next_step: 'Group the affected calls by warmMiss class and divergedWithinItems in prompt_cache_diagnostics to find which projection rewrites earlier items.'
+            description: Over 6h, prompt tokens lost to history_rewritten and thinking_dropped warm misses exceed 2% of the tokens the provider served from cache, with at least 10M cached tokens. An earlier request's items are being sent differently on a later request.
+        - alert: OpenGeniPromptCacheDiagnosticsBlind
+          # A warm miss with no request fingerprint on either call cannot be
+          # explained, so a defect that rewrites prefixes would go unseen.
+          # Most misses unobserved means the fingerprint path is broken for
+          # that provider's transport.
+          expr: |
+            (
+              sum by (provider) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},class="unobserved"}[24h]))
+              /
+              clamp_min(sum by (provider) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[24h])), 1)
+            ) > 0.5
+            and
+            sum by (provider) (increase(opengeni_model_prompt_cache_warm_misses_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[24h])) >= 20
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Most prompt-cache misses on {{ "{{ $labels.provider }}" }} have no request fingerprint.'
+            headline: 'Prompt cache diagnostics blind'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of misses unobserved'
+            user_impact: 'No direct impact; prompt-cache defects on this provider would go undetected.'
+            next_step: 'Check that the provider transport passes its request body to the prompt-cache fingerprint observer.'
+            description: Over 24h more than half of this provider's warm prompt-cache misses (at least 20) lack a request fingerprint on the call or its predecessor, so tools, system prompt and history changes cannot be told apart from provider eviction.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
           # Only infrastructure faults count (infrastructure="true": offline,

@@ -29,7 +29,9 @@ import {
 } from "./canary-publication-receipts";
 import { lockstepCanaryBase, retiredVersionSet } from "./release/lockstep-version";
 import {
-  publishableWorkspacePackages,
+  isBestEffortPublication,
+  isPublishedPackageName,
+  releaseContractPackages,
   repoRoot,
   topologicallySortedPackages,
   type WorkspacePackage,
@@ -971,8 +973,7 @@ export function parseCanaryCohort(
     if (
       !isObject(pkg) ||
       !onlyKeys(pkg, ["name", "version", "previousLatest", "integrity", "archiveBytes"]) ||
-      typeof pkg.name !== "string" ||
-      !/^@opengeni\/[a-z0-9][a-z0-9-]*$/.test(pkg.name) ||
+      !isPublishedPackageName(pkg.name) ||
       names.has(pkg.name) ||
       typeof pkg.version !== "string" ||
       !CANARY_VERSION_PATTERN.test(pkg.version) ||
@@ -1036,7 +1037,9 @@ export async function main(): Promise<void> {
     runId: process.env.GITHUB_RUN_ID!,
     attempt: process.env.GITHUB_RUN_ATTEMPT!,
   });
-  const packages = topologicallySortedPackages(publishableWorkspacePackages());
+  // Canaries publish only the release contract (no best-effort unscoped CLI);
+  // sourceCohort in canary-reconciliation-inputs must compute the same set.
+  const packages = topologicallySortedPackages(releaseContractPackages());
   const config = JSON.parse(readFileSync(join(repoRoot, ".changeset/config.json"), "utf8")) as {
     fixed?: string[][];
   };
@@ -1064,7 +1067,8 @@ export async function main(): Promise<void> {
   const versions = planCanaryVersions(
     canaryBasePackages(packages),
     new Map(packages.map((pkg) => [pkg.name, metadata.get(pkg.name)!["dist-tags"].canary ?? null])),
-    config.fixed ?? [],
+    // The best-effort CLI shares the fixed group but is not a canary package.
+    (config.fixed ?? []).map((group) => group.filter((name) => !isBestEffortPublication(name))),
     // Registry tags can lag reserved/staged versions. Each workflow attempt
     // therefore starts in a fresh range without guessing or overwriting them.
     workflowCanarySequence(process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT),

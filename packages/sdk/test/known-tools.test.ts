@@ -343,6 +343,57 @@ describe("known tools SDK", () => {
     ).rejects.toMatchObject({ status: 409 });
     expect(f.requests).toHaveLength(2);
   });
+  test("a Site declaring a former first-party name calls the current tool", async () => {
+    const former = { serverId: "opengeni", toolName: "site_data_query" };
+    const current = { serverId: "opengeni", toolName: "app_data_query" };
+    const renamed = (): ToolGatewayResolvedTool => ({
+      ...tool(),
+      entry: {
+        ...tool().entry,
+        identity: current,
+        modelName: "opengeni__app_data_query",
+        codemodePath: ["opengeni", "app_data_query"],
+      },
+    });
+    const f = fixture((path, body) => {
+      if (path === "manifest") {
+        expect(body.identities).toEqual([current]);
+        return response({ version: 1, digest: "c".repeat(64), tools: [renamed()] });
+      }
+      if (path === "resolve") return response(renamed());
+      return response(result(body, renamed()));
+    });
+    const bridge = createSiteToolBridge({
+      workspaceTools: f.tools,
+      workspaceId: "workspace",
+      artifactId: "artifact",
+      siteVersionId: "version",
+      requestedTools: [former],
+      callTool: async () => {
+        throw new Error("legacy workspace call forbidden");
+      },
+    });
+    const signal = new AbortController().signal;
+    const catalog = await bridge.catalog({ signal });
+    expect(catalog.entries.map((entry) => entry.identity)).toEqual([current]);
+    for (const named of [former, current]) {
+      await bridge.call(
+        { catalogDigest: catalog.digest, identity: named, arguments: {} },
+        { signal },
+      );
+      const resolved = await bridge.resolve!({ target: { identity: named } }, { signal });
+      expect(resolved.entry.identity).toEqual(current);
+    }
+    const sent = f.requests.filter((request) => request.path !== "manifest");
+    expect(sent.length).toBe(4);
+    for (const request of sent) expect(request.body.target).toEqual({ identity: current });
+    await expect(
+      bridge.resolve!(
+        { target: { identity: { serverId: "opengeni", toolName: "sessions_list" } } },
+        { signal },
+      ),
+    ).rejects.toThrow();
+  });
   test("modern Site calls strip forged host authority and approval tokens", async () => {
     const f = fixture((_path, body) => response(result(body)));
     const bridge = createSiteToolBridge({

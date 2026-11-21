@@ -76,7 +76,7 @@ async function click(element: HTMLElement) {
 
 test("explicit save, labeled custom choices, and deny-all are distinct from filtered-empty", async () => {
   const { calls } = await mount();
-  expect(host.textContent).toContain("Saving will block all new integration connections");
+  expect(host.textContent).toContain("Saving will block all new connected tool connections");
   expect(host.textContent).toContain("Custom MCP");
   expect(host.textContent).toContain("Custom OpenAPI");
   expect(host.textContent).toContain("Custom GraphQL");
@@ -104,12 +104,12 @@ test("uncertain saves lock edits and retry the exact operation and request", asy
   await click(host.querySelector<HTMLButtonElement>('[role="switch"][aria-label^="Allow "]')!);
   await click(button("Save changes"));
   expect(host.textContent).toContain("1 selected");
-  expect(button("All integrations").disabled).toBe(true);
+  expect(button("All connected tools").disabled).toBe(true);
   await click(button("Retry same save"));
   const writes = calls.filter((call) => call.method === "PUT");
   expect(writes).toHaveLength(2);
   expect(writes[0]!.body).toBe(writes[1]!.body);
-  expect(host.textContent).toContain("Integration settings saved.");
+  expect(host.textContent).toContain("Connected tool settings saved.");
 });
 
 test("switching from unrestricted to no selections explicitly saves deny-all", async () => {
@@ -117,7 +117,7 @@ test("switching from unrestricted to no selections explicitly saves deny-all", a
   // Everything is allowed, so there is nothing to pick.
   expect(host.querySelector('[role="switch"][aria-label^="Allow "]')).toBeNull();
   await click(button("Only selected"));
-  expect(host.textContent).toContain("Saving will block all new integration connections");
+  expect(host.textContent).toContain("Saving will block all new connected tool connections");
   await click(button("Save changes"));
   expect(calls.find((call) => call.method === "PUT")?.body).toMatchObject({
     mode: "restricted",
@@ -146,7 +146,7 @@ test("a definite permission refusal is not presented as an uncertain save", asyn
   await click(button("Save changes"));
   expect(host.textContent).toContain("no longer have permission");
   expect(host.textContent).not.toContain("Retry same save");
-  expect(button("All integrations").disabled).toBe(true);
+  expect(button("All connected tools").disabled).toBe(true);
   expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
 });
 
@@ -165,7 +165,7 @@ test("actor change ignores late save callbacks and non-admin sessions cannot rea
     resolve({ mode: "restricted", allowedIntegrationKeys: ["slack"], revision: 2 }),
   );
   expect(host.textContent).toContain("0 selected");
-  expect(host.textContent).not.toContain("Integration settings saved.");
+  expect(host.textContent).not.toContain("Connected tool settings saved.");
   const count = calls.length;
   await render({ managedSession: false });
   expect(calls).toHaveLength(count);

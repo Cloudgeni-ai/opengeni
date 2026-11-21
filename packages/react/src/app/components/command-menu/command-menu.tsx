@@ -912,8 +912,8 @@ function CommandMenuDialog(props: {
       const sites = recentSites(knownSites, env.currentSiteId, RECENT_SITE_LIMIT);
       if (sites.length > 0) {
         result.push({
-          label: "Recent Sites",
-          items: sites.map((site) => siteItem(site, "Recent Sites")),
+          label: "Recent apps",
+          items: sites.map((site) => siteItem(site, "Recent apps")),
           best: 0,
         });
       }
@@ -1096,8 +1096,8 @@ function CommandMenuDialog(props: {
     result.sort((a, b) => b.best - a.best);
     if (sitesFound.length > 0) {
       const sitesGroup: Group = {
-        label: "Sites",
-        items: sitesFound.map((entry) => siteItem(entry.site, "Sites", trimmed)),
+        label: "Apps",
+        items: sitesFound.map((entry) => siteItem(entry.site, "Apps", trimmed)),
         best: sitesFound[0]!.rank,
       };
       // Sites always follow chats; with no chats they take their place by match.
@@ -1128,7 +1128,7 @@ function CommandMenuDialog(props: {
       const lastFound = Math.max(
         result.findIndex((group) => group.label === "Chats"),
         result.findIndex((group) => group.label === "Sub-agent chats"),
-        result.findIndex((group) => group.label === "Sites"),
+        result.findIndex((group) => group.label === "Apps"),
       );
       const at =
         lastFound >= 0
@@ -1338,8 +1338,8 @@ function CommandMenuDialog(props: {
     : pickingWorkspace
       ? "Switch to workspace…"
       : meetingPages
-        ? "Search chats, Sites and meetings, or run an action…"
-        : "Search chats and Sites, or run an action…";
+        ? "Search chats, apps and meetings, or run an action…"
+        : "Search chats and apps, or run an action…";
   const optionId = (item: Item) => `${listId}-${item.key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 
   return (
@@ -1423,8 +1423,8 @@ function CommandMenuDialog(props: {
                   : pickingWorkspace
                     ? "Search workspaces"
                     : meetingPages
-                      ? "Search chats, Sites, meetings and actions"
-                      : "Search chats, Sites and actions"
+                      ? "Search chats, apps, meetings and actions"
+                      : "Search chats, apps and actions"
               }
               autoComplete="off"
               autoCorrect="off"

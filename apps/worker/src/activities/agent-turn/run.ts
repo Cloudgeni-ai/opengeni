@@ -10,8 +10,10 @@ import {
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
   readSessionAgentPrompt,
+  readSessionOrgAgentVersion,
   markOrganizationAnthropicApiKeyCreditRefused,
 } from "@opengeni/db";
+import { orgAgentEndUserSubject, resolveOrgAgentToolLogins } from "./org-agent-tool-logins";
 import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
@@ -49,6 +51,7 @@ import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
   codexRequestStorage,
+  createCodexTurnState,
   withCodexRequestOverrides,
   withResponsesConversation,
   createResponsesTurn,
@@ -90,7 +93,7 @@ import {
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
-import { ToolResultSpill } from "./tool-result-spill";
+import { ToolResultStore } from "./tool-result-store";
 import { attendanceChangeNote } from "./unattended";
 import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -465,7 +468,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sha256: string;
       filename: string;
     }> = [];
-    const toolResultSpill = new ToolResultSpill({
+    const toolResultStore = new ToolResultStore({
       db,
       objectStorage,
       observability,
@@ -485,7 +488,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getSetupBoxSession: () => sandboxState.setupBoxSession,
       getSdkOwnedSandboxSession: () => media.sdkOwnedSandboxSession,
       getSandboxGroupId: () => sandboxState.sandboxGroupId,
-      getTurnSandboxProvisioner: () => sandboxState.turnSandboxProvisioner,
       runWorkspaceMutation: runWorkspaceMutationForSandbox,
     });
     const historySink = createTurnHistorySink({
@@ -912,6 +914,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       session.scopeSubjectId,
                       input.sessionId,
                     ),
+                    // One attempt is one turn for the backend's sticky routing:
+                    // a retried or resumed attempt starts with fresh routing.
+                    turnState: createCodexTurnState(),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
@@ -1425,6 +1430,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // The agent revision in this chat's system prompt, read once so every
           // compaction and the turn itself use the same instructions. The
           // turn's first attempt records it, so retries build the same prompt.
+          // The organization agent version this chat runs, frozen for every
+          // attempt of the turn (null for every other chat).
+          const orgAgentVersion = await readSessionOrgAgentVersion(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turn: {
+              turnId: attempt.turnId!,
+              expectedExecutionGeneration: attempt.executionGeneration!,
+              expectedAttemptId: input.attemptId,
+            },
+          });
           const agentPrompt = await readSessionAgentPrompt(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -1688,6 +1705,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             attachCodemodeTokenRenewal,
             attachRunCredentialRenewal,
           } = runCredentials;
+          // An organization agent's tool servers get their logins (credential
+          // provider, the end user's stored login, the chat's headers, or the
+          // shared key); one without a login is attached as unavailable.
+          const orgAgentLogins = await resolveOrgAgentToolLogins({
+            db,
+            settings,
+            observability,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            orgAgent: orgAgentVersion,
+            endUserSubjectId: orgAgentEndUserSubject(
+              session.scopeSubjectId,
+              turn.initiatingHumanSubjectId,
+            ),
+            chat: {
+              sessionId: input.sessionId,
+              turnStarterSubjectId: turn.initiatingHumanSubjectId,
+              turnInitiatorSubjectId: turn.initiator.subjectId,
+            },
+            mcpServers: runSettings.mcpServers,
+            turnTools,
+            providerManaged: (serverId) => runMcpCredentials?.has(serverId) ?? false,
+            publishUnavailable: async (payload) => {
+              await eventing.publish!([{ type: "session.tool_server.unavailable", payload }], true);
+            },
+          });
+          if (orgAgentLogins) {
+            runSettings.mcpServers = orgAgentLogins.mcpServers;
+            turnTools.splice(0, turnTools.length, ...orgAgentLogins.turnTools);
+            unavailableMcpConnectors.connectors.push(...orgAgentLogins.unavailableMcpConnectors);
+          }
 
           await establishTurnSandbox({
             ...sandboxRoute,
@@ -1825,7 +1873,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             attempt,
             sandboxState,
             media,
-            toolResultSpill,
+            toolResultStore,
             turn,
             session,
             fileAuthoritySubjectId,
@@ -1882,6 +1930,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxState,
             providerTurn,
             media,
+            toolResultStore,
             leases,
             turn,
             session,
@@ -1935,6 +1984,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             promptToolAvailability: toolRuntime.promptToolAvailability,
             toolRouterInHistory: toolRuntime.toolRouterInHistory,
             toolRouterExpected: toolRuntime.toolRouterExpected,
+            firstRequestToolsRevision: toolRuntime.firstRequestToolsRevision,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
@@ -1997,7 +2047,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             initialRunCredentialMaterial,
             sandboxCodemodeToken,
             media,
-            toolResultSpill,
             connectionScope,
             codemodeAuthority,
             rigVersion,
@@ -2275,7 +2324,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               historySink,
               checkpointBeforeProviderDispatch,
               media,
-              toolResultSpill,
               claimedResult,
               flushRuntimeBatcher,
               finalizeTurnOpStreamOps,

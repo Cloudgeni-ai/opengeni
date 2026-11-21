@@ -155,21 +155,21 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
   if (input.access === "public" && !input.guestsAllowed)
     add({
       code: "public_sign_in_required",
-      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      message: "On this deployment, public apps still ask visitors to sign in to Opengeni.",
       suggestion:
-        "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the Site or its link.",
+        "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the app or its link.",
     });
   if (input.requestedTools > 0 || input.page?.workspaceTools)
     add({
       code: "workspace_tools_members_only",
-      message: `The page uses workspace tools, which require workspace membership; ${who} on the published Site can't use them.`,
-      suggestion: "Build the page on Site Data and Site SQL instead, or publish to members only.",
+      message: `The page uses workspace tools, which require workspace membership; ${who} on the published app can't use them.`,
+      suggestion: "Build the page on app data and app SQL instead, or publish to members only.",
     });
   if (input.agent.enabled && (input.agent.tools?.length ?? 0) > 0)
     add({
       code: "agent_tools_members_only",
       message: `The assistant's workspace tools are only for workspace members who may use connections; ${who} get none.`,
-      suggestion: "Let the assistant answer from the page and the Site's own data for them.",
+      suggestion: "Let the assistant answer from the page and the app's own data for them.",
     });
   const byName = new Map(input.collections.map((collection) => [collection.name, collection]));
   for (const [name, use] of input.page?.collections ?? []) {
@@ -178,7 +178,7 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
     if (use.writes && collection.accessMode === "shared_read")
       add({
         code: "site_data_members_write",
-        message: `${Who} can read ${name} but can't save to it: only the Site's managers write it.`,
+        message: `${Who} can read ${name} but can't save to it: only the app's managers write it.`,
         suggestion: `Change ${name} to shared, per_viewer or append_only, or publish to members only.`,
       });
     if (!input.guestsAllowed) continue;
@@ -214,7 +214,7 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
     if (query.audience === "managers")
       add({
         code: "site_sql_query_managers",
-        message: `The query ${name} is for the Site's managers only, so the page can't run it for ${who}.`,
+        message: `The query ${name} is for the app's managers only, so the page can't run it for ${who}.`,
         suggestion: `Let ${input.guestsAllowed ? "everyone" : "signed-in viewers"} run ${name}, or publish to members only.`,
         fix: { kind: "site_sql_query_audience", query: name, audience },
       });
@@ -238,7 +238,7 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
     add({
       code: "agent_model_outside_unavailable",
       message: `The assistant uses a subscription, and this workspace has no credit-billed model, so ${who} can't use it.`,
-      suggestion: "Pick a credit-billed model for the Site's assistant.",
+      suggestion: "Pick a credit-billed model for the app's assistant.",
     });
   else if (
     input.agent.enabled &&
@@ -249,7 +249,7 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
     add({
       code: "agent_model_outside_no_credits",
       message: `This workspace has no credits for ${input.outsideModel.model}, so ${who} can't use the assistant.`,
-      suggestion: "Add credits, or pick a model your credits cover for the Site's assistant.",
+      suggestion: "Add credits, or pick a model your credits cover for the app's assistant.",
     });
   else if (input.agent.enabled && input.outsideModelUnfunded === "allowance_exhausted")
     add({

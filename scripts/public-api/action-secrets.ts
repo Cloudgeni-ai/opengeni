@@ -37,6 +37,23 @@ export const ACTION_SECRET_ROUTES: ReadonlyArray<{ pattern: RegExp; reason: stri
   },
 ];
 
+/**
+ * Secret field paths a route's contract schema does not model, matched against
+ * "METHOD /path", each with the reason. Listed with the schema-derived fields.
+ */
+export const ACTION_SECRET_EXTRA_FIELDS: ReadonlyArray<{
+  pattern: RegExp;
+  paths: readonly string[];
+  reason: string;
+}> = [
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions$/,
+    paths: ["request.agent.toolServers[].headers"],
+    reason:
+      "an organization agent's per-chat tool logins; CreateSessionRequest's agent field models only today's agent object (the organization agent shape is CreateSessionAgentField)",
+  },
+];
+
 /** Field paths that match the rule but hold no secret, each with the reason. */
 export const ACTION_SECRET_FIELD_EXCEPTIONS: ReadonlyArray<{ path: RegExp; reason: string }> = [
   {
@@ -197,6 +214,8 @@ export function actionSecretFields(route: {
   const key = `${route.method} ${route.path}`;
   for (const rule of ACTION_SECRET_ROUTES)
     if (rule.pattern.test(key)) out.add(`route: ${rule.reason}`);
+  for (const rule of ACTION_SECRET_EXTRA_FIELDS)
+    if (rule.pattern.test(key)) for (const path of rule.paths) out.add(path);
   for (const [side, names] of [
     ["request", route.request],
     ["response", route.response],

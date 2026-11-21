@@ -207,8 +207,8 @@ describe("skill_read gateway definition", () => {
               if (text?.type !== "text") throw new Error("missing Skill text");
               const rendered = JSON.parse(text.text).files[0].content as string;
               expect(rendered).toBe(markdown);
-              const start = rendered.indexOf("## Make new Sites readable by default");
-              const build = rendered.indexOf("## Edit an existing Site");
+              const start = rendered.indexOf("## Make new apps readable by default");
+              const build = rendered.indexOf("## Edit an existing app");
               expect(start).toBeGreaterThan(-1);
               expect(start).toBeLessThan(build);
               const guidance = rendered.slice(start, build).replace(/\s+/gu, " ");
@@ -922,34 +922,13 @@ describe("skill_read use telemetry", () => {
     ]);
   });
 
-  test("the fact is dropped rather than push a result past the model-visible cap", async () => {
-    const resultFor = async (size: number, telemetry: boolean) => {
-      const { observed, plain } = readers({
-        files: [{ path: "SKILL.md", content: "a".repeat(size) }],
-        origin: builtin.origin,
-      });
-      return await (telemetry ? observed : plain)({});
-    };
-    // The largest SKILL.md whose plain result the model still receives as is.
-    let low = 0;
-    let high = 600_000;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      const fits = await resultFor(middle, false)
-        .then(modelToolResultFits)
-        .catch(() => false);
-      if (fits) low = middle;
-      else high = middle - 1;
-    }
-    const plainAtCap = await resultFor(low, false);
-    expect(modelToolResultFits(plainAtCap)).toBe(true);
-    const belowCap = skillUseFromToolOutput(await resultFor(low - 1_000, true));
-    expect(belowCap).not.toBeNull();
-    // With the fact attached, the model would get a spill receipt instead.
-    expect(modelToolResultFits({ ...plainAtCap, _meta: { [SKILL_USE_META_KEY]: belowCap } })).toBe(
-      false,
-    );
-    const observedAtCap = await resultFor(low, true);
-    expect(observedAtCap).toEqual(plainAtCap);
+  test("a read too large to show whole keeps its fact, which never reaches the model", async () => {
+    const { observed } = readers({
+      files: [{ path: "SKILL.md", content: "a".repeat(300_000) }],
+      origin: builtin.origin,
+    });
+    const result = await observed({});
+    expect(modelToolResultFits(result)).toBe(false);
+    expect(skillUseFromToolOutput(result)).toMatchObject({ kind: "full" });
   });
 });

@@ -747,8 +747,8 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     const providedSession = {
       state: {
         manifest: buildManifest(settings, [], environment, [], {
-          root: workspaceRoot,
-          includeResourceEntries: false,
+          activeSandboxBackend: "selfhosted",
+          sandboxWorkspaceRoot: workspaceRoot,
         }),
       },
       exec: async (args: { cmd: string }) => {

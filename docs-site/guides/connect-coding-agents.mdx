@@ -1,0 +1,42 @@
+---
+title: "Connect your coding agents"
+description: "Use Opengeni from Claude Code, Codex, Cursor and VS Code with one command."
+icon: "plug"
+---
+
+Run this on your computer:
+
+```bash
+npx opengeni connect
+```
+
+It adds the Opengeni MCP server (`https://app.opengeni.ai/v1/mcp`) to the coding agents it finds (Claude Code, Codex, Cursor, and VS Code with Copilot) and installs a short `opengeni` skill for each, so the agent knows when to hand work to Opengeni. Running it again changes nothing that's already set up.
+
+The first time an agent uses Opengeni, it opens sign-in in your browser. There you pick the organization, what the agent may do, and which workspaces it reaches. The command never sees a password or key.
+
+| Agent             | What `connect` changes                                                                          | Sign in                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Claude Code       | `claude mcp add --transport http --scope user opengeni …`; skill in `~/.claude/skills/opengeni` | Type `/mcp` and select `opengeni`                  |
+| Codex             | `[mcp_servers.opengeni]` in `~/.codex/config.toml`; skill in `~/.agents/skills/opengeni`        | `connect` runs `codex mcp login opengeni`          |
+| Cursor            | `opengeni` in `~/.cursor/mcp.json`; skill in `~/.cursor/skills/opengeni`                        | **Settings → MCP**, **Connect** next to `opengeni` |
+| VS Code (Copilot) | `opengeni` in your user `mcp.json`; skill in `~/.copilot/skills/opengeni`                       | VS Code asks the first time Copilot uses it        |
+
+Options: `--client claude,codex,cursor,vscode` (or `all`) sets up those even when they aren't detected, `--no-skill` skips the skill, `--no-sign-in` skips starting sign-in, and `--base-url <url>` points at a self-hosted Opengeni.
+
+## What your agent can do
+
+- **Hand off work**: `delegate` starts an Opengeni chat with a brief, a repository and branch, and optionally an agent or sandbox environment. `wait_for` follows it (up to 50 seconds per call) until it finishes with a final answer; `session_send` sends follow-ups. Stopping a wait in your agent doesn't stop the chat.
+- **Apps**: `apps_list`, `app_describe`, `app_query` and `app_write` read and change your apps' data. Agents are viewers by default: they read and write what each app lets a viewer. Set **App data** to **Manager** for an agent under **Connected agents** to let it manage collections too. Agents only reach apps that are members-only or unpublished.
+- **Connected tools**: `tools_search` and `tool_call`. A tool that needs approval returns a link; approve it in Opengeni and the agent's retry runs it once.
+- **Skills and Knowledge**: `skills_sync` uploads your local Skills (to your own Skills by default, following your Agent learning setting) or pulls the workspace's; `knowledge_search`, `knowledge_get` and `knowledge_save`.
+- **Everything else**: `opengeni_actions_search`, `opengeni_action_describe` and `opengeni_action_call` reach every Opengeni API action.
+
+With several workspaces, the agent asks once and calls `workspace_use`; later calls use that workspace. Retrying a call with the same input doesn't start the same work twice.
+
+## Self-hosted
+
+Set `OPENGENI_PUBLIC_BASE_URL` to your public origin; sign-in and approval links use it. Run `npx opengeni connect --base-url https://opengeni.example.com`. Rate limits are counted per API replica.
+
+Not supported yet: MCP Tasks and MCP event notifications. Use `wait_for` to follow a chat.
+
+Prefer a plugin with more skills? See [Opengeni plugin](/guides/developer-plugin).

@@ -72,6 +72,17 @@ test("publication uses immutable candidate versions, not latest tags", () => {
     packages: [{ name: "@opengeni/sdk", version: "5.0.3" }],
   };
   expect(candidatePackages(candidate, sha)).toEqual(["@opengeni/sdk@5.0.3"]);
+  expect(
+    candidatePackages(
+      { ...candidate, packages: [...candidate.packages, { name: "opengeni", version: "5.0.3" }] },
+      sha,
+    ),
+  ).toEqual(["@opengeni/sdk@5.0.3", "opengeni@5.0.3"]);
+  for (const name of ["react", "opengeni-web", "@other/sdk"]) {
+    expect(() =>
+      candidatePackages({ ...candidate, packages: [{ name, version: "5.0.3" }] }, sha),
+    ).toThrow();
+  }
   expect(() => candidatePackages(candidate, "b".repeat(40))).toThrow();
   for (const version of ["latest", "5.0.3-canary.0", "^5.0.3"]) {
     expect(() =>

@@ -20,6 +20,7 @@ import {
   unreturnedSignIn,
 } from "./connect-sign-in-memory";
 import { useConnect, type ConnectView } from "./hooks/use-connect";
+import { setupRefusalText, signInRefusalText } from "./connect-provider-refusal";
 import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 export const connectSetupStatus = (t: OpenGeniText): Record<ConnectAttempt["state"], string> => ({
@@ -475,9 +476,12 @@ export function useConnectSetupFlow(
           ? t("connectSetup.theIntegrationSourceChangedReview")
           : attempt.error?.code === "mcp_verification_failed"
             ? t("connectSetup.couldNotVerifyThisConnection")
-            : options.inChat
-              ? t("connectSetup.setupCouldNotContinueTryAgain")
-              : t("connectSetup.connectionSetupCouldNotContinue")
+            : // A service that refused setup says why.
+              ((view.error ? setupRefusalText(t, view.error) : null) ??
+              signInRefusalText(t, attempt) ??
+              (options.inChat
+                ? t("connectSetup.setupCouldNotContinueTryAgain")
+                : t("connectSetup.connectionSetupCouldNotContinue")))
         : null,
     signInClosed,
     notice: signInClosed ? t("connectSetup.signInWindowClosed") : null,

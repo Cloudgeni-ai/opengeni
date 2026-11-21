@@ -22,6 +22,7 @@ import {
 } from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
 import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
+import { withoutProviderCitationHandles } from "@opengeni/contracts/provider-citation-handles";
 import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import { isNoReplyText, mayBecomeNoReplyText } from "@opengeni/contracts/no-reply";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
@@ -2282,6 +2283,10 @@ export function buildTimeline(
     ];
     if (item.kind === "agent-message") {
       item.text = stripOpaqueCitationTokens(item.text);
+    } else if (item.kind === "worker-completion") {
+      // A worker's final answer, shown in the manager's chat.
+      item.text = stripOpaqueCitationTokens(item.text);
+      if (item.evidence) item.evidence = stripOpaqueCitationTokens(item.evidence);
     }
   }
   return withoutQuietReplies(items);
@@ -2677,44 +2682,26 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
 }
 
 /**
- * Codex subscription web search can return private citation handles without
- * the URL annotation table that would make them resolvable. Keep the canonical
- * model-history item untouched, but never expose those unusable handles in the
- * human timeline. Ordinary markdown links and structured URL citations remain.
- *
- * A handle is U+E200, `cite` or `filecite`, U+E202-separated references such
- * as `turn0search3`, then U+E201. It also reaches the timeline without its
- * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
- * text), cut short, or still streaming at the end of the text.
+ * Model-authored text as a person reads it in the timeline. Web-search
+ * citation handles that name no openable page are removed
+ * (`withoutProviderCitationHandles`); ordinary markdown links and structured
+ * URL citations remain. The canonical model-history item stays untouched.
  *
  * Claude's web-search citation tags (a `cite` tag with an `index="N-M"`
  * attribute) become their quoted text. The Claude transport already links them to their
  * search results where it can; any tag left over, for example in an answer
  * stored before that, would otherwise show as raw markup. Code keeps them.
  *
- * Source links lose the tracking a hosted web search tags onto them
- * (`utm_source=openai` and the `_t_q` search query); the page's own
- * parameters stay. Stored history keeps the links as the model wrote them.
+ * Displayed links omit UTM tracking as well as the hosted-search query on
+ * recognized provider links. This is shared by web/native rendering and copy;
+ * stored history keeps the links as the model wrote them.
  */
 export function stripOpaqueCitationTokens(text: string): string {
   return withoutProviderTrackingInText(
-    rewriteClaudeCiteTags(
-      text
-        .replace(PROVIDER_CITATION_HANDLE, "")
-        .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
-        .replace(PROVIDER_CITATION_DELIMITER, "")
-        .replace(BARE_PROVIDER_CITATION_HANDLE, ""),
-    ),
+    rewriteClaudeCiteTags(withoutProviderCitationHandles(text)),
+    "all-utm",
   );
 }
-
-const PROVIDER_CITATION_HANDLE =
-  /\s*\u{E200}(?:file)?cite(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
-/** A handle whose end has not streamed in yet, or never will. */
-const UNFINISHED_PROVIDER_CITATION_HANDLE = /\s*\u{E200}[^\u{E201}\s]*$/u;
-const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
-/** `cite` or `filecite` glued to one or more references, which no prose writes. */
-const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+/gu;
 
 /**
  * The turn summary's short outcome for a usage ceiling. The adjacent notice row

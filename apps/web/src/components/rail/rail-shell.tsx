@@ -10,6 +10,8 @@ import { PrimaryNavExtras, WorkspaceShortcutLinks } from "@/components/rail/prim
 import { RailFooter } from "@/components/rail/rail-footer";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
+import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
+import { AppPages } from "@opengeni/react/app/routes/app-page";
 import { PromotionReviewBanner } from "@/components/rail/promotion-review-banner";
 import { workspaceSectionForPath } from "@/components/rail/workspace-nav-data";
 import { DesktopUpdateButton } from "@opengeni/react/app/components/desktop/app-update";
@@ -29,6 +31,7 @@ function useWebShellSlots(): SessionShellSlots {
     () => ({
       switcher: <SwitcherBlock />,
       primaryNav: <PrimaryNavExtras />,
+      layout: <SidebarLayoutSection />,
       mobileWorkspacePanel: (
         <>
           <WorkspaceShortcutLinks className="px-2" />
@@ -72,5 +75,9 @@ export function RailBody() {
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
   useDesktopWorkspace(rail.workspaceId);
-  return <SessionShell slots={useWebShellSlots()}>{children}</SessionShell>;
+  return (
+    <SessionShell slots={useWebShellSlots()}>
+      <AppPages>{children}</AppPages>
+    </SessionShell>
+  );
 }

@@ -73,6 +73,22 @@ describe("withoutProviderTracking", () => {
 });
 
 describe("withoutProviderTrackingInText", () => {
+  test("chat mode cleans www autolinks and Markdown-escaped query separators", () => {
+    const text = [
+      "See www.example.com/a?utm_medium=search&page=2#top.",
+      "[Guide](https://example.com/guide?utm_medium=search&amp;lang=en&amp;utm_campaign=x&amp;lang=nb#steps)",
+      "https://example.com/?_t_q=kept&utm_term=x",
+    ].join("\n");
+    expect(withoutProviderTrackingInText(text, "all-utm")).toBe(
+      [
+        "See www.example.com/a?page=2#top.",
+        "[Guide](https://example.com/guide?lang=en&amp;lang=nb#steps)",
+        "https://example.com/?_t_q=kept",
+      ].join("\n"),
+    );
+    expect(withoutProviderTrackingInText(text)).toBe(text);
+  });
+
   test("cleans source links in a cited answer", () => {
     const answer =
       "The café opens at nine ([example.org](https://www.example.org/guides/opening-hours?_t_q=caf%C3%A9+hours&utm_source=openai)).\n" +

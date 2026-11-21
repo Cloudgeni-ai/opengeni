@@ -399,6 +399,18 @@ A failed renewal keeps the last good material and retries with backoff. The
 agent can also call `refresh_credentials` (found through tool search) after a
 command fails on an expired token.
 
+### Organization tool servers
+
+Console agents (see [agents.md, "Console agents"](agents.md#console-agents))
+use organization tool servers. A `per_user` server's login comes from, in
+order: this credential provider (the server is in the request's `mcpServers`
+like any selected remote MCP, and the request body is unchanged), then the
+end user's stored login
+(`PUT /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`,
+`tool_credentials:write`, write-only), then headers the chat sent for that
+server. A `per_user` server never falls back to a shared key; without a
+login the chat runs without it and records `session.tool_server.unavailable`.
+
 ## Webhooks
 
 Up to ten endpoints per organization and ten per workspace, each with its own
@@ -416,9 +428,14 @@ secret and a subset of:
 | `recording.transcript.current_changed` / `recording.speakers.updated` | Someone switched the shown transcript version, or named, moved or edited speakers and text |
 | `recording.notes.updated` | Someone, or an agent, saved a meeting's written-up notes |
 | `recording.deleted` | A recording and its audio, transcripts and speaker matches were deleted |
+| `app.record.added` / `app.record.changed` / `app.record.removed` | A record was added to, changed in or removed from an App's collection (one event per record). `data` has `appId`, `collection`, `change`, `recordId`, `recordKey`, `version` and, when everyone who can open the App may read it and it is at most 4 KB, `record`; otherwise `recordWithheld` or `recordTruncated` is set. Bulk imports send none; putting the same data again sends none |
+| `app.sql.changed` | Rows were written to an App's SQL database: `data` has `appId`, `rowsWritten` and the saved `query` that wrote, if one did. Sent after the App's database commits, best effort |
+
+App events carry `data.chainDepth` and, when an automation run made the change,
+`data.automationId` and `data.automationRunId`.
 
 Organization webhooks accept session and recording events. A create or update that names
-`usage.*` returns HTTP 422 with guidance to register a workspace webhook instead;
+`usage.*` or `app.*` returns HTTP 422 with guidance to register a workspace webhook instead;
 the shared public event-type vocabulary remains unchanged.
 
 ```ts

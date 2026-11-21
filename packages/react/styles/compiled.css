@@ -923,6 +923,9 @@
 :where(.og-root).inset-x-0,:where(.og-root) .inset-x-0 {
     inset-inline: calc(var(--spacing) * 0);
   }
+:where(.og-root).inset-x-3,:where(.og-root) .inset-x-3 {
+    inset-inline: calc(var(--spacing) * 3);
+  }
 :where(.og-root).inset-y-0,:where(.og-root) .inset-y-0 {
     inset-block: calc(var(--spacing) * 0);
   }
@@ -1450,6 +1453,9 @@
   }
 :where(.og-root).ml-7,:where(.og-root) .ml-7 {
     margin-left: calc(var(--spacing) * 7);
+  }
+:where(.og-root).ml-9,:where(.og-root) .ml-9 {
+    margin-left: calc(var(--spacing) * 9);
   }
 :where(.og-root).ml-\[2\.125rem\],:where(.og-root) .ml-\[2\.125rem\] {
     margin-left: 2.125rem;
@@ -2376,6 +2382,9 @@
   }
 :where(.og-root).max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\] {
     max-width: min(18rem, calc(100vw - 1.5rem));
+  }
+:where(.og-root).max-w-\[min\(22rem\,calc\(100\%-1\.5rem\)\)\],:where(.og-root) .max-w-\[min\(22rem\,calc\(100\%-1\.5rem\)\)\] {
+    max-width: min(22rem, calc(100% - 1.5rem));
   }
 :where(.og-root).max-w-\[min\(22rem\,calc\(100vw-16px\)\)\],:where(.og-root) .max-w-\[min\(22rem\,calc\(100vw-16px\)\)\] {
     max-width: min(22rem, calc(100vw - 16px));
@@ -3897,6 +3906,9 @@
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-brand) 6%, transparent);
     }
+  }
+:where(.og-root).bg-canvas,:where(.og-root) .bg-canvas {
+    background-color: var(--color-canvas);
   }
 :where(.og-root).bg-canvas\/75,:where(.og-root) .bg-canvas\/75 {
     background-color: var(--color-canvas);
@@ -17350,6 +17362,9 @@
 :where(.og-root).og-tc-card-foot > p[data-complete],:where(.og-root) .og-tc-card-foot > p[data-complete] {
   color: var(--og-color-status-idle);
   font-weight: 500;
+}
+:where(.og-root).og-tc-card-foot > p.og-tc-card-ready,:where(.og-root) .og-tc-card-foot > p.og-tc-card-ready {
+  flex-basis: 100%;
 }
 :where(.og-root).og-tc-card-foot > :is(button, a),:where(.og-root) .og-tc-card-foot > :is(button, a) {
   display: inline-flex;

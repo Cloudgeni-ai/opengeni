@@ -44,7 +44,7 @@ export function useDuplicateSite(workspaceId: string) {
       }
       return copy;
     } catch (error) {
-      toast.error("Couldn't duplicate the Site", { description: userErrorText(error) });
+      toast.error("Couldn't duplicate the app", { description: userErrorText(error) });
       return null;
     } finally {
       inFlight.current = false;

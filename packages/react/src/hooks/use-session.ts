@@ -52,6 +52,8 @@ function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
     isTitleEvent(event) ||
     // Description or avatar edits (by a person or the agent) refresh the header.
     event.type === "session.profile_set" ||
+    // The agent said it waits on a person, or stopped waiting.
+    event.type === "session.waiting_on.changed" ||
     // The chat's model, effort or speed changed (for example by the agent).
     event.type === "session.model_settings.updated" ||
     event.type.startsWith("session.command.") ||

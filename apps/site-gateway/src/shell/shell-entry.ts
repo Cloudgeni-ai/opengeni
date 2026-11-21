@@ -7,16 +7,32 @@
  * this page's own address: navigation adds history entries to this page (the
  * Site frame never reloads), and Back/Forward are passed on to the Site.
  * Requests outside the allowlist never leave the page.
+ *
+ * It shows the platform's connect card (`#og-connect`) to signed-in
+ * workspace members who still have to connect a tool the App declares: each
+ * button opens the App in Opengeni with that connect dialog open, since this
+ * page has no Opengeni frame. It answers the App's `site.connections.*`.
+ *
+ * It also keeps one live connection (`/_og/live`) and passes its data hints
+ * to the Site as `data_changed` events, and sends small batched speed
+ * beacons (`/_og/timing`): app load, first data and each bridge call.
  */
 import {
   SITE_GATEWAY_API_PREFIX,
+  SITE_GATEWAY_LIVE_PATH,
   SITE_GATEWAY_LOGIN_PATH,
+  SITE_GATEWAY_TIMING_PATH,
   matchSiteOperation,
+  type SiteLiveHint,
+  type SiteTimingBeacon,
   type SiteToolMethod,
   type SiteViewer,
 } from "@opengeni/contracts";
 import {
   SiteBridgeHost,
+  siteConnectCardDismissals,
+  siteConnectCardLabel,
+  type OpenGeniSiteDataChange,
   openGeniSiteLocationHref,
   openGeniSitePath,
   type OpenGeniSiteLocationValue,
@@ -25,6 +41,7 @@ import {
   type SiteBridgeViewerHandlers,
   type SiteHttpRequest,
 } from "@opengeni/sdk/site-bridge-host";
+import type { ToolGatewaySiteSetupItem, ToolGatewaySiteSetupResponse } from "@opengeni/sdk";
 import {
   SITE_GATEWAY_HUMAN_PATH,
   SITE_HUMAN_CHECK_REQUIRED,
@@ -78,7 +95,7 @@ function gatewayError(status: number, body: unknown, mutating: boolean): Error {
   const envelope = (body as { error?: Record<string, unknown> } | null)?.error ?? {};
   return Object.assign(
     new Error(
-      typeof envelope.message === "string" ? envelope.message : `Site request failed (${status})`,
+      typeof envelope.message === "string" ? envelope.message : `App request failed (${status})`,
     ),
     {
       code: typeof envelope.code === "string" ? envelope.code : "site_request_failed",
@@ -132,6 +149,61 @@ async function gatewayFetch(
   return response;
 }
 
+type Timing = SiteTimingBeacon["timings"][number];
+
+/** Measurements waiting for the next beacon; bounded, oldest dropped. */
+const timings: Timing[] = [];
+const MAX_PENDING_TIMINGS = 50;
+const TIMING_FLUSH_MS = 30_000;
+let firstDataSeen = false;
+/** The live connection, started when the Site first follows data changes. */
+let live: { start(): void } | null = null;
+let timingTimer: ReturnType<typeof setTimeout> | null = null;
+
+function measure(timing: Timing): void {
+  if (!Number.isFinite(timing.ms) || timing.ms < 0) return;
+  if (timings.length >= MAX_PENDING_TIMINGS) timings.shift();
+  timings.push({ ...timing, ms: Math.min(Math.round(timing.ms), 600_000) });
+  timingTimer ??= setTimeout(flushTimings, TIMING_FLUSH_MS);
+}
+
+/** Time one bridge call; the first data or SQL call also counts as first data. */
+async function timed<T>(op: string, data: boolean, run: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  let outcome: "ok" | "error" = "error";
+  try {
+    const result = await run();
+    if (!(result instanceof Response) || result.ok) outcome = "ok";
+    return result;
+  } finally {
+    const ended = performance.now();
+    measure({ kind: "bridge", op, ms: ended - started, outcome });
+    if (data && !firstDataSeen) {
+      firstDataSeen = true;
+      measure({ kind: "first_data", ms: ended, outcome });
+    }
+  }
+}
+
+/** Send what was measured; best effort, never retried. */
+function flushTimings(): void {
+  if (timingTimer) clearTimeout(timingTimer);
+  timingTimer = null;
+  if (timings.length === 0) return;
+  const body = JSON.stringify({ timings: timings.splice(0) } satisfies SiteTimingBeacon);
+  try {
+    if (navigator.sendBeacon?.(SITE_GATEWAY_TIMING_PATH, body)) return;
+  } catch {
+    // Fall through to fetch.
+  }
+  void fetch(SITE_GATEWAY_TIMING_PATH, {
+    method: "POST",
+    body,
+    credentials: "same-origin",
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 async function tool<T>(method: SiteToolMethod, payload: unknown, signal: AbortSignal): Promise<T> {
   const response = await gatewayFetch(
     `/tools/${method}`,
@@ -154,7 +226,7 @@ function refused(): Response {
       error: {
         status: 403,
         code: "site_operation_not_allowed",
-        message: "This operation is not available to Sites",
+        message: "This operation is not available to apps",
         retryable: false,
         outcomeUnknown: false,
       },
@@ -197,16 +269,245 @@ async function currentViewer(signal: AbortSignal): Promise<SiteViewer> {
   return viewer;
 }
 
+function timedTool<T>(method: SiteToolMethod, payload: unknown, signal: AbortSignal): Promise<T> {
+  return timed(method, false, () => tool<T>(method, payload, signal));
+}
+
+function timedSiteHttp(request: SiteHttpRequest, signal: AbortSignal): Promise<Response> {
+  const match = matchSiteOperation(
+    request.method,
+    new URL(request.path, "https://site.invalid").pathname,
+  );
+  const op = match?.operation.id ?? "other";
+  return timed(op, op.startsWith("data.") || op.startsWith("sql."), () =>
+    siteHttp(request, signal),
+  );
+}
+
+/**
+ * The connect card: what this member still has to connect for the App's
+ * declared tools, one button each (opening the App in Opengeni), and a close
+ * button that hides those items on this address until something new is
+ * missing. Nothing for guests and people outside the workspace: the API
+ * answers them with a refusal, and the card stays empty.
+ */
+function createConnectCard(onReturn: () => void) {
+  const dismissals = siteConnectCardDismissals(location.host);
+  let items: ToolGatewaySiteSetupItem[] | null = null;
+  let loading: Promise<ToolGatewaySiteSetupItem[] | null> | null = null;
+  let forced = false;
+  let awaitingReturn = false;
+  const load = (signal?: AbortSignal): Promise<ToolGatewaySiteSetupItem[] | null> =>
+    (loading ??= (async () => {
+      try {
+        const known = await currentViewer(signal ?? new AbortController().signal).catch(() => null);
+        if (known && known.kind !== "member") return (items = null);
+        const response = await timedTool<ToolGatewaySiteSetupResponse>(
+          "setup",
+          {},
+          signal ?? new AbortController().signal,
+        );
+        // Only items this page can act on: each opens the App in Opengeni.
+        items = response.items.filter((item) => typeof item.openUrl === "string");
+      } catch {
+        items = null;
+      }
+      return items;
+    })().finally(() => {
+      loading = null;
+    }));
+  const render = () => {
+    document.getElementById("og-connect")?.remove();
+    const visible = items ? (forced ? items : dismissals.visible(items)) : [];
+    if (visible.length === 0) return false;
+    const card = document.createElement("div");
+    card.id = "og-connect";
+    card.setAttribute("role", "region");
+    card.setAttribute("aria-label", "Connect tools for this app");
+    const list = document.createElement("div");
+    for (const item of visible) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = siteConnectCardLabel(item);
+      if (item.account) button.title = item.account;
+      button.addEventListener("click", () => {
+        open(item);
+      });
+      list.append(button);
+    }
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "og-connect-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", () => {
+      dismissals.dismiss(visible.map((item) => item.key));
+      forced = false;
+      render();
+    });
+    card.append(list, close);
+    document.body.append(card);
+    return true;
+  };
+  const open = (item: ToolGatewaySiteSetupItem): boolean => {
+    if (!item.openUrl) return false;
+    awaitingReturn = true;
+    window.open(item.openUrl, "_blank", "noopener");
+    return true;
+  };
+  // Back from connecting in Opengeni: read again and tell the App.
+  const back = () => {
+    if (!awaitingReturn || document.visibilityState === "hidden") return;
+    awaitingReturn = false;
+    void load().then(() => {
+      render();
+      onReturn();
+    });
+  };
+  window.addEventListener("focus", back);
+  document.addEventListener("visibilitychange", back);
+  return {
+    start: () => void load().then(render),
+    handlers: {
+      items: ({ signal }) => (items && !loading ? Promise.resolve(items) : load(signal)),
+      // Opengeni finishes the connect in its own tab; the App hears the change on return.
+      connect: async (item) => {
+        open(item);
+        return false;
+      },
+      show: async ({ signal }) => {
+        dismissals.reset();
+        forced = true;
+        await load(signal);
+        return render();
+      },
+    } satisfies NonNullable<SiteBridgeToolHandlers["connections"]>,
+  };
+}
+
+let notifyConnectionsChanged = () => {};
+const connectCard = createConnectCard(() => notifyConnectionsChanged());
+
 const tools: SiteBridgeToolHandlers = {
-  catalog: ({ signal }) => tool("catalog", {}, signal),
-  declarations: ({ signal }) => tool("declarations", {}, signal),
-  call: (request, { signal }) => tool("call", request, signal),
-  resolve: (request, { signal }) => tool("resolve", request, signal),
-  invoke: (request, { signal }) => tool("invoke", request, signal),
-  readiness: (request, { signal }) => tool("readiness", request, signal),
-  fetch: siteHttp,
+  catalog: ({ signal }) => timedTool("catalog", {}, signal),
+  declarations: ({ signal }) => timedTool("declarations", {}, signal),
+  call: (request, { signal }) => timedTool("call", request, signal),
+  resolve: (request, { signal }) => timedTool("resolve", request, signal),
+  invoke: (request, { signal }) => timedTool("invoke", request, signal),
+  readiness: (request, { signal }) => timedTool("readiness", request, signal),
+  fetch: timedSiteHttp,
   siteData: true,
+  dataChanges: true,
+  // Only Sites that follow data changes open the live connection.
+  watchDataChanges: () => live?.start(),
+  connections: connectCard.handlers,
 };
+
+/**
+ * One live connection for data hints, opened once the Site follows data
+ * changes (`site.data.onChange`; pages that never do cost nothing) and
+ * closed while the page is hidden. Reconnects with backoff (also when the gateway has no live
+ * updates: the Site then just never hears a hint), and before its admission
+ * ends. After a reconnect that missed changes, the Site hears "anything may
+ * have changed".
+ */
+function createLive(notify: (change: OpenGeniSiteDataChange) => void): { start(): void } {
+  let wanted = false;
+  let socket: WebSocket | null = null;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  let hiding: ReturnType<typeof setTimeout> | null = null;
+  let lastSeq: number | null = null;
+  let failures = 0;
+  const visible = () => document.visibilityState !== "hidden";
+  const later = (ms: number) => {
+    if (retry) clearTimeout(retry);
+    retry = setTimeout(
+      () => {
+        retry = null;
+        open();
+      },
+      ms * (0.75 + Math.random() * 0.5),
+    );
+  };
+  const open = () => {
+    if (!wanted || socket || !visible() || typeof WebSocket !== "function") return;
+    const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${SITE_GATEWAY_LIVE_PATH}`;
+    let current: WebSocket;
+    try {
+      current = new WebSocket(url);
+    } catch {
+      return;
+    }
+    socket = current;
+    let admitted = false;
+    let planned = false;
+    let refresh: ReturnType<typeof setTimeout> | null = null;
+    current.addEventListener("message", (event) => {
+      let hint: SiteLiveHint;
+      try {
+        hint = JSON.parse(String(event.data)) as SiteLiveHint;
+      } catch {
+        return;
+      }
+      if (hint.type === "hello") {
+        admitted = true;
+        failures = 0;
+        if (lastSeq !== null && hint.seq > lastSeq) notify({ collections: null, seq: hint.seq });
+        lastSeq = Math.max(lastSeq ?? 0, hint.seq);
+        // Reconnect shortly before the admission ends.
+        if (refresh) clearTimeout(refresh);
+        refresh = setTimeout(
+          () => {
+            planned = true;
+            current.close(1000);
+          },
+          Math.max(30, hint.ttlSeconds - 30) * 1000,
+        );
+      } else if (hint.type === "data") {
+        // Notices can arrive out of order: always pass them on.
+        lastSeq = Math.max(lastSeq ?? 0, hint.seq);
+        notify({ collections: hint.collections, seq: hint.seq });
+      }
+    });
+    current.addEventListener("close", () => {
+      if (refresh) clearTimeout(refresh);
+      if (socket === current) socket = null;
+      if (!wanted || !visible()) return;
+      if (!admitted) failures += 1;
+      // Live hints are off in this deployment: stop asking until a reload.
+      if (failures >= 5) {
+        wanted = false;
+        return;
+      }
+      // A planned refresh comes back at once; a dropped connection (a
+      // gateway deploy drops them all) spreads its return over 30 seconds; a
+      // refused or missing live route backs off.
+      later(planned ? 1_000 : admitted ? 1_000 + Math.random() * 29_000 : 5_000 * 2 ** failures);
+    });
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (visible()) {
+      if (hiding) clearTimeout(hiding);
+      hiding = null;
+      if (!retry) open();
+      return;
+    }
+    // A briefly hidden tab keeps its connection; a page left in the background lets it go.
+    hiding ??= setTimeout(() => {
+      hiding = null;
+      const current = socket;
+      socket = null;
+      current?.close(1000);
+    }, 30_000);
+  });
+  return {
+    start: () => {
+      if (wanted) return;
+      wanted = true;
+      open();
+    },
+  };
+}
 
 const viewerHandlers: SiteBridgeViewerHandlers = {
   viewer: ({ signal }) => currentViewer(signal),
@@ -298,8 +599,18 @@ if (frame) {
   frame.addEventListener("load", () => {
     const frameWindow = frame.contentWindow;
     if (frameWindow) host.load(frameWindow);
+    measure({ kind: "app_load", ms: performance.now(), outcome: "ok" });
   });
   // Back/Forward and edits to the #hash in the address bar.
   window.addEventListener("popstate", () => host.notifyLocation(pageLocation()));
-  window.addEventListener("pagehide", () => host.close());
+  window.addEventListener("pagehide", () => {
+    flushTimings();
+    host.close();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushTimings();
+  });
+  live = createLive((change) => host.notifyDataChanged(change));
+  notifyConnectionsChanged = () => host.notifyToolReadiness();
+  connectCard.start();
 }

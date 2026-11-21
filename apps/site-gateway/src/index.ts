@@ -9,13 +9,16 @@
 import {
   SITE_GATEWAY_API_PREFIX,
   SITE_GATEWAY_CALLBACK_PATH,
+  SITE_GATEWAY_LIVE_PATH,
   SITE_GATEWAY_LOGIN_PATH,
   SITE_GATEWAY_LOGOUT_PATH,
   SITE_GATEWAY_PREFIX,
   SITE_GATEWAY_REPORT_PATH,
+  SITE_GATEWAY_TIMING_PATH,
   SITE_GATEWAY_VERSION_PREFIX,
   parseSiteHostname,
 } from "@opengeni/contracts";
+import { SITE_UI_CSS, SITE_UI_STYLESHEET_PATH } from "@opengeni/sdk/site-ui";
 import { handleApi } from "./api";
 import { handleCallback, handleLogin, handleLogout } from "./auth";
 import { parseCookies, readSession, readVisitor } from "./cookies";
@@ -37,17 +40,44 @@ import { SITE_GATEWAY_HUMAN_PATH } from "./shell/shell-config";
 import { handleShell } from "./shell";
 import type { SiteContext } from "./site-context";
 import { handleSiteDbInternal, isSiteDbInternalPath } from "./site-db";
+import {
+  handleConsoleLive,
+  handleSiteLive,
+  handleSiteLiveInternal,
+  isSiteLiveInternalPath,
+} from "./site-live";
+import { handleTimingBeacon, recordTiming } from "./timing";
 import { handleVersionHtml, isFrameLoad } from "./version";
 
 export type { GatewayEnv } from "./env";
 /** The per-Site SQLite Durable Object class bound as `SITE_DB` (optional Cloudflare storage). */
 export { SiteDatabase } from "./site-database";
+/** The per-Site live-hint Durable Object class bound as `SITE_LIVE` (optional). */
+export { SiteLive } from "./site-live";
 
 function plain(status: number, body: string, headers: HeadersInit = {}): Response {
   const out = applySecurityHeaders(new Headers(headers), { noindex: true, hsts: false });
   out.set("Content-Type", "text/plain; charset=utf-8");
   if (!out.has("Cache-Control")) out.set("Cache-Control", "no-store");
   return new Response(body, { status, headers: out });
+}
+
+/**
+ * The opt-in Opengeni look for apps (`<link rel="stylesheet" href="/__opengeni/ui.css">`).
+ * Site HTML runs in an opaque origin, so the stylesheet may be read cross-origin.
+ */
+function siteUiStylesheet(request: Request, hsts: boolean): Response {
+  if (request.method !== "GET" && request.method !== "HEAD")
+    return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
+  const headers = applySecurityHeaders(
+    new Headers({
+      "content-type": "text/css; charset=utf-8",
+      "cache-control": "public, max-age=300",
+    }),
+    { noindex: true, hsts },
+  );
+  headers.set("Cross-Origin-Resource-Policy", "cross-origin");
+  return new Response(request.method === "HEAD" ? null : SITE_UI_CSS, { headers });
 }
 
 function robots(noindex: boolean): Response {
@@ -71,7 +101,11 @@ export function unexpectedErrorResponse(request: Request, env: GatewayEnv): Resp
   const url = new URL(request.url);
   const environment = env.ENVIRONMENT?.trim().toLowerCase();
   const hsts = environment !== "development" && environment !== "test";
-  if (isApiPath(url.pathname) || isSiteDbInternalPath(url.pathname))
+  if (
+    isApiPath(url.pathname) ||
+    isSiteDbInternalPath(url.pathname) ||
+    isSiteLiveInternalPath(url.pathname)
+  )
     return jsonError(
       500,
       {
@@ -91,7 +125,7 @@ export function unexpectedErrorResponse(request: Request, env: GatewayEnv): Resp
     },
     500,
     "Something went wrong",
-    "This Site couldn't be shown. Try again in a moment.",
+    "This app couldn't be shown. Try again in a moment.",
   );
 }
 
@@ -105,13 +139,15 @@ export async function handleRequest(
     config = gatewayConfig(env);
   } catch (error) {
     if (error instanceof GatewayConfigError) console.error(`site-gateway: ${error.message}`);
-    return plain(500, "Site gateway is not configured.\n");
+    return plain(500, "App gateway is not configured.\n");
   }
   const url = new URL(request.url);
   // The API's signed Site database route is not a Site page: it answers on
   // any host the Worker serves and never looks up a Site host.
   if (isSiteDbInternalPath(url.pathname))
     return await handleSiteDbInternal(request, url, env, config);
+  if (isSiteLiveInternalPath(url.pathname))
+    return await handleSiteLiveInternal(request, url, env, config);
   const requestHost = url.hostname.toLowerCase();
   // `og.<domain>` is reserved for the console's HTML frame host, never a Site.
   if (isHtmlFrameHostRequest(requestHost, config.sitesDomain)) {
@@ -119,6 +155,8 @@ export async function handleRequest(
       url.protocol = "https:";
       return new Response(null, { status: 308, headers: { Location: url.toString() } });
     }
+    if (url.pathname === SITE_GATEWAY_LIVE_PATH)
+      return await handleConsoleLive(request, url, env, config);
     return handleHtmlFrameHost(request, url, {
       appOrigin: config.appOrigin,
       hsts: !config.development,
@@ -169,13 +207,14 @@ export async function handleRequest(
           pageSecurity,
           502,
           "Temporarily unavailable",
-          "This Site could not be loaded. Try again shortly.",
+          "This app could not be loaded. Try again shortly.",
         );
   }
   // Platform usage: every request served for a known Site host counts,
   // cache hits and refusals included (src/platform-requests.ts).
   if (record) countSiteRequest(config, ctx, hostname);
   const forceNoindex = config.forceNoindex || !record || record.noindex;
+  if (pathname === SITE_UI_STYLESHEET_PATH) return siteUiStylesheet(request, hsts);
   if (pathname === "/robots.txt")
     return robots(forceNoindex || record?.status !== "active" || !record?.versionId);
   if (
@@ -186,7 +225,7 @@ export async function handleRequest(
     return api
       ? jsonError(
           404,
-          { code: "site_not_found", message: "No published Site here" },
+          { code: "site_not_found", message: "No published app here" },
           { noindex: true, hsts },
         )
       : neutralPage(pageSecurity);
@@ -194,7 +233,7 @@ export async function handleRequest(
     return api
       ? jsonError(
           410,
-          { code: "site_suspended", message: "This Site has been taken down" },
+          { code: "site_suspended", message: "This app has been taken down" },
           { noindex: true, hsts },
         )
       : takedownPage(pageSecurity, config.abuseEmail);
@@ -224,12 +263,14 @@ export async function handleRequest(
     if (pathname === SITE_GATEWAY_LOGOUT_PATH) return await handleLogout(site);
     if (pathname === SITE_GATEWAY_REPORT_PATH) return await handleReport(site);
     if (pathname === SITE_GATEWAY_HUMAN_PATH) return await handleHumanCheck(site);
+    if (pathname === SITE_GATEWAY_LIVE_PATH) return await handleSiteLive(site);
+    if (pathname === SITE_GATEWAY_TIMING_PATH) return await handleTimingBeacon(site);
     if (pathname.startsWith(`${SITE_GATEWAY_VERSION_PREFIX}/`))
       return await handleVersionHtml(site, pathname.slice(SITE_GATEWAY_VERSION_PREFIX.length + 1));
     if (pathname === SITE_GATEWAY_PREFIX || pathname.startsWith(`${SITE_GATEWAY_PREFIX}/`))
       return neutralPage(site);
     if (request.method !== "GET" && request.method !== "HEAD")
-      return messagePage(site, 405, "Not allowed", "Site pages are read-only.");
+      return messagePage(site, 405, "Not allowed", "App pages are read-only.");
     return await handleShell(site);
   } catch (error) {
     if (!(error instanceof UpstreamError)) throw error;
@@ -237,18 +278,67 @@ export async function handleRequest(
       pageSecurity,
       502,
       "Temporarily unavailable",
-      "This Site could not be loaded. Try again shortly.",
+      "This app could not be loaded. Try again shortly.",
     );
+  }
+}
+
+/** The closed route name the gateway reports its own handling time under. */
+export function gatewayRoute(pathname: string): string {
+  if (isApiPath(pathname)) return "api";
+  if (pathname.startsWith(`${SITE_GATEWAY_VERSION_PREFIX}/`)) return "version";
+  if (pathname === SITE_GATEWAY_LIVE_PATH) return "live";
+  if (pathname === SITE_GATEWAY_TIMING_PATH) return "timing";
+  if (pathname.startsWith(`${SITE_GATEWAY_PREFIX}/auth/`)) return "auth";
+  if (pathname === SITE_GATEWAY_REPORT_PATH) return "report";
+  if (pathname.startsWith(`${SITE_GATEWAY_PREFIX}/internal/`)) return "internal";
+  if (pathname.startsWith(`${SITE_GATEWAY_PREFIX}/`) || pathname === SITE_GATEWAY_PREFIX)
+    return "other";
+  return "shell";
+}
+
+/**
+ * Measure the gateway's own handling time (until the response starts; a
+ * streamed body is not waited for). Reported with the page beacons.
+ */
+function measureGateway(
+  request: Request,
+  env: GatewayEnv,
+  ctx: WaitUntil,
+  started: number,
+  status: number,
+): void {
+  try {
+    const config = gatewayConfig(env);
+    const route = gatewayRoute(new URL(request.url).pathname);
+    // The beacon measures the page, not the gateway.
+    if (route === "timing") return;
+    recordTiming(
+      config,
+      ctx,
+      "gateway",
+      route,
+      status >= 500 ? "error" : "ok",
+      Date.now() - started,
+    );
+  } catch {
+    // An unconfigured gateway has nothing to report to.
   }
 }
 
 export default {
   async fetch(request: Request, env: GatewayEnv, ctx: WaitUntil): Promise<Response> {
+    const started = Date.now();
+    let status = 500;
     try {
-      return await handleRequest(request, env, ctx);
+      const response = await handleRequest(request, env, ctx);
+      status = response.status;
+      return response;
     } catch (error) {
       console.error("site-gateway: unexpected error", error);
       return unexpectedErrorResponse(request, env);
+    } finally {
+      measureGateway(request, env, ctx, started, status);
     }
   },
 };

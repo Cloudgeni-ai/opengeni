@@ -50,6 +50,7 @@ import {
   type OpenGeniRuntime,
   type PrepareToolsOptions,
 } from "@opengeni/runtime";
+import type { StoredToolResultReaders } from "@opengeni/runtime";
 import { ScriptedModel } from "@opengeni/testing/scripted-model";
 import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { testSettings } from "@opengeni/testing/settings";
@@ -157,8 +158,6 @@ type FixtureOptions = {
   nestedAgentDepth?: number;
   /** The deployment Files server's allow-list (default: only the fixture tool). */
   filesAllowedTools?: string[];
-  /** Observes what the worker hands the spill port for an oversized result. */
-  onSpill?: (input: Parameters<PrepareTurnToolRuntimeDeps["toolResultSpill"]["spill"]>[0]) => void;
   /**
    * The product connector needs the person's own sign-in, and none was
    * admitted for this turn (no accepted account binding).
@@ -166,6 +165,8 @@ type FixtureOptions = {
   productSignInNotAdmitted?: boolean;
   /** The goal frozen with the turn; omitted leaves it unknown. */
   goal?: "none" | "paused";
+  /** The session's frozen first-request tools revision; omitted is 0, an existing session. */
+  firstRequestToolsRevision?: number;
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -173,6 +174,16 @@ type FixtureOptions = {
 // token-scoped tools/list response, and transport providers. It never applies
 // agent capability filtering itself.
 async function captureWorkerRequest(options: FixtureOptions = {}) {
+  const toolResultReaders: StoredToolResultReaders[] = [];
+  const toolResultStore = {
+    store: async () => {
+      throw new Error("fixture results are small");
+    },
+    inlineMaxBytes: () => 100_000,
+    readers: () => toolResultReaders.at(-1) ?? { reader: "none" as const, shell: false },
+    setReaders: (readers: StoredToolResultReaders) => toolResultReaders.push(readers),
+    readBytes: async () => null,
+  } as unknown as PrepareTurnToolRuntimeDeps["toolResultStore"];
   const delegatedPayloads: Awaited<ReturnType<typeof verifyDelegatedAccessToken>>[] = [];
   const interactionPayloads: Awaited<ReturnType<typeof verifyDelegatedAccessToken>>[] = [];
   const mcp = startTestMcpServer({
@@ -282,6 +293,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       // A session that never saw an index keeps none when told to omit it.
       return input.omitWhenEmpty ? "" : input.catalog;
     }),
+    spyOn(db, "ensureSessionWorkspaceFilesystem").mockImplementation(
+      async (_db, input) => input.layout,
+    ),
     spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(async (_db, input) => {
       governanceWrites.push(input.governance);
       return input.governance;
@@ -296,6 +310,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       : []),
     spyOn(db, "persistAttemptToolCatalog").mockImplementation(async (_db, catalog) => catalog),
     spyOn(db, "cancelQueuedCodemodeOperationsForAttempt").mockResolvedValue(0),
+    spyOn(db, "settleSessionFirstRequestToolsRevision").mockResolvedValue(
+      options.firstRequestToolsRevision ?? 0,
+    ),
   ];
   if (options.credentialRestrictionSource) {
     const createInteractionTools = runtimeExports.createFirstPartyInteractionAttemptToolDefinitions;
@@ -517,16 +534,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       objectStorage: null,
       observability: createObservability(settings, { component: "worker" }),
       media: {} as BuildTurnAgentDeps["media"],
-      ...(options.onSpill
-        ? {
-            toolResultSpill: {
-              spill: async (spillInput) => {
-                options.onSpill!(spillInput);
-                return { content: [{ type: "text", text: "spilled" }] };
-              },
-            } as PrepareTurnToolRuntimeDeps["toolResultSpill"],
-          }
-        : {}),
+      toolResultStore,
       turn,
       session,
       fileAuthoritySubjectId: null,
@@ -563,6 +571,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       observability: createObservability(settings, { component: "worker" }),
       objectStorage: {} as NonNullable<BuildTurnAgentDeps["objectStorage"]>,
       media: {} as BuildTurnAgentDeps["media"],
+      toolResultStore,
       turn,
       session,
       runSettings: settings,
@@ -679,6 +688,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       interactionPayloads,
       request,
       names: request.tools.map(toolName).sort(),
+      toolResultReaders,
       visibleNames: visibleTools.map(toolName).sort(),
       catalog: prepared.attemptToolCatalog!,
       preparation: preparation!,
@@ -1180,20 +1190,21 @@ describe("agent configuration reaches the production model request", () => {
   );
 });
 
-// goal_resume acts only on an existing goal, so a configured session whose
-// frozen goal is none is not sent it; any goal, or an unknown one, keeps it.
-describe("goal_resume follows the session's goal", () => {
+// A session's first goal must not change the tool list or the system prompt
+// under earlier requests: that re-reads the whole history uncached. Every goal
+// state, including none, sends goal_resume and its guidance.
+describe("goal_resume never follows the session's goal", () => {
   const resume = "opengeni__goal_resume";
-  test("a configured session without a goal has no goal_resume or its guidance", async () => {
-    const captured = await captureWorkerRequest({ agent: agentConfig("all"), goal: "none" });
-    expect(captured.names).toContain("opengeni__goal_set");
-    expect(captured.names).toContain("opengeni__goal_pause");
-    expect(captured.names).not.toContain(resume);
-    expect(captured.request.systemInstructions).not.toContain("goal_resume");
+  test("a configured session's tools and prompt are identical before and after its first goal", async () => {
+    const before = await captureWorkerRequest({ agent: agentConfig("all"), goal: "none" });
+    const after = await captureWorkerRequest({ agent: agentConfig("all"), goal: "paused" });
+    expect(before.names).toContain(resume);
+    expect(before.request.systemInstructions).toContain("goal_resume");
+    expect(after.names).toEqual(before.names);
+    expect(after.request.systemInstructions).toBe(before.request.systemInstructions);
   });
 
   test.each([
-    ["a paused goal", { agent: agentConfig("all"), goal: "paused" }],
     ["an unknown goal", { agent: agentConfig("all") }],
     ["a legacy session without a goal", { agent: null, goal: "none" }],
   ] as const)("%s keeps goal_resume", async (_label, options) => {
@@ -1311,6 +1322,92 @@ describe("effective-tools projection agrees with actual model preparation", () =
         },
       ),
     );
+    for (const entry of projection.tools) {
+      if (entry.visibility === "search") {
+        expect(captured.deferredNames).toContain(entry.name);
+        expect(captured.names).not.toContain(entry.name);
+      } else {
+        expect(captured.names).toContain(entry.name);
+      }
+    }
+  });
+
+  test("a new session finds list_models and privacy_facts through search; an existing one keeps them", async () => {
+    const existing = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      modelId: "gpt-5.6-sol",
+      lazy: true,
+    });
+    const created = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      modelId: "gpt-5.6-sol",
+      lazy: true,
+      firstRequestToolsRevision: 1,
+    });
+    const rarelyUsed = ["list_models", "privacy_facts"];
+    // An existing session (revision 0) sends both in its first request, as before.
+    for (const name of rarelyUsed) {
+      expect(existing.names).toContain(name);
+      expect(existing.deferredNames).not.toContain(name);
+    }
+    expect(existing.buildOptions).not.toHaveProperty("firstRequestToolsRevision");
+    // A new session's first request is the same request without them: no
+    // other tool and no instruction text changes.
+    expect(created.buildOptions.firstRequestToolsRevision).toBe(1);
+    for (const name of rarelyUsed) {
+      expect(created.names).not.toContain(name);
+      expect(created.deferredNames).toContain(name);
+    }
+    expect(created.request.tools).toEqual(
+      existing.request.tools.filter((entry) => !rarelyUsed.includes(toolName(entry))),
+    );
+    expect(created.request.systemInstructions).toBe(existing.request.systemInstructions);
+    expect(created.request.input).toEqual(existing.request.input);
+    // The removed bytes are the two serialized tool definitions.
+    const removed = existing.request.tools.filter((entry) => rarelyUsed.includes(toolName(entry)));
+    expect(removed.map(toolName).sort()).toEqual(rarelyUsed);
+    expect(JSON.stringify(existing.request.tools).length).toBeGreaterThan(
+      JSON.stringify(created.request.tools).length,
+    );
+  });
+
+  test("a new session keeps privacy_facts in the request when nothing else brings the router", async () => {
+    const captured = await captureWorkerRequest({
+      agent: agentConfig("none", "privacyFacts", true),
+      builtins: false,
+      hasSkills: false,
+      humanRecipient: false,
+      lazy: true,
+      firstRequestToolsRevision: 1,
+    });
+    expect(captured.names).toContain("privacy_facts");
+    expect(captured.names).not.toContain("tool_search");
+    expect(captured.deferredNames).toEqual([]);
+  });
+
+  test("the projection follows a new session's search visibility", async () => {
+    const captured = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      modelId: "gpt-5.6-sol",
+      lazy: true,
+      firstRequestToolsRevision: 1,
+    });
+    const projection = projectAgentEffectiveTools(
+      sessionEffectiveToolProjectionInput(
+        captured.session as Parameters<typeof sessionEffectiveToolProjectionInput>[0],
+        captured.turnTools,
+        {
+          settings: captured.settings,
+          humanInputEnabled: true,
+          hasWorkspaceSkills: true,
+          objectStorageAvailable: true,
+          mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
+          rarelyUsedToolsSearchableSessionIds: new Set([captured.session.id]),
+        },
+      ),
+    );
+    for (const name of ["list_models", "privacy_facts"])
+      expect(projection.tools.find((entry) => entry.name === name)?.visibility).toBe("search");
     for (const entry of projection.tools) {
       if (entry.visibility === "search") {
         expect(captured.deferredNames).toContain(entry.name);
@@ -1928,48 +2025,30 @@ describe("request_human_input follows who can answer", () => {
   });
 });
 
-// A result too large to show names only the readers the session has.
-describe("oversized tool results", () => {
-  const readersFor = async (options: FixtureOptions) => {
-    const seen: unknown[] = [];
-    const captured = await captureWorkerRequest({
-      ...options,
-      onSpill: (input) => seen.push(input.readers),
-    });
-    await captured.preparation.spillOversizedModelToolResult!({
-      operationId: "66666666-6666-4666-8666-666666666666",
-      result: { content: [{ type: "text", text: "x" }] },
-      serializedBytes: 1,
-    });
-    return seen;
+// `tool_result_read` reads tool results too large to show whole. It is never
+// in a first-request tool list, so no session's prompt prefix changes for it.
+describe("stored tool result reader", () => {
+  const embedding: FixtureOptions = {
+    agent: agentConfig("none"),
+    builtins: false,
+    eagerProduct: true,
+    hasSkills: false,
   };
 
-  test("the embedding profile has no shell and no download tool", async () => {
-    expect(
-      await readersFor({
-        agent: agentConfig("none"),
-        builtins: false,
-        eagerProduct: true,
-        hasSkills: false,
-      }),
-    ).toEqual([{ shell: false, fileDownload: false }]);
+  test("with a search router it is a deferred tool, loaded by exact name; the tool list is unchanged", async () => {
+    const turn = await captureWorkerRequest({ lazy: true });
+    expect(turn.names).not.toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)?.reader).toBe("searchable");
+    expect(turn.deferredNames).toContain("tool_result_read");
   });
 
-  test("attached compute brings the shell", async () => {
-    expect(await readersFor({ agent: agentConfig("none"), machineAttached: true })).toEqual([
-      { shell: true, fileDownload: false },
-    ]);
-  });
-
-  test("full capabilities with compute bring the shell and the download tool", async () => {
-    const filesAllowedTools = ["search_documents", "files_get_download_url"];
-    expect(
-      await readersFor({ agent: agentConfig("all"), machineAttached: true, filesAllowedTools }),
-    ).toEqual([{ shell: true, fileDownload: true }]);
-    // The same session under capabilities "none" has no Files server selected.
-    expect(
-      await readersFor({ agent: agentConfig("none"), machineAttached: true, filesAllowedTools }),
-    ).toEqual([{ shell: true, fileDownload: false }]);
+  test("without a search router the tool list is unchanged and the sandbox copy is the reader", async () => {
+    const turn = await captureWorkerRequest(embedding);
+    expect(turn.names).not.toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: false });
+    const machine = await captureWorkerRequest({ ...embedding, machineAttached: true });
+    expect(machine.names).not.toContain("tool_result_read");
+    expect(machine.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: true });
   });
 });
 

@@ -20,7 +20,7 @@ import {
   ToolGatewayCatalog,
   ToolGatewayCatalogEntry,
   ToolGatewayResult,
-  isToolResultSpilledReceipt,
+  isModelToolResultStoreView,
   executableToolSchema,
   type ToolGatewayCaller,
   type ToolGatewayCatalog as ToolGatewayCatalogValue,
@@ -407,7 +407,7 @@ export class ToolGateway {
                 const outputMatchesSchema =
                   result.structuredContent !== undefined &&
                   definition.validateOutput(result.structuredContent);
-                if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
+                if (!outputMatchesSchema && !isModelToolResultStoreView(result)) {
                   throw new ToolGatewayOutputValidationError();
                 }
               }

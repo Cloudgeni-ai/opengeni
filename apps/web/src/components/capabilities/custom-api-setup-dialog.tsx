@@ -463,7 +463,7 @@ function NewCredentialFields({
         </div>
       )}
       <p className="text-2xs leading-4 text-fg-subtle">
-        The value is encrypted in a new Connection. The Integration stores only the Connection
+        The value is encrypted in a new Connection. The connected tool stores only the Connection
         reference and never embeds credentials in its definition or tool schema.
       </p>
     </div>

@@ -79,6 +79,7 @@ import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
+import { startAppSyncPump } from "./app-sync/service";
 import {
   startEventIntakePrunePump,
   startEventTriggerDispatchPump,
@@ -150,6 +151,11 @@ export async function createTemporalWorkflowClient(
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
   startScheduledTaskEventRun: (occurrence: EventOccurrenceToStart) => Promise<void>;
+  startOrgAgentPublishMove: (input: {
+    accountId: string;
+    agentId: string;
+    operationId: string;
+  }) => Promise<void>;
   close: () => Promise<void>;
 }> {
   const connection = await Connection.connect(temporalConnectionOptions(settings));
@@ -487,6 +493,25 @@ export async function createTemporalWorkflowClient(
         if (!isWorkflowAlreadyStarted(error)) throw error;
       }
     },
+    // A publish that moves running chats. One operation, one run.
+    startOrgAgentPublishMove: async (input) => {
+      try {
+        await temporal.workflow.start("orgAgentPublishMoveWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `org-agent-publish-move-${input.operationId}`,
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              accountId: input.accountId,
+              agentId: input.agentId,
+              operationId: input.operationId,
+            },
+          ],
+        });
+      } catch (error) {
+        if (!isWorkflowAlreadyStarted(error)) throw error;
+      }
+    },
     close: async () => {
       await connection.close();
     },
@@ -644,6 +669,7 @@ export async function startApi(options: StartApiOptions = {}) {
       bus,
       workflowClient: traceClientCalls(workflowClient.client, "temporal"),
       documentIndexer: traceClientCalls(workflowClient.documentIndexer, "temporal"),
+      orgAgentPublishMoveStarter: workflowClient.startOrgAgentPublishMove,
       objectStorage,
       ...(editableArtifactComposition
         ? {
@@ -809,6 +835,9 @@ export async function startApi(options: StartApiOptions = {}) {
     startRun: (occurrence) => workflowClient.startScheduledTaskEventRun(occurrence),
     observability,
   });
+  // App data syncs: runs the worker queued, executed here where connected
+  // tools and Site Data are (docs/app-sync.md).
+  const stopAppSyncPump = startAppSyncPump(routeDeps);
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
   const stopBrowserHoldRenewalPump = startBrowserHoldRenewalPump(renewBrowserHolds, observability);
   const stopEventSubscriptionPump = startEventSubscriptionPump({
@@ -909,6 +938,7 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopTemporalScheduleCleanupPump();
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
+      await stopAppSyncPump();
       await stopEventIntakePrunePump();
       await stopBrowserHoldRenewalPump();
       await stopEventSubscriptionPump();

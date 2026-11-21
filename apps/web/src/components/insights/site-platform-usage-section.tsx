@@ -76,13 +76,13 @@ export function SitePlatformUsageView({ usage }: { usage: SitePlatformUsage }) {
   return (
     <div className="flex min-w-0 flex-col gap-3">
       {usage.brake.engaged ? (
-        <Notice tone="failed" title="Sites are paused">
-          Opengeni paused Site writes, publishing and visitor agents while it reviews unusual usage.
+        <Notice tone="failed" title="Apps are paused">
+          Opengeni paused app writes, publishing and visitor agents while it reviews unusual usage.
           Pages still load.
         </Notice>
       ) : null}
       {usage.meters.length > 0 ? (
-        <StatGroup columns={4} label="Site platform activity this month">
+        <StatGroup columns={4} label="App platform activity this month">
           {usage.meters.map((meter) => (
             <StatTile
               key={meter.meter}

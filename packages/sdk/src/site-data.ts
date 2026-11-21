@@ -54,8 +54,22 @@ export type OpenGeniSiteDataFilter = {
   /** Dotted data path (up to 4 levels) or $id, $key, $owner, $createdAt, $updatedAt, $version. */
   field: string;
   op: "eq" | "ne" | "in" | "gt" | "gte" | "lt" | "lte" | "contains" | "exists";
+  /**
+   * For gt, gte, lt and lte on $createdAt, $updatedAt or a field holding an
+   * ISO timestamp, `"$now"` (or `"$now-5m"`, `"$now+30s"`, units ms, s, m, h,
+   * d) is the server's current time, so lease checks never trust the
+   * viewer's clock.
+   */
   value?: OpenGeniSiteDataScalar | OpenGeniSiteDataScalar[];
 };
+
+/**
+ * A hint that Site data changed: the collections that changed (`$files` for
+ * files), or null when anything may have changed (after a reconnect). It
+ * carries no records; read again with your usual calls. Hints are best
+ * effort: keep a slow refresh if missing one would matter.
+ */
+export type OpenGeniSiteDataChange = { collections: string[] | null; seq: number | null };
 
 export type OpenGeniSiteDataListOptions = {
   where?: OpenGeniSiteDataFilter[];
@@ -78,7 +92,14 @@ export type OpenGeniSiteDataPage<T extends Record<string, unknown> = Record<stri
 export type OpenGeniSiteDataRef = string | { id: string } | { key: string };
 
 export type OpenGeniSiteDataOperation =
-  | { op: "insert"; collection: string; key?: string; data: Record<string, unknown> }
+  | {
+      op: "insert";
+      collection: string;
+      key?: string;
+      data: Record<string, unknown>;
+      /** Retrying with the same key returns the first attempt's record instead of a duplicate. */
+      idempotencyKey?: string;
+    }
   | {
       op: "put";
       collection: string;
@@ -98,7 +119,8 @@ export type OpenGeniSiteDataOperation =
 type RefFields = { id: string; key?: never } | { key: string; id?: never };
 
 export type OpenGeniSiteDataWriteResult =
-  | { op: "insert" | "put" | "patch" | "increment"; record: OpenGeniSiteDataRecord }
+  | { op: "insert"; record: OpenGeniSiteDataRecord; replayed?: boolean }
+  | { op: "put" | "patch" | "increment"; record: OpenGeniSiteDataRecord }
   | { op: "delete"; deleted: { id: string } };
 
 export type OpenGeniSiteDataCollection<
@@ -108,7 +130,16 @@ export type OpenGeniSiteDataCollection<
   list(options?: OpenGeniSiteDataListOptions): Promise<OpenGeniSiteDataPage<T>>;
   /** Resolves null when the record does not exist or is not visible to the viewer. */
   get(ref: OpenGeniSiteDataRef): Promise<OpenGeniSiteDataRecord<T> | null>;
-  insert(data: T, options?: { key?: string }): Promise<OpenGeniSiteDataRecord<T>>;
+  /**
+   * Add a record. Pass the same `idempotencyKey` (for example
+   * `crypto.randomUUID()` made once per user action) when retrying, and a
+   * retry returns the record the first attempt created instead of adding
+   * another.
+   */
+  insert(
+    data: T,
+    options?: { key?: string; idempotencyKey?: string },
+  ): Promise<OpenGeniSiteDataRecord<T>>;
   /** Create or replace the record with this key. */
   put(
     key: string,
@@ -129,6 +160,31 @@ export type OpenGeniSiteDataCollection<
     by?: number,
   ): Promise<OpenGeniSiteDataRecord<T>>;
   count(where?: OpenGeniSiteDataFilter[], options?: { scope?: "own" | "all" }): Promise<number>;
+  /**
+   * Call `listener` when this collection may have changed (someone wrote to
+   * it, or the connection was lost and came back). Returns an unsubscribe.
+   * Never fires where the host offers no live hints.
+   */
+  onChange(listener: (change: OpenGeniSiteDataChange) => void): () => void;
+};
+
+/** One App data sync as the App's page sees it (see docs/app-sync.md). */
+export type OpenGeniAppSyncStatus = {
+  id: string;
+  name: string;
+  collection: string;
+  mode: "shared" | "personal";
+  active: boolean;
+  /** The newest run; for a personal sync, the viewer's own. Null before the first run. */
+  lastRun: {
+    status: "queued" | "running" | "succeeded" | "failed" | "skipped";
+    /** When it finished (or started, while it runs). */
+    at: string;
+    error: string | null;
+    summary: { received: number; written: number; skipped: number; truncated: boolean } | null;
+  } | null;
+  /** Personal syncs: whether the viewer opted in. Null for shared syncs. */
+  optedIn: boolean | null;
 };
 
 export type OpenGeniSiteData = {
@@ -138,6 +194,13 @@ export type OpenGeniSiteData = {
   /** Up to 100 operations across collections, applied together or not at all. */
   batch(operations: OpenGeniSiteDataOperation[]): Promise<OpenGeniSiteDataWriteResult[]>;
   count(collection: string, where?: OpenGeniSiteDataFilter[]): Promise<number>;
+  /**
+   * Call `listener` whenever the Site's data may have changed (any
+   * collection the viewer can read, or `$files`). Returns an unsubscribe.
+   */
+  onChange(listener: (change: OpenGeniSiteDataChange) => void): () => void;
+  /** The App's data syncs: when each last ran and whether it failed. */
+  syncs(): Promise<OpenGeniAppSyncStatus[]>;
 };
 
 export type OpenGeniSiteFile = {
@@ -179,12 +242,14 @@ type SiteDataFetch = (path: string, init: RequestInit) => Promise<Response>;
 export function createOpenGeniSiteData(
   fetchSite: SiteDataFetch,
   ready: () => Promise<boolean>,
+  subscribeChanges: (listener: (change: OpenGeniSiteDataChange) => void) => () => void = () => () =>
+    undefined,
 ): { data: OpenGeniSiteData; files: OpenGeniSiteFiles } {
   const send = async <T>(path: string, init: RequestInit = {}): Promise<T> => {
     if (!(await ready()))
       throw new OpenGeniSiteDataError(
         "site_data_unsupported",
-        "This Site host does not provide Site Data",
+        "This app host does not provide app data",
         0,
       );
     const response = await fetchSite(`${SITE_DATA_PATH_PREFIX}${path}`, init);
@@ -209,7 +274,7 @@ export function createOpenGeniSiteData(
   const one = async (operation: OpenGeniSiteDataOperation) => {
     const [result] = await write([operation]);
     if (!result || !("record" in result))
-      throw new OpenGeniSiteDataError("request_failed", "Unexpected Site Data response", 200);
+      throw new OpenGeniSiteDataError("request_failed", "Unexpected app data response", 200);
     return result.record;
   };
   const count = async (
@@ -258,6 +323,9 @@ export function createOpenGeniSiteData(
             collection: name,
             data: value,
             ...(options.key === undefined ? {} : { key: options.key }),
+            ...(options.idempotencyKey === undefined
+              ? {}
+              : { idempotencyKey: options.idempotencyKey }),
           })) as OpenGeniSiteDataRecord<T>,
         put: async (key, value, options = {}) =>
           (await one({
@@ -287,11 +355,18 @@ export function createOpenGeniSiteData(
             ...(by === undefined ? {} : { by }),
           })) as OpenGeniSiteDataRecord<T>,
         count: async (where, options = {}) => await count(name, where, options.scope),
+        onChange: (listener) =>
+          subscribeChanges((change) => {
+            if (change.collections === null || change.collections.includes(name)) listener(change);
+          }),
       };
       return collection;
     },
     batch: write,
     count: async (collection, where) => await count(collection, where),
+    onChange: (listener) => subscribeChanges(listener),
+    syncs: async () =>
+      (await send<{ syncs: OpenGeniAppSyncStatus[] }>("/data/syncs", { method: "GET" })).syncs,
   };
 
   const files: OpenGeniSiteFiles = {
@@ -371,6 +446,6 @@ function siteDataErrorFromResponse(status: number, value: unknown): OpenGeniSite
   const message =
     typeof record.message === "string" && record.message
       ? record.message
-      : `Site Data request failed with HTTP ${status}`;
+      : `App data request failed with HTTP ${status}`;
   return new OpenGeniSiteDataError(code, message, status, details);
 }

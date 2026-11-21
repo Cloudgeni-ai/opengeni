@@ -44,6 +44,7 @@ import {
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
+  speechToTextProcessingResidency,
   type DictationProvider,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
@@ -100,6 +101,13 @@ import {
 } from "@opengeni/config";
 import { findInferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ObjectStorage } from "@opengeni/storage";
+import {
+  measureRecordingTiming,
+  recordRecordingTiming,
+  recordingTimingContext,
+  startRecordingTiming,
+  withRecordingTiming,
+} from "@opengeni/observability";
 import { createHash } from "node:crypto";
 import {
   measureRecordingStage,
@@ -897,15 +905,23 @@ export function createRecordingActivities(
     };
     const usage = new RecordingUsage();
     const startedAt = performance.now();
+    const purpose = job.recording.purpose === "dictation" ? "dictation" : "meeting";
+    const timing = { ...recordingTimingContext(input.recordingId, purpose), attempt: job.attempt };
+    if (job.queuedMilliseconds !== null) {
+      recordRecordingTiming(observability, timing, "queue_wait", job.queuedMilliseconds);
+    }
+    const endProcessing = startRecordingTiming(observability, timing, "worker_processing");
+    const endRetry =
+      job.attempt > 1 ? startRecordingTiming(observability, timing, "worker_retry") : null;
     const telemetry: Omit<
       RecordingProcessingReport,
       "outcome" | "errorCode" | "wallSeconds" | "stages"
     > = {
-      purpose: job.recording.purpose === "dictation" ? "dictation" : "meeting",
+      purpose,
       provider: job.version.providerId,
       model: job.version.model,
       funding: "none",
-      audioSeconds: 0,
+      audioSeconds: job.recording.durationMilliseconds / 1_000,
       sentAudioSeconds: null,
       queueSeconds: job.queuedMilliseconds === null ? null : job.queuedMilliseconds / 1_000,
       preparedBytes: 0,
@@ -928,9 +944,21 @@ export function createRecordingActivities(
     let finishing = false;
     try {
       finished = await withRecordingUsage(usage, () => {
-        const work = withCreditDebitAttribution(
-          job.creditAttribution ?? { kind: "unknown" },
-          transcribeClaimed,
+        const work = withCreditDebitAttribution(job.creditAttribution ?? { kind: "unknown" }, () =>
+          withRecordingTiming(
+            {
+              observability,
+              context: timing,
+              providerRegion: (id) => {
+                const residency = speechToTextProcessingResidency(
+                  settings,
+                  deploymentFor(settings, db).route(id),
+                );
+                return residency.regions.length === 1 ? residency.regions[0] : residency.geography;
+              },
+            },
+            transcribeClaimed,
+          ),
         );
         // The losing side of the race must not become an unhandled rejection.
         work.catch(() => undefined);
@@ -943,12 +971,30 @@ export function createRecordingActivities(
         });
         return Promise.race([work, outOfTime]);
       });
+      if (
+        finished.outcome === "complete" &&
+        job.version.versionNumber === 1 &&
+        job.recording.captureEndedAt
+      ) {
+        const duration = now() - Date.parse(job.recording.captureEndedAt);
+        // Capture time can be an imported timestamp or be skewed. Keep this estimate
+        // separate from the client's monotonic Stop-to-transcript measurement.
+        if (duration >= 0 && duration <= 7 * 24 * 60 * 60 * 1_000) {
+          recordRecordingTiming(observability, timing, "capture_end_to_transcript", duration, {
+            recordingTimingSource: "capture_timestamp",
+          });
+        }
+      }
       return finished;
     } catch (error) {
       if (error instanceof ApplicationFailure && error.type) retryCode = error.type;
       throw error;
     } finally {
       clearTimeout(budgetTimer);
+      const timingOutcome =
+        finished?.outcome === "skipped" ? "cancelled" : (finished?.outcome ?? "retry");
+      endProcessing(timingOutcome);
+      endRetry?.(timingOutcome);
       // The transcript is out; its tracks' kept copies are finished before
       // the attempt ends, so none is left half written for the next one.
       // Once the transcript is settled the uploaded pieces they replace go;
@@ -1197,7 +1243,7 @@ export function createRecordingActivities(
         let audioMilliseconds = 0;
         // Audio actually sent to the model, which is what it bills.
         let sentMilliseconds = 0;
-        const languages = new Set<string>();
+        const languages: string[] = [];
         const ourDiarizer = diarizerFor(settings);
         // Recognizing voices needs every speaker's voice vector, which only
         // our diarizer gives, so it tells the speakers apart whatever the model.
@@ -1290,7 +1336,7 @@ export function createRecordingActivities(
               store: true,
             };
             const audio = await measureRecordingStage("prepare", () =>
-              speechTrackAudio(keep, signal),
+              measureRecordingTiming("audio_prepare", () => speechTrackAudio(keep, signal)),
             );
             prepared.push({ plan, track, offsetMilliseconds, audio });
           }),
@@ -1426,7 +1472,7 @@ export function createRecordingActivities(
             } else if (diarize && result.diarized) {
               providerDiarized = true;
             }
-            for (const language of result.languages) languages.add(language);
+            languages.push(...result.languages);
             audioMilliseconds += result.audioMilliseconds ?? audio.durationMilliseconds;
             trackWords.push({
               trackNumber: plan.trackNumber,
@@ -1654,7 +1700,7 @@ export function createRecordingActivities(
         text: string;
         words: never[];
       }> = [];
-      const languages = new Set<string>();
+      const languages: string[] = [];
       let audioMilliseconds = 0;
       let creditCostMicros = 0;
       let charged = false;
@@ -1663,20 +1709,25 @@ export function createRecordingActivities(
       if (track && chunks.length > 0) {
         const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
         const audio = await measureRecordingStage("prepare", () =>
-          preparedTrackAudio({
-            db,
-            objectStorage: storage,
-            settings,
-            actor: actor,
-            recordingId: input.recordingId,
-            trackNumber: track.trackNumber,
-            mimeType: track.mimeType,
-            chunks,
-            offsetMilliseconds,
-            knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
-            signal,
-            store: false,
-          }),
+          measureRecordingTiming("audio_prepare", () =>
+            preparedTrackAudio({
+              db,
+              objectStorage: storage,
+              settings,
+              actor: actor,
+              recordingId: input.recordingId,
+              trackNumber: track.trackNumber,
+              mimeType: track.mimeType,
+              chunks,
+              offsetMilliseconds,
+              knownDurationMilliseconds: Math.max(
+                0,
+                track.durationMilliseconds - offsetMilliseconds,
+              ),
+              signal,
+              store: false,
+            }),
+          ),
         );
         telemetry.preparedBytes += audio.storedBytes;
         const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
@@ -1804,7 +1855,7 @@ export function createRecordingActivities(
             ? estimateRecordingTranscriptionCostMicros(heard.model, durationMilliseconds)
             : null;
           if (pieceCost !== null) listCostMicros = (listCostMicros ?? 0) + pieceCost;
-          for (const language of result.languages ?? []) languages.add(language);
+          languages.push(...(result.languages ?? []));
           audioMilliseconds += durationMilliseconds;
           const text = result.text.trim();
           if (!text) continue;

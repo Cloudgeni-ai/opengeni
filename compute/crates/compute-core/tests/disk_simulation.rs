@@ -106,6 +106,7 @@ impl Sim {
                 request: limit,
                 limit,
                 cpu: 0,
+                vcpus: 0,
                 save: limit + 64 * MIB,
                 disk,
                 fetch: limit + 64 * MIB,

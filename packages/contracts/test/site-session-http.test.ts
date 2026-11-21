@@ -306,9 +306,9 @@ test("a Site view conversation's context names its Site and the version shown", 
     versionId: "version-7",
     revision: 7,
   });
-  expect(context).toContain("“Spend dashboard” (Site id site-1)");
+  expect(context).toContain("“Spend dashboard” (App id site-1)");
   expect(context).toContain("at version 7 (version id version-7)");
-  expect(context).toContain("publish the change as a new version of this Site");
+  expect(context).toContain("publish the change as a new version of this app");
   // Bounded, and never empty, whatever the title.
   const long = siteConversationContext({
     siteId: "s",
@@ -319,7 +319,7 @@ test("a Site view conversation's context names its Site and the version shown", 
   expect(long.length).toBeLessThan(800);
   expect(
     siteConversationContext({ siteId: "s", title: " ", versionId: "v", revision: 1 }),
-  ).toContain("“Untitled Site”");
+  ).toContain("“Untitled app”");
 });
 
 test("only file attachments are set aside for the console's Site view check", () => {

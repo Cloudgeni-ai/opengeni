@@ -189,7 +189,7 @@ function Harness() {
     <div className="og-root min-h-screen bg-og-bg p-6 text-og-fg">
       <div className="mx-auto flex max-w-2xl flex-col gap-3">
         <div className="flex items-center justify-between">
-          <p className="text-og-xs text-og-fg-muted">Sample Site in the Opengeni frame</p>
+          <p className="text-og-xs text-og-fg-muted">Sample app in the Opengeni frame</p>
           <button
             type="button"
             className="rounded-og-md border border-og-border px-2 py-1 text-og-xs"
@@ -204,7 +204,7 @@ function Harness() {
         </div>
         <PublishedHtmlArtifactFrame
           html={SITE}
-          title="Sample Site"
+          title="Sample app"
           theme={dark ? "dark" : "light"}
           toolBridge={bridge}
           className="h-[520px] w-full rounded-og-md border border-og-border"

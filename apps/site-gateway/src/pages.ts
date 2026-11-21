@@ -46,7 +46,7 @@ export function neutralPage(security: Security): Response {
     noindex: true,
     status: 404,
     title: "Nothing here",
-    body: "<h1>Nothing here</h1><p>There is no published Site at this address.</p>",
+    body: "<h1>Nothing here</h1><p>There is no published app at this address.</p>",
   });
 }
 
@@ -56,8 +56,8 @@ export function takedownPage(security: Security, abuseEmail: string): Response {
     ...security,
     noindex: true,
     status: 410,
-    title: "Site unavailable",
-    body: `<h1>This Site has been taken down</h1><p>It is no longer available at this address.</p><p>Questions or reports: <a href="mailto:${email}">${email}</a></p>`,
+    title: "App unavailable",
+    body: `<h1>This app has been taken down</h1><p>It is no longer available at this address.</p><p>Questions or reports: <a href="mailto:${email}">${email}</a></p>`,
   });
 }
 
@@ -92,8 +92,8 @@ export function frameAccessPage(
   const title = status === 401 ? "Sign in required" : "No access";
   const message =
     status === 401
-      ? "Sign in to open this Site."
-      : "This Site is not shared with your current account. Sign in with an account that has access.";
+      ? "Sign in to open this app."
+      : "This app is not shared with your current account. Sign in with an account that has access.";
   return page({
     ...security,
     frameable: "self",
@@ -115,9 +115,9 @@ export function reportFormPage(
     ...security,
     noindex: true,
     status: init.error ? 400 : 200,
-    title: "Report this Site",
+    title: "Report this app",
     ...(init.headers ? { headers: init.headers } : {}),
-    body: `<h1>Report this Site</h1><p>Tell us what is wrong with “${escapeHtml(init.title)}”. Reports go to the Site's owners and to the abuse team of this service. You can also email <a href="mailto:${escapeHtml(init.abuseEmail)}">${escapeHtml(init.abuseEmail)}</a>.</p>${
+    body: `<h1>Report this app</h1><p>Tell us what is wrong with “${escapeHtml(init.title)}”. Reports go to the app's owners and to the abuse team of this service. You can also email <a href="mailto:${escapeHtml(init.abuseEmail)}">${escapeHtml(init.abuseEmail)}</a>.</p>${
       init.error ? `<p role="alert">${escapeHtml(init.error)}</p>` : ""
     }<form method="post" action="/_og/report"><input type="hidden" name="token" value="${escapeHtml(init.token)}"><label for="category">Reason</label><select id="category" name="category" required>${options}</select><label for="message">Details</label><textarea id="message" name="message" maxlength="4000"></textarea><label for="contactEmail">Your email (optional)</label><input id="contactEmail" name="contactEmail" type="email" maxlength="320" autocomplete="email"><button type="submit">Send report</button></form>`,
   });
@@ -131,6 +131,6 @@ export function logoutConfirmPage(security: Security, returnPath: string): Respo
     noindex: true,
     status: 200,
     title: "Sign out",
-    body: `<h1>Sign out of this Site?</h1><p>You can sign in again at any time.</p><form method="post" action="${escapeHtml(action)}"><button type="submit">Sign out</button></form>`,
+    body: `<h1>Sign out of this app?</h1><p>You can sign in again at any time.</p><form method="post" action="${escapeHtml(action)}"><button type="submit">Sign out</button></form>`,
   });
 }

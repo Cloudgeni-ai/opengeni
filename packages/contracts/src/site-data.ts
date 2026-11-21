@@ -21,7 +21,7 @@ export const SiteDataGuestAccess = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["none", "read", "append", "own"])
     .describe(
-      "Published Sites only: what anonymous guests may do. none (default): nothing. read: read what viewers read. append: add records and read their own. own: add, read, change and delete their own.",
+      "Published apps only: what anonymous guests may do. none (default): nothing. read: read what viewers read. append: add records and read their own. own: add, read, change and delete their own.",
     ),
 );
 export type SiteDataGuestAccess = z.infer<typeof SiteDataGuestAccess>;
@@ -53,7 +53,9 @@ export const SiteDataFilter = /* @__PURE__ */ defineSchema(() =>
     value: z
       .union([Scalar, z.array(Scalar).max(100)])
       .optional()
-      .describe("The value to compare with; an array for in. $owner accepts me."),
+      .describe(
+        "The value to compare with; an array for in. $owner accepts me. For gt, gte, lt and lte on $createdAt, $updatedAt or an ISO timestamp field, $now (optionally $now+30s, $now-5m, h or d) is the server's current time.",
+      ),
   }),
 );
 export type SiteDataFilter = z.infer<typeof SiteDataFilter>;
@@ -117,6 +119,14 @@ export const SiteDataWriteOperation = /* @__PURE__ */ defineSchema(() =>
       collection: CollectionName,
       key: RecordKey.optional(),
       data: RecordData,
+      idempotencyKey: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe(
+          "Retrying with the same key returns the record the first attempt created (replayed: true) instead of adding another.",
+        ),
     }),
     z.object({
       op: z.literal("put").describe("Create or replace the record with this key."),
@@ -164,10 +174,10 @@ export const SiteDataCollectionDefinitionRequest = /* @__PURE__ */ defineSchema(
   z.object({
     accessMode: SiteDataAccessMode,
     privateRecords: primitives.optionalBoolean.describe(
-      "per_viewer only: keep records private even from the Site's managers.",
+      "per_viewer only: keep records private even from the app's managers.",
     ),
     guestAccess: SiteDataGuestAccess.optional().describe(
-      "Anonymous guests of a public published Site; omitted keeps the current rule (none for a new collection).",
+      "Anonymous guests of a public published app; omitted keeps the current rule (none for a new collection).",
     ),
     jsonSchema: z
       .record(primitives.string, z.unknown())
@@ -297,6 +307,12 @@ export type SiteDataDescribeResponse = {
     workspaceBytes: number;
   };
   limits: SiteDataLimitsResponse;
+  /**
+   * Present as "viewer" when the caller reads the app like a viewer (a
+   * connected outside agent without app management), so record counts cover
+   * the whole app but writes follow each collection's viewer rules.
+   */
+  access?: "viewer";
 };
 
 export type SiteDataFileResponse = {
@@ -318,7 +334,8 @@ export type SiteDataQueryResponse = {
 };
 
 export type SiteDataWriteResultResponse =
-  | { op: "insert" | "put" | "patch" | "increment"; record: SiteDataRecordResponse }
+  | { op: "insert"; record: SiteDataRecordResponse; replayed?: boolean }
+  | { op: "put" | "patch" | "increment"; record: SiteDataRecordResponse }
   | { op: "delete"; deleted: { id: string } };
 
 export type SiteDataWriteResponse = { results: SiteDataWriteResultResponse[] };

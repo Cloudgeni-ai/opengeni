@@ -38,7 +38,6 @@ import {
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
   computeSandboxNamed,
-  coldSandboxesOfArchivedChatsAvailable,
   endComputeGroupOfArchivedChats,
   forgetColdSandboxOfArchivedChats,
   listColdSandboxesOfArchivedChats,
@@ -1458,6 +1457,7 @@ export function createSandboxLeaseActivities(
         forceDrained +=
           bounds.drained.compute_closed +
           bounds.drained.compute_daily_budget +
+          bounds.drained.compute_card_required +
           bounds.drained.compute_idle +
           bounds.drained.compute_turnless;
       } catch (error) {
@@ -1880,7 +1880,6 @@ export async function forgetColdSandboxesOfArchivedChats(
   options: { budgetMs?: number; pageSize?: number; now?: () => number } = {},
 ): Promise<{ examined: number; forgotten: number; failed: number }> {
   const result = { examined: 0, forgotten: 0, failed: 0 };
-  if (!(await coldSandboxesOfArchivedChatsAvailable(db))) return result;
   const now = options.now ?? Date.now;
   const deadline = now() + (options.budgetMs ?? ARCHIVED_CHAT_SANDBOX_SWEEP_BUDGET_MS);
   const pageSize = options.pageSize ?? ARCHIVED_CHAT_SANDBOX_SWEEP_PAGE;

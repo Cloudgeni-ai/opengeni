@@ -41,6 +41,7 @@
           "integrate/how-it-fits-together",
           "integrate/conversation-ui",
           "integrate/configure-the-agent",
+          "integrate/agents-as-code",
           "integrate/your-data",
           "integrate/background-agents",
           "integrate/meetings",
@@ -68,6 +69,8 @@
           "guides/excel-add-in",
           "guides/microsoft-teams",
           "guides/microsoft-dynamics",
+          "guides/superoffice",
+          "guides/connect-coding-agents",
           "guides/developer-plugin",
           "guides/self-host",
           "run-locally",
@@ -170,7 +173,7 @@
     },
     {
       "source": "/guides/coding-agents",
-      "destination": "/guides/developer-plugin"
+      "destination": "/guides/connect-coding-agents"
     }
   ]
 }

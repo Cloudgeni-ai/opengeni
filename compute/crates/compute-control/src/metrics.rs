@@ -449,7 +449,7 @@ fn bytes(mib: u64) -> Num {
 }
 
 /// The gauges each host the service counts on has.
-fn host_gauges() -> [HostGauge; 13] {
+fn host_gauges() -> [HostGauge; 14] {
     [
         (
             "compute_fleet_host_epoch",
@@ -490,6 +490,11 @@ fn host_gauges() -> [HostGauge; 13] {
             "compute_fleet_host_cpu_free_cores",
             "Processor time a wake can still reserve on a host, in cores, as it last reported.",
             |host| Num::Thousandths(host.capacity.cpu_free_millis),
+        ),
+        (
+            "compute_fleet_host_vcpus_awake",
+            "Processors the VMs of a host's sandboxes awake or waking have in all, which placement steers by, as it last reported.",
+            |host| Num::Whole(host.capacity.vcpus_awake),
         ),
         (
             "compute_fleet_host_disk_bytes",

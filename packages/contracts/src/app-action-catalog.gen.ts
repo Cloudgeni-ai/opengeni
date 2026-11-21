@@ -203,6 +203,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "addSessionLink",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links",
+    "request": [
+      "AddSessionLinkRequest"
+    ],
+    "response": [
+      "SessionLink"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "addWorkspaceMember",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/members",
@@ -250,6 +262,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ExternalAuthRunResponse"
     ]
+  },
+  {
+    "id": "agentsPath",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents",
+    "request": [],
+    "query": [
+      "includeArchived"
+    ],
+    "response": []
   },
   {
     "id": "answerAgentCall",
@@ -515,6 +537,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -663,6 +686,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SiteHostnameAvailability"
+    ]
+  },
+  {
+    "id": "claimClaudeSubscriptionAccountLimitReset",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/limit-resets/claim",
+    "request": [
+      "ClaimClaudeLimitResetRequest"
+    ],
+    "response": [
+      "ClaimClaudeLimitResetResponse"
+    ]
+  },
+  {
+    "id": "claimOrganizationClaudeSubscriptionAccountLimitReset",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/limit-resets/claim",
+    "request": [
+      "ClaimClaudeLimitResetRequest"
+    ],
+    "response": [
+      "ClaimClaudeLimitResetResponse"
     ]
   },
   {
@@ -970,6 +1015,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createAgentFromTemplate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-templates/:templateKey/agents",
+    "request": [
+      "CreateAgentFromTemplateRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "createApiKey",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/api-keys",
@@ -981,6 +1038,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "secretFields": [
       "response.token"
+    ]
+  },
+  {
+    "id": "createAppSync",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs",
+    "request": [
+      "AppSyncCreateRequest"
+    ],
+    "response": [
+      "AppSync"
     ]
   },
   {
@@ -1470,6 +1538,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "permission": "sessions:create",
     "secretFields": [
+      "request.agent.toolServers[].headers",
       "request.mcpServers[].headers"
     ]
   },
@@ -1547,6 +1616,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceArtifactMutationResponse"
     ]
+  },
+  {
+    "id": "createWorkspaceArtifactLiveTicket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/live",
+    "request": [],
+    "response": []
   },
   {
     "id": "createWorkspaceClaudeCustomModel",
@@ -1632,6 +1708,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "credentialPath",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deactivatePreferenceRegistry",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/preferences/:preferenceId/deactivate",
@@ -1673,6 +1756,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "DELETE /v1/organizations/:organizationId/agents/tool-servers/:key",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key",
+    "request": [],
+    "query": [
+      "expectedVersion"
+    ],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -1702,6 +1795,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultSummary"
     ],
     "permission": "connections:write"
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "request": [],
+    "response": []
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
@@ -1738,6 +1838,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
     "request": [],
     "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "request": [],
+    "response": [
+      "AppSyncSubscriptionResponse"
+    ]
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
@@ -1842,6 +1951,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "deleteAppSync",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteAutomationTemplate",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/automation-templates/:templateId",
@@ -1878,6 +1994,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectionMetadata",
       "ConnectionResponse"
     ]
+  },
+  {
+    "id": "deleteCustomMcpServer",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/capabilities/:capabilityId",
+    "request": [],
+    "response": [],
+    "permission": "connections:write"
   },
   {
     "id": "deleteDocument",
@@ -2430,6 +2554,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "exportAppPackage",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/package",
+    "request": [
+      "AppPackageExportRequest"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "exportCompanyBrainOkf",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/company-brain/export",
@@ -2628,6 +2762,132 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId",
+    "request": [],
+    "query": [
+      "includeArchived"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/movable-chats",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/movable-chats",
+    "request": [],
+    "query": [
+      "version"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/publish-operations",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/publish-operations",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/sessions",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/sessions",
+    "request": [
+      "ListOrgAgentSessionsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "version"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/events",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/events",
+    "request": [
+      "OrgAgentTestChatEventsQuery"
+    ],
+    "query": [
+      "after",
+      "limit"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/usage",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/usage",
+    "request": [
+      "OrgAgentUsageQuery"
+    ],
+    "query": [
+      "from",
+      "to"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/versions",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/versions",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/:agentId/versions/:version",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/versions/:version",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/by-key/:key",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/by-key/:key",
+    "request": [],
+    "query": [
+      "includeArchived"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/compute",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/compute",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/tool-servers",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/tool-servers/:key",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/agents/tool-servers/:key/tools",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key/tools",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:organizationId/codex/accounts",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/codex/accounts",
@@ -2638,6 +2898,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/organizations/:organizationId/codex/accounts/:accountId/overview",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/overview",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/console/access",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/access",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:organizationId/console/member-roles",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/member-roles",
     "request": [],
     "response": []
   },
@@ -2942,6 +3216,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "sessions:create"
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/organization-agents",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/organization-agents",
+    "request": [],
+    "response": [],
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/organization-vaults",
@@ -3294,6 +3576,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningSettingsRecord"
+    ]
+  },
+  {
+    "id": "getAppSyncStatus",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/syncs",
+    "request": [],
+    "response": [
+      "AppSyncStatusResponse"
     ]
   },
   {
@@ -4457,6 +4748,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSidebarLayout",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [],
+    "response": [
+      "SidebarLayoutResponse"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "getSiteAuthConnection",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
@@ -5095,6 +5396,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
+    "id": "installAppPackage",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/app-packages/install",
+    "request": [
+      "AppPackageInstallRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "installFikenConnection",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connections/fiken/install",
@@ -5268,6 +5578,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAgentTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-templates",
+    "request": [],
+    "response": [
+      "AgentTemplate",
+      "ListAgentTemplatesResponse"
+    ]
+  },
+  {
     "id": "listAgentTopology",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-topology",
@@ -5297,6 +5617,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "listAppSyncs",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs",
+    "request": [],
+    "response": [
+      "AppSyncListResponse"
     ]
   },
   {
@@ -6507,6 +6836,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "artifacts:read"
   },
   {
+    "id": "listSessionLinks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links",
+    "request": [],
+    "query": [
+      "fresh"
+    ],
+    "response": [
+      "SessionLinksResponse"
+    ],
+    "permission": "sessions:read"
+  },
+  {
     "id": "listSessionPage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions",
@@ -7098,6 +7440,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "PATCH /v1/organizations/:organizationId/agents/:agentId",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/agents/:agentId",
+    "request": [
+      "UpdateOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PATCH /v1/organizations/:organizationId/agents/tool-servers/:key",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers/:key",
+    "request": [
+      "UpdateOrgToolServerRequest"
+    ],
+    "response": [],
+    "secretFields": [
+      "request.oauthRefresh.clientSecret",
+      "request.sharedHeaders"
+    ]
+  },
+  {
     "id": "PATCH /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -7251,6 +7615,101 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/console-sign-in/authorize",
     "request": [],
     "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents",
+    "request": [
+      "CreateOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/archive",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/archive",
+    "request": [
+      "ArchiveOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/management",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/management",
+    "request": [
+      "SetOrgAgentManagementRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/publish",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/publish",
+    "request": [
+      "PublishOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats",
+    "request": [
+      "CreateOrgAgentTestChatRequest"
+    ],
+    "response": [],
+    "secretFields": [
+      "request.toolLogins"
+    ]
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/approvals/:approvalId",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/approvals/:approvalId",
+    "request": [
+      "DecideOrgAgentTestChatApprovalRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/control",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/control",
+    "request": [
+      "ControlOrgAgentTestChatRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/messages",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/test-chats/:sessionId/messages",
+    "request": [
+      "SendOrgAgentTestChatMessageRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/test-workspace",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/test-workspace",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/organizations/:organizationId/agents/tool-servers",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/agents/tool-servers",
+    "request": [
+      "CreateOrgToolServerRequest"
+    ],
+    "response": [],
+    "secretFields": [
+      "request.oauthRefresh.clientSecret",
+      "request.sharedHeaders"
+    ]
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
@@ -7598,6 +8057,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7616,6 +8076,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7641,6 +8102,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7681,6 +8143,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/tools/site-setup",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/site-setup",
+    "request": [],
+    "response": [
+      "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
+      "ToolGatewayTargetApprovalResponse"
+    ],
+    "permission": "workspace:read",
+    "secretFields": [
+      "response.approvalToken"
+    ]
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/tools/target-approvals",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/target-approvals",
@@ -7691,6 +8169,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
       "ToolGatewaySiteReadinessResponse",
+      "ToolGatewaySiteSetupResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -8110,6 +8589,33 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "PUT /v1/organizations/:organizationId/agents/:agentId/draft",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/agents/:agentId/draft",
+    "request": [
+      "SaveOrgAgentDraftRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/organizations/:organizationId/agents/by-key/:key/apply",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/agents/by-key/:key/apply",
+    "request": [
+      "ApplyOrgAgentRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/organizations/:organizationId/console/member-roles",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/member-roles",
+    "request": [
+      "SetConsoleMemberRoleRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "PUT /v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
     "method": "PUT",
     "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
@@ -8166,6 +8672,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey",
+    "request": [
+      "PutEndUserToolCredentialRequest"
+    ],
+    "response": [],
+    "secretFields": [
+      "request.accessToken",
+      "request.headers",
+      "request.refreshToken"
+    ]
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
@@ -8200,6 +8720,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "UpsertSitePublicationRequest"
     ],
     "response": []
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/subscription",
+    "request": [],
+    "response": [
+      "AppSyncSubscriptionResponse"
+    ]
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
@@ -8655,6 +9184,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "removeSessionLink",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links/:linkId",
+    "request": [],
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "removeSessionResources",
@@ -9152,6 +9689,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "secretFields": [
       "response.secret"
+    ]
+  },
+  {
+    "id": "runAppSync",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId/run",
+    "request": [],
+    "response": [
+      "AppSyncRunResponse"
     ]
   },
   {
@@ -10134,6 +10680,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateAppSync",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/syncs/:syncId",
+    "request": [
+      "AppSyncUpdateRequest"
+    ],
+    "response": [
+      "AppSync"
+    ]
+  },
+  {
     "id": "updateArtifactPin",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
@@ -10910,6 +11467,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UpdateSessionVisibilityResponse"
     ]
+  },
+  {
+    "id": "updateSidebarLayout",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/sidebar-layout",
+    "request": [
+      "UpdateSidebarLayoutRequest"
+    ],
+    "response": [
+      "SidebarLayoutResponse"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "updateSiteAuthConnection",

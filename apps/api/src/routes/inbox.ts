@@ -11,6 +11,7 @@ import {
   type AccessGrant,
   type AccessContext,
   type InboxItem,
+  type InboxNotice,
 } from "@opengeni/contracts";
 import {
   inboxSubjectForContext,
@@ -29,7 +30,7 @@ import {
   getSessionReplyMuteScope,
   getSessionRepliesMuted,
   getSessionTitles,
-  listInboxItems,
+  listInboxEntries,
   listBillingCreditNotifications,
   listWorkspacesForSubject,
   setInboxSettings,
@@ -37,7 +38,9 @@ import {
   setSessionRepliesMuted,
   updateInboxItemAttention,
   type InboxItemRow,
+  type InboxNoticeRow,
 } from "@opengeni/db";
+import { withoutProviderCitationHandles } from "@opengeni/contracts/provider-citation-handles";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { parseRequestBody } from "../http/request-body";
@@ -121,15 +124,45 @@ export async function itemsWithUnavailableSession(
   return unavailable;
 }
 
-/** An inbox row as the person sees it. */
+/**
+ * An inbox row as the person sees it. A reply or notification an agent wrote
+ * after a web search loses citation handles that name no openable page; the
+ * stored row, which agents read through their notification tools, keeps the
+ * exact text.
+ */
 export function presentInboxItem(
   row: InboxItemRow,
   sessionTitle: string | null,
   sessionAvailable: boolean,
 ): InboxItem {
+  const shown = {
+    ...row,
+    title: withoutProviderCitationHandles(row.title),
+    body: withoutProviderCitationHandles(row.body),
+  };
   return sessionAvailable
-    ? { ...row, sessionTitle, sessionAvailable: true }
-    : { ...row, sessionTitle: null, eventSequence: null, sessionAvailable: false };
+    ? { ...shown, sessionTitle, sessionAvailable: true }
+    : { ...shown, sessionTitle: null, eventSequence: null, sessionAvailable: false };
+}
+
+/**
+ * A notice about something other than a chat (such as a subscription account
+ * that needs signing in again): no session, and its link, stored as a path in
+ * the web app, made absolute with the deployment's web address when one is set.
+ */
+export function presentInboxNotice(
+  row: InboxNoticeRow,
+  webBaseUrl: string | undefined,
+): InboxNotice {
+  const base = webBaseUrl?.replace(/\/+$/u, "");
+  const url = row.link.url.startsWith("/") && base ? `${base}${row.link.url}` : row.link.url;
+  return {
+    ...row,
+    link: { ...row.link, url },
+    sessionTitle: null,
+    eventSequence: null,
+    sessionAvailable: false,
+  };
 }
 
 function isNeedsYou(kind: InboxItem["kind"]): boolean {
@@ -151,11 +184,11 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requireAccessContext(c, deps);
     const subjectId = requirePerson(context);
     const workspaceFilter = c.req.query("workspaceId") ?? null;
-    const rows = (
+    const entries = (
       await Promise.all(
         (
           await personAccounts(deps, context)
-        ).map((accountId) => listInboxItems(deps.db, { accountId, subjectId })),
+        ).map((accountId) => listInboxEntries(deps.db, { accountId, subjectId })),
       )
     )
       .flat()
@@ -163,9 +196,11 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     const readable = await readableWorkspaces(
       c,
       deps,
-      rows.map((row) => row.workspaceId),
+      entries.map((row) => row.workspaceId),
     );
-    const visible = rows.filter((row) => readable.has(row.workspaceId));
+    const visibleEntries = entries.filter((row) => readable.has(row.workspaceId));
+    const visible = visibleEntries.filter((row): row is InboxItemRow => row.sessionId !== null);
+    const notices = visibleEntries.filter((row): row is InboxNoticeRow => row.sessionId === null);
     const unavailable = await itemsWithUnavailableSession(visible, (row) =>
       sessionReadable(deps, readable.get(row.workspaceId)!, row.sessionId),
     );
@@ -184,10 +219,14 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
     );
     const now = Date.now();
+    const webBaseUrl = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
     const items: InboxItem[] = visible
       .map((row) =>
         presentInboxItem(row, titles.get(row.sessionId) ?? null, !unavailable.has(row.id)),
       )
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const noticeEntries = notices
+      .map((row) => presentInboxNotice(row, webBaseUrl))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const awake = items.filter(
       (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
@@ -215,6 +254,7 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListInboxResponse.parse({
         items,
+        notices: noticeEntries,
         billingNotifications,
         needsYouCount: awake.filter((item) => isNeedsYou(item.kind)).length,
         unreadCount: awake.filter((item) => item.unread).length,

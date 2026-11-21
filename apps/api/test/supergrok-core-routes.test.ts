@@ -413,6 +413,7 @@ const PUBLIC_SHAPE = {
     "plan",
     "quota",
     "scope",
+    "signedInAt",
     "status",
     "subject",
   ],

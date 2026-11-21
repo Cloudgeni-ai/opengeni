@@ -89,7 +89,7 @@ export function ChannelCreateDialog(props: {
                 label="Who can see it"
                 hint={
                   audience.value === "private"
-                    ? "Only you see it. It holds your Only me chats and Sites."
+                    ? "Only you see it. It holds your Only me chats and apps."
                     : "Everyone in this workspace sees it."
                 }
               >

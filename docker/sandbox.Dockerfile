@@ -146,6 +146,7 @@ COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-ke
 COPY packages/artifact-tool/package.json packages/artifact-tool/package.json
 COPY packages/browserd/package.json packages/browserd/package.json
 COPY packages/capabilities/package.json packages/capabilities/package.json
+COPY packages/cli/package.json packages/cli/package.json
 COPY packages/codemode/package.json packages/codemode/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json

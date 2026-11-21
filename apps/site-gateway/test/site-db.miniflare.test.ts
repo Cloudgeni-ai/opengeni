@@ -151,7 +151,7 @@ async function startWorker(
         APP_ORIGIN: "https://app.test",
         GATEWAY_SECRET: TEST_SECRET,
         GATEWAY_SECRET_PREVIOUS: PREVIOUS_SECRET,
-        ENVIRONMENT: "production",
+        ENVIRONMENT: "test",
         ...bindings,
       },
       ...(options.siteDb === false
@@ -330,7 +330,7 @@ describe("internal Site database route", () => {
       await run(SITE, "CREATE TABLE sneaky (a)", {}, { profile: "agent" }),
     );
     expect(schemaChange).toMatchObject({ status: 422, code: "validation" });
-    expect(schemaChange.message).toContain("site_sql_migrate");
+    expect(schemaChange.message).toContain("app_sql_migrate");
     expect(
       await failure(
         await call(SITE, "script", {

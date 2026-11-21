@@ -27,6 +27,7 @@ type PatchDiffComponent = ComponentType<{
     diffStyle?: "unified" | "split";
     overflow?: "scroll" | "wrap";
     stickyHeader?: boolean;
+    disableFileHeader?: boolean;
   };
   disableWorkerPool?: boolean;
   className?: string;
@@ -52,6 +53,9 @@ export type PierreDiffProps = {
    *  keeps lines on one row behind a horizontal scrollbar (better for a wide
    *  viewport or pathological minified lines). */
   overflow?: "wrap" | "scroll" | undefined;
+  /** Hide Pierre's own per-file header when the host draws one (the workbench's
+   *  collapsible section header). */
+  disableFileHeader?: boolean | undefined;
   className?: string | undefined;
 };
 
@@ -82,6 +86,7 @@ export function PierreDiff({
   fallback,
   plain,
   overflow = "wrap",
+  disableFileHeader,
   className,
 }: PierreDiffProps) {
   const [failed, setFailed] = useState(false);
@@ -148,6 +153,7 @@ export function PierreDiff({
     diffStyle: layout,
     overflow,
     stickyHeader: true,
+    ...(disableFileHeader ? { disableFileHeader: true } : {}),
     ...(theme
       ? { theme }
       : {

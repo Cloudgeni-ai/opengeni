@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
 import { currentTraceContext, withTraceContext, type Span } from "@opengeni/observability";
 import { measureSessionCreatePhase } from "../src/session-create-observability";
+import { withoutOrgAgentFieldsForPreflight } from "../src/routes/sessions";
 import {
   SITE_FRAME_HEADER,
   siteFrameBodyRefusal,
@@ -87,7 +88,8 @@ function productionRoute() {
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
       SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources,
-      defaultAgentChatVisibility, prepareAgentChatCreate, compactSessionResponse } = ports;
+      defaultAgentChatVisibility, prepareAgentChatCreate, compactSessionResponse,
+      withoutOrgAgentFieldsForPreflight } = ports;
     ${code}
     return handler;
   `,
@@ -159,6 +161,8 @@ function routeFixture() {
     // No agent in this payload: the Only me agent default changes nothing.
     defaultAgentChatVisibility: async () => {},
     prepareAgentChatCreate: async () => undefined,
+    // No organization agent in this payload: the early check reads it unchanged.
+    withoutOrgAgentFieldsForPreflight,
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;

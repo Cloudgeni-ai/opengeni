@@ -183,7 +183,7 @@ function ScopedSiteDetail({
         .then((detail) => {
           if (abort.signal.aborted) return;
           if (detail.artifact.id !== siteId || detail.artifact.workspaceId !== workspaceId)
-            throw new Error("Site scope mismatch");
+            throw new Error("App scope mismatch");
           if (
             detail.artifact.currentVersion?.id !== loaded.detail.artifact.currentVersion?.id ||
             detail.artifact.status !== loaded.detail.artifact.status
@@ -221,7 +221,7 @@ function ScopedSiteDetail({
         await client.rollbackWorkspaceArtifact(
           workspaceId,
           siteId,
-          { ...common, versionId: rollbackId, reason: "Restore explicitly selected Site version" },
+          { ...common, versionId: rollbackId, reason: "Restore explicitly selected app version" },
           { signal: abort.signal },
         );
       } else {
@@ -231,7 +231,7 @@ function ScopedSiteDetail({
           {
             ...common,
             status: loaded.detail.artifact.status === "active" ? "archived" : "active",
-            reason: "Explicit Site status change",
+            reason: "Explicit app status change",
           },
           { signal: abort.signal },
         );

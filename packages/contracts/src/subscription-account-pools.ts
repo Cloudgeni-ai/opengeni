@@ -34,6 +34,12 @@ export const SubscriptionAccountSummary = /* @__PURE__ */ defineSchema(() =>
     active: primitives.boolean,
     expiresAt: z.string().datetime().nullable(),
     lastRefreshAt: z.string().datetime().nullable(),
+    /**
+     * When the account was last signed in (connected or reconnected). The
+     * provider stops accepting a sign-in some weeks after it, so the account
+     * then needs signing in again. Null when unknown; absent from older servers.
+     */
+    signedInAt: z.string().datetime().nullable().optional(),
     lastError: primitives.nullableString,
     allocatorEnabled: primitives.boolean,
     allocatorVersion: primitives.positiveInteger,

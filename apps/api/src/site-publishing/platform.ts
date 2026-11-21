@@ -59,12 +59,7 @@ export async function moderateSiteAsPlatform(
     record = hostname && hostname.releasedAt === null ? hostname : null;
   }
   if (!record)
-    throw sitePublishingError(
-      404,
-      "not_found",
-      "site_not_found",
-      "No Site has this hostname or id",
-    );
+    throw sitePublishingError(404, "not_found", "site_not_found", "No app has this hostname or id");
   const scope = { accountId: record.accountId, workspaceId: record.workspaceId };
   const subject = `platform:${operator}`.slice(0, 300);
   const publication = await runSitePublishing(() =>

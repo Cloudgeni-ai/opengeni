@@ -44,10 +44,10 @@ export type SiteConversationSite = {
  * model-visible context (`modelContext`), never authority.
  */
 export function siteConversationContext(site: SiteConversationSite): string {
-  const title = site.title.replace(/\s+/gu, " ").trim().slice(0, 200) || "Untitled Site";
+  const title = site.title.replace(/\s+/gu, " ").trim().slice(0, 200) || "Untitled app";
   return [
-    `The person is working on the Opengeni Site “${title}” (Site id ${site.siteId}), shown beside this chat at version ${site.revision} (version id ${site.versionId}).`,
-    "When they ask for a change to “the Site”, “this page” or a part of it, they mean this Site: read its current source, then publish the change as a new version of this Site.",
+    `The person is working on the Opengeni app “${title}” (App id ${site.siteId}), shown beside this chat at version ${site.revision} (version id ${site.versionId}).`,
+    "When they ask for a change to “the app”, “this page” or a part of it, they mean this app: read its current source, then publish the change as a new version of this app.",
     "A published version goes live immediately and the preview beside this chat reloads; earlier versions can be restored.",
   ].join(" ");
 }
@@ -57,7 +57,7 @@ export class SiteSessionPathError extends Error {
   readonly code = "site_session_path_unsupported";
 
   constructor() {
-    super("Unsupported Site session API path");
+    super("Unsupported app session API path");
     this.name = "SiteSessionPathError";
   }
 }
@@ -67,7 +67,7 @@ export class SiteDataUnsupportedError extends Error {
   readonly code = "site_data_unsupported";
 
   constructor() {
-    super("This Site host does not provide Site Data");
+    super("This app host does not provide app data");
     this.name = "SiteDataUnsupportedError";
   }
 }

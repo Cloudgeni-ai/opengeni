@@ -553,6 +553,8 @@ export type DispatchScheduledTaskRunInput = {
 
 export type DispatchScheduledTaskRunResult =
   | { action: "deleted" }
+  /** An App data sync run, queued for the API's executor (no model run). */
+  | { action: "handed_off"; runId: string }
   | {
       action: "blocked";
       runId?: string;

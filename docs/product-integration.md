@@ -334,7 +334,7 @@ and switches single capabilities: `{ from: "none", webSearch: true }`.
 | `schedules` | create and manage scheduled tasks |
 | `knowledge` | search and save workspace Knowledge, task notes and instructions |
 | `workspaceFiles` | read files uploaded to the workspace |
-| `workspaceConnectors` | use the workspace's connected apps and integrations |
+| `workspaceConnectors` | use the workspace's connected apps and integrations, and show Connect cards for the person to connect one (or their own computer) |
 | `secrets` | use saved secrets by `{{secret:…}}` reference, save new ones and ask for them with a secure card |
 | `workspaceAdmin` | manage projects, rigs, machines and connector setup |
 
@@ -375,6 +375,20 @@ visuals) or `"markdown"` for any other UI; the chat facade defaults to
 workspace default or `"all"`. Sessions created before agent settings keep
 `agent: null` and their exact tools and prompt. See [Agent configuration](design/agent-configuration.md)
 for the design and enforcement details.
+
+### Console agents
+
+An organization can define its agents once instead of sending the full
+configuration on every create: in Console, or as YAML files in Git deployed
+with `npx opengeni agents deploy` (Console agents, off by default per
+organization). Name one with `agent: "<key>"` or `agent: { ref, ... }`; the
+other fields change settings for that chat only, and `instructions` are added
+after the agent's. A create that names no organization agent behaves exactly
+as above. With the session proxy, name it in `createSession`; the proxy drops
+an organization agent sent by the browser. Server-side administration and code
+deploys: `@opengeni/sdk/organization-agents`. See
+[agents.md, "Console agents"](agents.md#console-agents) and
+`docs-site/integrate/agents-as-code.mdx`.
 
 ### Choose who shares chats
 

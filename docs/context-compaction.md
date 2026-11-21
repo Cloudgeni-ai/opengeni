@@ -319,11 +319,18 @@ See `packages/runtime/src/anthropic-request-size.ts`,
 
 ## Model-facing tool output
 
-Every resolved model carries a textual tool-output policy. The Codex catalog's
-10,000-token policy is the default; Opengeni applies Codex's exact 1.2x JSON
-serialization allowance, UTF-8-safe head/tail truncation, and explicit
-`…N tokens truncated…` marker. Structured textual parts share one sequential
-budget while images, files, and encrypted content remain structured.
+Every resolved model carries a textual tool-output policy: how much text one
+tool result shows inline, 25,000 approximate tokens (100,000 UTF-8 bytes) by
+default. A newly produced result over it is stored whole and the model gets a
+view with the call that reads the rest (see
+[run lifecycle](run-lifecycle.md), "Tool results are lossless"), so this
+truncation is only the safety net behind that store. It applies Codex's exact
+1.2x JSON serialization allowance, UTF-8-safe head/tail truncation, and
+explicit `…N tokens truncated…` marker. Structured textual parts share one
+sequential budget while images, files, and encrypted content remain
+structured. Codex models never go below the 10,000-token policy the default
+used to be, so the bound only grows and history bounded under the earlier
+policy replays unchanged.
 
 The same pure normalizer runs at both canonical boundaries: before new
 `session_history_items` rows are written and again at the final live model-input
@@ -453,6 +460,30 @@ the start of every later request:
   appends a new item that replaces the old one; withdrawn governance appends an
   explicit "no workspace governance" item. Compaction re-adds only the latest
   governance item after the Skill catalog.
+- The active workspace's filesystem layout names its root, which differs
+  between a managed sandbox (`/workspace`) and each Connected Machine (its
+  host-native working directory). The SDK renders nothing from the manifest
+  into the system prompt (`manifestInstructions: false`); the system prompt
+  keeps a static section that points at the latest
+  `<opengeni_workspace_filesystem>` developer item. That item is the turn's
+  manifest (`buildManifest`, the same placement the agent's box applies)
+  without files, rendered by `workspaceFilesystemLayout`; it is written like
+  governance before the turn that first sees a new layout and frozen for that
+  turn's attempts. A `sandbox_swap` within a turn returns
+  the new `workspaceRoot` in its tool result; the next turn appends the new
+  layout. Compaction re-adds only the latest layout item after governance.
+  Before this, every machine swap rewrote the end of the system prompt and
+  every later request of the session re-read its whole history uncached.
+- The kind of compute works the same way. A configured agent's system prompt
+  describes the deployment's own kind of compute (`promptSandboxBackend`), not
+  the machine the turn runs on, so moving between a managed sandbox and a
+  Connected Machine keeps it byte-identical; only having compute at all still
+  follows the turn. When a session of a managed-sandbox deployment is on a
+  Connected Machine, its layout item adds the `# Connected Machine` section and
+  says which managed-sandbox guidance does not apply there. Before this, each
+  move between the two rewrote the file-link rules, the Connected Machine
+  section and the Git section, and on Claude routes the changed system prompt
+  also dropped every earlier signed thinking block.
 - An agent's Instructions are the exception that is allowed in the system
   prompt, because every chat of one agent shares them: chats bound to an agent
   revision (`sessions.agent_prompt_revision`) carry that revision as their own
@@ -488,19 +519,48 @@ the system prompt or tools, and the next request is a full write.
 counts 1, 2, 4, … and the full count). `model_call_facts.prompt_cache_diagnostics`
 stores that fingerprint, Claude's dropped signed-thinking counts by reason,
 and, when a call reads much less cache than the previous call of the same model
-in the session, a warm-miss class: `context_replaced`, `tools_changed`,
-`system_changed`, `history_rewritten` (with the first diverging checkpoint),
-`thinking_dropped`, `account_changed`, `idle_gap` or `unexplained`. The worker
-checks them in that order. `thinking_dropped` needs Claude to drop more signed
-thinking than it dropped for the previous call: a long conversation can drop
-the same old blocks on every request, which leaves the prompt unchanged, so a
-steady drop count falls through to the account, idle-gap or unexplained class.
+in the session, a warm-miss class: `idle_gap`, `context_replaced`,
+`tools_changed`, `system_changed`, `release_changed`, `history_rewritten` (with
+the first diverging checkpoint), `thinking_dropped`, `account_changed`,
+`unobserved` or `unexplained`. The worker checks them in that order. Time comes
+first: more than 5 minutes after the previous call (the cache lifetime Opengeni
+requests by default) the prefix may have expired anyway, so no request change
+is blamed. `context_replaced` needs the prompt to fall below 60% of the
+previous one in tokens or in items, or the history's first item to change:
+compaction keeps the tools, the system prompt and a summary, so a large fixed
+prefix can hold the token count up while the item count collapses, and a
+compacted history starts anew, while every in-place change keeps its first
+item. The first-item test also covers a call whose baseline was the compaction
+request itself, which is shorter than the history built from it. On Claude a
+compacted history's leading system items join the system prompt, so the system
+digest changes with it; that costs nothing beyond the replaced history and is
+not `system_changed`. Each fingerprint records the deployment revision that built the
+request, so a tools or system change between two deployments is
+`release_changed` (a release that edits model-facing text costs each live
+session one cold prefix) and the same change within one deployment is
+`tools_changed` or `system_changed`. A call whose fingerprint has no revision
+came from a build older than revision recording, so it also counts as another
+deployment.
+`thinking_dropped` needs Claude to drop more signed thinking than it dropped
+for the previous call: a long conversation can drop the same old blocks on
+every request, which leaves the prompt unchanged, so a steady drop count falls
+through to the account, idle-gap or unexplained class. `unobserved` means
+either call has no request fingerprint, so a prefix change cannot be ruled out;
+`unexplained` means both were fingerprinted with an identical prefix (provider
+eviction or routing). Every transport is fingerprinted: JSON text bodies and
+the replayable stream the OpenAI-family clients send.
 The worker
 also exports `opengeni_model_prompt_cache_warm_misses_total{class}`,
 `opengeni_model_prompt_cache_missed_tokens_total` and
 `opengeni_model_thinking_blocks_dropped_total{reason}`. `context_replaced`,
-`idle_gap` and `account_changed` are expected; a steady rate of any other class
-points to a prompt-cache bug.
+`release_changed`, `idle_gap` and `account_changed` are expected; a steady rate
+of any other class points to a prompt-cache bug. The chart alerts on them:
+`OpenGeniPromptCachePrefixChanged` (tools or system changed within one
+deployment, five or more in a day for a model), `OpenGeniPromptCacheHistoryRewriteLossHigh`
+(history rewrites and newly dropped thinking above 2% of cached tokens over
+6h) and `OpenGeniPromptCacheDiagnosticsBlind` (most of a provider's misses
+`unobserved`). A cache hit ratio cannot see a defect that rewrites each
+session's prefix once, because the median call stays warm.
 
 `packages/runtime/test/prompt-cache-prefix-stability.test.ts` asserts the
 byte-prefix contract across consecutive requests: new turn, steer and
@@ -596,6 +656,11 @@ tokens after each compaction instead of about 20,000.
 Turn-scoped operational notices are retained verbatim only for the turn running
 the compaction, or when one is the newest input; older notices are left to the
 checkpoint, because each applies only to its own turn.
+Preparing another stream in the same turn reuses the last durable notice when
+its text is unchanged. A checkpoint also retains only one copy of each run of
+unchanged notices from that turn, so copies written by older workers do not
+crowd out other history. An actual change still appears in order, and ordinary
+requests never remove or rewrite prior notices.
 Existing budget-driven omission and text truncation still apply. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.

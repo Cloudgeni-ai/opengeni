@@ -241,7 +241,15 @@ function fakeApi(initial: McpConnection[]): McpConnectionsApi {
   return {
     list: async () => ({ connections: rows, canManageAll: true }),
     update: async (id, change) => {
-      rows = rows.map((row) => (row.id === id ? { ...row, policy: change.policy } : row));
+      rows = rows.map((row) =>
+        row.id === id
+          ? {
+              ...row,
+              ...(change.policy ? { policy: change.policy } : {}),
+              ...(change.appDataAccess ? { appDataAccess: change.appDataAccess } : {}),
+            }
+          : row,
+      );
       return rows.find((row) => row.id === id)!;
     },
     disconnect: async (id) => {
@@ -297,10 +305,10 @@ export default function PageConnectedAgentsSection() {
   return (
     <KitSection sectionKey="page-connected-agents">
       <KitBlock
-        title="Connected apps"
-        description="Organization settings > Connected apps. How to add the MCP server to each client, then the agents: each row says whose agent it is, what it can do and where. A row opens the agent's page."
+        title="Connected agents"
+        description="Organization settings > Connected agents. How to add the MCP server to each client, then the agents: each row says whose agent it is, what it can do and where. A row opens the agent's page."
       >
-        <PagePreview label="Connected apps" height={980}>
+        <PagePreview label="Connected agents" height={980}>
           <AgentsPreview initial={CONNECTIONS} />
         </PagePreview>
       </KitBlock>

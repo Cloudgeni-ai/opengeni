@@ -35,7 +35,7 @@ type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
 };
 
-const SiteIdInput = z4.string().uuid().describe("The Site (published artifact) id.");
+const SiteIdInput = z4.string().uuid().describe("The app (published artifact) id.");
 const NameInput = z4
   .string()
   .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
@@ -48,15 +48,15 @@ const SITE_SQL_TOOL_EXPORT_MAX_BYTES = 2 * 1024 * 1024;
  * First-party Site SQL tools: optional per-Site Cloudflare storage (one SQLite
  * database per Site). Only the Site's managers (its owner, a workspace admin,
  * or an agent acting for them) can manage it; Site pages call named queries
- * with site.sql.run, and so can agents with site_sql_run. The tools act with
+ * with site.sql.run, and so can agents with app_sql_run. The tools act with
  * the agent's own authority, through the same service as the HTTP routes. An
  * agent started from a Site page gets that page's reach (resolveSiteDataAccess):
- * every management tool refuses it, and site_sql_run runs only the named
+ * every management tool refuses it, and app_sql_run runs only the named
  * queries the page itself could run, on that Site.
  *
  * A published Site's own agent (`siteAgent` resolves a Site context) gets
- * `site_sql_run` as the conversation's viewer (audiences and `:viewer` as on
- * the page) and, for workspace members, read-only `site_sql_query`; both are
+ * `app_sql_run` as the conversation's viewer (audiences and `:viewer` as on
+ * the page) and, for workspace members, read-only `app_sql_query`; both are
  * pinned to that Site and every other tool refuses it.
  */
 export function registerSiteSqlTools(
@@ -98,10 +98,10 @@ export function registerSiteSqlTools(
     };
 
   server.registerTool(
-    "site_sql_inspect",
+    "app_sql_inspect",
     {
       description:
-        "Describe a Site's SQL database (optional Cloudflare storage, one SQLite database per Site): whether it is available and turned on, its migrations, named queries, usage and limits, and, when it exists, its tables, columns, row counts and indexes. Only the Site's managers can use Site SQL tools.",
+        "Describe an app's SQL database (optional Cloudflare storage, one SQLite database per app): whether it is available and turned on, its migrations, named queries, usage and limits, and, when it exists, its tables, columns, row counts and indexes. Only the app's managers can use app SQL tools.",
       inputSchema: { siteId: SiteIdInput },
     },
     call(async ({ siteId }: { siteId: string }) => {
@@ -122,10 +122,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_enable",
+    "app_sql_enable",
     {
       description:
-        "Turn a Site's SQL database on or off. Turn it on before adding migrations or queries. Turning it off stops Site pages and SQL tools from using it but keeps its data, migrations and queries (export still works).",
+        "Turn an app's SQL database on or off. Turn it on before adding migrations or queries. Turning it off stops app pages and SQL tools from using it but keeps its data, migrations and queries (export still works).",
       inputSchema: { siteId: SiteIdInput, enabled: z4.boolean() },
     },
     call((args: { siteId: string; enabled: boolean }) =>
@@ -134,10 +134,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_migrate",
+    "app_sql_migrate",
     {
       description:
-        "Change a Site's database schema with a named migration (CREATE TABLE, CREATE INDEX, ALTER TABLE, and optional seed INSERTs). Migrations are kept in order and replayed when the database is rebuilt; a name can be used once. Any earlier migration the database is missing is applied first.",
+        "Change an app's database schema with a named migration (CREATE TABLE, CREATE INDEX, ALTER TABLE, and optional seed INSERTs). Migrations are kept in order and replayed when the database is rebuilt; a name can be used once. Any earlier migration the database is missing is applied first.",
       inputSchema: {
         siteId: SiteIdInput,
         name: NameInput.describe("A unique migration name, such as create_votes."),
@@ -154,10 +154,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_define_query",
+    "app_sql_define_query",
     {
       description:
-        'Create, replace or delete a named query a Site page runs with site.sql.run(name, params). Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement with :name parameters; pages pass values only, never SQL. :viewer (the viewer\'s principal, such as user:<id> or guest:<id>), :viewer_kind, :viewer_signed_in, :viewer_access (member, invited, user or guest) and :viewer_email (verified, lowercase, or NULL) are bound by the host, so a query can keep rows per viewer: e.g. INSERT INTO votes (voter, choice) VALUES (:viewer, :choice). audience: everyone (including anonymous guests of public Sites), signed_in (default) or managers (agents and the console only). Set action to "delete" to remove the query.',
+        'Create, replace or delete a named query an app page runs with site.sql.run(name, params). Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement with :name parameters; pages pass values only, never SQL. :viewer (the viewer\'s principal, such as user:<id> or guest:<id>), :viewer_kind, :viewer_signed_in, :viewer_access (member, invited, user or guest) and :viewer_email (verified, lowercase, or NULL) are bound by the host, so a query can keep rows per viewer: e.g. INSERT INTO votes (voter, choice) VALUES (:viewer, :choice). audience: everyone (including anonymous guests of public apps), signed_in (default) or managers (agents and the console only). Set action to "delete" to remove the query.',
       inputSchema: contractToolInput(
         z4.object({
           siteId: SiteIdInput,
@@ -202,10 +202,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_query",
+    "app_sql_query",
     {
       description:
-        "Run one read-only statement (SELECT, WITH, read-only PRAGMA or EXPLAIN) on a Site's database and return its rows. A statement that writes is refused.",
+        "Run one read-only statement (SELECT, WITH, read-only PRAGMA or EXPLAIN) on an app's database and return its rows. A statement that writes is refused.",
       inputSchema: statementInput,
     },
     call(
@@ -232,7 +232,7 @@ export function registerSiteSqlTools(
         if (site.viewerKind !== "member")
           throw new SiteSqlError(
             "forbidden",
-            "Only workspace members can query this Site's database through its assistant",
+            "Only workspace members can query this app's database through its assistant",
           );
         return await runSiteSqlStatement(
           deps,
@@ -251,14 +251,14 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_run",
+    "app_sql_run",
     {
       description:
-        "Run one of a Site's named queries by name, as a Site page does with site.sql.run(name, params). The query's audience applies to you as it would to the page's viewer; :viewer and the other principal parameters are bound from you, not from params. Use site_sql_inspect to list the queries.",
+        "Run one of an app's named queries by name, as an app page does with site.sql.run(name, params). The query's audience applies to you as it would to the page's viewer; :viewer and the other principal parameters are bound from you, not from params. Use app_sql_inspect to list the queries.",
       inputSchema: contractToolInput(
         z4.object({
           siteId: SiteIdInput,
-          name: NameInput.describe("The named query, as defined with site_sql_define_query."),
+          name: NameInput.describe("The named query, as defined with app_sql_define_query."),
           ...SiteSqlRunRequest.shape,
         }),
       ),
@@ -293,10 +293,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_execute",
+    "app_sql_execute",
     {
       description:
-        "Run one statement that changes data (INSERT, UPDATE, DELETE, REPLACE) on a Site's database. Schema changes go through site_sql_migrate so the database can be rebuilt.",
+        "Run one statement that changes data (INSERT, UPDATE, DELETE, REPLACE) on an app's database. Schema changes go through app_sql_migrate so the database can be rebuilt.",
       inputSchema: statementInput,
     },
     call(
@@ -321,10 +321,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_export",
+    "app_sql_export",
     {
       description:
-        "Export a Site's database so its data can always leave Cloudflare: sql (schema, multi-row INSERT statements, then triggers; ready for site_sql_import or any SQLite), csv (one table; values become text) or json (schema and rows per table). SQL and JSON keep every value. One call returns at most maxBytes (default 512 KB); when nextCursor is set, call again with it as cursor and append the pieces in order (only the first piece has the schema or CSV header, only the last SQL piece has the triggers). Works while Site SQL is off.",
+        "Export an app's database so its data can always leave Cloudflare: sql (schema, multi-row INSERT statements, then triggers; ready for app_sql_import or any SQLite), csv (one table; values become text) or json (schema and rows per table). SQL and JSON keep every value. One call returns at most maxBytes (default 512 KB); when nextCursor is set, call again with it as cursor and append the pieces in order (only the first piece has the schema or CSV header, only the last SQL piece has the triggers). Works while app SQL is off.",
       inputSchema: {
         siteId: SiteIdInput,
         format: SiteSqlExportFormat.optional().describe("sql (default), csv or json."),
@@ -377,10 +377,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_import",
+    "app_sql_import",
     {
       description:
-        "Import data into a Site's database (at most 2 MB per call). sql: schema statements (CREATE TABLE, INDEX, VIEW) are recorded as a migration first, the data statements run in batches, and triggers are recorded as a second migration after the data so they do not fire on imported rows; import the pieces of a large site_sql_export in order. csv: a header row of column names, then rows, into an existing table (an empty cell is NULL). json: rows as objects keyed by column, into an existing table. onConflict (csv, json): fail (default), replace or ignore. When a batch fails, earlier batches stay; the error says how much landed and which migration was recorded.",
+        "Import data into an app's database (at most 2 MB per call). sql: schema statements (CREATE TABLE, INDEX, VIEW) are recorded as a migration first, the data statements run in batches, and triggers are recorded as a second migration after the data so they do not fire on imported rows; import the pieces of a large app_sql_export in order. csv: a header row of column names, then rows, into an existing table (an empty cell is NULL). json: rows as objects keyed by column, into an existing table. onConflict (csv, json): fail (default), replace or ignore. When a batch fails, earlier batches stay; the error says how much landed and which migration was recorded.",
       inputSchema: contractToolInput(
         z4.object({ siteId: SiteIdInput, ...SiteSqlImportRequest.shape }),
       ),
@@ -398,10 +398,10 @@ export function registerSiteSqlTools(
   );
 
   server.registerTool(
-    "site_sql_reset",
+    "app_sql_reset",
     {
       description:
-        'Empty a Site\'s database. schema "keep" (default) deletes every row and rebuilds the tables from the migrations; "drop" deletes the database and forgets every migration and named query. Export first if the data matters. Needs confirm: true.',
+        'Empty an app\'s database. schema "keep" (default) deletes every row and rebuilds the tables from the migrations; "drop" deletes the database and forgets every migration and named query. Export first if the data matters. Needs confirm: true.',
       inputSchema: contractToolInput(
         z4.object({ siteId: SiteIdInput, ...SiteSqlResetRequest.shape }),
       ),

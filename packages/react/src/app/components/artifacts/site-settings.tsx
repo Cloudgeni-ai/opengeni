@@ -34,7 +34,7 @@ const PLACEHOLDER_SITE: WorkspaceArtifact = {
   accountId: "00000000-0000-4000-8000-000000000000",
   workspaceId: "00000000-0000-4000-8000-000000000000",
   slug: "loading",
-  title: "Site",
+  title: "App",
   description: null,
   status: "active",
   currentVersion: null,
@@ -99,15 +99,15 @@ export function useSiteManagement({
       await client.setWorkspaceArtifactStatus(workspaceId, siteId, {
         status,
         expectedCurrentVersionId: currentVersion.id,
-        reason: `${status === "archived" ? "Archived" : "Restored"} from Sites by ${context.authSession?.user?.name ?? "a workspace member"}`,
+        reason: `${status === "archived" ? "Archived" : "Restored"} from apps by ${context.authSession?.user?.name ?? "a workspace member"}`,
         idempotencyKey: crypto.randomUUID(),
       });
       invalidateArtifactCatalog(client, workspaceId);
-      toast.success(status === "archived" ? "Site archived" : "Site restored");
+      toast.success(status === "archived" ? "App archived" : "App restored");
       await onStatusChanged();
       return true;
     } catch (error) {
-      toast.error(status === "archived" ? "Couldn't archive Site" : "Couldn't restore Site", {
+      toast.error(status === "archived" ? "Couldn't archive app" : "Couldn't restore app", {
         description: userErrorText(error),
       });
       return false;
@@ -171,9 +171,9 @@ export function SiteSettings({
           <Section title="Publish to web">
             <Notice
               icon={<ArchiveIcon className="size-4" />}
-              title="Archived Sites aren't on the web"
+              title="Archived apps aren't on the web"
             >
-              Restore the Site to publish it again.
+              Restore the app to publish it again.
             </Notice>
           </Section>
         ) : (
@@ -197,8 +197,8 @@ export function SiteSettings({
             label={onlyMe ? "Only me" : "Workspace"}
             description={
               onlyMe
-                ? "Only you can see and open this Site."
-                : `Everyone in ${management.workspaceName} can see and open this Site.`
+                ? "Only you can see and open this app."
+                : `Everyone in ${management.workspaceName} can see and open this app.`
             }
             hint={owner ? undefined : "Only its owner can change this."}
             control={
@@ -221,8 +221,8 @@ export function SiteSettings({
         <Section title="Duplicate" variant="group">
           <SettingRowGroup>
             <SettingRow
-              label="Duplicate Site"
-              description="Makes a new Site from this version, owned by you. Its web address, data and history aren't copied."
+              label="Duplicate app"
+              description="Makes a new app from this version, owned by you. Its web address, data and history aren't copied."
               control={
                 <Button
                   type="button"
@@ -243,11 +243,11 @@ export function SiteSettings({
         <Section title="Archive" variant="group">
           <SettingRowGroup>
             <SettingRow
-              label={archived ? "Restore Site" : "Archive Site"}
+              label={archived ? "Restore app" : "Archive app"}
               description={
                 archived
-                  ? "Bring the Site back to edit it or restore an earlier version."
-                  : "Unpublishes the Site. Its source and versions are kept, and you can restore it."
+                  ? "Bring the app back to edit it or restore an earlier version."
+                  : "Unpublishes the app. Its source and versions are kept, and you can restore it."
               }
               control={
                 archived ? (
@@ -282,8 +282,8 @@ export function SiteSettings({
         open={archiveOpen}
         onOpenChange={setArchiveOpen}
         title={`Archive “${artifact.title}”?`}
-        description="The Site will be unpublished, but its source and complete version history will remain recoverable."
-        confirmLabel="Archive Site"
+        description="The app will be unpublished, but its source and complete version history will remain recoverable."
+        confirmLabel="Archive app"
         cancelAutoFocus
         onConfirm={() => management.setSiteStatus("archived")}
       />

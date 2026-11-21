@@ -16,7 +16,9 @@ import {
   firstPartyMcpToolsForCapability,
 } from "../src/index";
 
-const RUNTIME_TOOLS = ["set_session_title", "wait_for_input"];
+// capability_authorization_request is derived like wait_for_input: the turn
+// gate gives it to agents with workspaceConnectors or workspaceAdmin.
+const RUNTIME_TOOLS = ["set_session_title", "wait_for_input", "capability_authorization_request"];
 const SANDBOX_TOOLS = ["command_wait", "command_read"];
 
 describe("agent capability registry", () => {
@@ -69,10 +71,14 @@ describe("agent capability registry", () => {
         expect(owner[tool]).toBe("knowledge");
       }
       if (/^(secret_|variable_set_|environment_)/.test(tool)) expect(owner[tool]).toBe("secrets");
-      if (/^(capability_|connected_machine_|rig_|project_)/.test(tool)) {
+      if (
+        /^(capability_|connected_machine_|rig_|project_)/.test(tool) &&
+        tool !== "capability_authorization_request"
+      ) {
         expect(owner[tool]).toBe("workspaceAdmin");
       }
-      if (/^(sessions_list|session_(?!set_project))/.test(tool)) {
+      // session_links_* belong to goals: the chat's Linked items and merge wakes.
+      if (/^(sessions_list|session_(?!set_project|links_))/.test(tool)) {
         expect(owner[tool]).toBe("subagents");
       }
     }

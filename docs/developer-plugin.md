@@ -13,7 +13,7 @@ own OAuth sign-in, where the person chooses what the agent may access.
 | Public skill | Purpose |
 | --- | --- |
 | `build-with-opengeni` | Build a product or local demo, with the complete client guide as supporting reference material. |
-| `offload-to-opengeni` | Run work in an Opengeni session through the `opengeni` MCP tools (find, describe, run an action). |
+| `offload-to-opengeni` | Run work in an Opengeni session through the `opengeni` MCP named tools (`delegate`, `wait_for`, `session_send`), with the generic action tools as a fallback. `npx opengeni connect` installs a shorter `opengeni` skill without the plugin. |
 | `opengeni-setup` | Browser-assisted SDK/REST setup. Uses the `opengeni` MCP tools when available; never required. |
 
 The nested `build-with-opengeni/opengeni-client` guide is not a fourth public

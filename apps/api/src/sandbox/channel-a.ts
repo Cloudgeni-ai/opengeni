@@ -126,7 +126,9 @@ export type ChannelAServices = {
   db: Database;
   settings: Settings;
   bus: EventBus;
-  objectStorage?: ObjectStorage | null;
+  /** Restores a parked sandbox's workspace archive when this operation starts it
+   * again; required so no route can forget it. */
+  objectStorage: ObjectStorage | null | undefined;
   observability?: Observability | undefined;
   /** Wakes a session waiting on a background command a request settles.
    * Absent: the periodic wake dispatcher delivers the committed wake. */

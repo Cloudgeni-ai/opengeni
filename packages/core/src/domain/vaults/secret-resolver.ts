@@ -568,7 +568,7 @@ export function createSecretResolver(
       );
     };
     if (principal.kind === "site_viewer") {
-      refuse("this secret needs a person's approval for each use, which a Site cannot ask for");
+      refuse("this secret needs a person's approval for each use, which an app cannot ask for");
     }
     if (principal.kind !== "attempt") return refuse("this secret needs approval for each use");
     const approver = meta.humanExpected && meta.humanValid ? meta.subjectId : null;

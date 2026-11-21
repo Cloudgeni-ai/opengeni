@@ -65,10 +65,6 @@ described in [SECURITY.md](SECURITY.md).
 - Main merges go through the [merge batcher](docs/merge-batcher.md): run the
   relevant local suites, get review, then add `queue-ready` or turn on
   auto-merge. Batch green is not release green; main's cadence CI is.
-- Changes to what Opengeni sends to model providers (the model request section
-  of [`.github/CODEOWNERS`](.github/CODEOWNERS)) land only after the maintainer
-  approves the PR's current head; open them as drafts with a plain risk note.
-  See AGENTS.md, "Model request changes".
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.
@@ -280,7 +276,7 @@ rejects a superseded attempt: dispatch a new workflow instead of retrying the
 older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
 overwriting or removing any partially published versions.
 
-**Lockstep versions.** Every published `@opengeni/*` package is in one Changesets `fixed` group and always releases at one shared version (the line restarted at `1.0.0`); a new published package must join that group (`scripts/release/lockstep-version.test.ts` enforces it). Published manifests pin sibling packages exactly (`workspace:*` becomes the exact version), so consumers install every `@opengeni` package at the same version. The retired pre-reset line already burned some 1.x versions (for example `@opengeni/contracts@1.0.1`, `@opengeni/runtime@1.4.2`); `bun run changeset:version` runs `scripts/release/lockstep-version.ts`, which moves the whole group to the next free patch when the computed version is one of them (`1.0.1` → `1.0.2`), and rewrites the new CHANGELOG heading. The retired list in that script is closed history; never publish an `@opengeni` version by hand.
+**Lockstep versions.** Every published `@opengeni/*` package, and the unscoped `opengeni` CLI, is in one Changesets `fixed` group and always releases at one shared version (the line restarted at `1.0.0`); the CLI is published best-effort (`scripts/publish-unscoped-first.ts`): if npm refuses it, the release warns and continues, and it is never part of release candidates, expected package sets or canary cohorts; a new published package must join that group (`scripts/release/lockstep-version.test.ts` enforces it). Published manifests pin sibling packages exactly (`workspace:*` becomes the exact version), so consumers install every `@opengeni` package at the same version. The retired pre-reset line already burned some 1.x versions (for example `@opengeni/contracts@1.0.1`, `@opengeni/runtime@1.4.2`); `bun run changeset:version` runs `scripts/release/lockstep-version.ts`, which moves the whole group to the next free patch when the computed version is one of them (`1.0.1` → `1.0.2`), and rewrites the new CHANGELOG heading. The retired list in that script is closed history; never publish an `@opengeni` version by hand.
 
 A publish-coherence rule learned the hard way:
 

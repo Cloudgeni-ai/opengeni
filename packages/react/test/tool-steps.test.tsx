@@ -83,6 +83,10 @@ describe("built-in tool steps", () => {
   test("names follow the call's phase, with or without the server prefix", () => {
     expect(toolDisplayName(t, "opengeni__notify_user", undefined, "running")).toBe("Notifying you");
     expect(toolDisplayName(t, "notify_user")).toBe("Notified you");
+    expect(toolDisplayName(t, "tool_result_read", undefined, "running")).toBe(
+      "Reading more output",
+    );
+    expect(toolDisplayName(t, "tool_result_read")).toBe("Read more output");
     expect(toolDisplayName(t, "some_server__list_issues")).toBe("List issues");
   });
 
@@ -165,6 +169,11 @@ describe("plain tool details", () => {
         output: "[]",
       }),
       toolItem({
+        name: "tool_result_read",
+        arguments: { resultId: "result-1", offset: 100_000 },
+        output: "More tool output",
+      }),
+      toolItem({
         name: "variable_set_set_variable",
         arguments: { name: "API_TOKEN", value: "v" },
         output: "ok",
@@ -178,6 +187,10 @@ describe("plain tool details", () => {
       );
       await flush();
       const text = r.container.textContent ?? "";
+      if (item.name === "tool_result_read") {
+        expect(text).toContain("Read more output");
+        expect(text).not.toContain("More tool output");
+      }
       expect(text).not.toContain("{");
       expect(text).not.toContain("$ ");
       expect(text).not.toContain("API_TOKEN");

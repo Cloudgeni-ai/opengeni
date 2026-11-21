@@ -256,7 +256,7 @@ export const SiteLimitProfileKind = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["standard", "free", "credits", "unlimited", "custom"])
     .describe(
-      "Limits for people outside the workspace (workspace members are never limited by Site limits). standard: platform defaults ($10 per Site per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults. Any kind may carry overrides, which adjust that kind's limits.",
+      "Limits for people outside the workspace (workspace members are never limited by app limits). standard: platform defaults ($10 per app per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults. Any kind may carry overrides, which adjust that kind's limits.",
     ),
 );
 export type SiteLimitProfileKind = z.infer<typeof SiteLimitProfileKind>;
@@ -275,20 +275,20 @@ const NullableLimit = (description: string) =>
 export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
   z.object({
     requestsPerMinutePerVisitor: NullableLimit(
-      "Site runtime requests per viewer per minute (flood brake; members too).",
+      "App runtime requests per viewer per minute (flood brake; members too).",
     ),
     guestWritesPerMinute: NullableLimit("Data writes per guest visitor per minute."),
     agentsEnabled: primitives.boolean.describe(
-      "People outside the workspace may use the Site's embedded agent. Members always may when the agent is on.",
+      "People outside the workspace may use the app's embedded agent. Members always may when the agent is on.",
     ),
     guestAgentsEnabled: primitives.boolean.describe(
-      "Anonymous guests may use the embedded agent too (public Sites).",
+      "Anonymous guests may use the embedded agent too (public apps).",
     ),
     conversationsPerVisitorPerDay: NullableLimit(
       "Bot guard for anonymous guests: new conversations per visitor per UTC day.",
     ),
     conversationsPerSitePerDay: NullableLimit(
-      "Bot guard for anonymous guests: new conversations per Site per UTC day.",
+      "Bot guard for anonymous guests: new conversations per app per UTC day.",
     ),
     turnsPerConversation: NullableLimit(
       "Bot guard for anonymous guests: messages in one conversation.",
@@ -303,10 +303,10 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
       "Optional per-person limit: spend per person or visitor outside the workspace per UTC month, micro-USD.",
     ).default(null),
     agentMicrosPerSitePerDay: NullableLimit(
-      "The Site limit as a daily amount: spend of everyone outside the workspace together per UTC day, micro-USD.",
+      "The app limit as a daily amount: spend of everyone outside the workspace together per UTC day, micro-USD.",
     ).default(null),
     agentMicrosPerSitePerMonth: NullableLimit(
-      "The Site limit: spend of everyone outside the workspace together per UTC month, micro-USD.",
+      "The app limit: spend of everyone outside the workspace together per UTC month, micro-USD.",
     ),
     agentModels: z
       .array(z.string().min(1).max(200))
@@ -727,6 +727,121 @@ export const SITE_GATEWAY_LOGIN_PATH = "/_og/auth/login";
 export const SITE_GATEWAY_CALLBACK_PATH = "/_og/auth/callback";
 export const SITE_GATEWAY_LOGOUT_PATH = "/_og/auth/logout";
 export const SITE_GATEWAY_REPORT_PATH = "/_og/report";
+/**
+ * Live change hints: a WebSocket on a Site host (the viewer's own session)
+ * or on the console's frame host (with a console ticket). It carries only
+ * `SiteLiveHint` messages, never record data.
+ */
+export const SITE_GATEWAY_LIVE_PATH = "/_og/live";
+/** Batched speed beacons from the Site page (`SiteTimingBeacon`). */
+export const SITE_GATEWAY_TIMING_PATH = "/_og/timing";
+/** The API's signed route that sends a Site's live hints (`SiteLiveNotice`). */
+export const SITE_LIVE_INTERNAL_PREFIX = "/_og/internal/site-live";
+
+export function siteLiveInternalPath(siteId: string): string {
+  return `${SITE_LIVE_INTERNAL_PREFIX}/${encodeURIComponent(siteId)}`;
+}
+
+/** How long one live connection is admitted for; clients reconnect before it ends. */
+export const SITE_LIVE_TTL_SECONDS = 900;
+
+/**
+ * What a live connection hears. `data`: these collections changed (the
+ * pseudo-collection `$files` for files), at change number `seq`; null
+ * collections mean "refetch everything" (after a gap). `version`: a new
+ * version of the Site was published or rolled back. `hello` opens the
+ * connection with the current change number.
+ */
+export type SiteLiveHint =
+  | { type: "hello"; seq: number; collections: string[] | null; ttlSeconds: number }
+  | { type: "data"; seq: number; collections: string[] | null }
+  | { type: "version"; versionId: string | null };
+
+/** The API's notice to a Site's live connections (signed internal request). */
+export const SiteLiveNotice = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("data"),
+      seq: z.number().int().min(0),
+      collections: z.array(z.string().min(1).max(64)).max(200),
+    }),
+    z.object({ type: z.literal("version"), versionId: z.string().max(64).nullable() }),
+  ]),
+);
+export type SiteLiveNotice = z.infer<typeof SiteLiveNotice>;
+
+/**
+ * The API's answer when the gateway admits a live connection: what the
+ * connection may hear about (collections the viewer can read; null for every
+ * collection) and the current change number.
+ */
+export const SiteLiveAdmission = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    siteId: primitives.uuid,
+    seq: z.number().int().min(0),
+    collections: z.array(z.string()).nullable(),
+    ttlSeconds: z.number().int().min(1),
+  }),
+);
+export type SiteLiveAdmission = z.infer<typeof SiteLiveAdmission>;
+
+/** A console ticket for the live connection of a Site shown in the console. */
+export const SiteLiveTicketResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: primitives.string.describe("wss:// address of the live connection, ticket included."),
+    expiresAt: primitives.string,
+    seq: z.number().int().min(0),
+  }),
+);
+export type SiteLiveTicketResponse = z.infer<typeof SiteLiveTicketResponse>;
+
+/** Speed measurements a Site page sends (bounded names, no personal data). */
+export const SITE_TIMING_KINDS = ["app_load", "first_data", "bridge"] as const;
+export type SiteTimingKind = (typeof SITE_TIMING_KINDS)[number];
+export const SITE_TIMING_OUTCOMES = ["ok", "error"] as const;
+
+/** One page's batch of speed beacons (`POST /_og/timing`). */
+export const SiteTimingBeacon = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    timings: z
+      .array(
+        z.object({
+          kind: z.enum(SITE_TIMING_KINDS),
+          /** A Site operation id or tool bridge method; anything else counts as `other`. */
+          op: z.string().max(64).optional(),
+          ms: z.number().min(0).max(600_000),
+          outcome: z.enum(SITE_TIMING_OUTCOMES).optional(),
+        }),
+      )
+      .max(50),
+  }),
+);
+export type SiteTimingBeacon = z.infer<typeof SiteTimingBeacon>;
+
+/**
+ * The gateway's batched timing report to the API (`POST
+ * /v1/site-runtime/platform/timings`): per series, a bounded sample of
+ * durations in seconds. Series names are bounded; hosts and viewers never
+ * appear.
+ */
+export const SitePlatformTimingReport = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    v: z.literal(1),
+    series: z
+      .array(
+        z.object({
+          kind: z.enum([...SITE_TIMING_KINDS, "gateway"] as const),
+          op: z.string().max(64),
+          outcome: z.enum(SITE_TIMING_OUTCOMES),
+          samples: z.array(z.number().min(0).max(600)).max(100),
+          /** How many measurements the samples were drawn from (at least their number). */
+          seen: z.number().int().min(0).max(1_000_000_000).optional(),
+        }),
+      )
+      .max(300),
+  }),
+);
+export type SitePlatformTimingReport = z.infer<typeof SitePlatformTimingReport>;
 
 /** The API prefix the gateway forwards `/_og/api/*` to. */
 export const SITE_RUNTIME_API_PREFIX = "/v1/site-runtime";

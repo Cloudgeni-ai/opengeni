@@ -1,5 +1,283 @@
 # @opengeni/api-router
 
+## 6.35.0
+
+### Minor Changes
+
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+
+### Patch Changes
+
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [8bf1ec2]
+- Updated dependencies [c36504f]
+- Updated dependencies [227502b]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/core@6.35.0
+  - @opengeni/db@6.35.0
+  - @opengeni/runtime@6.35.0
+  - @opengeni/codemode@6.35.0
+  - @opengeni/xai-subscription@6.35.0
+  - @opengeni/artifact-tool@6.35.0
+  - @opengeni/capabilities@6.35.0
+  - @opengeni/codex@6.35.0
+  - @opengeni/config@6.35.0
+  - @opengeni/decisions@6.35.0
+  - @opengeni/documents@6.35.0
+  - @opengeni/events@6.35.0
+  - @opengeni/github@6.35.0
+  - @opengeni/interaction@6.35.0
+  - @opengeni/observability@6.35.0
+  - @opengeni/storage@6.35.0
+  - @opengeni/tool-gateway@6.35.0
+  - @opengeni/vaults@6.35.0
+  - @opengeni/vaults-bitwarden@6.35.0
+  - @opengeni/vaults-keeper@6.35.0
+  - @opengeni/vaults-onepassword@6.35.0
+  - @opengeni/vaults-protonpass@6.35.0
+  - @opengeni/agent-proto@6.35.0
+  - @opengeni/network@6.35.0
+
+## 6.34.0
+
+### Patch Changes
+
+- b0922a5: Computer and browser calls, and sandbox file artifacts, now restart a chat's parked sandbox with object storage. They reached the sandbox without it, so the first such call after the sandbox parked with its workspace archive in object storage failed with "sandbox not available (workspace archive object storage is not configured)", for example when a chat opened a computer again after its machine access was turned off and on. The services these calls use now require object storage, so no route can leave it out.
+- 79385b6: The Slack "Who should answer in #channel?" picker is now one menu with an Agents group and a Workspaces group, with "Not now" beside it. Agents show their avatar emoji, and workspaces show their plain names instead of "Opengeni in …". A choice in a Slack menu (`static_select`) is read from its selected option. In Opengeni, the Slack channels routing menu groups agents and workspaces the same way, and a closed menu says whether the chosen name is an agent or a workspace.
+- e292b4a: Add SuperOffice CRM to the catalog: SuperOffice's hosted MCP server, with its six update tools asking for approval by default. When a service refuses a connection's sign-in setup, the connect dialog now says why, for example that the service only accepts apps it has approved, instead of a generic failure; the API passes the provider's OAuth error in the error details, and a provider outage during registration is now a retryable `upstream_unavailable` error. A refused sign-in that returns a standard OAuth code with a plain meaning (`invalid_redirect_uri`, `unauthorized_client`, `unapproved_software_statement`, `invalid_scope`, `server_error`, `temporarily_unavailable`) now keeps that code as the attempt's `error.code` instead of `provider_denied`. Admins can remove a custom MCP server that never connected, through the new `DELETE /v1/workspaces/:workspaceId/capabilities/:capabilityId` route and `deleteCustomMcpServer` on the SDK.
+- Updated dependencies [393f876]
+- Updated dependencies [71c05a3]
+- Updated dependencies [9a84b63]
+- Updated dependencies [17ae971]
+- Updated dependencies [e292b4a]
+- Updated dependencies [8f1d49b]
+  - @opengeni/db@6.34.0
+  - @opengeni/config@6.34.0
+  - @opengeni/contracts@6.34.0
+  - @opengeni/core@6.34.0
+  - @opengeni/runtime@6.34.0
+  - @opengeni/documents@6.34.0
+  - @opengeni/events@6.34.0
+  - @opengeni/github@6.34.0
+  - @opengeni/storage@6.34.0
+  - @opengeni/artifact-tool@6.34.0
+  - @opengeni/capabilities@6.34.0
+  - @opengeni/codemode@6.34.0
+  - @opengeni/codex@6.34.0
+  - @opengeni/decisions@6.34.0
+  - @opengeni/interaction@6.34.0
+  - @opengeni/observability@6.34.0
+  - @opengeni/tool-gateway@6.34.0
+  - @opengeni/vaults@6.34.0
+  - @opengeni/vaults-bitwarden@6.34.0
+  - @opengeni/vaults-keeper@6.34.0
+  - @opengeni/vaults-onepassword@6.34.0
+  - @opengeni/vaults-protonpass@6.34.0
+  - @opengeni/agent-proto@6.34.0
+  - @opengeni/network@6.34.0
+  - @opengeni/xai-subscription@6.34.0
+
+## 6.33.0
+
+### Patch Changes
+
+- d58967a: When a connector isn't turned on in a workspace but the person already has their one own login for it, `capability_catalog_search` and `capability_authorization_request` now say so (`reason: "not_enabled"`) and that the card uses that login here without a new sign-in, instead of describing a first connection.
+- 0d394ec: Web-search citation handles no longer show on any surface that displays an answer. OpenAI models that search the web through a Codex or ChatGPT subscription write citations as private-use handles (U+E200 `cite` U+E202 `turn0search3` U+E201). The responses carry nothing that maps a handle to a page, so people saw `citeturn0search3` in the text. The chat timeline and Slack already removed them. Now the notification inbox (web, desktop banners and mobile, through the inbox API), phone push text, Teams replies, shared chat links and a worker's report in its manager's chat remove them too. Stored history and anything sent to a model keep the exact text. `@opengeni/contracts/provider-citation-handles` exports `withoutProviderCitationHandles` for other surfaces, such as products that render the raw chat stream.
+- Updated dependencies [176ccd5]
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [eb58354]
+- Updated dependencies [a204fd7]
+- Updated dependencies [617fa38]
+- Updated dependencies [316a815]
+- Updated dependencies [d6b29a4]
+  - @opengeni/runtime@6.33.0
+  - @opengeni/config@6.33.0
+  - @opengeni/contracts@6.33.0
+  - @opengeni/core@6.33.0
+  - @opengeni/db@6.33.0
+  - @opengeni/codex@6.33.0
+  - @opengeni/tool-gateway@6.33.0
+  - @opengeni/network@6.33.0
+  - @opengeni/documents@6.33.0
+  - @opengeni/github@6.33.0
+  - @opengeni/storage@6.33.0
+  - @opengeni/artifact-tool@6.33.0
+  - @opengeni/capabilities@6.33.0
+  - @opengeni/codemode@6.33.0
+  - @opengeni/decisions@6.33.0
+  - @opengeni/events@6.33.0
+  - @opengeni/interaction@6.33.0
+  - @opengeni/observability@6.33.0
+  - @opengeni/vaults@6.33.0
+  - @opengeni/vaults-bitwarden@6.33.0
+  - @opengeni/vaults-keeper@6.33.0
+  - @opengeni/vaults-onepassword@6.33.0
+  - @opengeni/vaults-protonpass@6.33.0
+  - @opengeni/xai-subscription@6.33.0
+  - @opengeni/agent-proto@6.33.0
+
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Organization agent Runs on is checked where a chat finally lands: a Personal (Only me) machine is refused whether the request names it, a default would pick it or a worker would join its parent's box on it, a person's own default machine is not used for organization agent chats, and a machine the caller can't read is refused as unavailable. A version now keeps the id of the machine or Sandbox Environment its `runsOn` named when it was saved (migration 1512 adds `agent_revisions.runs_on_target`), so renaming one, or adding another with the same name, no longer moves or breaks the agent; the written name stays for display and YAML. The reach dialog's "All product-managed workspaces" option says that every end customer's chats share the machine. Clients that predate `allowManagedWorkspaces` keep it unchanged when they narrow a machine's or environment's workspaces, so turn it off in Console or with a current SDK.
+- afb7be7: Console agents can say where their chats run with `runsOn`: no computer (`none`), each chat in its own cloud sandbox, optionally from an organization Sandbox Environment (`sandbox`), or one organization machine shared by every chat (`machine`). Omitted keeps today's placement. Saving or deploying refuses machines and environments that are not the organization's (Personal machines included), chat creation checks that the machine or environment is available in the chat's workspace, and a request's own `sandboxBackend`, `targetSandboxId` or `rigId` still wins within the usual checks and is recorded as the `runsOn` override; a Personal machine is never used for an organization agent chat. Organization machines and Sandbox Environments get an "All product-managed workspaces" reach option (`allowManagedWorkspaces`) that covers every workspace the organization's product manages, including ones created later. Console's agent editor has a "Runs on" setting and the reach picker the new option; `GET /v1/organizations/:organizationId/agents/compute` and the SDK's `listOrganizationAgentCompute` list the choices. The agent file JSON Schema includes `runsOn`.
+- afb7be7: Session create over HTTP accepts an organization agent named as `agent: "<key or id>"` or `agent: { ref, ... }`; the route's early body check no longer refuses it as an invalid agent object. The Console test chat route now reads its inner session create correctly when the caller accepts compressed responses. A fork of a chat that runs an organization agent runs the same agent version with the same recorded overrides.
+- afb7be7: Chats can run an organization (Console) agent. When Console agents are on for the organization, session create accepts `agent: "<key or id>"` or `agent: { ref, ... }`: the chat runs the agent's published version (a draft or `version` only in the organization's Console test workspace), its tool servers are attached as session MCP servers, and settings the request changes are recorded as `Session.orgAgent.overrides`; `agentOverrides: "reject"` refuses them with 422 `agent_override_rejected`. Inline `config` saves a version of a code-managed agent by config hash. Worker chats inherit the agent version, and its Instructions only when the version shares them. Turns resolve tool server logins from the credential provider, the end user's stored login (refreshed when it is about to expire) or the chat's own headers, never a shared key for per-user servers; a server without a login is attached as unavailable and the chat records `session.tool_server.unavailable`. A publish that moves running chats re-materializes each chat's tool servers on the new version and delivers its Instructions on the next turn. Chats that name no organization agent are unchanged.
+- afb7be7: Organization agents: changing "Ask first" on one of the agent's own tool servers after create may only ask first for more unless the caller holds `agents:manage` for the organization (403, `details.code` `agents_manage_required`). A chat's own tool login headers run only for turns its creator or its end user started, or that no person started; another person's turn needs their own login. Without `agents:manage`, an inline `config` matching a saved version runs only when that version is published (any version in the Console test workspace).
+- afb7be7: Organization agents: each turn re-checks that the agent is not archived and still reaches the chat's workspace; otherwise its shared-key tool servers and stored end-user logins are unavailable for that turn. An end user acting through an organization key no longer holds the key's `agents:manage` when changing "Ask first" on the agent's tool servers (403 `agents_manage_required`); the key without an actor still does.
+- afb7be7: Organization agents: saving an agent from an inline `config` on session create, turning on tools the agent left off, removing its "Ask first" tools, or replacing one of its tool servers through `mcpServers` now needs `agents:manage` for the organization (an organization key, or an owner or admin); workspace roles and keys never count, and other callers may only narrow the agent's tool servers (403 `agents_manage_required`). Inline saves are recorded in Console's audit log. A turn uses the stored tool login of the end user who sent it, never another person's. Stored OAuth logins refresh without holding a database lock during the token request. Per-chat tool logins under `agent.toolServers[].headers` are marked secret in the app action catalog. Session create refusals for an organization agent now use the route's envelope (`code` `SESSION_CREATE_FORBIDDEN` or `SESSION_CREATE_REJECTED`, the reason in `details.code`). A keyed retry of an organization agent create returns the original chat even after the agent was republished or archived, and an inline `config` retry saves nothing again. Live tool lists are read in parallel under one deadline. A worker chat moved to a version that does not share Instructions with workers keeps the ones it has.
+
+### Patch Changes
+
+- afb7be7: Console agents roles: Editors can't save drafts of, publish or roll back an agent that an owner or admin made available in team workspaces (403 `agent_in_team_workspaces`; Console shows it read-only for them). Counting the chats a publish would move needs Editor (or `agents:manage` for keys), and only callers who may publish re-drive a stalled move when listing publish operations; a start error there leaves it pending. Console roles and an agent's team workspaces are written only from the organization's account context.
+- afb7be7: Console test chats can answer "Ask first" approvals (`POST /v1/organizations/:id/agents/:agentId/test-chats/:sessionId/approvals/:approvalId`) and be stopped and resumed (`POST .../test-chats/:sessionId/control` with `pause` or `resume`; `GET .../test-chats/:sessionId` reports `paused`), only by the chat's own tester. `POST .../test-chats` takes an `idempotencyKey`, so starting twice with the same key returns the same chat. The Console test chat shows approval cards and a Stop control, and polls only new events. `PUT .../console/member-roles` now sets members' roles only; an invitation's Console role is chosen when inviting.
+- afb7be7: Console test chats are isolated from each other: they are created with `agentAccess: "session"` and Memory off, so one tester's agent can't read or message another tester's test chats; a test chat's own login headers run only for turns its tester's principal started; and `x-opengeni-service-initiator` refuses the server-reserved `console-test:` prefix (422).
+- afb7be7: Console test chats make nobody a member of the Console test workspace: a test chat runs as the tester's own test chat principal (only `workspace:read` and `sessions:create`, `sessions:read` and `sessions:control` there), and only its tester reads and continues it, through `GET /v1/organizations/:id/agents/:agentId/test-chats/:sessionId[/events]` and `POST .../test-chats/:sessionId/messages`, while their Console access is Editor or more. Console roles are reset in the same transaction as an organization role change or offboarding, set (to the invitation's role or none) when an invitation is accepted, written under a per-person lock that a concurrent offboarding can't overtake, only put on pending member invitations, and an invitation's Console role is written in the invitation's own transaction.
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/db@6.32.0
+  - @opengeni/core@6.32.0
+  - @opengeni/observability@6.32.0
+  - @opengeni/artifact-tool@6.32.0
+  - @opengeni/capabilities@6.32.0
+  - @opengeni/codemode@6.32.0
+  - @opengeni/codex@6.32.0
+  - @opengeni/config@6.32.0
+  - @opengeni/decisions@6.32.0
+  - @opengeni/documents@6.32.0
+  - @opengeni/events@6.32.0
+  - @opengeni/github@6.32.0
+  - @opengeni/interaction@6.32.0
+  - @opengeni/runtime@6.32.0
+  - @opengeni/storage@6.32.0
+  - @opengeni/tool-gateway@6.32.0
+  - @opengeni/vaults@6.32.0
+  - @opengeni/vaults-bitwarden@6.32.0
+  - @opengeni/vaults-keeper@6.32.0
+  - @opengeni/vaults-onepassword@6.32.0
+  - @opengeni/vaults-protonpass@6.32.0
+  - @opengeni/agent-proto@6.32.0
+  - @opengeni/network@6.32.0
+  - @opengeni/xai-subscription@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- Updated dependencies [23f4d6c]
+  - @opengeni/db@6.31.1
+  - @opengeni/core@6.31.1
+  - @opengeni/documents@6.31.1
+  - @opengeni/events@6.31.1
+  - @opengeni/agent-proto@6.31.1
+  - @opengeni/artifact-tool@6.31.1
+  - @opengeni/capabilities@6.31.1
+  - @opengeni/codemode@6.31.1
+  - @opengeni/codex@6.31.1
+  - @opengeni/config@6.31.1
+  - @opengeni/contracts@6.31.1
+  - @opengeni/decisions@6.31.1
+  - @opengeni/github@6.31.1
+  - @opengeni/interaction@6.31.1
+  - @opengeni/network@6.31.1
+  - @opengeni/observability@6.31.1
+  - @opengeni/runtime@6.31.1
+  - @opengeni/storage@6.31.1
+  - @opengeni/tool-gateway@6.31.1
+  - @opengeni/vaults@6.31.1
+  - @opengeni/vaults-bitwarden@6.31.1
+  - @opengeni/vaults-keeper@6.31.1
+  - @opengeni/vaults-onepassword@6.31.1
+  - @opengeni/vaults-protonpass@6.31.1
+  - @opengeni/xai-subscription@6.31.1
+
+## 6.31.0
+
+### Minor Changes
+
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+### Patch Changes
+
+- 6235287: A Desktop on a Connected Machine can be used by another agent chat working on that machine (a child given its parent's Desktop, say) after the chat that opened it has moved to another machine. Before, every request was refused with "this task now runs on another machine", even after the calling chat moved to the Desktop's machine, because only the opening chat's route counted. The request now goes through the calling chat's own route when it works on that machine. Requests from a chat on another machine are refused as before.
+- cafa73f: Your own connector login now has one switch per workspace. Turning it on in "Where it works" for a workspace that hasn't turned that connector on also turns the connector on there, for each person's own account. This happens in the same request, as the connect card's "Use it here" does it. Where only an admin may turn the connector on, nothing changes: the request is refused with `details.code` `own_login_connector_needs_admin`, and the row says an admin has to turn it on. Turning a login off never turns its connector off.
+
+  Each reach row carries an optional `connectorOff` flag. A login that is on where its connector isn't (for example a standing grant) reads as off, with a line saying the switch turns the connector on too. My things doesn't count such a workspace as one where the login works.
+
+  The OAuth connect card now offers your one own login first, as "Use my <service> here", without asking "Who can use this connection?". Connecting a new account for everyone stays a secondary choice.
+
+- 443b97b: Store Site SQL databases in Cloudflare's EU jurisdiction. Databases created before this move to the EU on first use (or with `scripts/move-site-databases-to-eu.ts`), verified against the original before they switch; a database that cannot move keeps working from its original object, and original objects are never deleted automatically (a reset or rebuild erases their data). The API treats a "moving" 503 as retryable with nothing run and logs databases not yet in the EU.
+- Updated dependencies [e75ea20]
+- Updated dependencies [c2fe398]
+- Updated dependencies [a0fb1c6]
+- Updated dependencies [5fb457f]
+- Updated dependencies [d07d727]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [ea21b19]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [4fdd778]
+- Updated dependencies [46d677b]
+- Updated dependencies [0531626]
+- Updated dependencies [9ca567a]
+- Updated dependencies [8e1f06d]
+  - @opengeni/db@6.31.0
+  - @opengeni/contracts@6.31.0
+  - @opengeni/runtime@6.31.0
+  - @opengeni/core@6.31.0
+  - @opengeni/config@6.31.0
+  - @opengeni/network@6.31.0
+  - @opengeni/codex@6.31.0
+  - @opengeni/documents@6.31.0
+  - @opengeni/events@6.31.0
+  - @opengeni/artifact-tool@6.31.0
+  - @opengeni/capabilities@6.31.0
+  - @opengeni/codemode@6.31.0
+  - @opengeni/decisions@6.31.0
+  - @opengeni/github@6.31.0
+  - @opengeni/interaction@6.31.0
+  - @opengeni/observability@6.31.0
+  - @opengeni/storage@6.31.0
+  - @opengeni/tool-gateway@6.31.0
+  - @opengeni/vaults@6.31.0
+  - @opengeni/vaults-bitwarden@6.31.0
+  - @opengeni/vaults-keeper@6.31.0
+  - @opengeni/vaults-onepassword@6.31.0
+  - @opengeni/vaults-protonpass@6.31.0
+  - @opengeni/xai-subscription@6.31.0
+  - @opengeni/agent-proto@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

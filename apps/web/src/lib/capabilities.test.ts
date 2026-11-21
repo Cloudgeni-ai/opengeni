@@ -201,7 +201,7 @@ describe("human labels", () => {
     expect(capabilityKindLabel("plugin")).toBe("Plugin");
     expect(
       capabilityItemKindLabel(item({ kind: "api", surfaceType: "provider_integration" })),
-    ).toBe("Integration");
+    ).toBe("Connected tool");
   });
 
   test("source labels are human", () => {
@@ -1573,7 +1573,7 @@ describe("capabilityCategoryLabel", () => {
   test("maps known slugs to human labels and hides custom", () => {
     expect(capabilityCategoryLabel("project-management")).toBe("Project management");
     expect(capabilityCategoryLabel("developer-tools")).toBe("Developer tools");
-    expect(capabilityCategoryLabel("integrations")).toBe("Integrations");
+    expect(capabilityCategoryLabel("integrations")).toBe("Connected tools");
     expect(capabilityCategoryLabel("custom")).toBeNull();
     expect(capabilityCategoryLabel(null)).toBeNull();
   });

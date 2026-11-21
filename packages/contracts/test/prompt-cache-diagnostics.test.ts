@@ -49,6 +49,64 @@ describe("prompt-cache warm-miss classification", () => {
     observation: { request: fingerprint(100) },
   });
 
+  test("a prompt a release changed is told apart from one a session changed", () => {
+    const before = sample({
+      sourceKey: "previous",
+      observation: { request: fingerprint(100), release: "rev-1" },
+    });
+    const after = (release: string | undefined, request: PromptCacheRequestFingerprint) =>
+      sample({
+        sourceKey: "current",
+        inputTokens: 190_000,
+        cachedTokens: 0,
+        occurredAt: at(30),
+        observation: { request, ...(release ? { release } : {}) },
+      });
+    const system = fingerprint(110, { system: digest("c") });
+    const tools = fingerprint(110, { tools: digest("d") });
+    expect(classifyPromptCacheWarmMiss(before, after("rev-2", system))?.class).toBe(
+      "release_changed",
+    );
+    expect(classifyPromptCacheWarmMiss(before, after("rev-2", tools))?.class).toBe(
+      "release_changed",
+    );
+    expect(classifyPromptCacheWarmMiss(before, after("rev-1", system))?.class).toBe(
+      "system_changed",
+    );
+    expect(classifyPromptCacheWarmMiss(before, after("rev-1", tools))?.class).toBe("tools_changed");
+    // Every build that fingerprints a request records its release, so a call
+    // without one came from an older build: a deployment boundary.
+    expect(classifyPromptCacheWarmMiss(before, after(undefined, system))?.class).toBe(
+      "release_changed",
+    );
+    const unreleased = sample({
+      sourceKey: "previous",
+      observation: { request: fingerprint(100) },
+    });
+    expect(classifyPromptCacheWarmMiss(unreleased, after("rev-1", tools))?.class).toBe(
+      "release_changed",
+    );
+    // Neither call recording a release proves nothing about a deployment.
+    expect(classifyPromptCacheWarmMiss(unreleased, after(undefined, system))?.class).toBe(
+      "system_changed",
+    );
+    // A history rewrite is never a release's doing.
+    expect(
+      classifyPromptCacheWarmMiss(before, after("rev-2", fingerprint(110, { rewrittenFrom: 8 })))
+        ?.class,
+    ).toBe("history_rewritten");
+  });
+
+  test("the release is kept only with a request fingerprint and in a bounded form", () => {
+    expect(parsePromptCacheObservation({ request: fingerprint(4), release: "v1.2.3+abc" })).toEqual(
+      { request: fingerprint(4), release: "v1.2.3+abc" },
+    );
+    expect(
+      parsePromptCacheObservation({ request: fingerprint(4), release: "x".repeat(129) }),
+    ).toEqual({ request: fingerprint(4) });
+    expect(parsePromptCacheObservation({ release: "rev-1" })).toBeNull();
+  });
+
   test("a call that reads the warm prefix is not a miss", () => {
     expect(
       classifyPromptCacheWarmMiss(
@@ -106,16 +164,134 @@ describe("prompt-cache warm-miss classification", () => {
     ).toMatchObject({ class: "idle_gap" });
     expect(
       classifyPromptCacheWarmMiss(previous, sample({ ...miss, occurredAt: at(10) })),
+    ).toMatchObject({ class: "unobserved" });
+    expect(
+      classifyPromptCacheWarmMiss(
+        previous,
+        sample({ ...miss, occurredAt: at(10), observation: { request: fingerprint(104) } }),
+      ),
     ).toMatchObject({ class: "unexplained" });
   });
 
+  test("past the cache lifetime no request change is blamed", () => {
+    const late = (request: PromptCacheRequestFingerprint, minutes: number) =>
+      sample({
+        sourceKey: "current",
+        inputTokens: 190_000,
+        cachedTokens: 0,
+        occurredAt: new Date(at(0).getTime() + minutes * 60_000),
+        observation: { request },
+      });
+    const system = fingerprint(110, { system: digest("c") });
+    const tools = fingerprint(110, { tools: digest("d") });
+    expect(classifyPromptCacheWarmMiss(previous, late(system, 6))?.class).toBe("idle_gap");
+    expect(classifyPromptCacheWarmMiss(previous, late(tools, 6.8 * 24 * 60))?.class).toBe(
+      "idle_gap",
+    );
+    expect(
+      classifyPromptCacheWarmMiss(previous, late(fingerprint(110, { rewrittenFrom: 8 }), 40))
+        ?.class,
+    ).toBe("idle_gap");
+    expect(
+      classifyPromptCacheWarmMiss(previous, { ...late(fingerprint(30), 60), inputTokens: 30_000 })
+        ?.class,
+    ).toBe("idle_gap");
+    // Within the lifetime the request change is still the cause.
+    expect(classifyPromptCacheWarmMiss(previous, late(system, 4))?.class).toBe("system_changed");
+  });
+
   test("a replaced history is an expected miss", () => {
+    // Compaction under a large fixed prefix: tokens fall to 63%, items to 6%,
+    // and a system item the compaction added changed the system prompt.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 96_363,
+          observation: { request: fingerprint(104) },
+        }),
+        sample({
+          inputTokens: 61_048,
+          cachedTokens: 28_013,
+          occurredAt: at(3),
+          observation: { request: fingerprint(6, { system: digest("c") }) },
+        }),
+      ),
+    ).toMatchObject({ class: "context_replaced" });
+    // A history that only shrank a little is not a compaction.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 286_377,
+          observation: { request: fingerprint(373) },
+        }),
+        sample({
+          inputTokens: 272_468,
+          cachedTokens: 0,
+          occurredAt: at(10),
+          observation: { request: fingerprint(323, { system: digest("c") }) },
+        }),
+      ),
+    ).toMatchObject({ class: "system_changed" });
     expect(
       classifyPromptCacheWarmMiss(
         previous,
         sample({ inputTokens: 60_000, cachedTokens: 29_739, occurredAt: at(10) }),
       ),
     ).toMatchObject({ class: "context_replaced" });
+  });
+
+  test("a history that starts anew is replaced, even when it is not much shorter", () => {
+    const newStart = (items: number): PromptCacheRequestFingerprint => {
+      const request = fingerprint(items, { system: digest("c") });
+      return { ...request, history: request.history.map(([count]) => [count, digest("e")]) };
+    };
+    // Compaction to 61% of the items; Claude's system prompt took the new
+    // history's leading system items.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 102_617,
+          observation: { request: fingerprint(95) },
+        }),
+        sample({
+          inputTokens: 77_619,
+          cachedTokens: 30_098,
+          occurredAt: at(4),
+          observation: { request: newStart(58) },
+        }),
+      ),
+    ).toMatchObject({ class: "context_replaced" });
+    // The previous call was the compaction request, shorter than the new history.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 38_043,
+          observation: { request: fingerprint(22) },
+        }),
+        sample({
+          inputTokens: 57_069,
+          cachedTokens: 27_737,
+          occurredAt: at(9),
+          observation: { request: newStart(96) },
+        }),
+      ),
+    ).toMatchObject({ class: "context_replaced" });
+    // A system change that keeps the history's first item is still a defect.
+    expect(
+      classifyPromptCacheWarmMiss(
+        previous,
+        sample({
+          inputTokens: 190_000,
+          cachedTokens: 0,
+          occurredAt: at(4),
+          observation: { request: fingerprint(110, { system: digest("c"), rewrittenFrom: 2 }) },
+        }),
+      ),
+    ).toMatchObject({ class: "system_changed" });
   });
 
   test("a steady thinking drop does not hide the real cause", () => {
@@ -148,6 +324,9 @@ describe("prompt-cache warm-miss classification", () => {
       class: "unexplained",
     });
     expect(classifyPromptCacheWarmMiss(warm, miss(dropping(9), 7))).toMatchObject({
+      class: "idle_gap",
+    });
+    expect(classifyPromptCacheWarmMiss(warm, miss(dropping(9), 1))).toMatchObject({
       class: "thinking_dropped",
     });
     expect(
@@ -156,7 +335,7 @@ describe("prompt-cache warm-miss classification", () => {
     expect(
       classifyPromptCacheWarmMiss(
         { ...warm, observation: { request: fingerprint(100) } },
-        miss(dropping(8), 7),
+        miss(dropping(8), 1),
       ),
     ).toMatchObject({ class: "thinking_dropped" });
   });

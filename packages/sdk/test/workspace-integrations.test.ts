@@ -381,3 +381,34 @@ test("test and inherited helpers use exact workspace-scoped routes", async () =>
     ["GET", "/v1/workspaces/ws%2Fone/inherited-integrations"],
   ]);
 });
+
+test("a verified App data change event names the workspace and App but no session", async () => {
+  const secret = "whsec_test";
+  const appId = crypto.randomUUID();
+  const body = JSON.stringify({
+    id: crypto.randomUUID(),
+    type: "app.record.changed",
+    lane: "workspace",
+    workspaceId: crypto.randomUUID(),
+    workspace: {
+      id: crypto.randomUUID(),
+      externalSource: null,
+      externalId: null,
+    },
+    occurredAt: new Date().toISOString(),
+    data: {
+      appId,
+      collection: "contacts",
+      recordId: "r1",
+      recordWithheld: true,
+      chainDepth: 0,
+    },
+  });
+  const { event } = await verifyWebhookEvent({
+    body,
+    headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, body) },
+    secret,
+  });
+  expect(event.type).toBe("app.record.changed");
+  expect((event.data as { appId?: string }).appId).toBe(appId);
+});

@@ -161,7 +161,7 @@ const PROVIDERS: Record<
   okta: {
     label: "Okta",
     kind: "Okta",
-    description: "People who sign in to Claude or another AI app through Okta.",
+    description: "People who sign in to Claude or another AI agent through Okta.",
     placeholder: "https://example.okta.com",
   },
   other: {
@@ -180,9 +180,9 @@ export function providerKind(provider: McpTrustedIssuerProvider): string {
 export function refusalText(reason: McpAutoConnectRefusalReason, organizationName: string): string {
   switch (reason) {
     case "malformed":
-      return "The app sent an assertion Opengeni couldn't read.";
+      return "The agent sent an assertion Opengeni couldn't read.";
     case "wrong_type":
-      return "The app sent a token that isn't an identity assertion.";
+      return "The agent sent a token that isn't an identity assertion.";
     case "issuer_disabled":
       return "Auto-connect was turned off.";
     case "signature_invalid":
@@ -194,11 +194,11 @@ export function refusalText(reason: McpAutoConnectRefusalReason, organizationNam
     case "wrong_resource":
       return "The assertion was for another MCP server URL.";
     case "client_mismatch":
-      return "The app's client ID didn't match the assertion.";
+      return "The agent's client ID didn't match the assertion.";
     case "client_not_allowed":
-      return "That app isn't one of the apps allowed here.";
+      return "That agent isn't one of the agents allowed here.";
     case "unknown_client":
-      return "Opengeni couldn't identify the app.";
+      return "Opengeni couldn't identify the agent.";
     case "expired":
       return "The assertion had expired.";
     case "replayed":
@@ -569,17 +569,17 @@ function AdvancedFields({
       title="Advanced"
       summary={[
         apps.length === 0
-          ? `Any app ${PROVIDERS[provider].label === "Other" ? "the issuer" : PROVIDERS[provider].label} vouches for`
-          : `${apps.length} ${apps.length === 1 ? "app" : "apps"}`,
+          ? `Any agent ${PROVIDERS[provider].label === "Other" ? "the issuer" : PROVIDERS[provider].label} vouches for`
+          : `${apps.length} ${apps.length === 1 ? "agent" : "agents"}`,
         jwksUri.trim() ? "Keys from a set URL" : "Keys found automatically",
       ].join(" · ")}
       open={open}
       onOpenChange={setOpen}
     >
       <Field
-        label="Only these apps"
+        label="Only these agents"
         optional
-        hint="Client IDs, one per line. Leave it empty to allow any app the issuer vouches for."
+        hint="Client IDs, one per line. Leave it empty to allow any agent the issuer vouches for."
         error={errors.clientIds}
       >
         <TextArea
@@ -685,7 +685,7 @@ export function AutoConnectSetupPage({
 
   return (
     <FlushFormPage
-      backLabel="Connected apps"
+      backLabel="Connected agents"
       onClose={onClose}
       title="Set up auto-connect"
       description={`People in ${organizationName} are connected the first time their agent uses Opengeni, with no sign-in.`}
@@ -704,7 +704,7 @@ export function AutoConnectSetupPage({
         if (jwksUri.trim() && !isIssuerUrl(jwksUri.trim()))
           next.jwksUri = "Use an https:// URL, or leave it empty.";
         const apps = parseClientIds(clientIds);
-        if (apps.length > 20) next.clientIds = "Allow at most 20 apps.";
+        if (apps.length > 20) next.clientIds = "Allow at most 20 agents.";
         if (apps.some((each) => each.length > 256)) next.clientIds = "A client ID is too long.";
         if (blocked) next.access = blocked;
         setErrors(next);
@@ -906,7 +906,7 @@ export function TrustedIssuerPage({
   onSaved: (next: McpTrustedIssuer) => void;
   onRemoved: (id: string) => void;
 }) {
-  const back = { label: "Connected apps", onClick: onClose };
+  const back = { label: "Connected agents", onClick: onClose };
   if (!issuer)
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -1022,7 +1022,7 @@ function LoadedTrustedIssuerPage({
     const next: typeof errors = {};
     if (jwksUri.trim() && !isIssuerUrl(jwksUri.trim()))
       next.jwksUri = "Use an https:// URL, or leave it empty.";
-    if (apps.length > 20) next.clientIds = "Allow at most 20 apps.";
+    if (apps.length > 20) next.clientIds = "Allow at most 20 agents.";
     setErrors(next);
     if (Object.keys(next).length > 0) return;
     setSaving(true);
@@ -1044,7 +1044,7 @@ function LoadedTrustedIssuerPage({
 
   return (
     <DetailPage
-      back={{ label: "Connected apps", onClick: onClose }}
+      back={{ label: "Connected agents", onClick: onClose }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       <DetailPageHeader

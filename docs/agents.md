@@ -373,8 +373,9 @@ Instructions, since it joined the First message the same way.
 
 `POST /sessions` takes `agentId` (an agent the caller can see; Only me agents
 only for their owner and only in Only me chats, which is the default when
-`visibility` is omitted, otherwise `agent_requires_private_chat`; never for
-child chats, `agent_child_chat`). The chat gets
+`visibility` is omitted, otherwise `agent_requires_private_chat`). A child
+chat can be bound too: that is delegation (below); `agent_child_chat` is no
+longer returned. The chat gets
 `sessions.agent_id` and `agent_prompt_revision` = the agent's current
 revision, so its Instructions reach the model through the worker's agent layer
 ([run lifecycle](run-lifecycle.md#agent-instructions)). Agents have no First
@@ -497,6 +498,108 @@ stored; `first_message` stays, empty, until a later step drops it:
   endpoint deletes the agent: a shared agent can't leave only one linked
   Slack workspace.
 
+### Starts when, Can use, Learns and Skills
+
+An agent is set up from its page; these fields are on the agent (migration
+1517: `tool_permissions`, `skills`, `template_key`) and in `Agent` /
+`AgentSummary` (`toolPermissions`, `skills`, `templateKey`, defaulting to
+empty for older servers). `PATCH` replaces `toolPermissions` or `skills` as a
+whole.
+
+- **Starts when**: the agent's triggers are ordinary automations with
+  `agentConfig.agentId`. Each run starts a new chat bound to the agent (its
+  Instructions, Memory and Can use), created as the task with the task
+  owner's access to the agent (`agent.subjectId` on session create), so Only
+  me agents work in their owner's Only me automations. Saving checks the
+  agent is one the owner can use, against the automation's agent, run mode
+  and visibility after the edit, and that each run starts a new chat
+  (`existing_session` and `reusable_session` are refused, so a change of
+  agent applies from the next run). Any trigger type in the catalog works,
+  including types added later, because the trigger is the automation's own.
+  Event runs keep the automation limits: the chain limit, the storm guard
+  (`maxRunsPerHour`) and usage limits. The page lists the automations with
+  an on/off switch (pause/resume) and remove, and **Add trigger** opens the
+  automation form with `?agent=<id>`.
+- **Can use**: rules `{connector, tool, permission}`. `connector` is a
+  connection's server id, a provider domain such as `github.com` (any
+  connection to that provider; what ready-made agents use), or `*`; `tool` is
+  a tool name or `*`. The most specific rule wins (server id, then domain,
+  then `*`; an exact tool over `*`; ties take the strictest), see
+  `agentToolPermissionFor` in `@opengeni/contracts`. Rules only make chats
+  stricter: **Ask first** and **Block** raise the decision the connection's
+  own tool permissions give (`minimumDecision` on the connector action
+  ledger), and **Allow** follows the connection. They apply to every call
+  that goes through the connector action policy: native connectors,
+  Opengeni's own GitHub tools (`github_app`, `github_personal`, which a
+  `github.com` rule names), MCP servers, gateway (Codemode) calls and Codex
+  Apps, which now goes through the same approvals with a default of Allow. A
+  blocked tool is refused with a reason, not hidden. A chat follows its own
+  agent and every agent above it, taking the strictest choice: an agent's
+  workers follow its Can use, and a delegated chat follows both its own
+  agent's and the caller's, so handing work over never drops a restriction.
+  In an unattended run Ask first refuses the call, as approvals do there.
+  Codex Apps calls carry no provider domain: rules name them by the
+  `codex_apps` server id or `*`. A rule a release can't fully read (such as
+  a permission added later) asks first rather than being ignored. The
+  page lists the workspace's enabled connections plus a **GitHub** row for
+  Opengeni's own GitHub tools (rules on `github.com`, the same rules the
+  ready-made agents use), unless a listed connection already covers
+  `github.com`. Rules for connections not listed still show and can be
+  changed or removed.
+- **Learns**: **Remember across chats** plus the entries of the agent's
+  Memory collection, each editable and removable (Knowledge entry save and
+  archive).
+- **Skills**: a short list of the Skills it relies on, by name, linked to
+  each Skill. It is a note for the people setting the agent up: every Skill
+  stays available to every chat, so there are no per-Skill switches.
+
+Not in self-hosted deployments without these pieces: Codex Apps rules need
+the Codex Apps deployment flag, Slack lines need the Opengeni Slack app, and
+the GitHub row only has an effect with the GitHub App or Your GitHub set up.
+Writes through `git` and `gh` with Your GitHub follow Can use too: a
+`github.com` or `github_personal` rule applies to the GitHub action each
+write maps to (for example `pull_request_merge` for `gh pr merge`). `gh`
+and GitHub API reads are refused when the agent chain blocks every built-in
+GitHub read tool (for example a `github.com` `*` Block rule). A read can't
+be mapped to one tool reliably, so a Block on a single read tool applies only
+to Opengeni's GitHub tools, and Ask first isn't applied to reads (the gateway
+has no read approvals; `gh` would fail rather than wait). `git clone` and
+`git fetch` aren't checked: the chat's own checkout needs them.
+
+### Ready-made agents
+
+`GET /v1/workspaces/:id/agent-templates` lists ready-made agents and
+`POST /v1/workspaces/:id/agent-templates/:key/agents` (`{name?, visibility?}`)
+adds one as an ordinary agent with `templateKey` set (SDK
+`listAgentTemplates`, `createAgentFromTemplate`). They are content files in
+`packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`):
+Triage, Bug fixer and PR reviewer, general for any software team, with
+Instructions written for autonomy with judgment (pick up work, fix it, and
+involve a person only when a decision needs one), suggested Can use rules
+(each blocks merging a pull request, through a GitHub connection or
+Opengeni's own GitHub tools) and suggested triggers. Suggested triggers are
+never created on add: the agent page offers each with **Set up**, which
+opens the automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`)
+so the person picks the repository or source and saves. Ready-made agents
+name no internal Skills.
+
+### Delegation by name
+
+An agent hands work to another agent of the same workspace by name or id:
+`session_create`'s `agentName` (the shared `agentRefToolInput` and
+`resolveDelegationAgent` in `apps/api/src/agent-delegation.ts`, which an
+outside agent's `delegate` tool reuses). The child is bound to that agent
+(Instructions, Memory guidance, Can use) and its final answer returns to the
+caller like any worker's. The child keeps the calling chat's privacy, and
+its Memory guidance matches it. Who can use the agent is checked for the
+person the calling chat acts for: an Only me agent only for its owner in Only
+me chats (a shared chat considers shared agents only), and from an open Slack
+chat only agents anyone in the organization can use. The caller's Can use
+still applies in the child (see Can use above).
+A name two agents share is refused with `agent_name_ambiguous` and their ids;
+an unknown one with `agent_not_found`. Delegated chats keep the nested agent
+depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer".
+
 ### Follow-ups
 
 Once the legacy drop is the previous release: stop writing
@@ -515,13 +618,15 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   say that templates and Slack agents became agents (shown when such agents
   exist, dismissible per browser), and a notice suggests renaming when names
   repeat.
+- Agents page: **Add an agent** lists ready-made agents not yet added here,
+  each with **Add**, which opens the new agent's page.
 - Agent page: **Chat** (`/sessions?agent=<id>`), **Export** (an `.agent.json`
   file with its name, icon, description, Instructions and Memory switch; no
   ids, chats, Memory contents or Slack; an older file's First message joins
-  the Instructions on import), its chats (Yours / Everyone's, each marked with
-  where it started), Instructions, **Remember across chats**, who can use it,
-  and **Available in**: the app always, and one row per linked Slack workspace
-  with no switch: how people ask it (`@Opengeni <Name>`) and
+  the Instructions on import), then **Instructions**, **Starts when**, **Can
+  use**, **Learns**, **Who can use it** and **Skills** (see above), and its
+  chats (Yours / Everyone's). Who can use it ends with one row per linked
+  Slack workspace with no switch: "Ask in Slack: `@Opengeni <Name>`" and
   **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`, or
   why it isn't there (Only me or its name). An agent is in several Slack
   workspaces at once. Controls follow the agent's `viewer` access. Choosing
@@ -567,3 +672,312 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
    the legacy tables and functions and the per-agent keys, require the
    installation workspace, read Anyone in the organization only from the
    agent, and join every First message into the Instructions.
+
+## Console agents
+
+A Console agent (an organization agent) belongs to an organization, not to a
+workspace. A product that embeds Opengeni sets it up once and every chat that
+names it runs it, in any workspace the organization manages. Its settings
+live in numbered, immutable versions: Instructions plus the model, built-ins,
+tool servers (organization MCP servers referenced by key), which of their
+tools are on, which ask first, and whether workers get the Instructions. One
+version is published; new chats run it, and each chat stays on the version
+it started on until a publish moves it.
+
+Contracts: `packages/contracts/src/organization-agents.ts`. Tables and the
+visibility rule: migrations `1505`–`1509`. Agents in this section are separate
+from the workspace agents above: `agentId` on session create keeps naming a
+workspace agent and never an organization agent.
+
+### Three setups
+
+- **Console agent** (`managedBy: "console"`): created, edited, saved as a
+  draft, tested, published and rolled back in Console.
+- **Code agent** (`managedBy: "code"`): one YAML file per agent,
+  `agents/<key>.yaml`, deployed with `npx opengeni agents deploy <dir>`, the
+  [GitHub Action](../actions/agents-deploy/README.md) or
+  `PUT /v1/organizations/:organizationId/agents/by-key/:key/apply`. Console
+  shows it read-only as "Managed by code". A deploy is idempotent: the config
+  hash (`sha256:` of `canonicalOrgAgentDefinitionJson`) of a definition that
+  matches an existing version reuses that version. An organization owner can
+  move a code agent to Console management (audit-logged); after that, code
+  deploys get 409 `agent_managed_in_console`. Console's **Export as YAML**
+  writes a Console agent's file and its Markdown instructions.
+- **No agent**: a chat that names no organization agent takes exactly
+  today's code path, with the same session row and prompt.
+
+### The agent file
+
+```yaml
+# yaml-language-server: $schema=https://cdn.jsdelivr.net/npm/opengeni/schemas/agent.schema.json
+key: support
+name: Customer support
+description: Answers customer questions.
+instructions: ./support.md
+model: gpt-5.5
+toolServers:
+  - server: helpdesk
+    tools: { mode: selected, enabled: [search_articles, create_ticket] }
+    approval: { ask: [create_ticket] }
+    newTools: off
+workers:
+  shareInstructions: false
+runsOn: { kind: sandbox }
+```
+
+`key` must match the file name. `instructions` that name an existing `.md`
+file next to the YAML file are read from it; any other value is the
+Instructions text. The JSON Schema ships in the `opengeni` npm package
+(`schemas/agent.schema.json`) and is generated from `OrgAgentFile`
+(`bun scripts/generate-agent-file-schema.ts`); the header line above gives
+editors completion and checks. The full reference is
+[Agents as code](../docs-site/integrate/agents-as-code.mdx).
+
+`opengeni agents deploy <dir>` checks every file first and deploys nothing
+while any has a problem, then prints one line per agent: key, outcome
+(`created`, `updated`, `unchanged`), version, whether it is published, and
+the config hash. A missing instructions `.md` file is an error. `--dry-run`
+writes nothing, says `would create vN` or `unchanged` for each agent and
+prints its diff against its published version,
+`--publish` publishes the
+deployed version, `--move-running-chats` (with `--publish`) also moves
+running chats. It reads `OPENGENI_API_KEY` (an organization key with
+`agents:manage`), `OPENGENI_ORGANIZATION_ID` (or `--organization`) and
+`OPENGENI_BASE_URL` (default `https://app.opengeni.ai`).
+`opengeni agents export <key> [--out <dir>]` writes an agent's YAML file.
+
+### Naming an agent in a chat
+
+Session create takes `agent: "<key or id>"`, or `agent: { ref, ... }` where
+the other fields change settings for this chat only:
+
+- `model` and `reasoningEffort` (top level), `capabilities`, `identity`,
+  `renderer`, `titleInstructions`;
+- `instructions`: added after the agent's Instructions, never replacing them;
+- `toolServers`: per server, `enabled: false` drops it, `tools` replaces the
+  selection, `disableTools` turns tools off, `approval` replaces "Ask first",
+  `eager`, and `headers`, the chat's own login (see Logins);
+- `mcpServers` and `tools` add servers as today;
+- `version`: pin the version to run. In the organization's Console test
+  workspace any version can run, drafts included; everywhere else only the
+  published version is accepted, and another number answers 404
+  `agent_not_found`;
+- `config`: an inline code-agent definition; each distinct config becomes a
+  version of a code-managed agent.
+
+Changes to the agent's own tool servers may only narrow what the agent gives:
+turn servers or tools off, choose fewer of its tools, or ask first for more of
+them. Turning on tools the agent left off, taking "Ask first" away, replacing
+one of its servers through `mcpServers`, and saving a `config` need
+`agents:manage` for the organization: an organization key holding it (whose
+workspace scope includes the chat's workspace), or the organization's owner or
+an admin. A workspace role never counts. Otherwise the create fails with 403
+`agents_manage_required`. Servers a chat adds under a new id need
+`mcp_servers:attach`, as for any chat. Inline saves are recorded in Console's
+audit log (`agent.created`, `agent.version_saved`). Without `agents:manage`, a
+`config` that matches a saved version runs only when that is the published
+version (any version in the Console test workspace); otherwise 404
+`agent_not_found`. After create, changing "Ask first" for one of the agent's
+servers (`PATCH .../mcp-servers/:serverId/approval-policy`) follows the same
+rule: asking first for more is allowed, asking for less than the agent needs
+`agents:manage` (403, `details.code` `agents_manage_required`). On that route
+an end user acting through the organization key (the external actor header,
+as the session proxy forwards the browser) never holds the key's
+`agents:manage`; the product's server, sending the same key without an actor,
+does. At create the key's `agents:manage` still counts for its end users,
+since the session proxy takes the agent and its overrides only from the
+host's `createSession` hook.
+
+What a chat changed is stored per session (`sessions.agent_overrides`,
+`{setting: {agent, chat}}`), returned as `Session.orgAgent.overrides`, and
+shown in Console as "Changed by this chat" with a diff. `agentOverrides:
+"reject"` makes a create that would change anything fail with 422
+`agent_override_rejected`.
+
+Refusals use the session create envelope: `code` is
+`SESSION_CREATE_FORBIDDEN` (403) or `SESSION_CREATE_REJECTED` (404, 409,
+422), and `details.code` names the reason, for example `agent_not_found`,
+`agent_not_published`, `agents_manage_required` or `agent_override_rejected`.
+
+The session proxy (`@opengeni/sdk/session-proxy`) drops an organization agent
+(`agent` as a string or with `ref`) and `agentOverrides` sent by the browser;
+the host names the agent from its `createSession` hook.
+
+### Tool servers and logins
+
+New tools a server starts offering after a version was saved are off unless
+the version's `newTools` is `on` or `on_with_approval`. A `per_user` tool
+server's login comes from, in order:
+
+1. the organization's credential provider (`credentials.request` with the
+   server in `mcpServers`, as today);
+2. the end user's stored login,
+   `PUT /v1/workspaces/:workspaceId/end-users/:externalUserId/tool-credentials/:toolServerKey`
+   (headers or OAuth, encrypted, refreshed before expiry, never readable back);
+3. the chat's own `headers` for the server, only for a turn its creator or
+   its end user started, or no person started (an API key, a schedule, a
+   worker); another person's turn needs their own login.
+
+A `per_user` server never falls back to a shared key. Without a login the
+chat runs without that server and records `session.tool_server.unavailable`.
+
+Each turn checks that the agent is not archived and still reaches the chat's
+workspace (a managed workspace, or one the agent was added to). If not,
+existing chats lose the organization's secrets from the next turn: shared-key
+servers and stored end-user logins are unavailable (`missing_credentials`),
+while the credential provider and the chat's own headers still apply.
+
+Stored secrets stay with the origin they were given for. Changing a tool
+server's URL to another origin drops its shared key (unless the same request
+sets a new one) and deletes every end user's stored login for it; changing the
+OAuth token URL to another origin (or adding one) drops the client secret
+(unless re-supplied) and deletes the stored OAuth logins. The audit row says
+what was dropped. Removing an end user from a workspace deletes their stored
+logins there; offboarding them from the organization deletes their logins in
+every workspace and the display name and email the product sent.
+
+Tool server writes and publishing with `moveRunningChats` reach every
+workspace of the organization, so an organization key limited to selected
+workspaces gets 403 `organization_key_workspace_limited` for them.
+Such a key sees only its own workspaces in an agent's `workspaceIds`, and a
+`PATCH` with `workspaceIds` changes only those: the agent's access in other
+workspaces stays as it is. Other callers replace the whole list.
+
+### Runs on
+
+`runsOn` says where an agent's chats run:
+
+- `{ kind: none }`, **No computer**: tools and API only; the chat is created
+  with `sandboxBackend: "none"`.
+- `{ kind: sandbox, environment? }`, **Cloud sandbox**: each chat gets its own
+  isolated sandbox from the deployment's cloud backend, optionally built from
+  an organization Sandbox Environment (name or id). Refused with 422
+  `runs_on_unavailable` on a deployment without a cloud backend.
+- `{ kind: machine, machine }`, **Organization machine**: every chat runs on
+  one organization Connected Machine (name, machine id or sandbox id), shared
+  by all chats of all end customers.
+
+Omitted `runsOn` keeps today's placement for the workspace (its default
+machine, else a cloud sandbox). Console suggests Cloud sandbox when the
+built-ins that use a computer (Browser or Workspace files) can be on, else No
+computer (`suggestedOrgAgentRunsOnKind`); the suggestion is never applied on
+its own.
+
+The machine or environment must be an organization one whose reach includes
+the workspaces the chats run in: **All product-managed workspaces**
+(`allowManagedWorkspaces`, migration 1512), which also covers managed
+workspaces created later and the Console test workspace. Every shared
+workspace alone doesn't count. Saving or deploying a version
+refuses a name that matches no organization machine or environment (422
+`machine_not_found` / `environment_not_found`); Personal (Only me) and
+workspace machines are never listed, so naming one is refused too. Reach is
+checked when a chat is created (422 `runs_on_unavailable`), because it can
+change after a version is saved. `GET /v1/organizations/:organizationId/agents/compute`
+lists the organization machines and environments with
+`worksInManagedWorkspaces`.
+
+A saved version keeps the machine or environment it named by id
+(`agent_revisions.runs_on_target`, migration 1512), and its chats use that id.
+Renaming the machine, or adding another with the same name, neither moves nor
+breaks the agent. If it is removed, chats look the written name up again
+(for example the same machine connected again), and refuse with
+`machine_not_found` / `environment_not_found` when nothing matches. `runsOn` keeps what
+was written, so the config hash and an exported YAML file stay as they were.
+
+A create may still pass `sandboxBackend`, `targetSandboxId` or `rigId` for one
+chat; the request has the final say, recorded as the `runsOn` override, and
+the usual machine-access and reach checks apply. Workers a chat starts share
+its computer unless they ask for their own (`sandbox: "new"`).
+
+A Personal (Only me) machine never runs an organization agent chat. This is
+checked where the chat finally lands, whatever placed it there: the request's
+`targetSandboxId`, a default, or the parent's machine a worker joins (422
+`personal_machine_not_allowed`). A person's own default machine ("Your default
+machine") is not used for these chats; they follow the agent's Runs on, else
+the workspace default. A machine the caller can't read is refused as well (422
+`runs_on_unavailable`).
+
+### Workers, publish and moves
+
+Workers a chat starts inherit its tools, approvals and logins; they get the
+agent's Instructions only when `workers.shareInstructions` is on. Publishing a
+version (or an older one, a rollback) changes what new chats run.
+`moveRunningChats` also moves chats on other versions; a moved chat gets the
+new Instructions as a history item at its next turn
+(`sessions.agent_prompt_version` trails `agent_version` until then).
+The publish operation is `pending` until the move runs. When the move cannot
+start, the version stays published and the operation is `failed` with
+`failureReason`: `move_unavailable` (the deployment has no move workflow),
+`move_start_failed` (publish again to retry) or `superseded` (a later publish
+came before it started).
+If the API stops between saving a publish and starting its move, the
+operation stays `pending` until someone who may publish (Editor or Full, or a
+key with `agents:manage`) lists the agent's publish operations more than two
+minutes later: the listing starts the move again (starting is idempotent).
+When the start fails it stays `pending` for the next listing; only a
+deployment without a move workflow marks it `failed` (`move_unavailable`).
+Viewers' and read-only keys' listings only read. A later publish also ends
+it as `superseded`. A move that was already running when a
+later publish took over ends `succeeded` with `failureReason: superseded`;
+its counts show what it moved before it stopped.
+
+### Access and rollout
+
+Permissions `agents:read`, `agents:manage` and `tool_credentials:write` (in
+full organization keys). Organization agents have no home workspace; a
+database rule hides them from Slack, Teams and app agent lists, and from the
+previous release. The feature is per organization and off by default:
+`OPENGENI_ORG_AGENTS_ACCOUNT_IDS` lists the accounts that have it. The
+Console test chat runs in a per-organization test workspace
+(`organization_managed_workspaces.source = 'console_test'`) as the tester's
+own test chat principal; nobody is a member of that workspace, and only the
+tester reads and continues their test chats, through the `test-chats` routes
+([Console roles](opengeni-console.md#roles)). Test chats reach only their own
+chat tree (`agentAccess: "session"`), keep no Memory, and their pasted logins
+run only for turns the tester's own principal started.
+
+### How Console agents are stored
+
+Console agents (organization agents) are agents an organization defines once
+and uses across its workspaces, edited in Console or deployed from code. They
+are on per organization (`OPENGENI_ORG_AGENTS_ACCOUNT_IDS`, see
+[deployment](deployment.md)); routes are listed in [`http-api.md`](http-api.md).
+
+- Data (migration 1505): an `agents` row with `scope = 'organization'`, no
+  home workspace, an `agent_key` unique in the organization,
+  `published_revision` and `managed_by` (`console` or `code`). Each version is
+  one immutable `agent_revisions` row with `config`, `tool_catalog`, `source`
+  and `config_hash` (`sha256:` of `canonicalOrgAgentDefinitionJson`); saving or
+  deploying a definition whose hash matches any version reuses that version.
+  Publishes and rollbacks are rows in `agent_publish_operations` (a version's
+  "published at" comes from them). `agent_workspace_access` lists workspaces
+  besides the organization's managed ones where the agent is available.
+- Visibility: a restrictive policy hides organization rows unless the
+  transaction sets `opengeni.org_agents_v1`. Only
+  `packages/db/src/organization-agents.ts` (and the turn worker's reads) set it,
+  so Slack placement, Teams routing and the app's agent lists never see them.
+  This is not authorization: every route checks permissions first.
+- Who: organization keys with `agents:read`, `agents:manage` and
+  `tool_credentials:write` (full organization keys hold them through
+  `workspace:admin`; explicit keys get `agents:read` from a `:read` preset), and
+  the organization's people by Console role: owners and admins everything,
+  Editors read and edit Console-managed agents (test chats, publish) except
+  ones available in team workspaces (403 `agent_in_team_workspaces`), Viewers
+  read, other members nothing (see
+  [Console roles](opengeni-console.md#roles)). Only an owner (never a key) switches an agent between Console and
+  code management; afterwards Console edits of a code agent answer 409
+  `agent_managed_by_code` and deploys to a Console agent 409
+  `agent_managed_in_console`.
+- Tool servers (`organization_tool_servers`) are referenced by key in versions.
+  A shared key and an OAuth client secret are stored encrypted and never
+  returned. End users' logins (`end_user_tool_credentials`) are stored per
+  managed workspace and end user (`external_user:<id>`), encrypted, write-only;
+  a workspace context sees its own, the account context all of the
+  organization's (to delete them across workspaces when a server moves to
+  another origin or an end user is offboarded, see
+  `packages/db/src/end-user-tool-data.ts`).
+- Every write records a Console audit row (`agent.*`, `tool_server.*`,
+  `tool_credential.*`).
+- Drafts run only in the organization's Console test workspace
+  (`organization_managed_workspaces.source = 'console_test'`), created by
+  `POST .../agents/test-workspace`.

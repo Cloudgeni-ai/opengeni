@@ -122,7 +122,7 @@ export function SiteConversationsPanel({
         allow ? [...new Set([...current, sessionId])] : current.filter((id) => id !== sessionId),
       );
       toast.success(
-        allow ? "Chat allowed in this Site" : "Chat access removed",
+        allow ? "Chat allowed in this app" : "Chat access removed",
         !allow
           ? {
               action: { label: "Undo", onClick: () => void changeAccess(sessionId, true) },
@@ -154,7 +154,7 @@ export function SiteConversationsPanel({
             setSearch("");
           }}
         >
-          {adding ? "Back to Site conversations" : "Allow an existing chat"}
+          {adding ? "Back to app conversations" : "Allow an existing chat"}
         </Button>
       )}
       <Toolbar>
@@ -162,7 +162,7 @@ export function SiteConversationsPanel({
           value={search}
           onValueChange={setSearch}
           placeholder="Search conversations"
-          aria-label="Search Site conversations"
+          aria-label="Search app conversations"
         />
         <ToolbarGroup align="end">
           <SegmentedControl<"active" | "archived">

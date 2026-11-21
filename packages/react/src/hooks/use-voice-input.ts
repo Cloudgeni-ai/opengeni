@@ -1,4 +1,8 @@
-import type { ClientVoiceInputConfig, RecordingTranscriptVersion } from "@opengeni/contracts";
+import type {
+  ClientVoiceInputConfig,
+  RecordingClientTimings,
+  RecordingTranscriptVersion,
+} from "@opengeni/contracts";
 import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -40,7 +44,8 @@ export type VoiceInputRecordingsClient = Pick<
   | "listRecordingTranscriptVersions"
   | "getRecordingTranscript"
   | "createRecordingTranscript"
->;
+> &
+  Partial<Pick<OpenGeniRecordingsClient, "reportRecordingTimings">>;
 
 export type UseVoiceInputOptions = {
   /**
@@ -245,7 +250,25 @@ type Dictation = {
   /** Dictated here and now, not one an earlier page left: Cancel deletes it. */
   fresh: boolean;
   text: string | null;
+  /** Only for a Stop observed on this page, never a recovered recording. */
+  stoppedAtMs?: number;
 };
+
+async function reportDictationTimings(
+  client: VoiceInputRecordingsClient | null | undefined,
+  workspaceId: string,
+  recordingId: string,
+  timings: Omit<RecordingClientTimings, "purpose">,
+): Promise<void> {
+  try {
+    await client?.reportRecordingTimings?.(workspaceId, recordingId, {
+      purpose: "dictation",
+      ...timings,
+    });
+  } catch {
+    // Diagnostics must not hold the composer or fail a dictation.
+  }
+}
 
 /**
  * Dictation for a composer: record the microphone, transcribe it with the
@@ -340,6 +363,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       createRecordingUploads: (...args) => current().createRecordingUploads(...args),
       completeRecordingChunks: (...args) => current().completeRecordingChunks(...args),
       finalizeRecording: (...args) => current().finalizeRecording(...args),
+      reportRecordingTimings: async (...args) => current().reportRecordingTimings?.(...args),
       deleteRecording: (...args) => current().deleteRecording(...args),
     };
   }, []);
@@ -524,7 +548,12 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
 
   /** Take the text: delete the dictation, then insert it once. */
   const take = useCallback(
-    async (dictation: Dictation, text: string, generation: number): Promise<void> => {
+    async (
+      dictation: Dictation,
+      text: string,
+      generation: number,
+      timing?: { stoppedAtMs: number; transcriptWaitMs: number; stopToTranscriptMs: number },
+    ): Promise<void> => {
       const client = latest.current.recordings;
       const workspace = latest.current.workspaceId;
       let insert = true;
@@ -546,6 +575,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
         return;
       }
       if (insert && text.trim()) insertText(text);
+      if (timing) {
+        const stopToComposerMs =
+          insert && text.trim() ? performance.now() - timing.stoppedAtMs : undefined;
+        void reportDictationTimings(client, workspace, dictation.recordingId, {
+          transcriptWaitMs: timing.transcriptWaitMs,
+          stopToTranscriptMs: timing.stopToTranscriptMs,
+          stopToComposerMs,
+        });
+      }
       settleIdle();
       void loadSaved(generation);
     },
@@ -558,6 +596,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       const client = latest.current.recordings;
       const workspace = latest.current.workspaceId;
       if (!client) return;
+      const waitingStarted = performance.now();
       let delay = latest.current.pollIntervalMilliseconds ?? DEFAULT_POLL_MILLISECONDS;
       for (;;) {
         if (generation !== generationRef.current) return;
@@ -592,14 +631,29 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
           if (text === null) {
             delay = Math.min(MAX_POLL_MILLISECONDS, delay * 2);
           } else {
+            const ready = performance.now();
+            const timing =
+              dictation.stoppedAtMs === undefined
+                ? undefined
+                : {
+                    stoppedAtMs: dictation.stoppedAtMs,
+                    transcriptWaitMs: ready - waitingStarted,
+                    stopToTranscriptMs: ready - dictation.stoppedAtMs,
+                  };
             const current = dictationRef.current;
             const automatic =
               current?.recordingId === dictation.recordingId &&
               current.autoInsert &&
               !latest.current.disabled;
             if (automatic) {
-              await take(dictation, text, generation);
+              await take(dictation, text, generation, timing);
             } else {
+              if (timing) {
+                void reportDictationTimings(client, workspace, dictation.recordingId, {
+                  transcriptWaitMs: timing.transcriptWaitMs,
+                  stopToTranscriptMs: timing.stopToTranscriptMs,
+                });
+              }
               // Set aside, recovered, or a send holds the composer: keep it,
               // and insert it once the send is done unless it was set aside.
               const waitingForSend =
@@ -674,6 +728,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
 
   const finishCapture = useCallback(
     async (autoInsert: boolean) => {
+      const stoppedAtMs = performance.now();
       const generation = generationRef.current;
       clearStopTimer();
       const oneShot = oneShotRef.current;
@@ -727,7 +782,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       const versionId = uploader().finalized.get(id)?.transcript.id ?? null;
       if (dictation.autoInsert) setStatus("transcribing");
       else hold(dictation, "recovered");
-      await watch(dictation, versionId, generation);
+      await watch({ ...dictation, stoppedAtMs }, versionId, generation);
     },
     [finishOneShot, giveAudio, hold, settleIdle, uploader, watch],
   );

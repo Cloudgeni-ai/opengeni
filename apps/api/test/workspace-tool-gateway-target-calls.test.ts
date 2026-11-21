@@ -181,6 +181,10 @@ mock.module("../src/mcp/server", () => ({
         },
       ],
     }));
+    // A renamed first-party tool: Sites declared it as site_data_query.
+    probe.registerTool("app_data_query", { description: "Answer as the app tool." }, async () => ({
+      content: [{ type: "text" as const, text: "app_data_query ran" }],
+    }));
     return probe;
   },
 }));
@@ -199,10 +203,12 @@ const {
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
   describeWorkspaceSiteToolReadiness,
+  describeWorkspaceSiteToolSetup,
   resetWorkspaceSiteToolAllowances,
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
   resolveWorkspaceToolManifest,
+  siteToolSetupKey,
 } = await import("../src/workspace-tool-target");
 const { declareSiteToolsForEveryViewer, readSiteToolAccountInventory } =
   await import("../src/site-tool-routing");
@@ -632,6 +638,121 @@ describe("portable known-tool calls", () => {
       );
       expect(JSON.stringify(response.result)).toContain("unrelated_0");
       expect(f.unrelatedSetupRequests()).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+  test("a Site version declaring a former first-party name reaches the current tool", async () => {
+    const f = createFixture({ firstParty: true });
+    try {
+      const site = { siteArtifactId: artifactId, siteVersionId: versionId };
+      const options = () =>
+        targetOptions({
+          readSiteVersion: siteVersion([{ serverId: "opengeni", toolName: "site_data_query" }]),
+        });
+      const current = { serverId: "opengeni", toolName: "app_data_query" };
+      for (const target of [
+        { identity: { serverId: "opengeni", toolName: "site_data_query" } },
+        { identity: current },
+        { path: ["opengeni", "site_data_query"] },
+        { path: ["opengeni", "app_data_query"] },
+      ]) {
+        const resolved = await resolveWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target, ...site },
+          options(),
+        );
+        expect(resolved.entry.identity).toEqual(current);
+        const response = await invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target, operationId: crypto.randomUUID(), arguments: {}, ...site },
+          options(),
+        );
+        expect(JSON.stringify(response.result)).toContain("app_data_query ran");
+      }
+      const checked: unknown[] = [];
+      const manifest = await resolveWorkspaceToolManifest(
+        f.deps,
+        targetAuthorization(),
+        { identities: [{ serverId: "opengeni", toolName: "site_data_query" }], ...site },
+        targetOptions({
+          authorizeSite: async (_db, _grant, context) => void checked.push(context.identity),
+        }),
+      );
+      // Admission and every later fence check see only the current name.
+      expect(checked.length).toBeGreaterThan(0);
+      for (const identity of checked) expect(identity).toEqual(current);
+      expect(manifest.tools.map((tool) => tool.entry.identity)).toEqual([current]);
+      // A tool the version never declared stays refused under either name.
+      await expectHttpStatus(
+        resolveWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          { target: { identity: { serverId: "opengeni", toolName: "sessions_list" } }, ...site },
+          options(),
+        ),
+        403,
+      );
+    } finally {
+      f.close();
+    }
+  });
+  test("an Always allow saved under a former first-party name still skips the prompt", async () => {
+    const f = createFixture({ firstParty: true });
+    try {
+      f.settings.mcpServers.find((server) => server.id === "opengeni")!.requireApproval = true;
+      const asked: string[] = [];
+      const invoke = (saved: string | null) =>
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { identity: { serverId: "opengeni", toolName: "app_data_query" } },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+            siteArtifactId: artifactId,
+            siteVersionId: versionId,
+          },
+          targetOptions({
+            readSiteVersion: siteVersion([{ serverId: "opengeni", toolName: "site_data_query" }]),
+            hasAllowance: async (_db, key) => {
+              asked.push(key.toolName);
+              return key.serverId === "opengeni" && key.toolName === saved;
+            },
+          }),
+        );
+      await expectHttpStatus(invoke(null), 409, "tool_gateway_approval_required");
+      expect(asked).toEqual(["app_data_query", "site_data_query"]);
+      for (const saved of ["site_data_query", "app_data_query"]) {
+        const response = await invoke(saved);
+        expect(JSON.stringify(response.result)).toContain("app_data_query ran");
+      }
+    } finally {
+      f.close();
+    }
+  });
+  test("a non-first-party tool named like a former first-party tool is not translated", async () => {
+    const { currentFirstPartyToolIdentity } = await import("@opengeni/contracts");
+    const foreign = { serverId: "grafana", toolName: "site_data_query" };
+    expect(currentFirstPartyToolIdentity(foreign)).toEqual(foreign);
+    const f = createFixture({ firstParty: true });
+    try {
+      // A version declaring another server's site_data_query does not declare app_data_query.
+      await expectHttpStatus(
+        resolveWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            target: { path: ["opengeni", "site_data_query"] },
+            siteArtifactId: artifactId,
+            siteVersionId: versionId,
+          },
+          targetOptions({ readSiteVersion: siteVersion([foreign]) }),
+        ),
+        403,
+      );
     } finally {
       f.close();
     }
@@ -2484,6 +2605,139 @@ describe("Site tool readiness and typed failures", () => {
     } finally {
       f.close();
     }
+  });
+
+  test("the connect card lists what this viewer can connect or reconnect, one item per connector or account", async () => {
+    const f = createFixture();
+    try {
+      // The connector as the catalog offers it, so the card has something to click.
+      const withCapability = (
+        capabilityId: string | null,
+        account: { grantedScopes?: string[] } = {},
+        gmail = false,
+      ) => ({
+        readAccounts: async (...args: Parameters<typeof readSiteToolAccountInventory>) => {
+          const inventory = await readSiteToolAccountInventory(...args);
+          const canonicalServers = new Map(
+            [...inventory.canonical].map(([id, connect]) => [id, { ...connect, capabilityId }]),
+          );
+          const servers = new Map(inventory.servers);
+          if (gmail)
+            for (const [id, server] of servers)
+              servers.set(id, {
+                ...server,
+                url: "https://gmailmcp.googleapis.com/mcp/v1",
+                connectionRef: {
+                  providerDomain: "gmailmcp.googleapis.com",
+                  kind: "oauth2" as const,
+                },
+              });
+          return {
+            ...inventory,
+            canonical: canonicalServers,
+            servers,
+            accounts: inventory.accounts.map((entry) => ({ ...entry, ...account })),
+          };
+        },
+      });
+      const setup = async (options: TargetGatewayOptions, declared = [canonical]) =>
+        (
+          await describeWorkspaceSiteToolSetup(
+            f.deps,
+            targetAuthorization(),
+            site,
+            targetOptions({ readSiteVersion: siteVersion(declared), ...options }),
+          )
+        ).items;
+      // No account yet: Connect, once, with the declared tool waiting on it.
+      f.state.connections = [f.foreign];
+      const [connect, ...others] = await setup({
+        ...withCapability("capability-grafana"),
+        readReconnect: async () => [],
+      });
+      expect(others).toEqual([]);
+      expect(connect).toMatchObject({
+        action: "connect",
+        capabilityId: "capability-grafana",
+        connectionId: null,
+        account: null,
+        shared: false,
+        tools: [canonical],
+        // In the console the dialog opens in place.
+        openUrl: null,
+      });
+      expect(connect!.key).toBe(
+        siteToolSetupKey({
+          action: "connect",
+          capabilityId: "capability-grafana",
+          connectionId: null,
+        }),
+      );
+      // The key names no connector, account or id.
+      expect(connect!.key).toMatch(/^connect:[0-9a-f]{24}$/u);
+      // Two declared tools on the same connector are one item.
+      const second = { serverId: "grafana", toolName: "list_dashboards" };
+      const merged = await setup(
+        { ...withCapability("capability-grafana"), readReconnect: async () => [] },
+        [canonical, second],
+      );
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.tools).toEqual([canonical, second]);
+      // An account that stopped working: Reconnect that same account.
+      const [reconnect] = await setup({
+        ...withCapability("capability-grafana"),
+        readReconnect: async () => [
+          {
+            canonicalServerId: "grafana",
+            connectionId: f.personal.id,
+            account: "ada@example.test",
+            shared: false,
+          },
+        ],
+      });
+      expect(reconnect).toMatchObject({
+        action: "reconnect",
+        connectionId: f.personal.id,
+        account: "ada@example.test",
+        key: siteToolSetupKey({
+          action: "reconnect",
+          capabilityId: "capability-grafana",
+          connectionId: f.personal.id,
+        }),
+      });
+      // Nothing the catalog can connect from here: nothing to click, no item.
+      expect(await setup({ ...withCapability(null), readReconnect: async () => [] })).toEqual([]);
+      // Connected and ready: an empty card.
+      f.state.connections = [f.personal, f.foreign];
+      expect(await setup(withCapability("capability-grafana"))).toEqual([]);
+      // An account that must allow more access signs in again: Reconnect.
+      const [grant] = await setup(
+        withCapability("capability-grafana", { grantedScopes: [] }, true),
+      );
+      expect(grant).toMatchObject({ action: "reconnect", connectionId: f.personal.id });
+      // An App that declares nothing has nothing to connect.
+      expect(await setup(withCapability("capability-grafana"), [])).toEqual([]);
+      // The card never builds a provider or reaches one.
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(preparations).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("connect card keys keep connectors and accounts apart even when their names match", () => {
+    const key = (capabilityId: string | null, connectionId: string | null = null) =>
+      siteToolSetupKey({ action: "connect", capabilityId, connectionId });
+    // Two connectors both shown as "Mail" are two items.
+    expect(key("capability-mail-a")).not.toBe(key("capability-mail-b"));
+    // Two accounts on one connector are two items; the same one is stable.
+    expect(key("capability-mail-a", "connection-1")).not.toBe(
+      key("capability-mail-a", "connection-2"),
+    );
+    expect(key("capability-mail-a", "connection-1")).toBe(key("capability-mail-a", "connection-1"));
+    expect(
+      siteToolSetupKey({ action: "reconnect", capabilityId: "c", connectionId: "x" }),
+    ).not.toBe(siteToolSetupKey({ action: "connect", capabilityId: "c", connectionId: "x" }));
   });
 
   test("an undeclared target is unavailable; a replaced Site version is refused", async () => {

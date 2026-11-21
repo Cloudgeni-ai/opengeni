@@ -236,6 +236,16 @@ export type AppDependencies = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  /**
+   * Starts moving running chats for a Console agent publish with
+   * `moveRunningChats` (the operation row is `pending`). Unset leaves the
+   * operation pending.
+   */
+  orgAgentPublishMoveStarter?: (input: {
+    accountId: string;
+    agentId: string;
+    operationId: string;
+  }) => Promise<void>;
   /** Read-only host funding admission; unset uses the standalone billing ledger. */
   entitlements?: EntitlementsPort | null;
   /**

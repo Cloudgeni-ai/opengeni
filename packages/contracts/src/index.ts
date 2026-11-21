@@ -2,6 +2,11 @@ export * from "./model-inference";
 export type * from "./decision-types";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
+import {
+  FIRST_PARTY_MCP_TOOL_ALIASES,
+  FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
+  firstPartyMcpToolAliasTarget,
+} from "./first-party-tool-aliases";
 import * as primitives from "./primitives";
 import {
   WORKSPACE_CONTROL_REASON_MAX_BYTES,
@@ -13,6 +18,7 @@ export * from "./billing-card-verification";
 export * from "./secret-value";
 export * from "./citation-urls";
 export * from "./claude-cite-tags";
+export * from "./provider-citation-handles";
 export * from "./machine-access";
 export * from "./no-reply";
 import { NO_REPLY_SENTINEL } from "./no-reply";
@@ -30,6 +36,9 @@ import { CONNECTION_LABEL_MAX_LENGTH } from "./connection-account-label";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
+export * from "./session-links";
+export * from "./github-built-in-tools";
+import { SessionWaitingOn } from "./session-links";
 export * from "./turn-serving-policy";
 import {
   AzureOpenAIEndpoint,
@@ -67,8 +76,12 @@ import { FileAccess } from "./file-access";
 export * from "./app-shot";
 import { AppShotCapture } from "./app-shot";
 export * from "./site-data";
+export * from "./app-sync";
+import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } from "./app-sync";
 export * from "./site-publishing";
 export * from "./site-sql";
+export * from "./app-package";
+export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
 export * from "./claude-subscription-oauth";
@@ -155,6 +168,7 @@ export const HostMcpCreateSelections = /* @__PURE__ */ defineSchema(() =>
 );
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { SessionOrgAgent } from "./organization-agents";
 import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
 import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
@@ -221,6 +235,7 @@ export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
 export * from "./agents";
+export * from "./organization-agents";
 export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
@@ -1089,6 +1104,9 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
  */
 export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
+  "set_waiting_on",
+  "session_links_add",
+  "session_links_remove",
   "notify_user",
   "notification_withdraw",
   "inbox_tidy",
@@ -1150,6 +1168,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "sidebar_layout_get",
+  "sidebar_layout_update",
   "admin_actions_search",
   "admin_action_describe",
   "admin_action_call",
@@ -1291,6 +1311,48 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_rollback",
   "artifacts_archive",
   "artifacts_restore",
+  "app_data_describe",
+  "app_data_define_collection",
+  "app_data_query",
+  "app_data_write",
+  "app_data_import",
+  "app_data_export",
+  "app_data_reset",
+  "app_sync_save",
+  "app_sync_list",
+  "app_sync_delete",
+  "app_sync_run",
+  "app_sync_opt_in",
+  "app_files_list",
+  "app_files_upload",
+  "app_files_delete",
+  "app_publication_get",
+  "app_publication_update",
+  "app_publication_apply_fix",
+  "app_hostname_check",
+  "app_sql_inspect",
+  "app_sql_enable",
+  "app_sql_migrate",
+  "app_sql_define_query",
+  "app_sql_query",
+  "app_sql_run",
+  "app_sql_execute",
+  "app_sql_export",
+  "app_sql_import",
+  "app_sql_reset",
+  "app_export",
+  "app_install",
+  "sandbox_file_publish",
+  "editable_artifact_list",
+  "editable_artifact_create",
+  "editable_artifact_import",
+  "editable_artifact_get",
+  "editable_artifact_inspect",
+  "editable_artifact_apply",
+  "editable_artifact_export",
+  "editable_artifact_export_status",
+  // Former names of the app_* tools (FIRST_PARTY_MCP_TOOL_ALIASES): stored
+  // selections and callers built before the rename still parse and run them.
   "site_data_describe",
   "site_data_define_collection",
   "site_data_query",
@@ -1315,15 +1377,6 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_sql_export",
   "site_sql_import",
   "site_sql_reset",
-  "sandbox_file_publish",
-  "editable_artifact_list",
-  "editable_artifact_create",
-  "editable_artifact_import",
-  "editable_artifact_get",
-  "editable_artifact_inspect",
-  "editable_artifact_apply",
-  "editable_artifact_export",
-  "editable_artifact_export_status",
 ] as const;
 export const FirstPartyMcpToolName = /* @__PURE__ */ defineSchema(() =>
   z.enum(FIRST_PARTY_MCP_TOOL_NAMES),
@@ -1413,6 +1466,19 @@ export const RETIRED_SESSION_TOOL_NAMES = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredSessionTools = new Set<FirstPartyMcpToolName>(RETIRED_SESSION_TOOL_NAMES);
 
+export {
+  FIRST_PARTY_MCP_TOOL_ALIASES,
+  FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
+  currentFirstPartyToolIdentity,
+  currentFirstPartyToolReference,
+  firstPartyMcpToolAliasTarget,
+  firstPartyMcpToolAliasesOf,
+} from "./first-party-tool-aliases";
+// Every alias and its successor are first-party tool names.
+void (FIRST_PARTY_MCP_TOOL_ALIASES satisfies Partial<
+  Record<FirstPartyMcpToolName, FirstPartyMcpToolName>
+>);
+
 const RETIRED_TOOL_SUCCESSORS = {
   variable_set_list: "secret_search",
   environment_list: "secret_search",
@@ -1420,8 +1486,11 @@ const RETIRED_TOOL_SUCCESSORS = {
   variable_set_set_variable: "secret_save",
   environment_set_variable: "secret_save",
   session_send_message: "session_queue_message",
+  ...FIRST_PARTY_MCP_TOOL_ALIASES,
 } as const satisfies Record<
-  (typeof RETIRED_SECRET_TOOL_NAMES)[number] | (typeof RETIRED_SESSION_TOOL_NAMES)[number],
+  | (typeof RETIRED_SECRET_TOOL_NAMES)[number]
+  | (typeof RETIRED_SESSION_TOOL_NAMES)[number]
+  | keyof typeof FIRST_PARTY_MCP_TOOL_ALIASES,
   FirstPartyMcpToolName
 >;
 
@@ -1470,7 +1539,8 @@ export function currentAgentLearningToolSelection(
       name === "remember_confirm" ||
       (!retiredLearningTools.has(name) &&
         !retiredSecretTools.has(name) &&
-        !retiredSessionTools.has(name)),
+        !retiredSessionTools.has(name) &&
+        firstPartyMcpToolAliasTarget(name) === undefined),
   );
 }
 
@@ -1483,6 +1553,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
   ...RETIRED_SECRET_TOOL_NAMES,
   ...RETIRED_SESSION_TOOL_NAMES,
+  ...FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1557,6 +1628,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !retiredLearningTools.has(name) &&
     !retiredSecretTools.has(name) &&
     !retiredSessionTools.has(name) &&
+    firstPartyMcpToolAliasTarget(name) === undefined &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -5034,11 +5106,22 @@ export function userSetupCardShownMessage(
   );
 }
 
-/** What the agent reads when the setup card could not be posted for it. */
-export function userSetupCardUnpostedMessage(blocker: UserSetupBlocker): string {
+/**
+ * What the agent reads when the setup card could not be posted for it.
+ * `cardTool` says whether the agent has capability_authorization_request:
+ * the message names that tool only when it may exist (undefined: unknown).
+ */
+export function userSetupCardUnpostedMessage(
+  blocker: UserSetupBlocker,
+  cardTool?: boolean,
+): string {
+  const card =
+    cardTool === false
+      ? ""
+      : `post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId})${cardTool ? "" : " if that tool is available"}, and `;
   return (
-    `${blocker.problem} The person can fix this. Offer the fix in this reply: post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId}) if that tool is available, ` +
-    `and tell them the exact next step: ${blocker.nextStep}. ` +
+    `${blocker.problem} The person can fix this. Offer the fix in this reply: ${card}` +
+    `tell them the exact next step: ${blocker.nextStep}. ` +
     "Do not only report that it is unavailable."
   );
 }
@@ -12824,14 +12907,18 @@ export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
  * Where an organization machine or rig works: always in the workspace it was
  * connected from or made in (`homeWorkspaceId`), plus every shared workspace
  * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
- * members' Personal workspaces when `allowPersonalWorkspaces` is on. Only
- * organization machines and rigs have it.
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on, and every
+ * workspace the organization's product manages (including ones it creates
+ * later) when `allowManagedWorkspaces` is on (migration 1512; servers before
+ * it omit the field). Only organization machines and rigs have it.
  */
 export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>
   z.object({
     homeWorkspaceId: primitives.uuid,
     allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
     allowPersonalWorkspaces: primitives.boolean,
+    /** Absent (older servers) means off. */
+    allowManagedWorkspaces: primitives.boolean.optional(),
   }),
 );
 export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
@@ -12841,12 +12928,14 @@ export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
  * PUT /v1/workspaces/:workspaceId/rigs/:rigId/reach: an organization owner or
  * admin changes where an organization machine or rig works. The ids are the
  * organization's shared workspaces; its home workspace always has it.
+ * `allowManagedWorkspaces` omitted keeps the current setting.
  */
 export const UpdateOrganizationComputeReachRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       allowedWorkspaceIds: z.array(primitives.uuid).max(1000).nullable(),
       allowPersonalWorkspaces: primitives.boolean,
+      allowManagedWorkspaces: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -13197,7 +13286,7 @@ export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSc
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
 export const ScheduledTaskActionKind = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["agent_turn", "knowledge_source_sync"]),
+  z.enum(["agent_turn", "knowledge_source_sync", "app_sync"]),
 );
 export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
 
@@ -13274,6 +13363,7 @@ export const ScheduledTaskAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
   z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("agent_turn") }).strict(),
     KnowledgeSourceSyncAction,
+    AppSyncAction,
   ]),
 );
 export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
@@ -13593,6 +13683,13 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     })
     .strict();
   return {
+    /**
+     * The workspace agent each run's chat is with (an agent's "Starts when"):
+     * it runs with that agent's Instructions, Memory and Can use. Checked
+     * against the task owner's access when the task is saved and at each
+     * run. Only for a task that starts its own chat.
+     */
+    agentId: primitives.uuid.optional(),
     bundledSkillIds: BundledSkillSelection.optional(),
     /** @deprecated Integration Knowledge sync was removed; a request carrying it returns 410. */
     knowledgeSource: KnowledgeSourceSyncAction.optional(),
@@ -14492,6 +14589,8 @@ export const ScheduledTaskRun = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() 
     actionKind: ScheduledTaskActionKind.default("agent_turn"),
     knowledgeSyncRunId: KnowledgeSourceSyncUuid.nullable().default(null),
     knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
+    /** App data sync runs: what the run read and wrote. */
+    syncSummary: AppSyncRunSummary.nullable().optional(),
     completedAt: primitives.nullableString.default(null),
     error: primitives.nullableString,
     admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
@@ -14796,6 +14895,87 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */ define
   ]),
 );
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+/**
+ * An App data sync as a plain, portable definition: what App export writes
+ * and install reads. It names the tool but no account or person; an installed
+ * sync starts paused until someone confirms the account it runs on.
+ */
+export const AppSyncDefinition = /* @__PURE__ */ defineSchema(() =>
+  AppSyncSettings.extend({
+    name: z.string().trim().min(1).max(200),
+    schedule: ScheduledTaskScheduleSpec.describe(
+      "When it runs: manual, once, interval (everySeconds, at least 300) or calendar.",
+    ),
+    events: ScheduledTaskEventsInput.optional().describe(
+      "Event triggers that also start a run, like any automation.",
+    ),
+  }),
+);
+export type AppSyncDefinition = z.infer<typeof AppSyncDefinition>;
+export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
+
+/** Create a sync. */
+export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
+  AppSyncDefinition.extend({ status: ScheduledTaskStatus.default("active") }),
+);
+export type AppSyncCreateRequest = z.input<typeof AppSyncCreateRequest>;
+
+/** Change a sync: only the fields given change. */
+export const AppSyncUpdateRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      collection: AppSyncSettings.shape.collection,
+      mode: z.enum(["shared", "personal"]),
+      tool: AppSyncSettings.shape.tool,
+      arguments: AppSyncSettings.shape.arguments.unwrap(),
+      recordsPath: AppSyncSettings.shape.recordsPath.unwrap(),
+      key: AppSyncSettings.shape.key,
+      fields: AppSyncSettings.shape.fields.unwrap(),
+      schedule: ScheduledTaskScheduleSpec,
+      events: ScheduledTaskEventsInput,
+      status: ScheduledTaskStatus,
+    })
+    .partial(),
+);
+export type AppSyncUpdateRequest = z.input<typeof AppSyncUpdateRequest>;
+
+/** A sync as its App's managers see it. */
+export const AppSync = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    siteId: primitives.uuid,
+    name: z.string(),
+    status: ScheduledTaskStatus,
+    mode: z.enum(["shared", "personal"]),
+    collection: z.string(),
+    tool: AppSyncSettings.shape.tool,
+    arguments: z.record(z.string(), z.unknown()),
+    recordsPath: z.string().nullable(),
+    key: z.string(),
+    fields: z.array(z.string()).nullable(),
+    schedule: ScheduledTaskScheduleSpec,
+    events: ScheduledTaskEvents.nullable(),
+    ownerSubjectId: z.string(),
+    /** Personal syncs: how many people opted in. */
+    subscribers: z.number().int().nonnegative().nullable(),
+    lastRun: AppSyncLastRun.nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
+export type AppSync = z.infer<typeof AppSync>;
+
+export const AppSyncListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ syncs: z.array(AppSync) }),
+);
+export type AppSyncListResponse = z.infer<typeof AppSyncListResponse>;
+
+export const AppSyncRunResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ syncId: primitives.uuid, lastRun: AppSyncLastRun }),
+);
+export type AppSyncRunResponse = z.infer<typeof AppSyncRunResponse>;
 
 /** Reviewable access consequences of moving a schedule to another chat. */
 export const ScheduledTaskTargetAccessChange = /* @__PURE__ */ defineSchema(() =>
@@ -15871,8 +16051,10 @@ export const CapabilityCatalogItem = /* @__PURE__ */ defineSchema(() =>
     /**
      * Whether the viewer may remove this custom MCP server from the workspace
      * (`DELETE …/capabilities/:id/installation`): integration admins remove
-     * any, a member only one they turned on, while it is on. Set by the
-     * workspace catalog list; older servers omit it.
+     * any, a member only one they turned on, while it is on. One that is not
+     * on, such as a server that never connected, is deleted by integration
+     * admins (`DELETE …/capabilities/:id`). Set by the workspace catalog list;
+     * older servers omit it.
      */
     canRemove: primitives.boolean.optional(),
   }),
@@ -17244,6 +17426,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * ordinary chat. Fixed at create. Omitted by older servers.
      */
     agentId: primitives.uuid.nullable().optional(),
+    /**
+     * The organization (Console) agent version this chat runs and what the
+     * chat changed from it; null or omitted for every other chat.
+     */
+    orgAgent: SessionOrgAgent.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -17371,6 +17558,9 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
       })
       .nullable()
       .optional(),
+    /** Who the chat waits on: the agent said so, or an open question or
+     * approval. Omitted by older servers. See ./session-links.ts. */
+    waitingOn: SessionWaitingOn.nullable().optional(),
     lastSequence: primitives.nonnegativeInteger,
     // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
     // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -17640,6 +17830,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     rootSessionId: true,
     effectiveControl: true,
     inputWait: true,
+    waitingOn: true,
     lastSequence: true,
     pinned: true,
     pinnedAt: true,
@@ -17903,6 +18094,10 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "session.title_set",
     // A chat's description or avatar changed (display metadata only).
     "session.profile_set",
+    // Who the chat waits on, or that it no longer waits (./session-links.ts).
+    "session.waiting_on.changed",
+    // The chat's Linked items changed; the payload carries the whole list.
+    "session.links.changed",
     "session.model_settings.updated",
     // An authorized person or host changed the task root's usage limit.
     "session.usage_limit.updated",
@@ -17917,6 +18112,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // A repository was attached to the chat after it started, such as one the
     // agent asked for and a person approved. The next turn clones it.
     "session.resources.added",
+    // An organization agent's tool server is attached without a usable login
+    // for this turn (`reason`: missing_credentials or credentials_expired).
+    "session.tool_server.unavailable",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -18203,6 +18401,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "turn.failed",
     "tool.auth_needed",
     "credential.auth_needed",
+    "session.tool_server.unavailable",
     "rig.setup.failed",
     "sandbox.operation.failed",
     "recording.failed",
@@ -18619,9 +18818,30 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
 );
 export type InboxItem = z.infer<typeof InboxItem>;
 
+/**
+ * A notice about something other than a chat, such as a subscription account
+ * that needs signing in again: shaped like a notification item, with no
+ * session and always a link (an address in the web app). It is marked seen or
+ * dismissed like an item.
+ */
+export const InboxNotice = /* @__PURE__ */ defineSchema(() =>
+  InboxItem.extend({
+    sessionId: z.null(),
+    kind: z.literal("notification"),
+    link: z.object({ url: primitives.string, label: primitives.string }),
+    sessionAvailable: z.literal(false).default(false),
+  }),
+);
+export type InboxNotice = z.infer<typeof InboxNotice>;
+
 export const ListInboxResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(InboxItem),
+    /**
+     * Open notices about something other than a chat, newest first. Not
+     * counted in `needsYouCount` or `unreadCount`.
+     */
+    notices: z.array(InboxNotice).optional(),
     /** Organization billing notices are not chat items or workspace events. */
     billingNotifications: z.array(BillingCreditNotification).optional(),
     /** Open items that need the person (questions, approvals, paused goals). */
@@ -19534,6 +19754,11 @@ export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
 // The single manifest blob (one per revision). Holds everything the workbench
 // needs for a cold paint: the tree index, per-repo status+diff, and the file
 // index (after-image refs). The M2 API serves this inline when small (≤2MB).
+// A capture never publishes a manifest larger than
+// WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES: diff hunks are shed (the entry is kept
+// with `truncated: true`) until it fits, so every reader can afford to parse
+// one. The API never parses a larger (legacy) manifest.
+export const WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
 export const WorkspaceCaptureManifest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     version: z.literal(1),
@@ -24096,6 +24321,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: primitives.optionalBoolean,
+    // Console agents (organization agents) are on for the caller's organization.
+    // Absent on older servers and when off.
+    orgAgents: primitives.optionalBoolean,
     // The Chrome extension people add to connect their own Chrome, and its
     // Chrome Web Store page. Absent on older servers: Opengeni Browser.
     browserExtension: z
@@ -24427,6 +24655,7 @@ export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
+export * from "./workspace-filesystem-context";
 export * from "./agent-instructions-context";
 export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";

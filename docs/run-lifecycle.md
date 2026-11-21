@@ -1157,6 +1157,82 @@ unchanged.
   worker is deployed, so rolling deploys meet the gate only if an old worker
   is still serving when the first agent chat is created.
 
+### Organization agents
+
+A chat that runs an organization (Console) agent ([`agents.md`](agents.md))
+records the version in `sessions.agent_version`, the version whose
+Instructions are in its system prompt in `sessions.agent_prompt_version`, and
+what its create changed in `sessions.agent_overrides`. `agent_prompt_revision`
+stays NULL. Every other chat has NULL in all three and takes none of the steps
+below.
+
+- **Create.** Only a create whose `agent` names an organization agent (a key or
+  id string, or an object with `ref`) runs the organization path; it becomes
+  an ordinary create body (tool servers as session MCP servers with id = tool
+  server key and no credentials; model and built-ins where the request is
+  silent), so the rest of the create path is the same code.
+- **Who may change what.** Saving an inline `config`, widening the agent's
+  tool servers (tools it left off, less "Ask first") and replacing one of them
+  through `mcpServers` need organization-level `agents:manage`
+  (`authorizationHoldsOrganizationPermission`: an organization key in scope,
+  or the owner or an admin); other callers may only narrow. Servers added
+  under a new id pass the ordinary `mcp_servers:attach` check.
+- **Worker chats.** A chat started by an organization agent chat inherits
+  `agent_id`, `agent_version` and `agent_overrides`, and `agent_prompt_version`
+  only when the version's `workers.shareInstructions` is on (NULL means no
+  agent layer). Tools, approvals and per-chat logins come with the parent's MCP
+  server snapshot as for every child chat.
+- **Forks.** A fork copies `agent_id`, `agent_version`, `agent_prompt_version`
+  and `agent_overrides` with the rest of the source row, and the agent's tool
+  servers with its MCP servers, so it runs the same version with the same
+  changes (`packages/db/test/session-fork-agent-parity-postgres.test.ts`).
+- **Pinning.** The worker reads `agent_version` once per turn: the first
+  attempt records it in the turn's metadata (`opengeniOrgAgentVersion`) and
+  retries reuse it, with the prompt version in `opengeniAgentPromptRevision`.
+  The layer is the same `agent_instructions` layer as a workspace agent's,
+  read from the immutable version, so an archived agent keeps its text.
+- **Logins.** For each MCP server whose id is one of the pinned version's tool
+  server keys (and whose URL is the tool server's), a `per_user` server uses
+  the workspace credential provider, then the stored login
+  (`end_user_tool_credentials`) of the end user who started the turn (a turn
+  another person started uses no stored login; only a turn no person started,
+  such as an API key's or a schedule's, uses the chat's end user), then the
+  chat's own headers, and never the shared key. An OAuth login expiring within
+  five minutes is refreshed under a lease (`refresh_lease_until`, taken in a
+  short transaction); the token request runs with no transaction open and the
+  result is written only if the row is still the leased version. A failed
+  refresh sets `refresh_failed_at`.
+  `shared_key` servers use the organization's shared headers, `none` servers
+  nothing. A server left without a login is dropped for the turn, named in the
+  turn's unavailable-connector notice, and recorded as
+  `session.tool_server.unavailable` (`missing_credentials` or
+  `credentials_expired`).
+- **Moves.** A publish with "move running chats" starts
+  `orgAgentPublishMoveWorkflow` on the control queue. It reads chats in
+  batches of 500 per workspace (the organization's managed workspaces except
+  its Console test workspace, and the agent's access rows) and moves each in
+  its own transaction under the session event lock: the agent's servers are
+  materialized again for the new version, servers the chat added or replaced
+  stay, the chat's recorded tool server changes are applied again (a change
+  that only narrowed the old version is narrowed to the new one: its tools stay
+  within the new version's and the new version's "Ask first" tools stay asked), per-chat
+  headers stay while the URL is unchanged, the tool policy version is bumped
+  (`session.tool_policy.updated`), `agent_version` is set and the overrides are
+  compared again with the new version. `agent_prompt_version` is not changed:
+  the next turn delivers the newer Instructions as a history item (as for an
+  edited workspace agent) and compaction folds the version it showed into
+  `agent_prompt_version`, never past `agent_version`. A chat with a running
+  turn or waiting on a person is deferred; the workflow scans again with
+  backoff (30 seconds doubling to 10 minutes) for up to six hours, then counts
+  what is left as failed. A newer publish ends the move. Model, built-ins and
+  other scalar settings are not moved.
+- **Claim gate (migration 1505).** A BEFORE INSERT trigger on
+  `session_turn_attempts` refuses, with SQLSTATE 55000, an attempt for a chat
+  with a non-NULL `agent_version` unless the claim set
+  `opengeni.org_agent_protocol_v1 = '1'`, which this worker sets around its
+  own attempt registration. An older worker's refused claim parks the work as
+  described for the agent-instructions gate above.
+
 Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
 chat or scheduled-run context. Child work and replacement attempts reuse their
@@ -2447,7 +2523,7 @@ history. A repeated default `SKILL.md` read by the model returns a short
 when an active, call-paired `skill_read` result in this session already holds the
 same identity and exact text. The check judges each result as the current model
 receives it, after this turn's tool-output bound, so a result truncated when stored,
-truncated by a lower bound of the current model, or spilled never counts. Compaction
+truncated by a lower bound of the current model, or stored as a view never counts. Compaction
 marks those rows inactive, so the next read after compaction returns full text. The
 lookup only saves tokens: when it fails, the read returns full text.
 Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`,
@@ -2474,8 +2550,8 @@ text returned, `inIndex` (listed in this turn's frozen, model-visible Skill
 index), and `searchedThisTurn` (returned by `skill_search` earlier in the same
 attempt). The model output is the text part alone, so `_meta` never reaches the
 model or model history; only the `agent.toolCall.output` event projection keeps
-it. It holds no Skill text, user text, or Skill title, and it is dropped rather
-than let a result cross the 1 MiB model-visible cap. Codemode results never carry
+it. It holds no Skill text, user text, or Skill title; a read too large to show
+whole keeps it beside the stored-result receipt. Codemode results never carry
 it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
 stored event and drops fields a newer worker added instead of the whole fact.
 The default `skill_read` (no `paths`) also returns a bounded `scripts` index:
@@ -3658,6 +3734,17 @@ save in its own object storage: a session whose latest save is a directory
 snapshot is restored from it into a tar destination, so that snapshot is the
 last one it reads and it never writes another. A box that is still live keeps
 the mode it was created in until it is next restored.
+A tar save or restore never holds the archive in the worker's or API's memory.
+On a save, `tar -c` runs in the box and its stdout streams through Modal's exec
+stream into a private disk spool on the worker, hashed and checked member by
+member as it arrives; the spool is then uploaded and read back as before. On a
+restore, cold restore downloads the object into a verified disk spool (size and
+SHA-256 against the descriptor) before any box is created, then streams it into
+`tar -x` reading stdin in the new box. Every chunk passes the SDK's tar member
+checks before the box sees it and is hashed again, so a spool that changed
+after it was verified fails the restore. The restored tree is then
+fingerprinted against the descriptor as before. A provider without these
+stream methods reads the verified spool into one buffer and hydrates from it.
 Filesystem snapshot recovery boots the exact selected immutable Image directly,
 attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
@@ -5268,35 +5355,66 @@ recovery replays the stored bytes. The instructions never contain a clock.
    model request projects that receipt to a deterministic artifact fact without
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
-   Model-visible tool results stay at or below 1 MiB. Overflow is a successful
-   tool: exact serialized bytes become a workspace File and a current-turn copy
-   lands at `tool-results/<operationId>.json` under the placement's workspace
-   root (the durable rematerialization path remains the virtual
-   `/workspace/tool-results/<operationId>.json`). History/events keep the
-   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt, followed by
-   one text block telling the model how to read it. `sandboxPath` is the
-   absolute path of the copy in the placement it was written to (a Connected
-   Machine's host-native root or a box's root), so the shell opens it from any
-   working directory; a root that is not an absolute POSIX path keeps the
-   cwd-relative form. The path is given only once the copy is in the sandbox:
-   a spill that finds the turn's lazy sandbox not started yet joins it (as a
-   shell command would; the start copies the attempt's spilled files before
-   releasing its first operation, and the spill retries a failed copy once), so
-   the receipt never promises a later copy. It is `null` without a sandbox
-   route, when the sandbox cannot start or the copy fails, and on the SDK-owned
-   path before its session exists. The text names the Files download tool
-   (`files__files_get_download_url` with the `fileId`) for a missing copy, as
-   attachment receipts do; later turns do not rematerialize. Spill write
-   failure is a bounded `result_too_large` error and never puts the huge payload
-   in history.
-   Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
-   `session_attempt_codemode_calls` is unchanged. An attempt-gateway MCP result
-   is bounded only by the 8 MiB MCP transport cap before this seam, so a large
-   MCP read spills (or reaches Codemode exactly) instead of failing after the
-   provider already returned it; a direct non-gateway SDK MCP call keeps the
-   1 MiB exact-result bound. See
-   `packages/runtime/src/tool-result-spill.ts` and
-   `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
+   Tool results are lossless. One result shows the model at most its inline
+   tool-output policy as text: 25,000 approximate tokens, 100,000 UTF-8 bytes,
+   by default (`OPENGENI_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS`, the same as
+   Claude Code's default MCP output limit). A larger result is a successful
+   tool: its full model-visible text (text blocks and the
+   `Structured result: …` line, exactly what the model would have seen) is
+   stored whole as a workspace File (`text/plain`, object key
+   `…/tool-results/<resultId>.txt`), and the model receives a view that fits:
+   the start of the text, then one bracketed Opengeni note with the total size,
+   the byte range shown and the exact call that reads on, such as
+   `tool_result_read {"resultId":"…","offset":99012}`. Shell output
+   (`exec_command`, `write_stdin`) keeps its head and tail in the view, with the
+   note in the middle naming the bytes left out, since the end of a command's
+   output usually matters most. Cuts fall on UTF-8 characters and, when one is
+   near, on line ends. The receipt (`tool_result_stored`: `resultId`,
+   `byteSize`, `notShownFrom`, `notShownTo`, `sandboxPath`) rides in `_meta`
+   under `opengeni/toolResultStored`, which the model never sees. Any other
+   `_meta` of the result is kept beside it. Images are not text: they count
+   only toward the 1 MiB transport bound on the whole result, and an image
+   past it is withheld with a note naming its type and size.
+   The one seam is the per-caller projection for attempt tools (MCP gateway
+   and connector tools, in-process definitions) and a wrapper on every
+   function tool the Agents SDK invokes (shell, web fetch and the rest), so
+   no tool implements paging itself. `tool_result_read` reads any stored
+   result of the workspace by `resultId`, byte `offset` and optional
+   `maxBytes` (at most the inline size, less 1 KiB) from durable storage, so it
+   works with or without a sandbox; each read names the offset to continue
+   from. Results stored by the earlier 1 MiB spill (exact JSON under the same
+   `tool-results/` prefix) read the same way. When a sandbox is already
+   running, the store also writes a copy at `tool-results/<resultId>.txt`
+   under the placement's root and the note names its absolute path, so the
+   shell can search it; the store never starts a sandbox for that. The ids are
+   derived from the attempt and the operation or call id, so a retried store
+   reuses its File. One cut stays the model's own choice: when a shell call
+   passes `max_output_tokens`, the sandbox provider shortens that output to
+   the requested size before the seam (the Agents SDK `truncateOutput`
+   head-and-tail view with its `Original token count` line), and that middle is
+   not stored; the model asked for the smaller view and can rerun the command
+   without the bound, which sends the whole output through the store. Without
+   `max_output_tokens` the provider returns the output whole. A store failure
+   shows the start with a note that the rest
+   could not be kept. Codemode callers receive exact results (the 16 MiB
+   Codemode journal cap is unchanged). An attempt-gateway MCP result is
+   bounded only by the 8 MiB MCP transport cap before this seam.
+   `tool_result_read` is never in a first-request tool list: it is needed only
+   after an oversized result, whose note names the exact call, so it joins as
+   a deferred tool behind the turn's search router and the model loads it by
+   exact name, which changes no prompt prefix. It is offered only on turns
+   that expect the router for other deferred tools, so it never brings the
+   router in by itself. A turn without a router (tool search turned off, or an
+   agent whose every tool is eager) has the shell copy when a sandbox runs and
+   is otherwise told to narrow the call. Only results
+   produced from now on pass through the store; history already sent is never
+   re-rendered. The request-time truncation behind the store applies 1.2x the
+   policy (120,000 bytes by default), so it never cuts a view or an inline
+   result, and since it only grew (Codex models never drop below their former
+   10,000-token policy), every item bounded under the earlier policy replays
+   byte for byte. See `packages/runtime/src/model-tool-result-store.ts`,
+   `apps/worker/src/activities/agent-turn/tool-result-store.ts` and
+   `apps/worker/src/activities/agent-turn/tool-result-read-tool.ts`.
    The same per-caller seam applies model-only projections:
    a model call to `knowledge_search` or `knowledge_prepare_save` receives a
    compact copy without bookkeeping or repeated preview text, and its history
@@ -5306,7 +5424,7 @@ recovery replays the stored bytes. The instructions never contain a clock.
    A local MCP bridge may also supply its own model-visible copy through
    `LocalMcpBridgeServer.projectModelToolResult` (the Gmail bridge's compact
    mail cards, see [Gmail](gmail.md#model-visible-results)); it runs before
-   the 1 MiB check, Codemode and the spill file keep the exact result, and a
+   the inline-size check, Codemode keeps the exact result, and a
    projection that throws leaves the exact result in place.
    User attachment rows store stable file references, not inline bytes. Active
    messages reconstruct the same authorized receipt and supported image content
@@ -6001,11 +6119,12 @@ current authorized metadata and checksum-valid content; compacted attachment
 catalogs remain receipt-only.
 
 Per-turn file attachments never change the system instructions. The modular
-contract has no attachment module, and the SDK-rendered remote mount policy and
-filesystem layout come from the agent's instruction manifest
-(`manifestWithoutFileResourceEntries`), which drops file resource entries,
-including files a resumed sandbox's manifest state still holds from earlier
-turns; the session still materializes the full manifest. Everything the model
+contract has no attachment module, and the SDK renders nothing from the
+sandbox manifest into them (`manifestInstructions: false`), so neither the
+turn's files nor files a resumed sandbox's manifest state still holds from
+earlier turns reach them; the session still materializes the full manifest.
+The workspace filesystem layout history item lists no files either
+(`workspaceFilesystemLayout`). Everything the model
 needs about the turn's files (paths, sizes, read-only handling, contents are
 data, an earlier attachment belongs to a request only when that message refers
 to it) is in the turn's "Attached files are available in the sandbox" notice,

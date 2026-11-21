@@ -1,3 +1,4 @@
+import { appSyncStatusForSite } from "../app-sync/service";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ReasoningEffort,
@@ -16,9 +17,12 @@ import {
   SiteDataGetRequest,
   SiteDataQueryRequest,
   SiteDataWriteRequest,
+  SitePlatformTimingReport,
   SiteSqlRunRequest,
   SiteViewAs,
+  SITE_LIVE_TTL_SECONDS,
   type SiteLimitProfileKind,
+  type SiteLiveAdmission,
   SITE_GATEWAY_CALLBACK_PATH,
   SITE_RUNTIME_API_PREFIX,
   SITE_TOOL_METHODS,
@@ -105,6 +109,7 @@ import {
 } from "../workspace-tool-gateway";
 import {
   describeWorkspaceSiteToolReadiness,
+  describeWorkspaceSiteToolSetup,
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
 } from "../workspace-tool-target";
@@ -119,9 +124,18 @@ import {
   listSiteDataFiles,
   querySiteData,
   uploadSiteDataFile,
+  watchSiteData,
   writeSiteData,
   deleteSiteDataFile,
 } from "../site-data/operations";
+import {
+  SITE_RUNTIME_REQUEST_METRIC,
+  SITE_TIMING_BUCKETS,
+  recordSiteTimingReport,
+  siteRuntimeOpLabel,
+  statusClass,
+} from "../site-live/metrics";
+import { siteLiveConfigured } from "../site-live/service";
 import type { PublishedSiteDataViewer } from "../site-data/service";
 import {
   sameSha256Hex,
@@ -253,6 +267,24 @@ const SteerRequest = z
   })
   .passthrough();
 
+/** The HTTP status an error will be answered with (500 when unknown). */
+function errorStatus(error: unknown): number {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 100 && status < 600 ? status : 500;
+}
+
+/** Add a Server-Timing header, copying the response when its headers are immutable. */
+function withServerTiming(response: Response, value: string): Response {
+  try {
+    response.headers.append("server-timing", value);
+    return response;
+  } catch {
+    const copy = new Response(response.body, response);
+    copy.headers.append("server-timing", value);
+    return copy;
+  }
+}
+
 function invalid(message: string) {
   return sitePublishingError(400, "validation_failed", "site_invalid_request", message);
 }
@@ -262,7 +294,7 @@ function unsupported() {
     404,
     "not_found",
     "site_operation_unsupported",
-    "This operation is not available to published Sites",
+    "This operation is not available to published apps",
   );
 }
 
@@ -490,14 +522,49 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Lifecycle cancellation is a native internal command, never viewer dispatch.
   setSitePublishingCancellation(deps.settings, (input) => cancelPublishedSiteSession(deps, input));
 
+  /**
+   * Every site-runtime request is measured by Site operation (a closed
+   * label set) and answers with Server-Timing: `auth` is the signature check
+   * and body read, `app` the operation itself.
+   */
   const handler = async (context: Context): Promise<Response> => {
+    const started = performance.now();
+    const timing = { authMs: 0 };
+    let status = 500;
+    let op = "other";
+    try {
+      const url = new URL(context.req.url);
+      const method = context.req.method.toUpperCase();
+      op = siteRuntimeOpLabel(method, url.pathname.slice(SITE_RUNTIME_API_PREFIX.length));
+      const response = await handle(context, timing);
+      status = response.status;
+      const appMs = performance.now() - started - timing.authMs;
+      return withServerTiming(
+        response,
+        `auth;dur=${timing.authMs.toFixed(1)}, app;dur=${appMs.toFixed(1)}`,
+      );
+    } catch (error) {
+      status = errorStatus(error);
+      throw error;
+    } finally {
+      deps.observability?.observeHistogram({
+        ...SITE_RUNTIME_REQUEST_METRIC,
+        labels: { op, status_class: statusClass(status) },
+        value: (performance.now() - started) / 1000,
+        buckets: SITE_TIMING_BUCKETS,
+      });
+    }
+  };
+
+  const handle = async (context: Context, timing: { authMs: number }): Promise<Response> => {
+    const authStarted = performance.now();
     const domain = configuredSitesDomain(deps.settings);
     if (!domain || !deps.settings.sitesGatewaySecret)
       throw sitePublishingError(
         404,
         "not_found",
         "sites_publishing_disabled",
-        "Publishing Sites is not enabled on this deployment",
+        "Publishing apps is not enabled on this deployment",
       );
     const url = new URL(context.req.url);
     const method = context.req.method.toUpperCase();
@@ -507,7 +574,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         401,
         "unauthenticated",
         "site_gateway_signature_invalid",
-        "This request was not signed by the Site gateway",
+        "This request was not signed by the app gateway",
         { reason },
       );
     // The gateway signature first: nothing about the request is trusted before
@@ -530,6 +597,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
               : SITE_RUNTIME_JSON_BODY_LIMIT,
           );
     if (!sameSha256Hex(read.sha256, verified.bodySha256)) throw refuse("body_mismatch");
+    timing.authMs = performance.now() - authStarted;
     const body = read.body;
     context.header("cache-control", "no-store");
     const runtime: RuntimeRequest = {
@@ -554,6 +622,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "POST" && suffix === "/auth/view-as") return await viewAs(request);
     if (method === "POST" && suffix === "/platform/requests")
       return await platformRequests(request);
+    if (method === "POST" && suffix === "/platform/timings") return await platformTimings(request);
+    if (method === "POST" && suffix === "/live/admit") return await liveAdmit(request);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
     const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
@@ -571,10 +641,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const asked = request.url.searchParams.get("host");
     const normalize = (host: string) => host.trim().toLowerCase().replace(/\.$/u, "");
     if (asked !== null && normalize(asked) !== normalize(request.fields.host))
-      throw invalid("host must be the signed Site host");
+      throw invalid("host must be the signed app host");
     const found = await findSiteRuntimeHost(deps, request.domain, request.fields.host);
     if (!found)
-      throw sitePublishingError(404, "not_found", "site_not_found", "This Site does not exist");
+      throw sitePublishingError(404, "not_found", "site_not_found", "This app does not exist");
     // A lookup reaches the API only on an edge miss: repair a lost edge sync.
     healSiteEdgeIfStale(deps, found.publication);
     return request.context.json(
@@ -697,7 +767,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         403,
         "forbidden",
         "site_access_denied",
-        "You do not have access to this Site",
+        "You do not have access to this app",
       );
     const sessionToken = randomBytes(32).toString("base64url");
     const session = await createSiteViewerSession(deps.db, host.scope, {
@@ -756,7 +826,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         403,
         "forbidden",
         "site_view_as_members_only",
-        "Only workspace members can preview a Site as a visitor",
+        "Only workspace members can preview an app as a visitor",
       );
     await setSiteViewerSessionViewAs(deps.db, host.scope, {
       siteId: host.site.id,
@@ -808,6 +878,56 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (usage) await afterSitePlatformUsage(deps, scope, usage);
     }
     return request.context.json({ counted });
+  };
+
+  /**
+   * Batched speed measurements from the gateway (its own handling time and
+   * the beacons Site pages sent it), signed on the Sites domain apex like
+   * request counts. Samples become Prometheus histograms with closed labels.
+   */
+  const platformTimings = async (request: RuntimeRequest): Promise<Response> => {
+    const apex = request.domain.toLowerCase();
+    if (request.fields.host.toLowerCase().replace(/\.$/u, "") !== apex)
+      throw invalid("Platform reports are signed for the Sites domain");
+    const input = parseJson(request.body, SitePlatformTimingReport);
+    const recorded = deps.observability
+      ? recordSiteTimingReport(
+          (metric) => deps.observability!.observeHistogram(metric),
+          input,
+          (metric) => deps.observability!.incrementCounter(metric),
+        )
+      : 0;
+    return request.context.json({ recorded });
+  };
+
+  /**
+   * Admit a live connection (the gateway's `/_og/live`): the viewer is
+   * checked like any other request, the Site is marked watched so its
+   * writes send hints, and the answer names the collections this viewer
+   * may hear about. A viewer without Site Data (an archived Site, or no
+   * collections) still hears about new versions.
+   */
+  const liveAdmit = async (request: RuntimeRequest): Promise<Response> => {
+    // Off here: the page keeps its own checks and never hears a hint.
+    if (!siteLiveConfigured(deps.settings))
+      throw sitePublishingError(404, "not_found", "site_live_disabled", "Live updates are off");
+    const { host, viewer } = await viewing(request);
+    let seq = 0;
+    let collections: string[] = [];
+    let ttlSeconds = SITE_LIVE_TTL_SECONDS;
+    try {
+      const watched = await watchSiteData(deps, publishedViewer(host, viewer), host.site.id, {
+        frameSiteId: host.site.id,
+      });
+      seq = watched.seq;
+      collections = watched.collections;
+      ttlSeconds = watched.ttlSeconds;
+    } catch (error) {
+      // Without Site Data access the page still hears about new versions.
+      if (!(error instanceof SiteDataError)) throw error;
+    }
+    const admission: SiteLiveAdmission = { siteId: host.site.id, seq, collections, ttlSeconds };
+    return request.context.json(admission);
   };
 
   /**
@@ -886,6 +1006,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         { ...parseJson(request.body, ToolGatewaySiteReadinessTargets), ...site },
         options,
       );
+    } else if (method === "setup") {
+      // The host's connect card; the page sends no body worth reading.
+      result = await describeWorkspaceSiteToolSetup(deps, authorization, site, options);
     } else if (method === "invoke") {
       result = await withSiteSecretContext(
         { siteId: site.siteArtifactId, siteVersion: site.siteVersionId },
@@ -1108,7 +1231,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           if (assistant.unavailable)
             throw siteNotAvailableForViewer(
               "agent",
-              "This Site's assistant is not available to you",
+              "This app's assistant is not available to you",
               { reason: "sessions_permission_required" },
             );
           return await sessions(request, id, host, assistant.viewer, assistant.limits);
@@ -1202,6 +1325,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
     };
     const file = /^\/files\/([^/]+)$/u.exec(path);
+    if (method === "GET" && path === "/data/syncs")
+      return context.json(
+        await runSiteData(() => appSyncStatusForSite(deps, authority, siteId, surface)),
+      );
     if (method === "POST" && path === "/data/query")
       return context.json(
         await runSiteData(() =>
@@ -1446,12 +1573,12 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (input.model && !models.allowed.includes(input.model))
         throw siteNotAvailableForViewer(
           "agent_model",
-          "This model is not available to you on this Site",
+          "This model is not available to you on this app",
         );
       if (models.unavailable)
         throw siteNotAvailableForViewer(
           "agent_model",
-          "This Site's assistant is only available to workspace members right now",
+          "This app's assistant is only available to workspace members right now",
           { reason: "no_credit_billed_model" },
         );
       if (
@@ -1463,7 +1590,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           403,
           "forbidden",
           "site_human_check_required",
-          "Confirm you are human to use this Site's assistant",
+          "Confirm you are human to use this app's assistant",
         );
       // A replayed idempotency key names the same conversation: answer it again.
       const requestedSessionId = input.idempotencyKey
@@ -1509,7 +1636,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!repair && viewer.kind !== "member" && deps.settings.privacyOnlyMeAllowed === false)
         throw siteNotAvailableForViewer(
           "private_conversations",
-          "Private Site conversations are disabled by this deployment",
+          "Private app conversations are disabled by this deployment",
         );
       for (const conversation of await listOwnedSiteRuntimeConversations(deps.db, host.scope, {
         siteId: host.site.id,
@@ -1533,7 +1660,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             409,
             "conflict",
             "site_conversation_outdated",
-            "This Site's assistant changed since this conversation started; start a new one",
+            "This app's assistant changed since this conversation started; start a new one",
           );
         if (
           viewer.kind !== "member" &&
@@ -1541,7 +1668,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         )
           throw siteNotAvailableForViewer(
             "agent_model",
-            "This Site's assistant cannot use that model for you",
+            "This app's assistant cannot use that model for you",
             { reason: "subscription_model" },
           );
         if (viewer.kind === "member" && previous.limitMicros !== null)
@@ -1789,7 +1916,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           409,
           "conflict",
           "site_conversation_outdated",
-          "This Site's assistant changed since this conversation started; start a new one",
+          "This app's assistant changed since this conversation started; start a new one",
         );
       // People outside the workspace never use a subscription-billed model,
       // whatever model the conversation holds.
@@ -1801,7 +1928,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         )
           throw siteNotAvailableForViewer(
             "agent_model",
-            "This Site's assistant cannot use that model for you",
+            "This app's assistant cannot use that model for you",
             { reason: "subscription_model" },
           );
       }
@@ -1867,7 +1994,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (draft.text.length > MESSAGE_MAX_CHARS)
         throw invalid(`A message is at most ${MESSAGE_MAX_CHARS} characters`);
       if (draft.resources.length > 0 || (draft.annotations?.length ?? 0) > 0)
-        throw invalid("Messages on a published Site are text only");
+        throw invalid("Messages on a published app are text only");
       const conversationModel = async () => {
         const current = await send("GET", target);
         const session = current.ok
@@ -1884,7 +2011,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (viewer.kind !== "member" && isSubscriptionBilledModel([], model))
         throw siteNotAvailableForViewer(
           "agent_model",
-          "This Site's assistant cannot use that model for you",
+          "This app's assistant cannot use that model for you",
           { reason: "subscription_model" },
         );
       if (draft.model !== undefined && !allowed.has(draft.model)) {
@@ -1893,7 +2020,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             400,
             "validation_failed",
             "site_model_not_allowed",
-            "This Site's assistant cannot use that model",
+            "This app's assistant cannot use that model",
           );
       }
       return {
@@ -1988,7 +2115,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           submit.connectionAccounts.length > 0 ||
           submit.personalResourceAttachment !== undefined
         )
-          throw invalid("Messages on a published Site are text only");
+          throw invalid("Messages on a published app are text only");
         const draft = await siteDraft(submit);
         await admitAgentWork(true);
         return await forwardView(

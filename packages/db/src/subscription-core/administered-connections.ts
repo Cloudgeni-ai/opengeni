@@ -58,6 +58,7 @@ import type { SubscriptionCoreConnectionRead, SubscriptionQuota } from "@opengen
 import { rawRows, withRlsContext, type Database } from "../database";
 import { setSubscriptionAdministrationSubject } from "./account-administrator";
 import { nestedPostgresSqlState } from "../persistence-errors";
+import { persistSubscriptionCoreAdministratorRefresh } from "../subscription-core-repository";
 import {
   buildSubscriptionCoreCredentialResolver,
   subscriptionCoreRefreshPolicy,
@@ -78,6 +79,9 @@ import {
   type SubscriptionCoreFetch,
   type SubscriptionCoreStoredQuotaRow,
   type SubscriptionCoreUsageMergeOptions,
+  subscriptionCoreUsageMergeSkipped,
+  subscriptionCoreUsageNotRecorded,
+  type SubscriptionCoreUsageRecord,
 } from "./operations";
 import {
   memoByProvider,
@@ -169,7 +173,7 @@ type Access = {
     tx: Database,
     observation: SubscriptionQuota,
     options?: SubscriptionCoreUsageMergeOptions,
-  ): Promise<{ applied: boolean; recovered: boolean }>;
+  ): Promise<SubscriptionCoreUsageRecord>;
 };
 
 /** Administered connection reads bound to one provider (memoized per binding). */
@@ -249,20 +253,24 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
                 }
               : null;
           },
+          // The shared refresh write, on the row this administrator may refresh.
           async persist(tx, input) {
-            const rows = await rawRows<{ id: string }>(
+            const [locked] = await rawRows<{ id: string }>(
               tx,
-              sql`update subscription_connections as connection
-              set credential_encrypted = ${input.credentialEncrypted},
-                credential_format = split_part(${input.credentialEncrypted}, ':', 1),
-                expires_at = ${input.expiresAt?.toISOString() ?? null}::timestamptz,
-                last_refresh_at = ${input.refreshedAt.toISOString()}::timestamptz,
-                refresh_generation = connection.refresh_generation + 1,
-                updated_at = clock_timestamp()
-              where ${target} and connection.refresh_generation = ${input.refreshGeneration}
-              returning connection.id::text as id`,
+              sql`select connection.id::text as id from subscription_connections connection
+              where ${target} for update`,
             );
-            return rows.length > 0;
+            if (!locked) return false;
+            return await persistSubscriptionCoreAdministratorRefresh(tx, {
+              provider: providerId,
+              accountId: scope.accountId,
+              connectionId,
+              expectedRefreshGeneration: input.refreshGeneration,
+              credentialEncrypted: input.credentialEncrypted,
+              expiresAt: input.expiresAt,
+              lastRefreshAt: input.refreshedAt,
+              planType: input.planType,
+            });
           },
           async fail(tx, input) {
             const rows = await rawRows<{ id: string }>(
@@ -280,7 +288,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
         },
         async record(tx, observation, options) {
           const connection = await credentialRow(tx);
-          if (!connection) return { applied: false, recovered: false };
+          if (!connection) return subscriptionCoreUsageNotRecorded("not_visible");
           const refreshGeneration = Number(connection.refresh_generation);
           const [row] = await rawRows<SubscriptionCoreStoredQuotaRow>(
             tx,
@@ -297,7 +305,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
             observation,
             options,
           );
-          if (!write) return { applied: false, recovered: false };
+          if (!write) return subscriptionCoreUsageMergeSkipped(refreshGeneration, observation);
           await tx.execute(
             sql`insert into subscription_connection_quota (
               account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
@@ -395,9 +403,10 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
           let generation: number | null = null;
           for (let attempt = 0; attempt < 2; attempt += 1) {
             const row = await ownedRow(tx);
-            if (!row) break;
+            if (!row) return subscriptionCoreUsageNotRecorded("not_visible");
             const refreshGeneration = Number(row.refresh_generation);
-            if (generation !== null && refreshGeneration !== generation) break;
+            if (generation !== null && refreshGeneration !== generation)
+              return subscriptionCoreUsageNotRecorded("credential_changed");
             generation = refreshGeneration;
             const write = operations().mergeSubscriptionCoreUsageObservation(
               row,
@@ -405,7 +414,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
               observation,
               options,
             );
-            if (!write) break;
+            if (!write) return subscriptionCoreUsageMergeSkipped(refreshGeneration, observation);
             const [recorded] = await rawRows<{ recorded: boolean }>(
               tx,
               sql`select opengeni_private.record_subscription_core_owned_connection_quota(${owner},
@@ -417,7 +426,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
             );
             if (recorded?.recorded === true) return { applied: true, recovered: write.recovered };
           }
-          return { applied: false, recovered: false };
+          return subscriptionCoreUsageNotRecorded("contended");
         },
       };
     }
@@ -588,8 +597,17 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
         refreshGeneration: prepared.current().credentialVersion,
         ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
       });
-      if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
+      if (!quota)
+        return {
+          kind: "read",
+          response,
+          quota: null,
+          applied: false,
+          recovered: false,
+          notApplied: "no_reading",
+        };
       const options = subscriptionCoreUsageMergeOptions(provider.adapter, response);
+      let writeError: unknown;
       const recorded = await scoped
         .scoped(db, async (tx) => {
           await recordSubscriptionUsageReading(
@@ -601,13 +619,21 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
           );
           return await scoped.record(tx, quota, options);
         })
-        .catch(() => null);
+        .catch((error: unknown) => {
+          writeError = error;
+          return null;
+        });
+      const record =
+        recorded?.value ??
+        subscriptionCoreUsageNotRecorded(writeError === undefined ? "not_visible" : "write_failed");
       return {
         kind: "read",
         response,
         quota,
-        applied: recorded?.value.applied === true,
-        recovered: recorded?.value.recovered === true,
+        applied: record.applied,
+        recovered: record.recovered,
+        ...(record.notApplied ? { notApplied: record.notApplied } : {}),
+        ...(writeError !== undefined ? { writeError } : {}),
       };
     }
 

@@ -37,6 +37,7 @@ import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
 import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
 import { organizationAppApproval, type OrganizationAppApproval } from "@opengeni/contracts/connect";
 import { organizationApprovalFor, type OrganizationApproval } from "../connect-setup-model";
+import { setupRefusalText, signInRefusalText } from "../connect-provider-refusal";
 
 const GOOGLE_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
 /** Google's connectors only ever connect a person's own account; the API refuses sharing. */
@@ -407,10 +408,12 @@ export function useMcpCapabilityConnect({
         } else {
           setError(
             // This flow's own steps explain themselves; a server or network
-            // failure gets the card's plain line instead of its raw text.
+            // failure gets the card's plain line instead of its raw text,
+            // unless the service refused setup and said why.
             failure instanceof ConnectCardMessage
               ? failure.message
-              : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
+              : (setupRefusalText(t, failure) ??
+                  t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish")),
           );
           if (failure instanceof ConnectCardMessage && failure.stepUp)
             setStepUp({
@@ -748,7 +751,9 @@ export function useMcpCapabilityConnect({
       }
       if (result.state !== "complete") {
         if (["failed", "expired"].includes(result.state)) setRetryFresh(true);
-        throw new ConnectCardMessage(t("sessionMcpCapabilityCard.signInDidNotFinish"));
+        throw new ConnectCardMessage(
+          signInRefusalText(t, finished) ?? t("sessionMcpCapabilityCard.signInDidNotFinish"),
+        );
       }
     } finally {
       lifetime.current?.signal.removeEventListener("abort", abortOnUnmount);

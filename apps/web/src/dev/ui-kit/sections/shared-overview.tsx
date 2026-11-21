@@ -72,7 +72,7 @@ const VAULTS = [
   },
   {
     id: "v3",
-    name: "Finance and payroll integrations for the Nordic subsidiaries",
+    name: "Finance and payroll connected tools for the Nordic subsidiaries",
     ownerKind: "organization",
     syncStatus: "auth_expired",
     availability: {

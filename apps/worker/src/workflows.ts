@@ -27,6 +27,7 @@ export {
   sandboxReaperWorkflowV2,
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export { orgAgentPublishMoveWorkflow } from "./workflows/org-agent-publish-move";
 export { sessionStorageMaintenanceWorkflow } from "./workflows/session-storage";
 export {
   sessionArchiveRequestWorkflow,

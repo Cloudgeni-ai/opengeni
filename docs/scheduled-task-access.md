@@ -29,6 +29,11 @@ newer Opengeni tools are absent, or an account a person pinned was
 disconnected. This page describes how Opengeni shows that, how the owner
 refreshes it, and how the owner learns that a run could not use a connector.
 
+App data syncs (action `app_sync`, [app-sync.md](app-sync.md)) create no chat,
+so none of this applies to them: each run resolves the sync owner's (or, for a
+personal sync, each opted-in person's) current account of the connector and
+fails with a readable error in the run history when it can't use it.
+
 ## Scheduling a message in a chat
 
 Conversational scheduling defaults to the calling chat. The first-party

@@ -104,7 +104,7 @@ function CreateWithOpenGeniDialog({
       description={
         simplified
           ? "It starts a chat, finds the apps the automation needs, and creates it. It asks you only for what it can't find."
-          : "It starts a chat, finds the repositories, secrets and integrations the automation needs, and creates it. It asks you only for what it can't find."
+          : "It starts a chat, finds the repositories, secrets and connected tools the automation needs, and creates it. It asks you only for what it can't find."
       }
       submitLabel="Start chat"
       pendingLabel="Starting…"

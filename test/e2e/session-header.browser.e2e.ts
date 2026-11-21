@@ -286,7 +286,7 @@ describe("responsive production session header", () => {
       await header.locator("[data-session-wait-badge]").waitFor({ state: "detached" });
       await page.locator(".og-genie-loading").waitFor();
       expect(await header.innerText()).not.toContain("Waiting ·");
-      expect(await header.innerText()).not.toContain("Idle");
+      expect(await header.innerText()).not.toContain("Done");
     } finally {
       await context.close();
     }

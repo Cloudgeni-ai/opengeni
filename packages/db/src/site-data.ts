@@ -1,4 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
+import { recordAppRecordChangesInTransaction, type AppRecordChange } from "./app-activity-events";
 import { rawRows, withRlsContext, type Database } from "./database";
 import {
   isPlainJsonObject,
@@ -77,6 +78,43 @@ export type SiteDataCaller = SiteDataScope & {
    * no files.
    */
   guest?: boolean;
+  /**
+   * How many automation hops led to this write (0 for people, a scheduled
+   * run's chain depth for its agents), recorded on change events so
+   * automations reacting to them can stop loops.
+   */
+  chainDepth?: number;
+  /** The automation and run that caused this write, recorded on App change events. */
+  automationId?: string | null;
+  automationRunId?: string | null;
+};
+
+/** What kind of change a Site Data transaction made. */
+export type SiteDataChangeKind = "write" | "import" | "reset" | "collection" | "files";
+
+/** The pseudo-collection name change hints use for the Site's files. */
+export const SITE_DATA_FILES_CHANGE = "$files";
+/** Record ids a change event keeps; more set `truncated`. */
+export const SITE_DATA_CHANGE_RECORD_IDS = 20;
+/** Change events kept per Site (the newest). */
+export const SITE_DATA_CHANGES_KEPT = 200;
+
+/**
+ * A committed change to a Site's data, reported to the store's change
+ * listener after the transaction commits, and only while the Site has a live
+ * listener (see `watch`). It names collections, never record data.
+ */
+export type SiteDataChange = SiteDataScope & {
+  seq: number;
+  kind: SiteDataChangeKind;
+  collections: string[];
+};
+
+export type SiteDataChangeListener = (change: SiteDataChange) => void;
+
+export type SiteDataStoreOptions = {
+  /** Called after each committed change while the Site is watched; must not throw. */
+  onChange?: SiteDataChangeListener;
 };
 
 /** Each started 5 ms of schema validation counts one more write operation. */
@@ -210,7 +248,18 @@ export type SiteDataQueryResult = {
 
 export type SiteDataRecordRef = { id?: string; key?: string };
 export type SiteDataWriteOp =
-  | { op: "insert"; collection: string; key?: string; data: Record<string, unknown> }
+  | {
+      op: "insert";
+      collection: string;
+      key?: string;
+      data: Record<string, unknown>;
+      /**
+       * Retrying an insert with the same key (per collection and principal)
+       * returns the record the first attempt created instead of a duplicate,
+       * for a day or until that record is deleted.
+       */
+      idempotencyKey?: string;
+    }
   | {
       op: "put";
       collection: string;
@@ -228,7 +277,8 @@ export type SiteDataWriteOp =
   | ({ op: "increment"; collection: string; field: string; by?: number } & SiteDataRecordRef);
 
 export type SiteDataWriteResultItem =
-  | { op: "insert" | "put" | "patch" | "increment"; record: SiteDataRecord }
+  | { op: "insert"; record: SiteDataRecord; replayed?: boolean }
+  | { op: "put" | "patch" | "increment"; record: SiteDataRecord }
   | { op: "delete"; deleted: { id: string } };
 
 export type SiteDataWriteSummary = {
@@ -244,6 +294,8 @@ export type SiteDataWriteOptions = {
   validate?: (schema: Record<string, unknown>, data: Record<string, unknown>) => string | null;
   /** Usage metering inside the same transaction. */
   afterWrite?: (tx: Database, summary: SiteDataWriteSummary) => Promise<void>;
+  /** `import` records one coarse change event per batch, without record ids. */
+  changeKind?: "write" | "import";
 };
 
 export type SiteDataFileScope = "shared" | "private";
@@ -343,6 +395,18 @@ export interface SiteDataStore {
     limits: SiteDataLimits,
   ): Promise<void>;
   deleteFile(caller: SiteDataCaller, fileId: string): Promise<SiteDataStoredFile>;
+  /**
+   * Mark the Site as watched for up to `ttlSeconds` (so writes record change
+   * events and notify the change listener) and return its change number, the
+   * collections the caller may read (plus `$files` when it may read files),
+   * and how long this watch lasts (until `live_until`, which may be sooner
+   * than asked). Renewing early is cheap: the lease is only extended once
+   * less than half of it is left.
+   */
+  watch(
+    caller: SiteDataCaller,
+    ttlSeconds: number,
+  ): Promise<{ seq: number; collections: string[]; ttlSeconds: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -738,8 +802,10 @@ function systemFilter(caller: SiteDataCaller, filter: SiteDataFilter): SQL {
           throw validationError("$version filters need integers");
         return sql`${value}::integer`;
       }
+      const offset = siteDataNowOffsetMs(value);
+      if (offset !== null) return nowPlus(offset);
       if (typeof value !== "string" || !ISO_TIMESTAMP.test(value))
-        throw validationError(`${field} filters need ISO timestamps`);
+        throw validationError(`${field} filters need ISO timestamps or $now`);
       return sql`${value}::timestamptz`;
     };
     if (op === "eq") return sql`${column} = ${cast(filter.value)}`;
@@ -797,6 +863,9 @@ function dataFilter(collection: SiteDataCollection, filter: SiteDataFilter): SQL
     case "lt":
     case "lte": {
       const scalar = requireScalar(filter);
+      const offset = siteDataNowOffsetMs(scalar);
+      if (offset !== null)
+        return sql`((case when jsonb_typeof(${value}) = 'string' then ${value} #>> '{}' end) collate "C") ${compare(filter.op)} (${nowIsoPlus(offset)} collate "C")`;
       if (typeof scalar === "number") {
         const exact = sql`(case when jsonb_typeof(${value}) = 'number' then (${value} #>> '{}')::numeric end) ${compare(filter.op)} ${scalar}::numeric`;
         return indexed
@@ -823,11 +892,96 @@ function dataFilter(collection: SiteDataCollection, filter: SiteDataFilter): SQL
   }
 }
 
+// --- change events ---------------------------------------------------------
+
+/** What one transaction changed, for the change outbox. Never record data. */
+type SiteDataChangeFact = {
+  kind: SiteDataChangeKind;
+  collections: string[];
+  opCounts?: Record<string, number>;
+  recordIds?: string[];
+};
+
+/** Stored JSON (jsonb keeps keys in one order), compared by value. */
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/** Who wrote, coarsely: never the principal itself. */
+export function siteDataActorKind(
+  caller: Pick<SiteDataCaller, "principal" | "actor" | "guest">,
+): "user" | "guest" | "agent" | "schedule" | "service" | "other" {
+  if (caller.guest === true || caller.principal.startsWith("guest:")) return "guest";
+  if (caller.principal.startsWith("schedule:")) return "schedule";
+  const prefix = caller.actor.split(":", 1)[0];
+  return prefix === "user" || prefix === "agent" || prefix === "service" ? prefix : "other";
+}
+
+const SITE_DATA_NOW_MAX_OFFSET_MS = 100 * 366 * 86_400_000;
+
+/**
+ * Server-evaluated time in a filter value: `$now`, or `$now` plus or minus a
+ * whole number of ms, s, m, h or d (`$now-5m`), clamped to a century. Returns the
+ * offset in milliseconds, or null when the value is not a `$now` expression.
+ */
+export function siteDataNowOffsetMs(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const match = /^\$now(?:([+-])(\d{1,9})(ms|s|m|h|d))?$/u.exec(value);
+  if (!match) return null;
+  if (!match[1]) return 0;
+  const unit = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[3]!]!;
+  // Beyond a century is not a lease; clamping keeps timestamps in range.
+  const amount = Math.min(Number(match[2]) * unit, SITE_DATA_NOW_MAX_OFFSET_MS);
+  return match[1] === "-" ? -amount : amount;
+}
+
+/** The database's transaction time shifted by `offsetMs`, as a timestamptz. */
+function nowPlus(offsetMs: number): SQL {
+  return sql`(now() + ${offsetMs}::bigint * interval '1 millisecond')`;
+}
+
+/**
+ * The same instant as an ISO 8601 string in UTC with milliseconds, as
+ * JavaScript's toISOString writes it, so it compares with stored ISO strings.
+ */
+function nowIsoPlus(offsetMs: number): SQL {
+  return sql`to_char(${nowPlus(offsetMs)} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+}
+
 // --- the store -------------------------------------------------------------
 
-export function createPostgresSiteDataStore(db: Database): SiteDataStore {
+export function createPostgresSiteDataStore(
+  db: Database,
+  storeOptions: SiteDataStoreOptions = {},
+): SiteDataStore {
   const scoped = <T>(scope: SiteDataScope, fn: (tx: Database) => Promise<T>) =>
     withRlsContext(db, { accountId: scope.accountId, workspaceId: scope.workspaceId }, fn);
+
+  /**
+   * A write transaction that reports its change events after it commits.
+   * The listener only hears about committed work, and a failed listener
+   * never fails the write.
+   */
+  const writing = async <T>(
+    scope: SiteDataScope,
+    fn: (tx: Database, changes: SiteDataChange[]) => Promise<T>,
+  ): Promise<T> => {
+    let changes: SiteDataChange[] = [];
+    const result = await scoped(scope, (tx) => {
+      changes = [];
+      return fn(tx, changes);
+    });
+    const listener = storeOptions.onChange;
+    if (listener)
+      for (const change of changes) {
+        try {
+          listener(change);
+        } catch {
+          // Hints are best effort; open pages fall back to polling.
+        }
+      }
+    return result;
+  };
 
   // Collections carry their own record count and charged bytes, maintained
   // in the write transaction, so no read ever counts a collection.
@@ -889,7 +1043,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
    */
   const refuseGuestFileWrites = (caller: SiteDataCaller) => {
     if (caller.guest === true)
-      throw new SiteDataError("forbidden", "Sign in to use this Site's files", {
+      throw new SiteDataError("forbidden", "Sign in to use this app's files", {
         reason: "guest_access",
       });
   };
@@ -912,10 +1066,10 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     limits: SiteDataLimits,
   ): Array<[string, number, string]> =>
     caller.role === "manager" && !caller.framed
-      ? [["manager:*", limits.managerWritesPerMinute, "This Site's managers are writing too fast."]]
+      ? [["manager:*", limits.managerWritesPerMinute, "This app's managers are writing too fast."]]
       : [
           [caller.principal, limits.viewerWritesPerMinute, "Too many writes."],
-          ["*", limits.siteWritesPerMinute, "This Site is receiving too many writes."],
+          ["*", limits.siteWritesPerMinute, "This app is receiving too many writes."],
         ];
 
   /** Add operations to one fixed one-minute window and return its total. */
@@ -1072,7 +1226,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         from site_data_usage where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}
         for update`,
     );
-    if (!row) throw new SiteDataError("not_found", "Site not found");
+    if (!row) throw new SiteDataError("not_found", "App not found");
     return {
       collectionCount: row.collection_count,
       recordCount: num(row.record_count),
@@ -1094,8 +1248,8 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         where workspace_id = ${caller.workspaceId} and id = ${caller.siteId}
         for share`,
     );
-    if (!row) throw new SiteDataError("not_found", "Site not found");
-    if (row.status !== "active") throw new SiteDataError("forbidden", "This Site is archived");
+    if (!row) throw new SiteDataError("not_found", "App not found");
+    if (row.status !== "active") throw new SiteDataError("forbidden", "This app is archived");
   };
 
   const workspaceBytes = async (tx: Database, scope: SiteDataScope) => {
@@ -1107,23 +1261,66 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     return num(row?.total);
   };
 
+  /**
+   * Apply a transaction's usage delta and, when it changed something, take
+   * the Site's next change number in the same statement (the caller holds
+   * the usage row lock, so numbers follow commit order). Only while the Site
+   * is watched does the change also go to the outbox and the listener, so an
+   * unwatched Site pays nothing beyond the counter.
+   */
   const applyUsage = async (
     tx: Database,
-    scope: SiteDataScope,
+    caller: SiteDataCaller,
     delta: Partial<
       Record<"collections" | "records" | "recordBytes" | "files" | "fileBytes", number>
     >,
+    change?: { changes: SiteDataChange[]; fact: SiteDataChangeFact | null },
   ) => {
-    await tx.execute(
+    const bump = change?.fact ? 1 : 0;
+    const [row] = await rawRows<{ change_seq: string | number; live: boolean | null }>(
+      tx,
       sql`update site_data_usage set
           collection_count = greatest(0, collection_count + ${delta.collections ?? 0}),
           record_count = greatest(0, record_count + ${delta.records ?? 0}),
           record_bytes = greatest(0, record_bytes + ${delta.recordBytes ?? 0}),
           file_count = greatest(0, file_count + ${delta.files ?? 0}),
           file_bytes = greatest(0, file_bytes + ${delta.fileBytes ?? 0}),
+          change_seq = change_seq + ${bump}::bigint,
           updated_at = now()
-        where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}`,
+        where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}
+        returning change_seq, live_until > now() as live`,
     );
+    const fact = change?.fact;
+    if (!row || !fact || row.live !== true) return;
+    const seq = num(row.change_seq);
+    const recordIds = [...new Set(fact.recordIds ?? [])];
+    const collections = [...new Set(fact.collections)].sort();
+    await tx.execute(
+      sql`insert into site_data_changes
+          (account_id, workspace_id, site_id, change_seq, kind, collections, op_counts, record_ids,
+           truncated, actor_kind, chain_depth)
+        values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId}, ${seq}, ${fact.kind},
+          ${JSON.stringify(collections)}::jsonb, ${JSON.stringify(fact.opCounts ?? {})}::jsonb,
+          ${JSON.stringify(recordIds.slice(0, SITE_DATA_CHANGE_RECORD_IDS))}::jsonb,
+          ${recordIds.length > SITE_DATA_CHANGE_RECORD_IDS}, ${siteDataActorKind(caller)},
+          ${Math.max(0, Math.min(32767, Math.trunc(caller.chainDepth ?? 0)))})
+        on conflict do nothing`,
+    );
+    // Keep the newest changes only; pruning every few changes is enough.
+    if (seq % 20 === 0)
+      await tx.execute(
+        sql`delete from site_data_changes
+          where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}
+            and change_seq <= ${seq - SITE_DATA_CHANGES_KEPT}`,
+      );
+    change.changes.push({
+      accountId: caller.accountId,
+      workspaceId: caller.workspaceId,
+      siteId: caller.siteId,
+      seq,
+      kind: fact.kind,
+      collections,
+    });
   };
 
   const fileQuota = async (
@@ -1140,12 +1337,12 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         { quota: "file_bytes", limit: limits.maxFileBytes },
       );
     if (usage.fileBytes + sizeBytes > limits.fileBytesPerSite)
-      throw new SiteDataError("quota_exceeded", "This Site's file storage is full", {
+      throw new SiteDataError("quota_exceeded", "This app's file storage is full", {
         quota: "site_file_bytes",
         limit: limits.fileBytesPerSite,
       });
     if ((await workspaceBytes(tx, caller)) + sizeBytes > limits.workspaceBytes)
-      throw new SiteDataError("quota_exceeded", "This workspace's Site data is full", {
+      throw new SiteDataError("quota_exceeded", "This workspace's app data is full", {
         quota: "workspace_bytes",
         limit: limits.workspaceBytes,
       });
@@ -1332,13 +1529,13 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         if (site > limits.siteValidationMsPerMinute * 1000)
           throw new SiteDataError(
             "rate_limited",
-            "This Site has used its schema-checking time for this minute. Try again in a minute.",
+            "This app has used its schema-checking time for this minute. Try again in a minute.",
             { retryAfterSeconds: 60, quota: "site_validation_time" },
           );
         if (workspace > limits.workspaceValidationMsPerMinute * 1000)
           throw new SiteDataError(
             "rate_limited",
-            "This workspace's Sites have used their schema-checking time for this minute. Try again in a minute.",
+            "This workspace's apps have used their schema-checking time for this minute. Try again in a minute.",
             { retryAfterSeconds: 60, quota: "workspace_validation_time" },
           );
         return { reservedMs: reserveMs, windowStartedAt };
@@ -1376,16 +1573,16 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
 
     async defineCollection(caller, input, limits) {
       if (caller.role !== "manager" || caller.framed)
-        throw new SiteDataError("forbidden", "Only the Site's managers can define collections");
+        throw new SiteDataError("forbidden", "Only the app's managers can define collections");
       const definition = normalizeSiteDataCollectionDefinition(input);
-      return scoped(caller, async (tx) => {
+      return writing(caller, async (tx, changes) => {
         const usage = await lockUsage(tx, caller);
         const existing = await loadCollection(tx, caller, definition.name);
         if (!existing) {
           if (usage.collectionCount >= limits.maxCollectionsPerSite)
             throw new SiteDataError(
               "quota_exceeded",
-              `A Site can have at most ${limits.maxCollectionsPerSite} collections`,
+              `An app can have at most ${limits.maxCollectionsPerSite} collections`,
               { quota: "collections", limit: limits.maxCollectionsPerSite },
             );
           const [row] = await rawRows<CollectionRow>(
@@ -1401,7 +1598,12 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
                 ${JSON.stringify(definition.uniqueFields)}::jsonb, ${caller.actor}, ${caller.actor})
               returning *`,
           );
-          await applyUsage(tx, caller, { collections: 1 });
+          await applyUsage(
+            tx,
+            caller,
+            { collections: 1 },
+            { changes, fact: { kind: "collection", collections: [definition.name] } },
+          );
           return { collection: toCollection(row!), created: true };
         }
         if (
@@ -1446,32 +1648,43 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           if (conflict)
             throw uniqueConflict(conflict, "Existing records repeat %s, so it cannot be unique");
         }
+        await applyUsage(
+          tx,
+          caller,
+          {},
+          { changes, fact: { kind: "collection", collections: [definition.name] } },
+        );
         return { collection: updated, created: false };
       });
     },
 
     async deleteCollection(caller, name) {
       if (caller.role !== "manager" || caller.framed)
-        throw new SiteDataError("forbidden", "Only the Site's managers can delete collections");
-      return scoped(caller, async (tx) => {
+        throw new SiteDataError("forbidden", "Only the app's managers can delete collections");
+      return writing(caller, async (tx, changes) => {
         await lockUsage(tx, caller);
         const collection = await requireCollection(tx, caller, name);
         await tx.execute(
           sql`delete from site_data_collections where workspace_id = ${caller.workspaceId} and id = ${collection.id}`,
         );
-        await applyUsage(tx, caller, {
-          collections: -1,
-          records: -collection.recordCount,
-          recordBytes: -collection.recordBytes,
-        });
+        await applyUsage(
+          tx,
+          caller,
+          {
+            collections: -1,
+            records: -collection.recordCount,
+            recordBytes: -collection.recordBytes,
+          },
+          { changes, fact: { kind: "collection", collections: [collection.name] } },
+        );
         return { deletedRecords: collection.recordCount };
       });
     },
 
     async resetCollection(caller, name) {
       if (caller.role !== "manager" || caller.framed)
-        throw new SiteDataError("forbidden", "Only the Site's managers can clear collections");
-      return scoped(caller, async (tx) => {
+        throw new SiteDataError("forbidden", "Only the app's managers can clear collections");
+      return writing(caller, async (tx, changes) => {
         await lockUsage(tx, caller);
         const collection = await requireCollection(tx, caller, name);
         await tx.execute(
@@ -1481,10 +1694,12 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           sql`update site_data_collections set record_count = 0, record_bytes = 0
             where workspace_id = ${caller.workspaceId} and id = ${collection.id}`,
         );
-        await applyUsage(tx, caller, {
-          records: -collection.recordCount,
-          recordBytes: -collection.recordBytes,
-        });
+        await applyUsage(
+          tx,
+          caller,
+          { records: -collection.recordCount, recordBytes: -collection.recordBytes },
+          { changes, fact: { kind: "reset", collections: [collection.name] } },
+        );
         return { deletedRecords: collection.recordCount };
       });
     },
@@ -1625,9 +1840,42 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         throw validationError("Give at least one operation");
       if (ops.length > SITE_DATA_MAX_BATCH)
         throw validationError(`A batch has at most ${SITE_DATA_MAX_BATCH} operations`);
-      return scoped(caller, async (tx) => {
+      return writing(caller, async (tx, changes) => {
         const usage = await lockUsage(tx, caller);
         await assertWritableSite(tx, caller);
+        // What this transaction changes, for the change outbox.
+        const changedCollections = new Set<string>();
+        const opCounts: Record<string, number> = {};
+        // Distinct ids; one past the cap is kept so the row says it is truncated.
+        const changedIdSet = new Set<string>();
+        // Per-record changes, for App change events (app.record.*).
+        const appChanges: AppRecordChange[] = [];
+        const changed = (
+          collection: SiteDataCollection,
+          op: string,
+          id: string,
+          app?: { change: AppRecordChange["change"]; record: SiteDataRecord },
+        ) => {
+          changedCollections.add(collection.name);
+          opCounts[op] = (opCounts[op] ?? 0) + 1;
+          if (changedIdSet.size <= SITE_DATA_CHANGE_RECORD_IDS) changedIdSet.add(id);
+          if (app)
+            appChanges.push({
+              change: app.change,
+              collection: {
+                name: collection.name,
+                accessMode: collection.accessMode,
+                privateRecords: collection.privateRecords,
+              },
+              record: {
+                id: app.record.id,
+                key: app.record.key,
+                owner: app.record.owner,
+                version: app.record.version,
+                data: app.record.data,
+              },
+            });
+        };
         const collections = new Map<string, SiteDataCollection>();
         const collectionFor = async (name: string) => {
           const cached = collections.get(name);
@@ -1698,7 +1946,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           if (!mayCreate(caller, collection))
             throw new SiteDataError(
               "forbidden",
-              `Only the Site's managers can add to ${collection.name}`,
+              `Only the app's managers can add to ${collection.name}`,
               { index },
             );
           const size = prepare(collection, data, index);
@@ -1779,6 +2027,35 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           account(collection, 0, size - row.size_bytes);
           return toRecord(updated!);
         };
+        const idempotencyKeyOf = (key: unknown, index: number): string | null => {
+          if (key === undefined || key === null) return null;
+          if (typeof key !== "string" || key.length === 0 || key.length > SITE_DATA_MAX_KEY_LENGTH)
+            throw validationError(
+              `Idempotency keys are 1 to ${SITE_DATA_MAX_KEY_LENGTH} characters`,
+              { index },
+            );
+          return key;
+        };
+        let prunedKeys = false;
+        /** The record an earlier insert with this idempotency key created, if it still exists. */
+        const keyedInsert = async (collection: SiteDataCollection, key: string) => {
+          if (!prunedKeys) {
+            prunedKeys = true;
+            await tx.execute(
+              sql`delete from site_data_insert_keys
+                where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}
+                  and created_at < now() - interval '1 day'`,
+            );
+          }
+          const [row] = await rawRows<RecordRow>(
+            tx,
+            sql`select r.* from site_data_insert_keys k
+              join site_data_records r on r.workspace_id = k.workspace_id and r.id = k.record_id
+              where k.workspace_id = ${caller.workspaceId} and k.collection_id = ${collection.id}
+                and k.principal = ${caller.principal} and k.idempotency_key = ${key}`,
+          );
+          return row ? toRecord(row) : null;
+        };
         const keyOf = (key: unknown, index: number): string | null => {
           if (key === undefined || key === null) return null;
           if (typeof key !== "string" || key.length === 0 || key.length > SITE_DATA_MAX_KEY_LENGTH)
@@ -1798,10 +2075,25 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           const collection = await collectionFor(op.collection);
           switch (op.op) {
             case "insert": {
-              results.push({
-                op: "insert",
-                record: await insertRecord(collection, keyOf(op.key, index), op.data, index),
-              });
+              const idempotencyKey = idempotencyKeyOf(op.idempotencyKey, index);
+              if (idempotencyKey !== null) {
+                const original = await keyedInsert(collection, idempotencyKey);
+                if (original) {
+                  results.push({ op: "insert", record: original, replayed: true });
+                  break;
+                }
+              }
+              const record = await insertRecord(collection, keyOf(op.key, index), op.data, index);
+              if (idempotencyKey !== null)
+                await tx.execute(
+                  sql`insert into site_data_insert_keys
+                      (account_id, workspace_id, site_id, collection_id, principal, idempotency_key,
+                       record_id)
+                    values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId},
+                      ${collection.id}, ${caller.principal}, ${idempotencyKey}, ${record.id})`,
+                );
+              changed(collection, "insert", record.id, { change: "added", record });
+              results.push({ op: "insert", record });
               break;
             }
             case "put": {
@@ -1815,18 +2107,24 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
                   index,
                 });
               checkVersion(visible, op.expectedVersion, index);
-              if (visible) {
-                const target = await targetFor(collection, { id: visible.id }, index);
-                results.push({
-                  op: "put",
-                  record: await replaceRecord(collection, target!, op.data, index),
-                });
-              } else {
-                results.push({
-                  op: "put",
-                  record: await insertRecord(collection, key, op.data, index),
-                });
-              }
+              const record = visible
+                ? await replaceRecord(
+                    collection,
+                    (await targetFor(collection, { id: visible.id }, index))!,
+                    op.data,
+                    index,
+                  )
+                : await insertRecord(collection, key, op.data, index);
+              changed(
+                collection,
+                "put",
+                record.id,
+                // Putting the same data again (a sync's refresh) is no App event.
+                visible && sameJson(visible.data, record.data)
+                  ? undefined
+                  : { change: visible ? "changed" : "added", record },
+              );
+              results.push({ op: "put", record });
               break;
             }
             case "patch": {
@@ -1835,10 +2133,19 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               checkVersion(row, op.expectedVersion, index);
               if (!isPlainJsonObject(op.data))
                 throw validationError("Patch data must be a JSON object", { index });
-              results.push({
-                op: "patch",
-                record: await replaceRecord(collection, row, { ...row.data, ...op.data }, index),
-              });
+              const record = await replaceRecord(
+                collection,
+                row,
+                { ...row.data, ...op.data },
+                index,
+              );
+              changed(
+                collection,
+                "patch",
+                record.id,
+                sameJson(row.data, record.data) ? undefined : { change: "changed", record },
+              );
+              results.push({ op: "patch", record });
               break;
             }
             case "delete": {
@@ -1849,6 +2156,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
                 sql`delete from site_data_records where workspace_id = ${caller.workspaceId} and id = ${row.id}`,
               );
               account(collection, -1, -siteDataChargedBytes(row.size_bytes));
+              changed(collection, "delete", row.id, { change: "removed", record: toRecord(row) });
               results.push({ op: "delete", deleted: { id: row.id } });
               break;
             }
@@ -1863,29 +2171,27 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               if (!row) {
                 if (ref.key === undefined)
                   throw new SiteDataError("not_found", "Record not found", { index });
-                results.push({
-                  op: "increment",
-                  record: await insertRecord(
-                    collection,
-                    ref.key,
-                    writeSiteDataPath({}, segments, by),
-                    index,
-                  ),
-                });
+                const record = await insertRecord(
+                  collection,
+                  ref.key,
+                  writeSiteDataPath({}, segments, by),
+                  index,
+                );
+                changed(collection, "increment", record.id, { change: "added", record });
+                results.push({ op: "increment", record });
                 break;
               }
               const current = readSiteDataPath(row.data, segments);
               if (current !== undefined && current !== null && typeof current !== "number")
                 throw validationError(`${op.field} is not a number`, { index });
-              results.push({
-                op: "increment",
-                record: await replaceRecord(
-                  collection,
-                  row,
-                  writeSiteDataPath(row.data, segments, (current ?? 0) + by),
-                  index,
-                ),
-              });
+              const record = await replaceRecord(
+                collection,
+                row,
+                writeSiteDataPath(row.data, segments, (current ?? 0) + by),
+                index,
+              );
+              changed(collection, "increment", record.id, { change: "changed", record });
+              results.push({ op: "increment", record });
               break;
             }
             default:
@@ -1921,7 +2227,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           if (usage.recordBytes + summary.byteDelta > options.limits.recordBytesPerSite)
             throw new SiteDataError(
               "quota_exceeded",
-              "This Site's records are full. Delete records to make room.",
+              "This app's records are full. Delete records to make room.",
               { quota: "site_record_bytes", limit: options.limits.recordBytesPerSite },
             );
           if (
@@ -1930,14 +2236,43 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           )
             throw new SiteDataError(
               "quota_exceeded",
-              "This workspace's Site data is full. Delete records or files to make room.",
+              "This workspace's app data is full. Delete records or files to make room.",
               { quota: "workspace_bytes", limit: options.limits.workspaceBytes },
             );
         }
-        await applyUsage(tx, caller, {
-          records: summary.recordDelta,
-          recordBytes: summary.byteDelta,
-        });
+        const imported = options.changeKind === "import";
+        await applyUsage(
+          tx,
+          caller,
+          { records: summary.recordDelta, recordBytes: summary.byteDelta },
+          {
+            changes,
+            // A batch of replayed inserts changed nothing.
+            fact:
+              changedCollections.size === 0
+                ? null
+                : {
+                    kind: imported ? "import" : "write",
+                    collections: [...changedCollections],
+                    opCounts,
+                    recordIds: imported ? [] : [...changedIdSet],
+                  },
+          },
+        );
+        // Imports are bulk loads, not record-by-record changes: they send no App events.
+        if (!imported)
+          await recordAppRecordChangesInTransaction(
+            tx,
+            caller,
+            {
+              principal: caller.principal,
+              writerKind: siteDataActorKind(caller),
+              automationId: caller.automationId ?? null,
+              automationRunId: caller.automationRunId ?? null,
+              chainDepth: caller.chainDepth ?? 0,
+            },
+            appChanges,
+          );
         await options.afterWrite?.(tx, summary);
         return { results, summary };
       });
@@ -2002,7 +2337,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
 
     async insertFile(caller, file, options) {
       refuseGuestFileWrites(caller);
-      return scoped(caller, async (tx) => {
+      return writing(caller, async (tx, changes) => {
         const usage = await lockUsage(tx, caller);
         await assertWritableSite(tx, caller);
         await fileQuota(tx, caller, usage, file.sizeBytes, options.limits);
@@ -2016,7 +2351,20 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               ${caller.principal}, ${caller.actor})
             returning *`,
         );
-        await applyUsage(tx, caller, { files: 1, fileBytes: file.sizeBytes });
+        await applyUsage(
+          tx,
+          caller,
+          { files: 1, fileBytes: file.sizeBytes },
+          {
+            changes,
+            fact: {
+              kind: "files",
+              collections: [SITE_DATA_FILES_CHANGE],
+              opCounts: { upload: 1 },
+              recordIds: [row!.id],
+            },
+          },
+        );
         await options.afterWrite?.(tx, {
           operations: 1,
           bytesWritten: file.sizeBytes,
@@ -2030,7 +2378,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     async deleteFile(caller, fileId) {
       refuseGuestFileWrites(caller);
       if (!UUID.test(fileId)) throw new SiteDataError("not_found", "File not found");
-      return scoped(caller, async (tx) => {
+      return writing(caller, async (tx, changes) => {
         await lockUsage(tx, caller);
         await assertWritableSite(tx, caller);
         const [row] = await rawRows<FileRow>(
@@ -2048,13 +2396,68 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         if (caller.role !== "manager" && row.owner_principal !== caller.principal)
           throw new SiteDataError(
             "forbidden",
-            "Only the uploader or the Site's managers can delete this file",
+            "Only the uploader or the app's managers can delete this file",
           );
         await tx.execute(
           sql`delete from site_data_files where workspace_id = ${caller.workspaceId} and id = ${fileId}`,
         );
-        await applyUsage(tx, caller, { files: -1, fileBytes: -num(row.size_bytes) });
+        await applyUsage(
+          tx,
+          caller,
+          { files: -1, fileBytes: -num(row.size_bytes) },
+          {
+            changes,
+            fact: {
+              kind: "files",
+              collections: [SITE_DATA_FILES_CHANGE],
+              opCounts: { delete: 1 },
+              recordIds: [row.id],
+            },
+          },
+        );
         return toFile(row);
+      });
+    },
+
+    async watch(caller, ttlSeconds) {
+      const ttl = Math.max(1, Math.min(3600, Math.trunc(ttlSeconds) || 1));
+      return scoped(caller, async (tx) => {
+        await tx.execute(
+          sql`insert into site_data_usage (account_id, workspace_id, site_id)
+            values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId})
+            on conflict (workspace_id, site_id) do nothing`,
+        );
+        // Extend the lease only when less than half of it is left, so many
+        // viewers renewing together rarely write the row a write locks.
+        // `remaining`: how long this watch lasts, so a connection never
+        // outlives the flag that makes writes publish changes.
+        type Watched = { change_seq: string | number; remaining: string | number | null };
+        const [extended] = await rawRows<Watched>(
+          tx,
+          sql`update site_data_usage set live_until = now() + ${ttl}::integer * interval '1 second'
+            where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}
+              and (live_until is null
+                or live_until < now() + ${Math.ceil(ttl / 2)}::integer * interval '1 second')
+            returning change_seq, floor(extract(epoch from (live_until - now()))) as remaining`,
+        );
+        const [current] = extended
+          ? [extended]
+          : await rawRows<Watched>(
+              tx,
+              sql`select change_seq, floor(extract(epoch from (live_until - now()))) as remaining
+                from site_data_usage
+                where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}`,
+            );
+        const collections = (await loadCollections(tx, caller))
+          .filter((collection) => {
+            if (caller.guest === true && collection.guestAccess === "none") return false;
+            return readReach(caller, collection) !== "none";
+          })
+          .map((collection) => collection.name);
+        // Every caller that can read Site Data can list (at least shared) files.
+        collections.push(SITE_DATA_FILES_CHANGE);
+        const remaining = Math.max(1, Math.min(ttl, num(current?.remaining)));
+        return { seq: num(current?.change_seq), collections, ttlSeconds: remaining };
       });
     },
   };
@@ -2106,14 +2509,26 @@ export async function getSiteDataScheduledTaskId(
   scope: { accountId: string; workspaceId: string },
   sessionId: string,
 ): Promise<string | null> {
+  return (await getSiteDataScheduledRun(db, scope, sessionId))?.taskId ?? null;
+}
+
+/**
+ * The scheduled run that created this session, if any: its task (the Site
+ * Data principal) and its automation chain depth (recorded on change events).
+ */
+export async function getSiteDataScheduledRun(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+  sessionId: string,
+): Promise<{ taskId: string; chainDepth: number } | null> {
   if (!UUID.test(sessionId)) return null;
   return withRlsContext(db, scope, async (tx) => {
-    const [run] = await rawRows<{ task_id: string }>(
+    const [run] = await rawRows<{ task_id: string; chain_depth: number | string | null }>(
       tx,
-      sql`select task_id from scheduled_task_runs
+      sql`select task_id, chain_depth from scheduled_task_runs
           where workspace_id = ${scope.workspaceId} and session_id = ${sessionId} limit 1`,
     );
-    return run?.task_id ?? null;
+    return run ? { taskId: run.task_id, chainDepth: num(run.chain_depth) } : null;
   });
 }
 

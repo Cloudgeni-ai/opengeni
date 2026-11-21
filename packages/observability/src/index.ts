@@ -47,6 +47,19 @@ export {
   type AgentToolCallOutcome,
   type AgentToolMetricFamily,
 } from "./agent-tool-metrics";
+export {
+  ORG_AGENT_CREDENTIAL_OUTCOMES,
+  ORG_AGENT_CREDENTIAL_SOURCES,
+  ORG_AGENT_PUBLISH_MOVE_OUTCOMES,
+  ORG_AGENT_RESOLVE_OUTCOMES,
+  recordOrgAgentCredentialSource,
+  recordOrgAgentPublishMove,
+  recordOrgAgentResolve,
+  type OrgAgentCredentialOutcome,
+  type OrgAgentCredentialSource,
+  type OrgAgentPublishMoveOutcome,
+  type OrgAgentResolveOutcome,
+} from "./org-agent-metrics";
 export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 import {
@@ -87,6 +100,16 @@ export {
   type TraceContext,
 } from "./trace-context";
 export { traceClientCalls, traceFetch, tracedFetchTarget } from "./client-spans";
+export {
+  measureRecordingTiming,
+  recordActiveRecordingTiming,
+  recordRecordingTiming,
+  recordingTimingContext,
+  startActiveRecordingTiming,
+  startRecordingTiming,
+  withRecordingTiming,
+  type RecordingTimingStage,
+} from "./recording-timing";
 export {
   analyzeCpuSamples,
   captureCpuSamplingProfile,
@@ -567,6 +590,27 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // and whether the audio was a meeting or a dictation.
   ["providerRequestId", /^[A-Za-z0-9._:-]{1,128}$/],
   ["recordingPurpose", /^(?:meeting|dictation)$/],
+  ["recordingKey", /^rec_[0-9a-f]{32}$/],
+  ["recordingTimingSource", /^(?:client|capture_timestamp)$/],
+  ["recordingProviderRegion", /^[a-z0-9][a-z0-9-]{0,63}$/],
+]);
+
+const PUBLIC_RECORDING_NUMBER_FIELDS = new Set([
+  "audioSeconds",
+  "sentAudioSeconds",
+  "wallSeconds",
+  "queueSeconds",
+  "audioBytes",
+  "chunkNumber",
+  "trackNumber",
+  "providerAttempt",
+  "prepareWallSeconds",
+  "convertWallSeconds",
+  "diarizeWallSeconds",
+  "alignWallSeconds",
+  "transcribeWallSeconds",
+  "segmentWallSeconds",
+  "finishWallSeconds",
 ]);
 
 /**
@@ -2002,6 +2046,9 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       Object.entries(attributes).filter(([key, value]) => {
         if (value === undefined) return false;
         if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+        if (PUBLIC_RECORDING_NUMBER_FIELDS.has(key)) {
+          return typeof value === "number" && Number.isFinite(value) && value >= 0;
+        }
         const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
         if (clientErrorField) {
           return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);

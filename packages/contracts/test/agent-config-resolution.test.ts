@@ -339,9 +339,18 @@ describe("write-through", () => {
   test('"none" keeps runtime mechanics; notifications are their own capability', () => {
     // "none" still lets the agent ask the person (request_human_input), but
     // phone notifications, calls and inbox tidying are switched on separately.
+    // Derived tools stay in the stored selection; the turn gate decides them.
     expect(
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
-    ).toEqual(["command_read", "command_wait", "set_session_title", "wait_for_input"].sort());
+    ).toEqual(
+      [
+        "capability_authorization_request",
+        "command_read",
+        "command_wait",
+        "set_session_title",
+        "wait_for_input",
+      ].sort(),
+    );
   });
 
   test("each capability keeps exactly its tools", () => {
@@ -523,7 +532,14 @@ describe("mid-session update", () => {
         widened,
         DEFAULT_FIRST_PARTY_MCP_TOOLS,
       ).sort(),
-    ).toEqual(DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((tool) => tool.startsWith("goal_")).sort());
+    ).toEqual(
+      DEFAULT_FIRST_PARTY_MCP_TOOLS.filter(
+        (tool) =>
+          tool.startsWith("goal_") ||
+          tool.startsWith("session_links_") ||
+          tool === "set_waiting_on",
+      ).sort(),
+    );
   });
 
   test("omitted fields keep current values and admission is enforced", () => {
@@ -762,24 +778,18 @@ describe("effective tools projection", () => {
       source: "first_party",
     });
   });
-  test("goal_resume is offered once the session has a goal, in any state", () => {
+  test("goal_resume is offered with the other goal tools, whatever the session's goal", () => {
     const all = resolve({ request: { capabilities: "all" } }).config!;
     const selection = ["goal_set", "goal_update", "goal_resume", "goal_pause"] as const;
-    const goalTools = (environment: { sessionGoal?: boolean }) =>
-      resolveAgentToolFamilies(all, environment)
-        .firstPartyTools(selection)
-        .filter((name) => name.startsWith("goal_"));
-    const without = resolveAgentToolFamilies(all, { sessionGoal: false });
-    expect(goalTools({ sessionGoal: false })).toEqual(["goal_set", "goal_update", "goal_pause"]);
-    expect(without.allowsFirstPartyTool("goal_resume")).toBe(false);
-    // A goal in any state, or a goal that is not known, keeps it.
-    for (const environment of [{ sessionGoal: true }, {}]) {
-      expect(goalTools(environment)).toEqual([...selection]);
+    // A session's first goal must not change the tool list or the system
+    // prompt under earlier requests, so the tool never follows goal state.
+    for (const config of [all, null]) {
+      expect(
+        resolveAgentToolFamilies(config, {})
+          .firstPartyTools(selection)
+          .filter((name) => name.startsWith("goal_")),
+      ).toEqual([...selection]);
     }
-    // Legacy sessions without an agent config are unchanged.
-    expect(
-      resolveAgentToolFamilies(null, { sessionGoal: false }).allowsFirstPartyTool("goal_resume"),
-    ).toBe(true);
   });
   test("lists capability tools and classifies servers", () => {
     const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;

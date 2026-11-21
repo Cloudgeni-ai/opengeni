@@ -75,7 +75,7 @@ beforeAll(async () => {
       API_ORIGIN: "http://127.0.0.1:18787",
       APP_ORIGIN: "https://app.test",
       GATEWAY_SECRET: SECRET,
-      ENVIRONMENT: "production",
+      ENVIRONMENT: "test",
     },
     durableObjects: { SITE_DB: { className: "SiteDatabase", useSQLite: true } },
   });
@@ -865,16 +865,16 @@ test("the gateway refuses internal calls the API did not sign", async () => {
 });
 
 const SQL_TOOLS = [
-  "site_sql_inspect",
-  "site_sql_enable",
-  "site_sql_migrate",
-  "site_sql_define_query",
-  "site_sql_query",
-  "site_sql_run",
-  "site_sql_execute",
-  "site_sql_export",
-  "site_sql_import",
-  "site_sql_reset",
+  "app_sql_inspect",
+  "app_sql_enable",
+  "app_sql_migrate",
+  "app_sql_define_query",
+  "app_sql_query",
+  "app_sql_run",
+  "app_sql_execute",
+  "app_sql_export",
+  "app_sql_import",
+  "app_sql_reset",
 ];
 
 /**
@@ -1130,7 +1130,7 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
   expect(
     Object.keys(
       (bare as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
-    ).filter((name) => name.startsWith("site_sql_")),
+    ).filter((name) => name.startsWith("app_sql_")),
   ).toEqual([]);
 }, 120_000);
 
@@ -1372,17 +1372,17 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
     member: {
       who: { session: String(exchanged.json.sessionToken) },
       principal: `user:${f.member.subjectId}`,
-      tools: ["site_data_query", "site_data_write", "site_sql_query", "site_sql_run"],
+      tools: ["app_data_query", "app_data_write", "app_sql_query", "app_sql_run"],
     },
     invited: {
       who: { session: invitedToken },
       principal: `user:${invitedSubject}`,
-      tools: ["site_data_query", "site_data_write", "site_sql_run"],
+      tools: ["app_data_query", "app_data_write", "app_sql_run"],
     },
     guest: {
       who: { visitor: guestVisitor },
       principal: `guest:${guestVisitor}`,
-      tools: ["site_data_query", "site_data_write", "site_sql_run"],
+      tools: ["app_data_query", "app_data_write", "app_sql_run"],
     },
   };
   const MANAGEMENT: [string, Record<string, unknown>][] = [

@@ -119,7 +119,8 @@ export function useResolvedCreator(
   createdBy: CreatorRef | null,
 ): CreatorRef | null {
   const context = useOptionalAppContext();
-  const self = context?.accessContext ?? null;
+  // Nothing to resolve reads nothing, so hosts without a viewer still render.
+  const self = createdBy ? (context?.accessContext ?? null) : null;
   const ownMatch =
     createdBy !== null &&
     self !== null &&

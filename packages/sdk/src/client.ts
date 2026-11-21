@@ -5,6 +5,12 @@ import type {
   ModelDecisionResponse,
 } from "@opengeni/contracts";
 import type {
+  AppPackageExportRequest,
+  AppPackageExportResponse,
+  AppPackageInstallRequest,
+  AppPackageInstallResponse,
+} from "@opengeni/contracts";
+import type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
   ListBillingCreditNotificationsResponse,
@@ -89,6 +95,7 @@ import type {
   ArtifactLinkResolution,
   ArtifactPinResponse,
 } from "./artifact-catalog";
+import type { SidebarLayoutResponse, UpdateSidebarLayoutRequest } from "./sidebar-layout";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   Agent,
@@ -101,6 +108,9 @@ import type {
   AgentSlackIntroResponse,
   AgentSummary,
   CreateAgentRequest,
+  CreateAgentFromTemplateRequest,
+  AgentTemplate,
+  ListAgentTemplatesResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -141,6 +151,15 @@ import type {
   UpdateAutomationTemplateRequest,
   UpdateEventSourceRequest,
   WorkspaceAutomationTemplate,
+} from "@opengeni/contracts";
+import type {
+  AppSync,
+  AppSyncCreateRequest,
+  AppSyncListResponse,
+  AppSyncRunResponse,
+  AppSyncStatusResponse,
+  AppSyncSubscriptionResponse,
+  AppSyncUpdateRequest,
 } from "@opengeni/contracts";
 import type {
   SiteDataCollectionDefinitionRequest,
@@ -224,6 +243,7 @@ import type {
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactCurrentResponse,
+  WorkspaceArtifactLiveTicketResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
@@ -510,6 +530,8 @@ import type {
   DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  ClaimClaudeLimitResetRequest,
+  ClaimClaudeLimitResetResponse,
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -774,6 +796,9 @@ import type {
   SessionShareLink,
   SessionShareLinkList,
   SessionShareLinkState,
+  SessionLink,
+  SessionLinksResponse,
+  AddSessionLinkRequest,
   SharedSession,
   SessionVisibilityChangePreview,
   SessionScopeSubjectId,
@@ -2018,6 +2043,47 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * A chat's Linked items (issues, pull requests, threads, records, URLs) with
+   * live status where the deployment can read it. `fresh` skips the short
+   * status cache.
+   */
+  async listSessionLinks(
+    workspaceId: string,
+    sessionId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<SessionLinksResponse> {
+    return await this.requestJson<SessionLinksResponse>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/links${options.fresh ? "?fresh=true" : ""}`,
+    );
+  }
+
+  /** Link something to a chat; the same URL again updates its title. */
+  async addSessionLink(
+    workspaceId: string,
+    sessionId: string,
+    request: AddSessionLinkRequest,
+  ): Promise<SessionLink> {
+    return await this.requestJson<SessionLink>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/links`,
+      request,
+    );
+  }
+
+  /** Remove a link from a chat. */
+  async removeSessionLink(
+    workspaceId: string,
+    sessionId: string,
+    linkId: string,
+  ): Promise<{ removed: boolean }> {
+    return await this.requestJson<{ removed: boolean }>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/links/${encodeURIComponent(linkId)}`,
+    );
+  }
+
   /** The person's live share links in a workspace, newest first. */
   async listSessionShareLinks(workspaceId: string): Promise<SessionShareLinkList> {
     return await this.requestJson<SessionShareLinkList>(
@@ -2435,14 +2501,14 @@ export class OpenGeniClient {
       (!response.originSiteId ||
         (options.originSiteId !== "current" && response.originSiteId !== options.originSiteId))
     ) {
-      throw unsupportedSessionPage("Site-filtered session lists");
+      throw unsupportedSessionPage("app-filtered session lists");
     }
     if (
       options.siteAccessId &&
       (!response.siteAccessId ||
         (options.siteAccessId !== "current" && options.siteAccessId !== response.siteAccessId))
     )
-      throw unsupportedSessionPage("Site access-filtered session lists");
+      throw unsupportedSessionPage("app access-filtered session lists");
     return response;
   }
 
@@ -6220,6 +6286,22 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Use one limit reset grant of a Claude account. Reuse `requestId` when
+   * the answer is `retryable`: Claude settles each request id once.
+   */
+  async claimClaudeSubscriptionAccountLimitReset(
+    workspaceId: string,
+    accountId: string,
+    request: ClaimClaudeLimitResetRequest,
+  ): Promise<ClaimClaudeLimitResetResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/limit-resets/claim`,
+      request,
+    );
+  }
+
   async listOrganizationClaudeSubscriptionAccounts(
     organizationId: string,
   ): Promise<ClaudeSubscriptionAccountsResponse> {
@@ -6294,6 +6376,19 @@ export class OpenGeniClient {
       "POST",
       `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/usage/refresh`,
       {},
+    );
+  }
+
+  /** Use one limit reset grant of an organization Claude account (see the workspace variant). */
+  async claimOrganizationClaudeSubscriptionAccountLimitReset(
+    organizationId: string,
+    accountId: string,
+    request: ClaimClaudeLimitResetRequest,
+  ): Promise<ClaimClaudeLimitResetResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/limit-resets/claim`,
+      request,
     );
   }
 
@@ -8735,6 +8830,29 @@ export class OpenGeniClient {
     return response.agent;
   }
 
+  /** Ready-made agents people can add ("Add an agent"). */
+  async listAgentTemplates(workspaceId: string): Promise<AgentTemplate[]> {
+    const response = await this.requestJson<ListAgentTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-templates`,
+    );
+    return response.templates;
+  }
+
+  /** Add a ready-made agent. Its suggested triggers are not created. */
+  async createAgentFromTemplate(
+    workspaceId: string,
+    templateKey: string,
+    request: CreateAgentFromTemplateRequest = {},
+  ): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/agents`,
+      request,
+    );
+    return response.agent;
+  }
+
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */
   async deleteAgent(workspaceId: string, agentId: string): Promise<DeleteAgentResponse> {
     return await this.requestJson<DeleteAgentResponse>(
@@ -10058,6 +10176,20 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Delete a custom MCP server added in this workspace: its catalog entry and,
+   * if it was set up here, its installation. This removes a server that never
+   * connected, which `removeCapabilityInstallation` cannot. Connected accounts
+   * are kept. Integration admins only (otherwise 403 `capabilities:manage`);
+   * `canRemove` on a catalog item that is not on says whether the viewer may.
+   */
+  async deleteCustomMcpServer(workspaceId: string, capabilityId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}`,
+    );
+  }
+
   /** Read-only, permission-filtered workspace or session output discovery. */
   async listArtifactCatalog(
     workspaceId: string,
@@ -10098,6 +10230,42 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog/${encodeURIComponent(kind)}/${encodeURIComponent(artifactId)}/pin`,
       { pinned },
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * The sidebar as this person sees it: the workspace default with their own
+   * changes on top, limited to apps they can open. Needs `workspace:read`.
+   */
+  async getSidebarLayout(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SidebarLayoutResponse> {
+    return this.requestJson<SidebarLayoutResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Change this person's own sidebar (`scope: "personal"`) or the workspace
+   * default (`scope: "workspace"`, workspace admins). The changes apply
+   * together; answers the updated sidebar.
+   */
+  async updateSidebarLayout(
+    workspaceId: string,
+    request: UpdateSidebarLayoutRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SidebarLayoutResponse> {
+    return this.requestJson<SidebarLayoutResponse>(
+      "PATCH",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout`,
+      request,
       undefined,
       options,
     );
@@ -10154,6 +10322,25 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * A ticket for an open Site view's live connection (new versions and data
+   * change hints). 404 when the deployment has no live hints; keep checking
+   * with `getWorkspaceArtifactCurrent` then.
+   */
+  async createWorkspaceArtifactLiveTicket(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactLiveTicketResponse> {
+    return await this.requestJson<WorkspaceArtifactLiveTicketResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/live`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
   /** Display-only HTML delivery: do not download the retained source bundle to render a Site. */
   async getWorkspaceArtifactHtml(
     workspaceId: string,
@@ -10194,6 +10381,37 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/duplicate`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** One package file of an app's current version (docs/app-packages.md). */
+  async exportAppPackage(
+    workspaceId: string,
+    appId: string,
+    request: AppPackageExportRequest = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageExportResponse> {
+    return await this.requestJson<AppPackageExportResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(appId)}/package`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Installs a package file as a new app in this workspace (docs/app-packages.md). */
+  async installAppPackage(
+    workspaceId: string,
+    request: AppPackageInstallRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageInstallResponse> {
+    return await this.requestJson<AppPackageInstallResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-packages/install`,
       request,
       undefined,
       options,
@@ -10277,6 +10495,122 @@ export class OpenGeniClient {
     return await this.requestJson<SiteDataDescribeResponse>(
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** An App's data syncs with their last run. Needs a manager of the App. */
+  async listAppSyncs(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncListResponse> {
+    return await this.requestJson<AppSyncListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/syncs`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Create a data sync: call a connected tool on a schedule or event, keep
+   * chosen fields and upsert them by key into a collection. No model runs.
+   * The caller owns it; a shared sync runs on their connection.
+   */
+  async createAppSync(
+    workspaceId: string,
+    siteId: string,
+    request: AppSyncCreateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSync> {
+    return await this.requestJson<AppSync>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/syncs`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change a data sync; only the given fields change and the caller becomes its owner. */
+  async updateAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    request: AppSyncUpdateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSync> {
+    return await this.requestJson<AppSync>(
+      "PATCH",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a data sync. Records it wrote stay. */
+  async deleteAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: string }> {
+    return await this.requestJson<{ deleted: string }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run a data sync now and wait for its result. */
+  async runAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncRunResponse> {
+    return await this.requestJson<AppSyncRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/run`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Opt the caller in to (or out of) a personal data sync. */
+  async setAppSyncOptIn(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    optedIn: boolean,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncSubscriptionResponse> {
+    return await this.requestJson<AppSyncSubscriptionResponse>(
+      optedIn ? "PUT" : "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/subscription`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Each data sync's last run as the caller sees it (what the App's page reads). */
+  async getAppSyncStatus(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncStatusResponse> {
+    return await this.requestJson<AppSyncStatusResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/data/syncs`,
       undefined,
       undefined,
       options,

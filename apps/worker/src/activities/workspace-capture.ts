@@ -60,6 +60,7 @@ import type {
   WorkspaceCaptureRepo,
   WorkspaceCaptureStats,
 } from "@opengeni/contracts";
+import { WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES } from "@opengeni/contracts";
 import { errorMessage } from "@opengeni/contracts/values";
 
 // ─── Guards & constants for pathological cases; configurable ─────
@@ -869,7 +870,20 @@ async function runCapture(
   await storage.putObject({ key: treeKey, contentType: "application/json", body: treeBytes });
   throwIfCaptureAborted(signal);
   stats.durationMs = Date.now() - startedAt;
-  const manifestBytes = utf8(JSON.stringify(manifest));
+  const manifestBytes = serializeCaptureManifest(manifest);
+  if (!manifestBytes) {
+    // Even without diff hunks the manifest exceeds what readers can parse.
+    // Never publish it; the workbench keeps reading the workspace live.
+    observability.warn("workspace capture skipped — manifest guard tripped", {
+      "opengeni.session_id": input.sessionId,
+      "workspace_capture.repo_count": repos.length,
+    });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "guard_tripped" },
+    });
+    return;
+  }
   stage.value = "manifest_upload";
   ownedKeys.add(manifestKey);
   await storage.putObject({
@@ -1137,6 +1151,89 @@ function sha256(bytes: Uint8Array): string {
 
 function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
+}
+
+/**
+ * Serialize a manifest within the published manifest bound. Diff hunks are the
+ * only unbounded part of a manifest (many repositories, each with thousands of
+ * changed files), so when the whole manifest would exceed `maxBytes` the largest
+ * hunk lists are shed — branch comparisons before the working tree — and their
+ * entries kept as `truncated` (paths, status and line counts stay; the review
+ * opens that file live). Returns null when even the hunk-free manifest does not
+ * fit; the caller then skips the revision like the other whole-capture guards.
+ *
+ * Costs are measured per hunk list so an oversized manifest is never
+ * serialized as one string.
+ */
+export function serializeCaptureManifest(
+  manifest: WorkspaceCaptureManifest,
+  maxBytes: number = WORKSPACE_CAPTURE_MANIFEST_MAX_BYTES,
+): Uint8Array | null {
+  type Candidate = { repo: number; branch: boolean; index: number; cost: number };
+  const candidates: Candidate[] = [];
+  let hunkBytes = 0;
+  const shed = (entries: WorkspaceCaptureRepo["diff"]) =>
+    entries.map((entry) => (entry.hunks.length === 0 ? entry : { ...entry, hunks: [] }));
+  const skeleton: WorkspaceCaptureManifest = {
+    ...manifest,
+    repos: manifest.repos.map((repo, repoIndex) => {
+      for (const [branch, entries] of [
+        [false, repo.diff],
+        [true, repo.branchDiff ?? []],
+      ] as const) {
+        entries.forEach((entry, index) => {
+          if (entry.hunks.length === 0) return;
+          // `"hunks":[...]` versus `"hunks":[]`: the brackets stay either way.
+          const cost = utf8(JSON.stringify(entry.hunks)).byteLength - 2;
+          hunkBytes += cost;
+          candidates.push({ repo: repoIndex, branch, index, cost });
+        });
+      }
+      return {
+        ...repo,
+        diff: shed(repo.diff),
+        ...(repo.branchDiff ? { branchDiff: shed(repo.branchDiff) } : {}),
+      };
+    }),
+  };
+  if (candidates.length === 0) {
+    const bytes = utf8(JSON.stringify(manifest));
+    return bytes.byteLength <= maxBytes ? bytes : null;
+  }
+  const skeletonBytes = utf8(JSON.stringify(skeleton)).byteLength;
+  if (skeletonBytes > maxBytes) return null;
+  let excess = skeletonBytes + hunkBytes - maxBytes;
+  if (excess <= 0) return utf8(JSON.stringify(manifest));
+  candidates.sort(
+    (a, b) =>
+      Number(b.branch) - Number(a.branch) ||
+      b.cost - a.cost ||
+      a.repo - b.repo ||
+      a.index - b.index,
+  );
+  const dropped = new Set<string>();
+  for (const candidate of candidates) {
+    if (excess <= 0) break;
+    dropped.add(`${candidate.repo}:${candidate.branch ? "b" : "w"}:${candidate.index}`);
+    excess -= candidate.cost;
+  }
+  const bound = (repoIndex: number, branch: boolean, entries: WorkspaceCaptureRepo["diff"]) =>
+    entries.map((entry, index) =>
+      dropped.has(`${repoIndex}:${branch ? "b" : "w"}:${index}`)
+        ? { ...entry, hunks: [], truncated: true }
+        : entry,
+    );
+  const bytes = utf8(
+    JSON.stringify({
+      ...manifest,
+      repos: manifest.repos.map((repo, repoIndex) => ({
+        ...repo,
+        diff: bound(repoIndex, false, repo.diff),
+        ...(repo.branchDiff ? { branchDiff: bound(repoIndex, true, repo.branchDiff) } : {}),
+      })),
+    }),
+  );
+  return bytes.byteLength <= maxBytes ? bytes : null;
 }
 
 /** Content-addressed after-image blob key, optionally in a unique capture namespace. */

@@ -51,7 +51,9 @@ import type {
   ApiIntegrationAuthPreview,
   ResolvedAgentConfig,
   SessionAvatar,
+  SessionLink,
   SessionToolPolicy,
+  SessionWaitingOn,
 } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
@@ -3694,6 +3696,9 @@ export const slackInteractions = pgTable(
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
       .notNull()
       .default("open"),
+    // A wake asked to reopen the delivery while it was open: a run settling at
+    // or before this sequence leaves it open for the woken answer.
+    deliveryReopenAfterSequence: integer("delivery_reopen_after_sequence"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -5271,6 +5276,12 @@ export const sessions = pgTable(
     // an avatar. Never part of the model's context; copied by forks.
     description: text("description"),
     avatar: jsonb("avatar").$type<SessionAvatar>(),
+    // Who the chat waits on, as the agent said (1521). `turnId` is the turn
+    // that said it: the wait shows only while that turn is the chat's latest
+    // and the chat is idle, so a reply or a new turn clears it.
+    waitingOn: jsonb("waiting_on").$type<SessionWaitingOn & { turnId: string | null }>(),
+    // The chat's Linked items (1521). NULL means none. Bounded by the contract.
+    links: jsonb("links").$type<SessionLink[]>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a
@@ -5581,9 +5592,23 @@ export const sessions = pgTable(
     // NULL is a legacy chat (instructions already in `instructions`): never
     // add the agent layer to it.
     agentPromptRevision: integer("agent_prompt_revision"),
+    // Migration 1505: the organization agent version this chat runs (with
+    // agentId), the version whose Instructions are in its system prompt (NULL:
+    // no agent layer, a worker without shared Instructions) and what the chat
+    // changed from the version ({setting: {agent, chat}}). NULL for every
+    // other chat.
+    agentVersion: integer("agent_version"),
+    agentPromptVersion: integer("agent_prompt_version"),
+    agentOverrides:
+      jsonb("agent_overrides").$type<Record<string, { agent: unknown; chat: unknown }>>(),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
+    // Migration 1513: which base runtime tools every request carries
+    // (CURRENT_FIRST_REQUEST_TOOLS_REVISION in @opengeni/contracts). Every
+    // older row is 0. A new row starts NULL and its first turn attempt sets it
+    // once, before any model request; forks copy their source's value.
+    firstRequestToolsRevision: integer("first_request_tools_revision"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Top-level xid, assigned by a BEFORE trigger in the original row write.
@@ -12280,6 +12305,7 @@ export const enrollments = pgTable(
     // Unused for workspace and personal machines.
     allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    allowManagedWorkspaces: boolean("allow_managed_workspaces").notNull().default(false),
     // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
     // Opengeni compute sandbox (migration 0858): bound to its sandbox group,
     // reached through the agent gateway, with no key or bearer, and never
@@ -13094,6 +13120,8 @@ export const scheduledTaskRuns = pgTable(
     actionKind: text("action_kind").notNull().default("agent_turn"),
     knowledgeSyncRunId: uuid("knowledge_sync_run_id"),
     knowledgeSummary: jsonb("knowledge_summary").$type<Record<string, unknown>>(),
+    // App data sync runs: what the run read and wrote (1520).
+    syncSummary: jsonb("sync_summary").$type<Record<string, unknown>>(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     // Stable Temporal producer identity. Activity replay/re-dispatch returns
     // the exact run instead of allocating a second schedule source row.
@@ -15332,6 +15360,7 @@ export const rigs = pgTable(
     // (migration 1190), as for organization machines. Unused otherwise.
     allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    allowManagedWorkspaces: boolean("allow_managed_workspaces").notNull().default(false),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

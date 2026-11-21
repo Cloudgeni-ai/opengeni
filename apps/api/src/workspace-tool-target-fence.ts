@@ -176,7 +176,7 @@ export class TargetAuthorityFence {
 
   /** Each part is installed once; a later install never replaces it. */
   setSite(check: TargetFenceCheck): void {
-    if (this.#site) throw new Error("target Site fence is already installed");
+    if (this.#site) throw new Error("target app fence is already installed");
     this.#site = check;
   }
 

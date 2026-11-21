@@ -1,5 +1,23 @@
 # @opengeni/browser-extension
 
+## 0.3.2
+
+### Patch Changes
+
+- b626e29: Branded browser extensions use their own native host registration so they can run alongside Opengeni Browser and connect to their own desktop runtime. Update the branded extension and its agent together; the standard Opengeni Browser host name is unchanged.
+
+## 0.3.1
+
+### Patch Changes
+
+- 81fff95: In a person's own connected Chrome, Bitwarden's inline menu made a sign-in or checkout tab uncontrollable as soon as a field got focus: the agent got "could not be removed" on every action. Bitwarden serves its menu at a random address (`use_dynamic_url`), `chrome-extension://<random uuid>/overlay/menu.html`, and the frame removal only recognised addresses naming a 32-letter extension id, so it never found the menu. The removal now recognises any other extension's address, so the menu is removed and the tab stays controllable.
+
+## 0.3.0
+
+### Minor Changes
+
+- aba7ce3: In a person's own connected Chrome, the tabs an agent is controlling now sit in a grey tab group named "Opengeni" and show a cursor in place of the site's icon, so the tab strip shows which tabs are in use. Shortly after control ends, a tab gets its own icon back and returns to where it was, or to the person's own group it came from, including after the extension updates or reloads. A tab the person drags out of the group stays out until that control ends. Page titles and content are not changed; pages the extension cannot script, such as Chrome's own pages, keep their icon. The extension now asks for Chrome's `tabGroups` permission, which shows no warning, and needs Chrome 130 or later.
+
 ## 0.2.6
 
 ### Patch Changes

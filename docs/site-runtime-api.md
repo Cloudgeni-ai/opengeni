@@ -81,7 +81,7 @@ managers. The Site must be shared with the workspace, not "Only me".
 | `PATCH /reports/:reportId` | 200 | 404 `site_report_not_found` |
 
 Every changing route (`PUT`, `DELETE`, takedown, restore, report status and
-`PUT site-limit-profile`), and the `site_publication_update` tool, refuses
+`PUT site-limit-profile`), and the `app_publication_update` tool, refuses
 a request made from a Site page (403 `site_page_forbidden`). Agents use ordinary
 owner authorization regardless of where their turn started.
 
@@ -147,8 +147,8 @@ Takedown:
   running conversations end on their caps and site-runtime refuses them
   further work.
 
-Agent tools: `site_publication_get`, `site_publication_update` and
-`site_hostname_check` call the same service with the person's authority.
+Agent tools: `app_publication_get`, `app_publication_update` and
+`app_hostname_check` call the same service with the person's authority.
 The artifact tools (`artifacts_publish`, `artifacts_rollback`,
 `artifacts_archive`, `artifacts_restore`) run the same publication hook as
 the API routes: a published Site's generation advances, the edge resyncs,
@@ -253,7 +253,7 @@ signature.
 | `POST /auth/exchange` | `SiteAuthExchangeResponse`. 400 `site_auth_code_invalid` (wrong verifier, host or redirect URI, expired, or already used) |
 | `POST /auth/logout` | 200 `{ revoked }`, even when the Site no longer exists |
 | `POST /site/reports` | 201. Rate limited per reporter, per client address and per Site |
-| `POST /tools/:method` | Member-only page `catalog`, `declarations`, `call`, `resolve`, `invoke`, `readiness`; normal console gateway request/response shapes (`readiness` takes `{ targets }`; the host adds the Site; anything needing a confirmation, an account choice or a connect answers `open_in_opengeni`). Exact current-version `requestedTools` intersect live viewer authority and account selection. Outside viewers: 403 `not_available_for_viewer`, `feature: "workspace_tools"`; undeclared tools: 403 `site_tool_not_authorized`; missing approval: 409 `tool_gateway_approval_required`. Independent of agent settings. |
+| `POST /tools/:method` | Member-only page `catalog`, `declarations`, `call`, `resolve`, `invoke`, `readiness`, `setup`; normal console gateway request/response shapes (`readiness` takes `{ targets }`; `setup` takes `{}` and answers the connect card's `ToolGatewaySiteSetupResponse`; the host adds the Site; anything needing a confirmation, an account choice or a connect answers `open_in_opengeni`). Exact current-version `requestedTools` intersect live viewer authority and account selection. Outside viewers: 403 `not_available_for_viewer`, `feature: "workspace_tools"`; undeclared tools: 403 `site_tool_not_authorized`; missing approval: 409 `tool_gateway_approval_required`. Independent of agent settings. |
 | `POST /auth/view-as` (`{ viewAs: "invited" \| "public" \| null }`) | 200 `{ viewAs }`: a workspace member starts or ends previewing the Site as that role on their own site session. 403 `site_view_as_members_only` for anyone else |
 | `POST /platform/requests` | Gateway request counts (`{ v: 1, reportId, hosts: [{ host, requests }] }`, at most 500 hosts), signed on the Sites domain apex; 200 `{ counted }`. Each report id counts once per host; unknown hosts are skipped. 400 when signed for a Site host |
 | `SITE_OPERATIONS` suffixes | Served for the viewer, as below. Anything else returns 404 `site_operation_unsupported` |
@@ -277,6 +277,9 @@ Operations:
   - Guests read and open the Site's `shared` files (list and short-lived
     download URLs, within the same per-visitor and per-address request
     limits). They never upload or delete files, and never see `private` files.
+  - `GET /data/syncs` (`site.data.syncs()`) returns each app data sync's last
+    run and, for personal syncs, the viewer's own last run and opt-in
+    ([app-sync.md](app-sync.md)).
 - `sessions.*` are Site agent conversations:
   - **Create.** A workspace member runs as their verified native human identity
     in a native private session. The in-process request carries a non-serializable
@@ -295,8 +298,8 @@ Operations:
       (`sandboxBackend: "none"`; a publication has no sandbox setting).
     - Their only first-party tools are the Site's own data tools, pinned on
       the server to this Site and acting as the conversation's viewer (the
-      same audience checks and row binding as the page): `site_data_query`
-      and `site_data_write`, plus `site_sql_run` when Site SQL is on. A call
+      same audience checks and row binding as the page): `app_data_query`
+      and `app_data_write`, plus `app_sql_run` when Site SQL is on. A call
       for another Site, or any Site management tool, is refused. Platform
       instructions tell the agent whom it is talking with and that it can
       only use this Site's own data.
@@ -418,6 +421,108 @@ Operations:
   - If the session cannot be created, its reservation is released; if a
     session appears that the conversation record does not track, it is
     cancelled and the call returns 502 `site_conversation_failed`.
+
+## Connect card
+
+When a workspace member opens an app (a Site), Opengeni shows a small card
+for each connected tool the app declares that they still have to connect or
+reconnect: "Connect Gmail", one button each, and a close button. Nothing shows
+when everything is ready, for guests and invited viewers outside the
+workspace, or after the viewer closed it (until a new need appears or the app
+asks for it again). App authors build nothing: the list comes from the current
+version's `requestedTools`.
+
+- **Source.** `POST /v1/workspaces/:workspaceId/tools/site-setup`
+  (`{ siteArtifactId, siteVersionId }`, `workspace:read`) in the console, and
+  `POST /v1/site-runtime/tools/setup` (`{}`) for a published app. Both answer
+  `ToolGatewaySiteSetupResponse` `{ version: 1, items }`; each item has a
+  stable `key` (`<action>:<digest>`, the digest of the connector's catalog
+  capability and the account's connection, so connectors that share a name
+  stay apart and Site code sees no ids), `action` (`connect` or
+  `reconnect`), `connector`, `capabilityId`, `connectionId`, `account`,
+  `shared`, the declared `tools` waiting on it, and `openUrl` (published
+  hosts only). It runs the same readiness as `tools/readiness` over every
+  declared tool, for every connection type, including gateway-provider
+  connections, and never calls a provider.
+- **What becomes a card item.** `connect` (no account yet) and `reconnect`
+  (the account's sign-in stopped working, or it lacks scopes a declared tool
+  needs and can sign in again). Tools that only need a confirmation or an
+  account choice are left to the call's own confirmation, where the viewer
+  picks the account; blocked, unavailable and permission-denied tools are not
+  something one click fixes, so they don't show. Tools whose connector has no
+  catalog entry are left out.
+- **Console.** The card sits over the app's bottom right corner. Its button
+  opens Opengeni's own connect or reconnect dialog (the same
+  `McpConnectionCard` flow as chat), and the card refreshes when it finishes
+  and when the window regains focus.
+- **Published app.** The gateway shell shows the same card to members. A
+  published page has no Opengeni frame to sign in through, so the button opens
+  `openUrl`, the app in the Opengeni console with `?connect=<key>`, in a new
+  tab, which opens that dialog at once; returning to the app refreshes the
+  card and its tool readiness. `openUrl` uses `OPENGENI_WEB_BASE_URL`,
+  falling back to `OPENGENI_PUBLIC_BASE_URL` as other console links do; set
+  `OPENGENI_WEB_BASE_URL` when the console is served from another origin
+  than the API, or the link opens the API's address. The console opens the
+  dialog once its connect dialogs are ready and drops a key the card no
+  longer lists.
+- **From the app.** `site.connections` in `@opengeni/sdk/site`:
+  `status()` resolves `{ supported, ready, needed }` (each need with `key`,
+  `action`, `connector`, `account`, `label` and `tools`; no ids or
+  addresses), `connect(key?)` starts one need's action and resolves
+  `{ connected }`, `showCard()` shows the platform card again even after it
+  was closed, and `onChange(listener)` fires when what the viewer has
+  connected may have changed. Hosts advertise this with `connections: 1` in
+  the bridge ready message; local previews, older hosts and outside viewers
+  answer `supported: false`, `ready: true`.
+- **Self-hosted.** Published app hosts (the Site gateway on Cloudflare) are not
+  available self-hosted, so there the card shows only in the console, where it
+  works the same. `site.connections` in the console behaves as above.
+
+## Opengeni look for apps
+
+Apps opened in Opengeni follow its light or dark theme: the frame's
+`color-scheme` is Opengeni's, so `prefers-color-scheme` inside the app
+matches it and changes without a reload. (Safari doesn't pass a frame's
+`color-scheme` to `prefers-color-scheme`, so there an app follows the
+system's theme; that differs only when Opengeni's appearance is set to the
+other one.) An app that wants Opengeni's own look opts in with one tag:
+
+```html
+<link rel="stylesheet" href="/__opengeni/ui.css">
+```
+
+A bundler (`bun build ./index.html`, Vite) tries to resolve that link and
+fails, so in a built app use a style that only imports it, which bundlers
+leave alone:
+
+```html
+<style>@import "/__opengeni/ui.css";</style>
+```
+
+Inside Opengeni either is replaced by the stylesheet itself (no request and
+no unstyled first paint). The path `/__opengeni/ui.css` is reserved: a Site's
+own file there is never served. A published Site's gateway serves it at that path,
+and so does the local preview (`createCodemodeSiteRequestHandler`). It styles
+nothing on its own; it defines:
+
+- Tokens that follow the theme: `--og-bg`, `--og-canvas`, `--og-surface`,
+  `--og-surface-2`, `--og-surface-3`, `--og-selection`, `--og-border`,
+  `--og-border-strong`, `--og-fg`, `--og-fg-label`, `--og-fg-muted`,
+  `--og-fg-subtle`, `--og-accent`, `--og-accent-fg`, `--og-primary`,
+  `--og-primary-ink`, `--og-primary-edge`, `--og-danger`, `--og-success`,
+  `--og-warning`, `--og-focus`, `--og-font-sans`, `--og-font-mono`,
+  `--og-radius` and `--og-radius-card`. `data-og-theme="light"` or `"dark"`
+  on `<html>` pins a theme.
+- Classes: `og-app` (on `<body>`: canvas, text and font), `og-page` and
+  `og-page-wide` (960 and 1136px columns), `og-title`, `og-heading`,
+  `og-muted`, `og-subtle`, `og-mono`, `og-stack`, `og-row`, `og-card`,
+  `og-button` (with `og-button-primary`, `og-button-ghost`,
+  `og-button-danger`), `og-input` (inputs, selects and textareas),
+  `og-label`, `og-badge` (with `-success`, `-warning`, `-danger`),
+  `og-table` and `og-link`.
+
+`@opengeni/sdk/site-ui` exports the stylesheet (`SITE_UI_CSS`), its path and
+`resolveSiteUiStylesheet(html)` for hosts that embed Sites themselves.
 
 ## Limits and metering
 

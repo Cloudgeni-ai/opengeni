@@ -1,5 +1,139 @@
 # @opengeni/react
 
+## 6.35.0
+
+### Minor Changes
+
+- 5fe41ba: Agents gain a lean setup page: Starts when (automations that start a chat with the agent), Can use (Allow, Ask first or Block per connector and tool, for every connection type), Learns (Memory entries you can edit or remove), Who can use and a short Skills list. Agents carry new `toolPermissions`, `skills` and `templateKey` fields, scheduled tasks accept `agentConfig.agentId`, and the SDK adds `listAgentTemplates` and `createAgentFromTemplate` for the ready-made agents in the "Add an agent" gallery. Agents can start a chat with another agent by name or id through `session_create`'s `agentName` parameter. Existing fields and requests are unchanged.
+- 7eda7f0: App data changes start automations and reach workspace webhooks: the `app.record.added`, `app.record.changed`, `app.record.removed` and `app.sql.changed` event types join the "This workspace" trigger source and the workspace webhook types, and `verifyWebhookEvent` accepts them. See docs/site-data.md.
+- 7eda7f0: Apps show a platform connect card to members who still have to connect or reconnect a tool the app declares, in the console and on published apps. Apps can read and drive it with `site.connections` (`status`, `connect`, `showCard`, `onChange`) from `@opengeni/sdk/site`.
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+- e7eb28c: Sites are now called apps in user-facing text, and the first-party `site_*` tools are `app_*` (for example `app_data_query` and `app_publication_update`). The old `site_*` names keep working everywhere a tool is called or selected, but are no longer listed. `FirstPartyMcpToolName` gains the `app_*` names; SDK methods, routes and field names are unchanged.
+- 5c3c4e6: Chats show who they wait on (`Session.waitingOn`) and their Linked items with live status (`listSessionLinks`, `addSessionLink`, `removeSessionLink`, and the `session.waiting_on.changed` and `session.links.changed` events). The workbench Changes tab now draws its own collapsible header per file for every embedder (an additive visual change; no props change), and accepts optional `pullRequest` and `onOpenPullRequest` props for View on GitHub and Open PR; without them the summary bar is unchanged.
+- 8bf1ec2: Customizable sidebar: a workspace default of groups, App links (optionally to an App page), https links and live lists (pinned or recent Apps) that admins set, with each person's own changes on top (add, hide, reorder, reset). New `GET`/`PATCH /v1/workspaces/:workspaceId/sidebar-layout`, `client.getSidebarLayout` and `client.updateSidebarLayout`, and the `sidebar_layout_get`/`sidebar_layout_update` agent tools. Apps opened from the sidebar are pages: they fill the main area with their address in the URL, follow Opengeni's light or dark theme, and stay open when you switch away. Apps can opt into Opengeni's look with `<link rel="stylesheet" href="/__opengeni/ui.css">` (`@opengeni/sdk/site-ui`). Older clients ignore item types they don't know.
+
+### Patch Changes
+
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [e7eb28c]
+- Updated dependencies [5c3c4e6]
+- Updated dependencies [8bf1ec2]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/sdk@6.35.0
+  - @opengeni/connect@6.35.0
+
+## 6.34.0
+
+### Minor Changes
+
+- e292b4a: Add SuperOffice CRM to the catalog: SuperOffice's hosted MCP server, with its six update tools asking for approval by default. When a service refuses a connection's sign-in setup, the connect dialog now says why, for example that the service only accepts apps it has approved, instead of a generic failure; the API passes the provider's OAuth error in the error details, and a provider outage during registration is now a retryable `upstream_unavailable` error. A refused sign-in that returns a standard OAuth code with a plain meaning (`invalid_redirect_uri`, `unauthorized_client`, `unapproved_software_statement`, `invalid_scope`, `server_error`, `temporarily_unavailable`) now keeps that code as the attempt's `error.code` instead of `provider_denied`. Admins can remove a custom MCP server that never connected, through the new `DELETE /v1/workspaces/:workspaceId/capabilities/:capabilityId` route and `deleteCustomMcpServer` on the SDK.
+
+### Patch Changes
+
+- 9a84b63: Assistant links in web and native chat no longer show or open with UTM tracking parameters. Other URL parameters, fragments, stored messages, and model inputs are unchanged.
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/contracts@6.34.0
+  - @opengeni/sdk@6.34.0
+  - @opengeni/connect@6.34.0
+
+## 6.33.0
+
+### Patch Changes
+
+- 0d394ec: Web-search citation handles no longer show on any surface that displays an answer. OpenAI models that search the web through a Codex or ChatGPT subscription write citations as private-use handles (U+E200 `cite` U+E202 `turn0search3` U+E201). The responses carry nothing that maps a handle to a page, so people saw `citeturn0search3` in the text. The chat timeline and Slack already removed them. Now the notification inbox (web, desktop banners and mobile, through the inbox API), phone push text, Teams replies, shared chat links and a worker's report in its manager's chat remove them too. Stored history and anything sent to a model keep the exact text. `@opengeni/contracts/provider-citation-handles` exports `withoutProviderCitationHandles` for other surfaces, such as products that render the raw chat stream.
+- a204fd7: Tool results no longer lose data. One result now shows the model up to 25,000 tokens (100,000 bytes) of text by default, up from 10,000 tokens (about 48 KB), the same as Claude Code's default MCP output limit. A larger result is stored whole as a workspace File and the model sees its start (shell output: its head and tail), the total size and the exact `tool_result_read {"resultId","offset"}` call that reads the rest from durable storage, with or without a sandbox. This replaces both the head/tail cut that dropped the middle of results between about 48 KB and 1 MiB and the separate over-1 MiB spill. `tool_result_read` is never in a first-request tool list: the model loads it by exact name through tool search, so no session's tool list changes. Only newly produced results change; history already sent replays byte for byte.
+- 13dd766: The mobile chat now shows the cards the web chat shows for long agent work. When the agent asks to use a machine you already connected, the card names it and offers Allow (or another machine), instead of only a link to open the chat on that computer. Goal changes, failed or skipped compaction, worker results, grouped machine updates and usage-limit notices get their own rows rather than plain dividers or nothing. The wording and grouping come from shared models that the web chat now uses too.
+- Updated dependencies [03d58fd]
+- Updated dependencies [3091618]
+- Updated dependencies [0d394ec]
+- Updated dependencies [a204fd7]
+  - @opengeni/contracts@6.33.0
+  - @opengeni/sdk@6.33.0
+  - @opengeni/connect@6.33.0
+
+## 6.32.0
+
+### Minor Changes
+
+- afb7be7: Console has Agents and Tool servers pages for organizations with Console agents turned on. Owners and admins create an agent, edit its Instructions, model, built-in tools, tool servers (each tool on or off, "Ask first", and what happens to tools a server adds later), workers and where it is available, save drafts, try a draft in a test chat, compare versions, publish or roll back (optionally moving running chats), and see each chat's version and what it changed. Code-managed agents open read-only with "Managed by code"; an owner can move one to Console. "Export as YAML" downloads the agent file. In the app, the Agents page lists the workspace's organization agents read-only under "Managed in Console". `AgentsPage` takes an optional `after` slot, the SDK knows the `agents:read`, `agents:manage` and `tool_credentials:write` permissions, and the permission picker shows them under Agents.
+- afb7be7: Console reads whether organization agents are on from `GET /v1/organizations/:id/console/access` (`orgAgentsEnabled`), so an organization without them makes no failing agent requests. `Session.orgAgent` carries the agent's `name`, and the chat header shows it. Console test chats no longer count toward an agent's chats, usage and cost, or appear in the Console Sessions list. CLI: `agents deploy --dry-run` reports `would create vN` or `unchanged vN`.
+- afb7be7: Marking or unmarking a product-managed workspace now needs an account-level context (migration 1512): Console, a workspace an organization API key creates and the Console test workspace still do it, but runtime code acting inside a workspace can't, since the mark decides organization machine and Sandbox Environment reach, organization agents and stored end-user logins. In the reach dialog, a machine's "All workspaces" and "All product-managed workspaces" options say they include the Console test workspace, where Editors run test chats. `WorkspaceReachFields` takes an optional `allDescription`.
+- afb7be7: Console roles for organization members: an owner or admin gives a member Console Viewer (sessions at the review level, cost, agents read-only) or Editor (also creates, tests and publishes Console-managed agents), on Console's Members page or when inviting (`consoleRole`). Owners and admins stay full. `GET /v1/organizations/:id/console/access` returns the caller's level and `GET|PUT .../console/member-roles` lists and sets roles; role changes are audited (`member.console_role_changed`). A Console role never grants app workspace access. `RoleSelect` takes an optional `noAccessDescription`.
+
+### Patch Changes
+
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [afb7be7]
+- Updated dependencies [01663b4]
+  - @opengeni/contracts@6.32.0
+  - @opengeni/sdk@6.32.0
+  - @opengeni/connect@6.32.0
+
+## 6.31.1
+
+### Patch Changes
+
+- @opengeni/connect@6.31.1
+- @opengeni/contracts@6.31.1
+- @opengeni/sdk@6.31.1
+
+## 6.31.0
+
+### Minor Changes
+
+- 993bd7b: Sites hear about data changes live (behind `OPENGENI_SITES_LIVE_ENABLED`, off by default, plus the gateway's `SITE_LIVE` Durable Object binding). Site Data writes take a per-Site change number in the write transaction and, while a page follows changes, record a small outbox row; pages connect only once their code calls `onChange`, notices are coalesced per Site, and hidden pages let the connection go; the gateway pushes `{collections, seq}` hints (never records) over a WebSocket held by a per-Site Durable Object, and Site code follows them with `site.data.onChange` / `collection.onChange`. The console's Site view uses the same connection for new versions, backs off its fallback checks while nothing changes, and makes none while hidden.
+
+  Site Data inserts accept an `idempotencyKey` (a retry returns the original record), and filters accept `$now` (server time, optionally offset) for lease expiry. Site speed is measured: per-operation API histograms with `Server-Timing`, Site SQL round trips, and sampled page timings (app load, first data, bridge calls) batched through the gateway. The sites Skill asks agents to review who sees what before publishing or sharing.
+
+### Patch Changes
+
+- f7a7736: `useBrowserSession` no longer keeps polling a tab's observation after the server refuses it for good (a non-retryable 4xx, such as a tab Chrome won't let the browser extension control). The poll skips that page until the tab shows another document or address, or an observation made for a person's input succeeds. Failures that may pass, such as a busy controller, are still retried.
+- 8db7a16: The Connect card for an OAuth MCP connector that isn't set up in this workspace yet now offers your one own login for it ("Use it here") even when that login is already turned on here. Using it sets the connector up for each person's own account and turns the login on here only when it is off, so no new sign-in is needed. For connectors that share one workspace connection by default, in a workspace with other people, the card still asks who can use the connection first, and offers your login once you choose "Only me".
+- cafa73f: Your own connector login now has one switch per workspace. Turning it on in "Where it works" for a workspace that hasn't turned that connector on also turns the connector on there, for each person's own account. This happens in the same request, as the connect card's "Use it here" does it. Where only an admin may turn the connector on, nothing changes: the request is refused with `details.code` `own_login_connector_needs_admin`, and the row says an admin has to turn it on. Turning a login off never turns its connector off.
+
+  Each reach row carries an optional `connectorOff` flag. A login that is on where its connector isn't (for example a standing grant) reads as off, with a line saying the switch turns the connector on too. My things doesn't count such a workspace as one where the login works.
+
+  The OAuth connect card now offers your one own login first, as "Use my <service> here", without asking "Who can use this connection?". Connecting a new account for everyone stays a secondary choice.
+
+- 46d677b: When a Claude, ChatGPT or SuperGrok subscription account stops accepting its sign-in, the person who connected it now gets one inbox notice and phone notification, for example "Sign in to Claude again", with the account's email. If that person can no longer manage the account, the organization's owners and admins get it instead. The notice's "Sign in again" opens that account's own sign-in step. For Claude, the step names the email to sign in as, and the person signs in with Claude and pastes the code. The notice goes away once the account works again, and a later lapse gets a new notice.
+
+  Each account's page shows how long ago it was signed in. A Claude account signed in 25 or more days ago shows a warning with "Sign in again" before Claude stops accepting the sign-in, which tends to happen around 28 to 30 days.
+
+  `GET /v1/inbox` returns these notices in a new optional `notices` list (`InboxNotice`: shaped like a notification item, with `sessionId: null` and always a `link`). `items`, `needsYouCount` and `unreadCount` are unchanged. Subscription account listings carry an optional `signedInAt`. A phone notification about something other than a chat carries the address to open in `url`.
+
+- Updated dependencies [c2fe398]
+- Updated dependencies [9ecc26c]
+- Updated dependencies [047b487]
+- Updated dependencies [cafa73f]
+- Updated dependencies [890c910]
+- Updated dependencies [1f5ea5b]
+- Updated dependencies [993bd7b]
+- Updated dependencies [443b97b]
+- Updated dependencies [46d677b]
+  - @opengeni/contracts@6.31.0
+  - @opengeni/sdk@6.31.0
+  - @opengeni/connect@6.31.0
+
 ## 6.30.1
 
 ### Patch Changes

@@ -7,7 +7,7 @@ import {
   parseNotificationText,
   type NotificationSpan,
 } from "@opengeni/react/timeline-model";
-import type { InboxItem } from "@opengeni/sdk";
+import type { InboxEntry } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ActionSheetIOS,
@@ -42,7 +42,7 @@ export {
   type NativeInboxClient,
 } from "./inbox-state";
 
-const KIND_ICON: Record<InboxItem["kind"], NativeIconName> = {
+const KIND_ICON: Record<InboxEntry["kind"], NativeIconName> = {
   question: "message-circle-question",
   approval: "shield-check",
   goal_paused: "circle-pause",
@@ -50,7 +50,7 @@ const KIND_ICON: Record<InboxItem["kind"], NativeIconName> = {
   reply: "message-square-text",
 };
 
-function kindIcon(item: InboxItem): NativeIconName {
+function kindIcon(item: InboxEntry): NativeIconName {
   // An MCP server's question is an approval of its call, but reads as a question.
   if (item.kind === "approval" && item.serverQuestion) return "message-circle-question";
   return item.kind === "notification" && item.urgency === "time_sensitive"
@@ -98,7 +98,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
  * An agent's notification under its title: the subtitle, the message (short
  * paragraphs and bullets) and its facts as a quiet two-column list.
  */
-function NotificationContent({ item }: { item: InboxItem }) {
+function NotificationContent({ item }: { item: InboxEntry }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const blocks = parseNotificationText(item.body);
@@ -388,7 +388,7 @@ function tomorrowMorning(): Date {
 }
 
 /** How long ago, or until when a snoozed item stays hidden. */
-function when(t: OpenGeniText, item: InboxItem): string {
+function when(t: OpenGeniText, item: InboxEntry): string {
   if (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= Date.now()) {
     return relative(t, item.updatedAt);
   }
@@ -406,7 +406,7 @@ export interface NativeInboxListProps {
   client: NativeInboxClient;
   inbox: ReturnType<typeof useNativeInbox>;
   /** Open the item's session (and its question or approval there). */
-  onOpenSession: (item: InboxItem) => void;
+  onOpenSession: (item: InboxEntry) => void;
   /** Names for the workspace line when items span workspaces. */
   workspaceNames?: ReadonlyMap<string, string> | undefined;
   /** A short confirmation after an action ("Approved"). */
@@ -456,23 +456,34 @@ export function NativeInboxList({
     return () => clearTimeout(timer);
   }, [client, items]);
 
-  const leave = (item: InboxItem) =>
+  const leave = (item: InboxEntry) =>
     inbox.patch((current) => current.filter((each) => each.id !== item.id));
 
   // Opening an item reads it.
-  const open = (item: InboxItem) => {
+  const open = (item: InboxEntry) => {
     if (item.unread) {
       inbox.patch((current) =>
         current.map((each) => (each.id === item.id ? { ...each, unread: false } : each)),
       );
       void client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
     }
+    // A notice about something other than a chat opens its link.
+    if (item.sessionId === null) {
+      if (item.link && /^https:\/\//iu.test(item.link.url)) openLink(item.link.url);
+      return;
+    }
     // Another member's private session would not open for this person.
     if (item.sessionAvailable === false) return;
     onOpenSession(item);
   };
 
-  const run = async (item: InboxItem, label: string, action: () => Promise<void>) => {
+  // Questions and approvals always come from a chat.
+  const chatOf = (item: InboxEntry): string => {
+    if (item.sessionId === null) throw new Error(t("native.timeline.inbox.tryAgain"));
+    return item.sessionId;
+  };
+
+  const run = async (item: InboxEntry, label: string, action: () => Promise<void>) => {
     setBusy((current) => ({ ...current, [item.id]: label }));
     try {
       await action();
@@ -487,9 +498,9 @@ export function NativeInboxList({
     }
   };
 
-  const decide = (item: InboxItem, decision: "approve" | "reject") =>
+  const decide = (item: InboxEntry, decision: "approve" | "reject") =>
     void run(item, decision, async () => {
-      await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
+      await client.sendApprovalDecision(item.workspaceId, chatOf(item), {
         approvalId: item.sourceKey,
         decision,
         // An MCP server's confirmation is answered for the question shown.
@@ -507,11 +518,11 @@ export function NativeInboxList({
       );
     });
 
-  const choose = (item: InboxItem, choice: { id: string; label: string }) =>
+  const choose = (item: InboxEntry, choice: { id: string; label: string }) =>
     void run(item, `choice:${choice.id}`, async () => {
       const request = await client.getHumanInputRequest(
         item.workspaceId,
-        item.sessionId,
+        chatOf(item),
         item.sourceKey,
       );
       const question = request.questions[0];
@@ -520,7 +531,7 @@ export function NativeInboxList({
         onNotice?.(t("native.timeline.inbox.alreadyAnswered"));
         return;
       }
-      await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
+      await client.submitHumanInputResponse(item.workspaceId, chatOf(item), item.sourceKey, {
         outcome: "answered",
         answers: [{ questionId: question.id, values: [choice.id] }],
       });
@@ -528,7 +539,7 @@ export function NativeInboxList({
       onNotice?.(t("native.timeline.inbox.answeredLabel", { label: choice.label }));
     });
 
-  const snooze = (item: InboxItem, until: Date | null) =>
+  const snooze = (item: InboxEntry, until: Date | null) =>
     void run(item, "snooze", async () => {
       const snoozedUntil = until ? until.toISOString() : null;
       inbox.patch((current) =>
@@ -537,7 +548,7 @@ export function NativeInboxList({
       await client.updateInboxItem(item.id, { snoozedUntil });
     });
 
-  const dismiss = (item: InboxItem) =>
+  const dismiss = (item: InboxEntry) =>
     void run(item, "dismiss", async () => {
       leave(item);
       await client.updateInboxItem(item.id, { dismissed: true });
@@ -570,7 +581,7 @@ export function NativeInboxList({
   };
 
   // A swipe toward the right snoozes: pick how long, or bring a snoozed one back.
-  const swipeSnooze = (item: InboxItem) => {
+  const swipeSnooze = (item: InboxEntry) => {
     if (snoozedNow(item, Date.now())) {
       snooze(item, null);
       onNotice?.(t("native.timeline.inbox.backInYourInbox"));
@@ -588,7 +599,7 @@ export function NativeInboxList({
     ]);
   };
 
-  const openMenu = (item: InboxItem) => {
+  const openMenu = (item: InboxEntry) => {
     const isSnoozed = snoozedNow(item, Date.now());
     const actions: Array<{ label: string; run: () => void; destructive?: boolean }> = [
       { label: t("native.timeline.inbox.openSession"), run: () => open(item) },
@@ -616,7 +627,7 @@ export function NativeInboxList({
   };
 
   // Where it comes from; the time sits apart so a long session title never hides it.
-  const meta = (item: InboxItem): string => {
+  const meta = (item: InboxEntry): string => {
     const parts: string[] = [];
     // Another member's agent sent it: say who, first.
     if (item.sender) parts.push(t("native.timeline.inbox.fromLabel", { label: item.sender.label }));
@@ -642,7 +653,7 @@ export function NativeInboxList({
     return parts.join(" · ");
   };
 
-  const actions = (item: InboxItem) => {
+  const actions = (item: InboxEntry) => {
     const pending = busy[item.id];
     if (item.kind === "approval" && item.serverQuestion) {
       // A plain confirmation is answered here; fields are filled in the session.
@@ -733,7 +744,7 @@ export function NativeInboxList({
     return null;
   };
 
-  const row = (item: InboxItem, index: number) => {
+  const row = (item: InboxEntry, index: number) => {
     const unread = !isNeedsYouKind(item.kind) && (item.unread || shownUnread.current.has(item.id));
     const rowActions = actions(item);
     return (
@@ -913,7 +924,7 @@ export function NativeInboxList({
     );
   };
 
-  const section = (title: string, list: InboxItem[], first: boolean) =>
+  const section = (title: string, list: InboxEntry[], first: boolean) =>
     list.length === 0 ? null : (
       <View key={title} style={{ marginTop: first ? 16 : 32 }}>
         <View style={{ paddingHorizontal: 2 }}>

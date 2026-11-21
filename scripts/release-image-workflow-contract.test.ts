@@ -1906,6 +1906,29 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("Build interaction helpers (Linux musl)");
   });
 
+  test("Windows ARM64 is built natively before signing, and unsigned artifacts are never published", async () => {
+    const release = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
+    const native = Bun.YAML.parse(await workflow("agent-windows-arm64.yml")) as ParsedWorkflow;
+    const signingDownload = release.jobs.build!.steps!.find(
+      (step) => step.name === "Download the native Windows ARM64 build for signing",
+    );
+    const publishDownload = release.jobs.publish!.steps!.find(
+      (step) => step.name === "Download all artifacts",
+    );
+    expect(signingDownload?.with?.["artifact-ids"]).toBe(
+      "${{ needs.windows-arm64.outputs.artifact-id }}",
+    );
+    expect(publishDownload?.with?.pattern).toBe("opengeni-agent-*");
+    const steps = native.jobs.build!.steps!;
+    const smoke = steps.findIndex(
+      (step) => step.name === "Start the runtime from the standalone agent",
+    );
+    const upload = steps.findIndex((step) => step.uses?.startsWith("actions/upload-artifact@"));
+    expect(smoke).toBeGreaterThanOrEqual(0);
+    expect(upload).toBeGreaterThan(smoke);
+    expect(steps[upload]?.with?.name).toStartWith("agent-windows-arm64-unsigned-");
+  });
+
   test("release-state parsing accepts a valid absent release without weakening type checks", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");

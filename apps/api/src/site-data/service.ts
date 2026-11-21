@@ -1,12 +1,19 @@
 import { createHash } from "node:crypto";
 import Ajv, { type ValidateFunction } from "ajv";
-import { hasLiteralPermission, hasPermission, siteViewerForGrant } from "@opengeni/core";
+import {
+  hasLiteralPermission,
+  hasPermission,
+  outsideAgentReach,
+  siteViewerForGrant,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { AccessGrant, SiteDataDescribeResponse } from "@opengeni/contracts";
 import {
   createPostgresSiteDataStore,
-  getSiteDataScheduledTaskId,
+  getAppAutomationCause,
+  getSiteDataScheduledRun,
   getSiteDataSite,
+  getSitePublication,
   parseSiteDataPath,
   readSiteDataPath,
   recordSitePlatformUsageInTransaction,
@@ -21,6 +28,7 @@ import {
   type SiteDataWriteSummary,
   writeSiteDataPath,
 } from "@opengeni/db";
+import { siteLiveChangeListener, type SiteLiveSettings } from "../site-live/service";
 
 /**
  * Site Data service: resolves who is calling (manager or viewer, and their
@@ -41,13 +49,19 @@ export type SiteDataAccess = {
 };
 
 const stores = new WeakMap<object, SiteDataStore>();
+const liveStores = new WeakMap<object, SiteDataStore>();
 
-/** One store per database handle. */
-export function siteDataStore(db: Database): SiteDataStore {
-  let store = stores.get(db);
+/**
+ * One store per database handle. With settings, the store also sends live
+ * change hints for watched Sites after its writes commit (site-live).
+ */
+export function siteDataStore(db: Database, settings?: SiteLiveSettings): SiteDataStore {
+  const onChange = settings ? siteLiveChangeListener(settings) : undefined;
+  const cache = onChange ? liveStores : stores;
+  let store = cache.get(db);
   if (!store) {
-    store = createPostgresSiteDataStore(db);
-    stores.set(db, store);
+    store = createPostgresSiteDataStore(db, onChange ? { onChange } : {});
+    cache.set(db, store);
   }
   return store;
 }
@@ -526,7 +540,11 @@ function contentDigest(value: unknown): string {
 export async function prevalidateSiteDataWrite(
   access: Pick<SiteDataAccess, "store" | "caller" | "limits" | "writeOptions">,
   operations: readonly unknown[],
-  options: { budgetMs?: number; meter?: SiteDataValidationMeter; reservedMs?: number } = {},
+  options: {
+    budgetMs?: number;
+    meter?: SiteDataValidationMeter;
+    reservedMs?: number;
+  } = {},
 ): Promise<SiteDataWriteOptions> {
   const budgetMs = options.budgetMs ?? SITE_DATA_VALIDATION_BUDGET_MS;
   const meter = options.meter ?? { ms: 0 };
@@ -779,6 +797,32 @@ export type SiteDataSurface = {
   management?: boolean;
 };
 
+/** Why an outside agent can't manage an app's data, and how the person changes it. */
+export const OUTSIDE_AGENT_VIEWER_MESSAGE =
+  "Connected agents read and write app data as viewers. The person who connected this agent can let it manage app data in Organization settings > Connected agents.";
+
+/** Why an outside agent can't use an app that people outside the workspace can open. */
+export const OUTSIDE_AGENT_MEMBERS_ONLY_MESSAGE =
+  "This app is open to people outside the workspace, so connected agents can't use its data: what a visitor writes could carry instructions to an agent that runs on someone's computer. Make the app members-only to use it from here.";
+
+/**
+ * Outside agents reach only apps whose audience is the workspace's members: a
+ * Site never published, or one published to members.
+ */
+async function requireMembersOnlyAppForOutsideAgent(
+  deps: SiteDataDeps,
+  scope: { accountId: string; workspaceId: string },
+  siteId: string,
+): Promise<void> {
+  const publication = await getSitePublication(deps.db, scope, siteId);
+  // Whatever its status: a suspended or unpublished app still holds what
+  // visitors wrote while it was open.
+  if (publication && publication.access !== "members")
+    throw new SiteDataError("forbidden", OUTSIDE_AGENT_MEMBERS_ONLY_MESSAGE, {
+      code: "outside_agent_members_only",
+    });
+}
+
 /**
  * A viewer of a published Site, resolved and authorized by site-runtime (the
  * gateway-signed API): a signed-in person (`user:<subject>`) or an anonymous
@@ -814,11 +858,10 @@ function publishedViewerAccess(
   surface: SiteDataSurface,
 ): SiteDataAccess {
   if (viewer.site.id !== siteId)
-    throw new SiteDataError("forbidden", "A Site can only use its own data");
+    throw new SiteDataError("forbidden", "An app can only use its own data");
   if (surface.management)
-    throw new SiteDataError("forbidden", "Only the Site's managers can manage its data");
-  if (viewer.site.status !== "active")
-    throw new SiteDataError("forbidden", "This Site is archived");
+    throw new SiteDataError("forbidden", "Only the app's managers can manage its data");
+  if (viewer.site.status !== "active") throw new SiteDataError("forbidden", "This app is archived");
   const caller: SiteDataCaller = {
     accountId: viewer.accountId,
     workspaceId: viewer.workspaceId,
@@ -837,7 +880,7 @@ function publishedViewerAccess(
     site: viewer.site,
     caller,
     subjectId,
-    store: siteDataStore(deps.db),
+    store: siteDataStore(deps.db, deps.settings),
     limits,
     writeOptions: {
       limits,
@@ -862,23 +905,42 @@ export async function resolveSiteDataAccess(
   const grant = authority;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   const agentIds = agentSessionIds(grant);
-  const scheduledTaskId = agentIds
-    ? await getSiteDataScheduledTaskId(deps.db, scope, agentIds.sessionId)
-    : null;
+  const [scheduledRun, automationCause] = agentIds
+    ? await Promise.all([
+        getSiteDataScheduledRun(deps.db, scope, agentIds.sessionId),
+        // The run behind this agent's turn (also through the chats that
+        // started it), so App change events carry its chain depth.
+        getAppAutomationCause(deps.db, scope, agentIds).catch(() => null),
+      ])
+    : [null, null];
+  const scheduledTaskId = scheduledRun?.taskId ?? null;
   const framed = surface.frameSiteId !== undefined && surface.frameSiteId !== null;
   if (surface.frameSiteId != null && surface.frameSiteId !== siteId)
-    throw new SiteDataError("forbidden", "A Site can only use its own data");
+    throw new SiteDataError("forbidden", "An app can only use its own data");
   const viewer = await siteViewerForGrant(deps.db, grant);
   const site = await getSiteDataSite(deps.db, scope, viewer, siteId);
-  if (!site) throw new SiteDataError("not_found", "Site not found");
+  if (!site) throw new SiteDataError("not_found", "App not found");
+  // An outside agent (a coding agent connected over MCP) usually has a shell
+  // on someone's computer. It reaches only members-only apps, so nothing a
+  // guest or an invited outsider wrote can carry instructions to it, and it
+  // reads like a viewer unless its connection was given app management.
+  const outsideAgent = outsideAgentReach(grant);
+  if (outsideAgent) await requireMembersOnlyAppForOutsideAgent(deps, scope, siteId);
   // Site HTML is untrusted: whoever views it, a Site frame gets viewer reach.
   // Managers keep full reach only through the Data view, the API and agent tools.
-  const manages = siteDataRole(grant, site, viewer.subjectId) === "manager";
+  const manages =
+    siteDataRole(grant, site, viewer.subjectId) === "manager" &&
+    (outsideAgent === null || outsideAgent.appData === "manager");
   const role = framed ? "viewer" : manages ? "manager" : "viewer";
   if (site.status !== "active" && (framed || role !== "manager"))
-    throw new SiteDataError("forbidden", "This Site is archived");
-  if (surface.management && (framed || role !== "manager"))
-    throw new SiteDataError("forbidden", "Only the Site's managers can manage its data");
+    throw new SiteDataError("forbidden", "This app is archived");
+  if (surface.management && (framed || role !== "manager")) {
+    if (outsideAgent?.appData === "viewer" && !framed)
+      throw new SiteDataError("forbidden", OUTSIDE_AGENT_VIEWER_MESSAGE, {
+        code: "outside_agent_viewer",
+      });
+    throw new SiteDataError("forbidden", "Only the app's managers can manage its data");
+  }
   const caller: SiteDataCaller = {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -887,13 +949,22 @@ export async function resolveSiteDataAccess(
     principal: siteDataPrincipal(grant, viewer.subjectId, scheduledTaskId),
     actor: siteDataActor(grant, viewer.subjectId),
     framed,
+    ...(automationCause
+      ? {
+          chainDepth: automationCause.chainDepth,
+          automationId: automationCause.taskId,
+          automationRunId: automationCause.runId,
+        }
+      : scheduledRun
+        ? { chainDepth: scheduledRun.chainDepth }
+        : {}),
   };
   const limits = siteDataLimits(deps.settings);
   return {
     site,
     caller,
     subjectId: viewer.subjectId,
-    store: siteDataStore(deps.db),
+    store: siteDataStore(deps.db, deps.settings),
     limits,
     writeOptions: {
       limits,

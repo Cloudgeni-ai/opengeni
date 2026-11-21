@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import { DEFAULT_SANDBOX_PLAN_LIMITS } from "@opengeni/config";
+import { DEFAULT_SANDBOX_PLAN_LIMITS, type SandboxPlanLimits } from "@opengeni/config";
 import {
   acquireLease as acquireLeaseUnscoped,
   commitWarmingToWarm,
@@ -27,7 +27,8 @@ import {
 // unpaid organization without a verified card cannot start a sandbox box;
 // joining a running box, paid, Enterprise, host-provisioned and credit-buying
 // organizations, and a Connected Machine are unaffected; another organization
-// of the same owner inherits the owner's verified card.
+// of the same owner inherits the owner's verified card. Until the tier's card
+// trial box time is used, an agent turn may still start one box.
 
 const acquireLease: typeof acquireLeaseUnscoped = (db, input) =>
   withCreditDebitAttribution({ kind: "service" }, () => acquireLeaseUnscoped(db, input));
@@ -66,6 +67,14 @@ async function setGate(enabled: boolean): Promise<void> {
   forgetCaches();
 }
 
+/** The default limits without the card trial: the gate refuses every box. */
+const NO_TRIAL_LIMITS: SandboxPlanLimits = Object.fromEntries(
+  Object.entries(DEFAULT_SANDBOX_PLAN_LIMITS).map(([tier, limit]) => [
+    tier,
+    { ...limit, cardTrialBoxSeconds: 0 },
+  ]),
+);
+
 type Org = { accountId: string; workspaceId: string };
 
 async function organization(options: { plan?: string; source?: string } = {}): Promise<Org> {
@@ -101,7 +110,12 @@ function card(accountId: string, subjectId: string, fingerprint = crypto.randomU
 function acquire(
   org: Org,
   kind: AcquireLeaseInput["kind"],
-  options: { group?: string; subjectId?: string; backend?: string } = {},
+  options: {
+    group?: string;
+    subjectId?: string;
+    backend?: string;
+    limits?: SandboxPlanLimits;
+  } = {},
 ) {
   return acquireLease(db, {
     accountId: org.accountId,
@@ -111,7 +125,7 @@ function acquire(
     holderId: `${kind}-${crypto.randomUUID()}`,
     backend: options.backend ?? "modal",
     leaseTtlMs: 90_000,
-    sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+    sandboxPlanLimits: options.limits ?? NO_TRIAL_LIMITS,
     ...(options.subjectId
       ? {
           actingSubjectId: options.subjectId,
@@ -231,13 +245,94 @@ describe("card verification gate (real PostgreSQL)", () => {
     forgetCaches();
     const standing = await resolveSandboxComputeStanding(db, {
       accountId: two.accountId,
-      limits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      limits: NO_TRIAL_LIMITS,
       actingSubjectId: subjectId,
     });
     expect(standing.cardRequired).toBe(false);
     expect((await acquire(two, "direct", { subjectId })).role).toBe("spawner");
     // Work no person acts for needs the organization's own card.
     expect((await refusal(acquire(two, "direct"))).reason).toBe("card_required");
+  }, 120_000);
+
+  test("card trial: an agent turn starts one box before the card; nothing else does", async () => {
+    await setGate(true);
+    const limits = DEFAULT_SANDBOX_PLAN_LIMITS;
+    expect(limits.free?.cardTrialBoxSeconds).toBe(600);
+    for (const planKey of ["free", undefined]) {
+      const org = await organization(planKey ? { plan: planKey } : {});
+      forgetCaches();
+      const standing = await resolveSandboxComputeStanding(db, {
+        accountId: org.accountId,
+        limits,
+      });
+      expect(standing).toMatchObject({
+        cardRequired: true,
+        cardTrial: true,
+        cardTrialSpent: false,
+      });
+      // Terminals, processes, desktops and viewers still need the card.
+      for (const kind of ["viewer", "direct", "interaction"] as const) {
+        expect((await refusal(acquire(org, kind, { limits }))).reason).toBe("card_required");
+      }
+      const group = crypto.randomUUID();
+      expect((await acquire(org, "turn", { group, limits })).role).toBe("spawner");
+      // One trial box at a time: a second chat is asked for the card.
+      expect((await refusal(acquire(org, "turn", { limits }))).reason).toBe("card_required");
+      // The same turn's box stays admitted while it runs.
+      await commitWarmingToWarm(db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        sandboxGroupId: group,
+        expectedEpoch: 0,
+        instanceId: `box-${group}`,
+        leaseTtlMs: 90_000,
+      });
+      expect((await acquire(org, "viewer", { group, limits })).role).not.toBe("spawner");
+    }
+  }, 120_000);
+
+  test("card trial used: no new box, and no join of a box no turn holds", async () => {
+    await setGate(false);
+    const limits = DEFAULT_SANDBOX_PLAN_LIMITS;
+    const org = await organization({ plan: "free" });
+    // One box only a terminal holds and one a turn holds, started before the gate.
+    const idle = crypto.randomUUID();
+    const busy = crypto.randomUUID();
+    for (const [group, kind] of [
+      [idle, "direct"],
+      [busy, "turn"],
+    ] as const) {
+      expect((await acquire(org, kind, { group, limits })).role).toBe("spawner");
+      await commitWarmingToWarm(db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        sandboxGroupId: group,
+        expectedEpoch: 0,
+        instanceId: `box-${group}`,
+        leaseTtlMs: 90_000,
+      });
+    }
+    await admin`insert into usage_events
+      (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at)
+      values (${org.accountId}, ${org.workspaceId}, 'sandbox.warm_seconds', 600, 'seconds',
+        ${crypto.randomUUID()}, now() - interval '2 days')`;
+    await setGate(true);
+    const standing = await resolveSandboxComputeStanding(db, { accountId: org.accountId, limits });
+    expect(standing).toMatchObject({
+      cardRequired: true,
+      cardTrial: false,
+      cardTrialSpent: true,
+    });
+    expect((await refusal(acquire(org, "turn", { limits }))).reason).toBe("card_required");
+    expect((await refusal(acquire(org, "turn", { group: idle, limits }))).reason).toBe(
+      "card_required",
+    );
+    // A box a turn still holds keeps admitting that work until the turn ends.
+    expect((await acquire(org, "viewer", { group: busy, limits })).role).not.toBe("spawner");
+    // A card lifts it.
+    await card(org.accountId, `user:${crypto.randomUUID()}`);
+    forgetCaches();
+    expect((await acquire(org, "turn", { group: idle, limits })).role).not.toBe("spawner");
   }, 120_000);
 
   test("the audited setter switches the gate and validates its value", async () => {

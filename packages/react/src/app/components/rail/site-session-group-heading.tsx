@@ -164,7 +164,7 @@ export function SiteSessionGroupHeading({
         activeOptions={{ exact: true, includeSearch: true }}
         aria-current={active ? "page" : undefined}
         // Without conversations there is no status to announce.
-        aria-label={`Open ${origin.title}. Site${pinned ? ". Pinned" : ""}${count > 0 ? `, ${conversations}. ${summary.label}` : ""}`}
+        aria-label={`Open ${origin.title}. App${pinned ? ". Pinned" : ""}${count > 0 ? `, ${conversations}. ${summary.label}` : ""}`}
         // Drag onto a project to move the row there, like a chat row.
         draggable={canMove}
         onDragStart={(event) => {
@@ -203,7 +203,7 @@ export function SiteSessionGroupHeading({
         <>
           <div className={RAIL_ROW_QUICK_ACTIONS_CLASS} data-site-quick-actions={origin.siteId}>
             <RailRowQuickAction
-              label={`${pinLabel} Site`}
+              label={`${pinLabel} app`}
               tooltip={pinLabel}
               data-site-actions={origin.siteId}
               data-site-action="pin"
@@ -212,7 +212,7 @@ export function SiteSessionGroupHeading({
               <PinIcon className={pinned ? "size-3.5 fill-current" : "size-3.5"} />
             </RailRowQuickAction>
             <RailRowQuickAction
-              label="Archive Site"
+              label="Archive app"
               tooltip="Archive"
               data-site-actions={origin.siteId}
               data-site-action="archive"
@@ -329,7 +329,7 @@ function SiteRowMenuItems({
       <Item asChild data-site-action="details">
         <Link {...site.details}>
           <InfoIcon className="size-4" />
-          Site details
+          App details
         </Link>
       </Item>
       <Item onSelect={() => actions.archive(origin)}>

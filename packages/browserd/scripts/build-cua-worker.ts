@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 // regenerated (scripts/generate-cua-desktop-tools.ts) and their byte and sha256
 // pins in scripts/check-public-repo-hygiene.ts updated: native calls are refused
 // when the worker's schema differs from the bundled one.
-export const cuaSourceRevision = "55ae670d60b0e71bd5094aa6abff6ea391764ec4";
+export const cuaSourceRevision = "7d295a41a655110e494f45c87bbfee998fb03b9a";
 const repository = "https://github.com/Cloudgeni-ai/cua.git";
 
 export async function buildCuaWorker(architecture: string): Promise<string> {

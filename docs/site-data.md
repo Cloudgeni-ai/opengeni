@@ -41,6 +41,8 @@ and DML granted to the runtime role, so it could move to its own database:
 | `site_data_rate_windows` | fixed one-minute windows: writes per principal and per Site, Site-frame reads per principal |
 | `site_data_validation_windows` | fixed one-minute window of schema-validation time per Site |
 | `site_data_workspace_validation_windows` | fixed one-minute window of schema-validation time per workspace, a ceiling across its Sites |
+| `site_data_changes` | the change outbox (migration `1504`): one row per committed write transaction while someone listens (see "Change events") |
+| `site_data_insert_keys` | idempotency keys of inserts, per collection and principal, pointing at the record they created |
 
 Principals are abstract strings: `user:<subjectId>` for people and
 `service:<subjectId>` for personless keys. Agents are recorded as
@@ -68,6 +70,116 @@ counts use the maintained counters; nothing counts a collection. Records carry a
 `version`; `expectedVersion` turns a stale patch, put or delete into
 `conflict` (`0` means "must not exist").
 
+Inserts accept an optional `idempotencyKey` (1 to 256 characters). Inside the
+write transaction, a key the same principal already used in the collection
+returns the record it created (`replayed: true`) instead of inserting again;
+a batch that only replays records no change. Keys are kept at least a day
+(older ones are pruned as writes go by) and vanish with their record.
+
+Filters on `$createdAt`, `$updatedAt` and data fields accept the server's
+clock as a value: `$now`, optionally offset (`$now-5m`, `$now+1h`, units `ms`,
+`s`, `m`, `h`, `d`). On data fields it compares as an ISO-8601 UTC string with
+milliseconds (`2026-11-19T12:00:00.000Z`), so store lease times in that form.
+That makes the expiry check use the server's clock; the `leaseUntil` a page
+writes with `patch` still comes from its own clock, so keep leases well above
+any likely clock skew. The record `version` (with `expectedVersion`) is the
+fencing token for whoever holds a claim.
+
+## Change events
+
+Every committed write moves the Site's `site_data_usage.change_seq` up by one,
+under the same row lock that already serializes the Site's writes, so the
+numbers are gap-free and in commit order. When someone listens
+(`site_data_usage.live_until` is in the future), the same transaction also
+writes one `site_data_changes` row: kind (`write`, `import`, `reset`,
+`collection`, `files`), the collections touched (`$files` for files), counts
+per operation, up to 20 record ids, the writer's kind (`user`, `guest`,
+`agent`, `schedule`, `service`, `other`) and the automation chain depth. Imports, resets
+and collection deletes are one coarse row each. With nobody listening the cost
+is the one column update; rows past the newest 200 per Site are pruned every
+20 changes.
+
+After commit the API sends a signed notice to the gateway's `SiteLive`
+Durable Object for the Site (best effort, gathered per Site for 50 ms, at
+most 3 seconds, never failing the write). Open pages hold a WebSocket to it (`/_og/live` on the Site host,
+admitted by `POST /v1/site-runtime/live/admit` with the viewer's normal
+access; the console uses a 60-second ticket from `POST
+/v1/workspaces/:workspaceId/published-artifacts/:artifactId/live`). Each
+connection hears only `{collections, seq}` for collections it may read, and
+new versions; never record data, so `per_viewer` and guest rules hold: pages
+read again through their ordinary authorized calls. Admission refreshes
+`live_until` (15 minutes, extended at half-life), and a connection lasts no
+longer than it, so connections reconnect before it lapses. A reconnect that
+missed changes, or a connection admitted just before a change, hears
+"anything may have changed". The published Site's page opens its connection
+when its code first calls `onChange`, lets it go after 30 seconds hidden, and
+stops after five refused connections. Hints still show when
+others write (activity timing, never content); readable collections are fixed
+per connection until it reconnects. Without `OPENGENI_SITES_LIVE_ENABLED` and the `SITE_LIVE` gateway binding the live routes answer 404
+and pages keep their timed checks.
+
+Live hints do not cover Site SQL writes (the Durable Object commit is not
+atomic with Postgres, so no hint is published).
+
+### App change events for automations and webhooks
+
+Automations and workspace webhooks hear about app data changes through the
+same vocabulary as Opengeni's other events (migration `1519`,
+`packages/db/src/app-activity-events.ts`):
+
+- `app.record.added`, `app.record.changed`, `app.record.removed`: one fact per
+  record a write transaction inserted (`insert`, a new `put` key, an
+  `increment` that created the record), changed (`put`, `patch`, `increment`)
+  or deleted. A `put` or `patch` that leaves the stored data unchanged sends
+  nothing, so a sync that refreshes the same data stays quiet. Imports,
+  collection resets and collection deletes send none.
+- `app.sql.changed`: a Site SQL write (a saved write query or
+  `app_sql_execute`) that wrote rows. The app's database commits in its
+  Durable Object, outside Postgres, so the API records this fact right after
+  the call returns, best effort: a crash in between loses the event, never
+  the write.
+
+Facts go to `workspace_activity_events` (the 1105 facts table) with the app's
+id, in the write's own transaction, and only while someone listens: an active
+"This workspace" event source or an enabled workspace webhook subscribed to an
+app type. Otherwise the write pays one indexed lookup. A fact carries the
+collection, record id, key, version, the record owner's subject, the writer's
+kind and the record's data when it is at most 4 KB (`recordTruncated`
+otherwise), plus the automation run that caused the write and its chain depth:
+an agent's write is traced to the run behind its turn the way chat facts are
+(the turn's run, the automation's own chat, or up to eight parent chats), so
+a loop of automations stops at the chain limit (depth 3) and the storm guard
+applies. A fact that cannot be written is logged and never fails the write.
+
+Who sees a fact is decided by row security, as the "This workspace" source
+reads as its owner:
+
+- The person must be able to open the app: it is shared with the workspace,
+  or it is their own Only me app.
+- In a collection where viewers read only their own records (`per_viewer`,
+  `append_only`), the record's owner sees it, and so do the app's managers
+  (members who may publish apps, and workspace administrators) unless the
+  records are private (`privateRecords`), when only the owner does.
+
+Workspace webhooks receive every app fact of the workspace, but without the
+record's data, key and owner when only some people may read it
+(`recordWithheld: true`): a
+record in a collection where people read only their own, or any record of an
+app that isn't shared with the workspace (an Only me app).
+Organization webhooks don't offer app types. Events for automations are
+rendered like other "This workspace" events: summary `Record added in
+<App> / <collection>`, the App's console address, `data.appId`,
+`data.appTitle`, `data.writtenByYou`, and the fields above. Filter on
+`data.appId` and `data.collection` to listen to one collection.
+
+A [data sync](app-sync.md) writes through the same path, so its changes send
+these events with the sync run's chain depth. They are not marked as
+Opengeni's own (a sync runs no model), so a trigger hears them without
+"include Opengeni's own events".
+
+Self-hosted: record events work wherever Site Data does. `app.sql.changed`
+needs Site SQL, which runs only on the hosted Cloudflare gateway.
+
 ## Access rules
 
 All rules are enforced in the API (`apps/api/src/site-data/service.ts`); the
@@ -82,6 +194,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   (for example a person-less scheduled task) is a viewer, whatever credential
   started it. Managers define collections and read everything except
   `privateRecords`. Everyone else who can view the Site is a **viewer**.
+- Agents outside Opengeni (connected agents and personal API keys on the
+  [organization MCP server](mcp-surfaces.md#named-tools-for-connected-agents))
+  are **viewers** unless the person set the connection's app data to Manager
+  (`outside_agent_viewer`), and reach only members-only or unpublished Sites
+  (`outside_agent_members_only`): text from outside visitors must not reach an
+  agent that picks up work. Describe answers them with `access: "viewer"`.
 - Requests from Site HTML always get **viewer** reach, whoever is viewing:
   Site HTML is untrusted (any member with `artifacts:publish` can publish a
   new version of a Site), so the owner's own Site page reads only their own
@@ -286,16 +404,20 @@ CORS policy allows `X-OpenGeni-Site-Frame`, `X-OpenGeni-Site-Id` and
 `X-OpenGeni-Site-Version`, so cross-origin hosts can send bridged requests.
 Stored records are untrusted; the Sites skill requires rendering them as text.
 
-**Agent tools** (MCP and Codemode, family `artifacts`; `site_data_describe`,
-`site_data_query`, `site_data_export` and `site_files_list` need
-`artifacts:read`, the rest `artifacts:publish`): `site_data_describe`,
-`site_data_define_collection` (create, change or delete), `site_data_query`,
-`site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset`
-(needs `confirm: true`), `site_files_list`, `site_files_upload` and
-`site_files_delete`. They run with the attempt's authority, so scheduled tasks
+**Agent tools** (MCP and Codemode, family `artifacts`; `app_data_describe`,
+`app_data_query`, `app_data_export` and `app_files_list` need
+`artifacts:read`, the rest `artifacts:publish`): `app_data_describe`,
+`app_data_define_collection` (create, change or delete), `app_data_query`,
+`app_data_write`, `app_data_import`, `app_data_export`, `app_data_reset`
+(needs `confirm: true`), `app_files_list`, `app_files_upload` and
+`app_files_delete`. They run with the attempt's authority, so scheduled tasks
 use the schedule's. Site-origin agents use the same native role as console agents.
 
 
+
+**Syncs.** An app data sync keeps a collection filled from a connected tool on
+a schedule without a model run; the page reads each sync's last run with
+`site.data.syncs()` (`GET /data/syncs`). See [app-sync.md](app-sync.md).
 
 **Web.** The Site page's Data tab (`packages/react/src/app/components/artifacts/site-data.tsx`)
 is shown to likely managers and trusts the API's answer: collections with
@@ -343,7 +465,8 @@ mode are added.
 ## Site SQL (optional Cloudflare storage)
 
 Site SQL gives one published Site its own SQLite database: one
-SQLite-backed Durable Object (`SiteDatabase`, `SITE_DB.idFromName(siteId)`)
+SQLite-backed Durable Object (`SiteDatabase`,
+`SITE_DB.jurisdiction("eu").idFromName(siteId)`, see [Location](#location))
 in the Sites gateway Worker. It sits next to Site Data; the owner turns it on
 per Site. Postgres stays the source of truth for the definitions, so the
 database can always be rebuilt; the Durable Object holds only the rows.
@@ -427,7 +550,7 @@ profiles decide the rest:
 | Profile  | Used for                  | Rules                                                                 |
 | -------- | ------------------------- | --------------------------------------------------------------------- |
 | `named`  | named queries Sites call  | exactly one SELECT/INSERT/UPDATE/DELETE/REPLACE (WITH allowed, not recursive: no `RECURSIVE`, and no WITH table that names itself or uses UNION, INTERSECT or EXCEPT, at any nesting level); no schema changes, PRAGMA or EXPLAIN; 16K characters |
-| `agent`  | `site_sql_query`/`execute` | exactly one read or write statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration) here and in the Durable Object; 64K characters |
+| `agent`  | `app_sql_query`/`execute` | exactly one read or write statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration) here and in the Durable Object; 64K characters |
 | `script` | migrations and SQL imports | up to 2,000 statements, run in one transaction; schema changes allowed; 2M characters |
 
 Statement boundaries are never guessed. A `CREATE TRIGGER` body starts at
@@ -474,7 +597,7 @@ visitor binds that role with their own email. A request that supplies one is ref
 a Site cannot impersonate another viewer:
 
 ```sql
--- define with site_sql_define_query, audience signed_in
+-- define with app_sql_define_query, audience signed_in
 INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
 ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
 ```
@@ -518,6 +641,73 @@ applied) is in the Durable Object's key-value storage, which workerd keeps in
 change it. Request ids are kept in one-minute buckets for three minutes and
 each request deletes at most 256 older ones.
 
+### Location
+
+Site databases are stored in Cloudflare's EU jurisdiction: the gateway names
+each Site's object in `SITE_DB.jurisdiction("eu")`, so Cloudflare keeps its
+data in the EU. Only storage is placed; serving traffic (the Worker and the
+edge) is not restricted to the EU.
+
+Databases created before that live in the plain namespace
+(`SITE_DB.idFromName(siteId)`, the legacy object). A jurisdiction-scoped id is
+a different object, so each database moves once, inside the gateway
+(`apps/site-gateway/src/site-db-location.ts`, `site-db-relocation.ts`):
+
+- The first request for a Site reaches its EU object, which asks the legacy
+  object what it holds. An empty legacy object (every new Site) stores only a
+  moved marker (the Site id, no data) and the EU object becomes the database's
+  home.
+- Otherwise the EU object fences the legacy object (earlier gateway releases
+  get a retryable 503 that says nothing ran), copies it page by page (pages
+  of at most 1 MiB of UTF-8, staged with every value's storage class), builds
+  the copy in one transaction (tables and FTS5 settings, then rows with their
+  rowids and exact storage classes, text as its stored bytes, then indexes,
+  views and triggers so triggers never fire on the copy, then the
+  AUTOINCREMENT counters, with foreign keys checked before commit) and copies
+  the migration records and recent request ids.
+- The copy is accepted only when its schema, FTS5 settings, per-table row
+  counts and row SHA-256 digests, AUTOINCREMENT counters and migration
+  records equal the legacy object's, taken under the fence. The fence never
+  expires on its own, so the legacy object takes no write between that check
+  and the switch. Then the EU object becomes the home and the legacy object is
+  marked moved: it keeps its data, frozen, and sends any request from an
+  earlier gateway release to the EU object.
+- Requests that arrive during the move wait for it (a Durable Object runs one
+  copy at a time and every new request goes through the EU object), so no
+  write is lost or applied to the old copy.
+- When the move fails, nothing changes for the Site: the EU object discards
+  its partial copy, releases the legacy object and serves every request from
+  it, and retries after a backoff (1 minute, doubling to 1 hour). Databases
+  that cannot move this way stay where they are and are reported: an FTS5
+  table without its own content, a virtual table other than FTS5, a rowid
+  table whose columns take all of `rowid`, `_rowid_` and `oid`, a table with
+more than 99 columns (SQLite's limits in a Durable Object), and databases
+  over 32 MiB (the copy runs inside one request). A legacy object still on the
+  previous release (Cloudflare can defer a busy object's code update) is
+  served as it is and asked again after 30 seconds. Responses say where they
+  were served (`x-og-site-db-location: eu|legacy`) and, from the legacy
+  object, why it has not moved (`x-og-site-db-relocation-error`); the API logs
+  the latter.
+- Erasing a database erases its legacy copy too: `reset` and `migrate` with
+  `rebuild` first delete everything in the legacy object except its moved
+  marker, and a `reset` before the move erases the legacy database instead of
+  copying it. Workspace deletion resets each database, so it erases both.
+
+Idle databases move when an operator runs
+`apps/site-gateway/scripts/move-site-databases-to-eu.ts` after the gateway is
+deployed, with the API's `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN` and
+`OPENGENI_SITES_GATEWAY_SECRET` and every `site_sql_databases.site_id` (read
+as the table owner: the table has row-level security). It calls `inspect` for
+each Site, prints where each database is, exits non-zero while any has not
+moved (or when no ids were given), and can be rerun at any time.
+
+Nothing deletes a legacy object, and only an explicit reset or rebuild erases
+its data. Removing the frozen copies is a separate, explicit cleanup step
+after the move is verified. Do not roll the gateway back to a release from
+before this change once databases have moved: that release does not know
+about locations and would serve the frozen legacy copies. The ops deploy
+workflows refuse such a source.
+
 ### Owner tools and routes
 
 Managers (the Site's owner, workspace admins and agents acting for them) use
@@ -528,22 +718,25 @@ PUT `/settings`, POST|PUT|DELETE `/queries/:name`, POST `/migrations`, `/query`,
 
 | Tool                    | Does                                                                  |
 | ----------------------- | --------------------------------------------------------------------- |
-| `site_sql_inspect`      | settings, limits, usage, tables, migrations, pending migrations, queries |
-| `site_sql_enable`       | turn the Site's database on or off                                     |
-| `site_sql_migrate`      | append a named schema migration and apply every missing one            |
-| `site_sql_define_query` | create, replace or delete a named query                                |
-| `site_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
-| `site_sql_run`          | one named query with params, as a Site page runs it (`site.sql.run`)    |
-| `site_sql_execute`      | one write statement (schema changes go through migrations)             |
-| `site_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
-| `site_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
-| `site_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
+| `app_sql_inspect`      | settings, limits, usage, tables, migrations, pending migrations, queries |
+| `app_sql_enable`       | turn the Site's database on or off                                     |
+| `app_sql_migrate`      | append a named schema migration and apply every missing one            |
+| `app_sql_define_query` | create, replace or delete a named query                                |
+| `app_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
+| `app_sql_run`          | one named query with params, as a Site page runs it (`site.sql.run`)    |
+| `app_sql_execute`      | one write statement (schema changes go through migrations)             |
+| `app_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
+| `app_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
+| `app_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
 
-Ordinary authoring routes and tools except `site_sql_run` need the manager role on the
+Ordinary authoring routes and tools except `app_sql_run` need the manager role on the
 Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
-`site_sql_run` needs `artifacts:read` and applies the query's audience to the
+`app_sql_run` needs `artifacts:read` and applies the query's audience to the
 agent as to a page viewer (managers run every query). The tools are only
 registered when the gateway origin and secret are configured.
+
+To move an app with its migrations, named queries and collection definitions
+to another workspace, export it as a package ([App packages](app-packages.md)).
 
 Site and console agents use identical native Site SQL authorization. Members
 are not pinned to the originating Site. Outside-workspace visitor conversations
@@ -560,7 +753,7 @@ and the tool returns `nextCursor`: pass it back as `cursor` and append the
 pieces in order. Only the first piece holds the header (the SQL schema, the
 CSV header row, the JSON schema) and only the last SQL piece holds the
 triggers, so the pieces of a SQL export re-import one after another
-(`site_sql_import` takes at most 2 MB per call). SQL and JSON exports keep
+(`app_sql_import` takes at most 2 MB per call). SQL and JSON exports keep
 every value (JSON writes blobs as `{ "$base64": "..." }`, which JSON imports
 cannot load back yet, so SQL is the lossless round trip); CSV turns every
 value into text (an empty cell imports as NULL) and blobs into base64. SQL
@@ -570,7 +763,7 @@ single row larger than that needs a JSON export and import.
 
 An export is not a point-in-time snapshot: each piece reads the database as
 it is then, so writes between pieces can show up in later pieces only. For a
-consistent copy, turn Site SQL off (`site_sql_enable` with `enabled: false`;
+consistent copy, turn Site SQL off (`app_sql_enable` with `enabled: false`;
 export keeps working) before a full export and back on afterwards.
 
 To restore a SQL export into the same or another Site, reset with `schema:
@@ -681,7 +874,10 @@ answered; a metering failure is logged and does not fail the call.
 - Forward Site Data through `createOpenGeniSessionProxy` for embedded hosts
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
-  principals; live updates.
+  principals.
+- App change events for imports, resets and file uploads; Site SQL change
+  events that name the tables a statement wrote; a durable outbox for Site
+  SQL change events instead of the best-effort write after the call.
 
 
 - Site SQL: per-call CPU time is bounded only by the Durable Object's own

@@ -483,7 +483,8 @@ that host-side restriction. Store uploads omit the development-only manifest
 
 A product built on Opengeni can ship its own branded build of the extension
 (see `apps/browser-extension/README.md`) as its own Chrome Web Store item. The
-agent then also accepts that item's origin: the desktop kit's
+agent registers a separate `ai.opengeni.browser.<extension-id>` host that only
+accepts that item's origin. Configure the ID with the desktop kit's
 `browserExtensionIds`, or `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` (comma-separated
 IDs) when running `opengeni-agent service install`. On the server,
 `OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`
@@ -491,14 +492,19 @@ make agents, the chat's machine card and `/v1/config/client` name and link that
 extension instead of Opengeni Browser.
 
 Where the browser finds the native host depends on the platform. On macOS and
-Linux the agent writes `ai.opengeni.browser.json` into each Chromium-family
-browser's per-user `NativeMessagingHosts` directory. On Windows, browsers look
-the host up in the per-user registry instead: the agent writes the one manifest
-to `%LOCALAPPDATA%\Opengeni\NativeMessagingHosts\ai.opengeni.browser.json` and
-sets the default value of
-`HKCU\Software\Google\Chrome\NativeMessagingHosts\ai.opengeni.browser` (and the
-matching keys for Chromium, Edge and Brave when those browsers are present) to
-that path. Removal deletes only keys that still name this agent's manifest.
+Linux the agent writes `<host-name>.json` into each Chromium-family browser's
+per-user `NativeMessagingHosts` directory. On Windows, browsers look the host up
+in the per-user registry instead: the agent writes the manifest to
+`%LOCALAPPDATA%\Opengeni\NativeMessagingHosts\<host-name>.json` and sets the default
+value of `HKCU\Software\Google\Chrome\NativeMessagingHosts\<host-name>` (and the
+matching keys for Chromium, Edge and Brave when present) to that path. Removal
+leaves registrations that belong to another executable alone.
+For an app-hosted agent, installation also records its config directory for
+the executable named in the manifest. The native host uses that directory even
+though Chrome does not inherit the desktop app's environment. Standalone service
+installs keep their normal config discovery. If an older branded app overwrote
+the standalone registration, run `opengeni-agent service install` using the
+standalone executable to restore it after updating the branded app.
 When the extension cannot reach the agent, its popup says why: no agent is set
 up on this computer, the agent is too old for the extension, or it is not
 running.
@@ -1713,7 +1719,7 @@ on menu changes the machine, not the folder. Historical attachments are not
 restaged automatically; retrieve them explicitly through Files or attach them
 to a new message when needed.
 
-While a machine still reports `/` (an older agent without a usable home), staging an attachment, spilled tool result or generated
+While a machine still reports `/` (an older agent without a usable home), staging an attachment, stored tool result copy or generated
 image into it usually still fails. When the turn's effective backend is a
 Connected Machine and its working directory is `/`, any failed staging command
 gets a reason that says the filesystem root is often not writable (read-only on
@@ -2158,10 +2164,25 @@ tools, attempt resolution and direct attaches all check where the machine works
 on every call, so a workspace it no longer works in simply stops seeing it.
 
 `PUT /v1/workspaces/:ws/machines/:enrollmentId/reach` with
-`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean, allowManagedWorkspaces?: boolean }`
 sets it (`null` means every shared workspace) and answers `{ reach }`, the same
 shape the machine list reports as `reach` for organization machines
-(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`). It needs
+(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`,
+`allowManagedWorkspaces`). `allowManagedWorkspaces` (**All product-managed
+workspaces** in the picker, migration 1512) adds every workspace the
+organization's product manages (`organization_managed_workspaces`), including
+ones it creates later, without listing them; omitted keeps the current value.
+So a client that predates the setting (an older SDK or UI) leaves it on when
+it narrows the list: switch it off explicitly to take those workspaces away.
+Every chat in a managed workspace can use the machine, including your end
+customers' chats, not only organization agent chats. Only the managed option
+reaches the Console test workspace, where Console Editors run test chats on it;
+every shared workspace or a list never does. Only an account-level context can mark or
+unmark a managed workspace (Console, or a workspace an organization API key
+creates); runtime code acting inside a workspace can't.
+[Console agents](agents.md#runs-on) that run on an organization machine need
+it, because their chats run in those workspaces.
+It needs
 `enrollments:manage`, and the caller is the organization's owner or an admin
 signed in as themselves (or a credential holding `account:admin`), the same
 rule as changing the machine. The connecting workspace is dropped

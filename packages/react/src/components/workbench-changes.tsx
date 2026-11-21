@@ -1,5 +1,12 @@
 import type { GitFileDiff } from "@opengeni/sdk";
-import { ArrowUpRightIcon, FileWarningIcon, HistoryIcon } from "lucide-react";
+import {
+  ArrowUpRightIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FileWarningIcon,
+  GitPullRequestArrowIcon,
+  HistoryIcon,
+} from "lucide-react";
 import {
   Component,
   type ReactNode,
@@ -45,6 +52,7 @@ const OVERSCAN = 2;
 const HEADER_PX = 30;
 const LINE_PX = 18;
 const GUARD_BODY_PX = 52;
+const EMPTY_BODY_PX = 36;
 const COMPACT_SURFACE_PX = 560;
 const useChangesLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -91,7 +99,17 @@ export type WorkbenchChangesProps = {
   themeType?: "dark" | "light" | undefined;
   /** Route a guarded binary/oversize file into the live Files surface. */
   onOpenFile?: ((path: string) => void) | undefined;
+  /** The branch's pull request, when one exists: shows "View on GitHub". */
+  pullRequest?: WorkbenchPullRequest | null | undefined;
+  /** Ask for a pull request for these changes: shows "Open PR" when there is none. */
+  onOpenPullRequest?: (() => void) | undefined;
   className?: string | undefined;
+};
+
+/** A pull request the host knows for the changes on screen. */
+export type WorkbenchPullRequest = {
+  url: string;
+  number?: number | undefined;
 };
 
 type RailRow =
@@ -299,10 +317,18 @@ function isGuarded(file: GitFileDiff): boolean {
   return file.isBinary || file.truncated;
 }
 
+/** A rename or mode change with no hunks: Pierre would draw nothing without its
+ *  own file header, so a one-line note stands in for the diff body. */
+function hasNoHunks(file: GitFileDiff): boolean {
+  return !isGuarded(file) && file.hunks.length === 0;
+}
+
 /** Estimate a section's rendered height for the windowing math. Line-count based,
  *  so it is close enough that the first paint barely shifts as real heights land. */
-function estimateSectionHeight(file: GitFileDiff): number {
+function estimateSectionHeight(file: GitFileDiff, collapsed = false): number {
+  if (collapsed) return HEADER_PX;
   if (isGuarded(file)) return HEADER_PX + GUARD_BODY_PX;
+  if (hasNoHunks(file)) return HEADER_PX + EMPTY_BODY_PX;
   let lines = 0;
   for (const hunk of file.hunks) lines += hunk.lines.length + 1;
   return HEADER_PX + Math.max(lines, 1) * LINE_PX + 8;
@@ -315,6 +341,8 @@ export function WorkbenchChanges({
   captureRevision,
   themeType,
   onOpenFile,
+  pullRequest,
+  onOpenPullRequest,
   className,
 }: WorkbenchChangesProps) {
   const t = useOpenGeniText();
@@ -324,6 +352,15 @@ export function WorkbenchChanges({
   const resolvedTheme = useThemeType(themeType);
   const [layout, setLayout] = useState<"unified" | "split">("unified");
   const [activePath, setActivePath] = useState<string | null>(null);
+  const [collapsedPaths, setCollapsedPaths] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleCollapsed = useCallback((path: string) => {
+    setCollapsedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
   const pickerId = useId();
 
   const unicodeFontPaths = useMemo(
@@ -373,9 +410,11 @@ export function WorkbenchChanges({
   const estimateHeight = useCallback(
     (index: number) => {
       const file = orderedFiles[index];
-      return file ? estimateSectionHeight(file) : HEADER_PX + LINE_PX;
+      return file
+        ? estimateSectionHeight(file, collapsedPaths.has(file.path))
+        : HEADER_PX + LINE_PX;
     },
-    [orderedFiles],
+    [orderedFiles, collapsedPaths],
   );
 
   const windowed = useWindowedSections({
@@ -455,6 +494,7 @@ export function WorkbenchChanges({
         >
           {compact ? null : <LayoutToggle layout={layout} onChange={setLayout} />}
           <SourceBadge source={source} capturedAt={capturedAt} label={sourceBadge} />
+          <PullRequestAction pullRequest={pullRequest} onOpenPullRequest={onOpenPullRequest} />
         </div>
       </div>
 
@@ -556,6 +596,8 @@ export function WorkbenchChanges({
                       file={file}
                       layout={layout}
                       themeType={resolvedTheme}
+                      collapsed={collapsedPaths.has(file.path)}
+                      onToggle={() => toggleCollapsed(file.path)}
                       {...(onOpenFile ? { onOpenFile } : {})}
                     />
                   </MeasuredSection>
@@ -711,42 +753,146 @@ function DiffSection({
   file,
   layout,
   themeType,
+  collapsed = false,
+  onToggle,
   onOpenFile,
 }: {
   file: GitFileDiff;
   layout: "unified" | "split";
   themeType: "dark" | "light";
+  collapsed?: boolean | undefined;
+  onToggle?: (() => void) | undefined;
   onOpenFile?: ((path: string) => void) | undefined;
 }) {
-  // The guard files (binary / over-cap) get a minimal header + "open live" body
-  // since Pierre has nothing to render; real diffs use Pierre's own sticky file
-  // header (one header — no redundant chrome).
-  if (isGuarded(file)) {
-    const renamed = file.oldPath && file.oldPath !== file.path;
-    return (
-      <section className="border-b border-og-border pb-1">
-        <header className="flex items-center justify-between gap-2 bg-og-surface-1 px-3 py-1.5 text-og-sm">
-          <span className="min-w-0 truncate font-og-mono text-og-xs">
-            {renamed ? `${file.oldPath} → ${file.path}` : file.path}
-          </span>
-          <span className="flex shrink-0 items-center gap-2 font-og-mono text-og-xs">
-            <span className="text-og-status-idle">+{file.additions}</span>
-            <span className="text-og-status-failed">−{file.deletions}</span>
-          </span>
-        </header>
+  // One header per file, drawn here so every file (diffable or guarded) folds
+  // the same way; Pierre's own file header is turned off to avoid a second one.
+  const guarded = isGuarded(file);
+  const empty = hasNoHunks(file);
+  return (
+    <section
+      data-diff-file={file.path}
+      data-diff-collapsed={collapsed ? "" : undefined}
+      {...(guarded || empty || collapsed ? {} : { "data-pierre-section": "" })}
+      className={cn("border-b border-og-border", !collapsed && (guarded ? "pb-1" : "pb-2"))}
+    >
+      <DiffFileHeader file={file} collapsed={collapsed} onToggle={onToggle} />
+      {collapsed ? null : guarded ? (
         <GuardBody file={file} {...(onOpenFile ? { onOpenFile } : {})} />
-      </section>
+      ) : empty ? (
+        <NoHunksBody />
+      ) : (
+        <PierreDiff
+          diff={[file]}
+          layout={layout}
+          themeType={themeType}
+          disableFileHeader
+          className="px-1"
+        />
+      )}
+    </section>
+  );
+}
+
+function DiffFileHeader({
+  file,
+  collapsed,
+  onToggle,
+}: {
+  file: GitFileDiff;
+  collapsed: boolean;
+  onToggle?: (() => void) | undefined;
+}) {
+  const renamed = file.oldPath && file.oldPath !== file.path;
+  const label = renamed ? `${file.oldPath} → ${file.path}` : file.path;
+  const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
+  const body = (
+    <>
+      {onToggle ? <Chevron className="size-3.5 shrink-0 text-og-fg-subtle" aria-hidden /> : null}
+      <span
+        aria-hidden
+        className={cn("w-3 shrink-0 font-og-mono text-og-xs", STATUS_TINT[file.status])}
+      >
+        {STATUS_LETTER[file.status]}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-left font-og-mono text-og-xs" title={label}>
+        {label}
+      </span>
+      <span className="flex shrink-0 items-center gap-2 font-og-mono text-og-xs">
+        <span className="text-og-status-idle">+{file.additions}</span>
+        <span className="text-og-status-failed">−{file.deletions}</span>
+      </span>
+    </>
+  );
+  const className =
+    "sticky top-0 z-10 flex w-full items-center gap-2 bg-og-surface-1 px-3 py-1.5 text-og-sm text-og-fg";
+  if (!onToggle) return <header className={className}>{body}</header>;
+  return (
+    <button
+      type="button"
+      aria-expanded={!collapsed}
+      onClick={onToggle}
+      className={cn(
+        className,
+        "hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
+      )}
+    >
+      {body}
+    </button>
+  );
+}
+
+/** One pull-request action for the change set: View on GitHub when a PR
+ *  exists, otherwise Open PR when the host can ask for one. */
+function PullRequestAction({
+  pullRequest,
+  onOpenPullRequest,
+}: {
+  pullRequest?: WorkbenchPullRequest | null | undefined;
+  onOpenPullRequest?: (() => void) | undefined;
+}) {
+  const t = useOpenGeniText();
+  const className =
+    "inline-flex min-h-7 shrink-0 items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-0.5 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11";
+  if (pullRequest?.url) {
+    return (
+      <a
+        href={pullRequest.url}
+        target="_blank"
+        rel="noreferrer noopener"
+        data-workbench-pr-action="view"
+        className={className}
+        {...(pullRequest.number ? { title: `#${pullRequest.number}` } : {})}
+      >
+        {t("workbenchChanges.viewOnGitHub")}
+        <ArrowUpRightIcon className="size-3.5" aria-hidden />
+      </a>
     );
   }
+  if (!onOpenPullRequest) return null;
   return (
-    <section data-pierre-section className="border-b border-og-border pb-2">
-      <PierreDiff diff={[file]} layout={layout} themeType={themeType} className="px-1" />
-    </section>
+    <button
+      type="button"
+      onClick={onOpenPullRequest}
+      data-workbench-pr-action="open"
+      className={className}
+    >
+      <GitPullRequestArrowIcon className="size-3.5" aria-hidden />
+      {t("workbenchChanges.openPullRequest")}
+    </button>
   );
 }
 
 /** The per-file guard: a binary file or an over-cap diff opens live rather than
  *  inlining a body we don't (fully) have. */
+function NoHunksBody() {
+  const t = useOpenGeniText();
+  return (
+    <div className="px-3 py-2 text-og-sm text-og-fg-subtle">
+      {t("workbenchChanges.noContentChanges")}
+    </div>
+  );
+}
+
 function GuardBody({
   file,
   onOpenFile,

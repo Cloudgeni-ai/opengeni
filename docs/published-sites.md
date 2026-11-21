@@ -37,8 +37,8 @@ can't be published, in a **Personal workspace** too. **Unpublish** takes the
 Site offline at once and keeps its address reserved; publishing again brings
 it back on the same address.
 
-Agents can do the same with the first-party tools `site_publication_get`,
-`site_publication_update` and `site_hostname_check`, within the same
+Agents can do the same with the first-party tools `app_publication_get`,
+`app_publication_update` and `app_hostname_check`, within the same
 permissions as the person they act for.
 
 ## Access modes
@@ -497,6 +497,17 @@ hostname stays held for the platform even if the Site or its workspace is
 deleted (`--release-hold` frees it). An optional content scanner (Google Web
 Risk) checks new versions when a key is configured.
 
+## Apps in the sidebar
+
+An App can be added to the sidebar ([Sidebar layout](sidebar-layout.md)),
+optionally at one of its pages. Opened from there it is a page of Opengeni's
+own: it fills the main area with its address in the URL, follows the light or
+dark theme, stays open (up to 3) while you go elsewhere, and can opt into
+Opengeni's look with `<link rel="stylesheet" href="/__opengeni/ui.css">`, or
+`<style>@import "/__opengeni/ui.css";</style>` in an App built by a bundler
+([reference](site-runtime-api.md#opengeni-look-for-apps)). Publishing is not
+needed for any of this.
+
 ## Staging and self-hosting
 
 Publishing is off until `OPENGENI_SITES_DOMAIN` is set; the console then
@@ -506,7 +517,9 @@ must be a registrable domain of its own: Opengeni refuses to start when
 `OPENGENI_PUBLIC_BASE_URL` or `OPENGENI_WEB_BASE_URL` is on the Sites domain,
 under it, or holds it. Nothing in the API
 depends on Cloudflare: edge sync is a no-op without its settings and the
-gateway falls back to the API for host lookups.
+gateway falls back to the API for host lookups. Without Publishing, Apps still open from the
+sidebar and get Opengeni's look inside Opengeni; only the gateway's
+`/__opengeni/ui.css` for published pages is missing.
 
 | Setting                                                    | Default             | Purpose                                              |
 | ---------------------------------------------------------- | ------------------- | ---------------------------------------------------- |
@@ -535,6 +548,7 @@ gateway falls back to the API for host lookups.
 | `OPENGENI_SITES_HOSTNAME_HOLD_DAYS`                        | `30`                | How long a released name stays held                  |
 | `OPENGENI_SITES_CLOUDFLARE_*`                              | unset               | Optional edge sync (KV host map, cache purge)        |
 | `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`                | `false`             | Offer Site SQL (per-Site Durable Object databases)   |
+| `OPENGENI_SITES_LIVE_ENABLED` | `false` | Send live data and version hints to open Site pages (needs the gateway's `SITE_LIVE` binding) |
 | `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN`                   | unset               | Gateway origin the API calls for Site SQL            |
 | `OPENGENI_SITES_SQL_*`                                     | see Site SQL        | Site SQL limits                                      |
 | `OPENGENI_SITES_WEB_RISK_API_KEY`                          | unset               | Optional content scanner                             |

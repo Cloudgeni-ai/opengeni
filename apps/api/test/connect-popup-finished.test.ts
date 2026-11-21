@@ -168,6 +168,18 @@ test("a sign-in popup ends on the closing page, never on a copy of the host page
     const stored = await (await app.request(`${base}/${cancelled.id}`, { headers })).json();
     expect(stored).toMatchObject({ state: "cancelled", error: { code: "provider_denied" } });
     expect(stored.error.message).not.toContain("https://");
+    // A refusal the connect dialog can explain keeps the provider's code; any
+    // other code stays generic.
+    const scopeRefused = await begin(true);
+    await callback(scopeRefused.state, false, "invalid_scope");
+    expect(
+      await (await app.request(`${base}/${scopeRefused.id}`, { headers })).json(),
+    ).toMatchObject({ state: "failed", error: { code: "invalid_scope" } });
+    const unknownRefusal = await begin(true);
+    await callback(unknownRefusal.state, false, "vendor_specific_reason");
+    expect(
+      await (await app.request(`${base}/${unknownRefusal.id}`, { headers })).json(),
+    ).toMatchObject({ state: "failed", error: { code: "provider_denied" } });
     // Without the flag the exact host return is unchanged.
     const host = await begin(false);
     expect((await callback(host.state)).headers.get("location")).toBe(hostPage);

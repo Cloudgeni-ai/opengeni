@@ -63,7 +63,7 @@ const SURFACE_PHRASES: Record<string, (destination: string | null) => string> = 
   run_on: (destination) => (destination ? `in a command on ${destination}` : "on another machine"),
   mcp: (destination) => (destination ? `in a call to ${destination}` : "in a connector call"),
   codemode: (destination) => (destination ? `in a call to ${destination}` : "in a tool call"),
-  site: () => "in a Site",
+  site: () => "in an app",
   browser: (destination) => (destination ? `in the browser on ${destination}` : "in the browser"),
   desktop: () => "on the desktop",
   human_reveal: () => "to show it",

@@ -322,7 +322,7 @@ function slackAvailability() {
   };
 }
 
-test("the agent page shows its chats, what it follows, Memory and where it is available", async () => {
+test("the agent page shows its chats, what it follows, Memory and its setup sections", async () => {
   const agent = makeAgent({
     name: "Data team",
     instructions: "Answer metric questions from the dashboards.",
@@ -366,7 +366,9 @@ test("the agent page shows its chats, what it follows, Memory and where it is av
     "Answer metric questions from the dashboards.",
     "Remember across chats",
     "People in Platform",
-    "Opengeni app",
+    "Starts when",
+    "Can use",
+    "Skills",
     "Slack part",
     "Delete agent",
   ]) {
@@ -1102,4 +1104,173 @@ test("a Show more from the previous filter never lands in the new list", async (
   expect(container.textContent).toContain("Everyone's chat");
   expect(container.textContent).not.toContain("Older mine");
   expect(container.textContent).not.toContain("Mine");
+});
+
+const TRIAGE_TEMPLATE = {
+  key: "triage",
+  name: "Triage",
+  description: "Sorts new issues and hands real bugs to Bug fixer.",
+  avatar: null,
+  instructions: "Triage new work.",
+  memoryEnabled: true,
+  toolPermissions: [],
+  skills: [],
+  suggestedTriggers: [
+    {
+      name: "When a GitHub issue opens",
+      instructions: "Triage it.",
+      schedule: null,
+      triggers: [{ source: { kind: "github" }, eventTypes: ["issues.opened"] }],
+    },
+    {
+      name: "When a Linear issue is created",
+      instructions: "Triage it.",
+      schedule: null,
+      triggers: [{ source: { kind: "github" }, eventTypes: ["issues.opened"] }],
+    },
+  ],
+};
+
+test("the agent page's setup: triggers, suggestions, Can use, Memory entries and Skills", async () => {
+  const agent = makeAgent({
+    name: "Triage",
+    templateKey: "triage",
+    memory: { enabled: true, collectionId: "c1", scope: "workspace", reviewFirst: false },
+    toolPermissions: [{ connector: "github.com", tool: "merge_pull_request", permission: "block" }],
+    skills: [{ name: "release-notes" }],
+  });
+  const trigger = {
+    id: "eeeeeeee-eeee-4eee-8eee-000000000001",
+    name: "Triage: When a GitHub issue opens",
+    status: "active",
+    schedule: { type: "manual" },
+    events: {
+      triggers: [{ source: { kind: "github" }, eventTypes: ["issues.opened"], conditions: [] }],
+    },
+    agentConfig: { agentId: agent.id },
+  };
+  const client = fakeAgentsClient([agent], {
+    templates: [TRIAGE_TEMPLATE],
+    tasks: [trigger, { ...trigger, id: "other", name: "Unrelated", agentConfig: {} }],
+    capabilities: [
+      {
+        id: "cap-gmail",
+        name: "Gmail",
+        kind: "mcp",
+        source: "integration",
+        enabled: true,
+        providerDomain: "gmail.com",
+        connectionRef: { providerDomain: "gmail.com" },
+        tools: [{ kind: "mcp", id: "gmail" }],
+      },
+    ],
+    memoryEntries: [
+      {
+        id: "m1",
+        version: 3,
+        revision: { title: "Release day", preview: "Releases go out on Tuesdays." },
+      },
+    ],
+  });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={appContext(client)} onLocation={(location) => (path = location.href)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  // Only this agent's automations are its triggers, and a set-up suggestion isn't offered again.
+  expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
+  const suggested = [...container.querySelectorAll("[data-agent-suggested-trigger]")];
+  expect(suggested.map((row) => row.textContent)).toEqual([
+    expect.stringContaining("When a Linear issue is created"),
+  ]);
+  await act(async () => button(container, "Set up").click());
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1`);
+  // Can use lists each connection and Opengeni's own GitHub tools, whose row
+  // holds the ready-made agent's github.com rule.
+  expect(container.querySelector("[data-agent-can-use='gmail.com']")).not.toBeNull();
+  const github = container.querySelector<HTMLElement>("[data-agent-can-use='github.com']")!;
+  expect(github.textContent).toContain("GitHub");
+  expect(github.textContent).toContain("1 tool set on their own");
+  await act(async () =>
+    [...github.querySelectorAll("button")].find((b) => b.textContent?.includes("1 tool"))!.click(),
+  );
+  await flush();
+  expect(github.textContent).toContain("pull_request_merge");
+  expect(github.textContent).toContain("merge_pull_request");
+  expect(container.textContent).not.toContain("github.com · merge_pull_request");
+  // Memory entries are listed and can be removed at the version read.
+  expect(container.textContent).toContain("Releases go out on Tuesdays.");
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("[aria-label='Remove Release day']")!.click(),
+  );
+  await flush();
+  expect(client.calls).toContainEqual([
+    "archiveKnowledgeEntry",
+    WORKSPACE_ID,
+    "m1",
+    { operationId: expect.any(String), expectedVersion: 3 },
+  ]);
+  expect(container.textContent).not.toContain("Releases go out on Tuesdays.");
+  // Pausing a trigger pauses its automation.
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>("[aria-label='Triage: When a GitHub issue opens on']")!
+      .click(),
+  );
+  await flush();
+  expect(client.calls).toContainEqual(["pauseScheduledTask", WORKSPACE_ID, trigger.id]);
+  expect(container.textContent).toContain("release-notes");
+});
+
+test("a listed GitHub connection's row also offers Opengeni's own GitHub tools", async () => {
+  const agent = makeAgent({ name: "Fixer" });
+  const client = fakeAgentsClient([agent], {
+    capabilities: [
+      {
+        id: "cap-github",
+        name: "GitHub MCP",
+        kind: "mcp",
+        source: "integration",
+        enabled: true,
+        providerDomain: "github.com",
+        connectionRef: { providerDomain: "github.com" },
+        tools: [{ kind: "mcp", id: "github" }],
+      },
+    ],
+    connectorTools: { "cap-github": ["search_code"] },
+  });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  await flush();
+  const rows = container.querySelectorAll<HTMLElement>("[data-agent-can-use='github.com']");
+  expect(rows).toHaveLength(1);
+  await act(async () =>
+    [...rows[0]!.querySelectorAll("button")]
+      .find((b) => b.textContent?.includes("Choose per tool"))!
+      .click(),
+  );
+  await flush();
+  expect(rows[0]!.textContent).toContain("search_code");
+  expect(rows[0]!.textContent).toContain("pull_request_merge");
+});
+
+test("Add an agent adds a ready-made agent once", async () => {
+  const client = fakeAgentsClient([], { templates: [TRIAGE_TEMPLATE] });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={appContext(client)} onLocation={(location) => (path = location.href)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  expect(container.textContent).toContain("Add an agent");
+  expect(container.textContent).toContain("Sorts new issues");
+  await act(async () => button(container, "Add").click());
+  await flush();
+  expect(client.calls).toContainEqual(["createAgentFromTemplate", WORKSPACE_ID, "triage"]);
+  const created = [...client.agents.values()][0]!;
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/${created.id}`);
 });

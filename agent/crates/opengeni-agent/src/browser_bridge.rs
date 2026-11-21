@@ -142,20 +142,36 @@ fn parse_extension_ids(value: &str) -> Vec<String> {
     ids
 }
 
-/// The origins allowed to start the host: the Opengeni Browser extension's
-/// development and store builds, then `extra_ids` in order.
-fn extension_origins(extra_ids: &[String]) -> Vec<String> {
-    let mut origins = vec![
-        extension_origin(),
-        format!("chrome-extension://{STORE_EXTENSION_ID}/"),
-    ];
-    for id in extra_ids {
-        let origin = format!("chrome-extension://{id}/");
-        if is_extension_id(id) && !origins.contains(&origin) {
-            origins.push(origin);
+struct NativeHostRegistration {
+    name: String,
+    origins: Vec<String>,
+}
+
+/// Each branded extension gets a separate browser registration (rather than
+/// taking the shared name from an existing standalone installation).
+fn native_hosts(ids: &[String], standalone_service: bool) -> Vec<NativeHostRegistration> {
+    let mut hosts: Vec<NativeHostRegistration> = Vec::new();
+    for id in ids.iter().filter(|id| {
+        is_extension_id(id) && id.as_str() != EXTENSION_ID && id.as_str() != STORE_EXTENSION_ID
+    }) {
+        let name = format!("{NATIVE_HOST_NAME}.{id}");
+        if !hosts.iter().any(|host| host.name == name) {
+            hosts.push(NativeHostRegistration {
+                name,
+                origins: vec![format!("chrome-extension://{id}/")],
+            });
         }
     }
-    origins
+    if standalone_service || hosts.is_empty() {
+        hosts.push(NativeHostRegistration {
+            name: NATIVE_HOST_NAME.to_owned(),
+            origins: vec![
+                extension_origin(),
+                format!("chrome-extension://{STORE_EXTENSION_ID}/"),
+            ],
+        });
+    }
+    hosts
 }
 
 fn extension_origin() -> String {
@@ -169,15 +185,12 @@ fn extension_origin() -> String {
 /// Chrome discards a host's stderr, so when the host cannot reach the agent it
 /// first tells the extension why in one `unavailable` frame on stdout. The
 /// extension shows that to the person instead of a bare disconnect.
-pub fn run_native_host() -> Result<(), BrowserBridgeError> {
+pub fn run_native_host(
+    config_dir: Result<PathBuf, BrowserBridgeError>,
+) -> Result<(), BrowserBridgeError> {
     let mut browser_output = std::io::stdout().lock();
-    let connected = crate::config::config_dir()
-        .map_err(|error| {
-            (
-                AgentUnavailableReason::AgentError,
-                BrowserBridgeError::Protocol(error.to_string()),
-            )
-        })
+    let connected = config_dir
+        .map_err(|error| (AgentUnavailableReason::AgentError, error))
         .and_then(|config_dir| connect_native_host(&config_dir));
     match connected {
         Ok(socket) => relay_native_host(socket, std::io::stdin(), browser_output),
@@ -186,6 +199,24 @@ pub fn run_native_host() -> Result<(), BrowserBridgeError> {
             Err(error)
         }
     }
+}
+
+/// Use the installer's binding before consulting the browser's environment.
+/// A standalone or older registration with no binding keeps the old lookup.
+pub fn native_host_config_dir() -> Result<PathBuf, BrowserBridgeError> {
+    if let Some(home) = native_host_home() {
+        let binary = crate::update::installed_executable().map_err(BrowserBridgeError::Protocol)?;
+        if let Some(config_dir) = read_native_host_config(binary, &home)? {
+            return Ok(config_dir);
+        }
+    }
+    crate::config::config_dir().map_err(|error| BrowserBridgeError::Protocol(error.to_string()))
+}
+
+pub fn native_host_home() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Opens the authenticated agent connection for this host, or says which
@@ -441,43 +472,104 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 
 /// Install the user-scoped Native Messaging manifest for Google Chrome and for
 /// any already-present compatible Chromium channels. The manifest points at the
-/// exact running agent binary and allows the Opengeni Browser extension plus
-/// `extra_extension_ids`, a product's own branded extensions.
+/// exact running agent binary. A branded app registers only its own extension
+/// hosts; an ordinary app or standalone service registers Opengeni Browser.
+/// A standalone service can also serve explicitly configured branded IDs.
+/// `config_dir` binds a desktop runtime's host to its config. A standalone
+/// service install uses its ordinary config discovery instead.
 ///
 /// On Windows the browsers find the manifest through the per-user registry, so
-/// the one manifest file is written under `%LOCALAPPDATA%` and each browser's
+/// each manifest file is written under `%LOCALAPPDATA%` and the browser's
 /// `NativeMessagingHosts` key names it.
 pub fn install_native_host_manifests(
     binary_path: &Path,
     home: &Path,
     extra_extension_ids: &[String],
+    config_dir: Option<&Path>,
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    update_native_host_config(binary_path, home, config_dir)?;
+    let hosts = native_hosts(extra_extension_ids, config_dir.is_none());
     #[cfg(windows)]
     return install_registered_native_host(
         binary_path,
         &browser_data_home(home),
-        extra_extension_ids,
+        &hosts,
         &CurrentUserRegistry,
     );
     #[cfg(not(windows))]
-    install_native_host_manifests_in(binary_path, &browser_data_home(home), extra_extension_ids)
+    install_native_host_manifests_in(binary_path, &browser_data_home(home), &hosts)
 }
 
-fn native_host_manifest_body(
+/// The host only gets its executable identity and the extension origin, not the
+/// manifest's path. Key the binding by the executable so another installation
+/// cannot redirect it. Keep it outside the app bundle and independent of any
+/// browser-specific directory or XDG override.
+fn native_host_config_path(binary: &Path, home: &Path) -> PathBuf {
+    let executable = launchable_program_path(binary);
+    let key = blake3::hash(executable.as_os_str().as_encoded_bytes()).to_hex();
+    home.join(".config/opengeni/native-hosts")
+        .join(format!("{key}.json"))
+}
+
+fn update_native_host_config(
+    binary: &Path,
+    home: &Path,
+    config_dir: Option<&Path>,
+) -> Result<(), BrowserBridgeError> {
+    let path = native_host_config_path(binary, home);
+    if let Some(config_dir) = config_dir {
+        // Chrome need not start the host in the runtime's working directory.
+        let config_dir = std::path::absolute(config_dir)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write_public_atomic(&path, &serde_json::to_vec(&config_dir)?)
+    } else {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn read_native_host_config(
+    binary: &Path,
+    home: &Path,
+) -> Result<Option<PathBuf>, BrowserBridgeError> {
+    let body = match std::fs::read(native_host_config_path(binary, home)) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let config_dir: PathBuf = serde_json::from_slice(&body)?;
+    if !config_dir.is_absolute() {
+        return Err(BrowserBridgeError::Protocol(
+            "the registered native host config directory is not absolute".to_string(),
+        ));
+    }
+    Ok(Some(config_dir))
+}
+
+fn write_native_host_manifest(
     binary_path: &Path,
-    extra_extension_ids: &[String],
-) -> Result<Vec<u8>, BrowserBridgeError> {
+    directory: &Path,
+    host: &NativeHostRegistration,
+) -> Result<PathBuf, BrowserBridgeError> {
     let binary = launchable_program_path(binary_path);
     let binary = binary.to_str().ok_or_else(|| {
         BrowserBridgeError::Protocol("agent binary path is not valid UTF-8".to_string())
     })?;
-    Ok(serde_json::to_vec_pretty(&NativeHostManifest {
-        name: NATIVE_HOST_NAME,
+    let body = serde_json::to_vec_pretty(&NativeHostManifest {
+        name: &host.name,
         description: "Opengeni attached-browser bridge",
         path: binary,
         kind: "stdio",
-        allowed_origins: extension_origins(extra_extension_ids),
-    })?)
+        allowed_origins: &host.origins,
+    })?;
+    let path = directory.join(format!("{}.json", host.name));
+    write_public_atomic(&path, &body)?;
+    Ok(path)
 }
 
 /// The path a manifest names for the agent binary. Chrome on Windows starts a
@@ -526,9 +618,8 @@ fn manifest_points_here(body: &[u8], binary_path: &Path) -> bool {
 fn install_native_host_manifests_in(
     binary_path: &Path,
     data_home: &Path,
-    extra_extension_ids: &[String],
+    hosts: &[NativeHostRegistration],
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
-    let body = native_host_manifest_body(binary_path, extra_extension_ids)?;
     let mut installed = Vec::new();
     for (browser_root, primary) in native_host_browser_roots(data_home) {
         if !primary && !browser_root.exists() {
@@ -536,35 +627,12 @@ fn install_native_host_manifests_in(
         }
         let directory = browser_root.join("NativeMessagingHosts");
         std::fs::create_dir_all(&directory)?;
-        let path = directory.join(format!("{NATIVE_HOST_NAME}.json"));
-        write_public_atomic(&path, &body)?;
-        installed.push(path);
+        for host in hosts {
+            installed.push(write_native_host_manifest(binary_path, &directory, host)?);
+        }
+        remove_owned_manifests(binary_path, &directory, hosts, |_, _| Ok(()))?;
     }
     Ok(installed)
-}
-
-/// Remove every user-scoped manifest location this build owns. Missing files are
-/// already clean and ignored.
-pub fn remove_native_host_manifests(home: &Path) -> Result<(), BrowserBridgeError> {
-    #[cfg(windows)]
-    return remove_registered_native_host(&browser_data_home(home), &CurrentUserRegistry);
-    #[cfg(not(windows))]
-    remove_native_host_manifests_in(&browser_data_home(home))
-}
-
-#[cfg_attr(windows, allow(dead_code))]
-fn remove_native_host_manifests_in(data_home: &Path) -> Result<(), BrowserBridgeError> {
-    for (browser_root, _) in native_host_browser_roots(data_home) {
-        let path = browser_root
-            .join("NativeMessagingHosts")
-            .join(format!("{NATIVE_HOST_NAME}.json"));
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
 }
 
 /// Remove the manifests that point at `binary_path`, leaving those another agent
@@ -592,15 +660,61 @@ fn remove_native_host_manifests_for_in(
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
     let mut removed = Vec::new();
     for (browser_root, _) in native_host_browser_roots(data_home) {
-        let path = browser_root
-            .join("NativeMessagingHosts")
-            .join(format!("{NATIVE_HOST_NAME}.json"));
+        removed.extend(remove_owned_manifests(
+            binary_path,
+            &browser_root.join("NativeMessagingHosts"),
+            &[],
+            |_, _| Ok(()),
+        )?);
+    }
+    Ok(removed)
+}
+
+fn is_native_host_name(name: &str) -> bool {
+    name == NATIVE_HOST_NAME
+        || name
+            .strip_prefix(NATIVE_HOST_NAME)
+            .and_then(|suffix| suffix.strip_prefix('.'))
+            .is_some_and(is_extension_id)
+}
+
+/// Reconcile only our host namespace and this executable. `keep` protects the
+/// newly written registrations while retiring an old name or changed ID list.
+fn remove_owned_manifests(
+    binary_path: &Path,
+    directory: &Path,
+    keep: &[NativeHostRegistration],
+    unregister: impl Fn(&str, &Path) -> Result<(), BrowserBridgeError>,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut removed = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name
+            .to_str()
+            .and_then(|file| file.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if !is_native_host_name(name)
+            || keep.iter().any(|host| host.name == name)
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
         let body = match std::fs::read(&path) {
             Ok(body) => body,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
         if manifest_points_here(&body, binary_path) {
+            unregister(name, &path)?;
             match std::fs::remove_file(&path) {
                 Ok(()) => removed.push(path),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -649,12 +763,8 @@ const WINDOWS_BROWSER_KEYS: [(&str, bool); 4] = [
     (r"Software\BraveSoftware\Brave-Browser", false),
 ];
 
-fn windows_host_key(browser_key: &str) -> String {
-    format!(r"{browser_key}\NativeMessagingHosts\{NATIVE_HOST_NAME}")
-}
-
-fn windows_manifest_path(manifest_directory: &Path) -> PathBuf {
-    manifest_directory.join(format!("{NATIVE_HOST_NAME}.json"))
+fn windows_host_key(browser_key: &str, host_name: &str) -> String {
+    format!(r"{browser_key}\NativeMessagingHosts\{host_name}")
 }
 
 /// Writes the manifest into `manifest_directory` and points each browser's
@@ -663,39 +773,27 @@ fn windows_manifest_path(manifest_directory: &Path) -> PathBuf {
 fn install_registered_native_host(
     binary_path: &Path,
     manifest_directory: &Path,
-    extra_extension_ids: &[String],
+    hosts: &[NativeHostRegistration],
     registry: &dyn NativeHostRegistry,
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
-    let body = native_host_manifest_body(binary_path, extra_extension_ids)?;
     std::fs::create_dir_all(manifest_directory)?;
-    let manifest = windows_manifest_path(manifest_directory);
-    write_public_atomic(&manifest, &body)?;
-    let value = manifest.to_str().ok_or_else(|| {
-        BrowserBridgeError::Protocol("manifest path is not valid UTF-8".to_string())
-    })?;
-    for (browser_key, primary) in WINDOWS_BROWSER_KEYS {
-        if !primary && !registry.key_exists(browser_key)? {
-            continue;
+    let mut installed = Vec::new();
+    for host in hosts {
+        let manifest = write_native_host_manifest(binary_path, manifest_directory, host)?;
+        let value = manifest.to_str().ok_or_else(|| {
+            BrowserBridgeError::Protocol("manifest path is not valid UTF-8".to_string())
+        })?;
+        for (browser_key, primary) in WINDOWS_BROWSER_KEYS {
+            if primary || registry.key_exists(browser_key)? {
+                registry.set_default_value(&windows_host_key(browser_key, &host.name), value)?;
+            }
         }
-        registry.set_default_value(&windows_host_key(browser_key), value)?;
+        installed.push(manifest);
     }
-    Ok(vec![manifest])
-}
-
-/// Removes this build's manifest and every browser host key that names it.
-/// A key naming another manifest belongs to someone else and stays.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn remove_registered_native_host(
-    manifest_directory: &Path,
-    registry: &dyn NativeHostRegistry,
-) -> Result<(), BrowserBridgeError> {
-    let manifest = windows_manifest_path(manifest_directory);
-    unregister_windows_manifest(&manifest, registry)?;
-    match std::fs::remove_file(&manifest) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
+    remove_owned_manifests(binary_path, manifest_directory, hosts, |name, path| {
+        unregister_windows_manifest(name, path, registry)
+    })?;
+    Ok(installed)
 }
 
 /// Removes the registration when its manifest points at `binary_path` (or at a
@@ -706,25 +804,18 @@ fn remove_registered_native_host_for(
     manifest_directory: &Path,
     registry: &dyn NativeHostRegistry,
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
-    let manifest = windows_manifest_path(manifest_directory);
-    let body = match std::fs::read(&manifest) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    if !manifest_points_here(&body, binary_path) {
-        return Ok(Vec::new());
-    }
-    remove_registered_native_host(manifest_directory, registry)?;
-    Ok(vec![manifest])
+    remove_owned_manifests(binary_path, manifest_directory, &[], |name, path| {
+        unregister_windows_manifest(name, path, registry)
+    })
 }
 
 fn unregister_windows_manifest(
+    name: &str,
     manifest: &Path,
     registry: &dyn NativeHostRegistry,
 ) -> Result<(), BrowserBridgeError> {
     for (browser_key, _) in WINDOWS_BROWSER_KEYS {
-        let key = windows_host_key(browser_key);
+        let key = windows_host_key(browser_key, name);
         let names_this = registry
             .default_value(&key)?
             .is_some_and(|value| Path::new(&value) == manifest);
@@ -809,12 +900,12 @@ struct BridgeAuthority {
 
 #[derive(Serialize)]
 struct NativeHostManifest<'a> {
-    name: &'static str,
+    name: &'a str,
     description: &'static str,
     path: &'a str,
     #[serde(rename = "type")]
     kind: &'static str,
-    allowed_origins: Vec<String>,
+    allowed_origins: &'a [String],
 }
 
 #[derive(Debug, Deserialize)]
@@ -2229,14 +2320,13 @@ fn write_public_atomic(destination: &Path, body: &[u8]) -> Result<(), BrowserBri
         options.mode(0o644);
     }
     let mut file = options.open(&temporary)?;
-    file.write_all(body)?;
-    file.sync_all()?;
-    #[cfg(windows)]
-    if destination.exists() {
-        std::fs::remove_file(destination)?;
+    let result = file.write_all(body).and_then(|()| file.sync_all());
+    drop(file);
+    let result = result.and_then(|()| std::fs::rename(&temporary, destination));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
-    std::fs::rename(&temporary, destination)?;
-    Ok(())
+    result.map_err(Into::into)
 }
 
 fn read_authority(path: &Path) -> Result<BridgeAuthority, BrowserBridgeError> {
@@ -2538,7 +2628,7 @@ mod tests {
 
     #[test]
     fn native_host_accepts_only_well_formed_extension_origins() {
-        for origin in extension_origins(&[]) {
+        for origin in native_hosts(&[], true).remove(0).origins {
             assert!(is_extension_origin(&origin));
             assert!(!is_extension_origin(origin.trim_end_matches('/')));
             assert!(!is_extension_origin(&format!("{origin}extra")));
@@ -2573,43 +2663,46 @@ mod tests {
             ids,
             vec!["b".repeat(32), EXTENSION_ID.to_string(), "c".repeat(32)]
         );
-        assert_eq!(
-            extension_origins(&ids),
-            vec![
-                extension_origin(),
-                format!("chrome-extension://{STORE_EXTENSION_ID}/"),
-                format!("chrome-extension://{}/", "b".repeat(32)),
-                format!("chrome-extension://{}/", "c".repeat(32)),
-            ]
-        );
+        let hosted = native_hosts(&ids, false);
+        assert_eq!(hosted.len(), 2);
+        for (host, id) in hosted.iter().zip(["b".repeat(32), "c".repeat(32)]) {
+            assert_eq!(host.name, format!("{NATIVE_HOST_NAME}.{id}"));
+            assert_eq!(host.origins, vec![format!("chrome-extension://{id}/")]);
+        }
+        let service = native_hosts(&ids, true);
+        assert_eq!(service.len(), 3);
+        assert_eq!(service[2].name, NATIVE_HOST_NAME);
         assert_eq!(parse_extension_ids(""), Vec::<String>::new());
     }
 
     #[test]
-    fn installs_a_manifest_that_also_allows_a_products_own_extension() {
+    fn migrating_a_branded_install_removes_its_legacy_manifest() {
         let directory = tempfile::tempdir().expect("tempdir");
         let binary = directory.path().join("opengeni-agent");
         std::fs::write(&binary, b"fixture").expect("binary");
         let own = "d".repeat(32);
-        let manifests =
-            install_native_host_manifests_in(&binary, directory.path(), std::slice::from_ref(&own))
-                .expect("install");
+        let legacy =
+            install_native_host_manifests_in(&binary, directory.path(), &native_hosts(&[], true))
+                .expect("legacy install");
+        let hosts = native_hosts(std::slice::from_ref(&own), false);
+        let manifests = install_native_host_manifests_in(&binary, directory.path(), &hosts)
+            .expect("branded install");
+        assert!(legacy.iter().all(|path| !path.exists()));
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_ne!(manifests, [] as [std::path::PathBuf; 0]);
         for path in &manifests {
             let manifest: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(path).expect("manifest")).expect("json");
-            assert_eq!(manifest["name"], NATIVE_HOST_NAME);
+            assert_eq!(manifest["name"], format!("{NATIVE_HOST_NAME}.{own}"));
             assert_eq!(
                 manifest["allowed_origins"],
-                json!([
-                    extension_origin(),
-                    format!("chrome-extension://{STORE_EXTENSION_ID}/"),
-                    format!("chrome-extension://{own}/"),
-                ])
+                json!([format!("chrome-extension://{own}/")])
             );
         }
-        remove_native_host_manifests_in(directory.path()).expect("remove");
+        assert_eq!(
+            remove_native_host_manifests_for_in(&binary, directory.path()).expect("remove"),
+            manifests
+        );
     }
 
     #[test]
@@ -3026,8 +3119,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let binary = directory.path().join("opengeni-agent");
         std::fs::write(&binary, b"fixture").expect("binary");
+        let hosts = native_hosts(&[], true);
         let manifests =
-            install_native_host_manifests_in(&binary, directory.path(), &[]).expect("install");
+            install_native_host_manifests_in(&binary, directory.path(), &hosts).expect("install");
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_ne!(manifests, Vec::<std::path::PathBuf>::new());
         for path in &manifests {
@@ -3036,9 +3130,9 @@ mod tests {
             assert_eq!(manifest["name"], NATIVE_HOST_NAME);
             assert_eq!(manifest["path"], binary.to_str().expect("path"));
             assert_eq!(manifest["allowed_origins"][0], extension_origin());
-            assert_eq!(manifest["allowed_origins"], json!(extension_origins(&[])));
+            assert_eq!(manifest["allowed_origins"], json!(hosts[0].origins));
         }
-        remove_native_host_manifests_in(directory.path()).expect("remove");
+        remove_native_host_manifests_for_in(&binary, directory.path()).expect("remove");
         assert!(manifests.iter().all(|path| !path.exists()));
     }
 
@@ -3048,14 +3142,15 @@ mod tests {
         let other = directory.path().join("other-agent");
         let this = directory.path().join("this-agent");
         std::fs::write(&other, b"fixture").expect("other binary");
+        let hosts = native_hosts(&[], true);
         let manifests =
-            install_native_host_manifests_in(&other, directory.path(), &[]).expect("install");
+            install_native_host_manifests_in(&other, directory.path(), &hosts).expect("install");
         assert_eq!(
             remove_native_host_manifests_for_in(&this, directory.path()).expect("keep"),
             Vec::<std::path::PathBuf>::new()
         );
         assert!(manifests.iter().all(|path| path.exists()));
-        install_native_host_manifests_in(&this, directory.path(), &[]).expect("overwrite");
+        install_native_host_manifests_in(&this, directory.path(), &hosts).expect("overwrite");
         assert_eq!(
             remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
             manifests
@@ -3071,7 +3166,8 @@ mod tests {
         let old_name = install.join("old-agent");
         let this = install.join("This Agent");
         let manifests =
-            install_native_host_manifests_in(&old_name, directory.path(), &[]).expect("install");
+            install_native_host_manifests_in(&old_name, directory.path(), &native_hosts(&[], true))
+                .expect("install");
         assert_eq!(
             remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
             manifests
@@ -3136,7 +3232,8 @@ mod tests {
         // Edge is installed; Chrome has never run (its key is absent).
         let registry = FakeRegistry::with_keys(&[r"Software\Microsoft\Edge"]);
 
-        let installed = install_registered_native_host(&binary, &manifests_dir, &[], &registry)
+        let hosts = native_hosts(&[], true);
+        let installed = install_registered_native_host(&binary, &manifests_dir, &hosts, &registry)
             .expect("install");
 
         let manifest = manifests_dir.join("ai.opengeni.browser.json");
@@ -3146,19 +3243,55 @@ mod tests {
         assert_eq!(body["name"], NATIVE_HOST_NAME);
         assert_eq!(body["path"], binary.to_str().expect("path"));
         assert_eq!(body["type"], "stdio");
-        assert_eq!(body["allowed_origins"], json!(extension_origins(&[])));
+        assert_eq!(body["allowed_origins"], json!(hosts[0].origins));
         let named = Some(manifest.to_str().expect("path").to_string());
         assert_eq!(registry.value(CHROME_HOST_KEY), named);
         assert_eq!(registry.value(EDGE_HOST_KEY), named);
         assert!(!registry.key_exists(BRAVE_HOST_KEY).expect("query"));
 
-        remove_registered_native_host(&manifests_dir, &registry).expect("remove");
+        remove_registered_native_host_for(&binary, &manifests_dir, &registry).expect("remove");
         assert!(!manifest.exists());
         assert!(!registry.key_exists(CHROME_HOST_KEY).expect("query"));
         assert!(!registry.key_exists(EDGE_HOST_KEY).expect("query"));
         assert!(registry
             .key_exists(r"Software\Microsoft\Edge")
             .expect("query"));
+    }
+
+    #[test]
+    fn windows_registrations_and_cleanup_keep_the_other_runtime() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let standalone = directory.path().join("standalone.exe");
+        let branded = directory.path().join("branded.exe");
+        for binary in [&standalone, &branded] {
+            std::fs::write(binary, b"fixture").expect("binary");
+        }
+        let manifests = directory.path().join("NativeMessagingHosts");
+        let registry = FakeRegistry::default();
+        let standard_hosts = native_hosts(&[], true);
+        let branded_hosts = native_hosts(&["d".repeat(32)], false);
+        let branded_key = windows_host_key(WINDOWS_BROWSER_KEYS[0].0, &branded_hosts[0].name);
+        // The old branded install previously claimed the shared registration.
+        install_registered_native_host(&branded, &manifests, &standard_hosts, &registry)
+            .expect("legacy");
+        install_registered_native_host(&branded, &manifests, &branded_hosts, &registry)
+            .expect("migrate");
+        assert!(registry.value(CHROME_HOST_KEY).is_none());
+        let branded_value = registry.value(&branded_key).expect("branded key");
+
+        install_registered_native_host(&standalone, &manifests, &standard_hosts, &registry)
+            .expect("standalone");
+        assert_eq!(
+            registry.value(&branded_key).as_deref(),
+            Some(branded_value.as_str())
+        );
+        let standalone_value = registry.value(CHROME_HOST_KEY).expect("standalone key");
+        remove_registered_native_host_for(&branded, &manifests, &registry).expect("remove branded");
+        assert!(registry.value(&branded_key).is_none());
+        assert_eq!(
+            registry.value(CHROME_HOST_KEY).as_deref(),
+            Some(standalone_value.as_str())
+        );
     }
 
     #[test]
@@ -3177,14 +3310,16 @@ mod tests {
             .set_default_value(EDGE_HOST_KEY, r"C:\Elsewhere\host.json")
             .expect("seed");
 
-        install_registered_native_host(&other, &manifests_dir, &[], &registry).expect("install");
+        let hosts = native_hosts(&[], true);
+        install_registered_native_host(&other, &manifests_dir, &hosts, &registry).expect("install");
         assert_eq!(
             remove_registered_native_host_for(&this, &manifests_dir, &registry).expect("keep"),
             Vec::<PathBuf>::new()
         );
         assert!(registry.value(CHROME_HOST_KEY).is_some());
 
-        install_registered_native_host(&this, &manifests_dir, &[], &registry).expect("overwrite");
+        install_registered_native_host(&this, &manifests_dir, &hosts, &registry)
+            .expect("overwrite");
         let manifest = manifests_dir.join("ai.opengeni.browser.json");
         assert_eq!(
             remove_registered_native_host_for(&this, &manifests_dir, &registry).expect("remove"),
@@ -3214,6 +3349,33 @@ mod tests {
         assert_eq!(ordinary_windows_path(r"\\?\Volume{0}\agent.exe"), None);
     }
 
+    #[test]
+    fn native_host_config_is_kept_per_executable_and_cleared_for_a_service_install() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path();
+        let branded = home.join("Desktop App/Runner");
+        let standalone = home.join("standalone/runner");
+        let original = home.join("original config");
+        let successor = home.join("successor config");
+
+        update_native_host_config(&branded, home, Some(&original)).expect("first install");
+        update_native_host_config(&branded, home, Some(&successor)).expect("reinstall");
+        assert_eq!(
+            read_native_host_config(&branded, home).expect("binding"),
+            Some(successor)
+        );
+        assert_eq!(
+            read_native_host_config(&standalone, home).expect("standalone"),
+            None
+        );
+
+        update_native_host_config(&branded, home, None).expect("service install");
+        assert_eq!(
+            read_native_host_config(&branded, home).expect("binding"),
+            None
+        );
+    }
+
     /// Chrome starts the host through `cmd.exe`, which cannot run a verbatim
     /// path, so a manifest written from the canonical binary path names the
     /// ordinary form, and still counts as this agent's when removing it.
@@ -3228,8 +3390,13 @@ mod tests {
         let manifests_dir = directory.path().join("NativeMessagingHosts");
         let registry = FakeRegistry::default();
 
-        install_registered_native_host(&canonical, &manifests_dir, &[], &registry)
-            .expect("install");
+        install_registered_native_host(
+            &canonical,
+            &manifests_dir,
+            &native_hosts(&[], true),
+            &registry,
+        )
+        .expect("install");
 
         let manifest = manifests_dir.join("ai.opengeni.browser.json");
         let body: serde_json::Value =
@@ -3237,6 +3404,10 @@ mod tests {
         let named = body["path"].as_str().expect("path");
         assert!(!named.starts_with(r"\\?\"), "{named}");
         assert_eq!(Path::new(named).canonicalize().expect("named"), canonical);
+        assert_eq!(
+            native_host_config_path(&canonical, directory.path()),
+            native_host_config_path(Path::new(named), directory.path())
+        );
         assert_eq!(
             remove_registered_native_host_for(&canonical, &manifests_dir, &registry)
                 .expect("remove"),
@@ -3804,7 +3975,8 @@ mod tests {
         // These ignored tests run alone; the variable only steers where the
         // manifest installer writes.
         std::env::set_var("XDG_CONFIG_HOME", &xdg);
-        install_native_host_manifests(Path::new(&binary), root.path(), &[]).expect("manifest");
+        install_native_host_manifests(Path::new(&binary), root.path(), &[], Some(&config_dir))
+            .expect("manifest");
         let process = tokio::process::Command::new(
             std::env::var("CHROMIUM").unwrap_or_else(|_| "chromium".to_string()),
         )
@@ -3825,7 +3997,7 @@ mod tests {
         .arg("data:text/html,<title>user page</title>")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &xdg)
-        .env("OPENGENI_CONFIG_DIR", &config_dir)
+        .env_remove("OPENGENI_CONFIG_DIR")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

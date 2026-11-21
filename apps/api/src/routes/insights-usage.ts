@@ -238,7 +238,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
       insightsQueryParameters(c.req.queries()),
       {
         status: 400,
-        message: "invalid Site Insights query",
+        message: "invalid app Insights query",
       },
     );
     const viewer = await siteViewerForGrant(deps.db, grant);

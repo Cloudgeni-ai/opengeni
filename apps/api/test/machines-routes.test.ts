@@ -1409,6 +1409,7 @@ describe("Where an organization machine works", () => {
       homeWorkspaceId: machine.originWorkspaceId,
       allowedWorkspaceIds: null,
       allowPersonalWorkspaces: true,
+      allowManagedWorkspaces: false,
     });
 
     const onlyHome = { allowedWorkspaceIds: [], allowPersonalWorkspaces: false };
@@ -1439,6 +1440,7 @@ describe("Where an organization machine works", () => {
         homeWorkspaceId: machine.originWorkspaceId,
         allowedWorkspaceIds: [machine.targetWorkspaceId],
         allowPersonalWorkspaces: false,
+        allowManagedWorkspaces: false,
       },
     });
 
@@ -1483,6 +1485,7 @@ describe("Where an organization machine works", () => {
             homeWorkspaceId: machine.originWorkspaceId,
             allowedWorkspaceIds: [],
             allowPersonalWorkspaces: false,
+            allowManagedWorkspaces: false,
           },
         },
       ],

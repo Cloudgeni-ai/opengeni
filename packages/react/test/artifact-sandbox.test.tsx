@@ -45,8 +45,8 @@ describe("published HTML artifacts", () => {
       <ArtifactSandbox html="<h1>App</h1>" title="Status" versionLabel="v4" />,
     );
     expect(markup).toContain("Live");
-    expect(markup).toContain('aria-label="Reload Site"');
-    expect(markup).toContain('aria-label="Open Site full screen"');
+    expect(markup).toContain('aria-label="Reload app"');
+    expect(markup).toContain('aria-label="Open app full screen"');
     expect(markup).toContain('aria-label="Status"');
     expect(markup).toContain("v4");
     expect(
@@ -70,7 +70,7 @@ describe("published HTML artifacts", () => {
       <ArtifactSandbox html="<h1>App</h1>" title="Status" liveStatus={null} />,
     );
     expect(hidden).not.toContain("Live");
-    expect(hidden).toContain('aria-label="Reload Site"');
+    expect(hidden).toContain('aria-label="Reload app"');
   });
 
   it("promotes the chat preview to the modal top layer without replacing its iframe", async () => {
@@ -88,7 +88,7 @@ describe("published HTML artifacts", () => {
       expect(dialog.querySelector("[data-window-drag]")).toBeNull();
       await act(async () =>
         (
-          container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
+          container.querySelector('[aria-label="Open app full screen"]') as HTMLButtonElement
         ).click(),
       );
       expect(showModal).toHaveBeenCalledTimes(1);
@@ -145,7 +145,7 @@ describe("published HTML artifacts", () => {
       expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
       await act(async () =>
         (
-          container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
+          container.querySelector('[aria-label="Open app full screen"]') as HTMLButtonElement
         ).click(),
       );
       expect(requests).toEqual([false, true]);

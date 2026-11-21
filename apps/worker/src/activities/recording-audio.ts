@@ -9,6 +9,7 @@ import {
 } from "@opengeni/contracts";
 import { pcmWavPiece, readPcmWav } from "./dictation-pieces";
 import { readTail, stoppedBySignal, trackRecordingProcesses } from "./recording-usage";
+import { measureRecordingTiming } from "@opengeni/observability";
 
 export { recordingAudioContainer, type RecordingAudioContainer };
 
@@ -243,7 +244,19 @@ type FfmpegStreams = {
   stdin?: (stdin: FileSink) => Promise<void>;
 };
 
-async function runFfmpeg(
+function runFfmpeg(
+  ffmpegPath: string,
+  args: string[],
+  signal?: AbortSignal,
+  stderrBytes?: number,
+  streams?: FfmpegStreams,
+): Promise<{ stderr: string }> {
+  return measureRecordingTiming("audio_normalize", () =>
+    runFfmpegProcess(ffmpegPath, args, signal, stderrBytes, streams),
+  );
+}
+
+async function runFfmpegProcess(
   ffmpegPath: string,
   args: string[],
   signal?: AbortSignal,

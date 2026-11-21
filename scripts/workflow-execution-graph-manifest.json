@@ -6,11 +6,15 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "636f24b57f904fa23d87a81b6c3b1ea8f3f421fc9fa026c6c7508f2592f6aac8"
+      "sha256": "73a98b52303a10636aaff60081ed5cb7150989132b98e790788836e2bc8639d2"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "4acdfbd22ff72cc944799dc2320762f438d20f72c1ecb03aaac71171132f3010"
+      "sha256": "507d3feb7c696841bcfd3515b94e23aa0ca186296bb933992032143e786d1510"
+    },
+    {
+      "path": ".github/workflows/agent-windows-arm64.yml",
+      "sha256": "9cf56550fe86632a51aa2d1b5a73ee9802cc08bd277a85e0b0359b8d17d8ff79"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -30,19 +34,19 @@
     },
     {
       "path": ".github/workflows/ci-browser-acceptance.yml",
-      "sha256": "32c3ad9d07f15c443ac731f1e51134406930e1700ad252414b9d677cb7d06b2e"
+      "sha256": "ef79b0a4b1bdfeee69e6090e31ee6b337cc165e2e8f15d9dab04b98ccb192859"
     },
     {
       "path": ".github/workflows/ci-e2e-shards.yml",
-      "sha256": "dd5e2b2b69d3e9489bdec3ca5df71ec96b8768f26e39fd4b5d51520c7a2ee97f"
+      "sha256": "5ad1818a166b0a547f695b12c1b7c3e9e41fb158e53550372ad53555eb491df2"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "636228c46ff445b50a85b7b2b75cb4f47f2c36d54e70364f98e90a0973ab86c7"
+      "sha256": "ef6d01ad22d1d02da2a19faac082a0da98ca5c768e2f5d06e39d7fd6a942725d"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
-      "sha256": "0aef40e8bfbbf2079aa35d82f4bdf764cca0b6a1ef656ba10e15b6d78b425953"
+      "sha256": "7cf343998d6f88e1aa97129adc54c7a16203aecc2a615a1a7c14dae948cc1268"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -62,7 +66,7 @@
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "ad59c33def67f13b7b0bd7be3b61c105f0903df4041110ebe381c669fa8c0d13"
+      "sha256": "1c8f519eb50c28383ea7c441995e956f44b51b04648676b81dc3fa8c558b81a7"
     },
     {
       "path": ".github/workflows/main-approval-superseded.yml",
@@ -70,19 +74,11 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "205a6aa9d47a33d191d9c55973aeec39765c207bad18e4a87357241f4f95e3ce"
+      "sha256": "69173fa6a798b641ab190de06352523d27647875465ef3247cb470c2ac06f6b3"
     },
     {
       "path": ".github/workflows/merge-content.yml",
       "sha256": "ccf67b8f6bcedacf010900f04da6add275adacc38db197da587e490a204d475c"
-    },
-    {
-      "path": ".github/workflows/model-request-review-signal.yml",
-      "sha256": "5f2fa7b87f9177c7e37e0069c9d40663b2aa4839af4298d33a014fbcaa4dcc52"
-    },
-    {
-      "path": ".github/workflows/model-request-review.yml",
-      "sha256": "a07b0841fd2f469fa2efc4d12cd6cb5723dfdc888ce67e0cffbd5a84f62b54cd"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -94,7 +90,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "61b9402aa9c4083e3e5631eff1a3756494815542f20a20074ddfd58139f1b371"
+      "sha256": "7e975a669e4e21c1aa380d513f6a8fbccf35c9629bdf740407c08d0dfe98bed8"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -200,7 +196,7 @@
     },
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "ef2a39d5f201fd82e101fa3c151d004f5fe7fe20075368d60958b6b46df881ba"
+      "sha256": "d62e0daff3104b2e98508bf43079cd36400c5390b3fb933b16748d8f8ba4e042"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
@@ -264,6 +260,12 @@
       "job": "cua-windows",
       "step": "Install",
       "sha256": "6b53200cb717e5db732d2f6094f04af1cddc07e651f9f39df6961dd57ae9b831"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Open controller databases at long Windows paths",
+      "sha256": "44bfa6cdc9a7cecbb3a0a8384622e3e47295f146ba0a09b5cc4075604b167495"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -388,12 +390,6 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
-      "step": "Build (Windows MSVC)",
-      "sha256": "47e82ccc9bf5233331015516e93808bcc105a3425b80ddbb85ededac49b20c3b"
-    },
-    {
-      "workflow": ".github/workflows/agent-release.yml",
-      "job": "build",
       "step": "Build interaction helpers (Linux glibc)",
       "sha256": "6bb244b0b2cb2d791b5f75a1a25f752f875d7cbfc8a5cd7faea807dcf5148d95"
     },
@@ -406,14 +402,8 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
-      "step": "Build interaction helpers (Windows x64)",
-      "sha256": "b3a144317b4213f203462e7db7c74868b38075315007781220c15592bb942bfd"
-    },
-    {
-      "workflow": ".github/workflows/agent-release.yml",
-      "job": "build",
-      "step": "Check the Windows binaries run on stock Windows",
-      "sha256": "69aa4d3a792aa0bcb5cf61f79fd93251138a1c1a867da96b35bc916487424ba3"
+      "step": "Build Windows x64 agent and interaction runtime",
+      "sha256": "096270196509cef71e536b159d7bb4eeacdd55af64c3d92a3d8195d420a2cab7"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -437,7 +427,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Install workspace dependencies",
-      "sha256": "8087ab5145312bf0747fbb8f871326960427169b20a5eff1b178cdc3704fe5ff"
+      "sha256": "c17932c388d4c03d171169818905bee42f836a6364962a3519b5f1dcf25cb544"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -534,6 +524,24 @@
       "job": "publish",
       "step": "Sign SHA256SUMS (if the key is present)",
       "sha256": "7971410990bd08d1f099e7ecd379b342714e1cc090bbd339c70abbc7b6c86690"
+    },
+    {
+      "workflow": ".github/workflows/agent-windows-arm64.yml",
+      "job": "build",
+      "step": "Build the Windows ARM64 agent and interaction runtime",
+      "sha256": "5a78c5b2a2fb6b34b21bfc8075e71ed5f54dbaa2454272fd2ac51d906852d5d7"
+    },
+    {
+      "workflow": ".github/workflows/agent-windows-arm64.yml",
+      "job": "build",
+      "step": "Install agent build and smoke dependencies",
+      "sha256": "914bbe5db1704efcee2f5743f04d27a7bb6e56ec17b96bba0a5cbd5e6fccc9ea"
+    },
+    {
+      "workflow": ".github/workflows/agent-windows-arm64.yml",
+      "job": "build",
+      "step": "Start the runtime from the standalone agent",
+      "sha256": "bc3229570196029190079b6cdc8288d90d5414f95e6af126ecf82fb2b9c13558"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -1488,24 +1496,6 @@
       "job": "content",
       "step": "Recompute landed merge content",
       "sha256": "58808325ef978e67fac85965381b0808323d1adb509b66a3bba9530e37523799"
-    },
-    {
-      "workflow": ".github/workflows/model-request-review-signal.yml",
-      "job": "signal",
-      "step": "Signal",
-      "sha256": "e27d316b41b4aa16da78e4c1fa112cdca9fc2ccd6366055ca121f1db0f261d18"
-    },
-    {
-      "workflow": ".github/workflows/model-request-review.yml",
-      "job": "evaluate",
-      "step": "Report the gate after a review",
-      "sha256": "46e796d352e300fa0a32c942c4df2954c2f2524ab157354831316cd1ad536ea3"
-    },
-    {
-      "workflow": ".github/workflows/model-request-review.yml",
-      "job": "evaluate",
-      "step": "Report the gate for a pushed or opened PR",
-      "sha256": "9329ab82c7bdbbd705a5d390d2d2b27cc53a23091353c5b96318da3461ca616a"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",

@@ -373,23 +373,32 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     action:
       action.kind === "agent_turn"
         ? { kind: "agent_turn" as const }
-        : {
-            kind: action.kind,
-            sourceId: action.sourceId,
-            sourceGeneration: action.sourceGeneration,
-            sourceLifecycleGeneration: action.sourceLifecycleGeneration,
-            destination: action.destination,
-            initiatingSubjectId: action.initiatingSubjectId,
-            allDescendants: action.allDescendants,
-            connection: {
-              connectionId: action.connection.connectionId,
-              connectionVersion: action.connection.connectionVersion,
-              providerDomain: action.connection.providerDomain,
-              kind: action.connection.kind,
-              ownerSubjectId: action.connection.ownerSubjectId,
+        : action.kind === "app_sync"
+          ? {
+              kind: action.kind,
+              siteId: action.siteId,
+              collection: action.collection,
+              mode: action.mode,
+              tool: action.tool,
+              note: "An App data sync: manage it with the app_sync_* tools.",
+            }
+          : {
+              kind: action.kind,
+              sourceId: action.sourceId,
+              sourceGeneration: action.sourceGeneration,
+              sourceLifecycleGeneration: action.sourceLifecycleGeneration,
+              destination: action.destination,
+              initiatingSubjectId: action.initiatingSubjectId,
+              allDescendants: action.allDescendants,
+              connection: {
+                connectionId: action.connection.connectionId,
+                connectionVersion: action.connection.connectionVersion,
+                providerDomain: action.connection.providerDomain,
+                kind: action.connection.kind,
+                ownerSubjectId: action.connection.ownerSubjectId,
+              },
+              limits: action.limits,
             },
-            limits: action.limits,
-          },
     targetSessionId: task.targetSessionId,
     reusableSessionId: task.reusableSessionId,
     rigId: task.rigId,

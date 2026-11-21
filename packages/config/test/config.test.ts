@@ -2034,6 +2034,22 @@ describe("sandbox preparation profiles", () => {
     ).toThrow("must be a subset");
   });
 
+  test("a former first-party tool name counts as its current name in the ceiling", () => {
+    for (const [defaults, allowed] of [
+      ["session_get,app_data_query", "session_get,site_data_query"],
+      ["session_get,site_data_query", "session_get,app_data_query"],
+    ])
+      expect(() =>
+        withEnv(
+          {
+            OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: defaults,
+            OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: allowed,
+          },
+          () => getSettings(),
+        ),
+      ).not.toThrow();
+  });
+
   test("does not duplicate a custom files MCP profile", () => {
     withEnv(
       {
@@ -3025,7 +3041,24 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     boxSecondsPerOrganizationPerDay: 43_200,
     boxSecondsPerPersonPerDay: 43_200,
     idleDrainAllHolders: true,
+    cardTrialBoxSeconds: 600,
   };
+
+  test("unpaid tiers get 10 box-minutes for agent turns before the card gate asks for a card", () => {
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.free?.cardTrialBoxSeconds).toBe(600);
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.restricted?.cardTrialBoxSeconds).toBeUndefined();
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.pro?.cardTrialBoxSeconds).toBeUndefined();
+    expect(parseSandboxPlanLimitsJson('{"free":{"cardTrialBoxSeconds":0}}').free).toEqual({
+      cardTrialBoxSeconds: 0,
+    });
+    expect(() => parseSandboxPlanLimitsJson('{"free":{"cardTrialBoxSeconds":-1}}')).toThrow(
+      "non-negative integer",
+    );
+    // A paying customer has no card trial to spend.
+    expect(paidSandboxPlanLimit(DEFAULT_SANDBOX_PLAN_LIMITS.free!).cardTrialBoxSeconds).toBe(
+      undefined,
+    );
+  });
 
   test("unpaid tiers share two running boxes, two per person and 12 box-hours a day", () => {
     expect(DEFAULT_SANDBOX_PLAN_LIMITS.free).toEqual({

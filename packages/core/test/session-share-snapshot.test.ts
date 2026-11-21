@@ -71,6 +71,29 @@ describe("chat share link snapshot", () => {
     expect(JSON.stringify(snapshot)).not.toContain("PRIVATE");
   });
 
+  test("an answer is shared as the chat shows it, without web-search citation handles", () => {
+    const { snapshot } = buildSharedSessionSnapshot([
+      event(1, "user.message", { text: "Is a permit needed?" }),
+      event(
+        2,
+        "agent.message.completed",
+        {
+          text: "Yes, for any extension. \uE200cite\uE202turn559410search0\uE201\nSee [the rules](https://example.com/rules?utm_source=openai).",
+          phase: "final_answer",
+        },
+        "t1",
+      ),
+      event(3, "turn.completed", {}, "t1"),
+    ]);
+    expect(snapshot.messages).toEqual([
+      { role: "user", text: "Is a permit needed?" },
+      {
+        role: "assistant",
+        text: "Yes, for any extension.\nSee [the rules](https://example.com/rules).",
+      },
+    ]);
+  });
+
   test("a finished turn without a final answer shows its first and last notes; a running one shows none", () => {
     const { snapshot } = buildSharedSessionSnapshot([
       event(1, "agent.message.completed", { text: "Starting.", phase: "commentary" }, "done"),

@@ -254,7 +254,10 @@ async function performCapabilityActionUntracked(
     if (item.canRemove !== true) {
       throw new Error(`Ask a workspace admin to remove ${item.name}.`);
     }
-    await client.removeCapabilityInstallation(workspaceId, item.id);
+    // A server that is not on (one that never connected, say) has nothing to
+    // turn off: its entry is deleted instead.
+    if (item.enabled) await client.removeCapabilityInstallation(workspaceId, item.id);
+    else await client.deleteCustomMcpServer(workspaceId, item.id);
     await refresh();
     onRuntimeChanged();
     await onComplete();

@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { prefixedMcpToolName as plainPrefixedMcpToolName } from "@opengeni/contracts";
+import {
+  currentFirstPartyToolReference,
+  firstPartyMcpToolAliasesOf,
+  prefixedMcpToolName as plainPrefixedMcpToolName,
+} from "@opengeni/contracts";
 
 /**
  * MCP tool naming. Each tool has two names:
@@ -222,6 +226,32 @@ export type McpToolReference = {
  * what an ambiguous reference does.
  */
 export function mcpToolReferenceMatches(tool: McpToolReference, name: string): boolean {
+  if (mcpToolReferenceMatchesExactly(tool, name)) return true;
+  // A first-party tool's hidden alias (its former name) still refers to it.
+  if (tool.registryId !== "opengeni") return false;
+  const current = currentFirstPartyToolReference(name);
+  return current !== undefined && mcpToolReferenceMatchesExactly(tool, current);
+}
+
+/**
+ * The current model name of a first-party tool called by its hidden alias:
+ * `site_data_query` or `opengeni__site_data_query` give
+ * `opengeni__app_data_query`. Undefined for any other name.
+ */
+export function firstPartyAliasModelToolName(name: string): string | undefined {
+  const current = currentFirstPartyToolReference(name);
+  if (current === undefined) return undefined;
+  const separator = current.lastIndexOf("__");
+  if (separator >= 0) return current.slice(0, separator) === "opengeni" ? current : undefined;
+  return current.includes(".") ? undefined : `opengeni__${current}`;
+}
+
+/** The hidden aliases (former names) of a tool, as published names; usually none. */
+export function mcpToolReferenceAliases(tool: McpToolReference): string[] {
+  return tool.registryId === "opengeni" ? firstPartyMcpToolAliasesOf(tool.toolName) : [];
+}
+
+function mcpToolReferenceMatchesExactly(tool: McpToolReference, name: string): boolean {
   if (name === tool.wireName || name === tool.toolName) return true;
   // Agents write a published name's separators as `.`, `-` or `_` alike.
   const own = looseToolName(tool.toolName);

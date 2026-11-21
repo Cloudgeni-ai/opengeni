@@ -187,8 +187,8 @@ export function SiteDataPanel({
           }
         >
           {forbidden(error)
-            ? "Only the Site's owner and workspace admins can see its data."
-            : "Couldn't load this Site's data."}
+            ? "Only the app's owner and workspace admins can see its data."
+            : "Couldn't load this app's data."}
         </Notice>
       ) : !described ? (
         <RowList label="Collections" busy flush>
@@ -199,7 +199,7 @@ export function SiteDataPanel({
           variant="inline"
           icon={<DatabaseIcon />}
           title="No saved data yet."
-          description="Ask Opengeni to add a collection, and the Site can save records and files in it."
+          description="Ask Opengeni to add a collection, and the app can save records and files in it."
         />
       ) : (
         <>
@@ -252,7 +252,7 @@ export function siteSqlSummary(
   if (!state.enabled)
     return state.usage.storageBytes > 0
       ? "Off. Its data is kept."
-      : "Tables and queries for this Site. Ask Opengeni to set them up.";
+      : "Tables and queries for this app. Ask Opengeni to set them up.";
   const queries = state.queries.length;
   return `${formatBytes(state.usage.storageBytes)} of ${formatBytes(state.limits.storageBytesPerSite)} · ${queries.toLocaleString()} ${queries === 1 ? "query" : "queries"}`;
 }
@@ -582,7 +582,7 @@ function SiteDataRecordView({
         onOpenChange={setConfirming}
         title={`Delete “${name}”?`}
         consequences={[
-          `It's removed from ${collection.name}, and the Site no longer shows it.`,
+          `It's removed from ${collection.name}, and the app no longer shows it.`,
           "This can't be undone.",
         ]}
         confirmLabel="Delete record"

@@ -23,7 +23,11 @@ const e2e = quarantineTest(
 const EXTENSION_ROOT = resolve(import.meta.dir, "../../../apps/browser-extension");
 
 // "src": the menu frame's address is its page; "blank": the frame is created
-// blank and then loaded with the page, so its address does not show it.
+// blank and then loaded with the page, so its address does not show it;
+// "dynamic": the menu's page is served at a random address
+// (use_dynamic_url), so the frame's address names no extension id, as with
+// Bitwarden.
+type Menu = "src" | "blank" | "dynamic";
 const PASSWORD_MANAGER = `
 let host = null;
 let frame = null;
@@ -64,7 +68,7 @@ const PAGE_FRAMES = ["error", "hopping", "posted"] as const;
 type PageMode = "agent" | "adding" | "menu-open" | "nested-data" | "loading";
 
 function page(
-  menu: "src" | "blank",
+  menu: Menu,
   otherOrigin: string,
   pageFrames: boolean,
   mode: PageMode = "agent",
@@ -147,7 +151,7 @@ document.getElementById("send").onclick = () => {
 type Fixture = Awaited<ReturnType<typeof launch>>;
 
 async function launch(
-  menu: "src" | "blank",
+  menu: Menu,
   pageFrames: boolean,
   options: { mode?: PageMode; menuTabs?: number } = {},
 ) {
@@ -167,7 +171,13 @@ async function launch(
       name: "Inline menu fixture",
       version: "1.0",
       content_scripts: [{ matches: ["<all_urls>"], js: ["content.js"], all_frames: true }],
-      web_accessible_resources: [{ resources: ["menu.html"], matches: ["<all_urls>"] }],
+      web_accessible_resources: [
+        {
+          resources: ["menu.html"],
+          matches: ["<all_urls>"],
+          ...(menu === "dynamic" ? { use_dynamic_url: true } : {}),
+        },
+      ],
     }),
   );
   await writeFile(join(manager, "content.js"), PASSWORD_MANAGER);
@@ -451,7 +461,7 @@ const shows = (observation: BrowserObservation, text: string) =>
   nodes(observation).some((node) => (node.name ?? "").includes(text));
 
 async function withFixture(
-  menu: "src" | "blank",
+  menu: Menu,
   run: (fixture: Fixture) => Promise<void>,
   pageFrames = false,
   options: { mode?: PageMode; menuTabs?: number } = {},
@@ -557,6 +567,44 @@ e2e(
       expect(shows(observation, "verified 123456")).toBe(true);
       // The page's own frame, also loaded by script from another origin, stays.
       expect(shows(observation, "widget present")).toBe(true);
+    });
+  },
+  90_000,
+);
+
+e2e(
+  "a sign-in page stays controllable while a password manager serves its inline menu at a random address",
+  async () => {
+    await withFixture("dynamic", async ({ observe, act }) => {
+      let observation = await observe();
+      // The click shows the menu, and Chrome ends debugging of the tab.
+      const focus = await act(observation, {
+        type: "click",
+        locator: ref(observation, "textbox", "Email"),
+      });
+      expect(["completed", "outcome_unknown"]).toContain(focus.state);
+      observation = await observe();
+      const send = await act(observation, {
+        type: "click",
+        locator: ref(observation, "button", "Send code"),
+      });
+      expect(["completed", "outcome_unknown"]).toContain(send.state);
+      observation = await observe();
+      observation = await observe();
+      const fill = await act(observation, {
+        type: "fill",
+        locator: ref(observation, "textbox", "Code"),
+        value: "123456",
+      });
+      expect(fill.state).toBe("completed");
+      observation = await observe();
+      const verify = await act(observation, {
+        type: "click",
+        locator: ref(observation, "button", "Verify"),
+      });
+      expect(verify.state).toBe("completed");
+      observation = await observe();
+      expect(shows(observation, "verified 123456")).toBe(true);
     });
   },
   90_000,

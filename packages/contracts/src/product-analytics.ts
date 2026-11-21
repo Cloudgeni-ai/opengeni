@@ -177,6 +177,7 @@ export const TOOL_FAMILY_INTEGRATION_DOMAINS = [
   "mcp.otter.ai",
   "mcp.notion.com",
   "mcp.hubspot.com",
+  "mcp.superoffice.com",
   "mcp.atlassian.com",
   "mcp.intercom.com",
 ] as const;
@@ -252,6 +253,7 @@ export const FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES = [
   "skill_save",
   "skill_search",
   "operation_read",
+  "tool_result_read",
   "files_get_download_url",
 ] as const;
 

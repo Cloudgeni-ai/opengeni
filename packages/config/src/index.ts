@@ -72,6 +72,7 @@ import {
   type CompatibleModelReasoning,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  firstPartyMcpToolAliasTarget,
   normalizeSitesDomain,
   OpenGeniSlackBotDisplayName,
   SandboxBackend,
@@ -418,6 +419,21 @@ export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:fca875a68cdce099fabaf2ffd97b99fac77578efd6ad0b422425aa2a174e973f";
 
 /**
+ * Whether Console agents (organization agents, docs/agents.md) are on for this
+ * organization. Off for every organization unless its id is listed in
+ * OPENGENI_ORG_AGENTS_ACCOUNT_IDS.
+ */
+export function orgAgentsEnabledForAccount(
+  settings: Partial<Pick<Settings, "orgAgentsAccountIds">>,
+  accountId: string | null | undefined,
+): boolean {
+  return (
+    typeof accountId === "string" &&
+    (settings.orgAgentsAccountIds ?? []).includes(accountId.toLowerCase())
+  );
+}
+
+/**
  * Whether this account keeps the billing terms from before the app/API split:
  * any credit pays any use, no own-key platform fee, no newly metered tools.
  */
@@ -458,6 +474,9 @@ export function paidHostedToolsChargeCredits(
   if (isLegacyBillingAccount({ billingLegacyAccountIds }, input.accountId)) return false;
   return input.chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
 }
+
+/** Every object storage backend a deployment can configure. */
+export const OBJECT_STORAGE_BACKENDS = ["s3-compatible", "aws-s3", "azure-blob", "gcs"] as const;
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -1051,10 +1070,12 @@ const SettingsSchema = z.object({
   // Model-catalog auto-compact limit. When present it is clamped to
   // 90% of the raw window, matching Codex core's auto_compact_token_limit().
   contextAutoCompactThresholdTokens: z.coerce.number().int().positive().optional(),
-  // Provider-neutral fallback for canonical model-facing tool-result text.
-  // The current stable Codex catalog policy is 10k tokens; the truncator adds
-  // Codex's 1.2x JSON serialization allowance when applying it.
-  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(10_000),
+  // Provider-neutral fallback for how much tool-result text one result shows
+  // inline: 25k approximate tokens, 100,000 UTF-8 bytes (Claude Code's default
+  // MCP output limit). A larger result is stored whole and the model reads the
+  // rest by offset. The request-time safety truncation adds Codex's 1.2x
+  // serialization allowance on top, so it never cuts a result within this.
+  modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(25_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -2264,9 +2285,7 @@ const SettingsSchema = z.object({
   objectStorageEndpoint: z.string().url().optional(),
   objectStorageInternalEndpoint: z.string().url().optional(),
   objectStorageSandboxEndpoint: z.string().url().optional(),
-  objectStorageBackend: z
-    .enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"])
-    .default("s3-compatible"),
+  objectStorageBackend: z.enum(OBJECT_STORAGE_BACKENDS).default("s3-compatible"),
   objectStorageBucket: z.string().min(1).default("opengeni-files"),
   objectStorageRegion: z.string().min(1).default("us-east-1"),
   objectStorageS3Provider: z.string().min(1).default("Minio"),
@@ -2304,6 +2323,10 @@ const SettingsSchema = z.object({
   // configured; the API signs its calls to the gateway with that secret.
   // Usage is recorded in the usage ledger only. Free-profile defaults are strict.
   sitesCloudflareStorageEnabled: EnvBoolean.default(false),
+  // Live data and version hints for open Site pages (docs/site-data.md,
+  // "Change events"). Turn on once the gateway has its SITE_LIVE binding; it
+  // also needs the gateway's internal origin and secret.
+  sitesLiveEnabled: EnvBoolean.default(false),
   sitesGatewayInternalOrigin: z
     .string()
     .url()
@@ -2622,6 +2645,19 @@ const SettingsSchema = z.object({
   // credit pays any use, no own-key platform fee, no newly metered tool
   // charges. Defaults to DEFAULT_BILLING_LEGACY_ACCOUNT_IDS (CloudGeni's host
   // account and our own team's organizations); "none" lists no account.
+  // Organizations with Console agents (organization agents, docs/agents.md
+  // "Console agents") turned on: comma-separated account ids. Empty (the
+  // default) turns them off everywhere.
+  orgAgentsAccountIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim().toLowerCase())
+            .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([]),
+  ),
   billingLegacyAccountIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -6879,6 +6915,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingAuth: optional("OPENGENI_DOCUMENT_EMBEDDING_AUTH"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
     sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
+    sitesLiveEnabled: optional("OPENGENI_SITES_LIVE_ENABLED"),
     sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
     sitesSqlFreeStorageBytes: optional("OPENGENI_SITES_SQL_FREE_STORAGE_BYTES"),
     sitesSqlFreeRowsReadPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_READ_PER_MONTH"),
@@ -7072,6 +7109,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
+    orgAgentsAccountIds: optional("OPENGENI_ORG_AGENTS_ACCOUNT_IDS"),
     byokPlatformFeeBps: optional("OPENGENI_BYOK_PLATFORM_FEE_BPS"),
     apiConnectedSubscriptionsEnabled: optional("OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED"),
     paidHostedToolsCreditBilling: optional("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING"),
@@ -9919,6 +9957,28 @@ function acceptedDefinitionVersionMatches(
   );
 }
 
+/** Reproduce the previous default for digest checks only. The larger inline
+ * budget cannot change tool results already bounded and persisted by the old
+ * worker. Keep the live limit for new results and require all other fields to
+ * match a definition that the previous worker would have accepted. */
+function preLosslessToolOutputDefinition(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): ConfiguredModel | null {
+  // Pin both rollout values; a future default is a separate decision.
+  if (model.executionLimits?.toolOutputTruncationTokens !== 25_000) {
+    return null;
+  }
+  const historical = {
+    ...model,
+    executionLimits: {
+      ...model.executionLimits,
+      toolOutputTruncationTokens: 10_000,
+    },
+  };
+  return { ...historical, definitionVersion: definitionVersionFor(historical, provider) };
+}
+
 /**
  * Built-in models on Azure OpenAI or another base URL declared Ultrafast until
  * it was limited to the direct OpenAI API. A non-Ultrafast turn accepted under
@@ -10014,10 +10074,15 @@ export function configuredModelForAcceptedTurnExecutionPolicy(
     policy.definitionVersion === model.definitionVersion ||
     // Runtime test doubles may resolve a partial shape; a model without a
     // runnable web-search declaration has nothing to withhold.
-    model.capabilities?.hostedTools?.webSearch?.runnable !== true ||
-    !matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+    model.capabilities?.hostedTools?.webSearch?.runnable !== true
   ) {
     return model;
+  }
+  if (!matchesWebSearchEnablementDefinitionVersion(model, provider, policy)) {
+    const historical = preLosslessToolOutputDefinition(model, provider);
+    if (!historical || !matchesWebSearchEnablementDefinitionVersion(historical, provider, policy)) {
+      return model;
+    }
   }
   return {
     ...model,
@@ -10181,7 +10246,14 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
           effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
           autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
-          toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+          // Codex models show tool output inline up to the deployment policy
+          // like every other model; larger results are stored and read by
+          // offset. Never below the 10k-token policy their history was
+          // bounded under, so replayed items are never cut further.
+          toolOutputTruncationTokens: Math.max(
+            settings.modelToolOutputTruncationTokens,
+            CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+          ),
         };
       }),
   };
@@ -10939,13 +11011,27 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     : executable;
   // The individual-account cutover corrects subscription accounting labels.
   // Preserve an already accepted legacy policy only if its complete original
-  // executable digest matches; this exception cannot compose with other drift.
+  // executable digest matches, accounting for the inline output default rollout.
   const legacyClaudeScope =
     resolved.provider.kind === "claude-subscription-workspace"
       ? "workspace"
       : resolved.provider.kind === "claude-subscription-organization"
         ? "organization"
         : null;
+  let legacyOutputDefinition: ConfiguredModel | null | undefined;
+  const matchesBeforeOutputLimitRollout = (match: (model: ConfiguredModel) => boolean) => {
+    if (legacyOutputDefinition === undefined) {
+      legacyOutputDefinition = preLosslessToolOutputDefinition(resolved.model, resolved.provider);
+    }
+    return legacyOutputDefinition !== null && match(legacyOutputDefinition);
+  };
+  const matchesLegacyClaudeAccountingDigest = (model: ConfiguredModel) =>
+    parsed.definitionVersion ===
+    definitionVersionFor(
+      { ...model, credentialSource: parsed.credentialSource, billing: parsed.billing },
+      resolved.provider,
+      { includeAutoCompactTokenLimit: true },
+    );
   const legacyClaudeAccountingMatches =
     legacyClaudeScope !== null &&
     parsed.providerId === resolved.provider.id &&
@@ -10961,30 +11047,23 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
         upstreamPayer: legacyClaudeScope,
         metering: "external",
       }) &&
-    parsed.definitionVersion ===
-      definitionVersionFor(
-        {
-          ...resolved.model,
-          credentialSource: parsed.credentialSource,
-          billing: parsed.billing,
-        },
-        resolved.provider,
-        { includeAutoCompactTokenLimit: true },
-      );
+    (matchesLegacyClaudeAccountingDigest(resolved.model) ||
+      matchesBeforeOutputLimitRollout(matchesLegacyClaudeAccountingDigest));
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
   // "openai", so accept that one legacy digest only; Azure and every other
   // executable-definition change remain fail-closed. A model whose structured
   // output was enabled after acceptance is also checked in its one
   // pre-enablement form.
-  const structuredOutputHistorical = structuredOutputPreEnablementModel(
-    resolved.model,
-    resolved.provider,
-  );
+  const matchesDefinition = (model: ConfiguredModel) => {
+    if (acceptedDefinitionVersionMatches(model, resolved.provider, parsed)) return true;
+    const historical = structuredOutputPreEnablementModel(model, resolved.provider);
+    return (
+      historical !== null && acceptedDefinitionVersionMatches(historical, resolved.provider, parsed)
+    );
+  };
   const definitionVersionMatches =
-    acceptedDefinitionVersionMatches(resolved.model, resolved.provider, parsed) ||
-    (structuredOutputHistorical !== null &&
-      acceptedDefinitionVersionMatches(structuredOutputHistorical, resolved.provider, parsed));
+    matchesDefinition(resolved.model) || matchesBeforeOutputLimitRollout(matchesDefinition);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -12596,6 +12675,12 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
  * - `organizationsYoungerThanMs`: only for the `new` tier, which applies to a
  *   Free self-serve organization created less than this long
  *   ago. Omitted or 0 turns the `new` tier off.
+ * - `cardTrialBoxSeconds`: while the card verification gate is on, the
+ *   metered box time an unpaid organization without a verified card gets for
+ *   agent turns before it must add one, over its whole life (not per day).
+ *   One such box runs at a time; terminals, processes, desktops and viewers
+ *   still need the card to start a box. Once it is used the reaper drains
+ *   boxes no turn holds. Omitted or 0: no box without a card.
  */
 export type SandboxPlanLimit = {
   viewerOnlyBoxesPerOrganization?: number;
@@ -12606,6 +12691,7 @@ export type SandboxPlanLimit = {
   boxSecondsPerPersonPerDay?: number;
   idleDrainAllHolders?: boolean;
   organizationsYoungerThanMs?: number;
+  cardTrialBoxSeconds?: number;
 };
 
 /**
@@ -12638,18 +12724,25 @@ const SANDBOX_PLAN_LIMIT_COUNT_FIELDS = [
   "boxSecondsPerOrganizationPerDay",
   "boxSecondsPerPersonPerDay",
   "organizationsYoungerThanMs",
+  "cardTrialBoxSeconds",
 ] as const;
 
 /** 12 box-hours: the daily box-time budget of an unpaid organization and person. */
 const UNPAID_BOX_SECONDS_PER_DAY = 12 * 60 * 60;
 
-/** The running, per-person, daily and idle bounds every unpaid tier shares. */
+/** 10 box-minutes: what an unpaid organization's agent gets before a card is
+ * required, while the card verification gate is on. */
+const UNPAID_CARD_TRIAL_BOX_SECONDS = 10 * 60;
+
+/** The running, per-person, daily, idle and card-trial bounds every unpaid
+ * tier shares. */
 const UNPAID_SANDBOX_BOUNDS = {
   runningBoxesPerOrganization: 2,
   runningBoxesPerPerson: 2,
   boxSecondsPerOrganizationPerDay: UNPAID_BOX_SECONDS_PER_DAY,
   boxSecondsPerPersonPerDay: UNPAID_BOX_SECONDS_PER_DAY,
   idleDrainAllHolders: true,
+  cardTrialBoxSeconds: UNPAID_CARD_TRIAL_BOX_SECONDS,
 } as const satisfies SandboxPlanLimit;
 
 export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
@@ -12950,6 +13043,7 @@ export const UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS = [
   "boxSecondsPerOrganizationPerDay",
   "boxSecondsPerPersonPerDay",
   "idleDrainAllHolders",
+  "cardTrialBoxSeconds",
 ] as const satisfies readonly (keyof SandboxPlanLimit)[];
 
 /** `limit` for an organization that has paid: without the unpaid-only bounds. */
@@ -13677,11 +13771,13 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   validateRecordingTranscriptionSettings(settings);
+  // A former first-party name (site_*) is the same tool as its successor (app_*).
+  const currentToolName = (tool: string) => firstPartyMcpToolAliasTarget(tool) ?? tool;
   const allowedFirstPartyMcpTools = new Set(
-    settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
+    (settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES).map(currentToolName),
   );
   const disallowedDefaults = (settings.defaultFirstPartyMcpTools ?? []).filter(
-    (tool) => !allowedFirstPartyMcpTools.has(tool),
+    (tool) => !allowedFirstPartyMcpTools.has(currentToolName(tool)),
   );
   if (disallowedDefaults.length > 0) {
     throw new Error(

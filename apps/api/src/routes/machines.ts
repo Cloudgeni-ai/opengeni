@@ -369,6 +369,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       homeWorkspaceId: machine.workspaceId,
       allowedWorkspaceIds: body.allowedWorkspaceIds,
       allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      allowManagedWorkspaces: body.allowManagedWorkspaces,
       subjectId: grant.subjectId,
     });
     return c.json(organizationComputeReachResponse(result, "machine"));

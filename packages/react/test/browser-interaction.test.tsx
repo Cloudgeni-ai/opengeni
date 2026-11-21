@@ -1643,6 +1643,86 @@ describe("BrowserSession React resources", () => {
     }
   });
 
+  test("stops polling a page whose observation is refused for good until it shows another document", async () => {
+    let observationCalls = 0;
+    let failure: "final" | "transient" | null = "transient";
+    let currentTarget = target();
+    const client = fakeClient({
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => {
+        observationCalls += 1;
+        if (failure === "transient")
+          throw new OpenGeniApiError(
+            503,
+            JSON.stringify({
+              error: { code: "upstream_unavailable", message: "busy", retryable: true },
+            }),
+          );
+        if (failure === "final")
+          throw new OpenGeniApiError(
+            409,
+            JSON.stringify({
+              error: {
+                code: "conflict",
+                message: "Chrome does not let the extension control this tab.",
+                retryable: false,
+              },
+            }),
+          );
+        return observation(BROWSER_SESSION_ID, currentTarget);
+      },
+    });
+    const props = (pollIntervalMs = 750) => ({
+      client,
+      workspaceId: WORKSPACE_ID,
+      browserSessionId: BROWSER_SESSION_ID,
+      pollIntervalMs,
+    });
+    const hook = await renderHook(
+      (options: ReturnType<typeof props>) => useBrowserSession(options),
+      props(),
+    );
+    await flush(20);
+    expect(observationCalls).toBe(1);
+
+    const poll = async () =>
+      await actRun(async () => {
+        jest.advanceTimersByTime(800);
+        for (let index = 0; index < 6; index++) await Promise.resolve();
+      });
+    jest.useFakeTimers();
+    try {
+      // Changing the interval installs the timer under the fake clock.
+      await hook.rerender(props(760));
+      // A failure that may pass is asked again.
+      await poll();
+      expect(observationCalls).toBe(2);
+
+      failure = "final";
+      await poll();
+      expect(observationCalls).toBe(3);
+      await poll();
+      await poll();
+      expect(observationCalls).toBe(3);
+      expect(hook.result.current.error).toBeNull();
+
+      // The tab shows another document: it is observed again.
+      failure = null;
+      currentTarget = target(BROWSER_SESSION_ID, "target-1", "document-2");
+      await poll();
+      expect(observationCalls).toBe(4);
+      expect(hook.result.current.observation?.target.documentGeneration).toBe("document-2");
+    } finally {
+      await hook.unmount();
+      jest.useRealTimers();
+    }
+  });
+
   test("uses a fresh tab-selection observation when the frame has not arrived yet", async () => {
     const currentTarget = target();
     let observationCalls = 0;

@@ -928,13 +928,29 @@ async function compactContextPortable(
     ANTHROPIC_REQUEST_MAX_BYTES,
     options.requestSizeRecovery?.maxBytes ?? ANTHROPIC_REQUEST_MAX_BYTES,
   );
+  // The exact ordinary request withheld at this boundary covers the whole
+  // durable history and extends the previous request byte for byte, so the
+  // checkpoint reads its warm prompt cache. Always consume it, so a later
+  // compaction never sees a stale request. A model switch never uses it: it
+  // still carries Codex's checkpoint, which the new model cannot read.
+  const taken = summarize.withheldWireHistory?.();
+  const withheld =
+    !options.portableModelSwitch &&
+    !options.requestSizeRecovery &&
+    taken &&
+    withheldHistoryCovers(taken, canonicalItems)
+      ? taken
+      : undefined;
   try {
+    // Null when the provider refused the withheld request as too large; that
+    // refused call is counted, and durable history is fitted as before.
+    const fromWithheld = withheld
+      ? await summarizeWithheldRequest(summarize, settings, withheld, maxBytes)
+      : null;
+    const refusedCalls = withheld && !fromWithheld ? 1 : 0;
     if (options.portableModelSwitch) {
       // A model switch summarizes the stored transcript, which can be far larger
-      // than the new model's window. The withheld request still carries Codex's
-      // checkpoint and never stands in for it; consume it all the same, so a
-      // later compaction never sees a stale request.
-      summarize.withheldWireHistory?.();
+      // than the new model's window.
       summarized = await summarizeTranscriptInBoundedRequests(
         summarize,
         settings,
@@ -942,7 +958,8 @@ async function compactContextPortable(
         projectForWire,
         { budgetTokens: Math.max(0, structuralBudget - prefixTokens), maxBytes },
       );
-    } else if (summarize.measureInputBytes) {
+    } else if (fromWithheld) summarized = fromWithheld;
+    else if (summarize.measureInputBytes) {
       const budget = Math.max(0, structuralBudget - prefixTokens);
       const prepare = async (prefix: CompactionItem[]) =>
         buildCompactionPromptInput(
@@ -951,24 +968,13 @@ async function compactContextPortable(
       const fits = async (projected: CompactionItem[]) =>
         estimateTokens(projected) <= budget &&
         (await summarize.measureInputBytes!(settings, projected)) <= maxBytes;
-      // Prefer the exact ordinary request withheld at this boundary: it covers
-      // the whole durable history and extends the previous request byte for
-      // byte. Size recovery and oversized histories still cut a fitting prefix.
-      // Always consume it, so a later compaction never sees a stale request.
-      const taken = summarize.withheldWireHistory?.();
-      const withheld =
-        !options.requestSizeRecovery && taken && withheldHistoryCovers(taken, canonicalItems)
-          ? taken
-          : undefined;
-      const exact = withheld ? buildCompactionPromptInput(withheld) : undefined;
-      const exactFits = exact ? await fits(exact) : false;
-      const cut = exactFits
-        ? canonicalItems.length
-        : await fitCompactionPrefix(
-            canonicalItems,
-            async (prefix) => fits(await prepare(prefix)),
-            Boolean(options.requestSizeRecovery),
-          );
+      // Size recovery, a withheld request the provider refused as too large,
+      // and boundaries without one cut a fitting prefix of durable history.
+      const cut = await fitCompactionPrefix(
+        canonicalItems,
+        async (prefix) => fits(await prepare(prefix)),
+        Boolean(options.requestSizeRecovery),
+      );
       if (cut === null)
         throw new EmptyCompactionSummaryError({
           stage: "portable_byte_budget",
@@ -976,7 +982,7 @@ async function compactContextPortable(
         });
       summarizedItems = canonicalItems.slice(0, cut);
       deferredItems = canonicalItems.slice(cut);
-      const projected = exactFits && exact ? exact : await prepare(summarizedItems);
+      const projected = await prepare(summarizedItems);
       summarized = {
         summaryBody: await summarize(settings, projected),
         preparation: {
@@ -985,9 +991,12 @@ async function compactContextPortable(
           rewrittenToolOutputs: 0,
           droppedHistoryItems: 0,
         },
-        providerCalls: 1,
+        providerCalls: 1 + refusedCalls,
       };
-    } else summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+    } else {
+      summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+      summarized = { ...summarized, providerCalls: summarized.providerCalls + refusedCalls };
+    }
   } catch (error) {
     // The chat's own model could not summarize. Rather than fail the turn,
     // keep the newest requests and platform context exactly as a summarized
@@ -1172,6 +1181,46 @@ async function compactContextPortable(
     replacementFingerprint,
     events: applied.events,
   };
+}
+
+/**
+ * Summarize from the ordinary request withheld at this model boundary, sent
+ * unchanged plus the checkpoint prompt, so the request extends the previous
+ * one byte for byte and reads its warm prompt cache. The provider accepted
+ * that history a moment ago, so the provider decides whether it still fits,
+ * not the coarse byte estimate, which can be a fifth or more off in either
+ * direction and would otherwise reproject (and break the cached prefix of)
+ * many checkpoints taken at the threshold. Only the hard request-byte limit is checked locally.
+ * Returns null when the request is over that limit or the provider refuses it
+ * as too large; the caller then fits durable history as before.
+ */
+export async function summarizeWithheldRequest(
+  summarize: CompactionSummarizer,
+  settings: Settings,
+  withheld: CompactionItem[],
+  maxBytes: number,
+): Promise<Awaited<ReturnType<typeof summarizeWithCodexOverflowTrimming>> | null> {
+  const input = buildCompactionPromptInput(withheld);
+  if (
+    summarize.measureInputBytes &&
+    (await summarize.measureInputBytes(settings, input)) > maxBytes
+  )
+    return null;
+  try {
+    return {
+      summaryBody: await summarize(settings, input),
+      preparation: {
+        input,
+        estimatedInputTokens: estimateTokens(input),
+        rewrittenToolOutputs: 0,
+        droppedHistoryItems: 0,
+      },
+      providerCalls: 1,
+    };
+  } catch (error) {
+    if (isContextWindowExceeded(error)) return null;
+    throw error;
+  }
 }
 
 export async function summarizeWithCodexOverflowTrimming(

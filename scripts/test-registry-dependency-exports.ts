@@ -17,6 +17,7 @@ import { basename, join, relative } from "node:path";
 import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
 import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
 import {
+  isPublishedPackageName,
   publishableWorkspacePackages,
   repoRoot,
   workspaceVersionMap,
@@ -292,7 +293,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
           const minimums: Record<string, string> = {};
           if (mode === "minimum") {
             for (const [dependency, range] of Object.entries(manifest.dependencies ?? {})) {
-              if (!dependency.startsWith("@opengeni/")) continue;
+              if (!isPublishedPackageName(dependency)) continue;
               const metadata = await packument(dependency);
               minimums[dependency] = lowestPublishedVersion(range, Object.keys(metadata.versions));
             }
@@ -311,7 +312,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
           }
           const resolved: Record<string, string> = {};
           for (const [dependency, range] of Object.entries(manifest.dependencies ?? {})) {
-            if (!dependency.startsWith("@opengeni/")) continue;
+            if (!isPublishedPackageName(dependency)) continue;
             const manifestPath = Bun.resolveSync(`${dependency}/package.json`, installed);
             const dep = JSON.parse(await readFile(manifestPath, "utf8")) as SmokeManifest;
             if (

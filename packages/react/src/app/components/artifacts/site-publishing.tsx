@@ -291,7 +291,7 @@ export function SitePublishPage(props: SitePublishPageProps) {
   );
   if (!props.canManage || load.state === "forbidden")
     return blocked(
-      "You can't publish this Site",
+      "You can't publish this app",
       "You need permission to publish artifacts in this workspace.",
     );
   if (load.state === "unavailable")
@@ -301,8 +301,8 @@ export function SitePublishPage(props: SitePublishPageProps) {
     );
   if (site.visibility === "private" && load.state !== "ready")
     return blocked(
-      "Share this Site with the workspace first",
-      "A Site that only you can see can't be published.",
+      "Share this app with the workspace first",
+      "An app that only you can see can't be published.",
       props.onShareWithWorkspace ? (
         <Button type="button" size="sm" onClick={props.onShareWithWorkspace}>
           <UsersIcon aria-hidden="true" />
@@ -428,14 +428,14 @@ function SitePublishForm({
     try {
       const next = await client.updateSitePublication(workspaceId, site.id, request);
       onPublication(next);
-      toast.success(publishing ? "Site published" : "Changes saved", {
+      toast.success(publishing ? "App published" : "Changes saved", {
         ...(publishing ? { description: next.hostname } : {}),
       });
       return true;
     } catch (error) {
       const code = siteErrorCode(error);
       if (code === "site_hostname_taken") {
-        setLabelError("Another Site uses this name.");
+        setLabelError("Another app uses this name.");
         return false;
       }
       if (code === "site_admin_required") {
@@ -468,7 +468,7 @@ function SitePublishForm({
       const next = await client.unpublishSite(workspaceId, site.id);
       onPublication(next);
       showUndoToast({
-        title: "Site unpublished",
+        title: "App unpublished",
         description: `${saved.hostname} stays reserved for this workspace.`,
         onUndo: () =>
           void client
@@ -489,9 +489,9 @@ function SitePublishForm({
     setBusy("restore");
     try {
       onPublication(await client.restoreSite(workspaceId, site.id));
-      toast.success("Site restored");
+      toast.success("App restored");
     } catch (error) {
-      toast.error("Couldn't restore the Site", { description: userErrorText(error) });
+      toast.error("Couldn't restore the app", { description: userErrorText(error) });
     } finally {
       setBusy(null);
     }
@@ -541,7 +541,7 @@ function SitePublishForm({
             error={shownLabelError}
             hint={
               suspended ? (
-                "Restore the Site to change its address."
+                "Restore the app to change its address."
               ) : (
                 <AvailabilityHint
                   availability={availability}
@@ -588,7 +588,7 @@ function SitePublishForm({
                     loginOnly: sites.loginOnly === true,
                   })}
                   disabled={choice.value === "public" && publicDisabled}
-                  disabledReason="Public Sites are turned off on this server."
+                  disabledReason="Public apps are turned off on this server."
                 />
               ))}
             </ChoiceCards>
@@ -597,7 +597,7 @@ function SitePublishForm({
           {draft.access === "invited" ? (
             <Field
               label="Invited people"
-              hint="They open the Site after signing in with this email."
+              hint="They open the app after signing in with this email."
               error={emailError}
             >
               <EmailChipsInput
@@ -620,7 +620,7 @@ function SitePublishForm({
 
           <div className="flex min-w-0 flex-col gap-4">
             <CheckboxField
-              label="Let people chat with the Site's agent"
+              label="Let people chat with the app's agent"
               checked={draft.agentEnabled}
               onCheckedChange={(agentEnabled) => update({ agentEnabled })}
             />
@@ -653,7 +653,7 @@ function SitePublishForm({
 
           <CheckboxField
             label="Hide from search engines"
-            description="Asks search engines not to list the Site."
+            description="Asks search engines not to list the app."
             checked={draft.noindex}
             disabled={forceNoindex}
             disabledReason="Always on for this server."
@@ -679,7 +679,7 @@ function SitePublishForm({
           onTakeDown={async (reason) => {
             const next = await client.takeDownSite(workspaceId, site.id, { reason });
             onPublication(next);
-            toast.success("Site taken down", {
+            toast.success("App taken down", {
               description: "Visitors see a takedown notice.",
             });
           }}
@@ -700,7 +700,7 @@ function AvailabilityHint({
   domain: string | null;
   unchanged: boolean;
 }) {
-  if (unchanged) return "Changing it moves the Site. The old address stops working.";
+  if (unchanged) return "Changing it moves the app. The old address stops working.";
   if (
     availability.state === "checking" ||
     (availability.state !== "idle" && availability.label !== label)
@@ -908,7 +908,7 @@ function OutsideAgentSection({
     <SettingRow
       variant="control-right"
       label="Agent for people outside the workspace"
-      description="People outside the workspace can only use this Site's own data."
+      description="People outside the workspace can only use this app's own data."
       hint={locked ? "Only workspace admins change this." : undefined}
       error={error}
       control={
@@ -1136,7 +1136,7 @@ function SiteReports({
   return (
     <Section
       title="Reports"
-      description="Visitors can report this Site from the link at the bottom of every page."
+      description="Visitors can report this app from the link at the bottom of every page."
       action={
         publication.status === "suspended" ? null : (
           <Button
@@ -1216,7 +1216,7 @@ function TakedownDialog({
       open={open}
       onOpenChange={onOpenChange}
       size="sm"
-      title="Take this Site down?"
+      title="Take this app down?"
       description={`${hostname} shows a takedown notice right away. You can restore it later.`}
       submitLabel="Take down"
       pendingLabel="Taking down…"

@@ -41,6 +41,7 @@ import type {
   RecordingNoteKind,
   RecordingPerson,
   RecordingCapturePurpose,
+  RecordingClientTimings,
   RecordingCaptureSource,
   RecordingTrackAudio,
   RecordingTranscriptPage,
@@ -266,11 +267,31 @@ export class OpenGeniRecordingsClient {
     workspaceId: string,
     recordingId: string,
     request: CompleteRecordingChunksRequest,
+    timings?: {
+      purpose: RecordingCapturePurpose;
+      puts: ReadonlyArray<readonly [chunkNumber: number, durationMs: number]>;
+    },
   ): Promise<CompleteRecordingChunksResponse> {
     return await this.client.requestJson<CompleteRecordingChunksResponse>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/chunks/complete`,
       request,
+      // Older servers validated the JSON body strictly but ignore extra query
+      // keys. Upload observations must not affect whether audio is accepted.
+      timings ? { putTimings: JSON.stringify(timings) } : {},
+    );
+  }
+
+  /** Report completed client stages. Callers should not wait for this diagnostic write. */
+  async reportRecordingTimings(
+    workspaceId: string,
+    recordingId: string,
+    timings: RecordingClientTimings,
+  ): Promise<void> {
+    await this.client.requestJson<void>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/timings`,
+      timings,
     );
   }
 
@@ -553,7 +574,7 @@ export type RecordingTransport = Pick<
   | "deleteRecording"
 > &
   /** Needed to rename a recording once the server has it. */
-  Partial<Pick<OpenGeniRecordingsClient, "updateRecording">> &
+  Partial<Pick<OpenGeniRecordingsClient, "updateRecording" | "reportRecordingTimings">> &
   Partial<LiveTranscriptTransport>;
 
 /** One encoded piece of one track, as captured. */
@@ -671,6 +692,8 @@ type Pump = {
   waiters: Array<() => void>;
   wake: (() => void) | null;
   backoff: number;
+  stoppedAtMs?: number;
+  lastPutAtMs?: number;
 };
 
 class PermanentRecordingError extends Error {
@@ -825,8 +848,11 @@ export class RecordingUploader {
    */
   async finish(
     recordingId: string,
-    options: { endedAt?: Date; signal?: AbortSignal } = {},
+    options: { endedAt?: Date; signal?: AbortSignal; stoppedAtMs?: number } = {},
   ): Promise<RecordingUploadStatus> {
+    const stoppedAtMs = options.stoppedAtMs ?? performance.now();
+    const pump = this.pumps.get(recordingId);
+    if (pump) pump.stoppedAtMs ??= stoppedAtMs;
     await this.mutate(recordingId, (recording) =>
       recording.phase === "capturing"
         ? {
@@ -837,7 +863,7 @@ export class RecordingUploader {
           }
         : null,
     );
-    return await this.settled(recordingId, options.signal);
+    return await this.settled(recordingId, options.signal, stoppedAtMs);
   }
 
   /** Throw a recording away: its local chunks and whatever the server already has. */
@@ -915,8 +941,12 @@ export class RecordingUploader {
     return await recordingLockHeld(recordingId);
   }
 
-  private async settled(recordingId: string, signal?: AbortSignal): Promise<RecordingUploadStatus> {
-    const pump = this.kick(recordingId);
+  private async settled(
+    recordingId: string,
+    signal?: AbortSignal,
+    stoppedAtMs?: number,
+  ): Promise<RecordingUploadStatus> {
+    const pump = this.kick(recordingId, stoppedAtMs);
     for (;;) {
       signal?.throwIfAborted();
       if (pump.status.finalized || pump.status.discarded || pump.status.failed) {
@@ -933,7 +963,7 @@ export class RecordingUploader {
     }
   }
 
-  private kick(recordingId: string): Pump {
+  private kick(recordingId: string, stoppedAtMs?: number): Pump {
     let pump = this.pumps.get(recordingId);
     if (!pump) {
       pump = {
@@ -956,6 +986,7 @@ export class RecordingUploader {
       };
       this.pumps.set(recordingId, pump);
     }
+    if (stoppedAtMs !== undefined) pump.stoppedAtMs ??= stoppedAtMs;
     // A new pass is a new attempt: what failed before says nothing about it,
     // so whoever waits for this pass waits for its own result.
     if (pump.status.failed) this.update(pump, { failed: null });
@@ -1132,7 +1163,7 @@ export class RecordingUploader {
         .filter((chunk) => chunk.trackNumber === trackNumber)
         .slice(0, UPLOAD_BATCH);
       try {
-        await this.uploadBatch(recording, batch);
+        await this.uploadBatch(recording, batch, pump);
       } catch (error) {
         // Another device or an earlier attempt already finalized it: the server has what it needs.
         if (error instanceof PermanentRecordingError && error.code === "not_capturing") {
@@ -1154,6 +1185,7 @@ export class RecordingUploader {
       await this.removeEmpty(recording, pump);
       return true;
     }
+    const finalizeStarted = performance.now();
     const finalized = await guarded(() =>
       client.finalizeRecording(recording!.workspaceId, recordingId, {
         ...(recording!.endedAt ? { endedAt: recording!.endedAt } : {}),
@@ -1173,7 +1205,23 @@ export class RecordingUploader {
       await this.removeEmpty(recording, pump);
       return true;
     }
-    if (finalized) this.finalized.set(recordingId, finalized);
+    if (finalized) {
+      this.finalized.set(recordingId, finalized);
+      const finalizeMs = performance.now() - finalizeStarted;
+      const stopToLastPutMs =
+        pump.stoppedAtMs === undefined
+          ? undefined
+          : Math.max(0, (pump.lastPutAtMs ?? pump.stoppedAtMs) - pump.stoppedAtMs);
+      void Promise.resolve()
+        .then(() =>
+          client.reportRecordingTimings?.(recording!.workspaceId, recordingId, {
+            purpose: recording!.create.purpose ?? "meeting",
+            stopToLastPutMs,
+            finalizeMs,
+          }),
+        )
+        .catch(() => undefined);
+    }
     await store.deleteRecording(recordingId);
     this.update(pump, { pendingChunks: 0, pendingBytes: 0, finalized: true });
     return true;
@@ -1198,6 +1246,7 @@ export class RecordingUploader {
   private async uploadBatch(
     recording: StoredRecording,
     batch: StoredRecordingChunk[],
+    pump: Pump,
   ): Promise<void> {
     const { client, store } = this.options;
     const trackNumber = batch[0]!.trackNumber;
@@ -1215,6 +1264,7 @@ export class RecordingUploader {
     );
     const byNumber = new Map(batch.map((chunk) => [chunk.chunkNumber, chunk]));
     const put: number[] = [];
+    const measured: Array<readonly [number, number]> = [];
     for (const upload of uploads) {
       const chunk = byNumber.get(upload.chunkNumber);
       if (!chunk) continue;
@@ -1225,6 +1275,7 @@ export class RecordingUploader {
       const bytes = await store.readChunk(recording.recordingId, trackNumber, chunk.chunkNumber);
       // Gone since the listing (another uploader confirmed it): the next pass lists again.
       if (!bytes) continue;
+      const putStarted = performance.now();
       const response = await this.fetchImpl(upload.url, {
         method: "PUT",
         headers: upload.headers,
@@ -1234,14 +1285,23 @@ export class RecordingUploader {
         // An expired or refused URL: the next pass reserves again and gets a fresh one.
         throw new Error(`Storage refused a chunk upload (HTTP ${response.status}).`);
       }
+      pump.lastPutAtMs = performance.now();
+      measured.push([upload.chunkNumber, Math.round(pump.lastPutAtMs - putStarted)]);
       put.push(upload.chunkNumber);
     }
     if (put.length === 0) return;
     const result = await guarded(() =>
-      client.completeRecordingChunks(recording.workspaceId, recording.recordingId, {
-        trackNumber,
-        chunkNumbers: put,
-      }),
+      client.completeRecordingChunks(
+        recording.workspaceId,
+        recording.recordingId,
+        {
+          trackNumber,
+          chunkNumbers: put,
+        },
+        measured.length
+          ? { purpose: recording.create.purpose ?? "meeting", puts: measured }
+          : undefined,
+      ),
     );
     if (result.uploaded.length > 0) {
       await store.deleteChunks(recording.recordingId, trackNumber, result.uploaded);
@@ -2617,6 +2677,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       if (!recordingId || (snapshot.state !== "recording" && snapshot.state !== "paused")) {
         return snapshot.upload;
       }
+      const stoppedAtMs = performance.now();
       emit({ state: "stopping", elapsedMilliseconds: elapsed() });
       await Promise.all(
         captures.map(
@@ -2644,6 +2705,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       const status = await uploader.finish(recordingId, {
         ...stopOptions,
         endedAt: new Date(),
+        stoppedAtMs,
       });
       await liveClosed.catch(() => undefined);
       emit({

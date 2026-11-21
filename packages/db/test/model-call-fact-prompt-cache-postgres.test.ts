@@ -130,5 +130,5 @@ test("repair paths that omit the observation leave diagnostics empty", async () 
     cachedTokens: 0,
     promptCache: null,
   });
-  expect(observed.promptCacheDiagnostics?.warmMiss?.class).toBe("unexplained");
+  expect(observed.promptCacheDiagnostics?.warmMiss?.class).toBe("unobserved");
 }, 180_000);

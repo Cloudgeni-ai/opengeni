@@ -19,7 +19,7 @@
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source)
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger)
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
@@ -43,7 +43,9 @@
 //   /console                                 → Opengeni Console (?org): Overview, for organization owners and admins
 //   /console/sessions[/:wsId/:sessionId]     → end users' sessions in managed workspaces (?workspace), one transcript
 //   /console/workspaces, /api-keys[/new]     → workspaces by kind; organization API keys
-//   /console/agents, /members, /usage, /settings → placeholders, members, spend by kind, review level + audit log
+//   /console/agents[/new|/:agentId]          → organization agents (?tab, ?session, ?from, ?to); without the flag a placeholder
+//   /console/tool-servers[/new|/:serverKey]  → the organization's tool servers
+//   /console/members, /usage, /settings      → members, spend by kind, review level + audit log
 //   (on a Console host, console.* or *.console.*, every app path opens a Console page; see lib/console-route.ts)
 //   /billing?checkout=success|cancelled      → Stripe return → default organization's billing
 //   /device?user_code=…                      → self-hosted enrollment approve page
@@ -113,6 +115,7 @@ import {
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import {
   consoleHostRedirectPath,
+  parseConsoleAgentSearch,
   parseConsoleMembersSearch,
   parseConsoleSearch,
   parseConsoleSessionsSearch,
@@ -179,6 +182,10 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "IntegrationsReturnRoute",
 );
+const LazySidebarCustomizeRoute = lazyRouteComponent(
+  () => import("@/routes/sidebar-customize"),
+  "SidebarCustomizeRoute",
+);
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyTeamsConnectRoute = lazyRouteComponent(
   () => import("@/routes/teams-connect"),
@@ -189,6 +196,10 @@ const LazyConnectAgentRoute = lazyRouteComponent(
   "ConnectAgentRoute",
 );
 const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
+const LazyToolApprovalRoute = lazyRouteComponent(
+  () => import("@/routes/tool-approval"),
+  "ToolApprovalRoute",
+);
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyComputerUseRoute = lazyRouteComponent(
   () => import("@/routes/computer-use"),
@@ -396,8 +407,28 @@ const LazyConsoleNewApiKeyRoute = lazyRouteComponent(
   "ConsoleNewApiKeyRoute",
 );
 const LazyConsoleAgentsRoute = lazyRouteComponent(
-  () => import("@/routes/console/organization-pages"),
+  () => import("@/routes/console/agents"),
   "ConsoleAgentsRoute",
+);
+const LazyConsoleNewAgentRoute = lazyRouteComponent(
+  () => import("@/routes/console/agents"),
+  "ConsoleNewAgentRoute",
+);
+const LazyConsoleAgentRoute = lazyRouteComponent(
+  () => import("@/routes/console/agent-detail"),
+  "ConsoleAgentRoute",
+);
+const LazyConsoleToolServersRoute = lazyRouteComponent(
+  () => import("@/routes/console/tool-servers"),
+  "ConsoleToolServersRoute",
+);
+const LazyConsoleNewToolServerRoute = lazyRouteComponent(
+  () => import("@/routes/console/tool-servers"),
+  "ConsoleNewToolServerRoute",
+);
+const LazyConsoleToolServerRoute = lazyRouteComponent(
+  () => import("@/routes/console/tool-servers"),
+  "ConsoleToolServerRoute",
 );
 const LazyConsoleMembersRoute = lazyRouteComponent(
   () => import("@/routes/console/organization-pages"),
@@ -588,10 +619,14 @@ const nativeSignInRoute = createRoute({
 // The Opengeni phone app's in-app viewers for a Site and for a document,
 // spreadsheet or presentation: the Site or editor alone, without the web app's
 // rail or header (the app draws its own). The app signs its web view in with
-// the device session.
+// the device session. `?page=` opens an app at one of its pages (a sidebar
+// link's path).
 const nativeSiteViewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "native-view/workspaces/$workspaceId/sites/$siteId",
+  validateSearch: (search: Record<string, unknown>): { page?: string | undefined } => ({
+    page: siteViewSearch(search).page,
+  }),
   component: NativeSiteView,
 });
 const nativeEditableArtifactViewRoute = createRoute({
@@ -715,6 +750,32 @@ const consoleAgentsRoute = createRoute({
   path: "agents",
   component: LazyConsoleAgentsRoute,
 });
+const consoleNewAgentRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "agents/new",
+  component: LazyConsoleNewAgentRoute,
+});
+const consoleAgentRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "agents/$agentId",
+  validateSearch: parseConsoleAgentSearch,
+  component: LazyConsoleAgentRoute,
+});
+const consoleToolServersRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "tool-servers",
+  component: LazyConsoleToolServersRoute,
+});
+const consoleNewToolServerRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "tool-servers/new",
+  component: LazyConsoleNewToolServerRoute,
+});
+const consoleToolServerRoute = createRoute({
+  getParentRoute: () => consoleRoute,
+  path: "tool-servers/$serverKey",
+  component: LazyConsoleToolServerRoute,
+});
 const consoleMembersRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "members",
@@ -835,6 +896,12 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+// A connected agent's link for approving one tool call (organization MCP tool_call).
+const workspaceToolApprovalRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "tool-approval",
+  component: ToolApproval,
+});
 const workspaceComputerUseRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "computer-use",
@@ -922,6 +989,10 @@ type NewAutomationSearch = {
   sourceSessionId?: string;
   /** Start with a trigger on this event source. */
   source?: string;
+  /** Each run is a chat with this agent (its "Starts when"). */
+  agent?: string;
+  /** Start from this one of the agent's suggested triggers. */
+  agentTrigger?: number;
 };
 function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
   return {
@@ -939,6 +1010,14 @@ function newAutomationSearch(search: Record<string, unknown>): NewAutomationSear
       : {}),
     ...(typeof search.source === "string" && AUTOMATIONS_SEARCH_UUID.test(search.source)
       ? { source: search.source }
+      : {}),
+    ...(typeof search.agent === "string" && AUTOMATIONS_SEARCH_UUID.test(search.agent)
+      ? { agent: search.agent }
+      : {}),
+    ...(Number.isInteger(Number(search.agentTrigger)) &&
+    Number(search.agentTrigger) >= 0 &&
+    Number(search.agentTrigger) < 10
+      ? { agentTrigger: Number(search.agentTrigger) }
       : {}),
   };
 }
@@ -1161,6 +1240,22 @@ const workspaceSiteViewRoute = createRoute({
   validateSearch: siteViewSearch,
   component: SiteViewPage,
 });
+// An app opened from the sidebar, as a page: its own address after `apps/<id>/`
+// (its query and fragment, rarely, in `?at=`). The app itself is drawn by
+// `AppPages` in the rail shell, which keeps the last few open.
+const workspaceAppPageRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "apps/$appId/$",
+  validateSearch: (search: Record<string, unknown>): { at?: string } =>
+    typeof search.at === "string" && /^[?#]/u.test(search.at) ? { at: search.at } : {},
+  component: AppPageOutlet,
+});
+// The sidebar's links and groups: your own, and the workspace default for admins.
+const workspaceSidebarRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "sidebar",
+  component: SidebarCustomize,
+});
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
@@ -1317,6 +1412,11 @@ const routeTree = rootRoute.addChildren([
     consoleApiKeysRoute,
     consoleNewApiKeyRoute,
     consoleAgentsRoute,
+    consoleNewAgentRoute,
+    consoleAgentRoute,
+    consoleToolServersRoute,
+    consoleNewToolServerRoute,
+    consoleToolServerRoute,
     consoleMembersRoute,
     consoleUsageRoute,
     consoleSettingsRoute,
@@ -1334,6 +1434,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     workspaceRigsRoute,
     workspaceRigDetailRoute,
+    workspaceToolApprovalRoute,
     workspaceReadOnlyChatsRoute,
     workspaceLegacyReadOnlyChatsRoute,
     workspaceInboxRoute,
@@ -1370,6 +1471,8 @@ const routeTree = rootRoute.addChildren([
     workspaceRetainedArtifactRoute,
     workspaceArtifactDetailRoute,
     workspaceSiteViewRoute,
+    workspaceAppPageRoute,
+    workspaceSidebarRoute,
     workspaceEditableArtifactRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
@@ -1503,6 +1606,11 @@ function Secrets() {
   );
 }
 
+function ToolApproval() {
+  const { workspaceId } = workspaceToolApprovalRoute.useParams();
+  return <LazyToolApprovalRoute workspaceId={workspaceId} />;
+}
+
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
   const { view } = workspaceRigsRoute.useSearch();
@@ -1583,11 +1691,20 @@ function Automations() {
 
 function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source } = workspaceAutomationNewRoute.useSearch();
+  const { template, from, sourceSessionId, source, agent, agentTrigger } =
+    workspaceAutomationNewRoute.useSearch();
   return (
     <LazyAutomationFormRoute
       workspaceId={workspaceId}
-      mode={{ kind: "create", template, from, sourceSessionId, eventSourceId: source }}
+      mode={{
+        kind: "create",
+        template,
+        from,
+        sourceSessionId,
+        eventSourceId: source,
+        agentId: agent,
+        agentTrigger,
+      }}
     />
   );
 }
@@ -1837,8 +1954,18 @@ function SiteViewPage() {
       startNew={search.new === true}
       page={search.page}
       artifactsReturn={siteViewArtifactsReturn(search)}
+      connect={search.connect}
     />
   );
+}
+
+function AppPageOutlet() {
+  return null;
+}
+
+function SidebarCustomize() {
+  const { workspaceId } = workspaceSidebarRoute.useParams();
+  return <LazySidebarCustomizeRoute workspaceId={workspaceId} />;
 }
 
 function EditableArtifact() {
@@ -1849,12 +1976,14 @@ function EditableArtifact() {
 
 function NativeSiteView() {
   const { workspaceId, siteId } = nativeSiteViewRoute.useParams();
+  const { page } = nativeSiteViewRoute.useSearch();
   return (
     <div className="h-dvh w-dvw overflow-hidden bg-og-bg">
       <LazySiteViewRoute
         key={`${workspaceId}:${siteId}`}
         workspaceId={workspaceId}
         siteId={siteId}
+        page={page}
         embedded
       />
     </div>

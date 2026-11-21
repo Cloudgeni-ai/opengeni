@@ -108,6 +108,8 @@ mock.module("../lib/console-site", () => ({
   useConsoleSiteViewer: () => ({ kind: "member", id: "user:me" }),
   useConsoleSiteToolBridge: () => () => undefined,
   notifySiteToolReadinessChanged: () => {},
+  subscribeSiteToolReadiness: () => () => {},
+  subscribeSiteConnectCardShow: () => () => {},
 }));
 mock.module("../lib/use-session-list-hint-refresh", () => ({
   useSessionListHintRefresh: () => {},

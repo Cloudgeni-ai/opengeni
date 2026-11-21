@@ -31,8 +31,9 @@ namespace_id = "1001"
 simple = { limit = 600, period = 60 }
 
 # Optional per-Site Cloudflare storage: one SQLite-backed Durable Object per
-# Site (`SITE_DB.idFromName(siteId)`), reached only through the API's signed
-# internal route `/_og/internal/site-db`. Remove the binding to turn the
+# Site, in the EU jurisdiction (`SITE_DB.jurisdiction("eu").idFromName(siteId)`,
+# chosen in code), reached only through the API's signed internal route
+# `/_og/internal/site-db`. Remove the binding to turn the
 # route off (404). The migration tag is permanent once deployed.
 [[durable_objects.bindings]]
 name = "SITE_DB"
@@ -41,6 +42,19 @@ class_name = "SiteDatabase"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SiteDatabase"]
+
+# Optional live change hints: one `SiteLive` Durable Object per Site
+# (`SITE_LIVE.idFromName(siteId)`) holds open pages' WebSockets (Hibernation
+# API) and passes on the API's signed change and version notices. Remove the
+# binding to turn `/_og/live` off (404); pages then keep their fallback
+# checks. See src/site-live.ts.
+[[durable_objects.bindings]]
+name = "SITE_LIVE"
+class_name = "SiteLive"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SiteLive"]
 
 [env.staging]
 name = "opengeni-site-gateway-staging"
@@ -70,6 +84,10 @@ LOGIN_ONLY = "true"
 # name = "SITE_DB"
 # class_name = "SiteDatabase"
 
+# [[env.staging.durable_objects.bindings]]
+# name = "SITE_LIVE"
+# class_name = "SiteLive"
+
 [env.production]
 name = "opengeni-site-gateway-production"
 # account_id = "<production account id>"
@@ -95,3 +113,7 @@ LOGIN_ONLY = "false"
 # [[env.production.durable_objects.bindings]]
 # name = "SITE_DB"
 # class_name = "SiteDatabase"
+
+# [[env.production.durable_objects.bindings]]
+# name = "SITE_LIVE"
+# class_name = "SiteLive"

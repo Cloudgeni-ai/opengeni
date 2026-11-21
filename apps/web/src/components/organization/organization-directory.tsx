@@ -138,6 +138,8 @@ export interface OrganizationDirectory {
     emails: string[];
     role: OrganizationMembershipRole;
     workspaceIds: string[];
+    /** Their Console role once they join (Console's invite only). */
+    consoleRole?: "viewer" | "editor" | undefined;
   }) => Promise<InviteResult>;
   retryInvitation: (invitation: OrganizationInvitation) => Promise<OrganizationInvitation>;
   revokeInvitation: (invitation: OrganizationInvitation) => Promise<void>;
@@ -769,10 +771,12 @@ export function OrganizationDirectoryProvider({
       emails,
       role,
       workspaceIds,
+      consoleRole,
     }: {
       emails: string[];
       role: OrganizationMembershipRole;
       workspaceIds: string[];
+      consoleRole?: "viewer" | "editor" | undefined;
     }): Promise<InviteResult> => {
       const operation = claim("admin-invitations", "mutation");
       // Invitations and their setup links last 48 hours (the server caps them there).
@@ -783,7 +787,12 @@ export function OrganizationDirectoryProvider({
         const key = `invite:${email}`;
         const request = attempt(
           key,
-          { email, role, initialWorkspaceIds: [...workspaceIds].sort() },
+          {
+            email,
+            role,
+            initialWorkspaceIds: [...workspaceIds].sort(),
+            ...(consoleRole && role === "member" ? { consoleRole } : {}),
+          },
           () => ({ expiresAt }),
         );
         try {

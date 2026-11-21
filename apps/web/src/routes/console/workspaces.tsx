@@ -13,7 +13,7 @@ import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { Toolbar } from "@opengeni/react/ui/toolbar";
+import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 
 import {
   ConsoleLoadError,
@@ -22,7 +22,9 @@ import {
   formatMicros,
   rangeLabel,
   useConsole,
+  useConsoleCan,
   useConsoleQuery,
+  WorkspaceName,
 } from "./console-shared";
 import { RangeControl } from "./overview";
 
@@ -34,23 +36,34 @@ export function workspaceKindLabel(kind: ConsoleWorkspaceKind): string {
 
 export function ConsoleWorkspacesRoute() {
   const { client, organizationId, search } = useConsole();
+  // Viewers and Editors read workspaces and their cost; only owners and admins
+  // mark them and see the keys that created them.
+  const full = useConsoleCan("full");
   const navigate = useNavigate();
   const [range, setRange] = useState<ConsoleRange>("30d");
   const [kind, setKind] = useState<KindFilter>("all");
   const [switching, setSwitching] = useState<ConsoleWorkspace | null>(null);
+  const [query, setQuery] = useState("");
   const workspaces = useConsoleQuery(
     (signal) => client.listConsoleWorkspaces(organizationId, { range, kind, signal }),
     [client, organizationId, range, kind],
   );
   const keys = useConsoleQuery(
-    () => client.listOrganizationApiKeys(organizationId),
-    [client, organizationId],
+    async () => (full ? await client.listOrganizationApiKeys(organizationId) : []),
+    [client, organizationId, full],
   );
   const keyNames = useMemo(
     () => new Map((keys.data ?? []).map((key) => [key.id, key.name])),
     [keys.data],
   );
-  const rows = workspaces.data?.workspaces ?? [];
+  const needle = query.trim().toLowerCase();
+  const rows = (workspaces.data?.workspaces ?? []).filter(
+    (workspace) =>
+      !needle ||
+      [workspace.name, workspace.externalId, workspace.id].some((value) =>
+        value?.toLowerCase().includes(needle),
+      ),
+  );
   const nextKind: ConsoleWorkspaceKind = switching?.kind === "managed" ? "team" : "managed";
 
   return (
@@ -73,6 +86,13 @@ export function ConsoleWorkspacesRoute() {
           value={kind}
           onValueChange={(value) => setKind(value as KindFilter)}
         />
+        <ToolbarSearch
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search workspaces"
+          aria-label="Search workspaces"
+          wrapperClassName="min-w-56 flex-1"
+        />
       </Toolbar>
       {workspaces.error ? (
         <ConsoleLoadError error={workspaces.error} onRetry={workspaces.reload} />
@@ -82,7 +102,7 @@ export function ConsoleWorkspacesRoute() {
         <EmptyState
           variant="page"
           icon={<Building2Icon />}
-          title="No workspaces here"
+          title={needle ? "No workspaces match" : "No workspaces here"}
           description={
             kind === "managed"
               ? "Workspaces your product creates with an API key show up here."
@@ -105,7 +125,7 @@ export function ConsoleWorkspacesRoute() {
           {rows.map((workspace) => (
             <ListRow
               key={workspace.id}
-              title={workspace.name}
+              title={<WorkspaceName name={workspace.name} />}
               cells={{
                 kind: <MetaChip variant="soft">{workspaceKindLabel(workspace.kind)}</MetaChip>,
                 key: workspace.createdByApiKeyId
@@ -129,11 +149,13 @@ export function ConsoleWorkspacesRoute() {
                   }
                 : {})}
               menu={
-                <DropdownMenuItem onSelect={() => setSwitching(workspace)}>
-                  {workspace.kind === "managed"
-                    ? "Mark as team workspace"
-                    : "Mark as managed by product"}
-                </DropdownMenuItem>
+                full ? (
+                  <DropdownMenuItem onSelect={() => setSwitching(workspace)}>
+                    {workspace.kind === "managed"
+                      ? "Mark as team workspace"
+                      : "Mark as managed by product"}
+                  </DropdownMenuItem>
+                ) : undefined
               }
             />
           ))}

@@ -42,7 +42,8 @@
       "@opengeni/vaults-onepassword",
       "@opengeni/vaults-protonpass",
       "@opengeni/worker-bundle",
-      "@opengeni/xai-subscription"
+      "@opengeni/xai-subscription",
+      "opengeni"
     ]
   ],
   "access": "public",

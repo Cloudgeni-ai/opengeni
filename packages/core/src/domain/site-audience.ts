@@ -21,14 +21,14 @@ import { mayStartOnlyMe, scheduledTaskViewerSubjectForGrant } from "./scheduled-
  * database layer enforces it.
  */
 
-/** What the audience belongs to, as people name it ("Site", "document"). */
-export type ArtifactAudienceNoun = "Site" | "document" | "spreadsheet" | "presentation";
+/** What the audience belongs to, as people name it ("app", "document"). */
+export type ArtifactAudienceNoun = "app" | "document" | "spreadsheet" | "presentation";
 
 export function artifactPrivateOwnerMessage(noun: ArtifactAudienceNoun): string {
   return `Only a person can have an Only me ${noun}.`;
 }
 
-export const SITE_PRIVATE_OWNER_MESSAGE = artifactPrivateOwnerMessage("Site");
+export const SITE_PRIVATE_OWNER_MESSAGE = artifactPrivateOwnerMessage("app");
 export const SITE_PRIVATE_DISABLED_MESSAGE = "Only me is turned off for this organization.";
 
 /**
@@ -127,7 +127,7 @@ export async function resolveNewSiteAudience(input: {
   visibility: "user_private" | "workspace_shared";
   ownerSubjectId: string | null;
 }> {
-  return await resolveNewArtifactAudience({ ...input, noun: "Site" });
+  return await resolveNewArtifactAudience({ ...input, noun: "app" });
 }
 
 /**
@@ -164,5 +164,5 @@ export async function resolveSiteAudienceChange(input: {
   viewer: WorkspaceArtifactViewer;
   requested: WorkspaceArtifactVisibility;
 }): Promise<"user_private" | "workspace_shared"> {
-  return await resolveArtifactAudienceChange({ ...input, noun: "Site" });
+  return await resolveArtifactAudienceChange({ ...input, noun: "app" });
 }

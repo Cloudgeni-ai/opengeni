@@ -1675,6 +1675,28 @@ describe("normalized model definitions", () => {
     );
   });
 
+  test("accepts the pre-rollout output limit digest without changing the live limit", () => {
+    const before = settingsFor({ modelOverrides: { toolOutputTruncationTokens: 10_000 } });
+    const current = settingsFor({ modelOverrides: { toolOutputTruncationTokens: 25_000 } });
+    const accepted = resolveTurnExecutionPolicyV1(before, policyInput);
+    const next = resolveTurnExecutionPolicyV1(current, policyInput);
+    expect(next.definitionVersion).not.toBe(accepted.definitionVersion);
+    const result = assertTurnExecutionPolicyMatchesConfigV1(current, accepted, policyInput);
+    expect(result.policy).toEqual(accepted);
+    expect(result.model.executionLimits.toolOutputTruncationTokens).toBe(25_000);
+    for (const drift of [
+      settingsFor({ modelOverrides: { toolOutputTruncationTokens: 25_001 } }),
+      settingsFor({
+        publicQueryValue: "v2",
+        modelOverrides: { toolOutputTruncationTokens: 25_000 },
+      }),
+    ]) {
+      expect(() => assertTurnExecutionPolicyMatchesConfigV1(drift, accepted, policyInput)).toThrow(
+        TurnExecutionPolicyDefinitionMismatchError,
+      );
+    }
+  });
+
   test("keeps a turn accepted before the compaction trigger left the digest runnable", () => {
     // The pinned V1 digest of this exact definition when it still included
     // the compaction trigger.
@@ -1981,8 +2003,12 @@ describe("turn execution policy V1", () => {
     };
     const newer = resolveTurnExecutionPolicyV1(current, input);
     expect(newer.definitionVersion).toBe(
-      "sha256:3728b7c579458cf7f853d0d2bf24942b93b56d793e432576125c0f8337dc7ab9",
+      "sha256:30166b3c12250de8c6ea74dda52ef64950a6f147f5c6c23008b4c650b2aff742",
     );
+    const beforeOutputLimitRollout = {
+      ...newer,
+      definitionVersion: "sha256:3728b7c579458cf7f853d0d2bf24942b93b56d793e432576125c0f8337dc7ab9",
+    };
     // The same current definition accepted before the compaction trigger left
     // the digest.
     expect(
@@ -1997,7 +2023,7 @@ describe("turn execution policy V1", () => {
       ).policy.definitionVersion,
     ).toBe("sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479");
     const before = structuredClone(accepted);
-    for (const policy of [accepted, newer]) {
+    for (const policy of [accepted, beforeOutputLimitRollout, newer]) {
       expect(settingsForAcceptedSubscriptionTurn(current, policy, input)).toBe(current);
       expect(assertTurnExecutionPolicyMatchesConfigV1(current, policy, input).policy).toEqual(
         policy,

@@ -33,6 +33,7 @@ import {
   buildCapabilityCatalog,
   createCatalogItem,
   customMcpServerRemovability,
+  deleteCustomMcpServer,
   disableCapability,
   discoverMcpRegistryCapabilities,
   enableCapability,
@@ -316,6 +317,26 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
       throw error;
     }
+  });
+
+  // Delete a custom MCP server added in this workspace: its entry and its
+  // installation, if any. How a server that never connected leaves.
+  // Integration admins only.
+  app.delete("/v1/workspaces/:workspaceId/capabilities/:capabilityId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
+    if (!hasIntegrationAdminPermission(grant))
+      throw new MissingPermissionRefusal("capabilities:manage", {
+        message: "Only an admin can delete a server from this workspace",
+      });
+    await deleteCustomMcpServer({
+      db,
+      accountId: grant.accountId,
+      workspaceId,
+      settings,
+      capabilityId: decodeURIComponent(c.req.param("capabilityId")),
+    });
+    return c.body(null, 204);
   });
 }
 

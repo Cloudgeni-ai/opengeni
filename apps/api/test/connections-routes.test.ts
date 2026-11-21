@@ -4823,6 +4823,166 @@ describe("connections routes", () => {
     }
   });
 
+  test.each([
+    {
+      name: "an allow-list refusal",
+      status: 400,
+      contentType: "application/json",
+      body: {
+        error: "invalid_redirect_uri",
+        error_description: `Redirect URI 'https://api.opengeni.test/v1/integrations/oauth/callback' is not allowed.\n${"x".repeat(400)}`,
+      },
+      expected: {
+        httpStatus: 422,
+        code: "validation_failed",
+        retryable: false,
+        providerRefusal: "app_not_allowed",
+        providerError: "invalid_redirect_uri",
+        message: "only accepts sign-ins from apps it has approved",
+      },
+    },
+    {
+      name: "a provider that admits only registered apps",
+      status: 403,
+      contentType: "application/problem+json",
+      body: { error: "access_denied", error_description: "Registration is closed." },
+      expected: {
+        httpStatus: 422,
+        code: "validation_failed",
+        retryable: false,
+        providerRefusal: "app_registration_required",
+        providerError: "access_denied",
+        message: "doesn't let apps register themselves",
+      },
+    },
+    {
+      name: "a provider outage",
+      status: 503,
+      contentType: "application/json",
+      body: { error: "temporarily_unavailable" },
+      expected: {
+        httpStatus: 502,
+        code: "upstream_unavailable",
+        retryable: true,
+        providerRefusal: "provider_unavailable",
+        providerError: "temporarily_unavailable",
+        message: "Try again later",
+      },
+    },
+    {
+      name: "a rate limit",
+      status: 429,
+      contentType: "application/json",
+      body: { error: "slow_down" },
+      expected: {
+        httpStatus: 429,
+        code: "upstream_unavailable",
+        retryable: true,
+        providerRefusal: "provider_unavailable",
+        providerError: "slow_down",
+        message: "Try again later",
+      },
+    },
+    {
+      name: "an outage reported with a 403",
+      status: 403,
+      contentType: "application/json",
+      body: { error: "server_error" },
+      expected: {
+        httpStatus: 502,
+        code: "upstream_unavailable",
+        retryable: true,
+        providerRefusal: "provider_unavailable",
+        providerError: "server_error",
+        message: "Try again later",
+      },
+    },
+  ])("oauth start passes on the provider's reason for $name at registration", async (scenario) => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const source = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        const origin = `http://127.0.0.1:${source.port}`;
+        if (url.pathname === "/mcp") {
+          return new Response("", {
+            status: 401,
+            headers: { "www-authenticate": `Bearer resource_metadata="${origin}/prm"` },
+          });
+        }
+        if (url.pathname === "/prm") {
+          return Response.json({
+            resource: `${origin}/mcp`,
+            authorization_servers: [`${origin}/as`],
+          });
+        }
+        if (url.pathname === "/.well-known/oauth-authorization-server/as") {
+          return Response.json({
+            issuer: `${origin}/as`,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            registration_endpoint: `${origin}/register`,
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["none"],
+          });
+        }
+        if (url.pathname === "/register") {
+          return new Response(JSON.stringify(scenario.body), {
+            status: scenario.status,
+            headers: { "content-type": scenario.contentType },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const response = await app({ environment: "test" }).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "dcr-refused.example.com",
+            mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
+          }),
+        },
+      );
+      const body = (await response.json()) as {
+        error: {
+          code: string;
+          message: string;
+          retryable: boolean;
+          details?: Record<string, string>;
+        };
+      };
+      const { expected } = scenario;
+      expect(response.status).toBe(expected.httpStatus);
+      expect(body.error).toMatchObject({ code: expected.code, retryable: expected.retryable });
+      expect(body.error.details).toMatchObject({
+        oauthStage: "client_registration",
+        providerRefusal: expected.providerRefusal,
+        providerError: expected.providerError,
+      });
+      expect(body.error.message).toContain(expected.message);
+      expect(body.error.message).toContain(expected.providerError);
+      expect(body.error.message).not.toContain(".).");
+      const description = body.error.details?.providerErrorDescription;
+      if (description !== undefined) {
+        expect(description).not.toContain("\n");
+        expect(Array.from(description).length).toBeLessThanOrEqual(300);
+      }
+      if (expected.providerError === "invalid_redirect_uri")
+        expect(description).toStartWith("Redirect URI 'https://api.opengeni.test/");
+    } finally {
+      source.stop(true);
+    }
+  });
+
   test.each(["personal", "workspace"] as const)(
     "Slack MCP uses configured operator credentials with %s ownership",
     async (ownership) => {

@@ -2,6 +2,7 @@ import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/conf
 import {
   ExternalActorSelection,
   ExternalActorAttribution,
+  splitExternalIdentityProfile,
   type ExternalActorContinuation,
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
@@ -267,6 +268,43 @@ const delegatedHumanAuthorizationSchema = z.object({
 
 const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>();
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
+/**
+ * Proofs dispatched for an outside agent (a coding agent connected to the
+ * organization MCP server, or a personal API key used there), with the app
+ * data reach its connection allows. Grants resolved from such a proof carry
+ * {@link OUTSIDE_AGENT_GRANT_METADATA_KEY}.
+ */
+const outsideAgentProofs = new WeakMap<DelegatedHumanAuthorization, OutsideAgentReach>();
+
+/** What an outside agent may do with app data: read like a viewer, or manage. */
+export type OutsideAgentReach = Readonly<{ appData: "viewer" | "manager" }>;
+
+/** Grant metadata key naming an outside agent's reach (see {@link outsideAgentReach}). */
+export const OUTSIDE_AGENT_GRANT_METADATA_KEY = "outsideAgent";
+
+/**
+ * The outside-agent reach a grant was resolved with, or null for every other
+ * caller. Only narrows: a grant that claims it is treated as an outside agent.
+ */
+export function outsideAgentReach(
+  grant: { metadata?: Record<string, unknown> | undefined } | null | undefined,
+): OutsideAgentReach | null {
+  const value = grant?.metadata?.[OUTSIDE_AGENT_GRANT_METADATA_KEY];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  return { appData: (value as { appData?: unknown }).appData === "manager" ? "manager" : "viewer" };
+}
+
+function withOutsideAgentMetadata<T extends { metadata?: Record<string, unknown> | undefined }>(
+  grant: T,
+  proof: DelegatedHumanAuthorization,
+): T {
+  const reach = outsideAgentProofs.get(proof);
+  if (!reach) return grant;
+  return {
+    ...grant,
+    metadata: { ...grant.metadata, [OUTSIDE_AGENT_GRANT_METADATA_KEY]: { appData: reach.appData } },
+  };
+}
 /** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
 const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
 /** The verified Better Auth session (its id and user) behind a canonical managed-cookie context. */
@@ -332,6 +370,7 @@ const verifiedDelegatedHumanAuthorizations = new WeakMap<
 export function stampDelegatedHumanAuthorization(
   request: Request,
   input: DelegatedHumanAuthorization,
+  options: { outsideAgent?: OutsideAgentReach } = {},
 ): void {
   if (delegatedHumanRequests.has(request) || accessResolvedRequests.has(request)) {
     throw new HTTPException(403, { message: "request access authorization already resolved" });
@@ -354,6 +393,8 @@ export function stampDelegatedHumanAuthorization(
     workspaceScope,
   };
   Object.freeze(proof.permissions);
+  if (options.outsideAgent)
+    outsideAgentProofs.set(proof, Object.freeze({ appData: options.outsideAgent.appData }));
   delegatedHumanRequests.set(request, Object.freeze(proof));
 }
 
@@ -394,12 +435,17 @@ export function stampWorkspacePersonAuthorization(
     subjectId: string;
     permissions: Permission[];
   },
+  options: { outsideAgent?: OutsideAgentReach } = {},
 ): void {
   if (input.subjectId.startsWith("user:")) {
-    stampDelegatedHumanAuthorization(request, {
-      ...input,
-      workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
-    });
+    stampDelegatedHumanAuthorization(
+      request,
+      {
+        ...input,
+        workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
+      },
+      options,
+    );
     return;
   }
   if (delegatedHumanRequests.has(request) || accessResolvedRequests.has(request))
@@ -412,11 +458,13 @@ export function stampWorkspacePersonAuthorization(
         .regex(/^external_user:[^\s\u0000-\u001f\u007f]+$/),
     })
     .parse({ ...input, workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] } });
-  if (parsed.workspaceScope.kind !== "selected") throw new Error("Site workspace scope required");
+  if (parsed.workspaceScope.kind !== "selected") throw new Error("App workspace scope required");
   Object.freeze(parsed.permissions);
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);
   const proof = Object.freeze(parsed);
+  if (options.outsideAgent)
+    outsideAgentProofs.set(proof, Object.freeze({ appData: options.outsideAgent.appData }));
   workspaceExternalPersonProofs.add(proof);
   delegatedHumanRequests.set(request, proof);
 }
@@ -1121,6 +1169,31 @@ export function holdsOrganizationAdministration(
 }
 
 /**
+ * Whether this person may hold a Console role as a member of this
+ * organization (docs/opengeni-console.md, "Roles"): their live role in it is
+ * `member` and they signed in to Opengeni as themselves (the canonical
+ * managed browser session or an approved native app credential). Their Console
+ * role itself (none, viewer or editor) is stored per organization; this only
+ * says the request is theirs. API keys, services, end users, agents and
+ * personal keys acting for a member, and people of other organizations never
+ * qualify. Owners and admins are covered by
+ * {@link holdsOrganizationAdministration} instead.
+ */
+export function holdsOrganizationMemberConsoleStanding(
+  context: AccessContext,
+  organizationId: string,
+): boolean {
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return false;
+  if (!canonicalManagedCookieContexts.has(context)) return false;
+  const matching = context.accountGrants.filter(
+    (candidate) => candidate.accountId === organizationId,
+  );
+  if (matching.length !== 1) return false;
+  const accountGrant = matching[0]!;
+  return accountGrant.subjectId === context.subjectId && accountGrant.role === "member";
+}
+
+/**
  * {@link holdsOrganizationAdministration} for a resolved workspace
  * authorization, in that workspace's organization. A literal `account:admin`
  * account grant keeps its existing meaning; the role path needs the exact
@@ -1141,6 +1214,52 @@ export function authorizationHoldsOrganizationAdministration(
     accountGrant.subjectId === grant.subjectId &&
     holdsOrganizationAdministration(context, grant.accountId),
   );
+}
+
+/**
+ * Organization-level `permission` behind a workspace request, checked like the
+ * organization routes (`authorizeOrgAgentsCaller`): an organization key holding
+ * it (directly, or for one of its end users) whose scope includes the
+ * workspace, or the organization's owner or an admin. A workspace membership,
+ * a workspace key or a role on one workspace never counts.
+ *
+ * `endUsers: false` refuses an end user acting through the key (the external
+ * actor header): use it on routes the session proxy passes through from the
+ * browser, where the end user, not the product's server, decides the request.
+ * The same key without an actor (the product's server) still counts.
+ */
+export function authorizationHoldsOrganizationPermission(
+  authorization: AccessGrantAuthorization | undefined,
+  permission: Permission,
+  options: { endUsers?: boolean } = {},
+): boolean {
+  if (!authorization) return false;
+  const { grant } = authorization;
+  if (!resolvedAccessGrantAuthorizations.has(authorization) || !authorization.contextIntegrity) {
+    return false;
+  }
+  const context = authorizationContexts.get(authorization);
+  if (!context) return false;
+  const key = accountScopedApiKeyWorkspaceAuthority(context);
+  if (key) {
+    return (
+      key.accountId === grant.accountId &&
+      organizationWorkspaceInScope(key.workspaceScope, grant.workspaceId) &&
+      hasPermission(key.permissions, permission, key.permissionMode)
+    );
+  }
+  const external = externalActorContexts.get(context);
+  if (external) {
+    // `external.permissions` are the organization key's own, never the end
+    // user's stated workspace membership.
+    return (
+      options.endUsers !== false &&
+      external.identity.accountId === grant.accountId &&
+      organizationWorkspaceInScope(external.workspaceScope, grant.workspaceId) &&
+      hasPermission(external.permissions, permission, external.permissionMode)
+    );
+  }
+  return authorizationHoldsOrganizationAdministration(authorization);
 }
 
 /**
@@ -2091,6 +2210,25 @@ export function hasLiteralPermission(
   return permissions.includes(permission);
 }
 
+/**
+ * Held only when listed or by a full organization key: `workspace:admin` alone
+ * (a workspace key, the Developer setup preset) never implies them.
+ */
+const FULL_ORGANIZATION_KEY_ONLY_PERMISSIONS: ReadonlySet<Permission> = new Set<Permission>([
+  "agents:manage",
+  "tool_credentials:write",
+]);
+
+/**
+ * What marks a `full` organization API key (apps/api routes/api-keys.ts), in
+ * both its raw permissions and its account-scoped workspace authority (which
+ * drops the account-only ones). The Developer setup preset can't manage keys.
+ */
+const FULL_ORGANIZATION_KEY_PERMISSIONS: readonly Permission[] = [
+  "workspace:admin",
+  "api_keys:manage",
+];
+
 export function hasPermission(
   permissions: readonly Permission[],
   permission: Permission,
@@ -2099,6 +2237,14 @@ export function hasPermission(
   if (!Array.isArray(permissions)) return false;
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
+  }
+  // Console agents' write permissions: listed, or a full organization key
+  // (every permission a `full` key is minted with). Legacy `workspace:admin`
+  // alone, including the Developer setup preset, never implies them.
+  if (FULL_ORGANIZATION_KEY_ONLY_PERMISSIONS.has(permission)) {
+    if (permissions.includes(permission)) return true;
+    if (permissionMode === "explicit" || explicitPermissionSets.has(permissions)) return false;
+    return FULL_ORGANIZATION_KEY_PERMISSIONS.every((held) => permissions.includes(held));
   }
   const granted =
     permissions.includes(permission) ||
@@ -2364,7 +2510,7 @@ async function resolveDelegatedHumanAccessContext(
     if (!grant || grant.accountId !== proof.organizationId)
       throw new HTTPException(403, { message: "this person can no longer use this workspace" });
     const bounded = Object.freeze({
-      ...grant,
+      ...withOutsideAgentMetadata(grant, proof),
       permissionMode: "explicit" as const,
       permissions: Object.freeze(
         explicitPermissions(
@@ -2456,7 +2602,7 @@ async function resolveDelegatedHumanAccessContext(
         delegatedHumanWorkspaceAllowed(proof, grant.workspaceId),
     )
     .map((grant) => ({
-      ...grant,
+      ...withOutsideAgentMetadata(grant, proof),
       permissions: intersectWorkspacePermissions(grant.permissions),
       permissionMode: "explicit" as const,
     }));
@@ -2544,6 +2690,10 @@ async function apiKeyAccessContext(
     } catch {
       throw new HTTPException(400, { message: "invalid external actor selection" });
     }
+    // Display details (name, email) are never part of the identity.
+    const { identity: actorIdentity, profile: actorProfile } = splitExternalIdentityProfile(
+      selection.identity,
+    );
     const statedPermissions =
       selection.mode === "external" && selection.membership
         ? [...new Set(selection.membership.permissions)].sort()
@@ -2565,7 +2715,7 @@ async function apiKeyAccessContext(
         await lockExternalWorkspaceMembershipLifecycleShared(tx, apiKey.accountId);
         const existing = await readExternalIdentity(tx, {
           accountId: apiKey.accountId,
-          ...selection.identity,
+          ...actorIdentity,
         });
         if (!existing) return null;
         // Under the same fence as every revoke: a revoke stamped above this
@@ -2585,7 +2735,7 @@ async function apiKeyAccessContext(
           await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
           const ensured = await ensureExternalIdentity(tx, {
             accountId: apiKey.accountId,
-            ...selection.identity,
+            ...actorIdentity,
           });
           return {
             identity: ensured,
@@ -2605,6 +2755,7 @@ async function apiKeyAccessContext(
       subjectId: identity.subjectId,
       source: identity.source,
       externalId: identity.externalId,
+      ...actorProfile,
     });
     const linked =
       selection.mode === "linked_native"

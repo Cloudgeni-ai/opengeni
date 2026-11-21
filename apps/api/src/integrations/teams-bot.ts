@@ -7,6 +7,7 @@ import type { Settings } from "@opengeni/config";
 import type { AccessGrant } from "@opengeni/contracts";
 import { turnCompletedReply } from "@opengeni/contracts";
 import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
+import { withoutProviderCitationHandles } from "@opengeni/contracts/provider-citation-handles";
 import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import {
   managedHumanSubjectForRequest,
@@ -2684,12 +2685,17 @@ async function catalogDeps(deps: ApiRouteDeps, grant: AccessGrant): Promise<ApiR
 /**
  * An agent's reply as Teams message parts. Claude citation tags left in the
  * text become their quoted text instead of raw markup; links the Claude
- * transport already made from them stay Markdown links. Source links lose the
+ * transport already made from them stay Markdown links. Web-search citation
+ * handles that name no openable page are removed, and source links lose the
  * tracking a hosted web search tagged onto them. Markdown Teams can't show in a
  * text message is rewritten into what it can (see teamsMarkdown).
  */
 export function teamsReplyParts(text: string): string[] {
-  return teamsTextParts(teamsMarkdown(withoutProviderTrackingInText(rewriteClaudeCiteTags(text))));
+  return teamsTextParts(
+    teamsMarkdown(
+      withoutProviderTrackingInText(rewriteClaudeCiteTags(withoutProviderCitationHandles(text))),
+    ),
+  );
 }
 
 /** Message parts within the Teams size limit; code blocks survive a split. */

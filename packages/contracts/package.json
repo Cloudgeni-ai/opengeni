@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.30.1",
+  "version": "6.35.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./organization-agents": {
+      "types": "./src/organization-agents.ts",
+      "default": "./src/organization-agents.ts"
+    },
     "./machine-access": {
       "types": "./src/machine-access.ts",
       "default": "./src/machine-access.ts"
@@ -33,6 +37,10 @@
     "./html-frame-host": {
       "types": "./src/html-frame-host.ts",
       "default": "./src/html-frame-host.ts"
+    },
+    "./sidebar-layout": {
+      "types": "./src/sidebar-layout.ts",
+      "default": "./src/sidebar-layout.ts"
     },
     "./billing-credit-notifications": {
       "types": "./src/billing-credit-notifications.ts",
@@ -106,6 +114,10 @@
       "types": "./src/claude-cite-tags.ts",
       "default": "./src/claude-cite-tags.ts"
     },
+    "./provider-citation-handles": {
+      "types": "./src/provider-citation-handles.ts",
+      "default": "./src/provider-citation-handles.ts"
+    },
     "./no-reply": {
       "types": "./src/no-reply.ts",
       "default": "./src/no-reply.ts"
@@ -177,6 +189,10 @@
     "./site-session-http": {
       "types": "./src/site-session-http.ts",
       "default": "./src/site-session-http.ts"
+    },
+    "./first-party-tool-aliases": {
+      "types": "./src/first-party-tool-aliases.ts",
+      "default": "./src/first-party-tool-aliases.ts"
     },
     "./organization-model-usage": {
       "types": "./src/organization-model-usage.ts",

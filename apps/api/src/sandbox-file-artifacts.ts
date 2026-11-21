@@ -278,6 +278,7 @@ async function publishSandboxFileArtifactInScope(
     db: deps.db,
     settings: deps.settings,
     bus: deps.bus,
+    objectStorage: storage,
     ...(deps.observability ? { observability: deps.observability } : {}),
   };
   const channelContext = {

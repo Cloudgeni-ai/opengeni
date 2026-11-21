@@ -134,7 +134,7 @@ function SessionDefaultsSection({ action }: { action?: ReactNode }) {
         }
       />
       <SettingRow
-        label="Use connected apps automatically"
+        label="Use connected tools automatically"
         description="Agents can use Gmail, Linear and PostHog without asking each time."
         control={<Switch checked={apps} onCheckedChange={setApps} />}
       />

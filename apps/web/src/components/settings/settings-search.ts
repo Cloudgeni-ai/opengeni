@@ -137,7 +137,13 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "llm",
     "compaction",
   ],
-  "organization:integrations": ["allowed integrations", "connectors", "apps", "tools", "plugins"],
+  "organization:integrations": [
+    "allowed connected tools",
+    "integrations",
+    "connectors",
+    "tools",
+    "plugins",
+  ],
   "organization:agents": [
     "mcp",
     "mcp server",
@@ -206,7 +212,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
     { label: "Sandbox image", keywords: ["docker", "container"] },
     { label: "Voice input", keywords: ["transcription", "dictation", "microphone", "speech"] },
     { label: "Video generation", keywords: ["video"] },
-    { label: "Use connected apps automatically", keywords: ["integrations", "tools"] },
+    {
+      label: "Use connected tools automatically",
+      keywords: ["integrations", "connected apps", "tools"],
+    },
     { label: "Delete workspace", keywords: ["remove workspace", "danger zone"] },
   ],
   "workspace:access": [

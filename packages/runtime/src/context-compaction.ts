@@ -37,10 +37,12 @@ import {
   latestAgentInstructionsContext,
   latestRepositorySkillsContext,
   latestSkillCatalogContext,
+  latestWorkspaceFilesystemContext,
   latestWorkspaceGovernanceContext,
   readAgentInstructionsContext,
   readRepositorySkillsContext,
   readSkillCatalogContext,
+  readWorkspaceFilesystemContext,
   readWorkspaceGovernanceContext,
   resourceMountPath,
 } from "@opengeni/contracts";
@@ -1784,6 +1786,8 @@ export const PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION = "portable_model_s
  * - Turn-scoped operational notices apply only to their own turn, so only the
  *   notices of the turn running the compaction are retained verbatim (and the
  *   newest input, whatever it is). Older notices are left to the summary.
+ *   Repeated copies of the same state do not spend the retention budget;
+ *   changes in state are retained in their original order.
  */
 function prepareRetainedInputs(
   items: readonly CompactionItem[],
@@ -1807,6 +1811,19 @@ function prepareRetainedInputs(
   }
   const replies = finishedTurnReplies(source, turns);
   const activeTurnId = turns?.activeTurnId ?? null;
+  const duplicateNotices = new Set<number>();
+  if (activeTurnId !== null) {
+    let laterNotice: string | undefined;
+    for (let index = source.length - 1; index >= 0; index -= 1) {
+      const item = source[index]!;
+      if (knownTurnId(turns, index) !== activeTurnId || !isTurnOperationalNotice(item)) continue;
+      // Runtime notices use plain strings. Do not conflate structured items
+      // with different non-text content or metadata at a checkpoint.
+      const content = typeof item.content === "string" ? item.content : undefined;
+      if (content !== undefined && content === laterNotice) duplicateNotices.add(index);
+      laterNotice = content;
+    }
+  }
   const isEarlierTurnNotice = (index: number) =>
     isTurnOperationalNotice(source[index]!) &&
     (activeTurnId === null || knownTurnId(turns, index) !== activeTurnId);
@@ -1815,7 +1832,9 @@ function prepareRetainedInputs(
     charged,
     skip: (index) =>
       index !== newest &&
-      (isTransientSessionSystemUpdateBatch(source[index]!) || isEarlierTurnNotice(index)),
+      (isTransientSessionSystemUpdateBatch(source[index]!) ||
+        isEarlierTurnNotice(index) ||
+        duplicateNotices.has(index)),
     goalAllowanceTokens: (index) =>
       source[index] === charged[index]
         ? 0
@@ -2291,6 +2310,7 @@ function rebuildAroundCheckpoint(
   const currentCatalog = latestSkillCatalogContext(items);
   const currentRepositorySkills = latestRepositorySkillsContext(items);
   const currentGovernance = latestWorkspaceGovernanceContext(items);
+  const currentFilesystem = latestWorkspaceFilesystemContext(items);
   const carriedAgentInstructions = carriedAgentInstructionsContext(items, turns);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
   const attachmentCatalog = buildAttachmentCatalogItem(
@@ -2302,6 +2322,7 @@ function rebuildAroundCheckpoint(
     currentCatalog,
     currentRepositorySkills,
     currentGovernance,
+    currentFilesystem,
     carriedAgentInstructions,
     attachmentCatalog,
   ].filter((item): item is CompactionItem => Boolean(item));
@@ -2406,7 +2427,8 @@ function isTurnOperationalNotice(item: CompactionItem): boolean {
 }
 
 /**
- * Skill catalog, repository Skill index and workspace governance snapshots
+ * Skill catalog, repository Skill index, workspace governance and workspace
+ * filesystem snapshots
  * are re-added as the latest copy only; agent instruction edits are folded
  * into the system prompt.
  */
@@ -2415,6 +2437,7 @@ function isSessionContextSnapshot(item: CompactionItem): boolean {
     readSkillCatalogContext(item) !== null ||
     readRepositorySkillsContext(item) !== null ||
     readWorkspaceGovernanceContext(item) !== null ||
+    readWorkspaceFilesystemContext(item) !== null ||
     readAgentInstructionsContext(item) !== null
   );
 }

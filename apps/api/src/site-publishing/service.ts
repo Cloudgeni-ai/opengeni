@@ -56,6 +56,7 @@ import {
 import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
 import { ApiHttpError } from "../http/api-error";
 import { siteDataRole } from "../site-data/service";
+import { notifySiteLive } from "../site-live/service";
 import { createSiteContentScanner, type SiteContentScanner } from "./content-scanner";
 import { createSiteEdgeSync, type SiteEdgeSync } from "./edge-sync";
 import { effectiveSiteLimits, sourceSiteLimitProfile, storedSiteLimitProfileKind } from "./limits";
@@ -108,7 +109,7 @@ export function requireSitesDomain(settings: ApiRouteDeps["settings"]): string {
       404,
       "not_found",
       "sites_publishing_disabled",
-      "Publishing Sites is not enabled on this deployment",
+      "Publishing apps is not enabled on this deployment",
     );
   return domain;
 }
@@ -537,7 +538,7 @@ export async function notifySitePublicationChanged(
     if (options.scanVersionId && publication.status === "active")
       scheduleSiteContentScan(deps, scope, siteId, options.scanVersionId);
   } catch (error) {
-    console.warn("[site-publishing] could not record a Site change", {
+    console.warn("[site-publishing] could not record an app change", {
       siteId,
       error: errorMessage(error),
     });
@@ -557,13 +558,20 @@ export async function afterSiteArtifactMutation<
     version?: { id: string } | null;
   },
 >(deps: SitePublishingDeps, result: T, options: { scan?: boolean } = {}): Promise<T> {
-  if (!result.replayed)
+  if (!result.replayed) {
     await notifySitePublicationChanged(
       deps,
       { accountId: result.artifact.accountId, workspaceId: result.artifact.workspaceId },
       result.artifact.id,
       options.scan && result.version ? { scanVersionId: result.version.id } : {},
     );
+    // Open pages and consoles showing the Site hear that a version changed
+    // (best effort; they keep a slow fallback check).
+    notifySiteLive(deps.settings, result.artifact.id, {
+      type: "version",
+      versionId: result.version?.id ?? null,
+    });
+  }
   return result;
 }
 
@@ -619,7 +627,7 @@ export async function siteServiceSessionRequest(
       503,
       "upstream_unavailable",
       "site_agents_unavailable",
-      "Site assistants are not configured on this deployment",
+      "App assistants are not configured on this deployment",
       { reason: "delegation_unconfigured" },
     );
   const token = await signDelegatedAccessToken(secret, {
@@ -720,7 +728,7 @@ export async function stopSiteViewers(
             });
           } catch (error) {
             failed += 1;
-            console.warn("[site-publishing] could not cancel a Site conversation", {
+            console.warn("[site-publishing] could not cancel an app conversation", {
               siteId,
               sessionId,
               error: errorMessage(error),
@@ -730,7 +738,7 @@ export async function stopSiteViewers(
         after = sessionIds.at(-1)!;
       }
       if (failed > 0)
-        throw new Error(`Site lifecycle cancellation failed for ${failed} conversations`);
+        throw new Error(`App lifecycle cancellation failed for ${failed} conversations`);
     });
   // A saturated best-effort effects queue must not silently drop cancellation.
   if (!effects.schedule("cancel conversations", run)) await run();
@@ -780,19 +788,19 @@ export function notifySiteAbuse(
   abuseNoticeHours.set(key, hour);
   const what = input.kind === "report" ? "An abuse report" : "A flagged content scan";
   const text = [
-    `${what} for the published Site https://${input.hostname}/`,
-    `Site: ${input.siteId}`,
+    `${what} for the published app https://${input.hostname}/`,
+    `App: ${input.siteId}`,
     `Workspace: ${input.scope.workspaceId}`,
     `Detail: ${input.detail.slice(0, 200)}`,
     "",
-    "List open items with scripts/operator/site-moderation-queue.ts; take a Site down with scripts/operator/site-takedown.ts.",
+    "List open items with scripts/operator/site-moderation-queue.ts; take an app down with scripts/operator/site-takedown.ts.",
   ].join("\n");
   sitePublishingEffects(deps.settings).schedule("abuse notice", async () => {
     const result = await transport.send({
       kind: "site_abuse_notice",
       from: transport.sender,
       to,
-      subject: `[Opengeni Sites] ${what}: ${input.hostname}`.slice(0, 200),
+      subject: `[Opengeni apps] ${what}: ${input.hostname}`.slice(0, 200),
       text,
       html: `<pre>${text.replace(/[&<>]/gu, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"))}</pre>`,
       idempotencyKey: `site-abuse-notice:${key}:${hour}`,
@@ -831,7 +839,7 @@ export async function requireSitePublicationWriter(
       403,
       "forbidden",
       "site_page_forbidden",
-      "A Site page cannot change Site publications",
+      "An app page cannot change app publications",
     );
 }
 
@@ -854,7 +862,7 @@ export async function resolveSiteManagement(
   const site = await getSiteDataSite(deps.db, scope, viewer, siteId);
   const record = site ? await getPublishedSite(deps.db, scope, siteId) : null;
   if (!site || !record)
-    throw sitePublishingError(404, "not_found", "site_not_found", "Site not found");
+    throw sitePublishingError(404, "not_found", "site_not_found", "App not found");
   const owner = site.ownerSubjectId ?? site.createdBySubjectId ?? null;
   return {
     scope,
@@ -895,7 +903,7 @@ export function requireSiteManager(management: SiteManagement): void {
       403,
       "forbidden",
       "site_manager_required",
-      "You need permission to publish artifacts in this workspace to manage this Site's publication",
+      "You need permission to publish artifacts in this workspace to manage this app's publication",
     );
 }
 
@@ -1054,7 +1062,7 @@ export async function upsertSitePublicationForManager(
       409,
       "conflict",
       "site_suspended",
-      "This Site was taken down; restore it first",
+      "This app was taken down; restore it first",
     );
   const activating =
     (request.status ?? existing?.status ?? "active") === "active" &&
@@ -1073,22 +1081,22 @@ export async function upsertSitePublicationForManager(
       "conflict",
       record.status !== "active" ? "site_archived" : "site_not_shared",
       record.status !== "active"
-        ? "Restore this Site before publishing it"
-        : "Share this Site with the workspace before publishing it; Only me Sites cannot be published",
+        ? "Restore this app before publishing it"
+        : "Share this app with the workspace before publishing it; Only me apps cannot be published",
     );
   if (request.access === "public" && !deps.settings.sitesPublicEnabled)
     throw sitePublishingError(
       403,
       "forbidden",
       "site_public_disabled",
-      "Public Sites are turned off on this deployment",
+      "Public apps are turned off on this deployment",
     );
   if (request.limitProfile !== undefined && !management.admin)
     throw sitePublishingError(
       403,
       "forbidden",
       "site_admin_required",
-      "Only a workspace admin can change a Site's limits",
+      "Only a workspace admin can change an app's limits",
     );
   // `agent.tools` is still saved, but no conversation is given it: a
   // workspace member's chat with the Site's agent is an ordinary chat with
@@ -1104,7 +1112,7 @@ export async function upsertSitePublicationForManager(
       403,
       "forbidden",
       "site_admin_required",
-      "Only a workspace admin can give a Site's assistant workspace tools",
+      "Only a workspace admin can give an app's assistant workspace tools",
     );
   for (const tool of tools ?? [])
     if (!SITE_AGENT_TOOL_ID.test(tool) || RESERVED_SITE_AGENT_TOOL_IDS.has(tool))
@@ -1112,7 +1120,7 @@ export async function upsertSitePublicationForManager(
         400,
         "validation_failed",
         "site_tool_invalid",
-        `"${tool.slice(0, 80)}" is not a workspace tool connection a Site's assistant can use`,
+        `"${tool.slice(0, 80)}" is not a workspace tool connection an app's assistant can use`,
       );
   const limitProfile =
     request.limitProfile === undefined
@@ -1140,7 +1148,7 @@ export async function upsertSitePublicationForManager(
         400,
         "validation_failed",
         "site_model_not_allowed",
-        "This model is not allowed for this Site's agent",
+        "This model is not allowed for this app's agent",
       );
   }
   const changes = {
