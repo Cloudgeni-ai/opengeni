@@ -109,7 +109,7 @@ bytes = "1"
 # --- Relay tier (opengeni-relay) ------------------------------------------------
 # The HTTP/WebSocket server framework for the relay's wss listener + health/metrics
 # endpoints. rustls (no system OpenSSL) keeps the static-musl release build clean.
-axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "ws", "query"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "query"] }
 tower = { version = "0.5", default-features = false }
 # HMAC-SHA256 verify of the `ogs_` viewer token + the `ogr_` producer token (the
 # Rust mirror of the TS mint — the single-source token-verify contract, §10.5). A
