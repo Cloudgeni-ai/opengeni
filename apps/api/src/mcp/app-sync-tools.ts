@@ -247,7 +247,15 @@ export function registerAppSyncTools(
         optedIn?: boolean | undefined;
         account?: string | undefined;
       }) =>
-        setAppSyncOptIn(deps, grant, siteId, syncId, optedIn ?? true, {}, account ? { account } : {}),
+        setAppSyncOptIn(
+          deps,
+          grant,
+          siteId,
+          syncId,
+          optedIn ?? true,
+          {},
+          account ? { account } : {},
+        ),
     ),
   );
 }

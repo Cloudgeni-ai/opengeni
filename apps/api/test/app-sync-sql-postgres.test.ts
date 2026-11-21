@@ -112,7 +112,11 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
   const deps = {
     db: db.db,
     bus: new MemoryEventBus(),
-    settings: testSettings({ productAccessMode: "configured", sandboxBackend: "none", ...overrides }),
+    settings: testSettings({
+      productAccessMode: "configured",
+      sandboxBackend: "none",
+      ...overrides,
+    }),
     objectStorage: {
       maxSinglePutSizeBytes: 5_000_000_000,
       putObject: noop,

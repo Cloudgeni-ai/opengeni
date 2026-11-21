@@ -4169,8 +4169,8 @@ export type ScheduledTaskAction =
       /** An App data sync (see the App sync methods); no model runs. */
       kind: "app_sync";
       siteId: string;
-      /** Null when the sync fills an SQL table (`target`). */
-      collection: string | null;
+      /** The collection it fills; for an SQL table (`target`), the table's name. */
+      collection: string;
       mode: "shared" | "personal";
       ownerSubjectId: string;
       tool: { serverId: string; toolName: string };

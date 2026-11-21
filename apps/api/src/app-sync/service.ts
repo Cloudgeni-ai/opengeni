@@ -448,7 +448,10 @@ export function appSyncAccountChoices(
       connector: account.connector,
       shared: account.shared === true,
     }));
-  return { connector: inventory.canonical.get(canonicalId)?.name ?? own?.connector ?? null, accounts };
+  return {
+    connector: inventory.canonical.get(canonicalId)?.name ?? own?.connector ?? null,
+    accounts,
+  };
 }
 
 /** A readable list of accounts to choose from, for an error. */
@@ -475,7 +478,8 @@ async function toolForPerson(
     // call may use: only the person's own routes resolve. A personal sync
     // must run on the person's own account, which can't be confirmed, so
     // their run fails instead.
-    if (action.mode === "shared") return chosen ? { ...action.tool, serverId: chosen } : action.tool;
+    if (action.mode === "shared")
+      return chosen ? { ...action.tool, serverId: chosen } : action.tool;
     throw forbidden(
       "Couldn't check your connected accounts for this sync. It will try again next run.",
     );
@@ -666,7 +670,7 @@ async function syncAccess(
     throw forbidden(
       "The sync's owner can no longer manage this app's data. Someone who manages the app should save the sync again.",
     );
-  if (action.collection) {
+  if (!action.target) {
     const collection = await access.store.getCollection(
       { accountId: task.accountId, workspaceId: task.workspaceId, siteId: action.siteId },
       action.collection,
@@ -710,7 +714,7 @@ async function syncWriter(
   context: AppSyncRunContext,
 ): Promise<SyncWriter> {
   const access = await syncAccess(deps, grant, task, action, context);
-  if (action.collection) {
+  if (!action.target) {
     const collection = action.collection;
     return {
       write: (records) => writeRecords(deps, access, collection, records),
@@ -1264,7 +1268,9 @@ async function routeToolForOwner(
   if (mode === "shared") {
     if (!inventory) {
       if (account)
-        throw forbidden("Couldn't check your connected accounts. Try saving the sync again shortly.");
+        throw forbidden(
+          "Couldn't check your connected accounts. Try saving the sync again shortly.",
+        );
     } else {
       const routed = {
         tool: requested,
@@ -1322,7 +1328,7 @@ async function requireSyncTask(
 
 /** The collection a sync fills, or the table of a Site SQL target. */
 function syncTargetName(action: Pick<AppSyncAction, "collection" | "target">): string {
-  return action.collection ?? action.target?.table ?? "";
+  return action.target?.table ?? action.collection;
 }
 
 function viewOf(
@@ -1449,7 +1455,7 @@ async function insertSync(
     kind: "app_sync",
     siteId,
     ownerSubjectId,
-    collection: request.target ? null : (request.collection ?? null),
+    collection: request.target ? request.target.table : request.collection,
     mode: request.mode,
     ...routed,
     arguments: request.arguments,
@@ -1549,10 +1555,7 @@ export async function updateAppSync(
   if (patch.schedule) validateSchedule(schedule);
   const ownerChanged = action.ownerSubjectId !== access.subjectId;
   const reroute =
-    patch.tool !== undefined ||
-    patch.account !== undefined ||
-    ownerChanged ||
-    mode !== action.mode;
+    patch.tool !== undefined || patch.account !== undefined || ownerChanged || mode !== action.mode;
   const routed: RoutedTool & { ownerAccount: string | null } = reroute
     ? await routeToolForOwner(
         deps,
@@ -1584,7 +1587,7 @@ export async function updateAppSync(
   const nextAction = AppSyncAction.parse({
     ...kept,
     ownerSubjectId: access.subjectId,
-    collection,
+    collection: target ? target.table : collection,
     mode,
     ...routed,
     ...(patch.arguments !== undefined ? { arguments: patch.arguments } : {}),
@@ -1876,8 +1879,7 @@ export async function appSyncOptInReview(
     access.subjectId,
   );
   const subscription = own.get(task.id);
-  const choices =
-    action.mode === "personal" ? await ownAccountChoices(deps, grant, action) : null;
+  const choices = action.mode === "personal" ? await ownAccountChoices(deps, grant, action) : null;
   const connector = choices?.connector ?? null;
   const accounts = choices?.accounts ?? [];
   const blocked =
@@ -1959,7 +1961,7 @@ export async function listAppSyncDefinitions(
     if (!action) return [];
     const definition: AppSyncDefinitionInput = {
       name: task.name,
-      ...(action.collection ? { collection: action.collection } : {}),
+      ...(action.target ? {} : { collection: action.collection }),
       mode: action.mode,
       // The connector, not one person's account: each installer's sync runs
       // on their own account of it.

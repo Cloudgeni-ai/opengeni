@@ -6,7 +6,8 @@ import { sql, type SQL } from "drizzle-orm";
  * sync keeps its owner (the person whose connection a shared sync runs on)
  * in its action, so its owner's private sources reach it too.
  */
-export const AUTOMATION_HEARS_SOURCE = sql.raw(`(source.visibility = 'workspace' or source.owner_subject_id is null
+export const AUTOMATION_HEARS_SOURCE =
+  sql.raw(`(source.visibility = 'workspace' or source.owner_subject_id is null
         or source.owner_subject_id = task.owner_subject_id
         or (task.action ->> 'kind' = 'app_sync'
           and source.owner_subject_id = task.action ->> 'ownerSubjectId'))`);

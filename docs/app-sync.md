@@ -140,7 +140,12 @@ go through `apps/api/src/site-sql/service.ts` (`upsertSiteSqlRowsForSync`,
 and `removeMissing` work the same. A sync fills either a `collection` or a
 `target`; personal syncs need a collection. Saving a table sync where Site
 SQL isn't available or not turned on for the app is refused readably. Views
-show the table name as `collection` and set `table`.
+show the table name as `collection` and set `table`. The stored action keeps
+the table name in `collection` too (so the scheduled-task API's `collection`
+stays a string), which is why a sync's table name must start with a letter and
+be at most 64 characters. Older replicas parse the action strictly, so during a
+rolling deploy they fail a sync that has the new fields instead of misreading
+it.
 
 ### Approvals, access and limits
 

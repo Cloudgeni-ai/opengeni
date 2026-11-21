@@ -117,9 +117,13 @@ const SqlIdentifier = /* @__PURE__ */ defineSchema(() => z.string().regex(SITE_S
 export const AppSyncTableTarget = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      table: SqlIdentifier.refine(isSiteSqlTableName, "Not a table name an app can use").describe(
-        "The app's Site SQL table to fill.",
-      ),
+      table: SqlIdentifier.refine(isSiteSqlTableName, "Not a table name an app can use")
+        // Stored as the sync's collection name too, so it fits both.
+        .refine(
+          (name) => /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(name),
+          "Start with a letter; at most 64 characters",
+        )
+        .describe("The app's Site SQL table to fill."),
       keyColumn: SqlIdentifier.describe(
         "The column that holds each record's key; it must be the table's primary key or have a unique index.",
       ),
@@ -199,8 +203,8 @@ export const AppSyncAction = /* @__PURE__ */ defineSchema(() =>
     .object({
       kind: z.literal("app_sync"),
       siteId: primitives.uuid,
-      /** Null when the sync fills a Site SQL table (`target`). */
-      collection: AppSyncCollection.nullable(),
+      /** For a Site SQL target (`target`), the table's name. */
+      collection: AppSyncCollection,
       mode: AppSyncMode,
       /** The person whose connection a shared sync uses; never a request field. */
       ownerSubjectId: z.string().min(1).max(1024),
