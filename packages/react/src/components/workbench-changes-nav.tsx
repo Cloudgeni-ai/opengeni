@@ -154,6 +154,7 @@ export const ChangesTree = memo(function ChangesTree({
   onSelect: (index: number) => void;
   className?: string;
 }) {
+  const t = useOpenGeniText();
   const tree = useMemo(() => buildChangesTree(files), [files]);
   const [closed, setClosed] = useState<ReadonlySet<string>>(() => new Set());
   const toggle = (path: string) =>
@@ -222,7 +223,7 @@ export const ChangesTree = memo(function ChangesTree({
   ];
   return (
     <nav
-      aria-label="Changed files"
+      aria-label={t("workbenchChanges.changedFiles")}
       data-changes-tree=""
       className={cn("overflow-y-auto py-1.5", className)}
     >

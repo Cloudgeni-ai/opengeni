@@ -851,12 +851,6 @@ function DockChrome({
 
   const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
     if (shownTabs.length === 0) return;
-    const tab = shownTabs[index];
-    if (tab?.optional && (event.key === "Delete" || event.key === "Backspace")) {
-      event.preventDefault();
-      onClose(tab.id);
-      return;
-    }
     let nextIndex: number | null = null;
     if (event.key === "ArrowRight") nextIndex = (index + 1) % shownTabs.length;
     else if (event.key === "ArrowLeft")
@@ -935,13 +929,12 @@ function DockChrome({
                   {tab.optional ? (
                     <button
                       type="button"
-                      tabIndex={-1}
                       aria-label={msg("workspaceDock.closeTab", { name: tabName(tab) })}
                       title={msg("workspaceDock.closeTab", { name: tabName(tab) })}
                       onClick={() => onClose(tab.id)}
                       data-dock-tab-close={tab.id}
                       className={cn(
-                        "mr-1 inline-flex size-4 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-opacity hover:bg-og-surface-2 hover:text-og-fg group-hover/tab:opacity-100 max-[1023px]:size-8 pointer-coarse:size-8 pointer-coarse:opacity-100",
+                        "mr-1 inline-flex size-4 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-opacity hover:bg-og-surface-2 hover:text-og-fg focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent group-hover/tab:opacity-100 max-[1023px]:size-8 pointer-coarse:size-8 pointer-coarse:opacity-100",
                         selected ? "opacity-100" : "opacity-0",
                       )}
                     >

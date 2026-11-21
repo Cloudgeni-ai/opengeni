@@ -6678,6 +6678,7 @@ export const englishMessages = {
   "workbenchChanges.asOfTurnRevisionTime": "as of turn {revision} · {time}",
   "workbenchChanges.binaryFile": "Binary file",
   "workbenchChanges.changedFile": "Changed file",
+  "workbenchChanges.changedFiles": "Changed files",
   "workbenchChanges.changedFileDiff": "Changed file diff",
   "workbenchChanges.changedFilesDiff": "Changed files diff",
   "workbenchChanges.diffTooLargeToShow": "Diff too large to show here",

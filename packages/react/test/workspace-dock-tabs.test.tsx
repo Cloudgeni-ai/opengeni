@@ -23,11 +23,12 @@ const TABS = [
 ];
 
 describe("WorkspaceDock tab strip", () => {
-  test("optional tabs live in the one menu, which names the open one", async () => {
+  test("an opened optional tab joins the strip until it is closed", async () => {
     const rendered = await renderComponent(
       <WorkspaceDock
         autoSaveId="og.test.workspace-dock-optional"
         essentials
+        tabScope="chat-a"
         primary={<div>Chat pane</div>}
         tabs={TABS}
       />,
@@ -40,9 +41,7 @@ describe("WorkspaceDock tab strip", () => {
     expect(
       rendered.container.querySelector('[role="tablist"]')?.getAttribute("aria-orientation"),
     ).toBe("horizontal");
-    const menu = () => rendered.container.querySelector<HTMLElement>("[data-dock-menu]");
-    expect(menu()).not.toBeNull();
-    expect(menu()?.getAttribute("data-dock-menu-active")).toBeNull();
+    expect(rendered.container.querySelector("[data-dock-menu]")).not.toBeNull();
     const menuTabs = () =>
       [...rendered.container.querySelectorAll<HTMLElement>("[data-dock-menu-tab]")].map((item) =>
         item.getAttribute("data-dock-menu-tab"),
@@ -55,15 +54,71 @@ describe("WorkspaceDock tab strip", () => {
 
     await click(rendered.container.querySelector('[data-dock-menu-tab="files"]'));
     await flush();
-    // Opening Files keeps the strip at its essentials; the menu shows Files.
-    expect(shown()).toEqual(["Changes"]);
-    expect(menu()?.getAttribute("data-dock-menu-active")).toBe("files");
+    // Files is on the strip now, selected, and out of the "+" menu.
+    expect(shown()).toEqual(["Changes", "Files"]);
+    expect(menuTabs()).toEqual(["terminal"]);
+    expect(
+      rendered.container
+        .querySelector('[role="tab"][aria-label="Files"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
     expect(rendered.container.textContent ?? "").toContain("Files content");
 
+    // It stays while the person looks at another tab.
     await click(rendered.container.querySelector('[role="tab"][aria-label="Changes"]'));
     await flush();
-    expect(menu()?.getAttribute("data-dock-menu-active")).toBeNull();
+    expect(shown()).toEqual(["Changes", "Files"]);
+
+    // Closing it puts it back in the menu.
+    await click(rendered.container.querySelector('[data-dock-tab-close="files"]'));
+    await flush();
+    expect(shown()).toEqual(["Changes"]);
+    expect(menuTabs()).toEqual(["files", "terminal"]);
     await rendered.unmount();
+  });
+
+  test("closing the open tab selects its neighbour, and opened tabs are kept per scope", async () => {
+    const dock = (scope: string) => (
+      <WorkspaceDock
+        autoSaveId="og.test.workspace-dock-scope"
+        essentials
+        tabScope={scope}
+        primary={<div>Chat pane</div>}
+        tabs={TABS}
+      />
+    );
+    const first = await renderComponent(dock("chat-b"));
+    await click(first.container.querySelector('[data-dock-menu-tab="terminal"]'));
+    await flush();
+    await first.unmount();
+
+    // Back in the same chat: Terminal is still on the strip.
+    const again = await renderComponent(dock("chat-b"));
+    const shown = () =>
+      [...again.container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) =>
+        tab.getAttribute("aria-label"),
+      );
+    expect(shown()).toEqual(["Changes", "Terminal"]);
+    await click(again.container.querySelector('[role="tab"][aria-label="Terminal"]'));
+    await flush();
+    await click(again.container.querySelector('[data-dock-tab-close="terminal"]'));
+    await flush();
+    expect(shown()).toEqual(["Changes"]);
+    expect(
+      again.container
+        .querySelector('[role="tab"][aria-label="Changes"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+    await again.unmount();
+
+    // Another chat starts with only what is relevant.
+    const other = await renderComponent(dock("chat-c"));
+    expect(
+      [...other.container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) =>
+        tab.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Changes"]);
+    await other.unmount();
   });
 
   test("without essentials the dock keeps its own buttons", async () => {

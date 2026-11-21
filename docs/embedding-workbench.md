@@ -211,7 +211,7 @@ being observed.
 | `openTabRequest` | a host request `{ tab, requestId }` that selects an available built-in or host-injected tab and expands the dock. Change `requestId` to repeat an open; ordinary rerenders do not steal the user's selection. Unknown tab IDs are ignored. This is presentation state, not artifact or compute authority. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 | `pullRequest` / `onOpenPullRequest` | optional. `pullRequest: { url, number? }` shows **View on GitHub** in the Changes summary bar; otherwise `onOpenPullRequest` shows **Open PR** (the host decides how to ask for one; `apps/web` asks the agent). Omit both and the bar is unchanged. Every embedder gets the collapsible per-file headers. See [session-status-and-links.md](session-status-and-links.md). |
-| `tabVisibility` | `"all"` (default) shows every allowed surface as a tab, as before. `"relevant"` is the essentials layout: Changes shows only when there are changes (or the person picked a comparison), Files, Terminal, Browser and Desktop live in the dock's one menu, and expand/hide move into that menu too. Every surface stays reachable either way. |
+| `tabVisibility` | `"all"` (default) shows every allowed surface as a tab, as before. `"relevant"` is the essentials layout: Changes shows only when there are changes (or the person picked a comparison) and lists its files as a folder tree; Files, Terminal, Browser and Desktop open from the dock's "+" menu and stay on the strip for that chat until closed; expand/hide move into that menu too. Every surface stays reachable either way. |
 
 For chat or timeline Markdown, wire `Markdown.onSandboxFile` to
 `SandboxWorkspace.openFileRequest`. `sandbox:` is an application protocol, not a
@@ -221,16 +221,19 @@ separate, explicit retained-artifact actions.
 
 Workspace surfaces use a keyboard-navigable tab strip across the top of the
 dock. Left/Right move between tabs and Home/End jump to the ends. A
-`WorkspaceTab` with `optional: true` lives in the dock's one menu instead of
-the strip; while it is open the menu button carries its name. Tabs without
+`WorkspaceTab` with `optional: true` starts in the dock's "+" menu; once the
+person opens it, it stays on the strip with a close button that puts it back. `WorkspaceDock`'s `tabScope` remembers opened tabs per value,
+such as the chat's id (`SandboxWorkspace` passes its `sessionId`). Tabs without
 `optional` always show, so embedders passing their own tabs keep today's
 behaviour. `WorkspaceDock`'s `essentials` prop also moves the expand and hide
 buttons and the header accessory into that menu (`SandboxWorkspace` sets it
-for `tabVisibility="relevant"`). Visited panels stay mounted.
+for `tabVisibility="relevant"`). Visited panels stay mounted, so switching back
+keeps their scroll and selection.
 
 `WorkbenchChanges` takes an optional `comparison` (`{ value, options, onChange }`)
-for its view menu, which also holds the unified/split choice, and `hideSummary`
-to drop its summary row when the host draws its own header.
+for its view menu, which also holds the unified/split choice, `hideSummary`
+to drop its summary row when the host draws its own header, and `navigation`:
+`"rail"` (default, the flat file list) or `"tree"` (folders with +/− change bars).
 
 The machine-state chip is rendered in the dock header automatically. Managed
 cold compute reads `Sleeping` with saved-workspace freshness, for example

@@ -490,6 +490,40 @@ describe("WorkbenchChanges — per-file sections and the pull request action", (
     await r.unmount();
   });
 
+  test("the tree navigation folds folders and selects a file", async () => {
+    const diff = [
+      fakeFileDiff({ path: "apps/api/src/a.ts", additions: 4, deletions: 1 }),
+      fakeFileDiff({ path: "apps/api/src/b.ts", additions: 0, deletions: 9 }),
+      fakeFileDiff({ path: "README.md", additions: 2, deletions: 0 }),
+    ];
+    const r = await renderComponent(
+      <WorkbenchChanges diff={diff} source="live" capturedAt={null} navigation="tree" />,
+    );
+    await flush();
+    const root = container(r);
+    expect(root.querySelector("[data-opengeni-changes-rail]")).toBeNull();
+    const tree = root.querySelector("[data-changes-tree]");
+    expect(tree?.getAttribute("aria-label")).toBe("Changed files");
+    // A chain of single folders folds into one row.
+    const dirs = [...root.querySelectorAll("[data-tree-dir]")].map((el) =>
+      el.getAttribute("data-tree-dir"),
+    );
+    expect(dirs).toEqual(["apps/api/src"]);
+    const file = (path: string) =>
+      root.querySelector<HTMLButtonElement>(`[data-changes-tree] [data-rail-file-path="${path}"]`);
+    expect(file("apps/api/src/a.ts")?.getAttribute("aria-current")).toBe("true");
+    await act(async () => file("apps/api/src/b.ts")!.click());
+    await flush();
+    expect(file("apps/api/src/b.ts")?.getAttribute("aria-current")).toBe("true");
+    expect(file("apps/api/src/a.ts")?.getAttribute("aria-current")).toBeNull();
+    // Closing the folder hides its files.
+    await act(async () => root.querySelector<HTMLButtonElement>("[data-tree-dir]")!.click());
+    await flush();
+    expect(file("apps/api/src/a.ts")).toBeNull();
+    expect(file("README.md")).not.toBeNull();
+    await r.unmount();
+  });
+
   test("shows View on GitHub when a pull request exists, else Open PR", async () => {
     let asked = 0;
     const withPr = await renderComponent(
