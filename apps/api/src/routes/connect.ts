@@ -1102,8 +1102,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             {
               db: deps.db,
               settings: deps.settings,
-              providers: (workspaceId) =>
-                vaultProviderRegistryFor(deps, { workspaceId, subjectId: null }),
+              providers: (vaultWorkspaceId) =>
+                vaultProviderRegistryFor(deps, { workspaceId: vaultWorkspaceId, subjectId: null }),
             },
             {
               connection: {

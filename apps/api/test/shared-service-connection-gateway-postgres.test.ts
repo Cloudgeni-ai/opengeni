@@ -74,9 +74,9 @@ describe("shared service connections in the API tool gateway", () => {
     });
     const seen: Array<string | null> = [];
     const provider = startTestMcpServer({
-      validateAuthorization: (authorization) => {
-        seen.push(authorization);
-        return authorization === `Bearer ${VALUE}`;
+      validateAuthorization: (header) => {
+        seen.push(header);
+        return header === `Bearer ${VALUE}`;
       },
     });
     const host = new URL(provider.url).hostname;
