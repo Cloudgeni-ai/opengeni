@@ -4,6 +4,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   Columns2Icon,
+  EllipsisIcon,
   FileWarningIcon,
   GitPullRequestArrowIcon,
   HistoryIcon,
@@ -30,6 +31,15 @@ import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
 import { useWindowedSections } from "../hooks/use-windowed-sections";
 import { PierreDiff } from "./pierre-diff";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 
 /* ----------------------------------------------------------------------------
    Changes tab — a PR-review surface.
@@ -58,24 +68,6 @@ const GUARD_BODY_PX = 52;
 const EMPTY_BODY_PX = 36;
 const COMPACT_SURFACE_PX = 560;
 const useChangesLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
-
-const STATUS_TINT: Record<GitFileDiff["status"], string> = {
-  added: "text-og-status-idle",
-  modified: "text-og-status-running",
-  deleted: "text-og-status-failed",
-  renamed: "text-og-accent",
-  copied: "text-og-accent",
-  untracked: "text-og-fg-subtle",
-  ignored: "text-og-fg-subtle",
-  conflicted: "text-og-status-failed",
-  typechange: "text-og-status-running",
-};
-
-const STATUS_WORD = {
-  added: "workbenchChanges.added",
-  deleted: "workbenchChanges.deleted",
-  untracked: "workbenchChanges.new",
-} as const;
 
 const STATUS_LETTER: Record<GitFileDiff["status"], string> = {
   added: "A",
@@ -112,11 +104,20 @@ export type WorkbenchChangesProps = {
   pullRequest?: WorkbenchPullRequest | null | undefined;
   /** Ask for a pull request for these changes: shows "Open PR" when there is none. */
   onOpenPullRequest?: (() => void) | undefined;
-  /** Controls drawn at the start of the summary row (e.g. a comparison picker). */
-  leading?: ReactNode | undefined;
-  /** Hide the file rail and stack the diffs (a narrow review surface). */
-  hideRail?: boolean | undefined;
+  /** What the diff compares (e.g. branch, uncommitted, staged): offered in the
+   *  view menu at the start of the summary row, with the diff layout. */
+  comparison?: WorkbenchChangesComparison | undefined;
+  /** Leave out the summary row (view menu and pull-request action), for a host
+   *  that draws its own header above the changes. */
+  hideSummary?: boolean | undefined;
   className?: string | undefined;
+};
+
+/** The diff's comparison choices, shown in the Changes view menu. */
+export type WorkbenchChangesComparison = {
+  value: string;
+  options: readonly { value: string; label: string }[];
+  onChange: (value: string) => void;
 };
 
 /** A pull request the host knows for the changes on screen. */
@@ -356,8 +357,8 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   onOpenFile,
   pullRequest,
   onOpenPullRequest,
-  leading,
-  hideRail = false,
+  comparison,
+  hideSummary = false,
   className,
 }: WorkbenchChangesProps) {
   const t = useOpenGeniText();
@@ -445,21 +446,28 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   // The section a rail click jumped to. While set, the pane stays pinned to it
   // as sections above it replace their estimated heights with measured ones,
   // and the rail keeps it selected even when the pane cannot scroll that far.
-  const anchorRef = useRef<number | null>(null);
+  // It is kept by path, so a list that changes under it never re-points it.
+  const anchorRef = useRef<string | null>(null);
   const scrollToIndex = windowed.scrollToIndex;
   const scrollToIndexRef = useRef(scrollToIndex);
   scrollToIndexRef.current = scrollToIndex;
   const jumpTo = useCallback((index: number) => {
-    anchorRef.current = index;
-    setActivePath(layoutRef.current.orderedFiles[index]?.path ?? null);
+    const path = layoutRef.current.orderedFiles[index]?.path ?? null;
+    anchorRef.current = path;
+    setActivePath(path);
     scrollToIndexRef.current(index);
   }, []);
 
   useChangesLayoutEffect(() => {
     const anchor = anchorRef.current;
     if (anchor === null) return;
-    scrollToIndex(anchor);
-  }, [windowed.offsets, scrollToIndex]);
+    const index = orderedFiles.findIndex((file) => file.path === anchor);
+    if (index < 0) {
+      anchorRef.current = null;
+      return;
+    }
+    scrollToIndex(index);
+  }, [windowed.offsets, orderedFiles, scrollToIndex]);
 
   // Track which section is at the top of the pane so the rail highlights it.
   const onPaneScroll = useCallback(() => {
@@ -503,40 +511,32 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
   const sourceBadge = describeSource(t, source, capturedAt, captureRevision ?? null);
   const activeFile = orderedFiles[activeIndex] ?? orderedFiles[0];
   const onToggle = toggleCollapsed;
-  const stacked = compact || hideRail;
 
   return (
     <div
       ref={rootRef}
       className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
-      data-workbench-changes-layout={compact ? "compact" : hideRail ? "stacked" : "rail"}
+      data-workbench-changes-layout={compact ? "compact" : "rail"}
     >
-      {/* One quiet row: optional host controls, the summary, then actions. */}
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-og-border px-3 py-1">
-        {leading}
-        <span
-          role="status"
-          aria-atomic="true"
-          aria-live="polite"
-          data-contrast-audited
-          className="min-w-0 text-og-xs text-og-fg-muted"
-        >
-          {t("workbenchChanges.filesChanged", { count: diff.length })}
-          <span data-contrast-audited className="ml-2 font-og-mono text-og-status-idle">
-            +{additions}
-          </span>
-          <span data-contrast-audited className="ml-1 font-og-mono text-og-status-failed">
-            −{deletions}
-          </span>
-        </span>
-        <div className="ml-auto flex shrink-0 items-center gap-1">
+      <span role="status" aria-atomic="true" aria-live="polite" className="sr-only">
+        {t("workbenchChanges.filesChanged", { count: diff.length })} +{additions} −{deletions}
+      </span>
+      {/* One quiet row: the view menu, then the one pull-request action. */}
+      {hideSummary ? null : (
+        <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-og-border px-2 py-1">
+          <WorkbenchChangesViewMenu
+            comparison={comparison}
+            layout={layout}
+            onLayoutChange={compact ? undefined : setLayout}
+          />
           {source === "capture" && capturedAt ? (
             <SourceBadge capturedAt={capturedAt} label={sourceBadge} />
           ) : null}
-          {compact ? null : <LayoutToggle layout={layout} onChange={setLayout} />}
-          <PullRequestAction pullRequest={pullRequest} onOpenPullRequest={onOpenPullRequest} />
+          <div className="ml-auto flex shrink-0 items-center">
+            <PullRequestAction pullRequest={pullRequest} onOpenPullRequest={onOpenPullRequest} />
+          </div>
         </div>
-      </div>
+      )}
 
       {compact ? (
         <div className="flex min-h-0 flex-1 flex-col">
@@ -583,7 +583,7 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* File rail — virtualized (virtua): a dense change set is fine. */}
-          {stacked ? null : (
+          {compact ? null : (
             <ChangesRailVList
               rowCount={rows.length}
               coarsePointer={coarsePointer}
@@ -598,7 +598,6 @@ export const WorkbenchChanges = memo(function WorkbenchChanges({
                     className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-og-xs font-medium text-og-fg-subtle"
                   >
                     <span className="min-w-0 truncate">{row.label}</span>
-                    <span className="shrink-0">{row.count}</span>
                   </div>
                 ) : (
                   <RailFileRow
@@ -729,27 +728,9 @@ const RailFileRow = memo(function RailFileRow({
         active && "bg-og-surface-2 text-og-fg",
       )}
     >
-      <span
-        data-contrast-audited
-        className={cn("w-3 shrink-0 text-center font-og-mono text-og-xs", STATUS_TINT[file.status])}
-      >
-        {STATUS_LETTER[file.status]}
-      </span>
       <span className="min-w-0 flex-1 truncate">
-        {name}
+        <span className={cn(file.status === "deleted" && "line-through")}>{name}</span>
         {dir ? <span className="ml-1.5 text-og-xs text-og-fg-subtle">{dir}</span> : null}
-      </span>
-      <span className="ml-auto flex shrink-0 items-center gap-1 pl-1 font-og-mono text-og-xs">
-        {file.additions > 0 ? (
-          <span data-contrast-audited className="text-og-status-idle">
-            +{file.additions}
-          </span>
-        ) : null}
-        {file.deletions > 0 ? (
-          <span data-contrast-audited className="text-og-status-failed">
-            −{file.deletions}
-          </span>
-        ) : null}
       </span>
     </button>
   );
@@ -845,7 +826,6 @@ function DiffFileHeader({
   collapsed: boolean;
   onToggle?: ((path: string) => void) | undefined;
 }) {
-  const t = useOpenGeniText();
   const renamed = file.oldPath && file.oldPath !== file.path;
   const label = renamed ? `${file.oldPath} → ${file.path}` : file.path;
   const { name, dir } = splitPath(file.path);
@@ -854,21 +834,12 @@ function DiffFileHeader({
     <>
       {onToggle ? <Chevron className="size-3.5 shrink-0 text-og-fg-subtle" aria-hidden /> : null}
       <span className="min-w-0 flex-1 truncate text-left" title={label}>
-        <span className="font-medium text-og-fg">{name}</span>
+        <span className={cn("font-medium text-og-fg", file.status === "deleted" && "line-through")}>
+          {name}
+        </span>
         {dir ? <span className="ml-1.5 text-og-xs text-og-fg-subtle">{dir}</span> : null}
         {renamed ? (
           <span className="ml-1.5 text-og-xs text-og-fg-subtle">← {file.oldPath}</span>
-        ) : null}
-      </span>
-      <span className="flex shrink-0 items-center gap-1.5 font-og-mono text-og-xs">
-        {file.additions > 0 ? <span className="text-og-status-idle">+{file.additions}</span> : null}
-        {file.deletions > 0 ? (
-          <span className="text-og-status-failed">−{file.deletions}</span>
-        ) : null}
-        {file.status === "added" || file.status === "deleted" || file.status === "untracked" ? (
-          <span className={cn("font-og-sans", STATUS_TINT[file.status])}>
-            {t(STATUS_WORD[file.status])}
-          </span>
         ) : null}
       </span>
     </>
@@ -972,28 +943,66 @@ function GuardBody({
   );
 }
 
-function LayoutToggle({
-  layout,
-  onChange,
+/** The view menu: what the diff compares (when the host offers a choice) and
+ *  unified or split. Its button names the comparison, or is a quiet "⋯". */
+export function WorkbenchChangesViewMenu({
+  comparison,
+  layout = "unified",
+  onLayoutChange,
 }: {
-  layout: "unified" | "split";
-  onChange: (next: "unified" | "split") => void;
+  comparison?: WorkbenchChangesComparison | undefined;
+  layout?: "unified" | "split" | undefined;
+  onLayoutChange?: ((next: "unified" | "split") => void) | undefined;
 }) {
   const t = useOpenGeniText();
+  if (!comparison && !onLayoutChange) return null;
+  const current = comparison?.options.find((option) => option.value === comparison.value);
   const next = layout === "unified" ? "split" : "unified";
-  const label =
+  const layoutLabel =
     next === "split" ? t("workbenchChanges.showSplitDiff") : t("workbenchChanges.showUnifiedDiff");
-  const Icon = next === "split" ? Columns2Icon : Rows2Icon;
+  const LayoutIcon = next === "split" ? Columns2Icon : Rows2Icon;
   return (
-    <button
-      type="button"
-      onClick={() => onChange(next)}
-      title={label}
-      aria-label={label}
-      data-diff-layout={layout}
-      className="inline-flex size-7 items-center justify-center rounded-og-sm text-og-fg-subtle transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
-    >
-      <Icon className="size-3.5" aria-hidden />
-    </button>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          data-changes-view-menu
+          aria-label={current ? undefined : t("workbenchChanges.view")}
+          title={t("workbenchChanges.view")}
+          className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent data-[state=open]:bg-og-surface-2 pointer-coarse:min-h-11"
+        >
+          {current ? (
+            <>
+              {current.label}
+              <ChevronDownIcon className="size-3 text-og-fg-subtle" aria-hidden />
+            </>
+          ) : (
+            <EllipsisIcon className="size-4" aria-hidden />
+          )}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-[11rem]">
+        {comparison ? (
+          <DropdownMenuRadioGroup value={comparison.value} onValueChange={comparison.onChange}>
+            {comparison.options.map((option) => (
+              <DropdownMenuRadioItem
+                key={option.value}
+                value={option.value}
+                data-changes-comparison-option={option.value}
+              >
+                {option.label}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        ) : null}
+        {comparison && onLayoutChange ? <DropdownMenuSeparator /> : null}
+        {onLayoutChange ? (
+          <DropdownMenuItem data-diff-layout={layout} onSelect={() => onLayoutChange(next)}>
+            <LayoutIcon className="size-3.5 text-og-fg-subtle" aria-hidden />
+            {layoutLabel}
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

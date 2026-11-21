@@ -1,41 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
-import type { ReactNode } from "react";
 import { flush, registerDom, renderComponent } from "./render-hook";
+import { dropdownMenuStub } from "./dropdown-menu-stub";
 
 registerDom();
 
-// A semantic stand-in for the Radix menu: the same trigger and items, rendered
-// in place, so the "+" choices can be read and clicked in happy-dom.
-mock.module("../src/ui/dropdown-menu", () => {
-  const Pass = ({ children }: { children?: ReactNode }) => <>{children}</>;
-  return {
-    DropdownMenu: Pass,
-    DropdownMenuTrigger: Pass,
-    DropdownMenuContent: ({ children }: { children?: ReactNode }) => (
-      <div role="menu">{children}</div>
-    ),
-    DropdownMenuLabel: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
-    DropdownMenuSeparator: () => <hr />,
-    DropdownMenuItem: ({
-      children,
-      onSelect,
-      ...rest
-    }: {
-      children?: ReactNode;
-      onSelect?: () => void;
-      [key: string]: unknown;
-    }) => (
-      <button
-        type="button"
-        role="menuitem"
-        data-dock-menu-tab={rest["data-dock-menu-tab"] as string | undefined}
-        onClick={() => onSelect?.()}
-      >
-        {children}
-      </button>
-    ),
-  };
-});
+mock.module("../src/ui/dropdown-menu", dropdownMenuStub);
 
 const { act } = await import("react");
 const { WorkspaceDock } = await import("../src/components/workspace-dock");
@@ -47,23 +16,20 @@ async function click(element: Element | null): Promise<void> {
   });
 }
 
+const TABS = [
+  { id: "changes", label: "Changes", content: <div>Changes content</div> },
+  { id: "files", label: "Files", optional: true, content: <div>Files content</div> },
+  { id: "terminal", label: "Terminal", optional: true, content: <div>Terminal content</div> },
+];
+
 describe("WorkspaceDock tab strip", () => {
-  test("optional tabs wait under + until opened, and close back into it", async () => {
+  test("optional tabs live in the one menu, which names the open one", async () => {
     const rendered = await renderComponent(
       <WorkspaceDock
         autoSaveId="og.test.workspace-dock-optional"
-        tabScope="chat-1"
+        essentials
         primary={<div>Chat pane</div>}
-        tabs={[
-          { id: "changes", label: "Changes", content: <div>Changes content</div> },
-          { id: "files", label: "Files", optional: true, content: <div>Files content</div> },
-          {
-            id: "terminal",
-            label: "Terminal",
-            optional: true,
-            content: <div>Terminal content</div>,
-          },
-        ]}
+        tabs={TABS}
       />,
     );
     const shown = () =>
@@ -74,28 +40,41 @@ describe("WorkspaceDock tab strip", () => {
     expect(
       rendered.container.querySelector('[role="tablist"]')?.getAttribute("aria-orientation"),
     ).toBe("horizontal");
-    const add = rendered.container.querySelector<HTMLButtonElement>("[data-dock-add-tab]");
-    expect(add?.getAttribute("aria-label")).toBe("Open panel");
+    const menu = () => rendered.container.querySelector<HTMLElement>("[data-dock-menu]");
+    expect(menu()).not.toBeNull();
+    expect(menu()?.getAttribute("data-dock-menu-active")).toBeNull();
     const menuTabs = () =>
       [...rendered.container.querySelectorAll<HTMLElement>("[data-dock-menu-tab]")].map((item) =>
         item.getAttribute("data-dock-menu-tab"),
       );
     expect(menuTabs()).toEqual(["files", "terminal"]);
+    const actions = [
+      ...rendered.container.querySelectorAll<HTMLElement>("[data-dock-menu-action]"),
+    ].map((item) => item.getAttribute("data-dock-menu-action"));
+    expect(actions).toEqual(["maximize", "hide"]);
+
     await click(rendered.container.querySelector('[data-dock-menu-tab="files"]'));
     await flush();
-    expect(shown()).toEqual(["Changes", "Files"]);
-    expect(menuTabs()).toEqual(["terminal"]);
+    // Opening Files keeps the strip at its essentials; the menu shows Files.
+    expect(shown()).toEqual(["Changes"]);
+    expect(menu()?.getAttribute("data-dock-menu-active")).toBe("files");
     expect(rendered.container.textContent ?? "").toContain("Files content");
 
-    // Close Files: it returns to "+" and the neighbouring tab takes over.
-    await click(rendered.container.querySelector('[data-dock-tab-close="files"]'));
+    await click(rendered.container.querySelector('[role="tab"][aria-label="Changes"]'));
     await flush();
-    expect(shown()).toEqual(["Changes"]);
-    expect(
-      rendered.container
-        .querySelector('[role="tab"][aria-selected="true"]')
-        ?.getAttribute("aria-label"),
-    ).toBe("Changes");
+    expect(menu()?.getAttribute("data-dock-menu-active")).toBeNull();
+    await rendered.unmount();
+  });
+
+  test("without essentials the dock keeps its own buttons", async () => {
+    const rendered = await renderComponent(
+      <WorkspaceDock
+        autoSaveId="og.test.workspace-dock-default"
+        primary={<div>Chat pane</div>}
+        tabs={TABS}
+      />,
+    );
+    expect(rendered.container.querySelectorAll("[data-dock-menu-action]").length).toBe(0);
     await rendered.unmount();
   });
 });

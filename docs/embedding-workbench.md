@@ -1,7 +1,7 @@
 # Embedding the Opengeni Workbench
 
 This guide is for a host app that wants to drop the Opengeni **session workspace**
-— the Changes / Files / Terminal / Browser / Computer dock, with instant cold paint and the
+— the Changes / Files / Terminal / Browser / Desktop dock, with instant cold paint and the
 machine-state chip — into its own UI. It is the frontend companion to the
 standalone SDK/proxy integration as well as the advanced in-process path in
 `docs/embedding.md`. It is the exact surface `apps/web` itself consumes (see
@@ -211,7 +211,7 @@ being observed.
 | `openTabRequest` | a host request `{ tab, requestId }` that selects an available built-in or host-injected tab and expands the dock. Change `requestId` to repeat an open; ordinary rerenders do not steal the user's selection. Unknown tab IDs are ignored. This is presentation state, not artifact or compute authority. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 | `pullRequest` / `onOpenPullRequest` | optional. `pullRequest: { url, number? }` shows **View on GitHub** in the Changes summary bar; otherwise `onOpenPullRequest` shows **Open PR** (the host decides how to ask for one; `apps/web` asks the agent). Omit both and the bar is unchanged. Every embedder gets the collapsible per-file headers. See [session-status-and-links.md](session-status-and-links.md). |
-| `tabVisibility` | `"all"` (default) shows every allowed surface as a tab. `"relevant"` shows Changes only when there are changes, and keeps Files, Terminal, Browser and Computer under **+** until the person opens one. Every surface stays reachable either way. |
+| `tabVisibility` | `"all"` (default) shows every allowed surface as a tab, as before. `"relevant"` is the essentials layout: Changes shows only when there are changes (or the person picked a comparison), Files, Terminal, Browser and Desktop live in the dock's one menu, and expand/hide move into that menu too. Every surface stays reachable either way. |
 
 For chat or timeline Markdown, wire `Markdown.onSandboxFile` to
 `SandboxWorkspace.openFileRequest`. `sandbox:` is an application protocol, not a
@@ -221,12 +221,16 @@ separate, explicit retained-artifact actions.
 
 Workspace surfaces use a keyboard-navigable tab strip across the top of the
 dock. Left/Right move between tabs and Home/End jump to the ends. A
-`WorkspaceTab` with `optional: true` waits under **+** until it is opened (or
-selected by a request), then shows a close button and returns to **+** when
-closed (Delete or Backspace also closes it). Opened tabs are remembered per
-`tabScope` (`SandboxWorkspace` uses the session id). Tabs without `optional`
-always show, so embedders passing their own tabs keep today's behaviour.
-Visited panels stay mounted.
+`WorkspaceTab` with `optional: true` lives in the dock's one menu instead of
+the strip; while it is open the menu button carries its name. Tabs without
+`optional` always show, so embedders passing their own tabs keep today's
+behaviour. `WorkspaceDock`'s `essentials` prop also moves the expand and hide
+buttons and the header accessory into that menu (`SandboxWorkspace` sets it
+for `tabVisibility="relevant"`). Visited panels stay mounted.
+
+`WorkbenchChanges` takes an optional `comparison` (`{ value, options, onChange }`)
+for its view menu, which also holds the unified/split choice, and `hideSummary`
+to drop its summary row when the host draws its own header.
 
 The machine-state chip is rendered in the dock header automatically. Managed
 cold compute reads `Sleeping` with saved-workspace freshness, for example

@@ -6,21 +6,27 @@
 // other tool call; this panel never writes to GitHub itself.
 import type { SessionLinkWithStatus, SessionPullRequestDetail } from "@opengeni/sdk";
 import {
-  ArrowLeftIcon,
   ArrowUpRightIcon,
   CheckIcon,
   CircleDotIcon,
+  EllipsisIcon,
   GitMergeIcon,
-  GitPullRequestClosedIcon,
-  GitPullRequestDraftIcon,
-  GitPullRequestIcon,
   LoaderCircleIcon,
   XIcon,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { WorkbenchChanges } from "../../../components/workbench-changes";
 import { Button } from "../../../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../../../ui/dropdown-menu";
 import { formatRelativeTime } from "../../../ui/time-format";
 import { useAppContext } from "../../app-context";
 import { cn } from "../../lib/utils";
@@ -35,7 +41,8 @@ export function pullRequestLinkFromLinks(
   let newest: SessionLinkWithStatus | null = null;
   for (let index = links.length - 1; index >= 0; index -= 1) {
     const link = links[index]!;
-    if (link.kind !== "pull_request") continue;
+    // The PR tab reads GitHub; other providers' links stay in Linked.
+    if (link.kind !== "pull_request" || link.provider !== "github") continue;
     newest ??= link;
     const state = link.status?.state;
     if (state !== "merged" && state !== "closed") return link;
@@ -59,11 +66,13 @@ export type PullRequestDetailState =
   | { status: "ready"; detail: SessionPullRequestDetail | null }
   | { status: "error"; detail: SessionPullRequestDetail | null };
 
-/** The pull request's details, re-read when its live status changes. */
+/** The pull request's details, re-read (fresh) when its live status changes
+ *  or the person retries. */
 function usePullRequestDetail(input: {
   workspaceId: string;
   sessionId: string;
   link: SessionLinkWithStatus;
+  attempt: number;
 }): PullRequestDetailState {
   const { client } = useAppContext();
   const statusKey = JSON.stringify(input.link.status ?? null);
@@ -72,15 +81,20 @@ function usePullRequestDetail(input: {
     status: "loading",
     detail: null,
   });
+  const readLink = useRef<string | null>(null);
   useEffect(() => {
     let live = true;
+    // The first read may use the shared cache; later ones follow a change
+    // GitHub already reported, so they skip it.
+    const fresh = readLink.current === input.link.id;
+    readLink.current = input.link.id;
     setState((current) =>
       current.key === input.link.id
         ? { ...current, status: current.detail ? "ready" : "loading" }
         : { key: input.link.id, status: "loading", detail: null },
     );
     client
-      .getSessionPullRequest(input.workspaceId, input.sessionId, input.link.id)
+      .getSessionPullRequest(input.workspaceId, input.sessionId, input.link.id, { fresh })
       .then((response) => {
         if (live) setState({ key: input.link.id, status: "ready", detail: response.pullRequest });
       })
@@ -90,53 +104,18 @@ function usePullRequestDetail(input: {
     return () => {
       live = false;
     };
-  }, [client, input.workspaceId, input.sessionId, input.link.id, statusKey]);
+  }, [client, input.workspaceId, input.sessionId, input.link.id, statusKey, input.attempt]);
   return state.key === input.link.id ? state : { status: "loading", detail: null };
 }
 
-const STATE_LOOK: Record<
-  PullRequestState,
-  { label: string; icon: typeof GitPullRequestIcon; className: string }
-> = {
-  open: {
-    label: "Open",
-    icon: GitPullRequestIcon,
-    className: "bg-status-idle/15 text-status-idle",
-  },
-  draft: {
-    label: "Draft",
-    icon: GitPullRequestDraftIcon,
-    className: "bg-surface-2 text-fg-muted",
-  },
-  merged: {
-    label: "Merged",
-    icon: GitMergeIcon,
-    className: "bg-accent/15 text-accent",
-  },
-  closed: {
-    label: "Closed",
-    icon: GitPullRequestClosedIcon,
-    className: "bg-status-failed/15 text-status-failed",
-  },
+const STATE_WORD: Record<PullRequestState, string> = {
+  open: "Open",
+  draft: "Draft",
+  merged: "Merged",
+  closed: "Closed",
 };
 
-function StateBadge({ state }: { state: PullRequestState }) {
-  const look = STATE_LOOK[state];
-  const Icon = look.icon;
-  return (
-    <span
-      data-pr-state={state}
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
-        look.className,
-      )}
-    >
-      <Icon aria-hidden className="size-3.5" />
-      {look.label}
-    </span>
-  );
-}
-
+/** Checks, review and conflicts in a few words ("Checks passed · Approved"). */
 function statusSummary(detail: SessionPullRequestDetail): string | null {
   const words: string[] = [];
   if (detail.checks === "passing") words.push("Checks passed");
@@ -151,65 +130,95 @@ function statusSummary(detail: SessionPullRequestDetail): string | null {
 
 type SubTab = "changes" | "description" | "discussion" | "commits" | "checks";
 
-/** The PR tab body. `onMerge` is absent when this viewer cannot ask the agent. */
+const VIEW_LABEL: Record<SubTab, string> = {
+  changes: "Changes",
+  description: "Description",
+  discussion: "Discussion",
+  commits: "Commits",
+  checks: "Checks",
+};
+
+/** The PR tab body. `onMerge` is absent when this viewer cannot ask the
+ *  agent, and `onRemove` when they cannot edit the chat's links. */
 export function SessionPullRequestPanel({
   workspaceId,
   sessionId,
   link,
   onMerge,
+  onRemove,
 }: {
   workspaceId: string;
   sessionId: string;
   link: SessionLinkWithStatus;
   onMerge?: (() => Promise<void>) | undefined;
+  onRemove?: (() => void) | undefined;
 }) {
-  const state = usePullRequestDetail({ workspaceId, sessionId, link });
-  return <PullRequestView link={link} state={state} onMerge={onMerge} />;
+  const [attempt, setAttempt] = useState(0);
+  const state = usePullRequestDetail({ workspaceId, sessionId, link, attempt });
+  return (
+    <PullRequestView
+      link={link}
+      state={state}
+      onMerge={onMerge}
+      onRemove={onRemove}
+      onRetry={() => setAttempt((count) => count + 1)}
+    />
+  );
 }
 
-/** Presentational PR view, so harnesses and tests render it with fixed data. */
+/** Presentational PR view, so harnesses and tests render it with fixed data.
+ *  Essentials only: the title, one muted line, one primary action (Merge, or
+ *  View on GitHub) and one menu for the other views. */
 export function PullRequestView({
   link,
   state,
   onMerge,
+  onRemove,
+  onRetry,
 }: {
   link: SessionLinkWithStatus;
   state: PullRequestDetailState;
   onMerge?: (() => Promise<void>) | undefined;
+  onRemove?: (() => void) | undefined;
+  onRetry?: (() => void) | undefined;
 }) {
   const detail = state.detail;
-  const [tab, setTab] = useState<SubTab>("changes");
+  const [view, setView] = useState<SubTab>("changes");
   const [merging, setMerging] = useState<"idle" | "asking" | "asked">("idle");
   const number = pullRequestNumber(link);
 
   if (!detail) {
+    const title = link.status?.title ?? link.title ?? (number ? `#${number}` : link.url);
     return (
       <div className="flex h-full min-h-0 flex-col" data-session-pr-panel="">
-        <div className="flex items-center justify-between gap-2 px-4 pt-3">
-          {link.status && link.status.state !== "done" && link.status.state !== "unknown" ? (
-            <StateBadge state={link.status.state} />
-          ) : (
-            <span />
-          )}
+        <header className="flex shrink-0 items-start gap-2 px-4 pt-3">
+          <h2 className="min-w-0 flex-1 text-sm font-semibold leading-snug text-fg">{title}</h2>
           <GitHubLink url={link.url} />
-        </div>
-        <div className="px-4 pt-2">
-          <h2 className="text-base font-semibold text-fg">
-            {link.status?.title ?? link.title ?? (number ? `#${number}` : link.url)}
-          </h2>
-          <p className="mt-2 text-sm text-fg-muted">
-            {state.status === "loading" ? (
-              <span className="inline-flex items-center gap-1.5">
-                <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
-                Loading
-              </span>
-            ) : state.status === "error" ? (
-              "The pull request couldn't be loaded."
-            ) : (
-              "Opengeni can't read this pull request. Add its repository to the workspace's GitHub App to see it here."
-            )}
-          </p>
-        </div>
+        </header>
+        <p className="px-4 pt-1 text-xs text-fg-muted">
+          {state.status === "loading" ? (
+            <span className="inline-flex items-center gap-1.5">
+              <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
+              Loading
+            </span>
+          ) : state.status === "error" ? (
+            <span>
+              Couldn't load it.{" "}
+              {onRetry ? (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  data-pr-retry=""
+                  className="font-medium text-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                >
+                  Retry
+                </button>
+              ) : null}
+            </span>
+          ) : (
+            "Can't read this pull request here."
+          )}
+        </p>
       </div>
     );
   }
@@ -226,101 +235,116 @@ export function PullRequestView({
       setMerging("idle");
     }
   };
-  const tabs: { id: SubTab; label: string; count?: number | undefined }[] = [
-    { id: "changes", label: "Changes", count: detail.changedFiles },
-    { id: "description", label: "Description" },
-    { id: "discussion", label: "Discussion", count: detail.comments.length },
-    { id: "commits", label: "Commits", count: detail.commitCount },
-    { id: "checks", label: "Checks", count: detail.checkRuns.length },
-  ];
+  const counts: Partial<Record<SubTab, number>> = {
+    discussion: detail.comments.length,
+    commits: detail.commitCount,
+    checks: detail.checkRuns.length,
+  };
+  const meta = [
+    STATE_WORD[detail.state],
+    `${detail.owner}/${detail.repo}#${detail.number}`,
+    `${detail.base} ← ${detail.head}`,
+    summary,
+  ].filter(Boolean);
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-session-pr-panel="">
-      <header className="shrink-0 px-4 pt-3">
-        <div className="flex items-center justify-between gap-2">
-          <StateBadge state={detail.state} />
+      <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-2.5">
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-sm font-semibold leading-snug text-fg" title={detail.title}>
+            {detail.title}
+          </h2>
+          <p
+            className={cn(
+              "mt-0.5 truncate text-xs",
+              detail.checks === "failing" || detail.review === "changes_requested"
+                ? "text-status-failed"
+                : "text-fg-muted",
+            )}
+            data-pr-state={detail.state}
+            title={meta.join(" · ")}
+          >
+            {meta.join(" · ")}
+          </p>
+        </div>
+        {canMerge ? (
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void merge()}
+            disabled={merging !== "idle"}
+            data-pr-merge=""
+            title="Ask the agent to merge, with its usual approvals"
+            className="shrink-0"
+          >
+            {merging === "asking" ? (
+              <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
+            ) : merging === "asked" ? (
+              <CheckIcon aria-hidden className="size-3.5" />
+            ) : (
+              <GitMergeIcon aria-hidden className="size-3.5" />
+            )}
+            {merging === "asked" ? "Asked" : "Merge"}
+          </Button>
+        ) : (
           <GitHubLink url={detail.url} />
-        </div>
-        <p className="mt-2 text-xs text-fg-muted">
-          {detail.owner}/{detail.repo} · #{detail.number}
-        </p>
-        <h2 className="mt-0.5 text-base font-semibold leading-snug text-fg">{detail.title}</h2>
-        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
-          {detail.author ? <Person person={detail.author} /> : null}
-          <span className="inline-flex min-w-0 items-center gap-1 font-mono">
-            <span className="truncate rounded bg-surface-2 px-1.5 py-0.5">{detail.base}</span>
-            <ArrowLeftIcon aria-label="from" className="size-3 shrink-0" />
-            <span className="truncate rounded bg-surface-2 px-1.5 py-0.5">{detail.head}</span>
-          </span>
-        </div>
-        <p className="mt-2 text-xs text-fg-muted">
-          {detail.createdAt ? `Opened ${formatRelativeTime(detail.createdAt)} · ` : ""}
-          {detail.changedFiles} {detail.changedFiles === 1 ? "file" : "files"}
-          <span className="ml-2 font-mono text-status-idle">+{detail.additions}</span>
-          <span className="ml-1 font-mono text-status-failed">−{detail.deletions}</span>
-        </p>
-        {summary || canMerge ? (
-          <div className="mt-3 flex min-h-9 items-center gap-2 border-t border-border pt-2">
-            <span
-              className={cn(
-                "min-w-0 flex-1 truncate text-xs",
-                detail.checks === "failing" || detail.review === "changes_requested"
-                  ? "text-status-failed"
-                  : "text-fg-muted",
-              )}
-            >
-              {summary}
-            </span>
-            {canMerge ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => void merge()}
-                disabled={merging !== "idle"}
-                data-pr-merge=""
-                title="Ask the agent to merge, with its usual approvals"
-                className="shrink-0"
-              >
-                {merging === "asking" ? (
-                  <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
-                ) : merging === "asked" ? (
-                  <CheckIcon aria-hidden className="size-3.5" />
-                ) : (
-                  <GitMergeIcon aria-hidden className="size-3.5" />
-                )}
-                {merging === "asked" ? "Asked" : "Merge"}
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-        <div
-          role="tablist"
-          aria-label="Pull request"
-          className="-mx-1 mt-2 flex items-center gap-0.5 overflow-x-auto [scrollbar-width:none]"
-        >
-          {tabs.map((item) => (
+        )}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
             <button
-              key={item.id}
               type="button"
-              role="tab"
-              aria-selected={tab === item.id}
-              onClick={() => setTab(item.id)}
-              data-pr-tab={item.id}
-              className={cn(
-                "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
-                tab === item.id ? "bg-surface-2 text-fg" : "text-fg-muted hover:text-fg",
-              )}
+              aria-label="More"
+              title="More"
+              data-pr-menu=""
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-surface-2"
             >
-              {item.label}
-              {item.count !== undefined && item.count > 0 ? (
-                <span className="text-fg-muted">{item.count}</span>
-              ) : null}
+              <EllipsisIcon aria-hidden className="size-4" />
             </button>
-          ))}
-        </div>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[11rem]">
+            <DropdownMenuRadioGroup value={view} onValueChange={(next) => setView(next as SubTab)}>
+              {(Object.keys(VIEW_LABEL) as SubTab[]).map((id) => (
+                <DropdownMenuRadioItem key={id} value={id} data-pr-tab={id}>
+                  <span className="min-w-0 flex-1">{VIEW_LABEL[id]}</span>
+                  {counts[id] ? (
+                    <span className="shrink-0 text-xs text-fg-muted">{counts[id]}</span>
+                  ) : null}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+            {canMerge || onRemove ? <DropdownMenuSeparator /> : null}
+            {canMerge ? (
+              <DropdownMenuItem asChild>
+                <a href={detail.url} target="_blank" rel="noreferrer noopener" data-pr-github="">
+                  View on GitHub
+                  <ArrowUpRightIcon aria-hidden className="ml-auto size-3.5" />
+                </a>
+              </DropdownMenuItem>
+            ) : null}
+            {onRemove ? (
+              <DropdownMenuItem onSelect={onRemove} data-pr-remove="">
+                Remove link
+              </DropdownMenuItem>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </header>
-      <div className="mt-1 min-h-0 flex-1 border-t border-border">
-        <PullRequestTabBody tab={tab} detail={detail} />
+      {view === "changes" ? null : (
+        <div className="flex shrink-0 items-center gap-1 px-4 pt-2 text-xs text-fg-muted">
+          <button
+            type="button"
+            onClick={() => setView("changes")}
+            data-pr-back=""
+            className="rounded hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
+          >
+            Changes
+          </button>
+          <span aria-hidden>›</span>
+          <span className="text-fg">{VIEW_LABEL[view]}</span>
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        <PullRequestTabBody tab={view} detail={detail} />
       </div>
     </div>
   );
@@ -330,7 +354,26 @@ function PullRequestTabBody({ tab, detail }: { tab: SubTab; detail: SessionPullR
   const files = useMemo(() => detail.files, [detail.files]);
   if (tab === "changes") {
     if (files.length === 0) return <Empty>No file changes.</Empty>;
-    return <WorkbenchChanges diff={files} source={null} capturedAt={null} hideRail />;
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        {detail.filesTruncated ? (
+          <p className="shrink-0 px-4 pt-2 text-xs text-fg-muted" data-pr-files-truncated="">
+            {files.length} of {detail.changedFiles} files.{" "}
+            <a
+              href={`${detail.url}/files`}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="font-medium text-fg underline-offset-2 hover:underline"
+            >
+              All on GitHub
+            </a>
+          </p>
+        ) : null}
+        <div className="min-h-0 flex-1">
+          <WorkbenchChanges diff={files} source={null} capturedAt={null} hideSummary />
+        </div>
+      </div>
+    );
   }
   return (
     <div className="h-full overflow-y-auto">
@@ -461,10 +504,10 @@ function GitHubLink({ url }: { url: string }) {
       target="_blank"
       rel="noreferrer noopener"
       data-pr-github=""
-      className="inline-flex items-center gap-0.5 rounded px-1 text-xs text-fg-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
+      className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
     >
-      GitHub
-      <ArrowUpRightIcon aria-hidden className="size-3" />
+      View on GitHub
+      <ArrowUpRightIcon aria-hidden className="size-3.5" />
     </a>
   );
 }

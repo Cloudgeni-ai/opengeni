@@ -51,8 +51,9 @@ Changes publish `session.waiting_on.changed`, so open chats refresh at once.
 
 The Linked tab in the chat's side panel lists what the chat works on: issues,
 pull requests, Slack threads, App records and any URL (at most 30).
-In the app, a linked pull request gets its own **PR** tab (below) and the
-Linked tab lists the rest; it appears only when something else is linked.
+In the app, the chat's GitHub pull request gets its own **PR** tab (below)
+and Linked, in the dock's menu, lists the rest, including other pull
+requests; it appears only when something else is linked.
 
 - The agent adds items with `session_links_add` (`url`, optional `title`) and
   removes them with `session_links_remove`. People with `sessions:control`
@@ -146,12 +147,16 @@ result says why no wake was set (`wakeNotSet`).
 ## Workbench
 
 When the chat has a linked GitHub pull request, the side panel opens a **PR**
-tab: its state, title, author, base and head branches, file and line counts,
-and sub-tabs for Changes, Description, Discussion, Commits and Checks. It reads
+tab with the essentials: the title, one line with its state, repository and
+number, branches and checks, one action (**Merge**, or **View on GitHub**) and
+a menu for Description, Discussion, Commits, Checks and removing the link. The
+body is its Changes. It reads
 `GET /v1/workspaces/:ws/sessions/:id/links/:linkId/pull-request`
-(`sessions:read`, `?fresh=true` to re-read), through the same workspace GitHub
-App as the live status; `pullRequest` is null where the deployment cannot read
-it, and the tab then shows the link only. Lists are one GitHub page (100) each.
+(`sessions:read`, `?fresh=true` to re-read) through the workspace GitHub App,
+then the viewer's own GitHub, like the live status. `pullRequest` is null
+where neither can read it, and the tab then shows the link only; a failed
+GitHub read answers 502 and the tab offers Retry. Lists are one GitHub page
+(100) each, and patch text is capped per pull request.
 **Merge** asks the agent to merge it with its own GitHub tools, so the
 connection's Can use and approval settings apply; it shows only to people who
 can message the chat.
