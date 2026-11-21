@@ -1464,6 +1464,7 @@ export function registerComputerSessionRoutes(
           operation,
           retryControllerTransport:
             operation === "computer.read" || operation === "computer.action",
+          ...(expectedPlacement?.kind === "sandbox_group" ? { managedHome: true } : {}),
           ...(expectedPlacementInstanceId && expectedPlacement?.kind === "sandbox_group"
             ? { retainedInstanceId: expectedPlacementInstanceId }
             : {}),
