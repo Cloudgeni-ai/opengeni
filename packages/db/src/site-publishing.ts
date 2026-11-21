@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
-import type { Permission } from "@opengeni/contracts";
+import type { Permission, SiteAssetManifest } from "@opengeni/contracts";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
 import { rawMembershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
@@ -497,6 +497,7 @@ export async function getPublishedSiteVersion(
   contentSha256: string | null;
   sizeBytes: number;
   requestedTools: Array<{ serverId: string; toolName: string }>;
+  assetManifest: SiteAssetManifest | null;
 } | null> {
   if (!UUID.test(siteId) || !UUID.test(versionId)) return null;
   return await withRlsContext(db, scope, async (tx) => {
@@ -506,9 +507,10 @@ export async function getPublishedSiteVersion(
       content_sha256: string | null;
       size_bytes: string | number;
       requested_tools: unknown;
+      asset_manifest: SiteAssetManifest | null;
     }>(
       tx,
-      sql`select id, content_key, content_sha256, size_bytes, requested_tools
+      sql`select id, content_key, content_sha256, size_bytes, requested_tools, asset_manifest
         from workspace_artifact_versions
         where workspace_id = ${scope.workspaceId} and artifact_id = ${siteId} and id = ${versionId}`,
     );
@@ -521,6 +523,7 @@ export async function getPublishedSiteVersion(
           requestedTools: Array.isArray(row.requested_tools)
             ? (row.requested_tools as Array<{ serverId: string; toolName: string }>)
             : [],
+          assetManifest: row.asset_manifest ?? null,
         }
       : null;
   });
@@ -542,6 +545,7 @@ export async function getServableSiteVersion(
   contentSha256: string | null;
   sizeBytes: number;
   requestedTools: Array<{ serverId: string; toolName: string }>;
+  assetManifest: SiteAssetManifest | null;
 } | null> {
   if (!UUID.test(input.siteId) || !UUID.test(input.versionId)) return null;
   if (input.versionId !== input.currentVersionId) {
