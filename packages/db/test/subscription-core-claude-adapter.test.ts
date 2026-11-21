@@ -121,9 +121,7 @@ describe("Claude adapter", () => {
       ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS,
     });
     expect(adapter.health).toEqual({
-      // Claude's 403 never rotates accounts; this only bounds a forbidden
-      // outcome another path reports.
-      forbiddenQuarantineMs: 60 * 60_000,
+      forbiddenQuarantineMs: null,
       entitlementCooldownMs: 24 * 60 * 60_000,
       // A 429 without a retry time, and a limit without a known reset, are
       // checked again after a minute (the legacy capacity recheck).
