@@ -1267,7 +1267,10 @@ describe("BrowserControlClient", () => {
             "content-type": "image/jpeg",
             "x-opengeni-browser-frame": Buffer.from(JSON.stringify(metadata)).toString("base64url"),
             ...(new URL(request.url).searchParams.has("fullPage")
-              ? { "x-opengeni-browser-frame-note": "inexact-scrollbars" }
+              ? {
+                  "x-opengeni-browser-frame-note": "inexact-scrollbars",
+                  "x-opengeni-browser-frame-hidden-scrolled-height": "1604",
+                }
               : {}),
           },
         });
@@ -1294,6 +1297,8 @@ describe("BrowserControlClient", () => {
       const fullPageFrame = await browser.capture(targetId, { fullPage: true, quality: 80 });
       expect(fullPageFrame.data).toEqual(image);
       expect(fullPageFrame.inexactScrollbars).toBe(true);
+      expect(fullPageFrame.hiddenScrolledHeight).toBe(1604);
+      expect(viewportFrame.hiddenScrolledHeight).toBeUndefined();
       expect(new URL(routes[0]!).searchParams.toString()).toBe("format=jpeg&quality=55");
       expect(new URL(routes[1]!).searchParams.toString()).toBe(
         "format=jpeg&quality=80&fullPage=true",
