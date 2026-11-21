@@ -23,6 +23,10 @@ import {
   withoutGoneSidebarAgents,
   withoutGoneSidebarApps,
   knownSidebarItem,
+  mergeSidebarOptions,
+  readResolvedSidebarOptions,
+  readStoredSidebarOptions,
+  DEFAULT_SIDEBAR_LAYOUT_OPTIONS,
   ResolvedSidebarItem,
   type SidebarLayoutChange,
   type MergedSidebarGroup,
@@ -390,7 +394,7 @@ describe("sidebar layout", () => {
   });
 
   test("fields from a newer version don't hide an item from older readers", () => {
-    expect(knownSidebarItem({ id: "a", type: "app", appId: APP_A, icon: "rocket" })).toEqual({
+    expect(knownSidebarItem({ id: "a", type: "app", appId: APP_A, accent: "red" })).toEqual({
       id: "a",
       type: "app",
       appId: APP_A,
@@ -642,5 +646,128 @@ describe("agent links", () => {
     expect(read.map((item) => item.id)).toEqual(["a", "g"]);
     expect(read[1]!.type === "group" && read[1]!.items.map((item) => item.id)).toEqual(["a"]);
     expect(flattenSidebarItemsForMobile(read).map((item) => item.type)).toEqual(["agent", "agent"]);
+  });
+});
+
+describe("icons", () => {
+  test("items take an icon from the set; null removes it; others are refused", () => {
+    const workspace = applyWorkspaceSidebarChanges(
+      engineering(),
+      parseChanges([
+        { op: "update", itemId: "engineering", icon: "code" },
+        { op: "update", itemId: "releases", icon: "rocket" },
+        { op: "update", itemId: "status", icon: "globe" },
+      ]),
+      ids(),
+    );
+    const group = mergeSidebarLayout(workspace, EMPTY_SIDEBAR_PERSONAL_CHANGES)
+      .items[0] as MergedSidebarGroup;
+    expect(group.icon).toBe("code");
+    expect(group.items.map((item) => ("icon" in item ? item.icon : undefined))).toEqual([
+      "rocket",
+      undefined,
+      undefined,
+      "globe",
+    ]);
+    const cleared = applyWorkspaceSidebarChanges(
+      workspace,
+      parseChanges([{ op: "update", itemId: "releases", icon: null }]),
+      ids(),
+    );
+    const releases = (
+      cleared.items[0] as unknown as { items: Array<{ id: string; icon?: string }> }
+    ).items[0];
+    expect(releases?.icon).toBeUndefined();
+    expect(() =>
+      parseChanges([{ op: "update", itemId: "releases", icon: "not-an-icon" }]),
+    ).toThrow();
+    expect(() =>
+      parseChanges([
+        { op: "add", item: { type: "link", url: "https://a.example.com", label: "A", icon: "x" } },
+      ]),
+    ).toThrow();
+  });
+
+  test("an icon this version doesn't know is dropped, and the item still shows", () => {
+    const stored = readStoredSidebarLayout({
+      version: 1,
+      items: [{ id: "a", type: "app", appId: APP_A, icon: "from-a-newer-version" }],
+    });
+    const item = knownSidebarItem(stored.items[0]!);
+    expect(item?.id).toBe("a");
+    expect(item && "icon" in item ? item.icon : undefined).toBeUndefined();
+  });
+});
+
+describe("options", () => {
+  test("unset options keep today's behaviour", () => {
+    expect(mergeSidebarOptions(undefined, undefined)).toEqual(DEFAULT_SIDEBAR_LAYOUT_OPTIONS);
+    expect(readResolvedSidebarOptions(undefined)).toEqual(DEFAULT_SIDEBAR_LAYOUT_OPTIONS);
+    expect(DEFAULT_SIDEBAR_LAYOUT_OPTIONS).toEqual({
+      sessionsShowApps: true,
+      hiddenNavEntries: [],
+      settingsMore: null,
+    });
+  });
+
+  test("a person's own choice wins over the default's; null clears it", () => {
+    const workspace = applyWorkspaceSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      parseChanges([{ op: "options", sessionsShowApps: false, hiddenNavEntries: ["meetings"] }]),
+      ids(),
+    );
+    expect(workspace.options).toEqual({ sessionsShowApps: false, hiddenNavEntries: ["meetings"] });
+    const member = applyPersonalSidebarChanges(
+      workspace,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "options", hiddenNavEntries: [], settingsMore: ["workspace:general"] }]),
+      ids(),
+    );
+    expect(sidebarPersonalChangesCustomized(member)).toBe(true);
+    expect(mergeSidebarOptions(workspace.options, member.options)).toEqual({
+      sessionsShowApps: false,
+      hiddenNavEntries: [],
+      settingsMore: ["workspace:general"],
+    });
+    const cleared = applyPersonalSidebarChanges(
+      workspace,
+      member,
+      parseChanges([{ op: "options", hiddenNavEntries: null, settingsMore: null }]),
+      ids(),
+    );
+    expect(cleared.options).toBeUndefined();
+    expect(sidebarPersonalChangesCustomized(cleared)).toBe(false);
+    expect(mergeSidebarOptions(workspace.options, cleared.options).hiddenNavEntries).toEqual([
+      "meetings",
+    ]);
+  });
+
+  test("reset clears options; stored options read leniently", () => {
+    const workspace = applyWorkspaceSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      parseChanges([{ op: "options", sessionsShowApps: false }]),
+      ids(),
+    );
+    const reset = applyWorkspaceSidebarChanges(workspace, parseChanges([{ op: "reset" }]), ids());
+    expect(reset.options).toBeUndefined();
+    const member = applyPersonalSidebarChanges(
+      workspace,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "options", sessionsShowApps: true }]),
+      ids(),
+    );
+    expect(
+      applyPersonalSidebarChanges(workspace, member, parseChanges([{ op: "reset" }]), ids())
+        .options,
+    ).toBeUndefined();
+    expect(
+      readStoredSidebarOptions({ sessionsShowApps: "no", hiddenNavEntries: ["knowledge", 3] }),
+    ).toEqual({ hiddenNavEntries: ["knowledge"] });
+    expect(
+      readStoredSidebarPersonalChanges({
+        ...EMPTY_SIDEBAR_PERSONAL_CHANGES,
+        options: { sessionsShowApps: false },
+      }).options,
+    ).toEqual({ sessionsShowApps: false });
   });
 });

@@ -17,6 +17,7 @@ import { createApp } from "../../apps/api/src/app";
 import { createManagedAuth, hashManagedAuthPassword } from "../../apps/api/src/auth/managed-auth";
 import { createBetterAuthSessionAdapter } from "../../apps/api/src/auth/managed-auth-session-adapter";
 import { apiRequestBindingsForTransportPeer } from "../../apps/api/src/http/request-source";
+import { openCapabilitiesTab } from "./fixtures/capabilities-tabs";
 
 /*
  * An owner signed in with a password (a session never confirmed with a
@@ -255,7 +256,7 @@ describe("admin pages with the passkey step-up required", () => {
     const page = await context.newPage();
     const results: Record<string, { refusals: Refusal[]; prompted: number }> = {};
     const connectionsTab = async (target: Page) => {
-      await target.getByRole("tab", { name: "Connections", exact: true }).click();
+      await openCapabilitiesTab(target, "Connections");
     };
     for (const [name, path, then] of [
       ["capabilities", `/workspaces/${workspaceId}/capabilities`, undefined],

@@ -12,7 +12,6 @@ import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
-  APP_TABS,
   EDGE_SWIPE_WIDTH,
   edgeSwipeOpensDrawer,
   TAB_BAR_HEIGHT,
@@ -22,11 +21,13 @@ import {
   tabBarHeight,
   tabBadge,
   tabNavigation,
+  visibleAppTabs,
   type AppTab,
 } from "@/app-tabs";
 import { useAppInbox } from "@/inbox-store";
 import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { dismissToHome } from "@/navigation";
+import { useSidebarHiddenEntries } from "@/use-sidebar-layout";
 
 /** Go to one of the bar's places from `from` (null: from the side menu or a chat). */
 export function openTab(from: AppTab | null, to: AppTab): void {
@@ -108,6 +109,11 @@ export function AppTabBar({ current }: { current: AppTab }) {
     }, [refreshInbox]),
   );
   const badge = tabBadge(nativeInboxAttentionCount(inbox.data));
+  const tabs = visibleAppTabs(useSidebarHiddenEntries(), {
+    current,
+    recording,
+    inboxWaiting: badge !== null,
+  });
   const android = Platform.OS === "android";
   return (
     <View
@@ -134,7 +140,7 @@ export function AppTabBar({ current }: { current: AppTab }) {
           borderColor: c.border,
         }}
       >
-        {APP_TABS.map((entry) => {
+        {tabs.map((entry) => {
           const selected = entry.tab === current;
           const live = entry.tab === "meetings" && recording;
           const count = entry.tab === "inbox" ? badge : null;

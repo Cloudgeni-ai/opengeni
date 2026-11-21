@@ -82,6 +82,26 @@ export function tabBadge(waiting: number): string | null {
   if (waiting <= 0) return null;
   return waiting > 99 ? "99+" : String(waiting);
 }
+
+/**
+ * The bar's places the person keeps: the sidebar layout's hidden entries
+ * (docs/sidebar-layout.md, `hiddenNavEntries`) leave Artifacts, Meetings or
+ * Inbox out, as on the web's rail. Chats always stays, and so does the place
+ * in use, Meetings while it records and Inbox while something waits.
+ */
+export function visibleAppTabs(
+  hidden: readonly string[],
+  keep: { current: AppTab; recording: boolean; inboxWaiting: boolean },
+): (typeof APP_TABS)[number][] {
+  return APP_TABS.filter(
+    (entry) =>
+      entry.tab === "chats" ||
+      entry.tab === keep.current ||
+      (entry.tab === "meetings" && keep.recording) ||
+      (entry.tab === "inbox" && keep.inboxWaiting) ||
+      !hidden.includes(entry.tab),
+  );
+}
 /**
  * The pill's distance from the bottom: just above the home indicator, as in
  * Claude, and a little room on phones without one.

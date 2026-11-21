@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { BookOpenIcon, LinkIcon, PlusIcon } from "lucide-react";
+import { GraduationCapIcon, LinkIcon, PlusIcon } from "lucide-react";
 import { ConnectionInstalled } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import type {
@@ -22,6 +22,7 @@ import {
 } from "@/components/organization-reach-dialog";
 import { useOrganizationNameFrom } from "@/lib/use-organization-name";
 import { Button } from "@opengeni/react/ui/button";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -43,6 +44,14 @@ import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 type SkillsFailure = { title: string; cause: unknown };
 
 /** Both product destinations use this catalog and the same folder write API. */
+
+/** Whose a skill is, on its status line: "Installed · Workspace". */
+const SKILL_SCOPE_LABEL: Record<SkillScope, string> = {
+  workspace: "Workspace",
+  organization: "Organization",
+  user: "Yours",
+};
+
 export function SkillsPanel({
   workspaceId,
   query = "",
@@ -709,18 +718,20 @@ export function SkillsPanelContent({
         ) : null}
         <ConnectionInstalled
           title="Your skills"
-          items={matchingSkills.map((skill) => ({
-            id: skill.id,
-            name: humanizeName(skill.title || skill.stableKey),
-            icon: <BookOpenIcon aria-hidden="true" className="size-10 p-2 text-fg-muted" />,
-            status: skill.availableHere === false ? "Not used here" : skillStatus(skill),
-            showStatus: skill.availableHere === false || skillStatus(skill) !== "Installed",
-            needsAttention: Boolean(skill.pendingRevisionIds.length),
-            disabled: busy,
-            onOpen: () => {
-              if (!busy) navigate(() => void open(skill.id));
-            },
-          }))}
+          items={matchingSkills.map((skill) => {
+            const name = humanizeName(skill.title || skill.stableKey);
+            return {
+              id: skill.id,
+              name,
+              icon: <LogoTile name={name} icon={<GraduationCapIcon />} />,
+              status: `${skill.availableHere === false ? "Not used here" : skillStatus(skill)} · ${SKILL_SCOPE_LABEL[skill.scope]}`,
+              needsAttention: Boolean(skill.pendingRevisionIds.length),
+              disabled: busy,
+              onOpen: () => {
+                if (!busy) navigate(() => void open(skill.id));
+              },
+            };
+          })}
         />
         {nextCursor ? (
           <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>

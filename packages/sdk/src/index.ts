@@ -8,6 +8,8 @@ export type {
   AppPackageUpgradePlan,
   AppPackageUpgradeRequest,
   AppPackageUpgradeResponse,
+  AppTemplate,
+  ListAppTemplatesResponse,
 } from "@opengeni/contracts";
 export type {
   ModelDecisionRequest,
@@ -277,11 +279,15 @@ export type {
   ResolvedSidebarExternalLink,
   ResolvedSidebarGroup,
   ResolvedSidebarItem,
+  ResolvedSidebarLayoutOptions,
   ResolvedSidebarLiveList,
+  SidebarItemIcon,
   SidebarItemOrigin,
   SidebarLayoutChange,
+  SidebarLayoutOptions,
   SidebarLayoutResponse,
   SidebarLiveListKind,
+  SidebarNavEntry,
   UpdateSidebarLayoutRequest,
 } from "./sidebar-layout";
 export type {
@@ -1460,6 +1466,7 @@ export type {
   InstalledSkill,
   InstalledSkillSummary,
   ListInstalledSkillsResponse,
+  ListLibrarySkillsResponse,
   Document,
   DocumentAuthorityKind,
   DocumentBase,

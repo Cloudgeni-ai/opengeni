@@ -11,6 +11,7 @@ import {
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { installedRows, openCapabilitiesTab } from "./fixtures/capabilities-tabs";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000231";
@@ -124,14 +125,17 @@ describe("Slack installation binding browser acceptance", () => {
 });
 
 async function openSlackSettings(page: Page, chip: string) {
-  await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  // One row per connected provider in the Connected list. A healthy row is
-  // named for the provider alone; a row that needs attention also says so.
+  await openCapabilitiesTab(page, "Connections");
+  // One row per connected provider under Connected: its name and one status
+  // line. Only a row that needs attention also carries a notice.
   const healthy = chip === "Connected";
-  const row = page
-    .getByRole("list", { name: "Connected", exact: true })
-    .getByRole("button", { name: healthy ? "Slack" : `Slack ${chip}`, exact: true });
+  const row = installedRows(page, "Connected").filter({
+    has: page.locator("strong", { hasText: /^Slack$/ }),
+  });
   await row.waitFor({ state: "visible", timeout: 15_000 });
+  expect(await row.count()).toBe(1);
+  expect(await row.locator(".og-capability-catalog-notice").count()).toBe(healthy ? 0 : 1);
+  if (!healthy) expect(await row.locator(".og-capability-catalog-notice").textContent()).toBe(chip);
   await row.click();
   // Slack opens as one page listing its bot workspaces and personal accounts.
   const slack = page.locator("[data-capability-page]");

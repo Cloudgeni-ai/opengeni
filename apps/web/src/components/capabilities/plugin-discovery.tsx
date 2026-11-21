@@ -234,7 +234,8 @@ export function PluginDiscovery({
             .map((plugin) => ({
               id: plugin.pluginKey,
               name: humanizeName(plugin.name),
-              status: plugin.status === "needs_attention" ? "Needs attention" : "Installed",
+              status:
+                plugin.status === "needs_attention" ? "Needs attention" : "Installed · Workspace",
               needsAttention: plugin.status === "needs_attention",
               onOpen: () => void openInstalled(plugin),
               icon: (
