@@ -72,6 +72,7 @@ import {
   personalConnectionDelegationSourceForGrant,
   createSlackEventSource,
   createSessionForRequest,
+  settleSlackEventRecordings,
   updateSessionTitle,
   type ApiRouteDeps,
   type AppDependencies,
@@ -12501,6 +12502,8 @@ describe("Slack event source", () => {
         ),
       );
       expect(response.status).toBe(200);
+      // Slack is answered first; the shared workspaces' deliveries land after.
+      await settleSlackEventRecordings();
     };
     const summaries = async (workspaceId: string, sourceId: string) =>
       (await listInboundEvents(client.db, workspaceId, { sourceIds: [sourceId], limit: 10 })).events

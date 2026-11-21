@@ -202,6 +202,17 @@ type SlackDeliveryTarget = {
   statusReason: string | null;
 };
 
+/** The shared workspaces' recordings still running in this process. */
+const sharedRecordings = new Set<Promise<void>>();
+
+/**
+ * Resolves once every shared workspaces' recording started so far has
+ * finished, so shutdown can let them land before the database closes.
+ */
+export async function settleSlackEventRecordings(): Promise<void> {
+  while (sharedRecordings.size > 0) await Promise.allSettled([...sharedRecordings]);
+}
+
 /** What recording one callback started: the shared workspaces' part runs on. */
 export type SlackEventRecording = {
   /**
@@ -308,6 +319,8 @@ export async function recordSlackEvent(input: {
       SHARED_SLACK_DELIVERY_CONCURRENCY,
     );
   })().catch((error: unknown) => logRecordingFailure(input.workspaceId, error));
+  sharedRecordings.add(shared);
+  void shared.finally(() => sharedRecordings.delete(shared));
   return { shared };
 }
 

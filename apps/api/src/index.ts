@@ -48,6 +48,7 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+  settleSlackEventRecordings,
 } from "@opengeni/core";
 import {
   Connection,
@@ -946,6 +947,9 @@ export async function startApi(options: StartApiOptions = {}) {
       await stopNativePushDispatchPump();
       await billingAutoTopUpsStopped;
       await httpDrained;
+      // Slack callbacks answered during the drain may still be recording into
+      // the workspaces their bot is shared with.
+      await settleSlackEventRecordings();
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await routeDeps.decisions?.flushUsage().catch(() => {

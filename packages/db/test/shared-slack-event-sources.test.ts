@@ -6,7 +6,10 @@ import { createDb, rawRows, withRlsContext } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { createConnection, createEventSource, nestedPostgresSqlState } from "../src";
-import { sharedSlackEventSources } from "../src/organization-slack-bots";
+import {
+  sharedSlackEventSources,
+  type SharedSlackEventSource,
+} from "../src/organization-slack-bots";
 
 const postgresTest = process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? test : test.skip;
 const signature = "list_shared_slack_event_sources_v1(uuid, uuid, uuid, text)";
@@ -95,7 +98,7 @@ postgresTest(
           connectionId: bot.id,
           externalKey,
         });
-      const shareTarget = [
+      const shareTarget: SharedSlackEventSource[] = [
         {
           workspaceId: target.workspaceId,
           sourceId: sources[target.workspaceId]!,

@@ -157,7 +157,9 @@ test("a callback reaches the home and live-shared Slack sources, never the other
   // source says why it hears nothing.
   await shared.admin`update opengeni_private.organization_slack_bot_access
     set enabled = false, generation = generation + 1 where connection_id = ${bot.id}`;
-  await (await record()).shared;
+  await (
+    await record()
+  ).shared;
   expect(await deliveries()).toEqual({
     [sources[home.workspaceId]!]: 2,
     [sources[target.workspaceId]!]: 1,
@@ -171,7 +173,9 @@ test("a callback reaches the home and live-shared Slack sources, never the other
   await shared.admin`update opengeni_private.organization_slack_bot_access
     set enabled = true, workspace_ids = null, generation = generation + 1
     where connection_id = ${bot.id}`;
-  await (await record()).shared;
+  await (
+    await record()
+  ).shared;
   expect(await deliveries()).toEqual({
     [sources[home.workspaceId]!]: 3,
     [sources[target.workspaceId]!]: 2,
