@@ -4733,6 +4733,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionPullRequest",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/links/:linkId/pull-request",
+    "request": [],
+    "query": [
+      "fresh"
+    ],
+    "response": [],
+    "permission": "sessions:read"
+  },
+  {
     "id": "getSessionRetainedArtifact",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId",
