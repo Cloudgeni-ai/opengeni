@@ -18,6 +18,7 @@ import type { PinnedFetchOptions } from "@opengeni/network";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { parseRequestJson } from "../http/request-body";
+import { userContentResponseHeaders } from "../http/user-content";
 import { readSidebarLinkIcon } from "../sidebar-link-icon";
 
 export function registerSidebarLayoutRoutes(
@@ -56,9 +57,10 @@ export function registerSidebarLayoutRoutes(
       throw new HTTPException(404, { message: "No link to that site in your sidebar." });
     const icon = await readSidebarLinkIcon(url, deps.settings, linkIconFetch);
     if (!icon) throw new HTTPException(404, { message: "That site has no icon to show." });
+    // Another site's bytes: the shared user-content headers apply.
+    for (const [name, value] of Object.entries(userContentResponseHeaders(icon.contentType)))
+      c.header(name, value);
     c.header("cache-control", "private, max-age=86400");
-    c.header("x-content-type-options", "nosniff");
-    c.header("content-security-policy", "default-src 'none'; sandbox");
     c.header("content-type", icon.contentType);
     return c.body(icon.bytes.slice().buffer as ArrayBuffer);
   });

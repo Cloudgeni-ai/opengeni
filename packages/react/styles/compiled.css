@@ -15444,10 +15444,10 @@
 :where(.og-root).og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-status-line {
   color: var(--og-color-fg-muted, inherit);
 }
-:where(.og-root).og-capability-catalog-row[data-status="added"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-status="added"] .og-capability-catalog-status-line {
+:where(.og-root).og-capability-catalog-row[data-row-status="added"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-row-status="added"] .og-capability-catalog-status-line {
   color: var(--og-color-status-idle, var(--og-color-fg-muted, inherit));
 }
-:where(.og-root).og-capability-catalog-row[data-status="attention"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-status="attention"] .og-capability-catalog-status-line {
+:where(.og-root).og-capability-catalog-row[data-row-status="attention"] .og-capability-catalog-status-line,:where(.og-root) .og-capability-catalog-row[data-row-status="attention"] .og-capability-catalog-status-line {
   color: var(--og-color-status-waiting, var(--og-color-fg-muted, inherit));
 }
 :where(.og-root).og-connection-type-picker,:where(.og-root) .og-connection-type-picker {

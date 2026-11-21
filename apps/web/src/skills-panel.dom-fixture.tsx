@@ -272,7 +272,7 @@ test("a skill opens as a page with a back link that restores focus to its catalo
     )!;
     await view.click("Example");
     const page = view.container.querySelector("[data-capability-page]")!;
-    expect(opener.getAttribute("aria-label")).toContain("Example");
+    expect(opener.textContent).toContain("Example");
     expect(page.querySelector("h1")?.textContent).toBe("Example");
     expect(view.container.querySelector('[role="dialog"]')).toBeNull();
     expect(page.querySelector("textarea")).not.toBeNull();

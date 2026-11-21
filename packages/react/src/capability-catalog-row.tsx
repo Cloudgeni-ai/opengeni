@@ -91,7 +91,9 @@ export function CapabilityCatalogRow({
       {...props}
       type="button"
       className={`og-capability-catalog-row ${className}`}
-      data-status={status}
+      data-row-status={status}
+      // A quiet row has no indicator, so the row itself carries the status.
+      {...(quiet ? { "data-status": status } : {})}
       onClick={onOpen}
     >
       {icon ? <span className="og-capability-catalog-icon">{icon}</span> : null}
