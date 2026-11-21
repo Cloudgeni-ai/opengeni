@@ -2064,6 +2064,7 @@ export const FORCE_RLS_TABLES = [
   "api_keys",
   "app_notifications",
   "app_package_exports",
+  "app_sync_keys",
   "app_sync_queue",
   "app_sync_subscriptions",
   "app_webhooks",
@@ -2672,6 +2673,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   // 1523_app_package_exports: stored app package files and their sweep.
   "app_package_exports",
+  // 1522_app_sync_paging_and_leases: the keys each sync wrote (removeMissing).
+  "app_sync_keys",
   // 1520_app_data_sync: App data sync executor queue and personal opt-ins.
   "app_sync_queue",
   "app_sync_subscriptions",

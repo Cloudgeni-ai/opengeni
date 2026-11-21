@@ -2903,8 +2903,11 @@ App data syncs fill Site Data from a connected tool without a model run. A
 sync is a scheduled task with action `app_sync`: the worker's dispatch records
 the run and queues it (`app_sync_queue`), and an executor loop in every API
 replica calls the tool through the workspace tool gateway as the owner or each
-opted-in person and writes through the Site Data write path. See
-[`app-sync.md`](app-sync.md).
+opted-in person and writes through the Site Data write path (or the Site SQL
+service for a table target). Claims carry a lease token that every renewal and
+settle checks; `app_sync_keys` records the keys a sync wrote for
+`removeMissing`. Apps ask the platform host to confirm personal opt-ins
+(bridge `syncs.optIn`). See [`app-sync.md`](app-sync.md).
 
 App webhooks let other services post JSON into one shared collection of an
 app (`app_webhooks`, public `POST /v1/webhooks/apps/:workspaceId/:webhookId`,
@@ -3501,7 +3504,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | App webhooks and app notifications (`site.notify`) | `packages/contracts/src/app-webhook.ts`, `packages/db/src/app-webhooks.ts`, `apps/api/src/app-webhooks/service.ts`, `apps/api/src/app-notify/service.ts`, `apps/api/src/routes/app-webhooks.ts`, `apps/api/src/mcp/app-webhook-tools.ts` | [`app-webhooks.md`](app-webhooks.md) |
-| App data sync (no-model refresh of Site Data from a connected tool) | `packages/contracts/src/app-sync.ts`, `packages/db/src/app-sync.ts`, `apps/api/src/app-sync/service.ts`, `apps/api/src/routes/app-sync.ts`, `apps/api/src/mcp/app-sync-tools.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`app-sync.md`](app-sync.md) |
+| App data sync (no-model refresh of Site Data from a connected tool) | `packages/contracts/src/app-sync.ts`, `packages/db/src/app-sync.ts`, `apps/api/src/app-sync/service.ts`, `apps/api/src/routes/app-sync.ts`, `apps/api/src/mcp/app-sync-tools.ts`, `apps/worker/src/activities/scheduled-tasks.ts`, `packages/react/src/app/lib/app-sync-opt-in.tsx` | [`app-sync.md`](app-sync.md) |
 | Site Data (Site collections, files, access modes, quotas, App change events) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `packages/db/src/app-activity-events.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | App packages (export, install, upgrade, export file cleanup, syncs hook) | `packages/contracts/src/app-package.ts`, `apps/api/src/app-packages/`, `apps/api/src/routes/app-packages.ts`, `apps/api/src/mcp/app-package-tools.ts` | [`app-packages.md`](app-packages.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |

@@ -47,6 +47,19 @@ Another service can send data into an app: ask the agent to add a webhook to a c
 
 An app page can also notify people with `site.notify({ title, body, path })`: by default the person using it, or another member who allows notifications. The notification opens the app at `path`. Only workspace members can send them.
 
+## Data syncs
+
+A data sync refills a collection, or one of the app's SQL tables, from a connected tool on a schedule or event, with no model run. Ask Opengeni to set one up (agents use the `app_sync_*` tools). A sync can page through results, and with `removeMissing` it deletes records it wrote that the tool no longer returns.
+
+A personal sync fills each person's own records from their own account. People join from the app: Opengeni lists the personal syncs they haven't joined next to the app, and app code can ask with `site.data.syncs.optIn(id)`. Either way Opengeni shows its own confirmation naming the tool, the account and the collection, and joins only after the person confirms. People with several accounts of the tool choose one.
+
+```ts
+const { optedIn } = await site.data.syncs.optIn(syncId); // false if they cancel
+const syncs = await site.data.syncs(); // each sync's last run and whether you joined
+```
+
+Syncs into SQL tables need app SQL, which self-hosted deployments without the Cloudflare site gateway don't have.
+
 ## Limits and usage
 
 By default an app can hold 100 MB of records (256 KB each, each charged an extra 512 bytes), 100,000 records per collection, 50 collections and 1 GB of files (10 MB each), and a workspace 1 GB of app data in total. One request carries at most 4 MB of records. Self-hosted deployments change these with the `OPENGENI_SITE_DATA_*` settings. Writes are rate limited per person and per app (managers and agents share a generous per-app limit), and reads from an app page per person. Usage is recorded for the workspace, which pays for what viewers do; it is not charged yet.

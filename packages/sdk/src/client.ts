@@ -158,6 +158,7 @@ import type {
   AppSync,
   AppSyncCreateRequest,
   AppSyncListResponse,
+  AppSyncOptInReview,
   AppSyncRunResponse,
   AppSyncStatusResponse,
   AppSyncSubscriptionResponse,
@@ -10615,17 +10616,41 @@ export class OpenGeniClient {
     );
   }
 
-  /** Opt the caller in to (or out of) a personal data sync. */
+  /**
+   * Opt the caller in to (or out of) a personal data sync. `account` picks
+   * which of their accounts of the sync's connector it runs on (an id from
+   * `getAppSyncOptInReview`); needed when they have several.
+   */
   async setAppSyncOptIn(
     workspaceId: string,
     siteId: string,
     syncId: string,
     optedIn: boolean,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; account?: string } = {},
   ): Promise<AppSyncSubscriptionResponse> {
+    const { account, ...requestOptions } = options;
     return await this.requestJson<AppSyncSubscriptionResponse>(
       optedIn ? "PUT" : "DELETE",
       `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/subscription`,
+      optedIn && account ? { account } : undefined,
+      undefined,
+      requestOptions,
+    );
+  }
+
+  /**
+   * What the caller confirms before opting in to a personal data sync: the
+   * tool and connector, their accounts of it, and the collection it fills.
+   */
+  async getAppSyncOptInReview(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncOptInReview> {
+    return await this.requestJson<AppSyncOptInReview>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/opt-in`,
       undefined,
       undefined,
       options,

@@ -337,3 +337,59 @@ describe("Site tool readiness through the bridge host", () => {
     ).toMatchObject({ code: "upstream_unavailable", retryable: false, outcomeUnknown: true });
   });
 });
+
+describe("Personal sync opt-in through the bridge host", () => {
+  test("the App asks; the host confirms and answers with the viewer's choice", async () => {
+    const asked: Array<{ syncId: string; optedIn: boolean }> = [];
+    const withSyncs: SiteBridgeToolHandlers = {
+      ...tools,
+      syncs: {
+        optIn: async (request) => {
+          asked.push(request);
+          // The viewer cancels joining "s-2".
+          return { optedIn: request.optedIn && request.syncId !== "s-2" };
+        },
+      },
+    };
+    expect(siteBridgeReadyMessage(withSyncs)).toMatchObject({ syncs: 1 });
+    expect(siteBridgeReadyMessage(tools)).not.toHaveProperty("syncs");
+    const { host, site } = connect({ tools: () => withSyncs });
+    try {
+      expect(await site.data.syncs.optIn("s-1")).toEqual({ syncId: "s-1", optedIn: true });
+      expect(await site.data.syncs.optIn("s-2")).toEqual({ syncId: "s-2", optedIn: false });
+      expect(await site.data.syncs.optOut("s-1")).toEqual({ syncId: "s-1", optedIn: false });
+      expect(asked).toEqual([
+        { syncId: "s-1", optedIn: true },
+        { syncId: "s-2", optedIn: true },
+        { syncId: "s-1", optedIn: false },
+      ]);
+    } finally {
+      site.close();
+      host.close();
+    }
+  });
+
+  test("a host without the confirmation refuses opt-in readably", async () => {
+    const { host, site } = connect({ tools: () => tools });
+    try {
+      const error = await site.data.syncs.optIn("s-1").catch((caught: unknown) => caught);
+      expect((error as { code?: string }).code).toBe("syncs_unsupported");
+    } finally {
+      site.close();
+      host.close();
+    }
+  });
+
+  test("opt-in requests carry a sync id and a boolean", () => {
+    const base = {
+      type: "opengeni.site.request",
+      version: OPENGENI_SITE_BRIDGE_VERSION,
+      requestId: "r1",
+      method: "syncs.optIn",
+    };
+    expect(
+      isOpenGeniSiteBridgeRequestMessage({ ...base, payload: { syncId: "s", optedIn: true } }),
+    ).toBe(true);
+    expect(isOpenGeniSiteBridgeRequestMessage({ ...base, payload: { syncId: "s" } })).toBe(false);
+  });
+});
