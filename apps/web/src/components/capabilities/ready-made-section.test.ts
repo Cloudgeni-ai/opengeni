@@ -1,18 +1,18 @@
 import { describe, expect, test } from "bun:test";
 
-import { galleryGroups, type GalleryEntry } from "./gallery-section";
+import { readyMadeGroups, type ReadyMadeEntry } from "./ready-made-section";
 
 function entry(
   key: string,
   team: string | null,
-  kind: GalleryEntry["kind"] = "agent",
-): GalleryEntry {
+  kind: ReadyMadeEntry["kind"] = "agent",
+): ReadyMadeEntry {
   return { key, kind, name: key, description: `About ${key}`, team, icon: null, added: false };
 }
 
-describe("gallery groups", () => {
+describe("ready-made groups", () => {
   test("groups by each entry's own team, alphabetically, with no team last", () => {
-    const groups = galleryGroups([
+    const groups = readyMadeGroups([
       entry("a", "Sales"),
       entry("b", null),
       entry("c", "Engineering"),
@@ -26,8 +26,8 @@ describe("gallery groups", () => {
 
   test("the page search matches name, description, team and kind", () => {
     const entries = [entry("triage", "Engineering"), entry("notes", "Product", "app")];
-    expect(galleryGroups(entries, "product").map((group) => group.team)).toEqual(["Product"]);
-    expect(galleryGroups(entries, "app")[0]!.entries.map((each) => each.key)).toEqual(["notes"]);
-    expect(galleryGroups(entries, "nothing")).toEqual([]);
+    expect(readyMadeGroups(entries, "product").map((group) => group.team)).toEqual(["Product"]);
+    expect(readyMadeGroups(entries, "app")[0]!.entries.map((each) => each.key)).toEqual(["notes"]);
+    expect(readyMadeGroups(entries, "nothing")).toEqual([]);
   });
 });

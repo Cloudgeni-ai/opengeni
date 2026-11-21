@@ -23,7 +23,7 @@ export function CapabilitiesLegacyRedirect({
   section,
 }: {
   workspaceId: string;
-  section?: CapabilitiesSection | "knowledge" | undefined;
+  section?: CapabilitiesSection | undefined;
 }) {
   return (
     <ReplaceLocation

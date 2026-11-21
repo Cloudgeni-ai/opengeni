@@ -88,8 +88,11 @@ import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
-import type { CapabilitiesSection } from "@/components/capabilities/capabilities-section";
-import { GallerySection } from "@/components/capabilities/gallery-section";
+import type {
+  CapabilitiesSection,
+  ReadyMadeKind,
+} from "@/components/capabilities/capabilities-section";
+import { ReadyMadeSection } from "@/components/capabilities/ready-made-section";
 import { SetupTabs, setupTabLabel } from "@/components/capabilities/setup-tabs";
 import { LineTabs, LineTabsContent } from "@opengeni/react/ui/line-tabs";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
@@ -300,7 +303,9 @@ export function apiIntegrationAccess(
 
 type CapabilitiesRouteProps = {
   workspaceId: string;
-  initialSection?: CapabilitiesSection | "knowledge" | undefined;
+  initialSection?: CapabilitiesSection | undefined;
+  /** `?kind=` of Ready-made, for example agents from the Agents page. */
+  readyMadeKind?: ReadyMadeKind | undefined;
   legacyRedirect?: boolean;
 };
 
@@ -312,7 +317,7 @@ export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
   );
 }
 
-function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProps) {
+function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: CapabilitiesRouteProps) {
   const context = useAppContext();
 
   const client = context.client;
@@ -353,8 +358,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // now, so it scrolls that section into view instead.
   const [filter] = useState<CapabilityFilter>("all");
   // Each tab is its own address (`?section=`), so links and Back keep it.
-  const chosenTab: CapabilitiesSection =
-    initialSection && initialSection !== "knowledge" ? initialSection : "connections";
+  const chosenTab: CapabilitiesSection = initialSection ?? "connections";
   // The simplified interface shows one thing here: the apps to connect. Other
   // tabs opened by their own address still show, with the full page around them.
   const focused = useSimplifiedInterface().simplified && chosenTab === "connections";
@@ -391,7 +395,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   const clearReturnParams = useCallback(() => {
     const current = new URLSearchParams(window.location.search);
     const kept = new URLSearchParams();
-    for (const key of ["section", "open"]) {
+    for (const key of ["section", "kind", "open"]) {
       const value = current.get(key);
       if (value) kept.set(key, value);
     }
@@ -2448,10 +2452,28 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                       }}
                     />
                   </div>
+                  {activeTab === "ready-made" ? (
+                    <div className="pt-6">
+                      <ReadyMadeSection
+                        workspaceId={workspaceId}
+                        query={query}
+                        kind={readyMadeKind}
+                        items={items}
+                        canInstallSkills={canManageSkills}
+                        onSkillAdded={async () => {
+                          setSkillsRevision((value) => value + 1);
+                          await refresh();
+                          onRuntimeChanged();
+                        }}
+                      />
+                    </div>
+                  ) : null}
                   <div
                     ref={bundlesRef}
                     className="pt-6"
-                    hidden={activeTab !== "skills" && activeTab !== "plugins"}
+                    hidden={
+                      activeTab !== "skills" && !(activeTab === "ready-made" && !readyMadeKind)
+                    }
                   >
                     <BundlesSection
                       refreshRevision={skillsRevision}
@@ -2479,7 +2501,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                             openSkillRef.current?.(skill.id);
                           },
                         }))}
-                      discoveryEnabled={activeTab === "skills" || activeTab === "plugins"}
+                      discoveryEnabled={activeTab === "skills" || activeTab === "ready-made"}
                       onSearchSkills={() => {
                         const search =
                           capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
@@ -2508,27 +2530,12 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                         onRuntimeChanged();
                       }}
                     />
-                    {activeTab === "plugins" && eventTriggersEnabled ? (
+                    {activeTab === "ready-made" && eventTriggersEnabled ? (
                       <div className="mt-6 grid gap-4">
                         <PrReviewAutomationCard workspaceId={workspaceId} />
                       </div>
                     ) : null}
                   </div>
-                  {activeTab === "gallery" ? (
-                    <div className="pt-6">
-                      <GallerySection
-                        workspaceId={workspaceId}
-                        query={query}
-                        items={items}
-                        canInstallSkills={canManageSkills}
-                        onSkillAdded={async () => {
-                          setSkillsRevision((value) => value + 1);
-                          await refresh();
-                          onRuntimeChanged();
-                        }}
-                      />
-                    </div>
-                  ) : null}
                 </LineTabsContent>
               </div>
             </CatalogActionContext.Provider>

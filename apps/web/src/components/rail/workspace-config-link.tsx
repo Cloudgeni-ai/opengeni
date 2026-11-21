@@ -71,9 +71,7 @@ export function WorkspaceConfigLink(props: {
   if (variant === "rail") {
     const link = (
       <Link
-        // Knowledge waiting for review opens its Review tab, also from
-        // Capabilities, whose Knowledge tab it is in.
-        to={props.needsReview ? "/workspaces/$workspaceId/state" : item.to}
+        to={item.to}
         params={{ workspaceId }}
         search={props.needsReview ? { review: true } : {}}
         {...(active === undefined

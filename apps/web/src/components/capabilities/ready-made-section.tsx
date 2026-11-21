@@ -12,13 +12,14 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
+import type { ReadyMadeKind } from "./capabilities-section";
 
 /** Content without a team goes last, under this heading. */
 const NO_TEAM = "More";
 
-export type GalleryEntry = {
+export type ReadyMadeEntry = {
   key: string;
-  kind: "agent" | "app" | "skill";
+  kind: ReadyMadeKind;
   name: string;
   description: string;
   team: string | null;
@@ -29,7 +30,7 @@ export type GalleryEntry = {
   unavailable?: string | undefined;
 };
 
-const KIND_LABEL: Record<GalleryEntry["kind"], string> = {
+const KIND_LABEL: Record<ReadyMadeEntry["kind"], string> = {
   agent: "Agent",
   app: "App",
   skill: "Skill",
@@ -39,13 +40,15 @@ const KIND_LABEL: Record<GalleryEntry["kind"], string> = {
  * Ready-made content grouped by the team it is for. The teams come from each
  * entry's own `team`, in alphabetical order, and entries without one last.
  */
-export function galleryGroups(
-  entries: readonly GalleryEntry[],
+export function readyMadeGroups(
+  entries: readonly ReadyMadeEntry[],
   query = "",
-): { team: string; entries: GalleryEntry[] }[] {
+  kind?: ReadyMadeKind,
+): { team: string; entries: ReadyMadeEntry[] }[] {
   const needle = query.trim().toLowerCase();
-  const groups = new Map<string, GalleryEntry[]>();
+  const groups = new Map<string, ReadyMadeEntry[]>();
   for (const entry of entries) {
+    if (kind && entry.kind !== kind) continue;
     const haystack = `${entry.name} ${entry.description} ${entry.team ?? ""} ${KIND_LABEL[entry.kind]}`;
     if (needle && !haystack.toLowerCase().includes(needle)) continue;
     const team = entry.team?.trim() || NO_TEAM;
@@ -67,18 +70,21 @@ function metadataString(value: unknown): string | null {
 }
 
 /**
- * The Gallery tab: ready-made agents, apps and skills, each added with one
+ * The Ready-made tab: ready-made agents, apps and skills, each added with one
  * click. An added agent or app opens; an added skill opens in Skills.
  */
-export function GallerySection({
+export function ReadyMadeSection({
   workspaceId,
   query,
+  kind,
   items,
   canInstallSkills,
   onSkillAdded,
 }: {
   workspaceId: string;
   query: string;
+  /** Only this kind (`?kind=` of the tab), for example agents from the Agents page. */
+  kind?: ReadyMadeKind | undefined;
   /** The capability catalog, for the reviewed library skills. */
   items: readonly CapabilityCatalogItem[];
   canInstallSkills: boolean;
@@ -120,7 +126,7 @@ export function GallerySection({
     [items],
   );
 
-  const entries: GalleryEntry[] = useMemo(
+  const entries: ReadyMadeEntry[] = useMemo(
     () => [
       ...(agentTemplates ?? []).map((template) => ({
         key: `agent:${template.key}`,
@@ -170,7 +176,7 @@ export function GallerySection({
     ],
   );
 
-  const open = (entry: GalleryEntry) => {
+  const open = (entry: ReadyMadeEntry) => {
     const [, key] = entry.key.split(/:(.*)/su) as [string, string];
     if (entry.kind === "agent") {
       const agentId = addedAgents.get(key);
@@ -197,7 +203,7 @@ export function GallerySection({
     }
   };
 
-  const add = async (entry: GalleryEntry) => {
+  const add = async (entry: ReadyMadeEntry) => {
     const [, key] = entry.key.split(/:(.*)/su) as [string, string];
     setBusy(entry.key);
     try {
@@ -242,15 +248,15 @@ export function GallerySection({
   if (agentTemplates === null || appTemplates === null) {
     return (
       <p role="status" className="text-sm text-fg-muted">
-        Loading the gallery…
+        Loading…
       </p>
     );
   }
-  const groups = galleryGroups(entries, query);
+  const groups = readyMadeGroups(entries, query, kind);
   if (groups.length === 0) {
     return (
       <p role="status" className="text-sm text-fg-muted">
-        {query.trim() ? `Nothing in the gallery matches "${query.trim()}".` : "Nothing to add yet."}
+        {query.trim() ? `Nothing in Ready-made matches "${query.trim()}".` : "Nothing to add yet."}
       </p>
     );
   }
@@ -272,7 +278,7 @@ export function GallerySection({
               return (
                 <CapabilityCatalogRow
                   key={entry.key}
-                  data-gallery-entry={entry.key}
+                  data-ready-made-entry={entry.key}
                   name={entry.name}
                   icon={entry.icon}
                   status={status}

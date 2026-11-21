@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { slackSettingsSearch } from "@/lib/slack-settings-search";
 import {
   capabilitiesSectionFromSearch,
+  readyMadeKindFromSearch,
   type CapabilitiesSection,
 } from "@/components/capabilities/capabilities-section";
 
@@ -49,16 +50,14 @@ const MAX_CALLBACK_VALUE_LENGTH = 512;
 export function workspaceIntegrationsCallbackHref(
   workspaceId: string,
   search: string,
-  section?: CapabilitiesSection | "knowledge",
+  section?: CapabilitiesSection,
 ): string {
   const incoming = new URLSearchParams(search);
   const outgoing = new URLSearchParams();
-  const tab =
-    section ??
-    (incoming.get("section") === "knowledge"
-      ? "knowledge"
-      : capabilitiesSectionFromSearch(incoming.get("section")));
+  const tab = section ?? capabilitiesSectionFromSearch(incoming.get("section"));
   if (tab && tab !== "connections") outgoing.set("section", tab);
+  const kind = tab === "ready-made" ? readyMadeKindFromSearch(incoming.get("kind")) : undefined;
+  if (kind) outgoing.set("kind", kind);
   const slack = slackSettingsSearch(Object.fromEntries(incoming));
   for (const key of CALLBACK_KEYS) {
     // A Slack outcome owns `reason`/`connectionId`, already sanitized above.

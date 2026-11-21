@@ -165,7 +165,9 @@ import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 import {
   capabilitiesSectionFromSearch,
+  readyMadeKindFromSearch,
   type CapabilitiesSection,
+  type ReadyMadeKind,
 } from "@/components/capabilities/capabilities-section";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -948,13 +950,14 @@ const workspaceInsightsRoute = createRoute({
   }),
   component: Insights,
 });
-/** `?section=` names a Capabilities tab; `knowledge` is the Knowledge page (`/state`). */
+/** `?section=` names a Capabilities tab; `?kind=` narrows Ready-made. */
 function capabilitiesSearch(search: Record<string, unknown>): {
-  section?: CapabilitiesSection | "knowledge";
+  section?: CapabilitiesSection;
+  kind?: ReadyMadeKind;
 } {
-  const section =
-    search.section === "knowledge" ? "knowledge" : capabilitiesSectionFromSearch(search.section);
-  return section ? { section } : {};
+  const section = capabilitiesSectionFromSearch(search.section);
+  const kind = section === "ready-made" ? readyMadeKindFromSearch(search.kind) : undefined;
+  return { ...(section ? { section } : {}), ...(kind ? { kind } : {}) };
 }
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1678,12 +1681,14 @@ function CapabilitiesLegacyRedirect() {
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
-  const { section } = workspaceCapabilitiesRoute.useSearch();
-  if (section === "knowledge") {
-    return <Navigate to="/workspaces/$workspaceId/state" params={{ workspaceId }} replace />;
-  }
+  const { section, kind } = workspaceCapabilitiesRoute.useSearch();
   return (
-    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+    <LazyCapabilitiesRoute
+      key={workspaceId}
+      workspaceId={workspaceId}
+      initialSection={section}
+      readyMadeKind={kind}
+    />
   );
 }
 

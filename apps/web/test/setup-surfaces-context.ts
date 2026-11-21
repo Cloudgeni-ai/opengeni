@@ -1,5 +1,5 @@
 // Preview-only data/context for the setup pages (Capabilities, Knowledge,
-// Gallery) beside the real rail. Every page and row is production UI; only the
+// Ready-made) beside the real rail. Every page and row is production UI; only the
 // SDK client is a fixture. Calls the fixture doesn't serve resolve to an empty
 // list, so a page shows its empty state instead of failing.
 import type { AppContextValue } from "@opengeni/react/app/app-context";

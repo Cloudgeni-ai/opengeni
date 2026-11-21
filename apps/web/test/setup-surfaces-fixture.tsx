@@ -1,4 +1,8 @@
 import { createRoot } from "react-dom/client";
+import {
+  capabilitiesSectionFromSearch,
+  readyMadeKindFromSearch,
+} from "@/components/capabilities/capabilities-section";
 import { OpenGeniProvider } from "@opengeni/react";
 import {
   createRootRoute,
@@ -64,15 +68,15 @@ const home = createRoute({
 const capabilities = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/plugins",
-  validateSearch: (search: Record<string, unknown>) =>
-    typeof search.section === "string" ? { section: search.section } : {},
+  validateSearch: (search: Record<string, unknown>) => {
+    const section = capabilitiesSectionFromSearch(search.section);
+    const kind = readyMadeKindFromSearch(search.kind);
+    return { ...(section ? { section } : {}), ...(kind ? { kind } : {}) };
+  },
   component: function Capabilities() {
-    const { section } = capabilities.useSearch() as { section?: string };
+    const { section, kind } = capabilities.useSearch();
     return (
-      <CapabilitiesRoute
-        workspaceId={workspaceId}
-        initialSection={section as Parameters<typeof CapabilitiesRoute>[0]["initialSection"]}
-      />
+      <CapabilitiesRoute workspaceId={workspaceId} initialSection={section} readyMadeKind={kind} />
     );
   },
 });

@@ -822,14 +822,15 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 
 ## Web Flow
 
-The **Capabilities** page is the one setup page, with tabs **Connections**,
-**Skills**, **Plugins**, **Knowledge** and **Gallery**
+The **Capabilities** page is the one setup page, with three tabs:
+**Connections**, **Skills** and **Ready-made**
 (`apps/web/src/components/capabilities/setup-tabs.tsx`). Each tab is its own
-address: `/plugins?section=skills|plugins|gallery` (no `section` is
-Connections), and Knowledge keeps `/state`, showing the same header and tabs
-(`?section=knowledge` redirects there). Older `/capabilities` links and their
-`?section=` keep working. The simplified interface's Capabilities page shows
-only connections and keeps Knowledge as its own page.
+address: `/plugins?section=skills|ready-made` (no `section` is Connections).
+Ready-made also takes `?kind=agent|app|skill` to show one kind, which the
+Agents page links to. Older `?section=plugins` and `?section=gallery` links
+open Ready-made, and `/capabilities` links keep working. Knowledge keeps its
+own page (`/state`). The simplified interface's Capabilities page shows only
+connections.
 
 Every tab lists what you have first, then suggestions, in the same row
 (`CapabilityCatalogRow`): logo or initial, name, one line and one action.
@@ -837,7 +838,7 @@ Rows you have show a status line in place of the description, with whose it
 is where that is known ("Installed · Workspace", "Installed · Yours"), and no
 glyph unless they need attention (`ConnectionInstalled`).
 
-**Gallery** lists ready-made agents (`packages/core/src/agent-templates`),
+**Ready-made** lists ready-made agents (`packages/core/src/agent-templates`),
 apps (`packages/core/src/app-templates`, [app packages](app-packages.md#ready-made-apps))
 and reviewed library skills, grouped by each item's own `team` (agent and app
 templates' `team`, a library skill's `metadata.team`), alphabetically, with
