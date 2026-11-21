@@ -744,6 +744,12 @@ export function SidebarLayoutSection() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { layout, update } = useSidebarLayout(rail.workspaceId);
   const [openGroups, setOpenGroups] = useState(readOpenGroups);
+  // Groups closed while they hold the open page, until the page changes: such
+  // a group opens by itself, as before, and the person can still close it.
+  const [closedHere, setClosedHere] = useState<{ path: string; ids: ReadonlySet<string> }>({
+    path: "",
+    ids: new Set(),
+  });
   const [renaming, setRenaming] = useState<string | null>(null);
   const shownItems = layout ? sidebarItemsShown(layout.items) : [];
   if (rail.collapsed || !layout || shownItems.length === 0) return null;
@@ -820,8 +826,9 @@ export function SidebarLayoutSection() {
                 pathHasAppPage(router, path),
               )?.split(/[?#]/)[0] === pathname),
         );
-        // A group holding the open page starts open; the person's own toggle still wins.
-        const open = openGroups[item.id] ?? (holdsActive || !item.collapsed);
+        const open = holdsActive
+          ? !(closedHere.path === pathname && closedHere.ids.has(item.id))
+          : (openGroups[item.id] ?? !item.collapsed);
         return (
           <div key={item.id} className="grid gap-0.5">
             {renaming === item.id ? (
@@ -832,7 +839,13 @@ export function SidebarLayoutSection() {
                   <button
                     type="button"
                     aria-expanded={open}
-                    onClick={() => toggle(item.id, !open)}
+                    onClick={() => {
+                      if (!holdsActive) return toggle(item.id, !open);
+                      const ids = new Set(closedHere.path === pathname ? closedHere.ids : []);
+                      if (open) ids.add(item.id);
+                      else ids.delete(item.id);
+                      setClosedHere({ path: pathname, ids });
+                    }}
                     className={cn(ROW, "w-full text-left", canChange ? "pr-14" : "pr-8")}
                   >
                     {item.icon ? (

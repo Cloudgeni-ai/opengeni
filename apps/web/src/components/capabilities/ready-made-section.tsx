@@ -17,6 +17,10 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import type { ReadyMadeKind } from "./capabilities-section";
 
+function isForbidden(error: unknown): boolean {
+  return (error as { status?: unknown } | null)?.status === 403;
+}
+
 /** Content without a team goes last, under this heading. */
 const NO_TEAM = "More";
 
@@ -121,8 +125,11 @@ export function ReadyMadeSection({
     ]).then(([templates, agents, apps, skills]) => {
       if (!live) return;
       const kinds = [templates, apps, skills];
-      const failed = kinds.filter((result) => result.status === "rejected");
-      if (failed.length === kinds.length) {
+      // A kind this person may not read (403) isn't offered; it hasn't failed.
+      const failed = kinds.filter(
+        (result) => result.status === "rejected" && !isForbidden(result.reason),
+      );
+      if (failed.length > 0 && failed.length === kinds.length) {
         const reason = (failed[0] as PromiseRejectedResult).reason;
         setLoadError(reason instanceof Error ? reason : new Error(String(reason)));
         return;
@@ -168,7 +175,7 @@ export function ReadyMadeSection({
           ? "Ask an admin to add agents"
           : agentsKnown
             ? undefined
-            : "Couldn't check your agents. Reload to add.",
+            : "Couldn't check your agents. Retry to add.",
       })),
       ...(appTemplates ?? []).map((template) => ({
         key: `app:${template.key}`,
@@ -249,10 +256,15 @@ export function ReadyMadeSection({
           package: template.package,
           idempotencyKey: `ready-made:${template.key}`,
         });
-        if (installed.replayed && installed.app.status !== "active") {
+        // Each archived copy keys the next one, so adding again finds the live copy.
+        for (
+          let hops = 0;
+          installed.replayed && installed.app.status !== "active" && hops < 20;
+          hops += 1
+        ) {
           installed = await client.installAppPackage(workspaceId, {
             package: template.package,
-            idempotencyKey: `ready-made:${template.key}:${crypto.randomUUID()}`,
+            idempotencyKey: `ready-made:${template.key}:after:${installed.app.id}`,
           });
         }
         setAddedApps((current) => new Map(current).set(key, installed.app.id));
@@ -316,27 +328,33 @@ export function ReadyMadeSection({
     );
   }
   const groups = readyMadeGroups(entries, query, kind);
+  const partial = partlyLoaded ? (
+    <p role="status" className="text-sm text-fg-muted">
+      Some of it couldn't load.{" "}
+      <button
+        type="button"
+        className="font-medium text-fg underline-offset-2 hover:underline"
+        onClick={() => setLoadRevision((value) => value + 1)}
+      >
+        Retry
+      </button>
+    </p>
+  ) : null;
   if (groups.length === 0) {
     return (
-      <p role="status" className="text-sm text-fg-muted">
-        {query.trim() ? `Nothing in Ready-made matches "${query.trim()}".` : "Nothing to add yet."}
-      </p>
+      <div className="grid gap-3">
+        {partial}
+        <p role="status" className="text-sm text-fg-muted">
+          {query.trim()
+            ? `Nothing in Ready-made matches "${query.trim()}".`
+            : "Nothing to add yet."}
+        </p>
+      </div>
     );
   }
   return (
     <div className="grid gap-8">
-      {partlyLoaded ? (
-        <p role="status" className="text-sm text-fg-muted">
-          Some of it couldn't load.{" "}
-          <button
-            type="button"
-            className="font-medium text-fg underline-offset-2 hover:underline"
-            onClick={() => setLoadRevision((value) => value + 1)}
-          >
-            Retry
-          </button>
-        </p>
-      ) : null}
+      {partial}
       {groups.map((group) => (
         <section key={group.key} aria-label={group.team}>
           <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>{group.team}</h2>

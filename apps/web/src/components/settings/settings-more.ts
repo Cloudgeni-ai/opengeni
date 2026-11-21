@@ -2,6 +2,8 @@
 // person moves the settings they rarely use under one More at the end; every
 // other entry, including ones a later release adds, stays at the top. Unset
 // (the default) keeps every entry at the top. Search still finds everything.
+import { SIDEBAR_SETTINGS_MORE_MAX } from "@opengeni/contracts/sidebar-layout";
+
 import type { SettingsRailItem, SettingsRailSection } from "./settings-sidebar";
 
 export const SETTINGS_MORE_SECTION_ID = "more";
@@ -18,7 +20,20 @@ export function foldSettingsRail(
   const under = new Set(moved ?? []);
   // Saved entries this rail doesn't list right now (another role, flag or
   // release) keep their place.
-  const toMore = (id: string) => save([...under, id]);
+  const all = new Set(
+    sections.flatMap((section) =>
+      section.groups.flatMap((group) => group.items.map((item) => item.id)),
+    ),
+  );
+  // At most the stored maximum, dropping ids this rail doesn't list first.
+  const toMore = (id: string) => {
+    const next = [...under, id];
+    while (next.length > SIDEBAR_SETTINGS_MORE_MAX) {
+      const stale = next.findIndex((each) => !all.has(each));
+      next.splice(stale >= 0 ? stale : 0, 1);
+    }
+    save(next);
+  };
   const toTop = (id: string) => save([...under].filter((each) => each !== id));
   const more: SettingsRailItem[] = [];
   const folded = sections.flatMap((section): SettingsRailSection[] => {

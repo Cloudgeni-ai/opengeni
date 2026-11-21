@@ -47,6 +47,7 @@ import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   DropdownMenu,
   DropdownMenuCheck,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSub,
@@ -637,10 +638,9 @@ function NavigationSection({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               {SIDEBAR_NAV_ENTRIES.map((entry) => (
-                <DropdownMenuItem
+                <DropdownMenuCheckboxItem
                   key={entry}
-                  role="menuitemcheckbox"
-                  aria-checked={!hidden.has(entry)}
+                  checked={!hidden.has(entry)}
                   onSelect={(event) => {
                     event.preventDefault();
                     const next = SIDEBAR_NAV_ENTRIES.filter((each) =>
@@ -649,9 +649,8 @@ function NavigationSection({
                     onChange([{ op: "options", hiddenNavEntries: next }]);
                   }}
                 >
-                  <DropdownMenuCheck checked={!hidden.has(entry)} />
                   {NAV_ENTRY_LABELS[entry]}
-                </DropdownMenuItem>
+                </DropdownMenuCheckboxItem>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>

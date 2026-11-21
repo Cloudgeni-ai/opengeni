@@ -123,7 +123,7 @@ export const SIDEBAR_NAV_ENTRIES = [
 export const SidebarNavEntry = /* @__PURE__ */ defineSchema(() => z.enum(SIDEBAR_NAV_ENTRIES));
 export type SidebarNavEntry = (typeof SIDEBAR_NAV_ENTRIES)[number];
 
-/** Settings pages a person keeps at the top of the settings rail, at most. */
+/** Settings pages a person moves under More in the settings rail, at most. */
 export const SIDEBAR_SETTINGS_MORE_MAX = 100;
 
 /** A settings rail entry's id, such as `workspace:general` or `organization:members`. */

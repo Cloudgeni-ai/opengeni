@@ -170,7 +170,8 @@ export async function readSidebarApps(
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
-  // Edits count from the last 90 days, which keeps the versions read small.
+  // Edits count from the last 90 days, read through
+  // workspace_artifact_versions_creator_idx.
   // A person's opens are their own rows: row-level security shows them only
   // under that person's identity, so this read runs as them.
   const recent =
