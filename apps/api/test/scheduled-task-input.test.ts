@@ -3,8 +3,10 @@ import { CreateScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengen
 import { contractToolInput } from "../src/mcp/contract-input";
 import {
   resolveScheduledTaskCreateInput,
+  scheduledTaskAgentNameRefusal,
   scheduledTaskCreateToolInput,
   scheduledTaskCreateToolValidation,
+  withResolvedScheduledTaskAgent,
 } from "../src/mcp/scheduled-task-input";
 
 const sessionId = "00000000-0000-4000-8000-000000000001";
@@ -16,6 +18,68 @@ const message = {
 } as const;
 
 describe("conversational scheduling input", () => {
+  test("a separate agent's chat can name its agent; the tool sends the contract's agentId", async () => {
+    const agentId = "00000000-0000-4000-8000-0000000000aa";
+    const { prompt, ...base } = message;
+    const schema = contractToolInput(
+      scheduledTaskCreateToolInput({ events: true }),
+      scheduledTaskCreateToolValidation(sessionId),
+    );
+    const call = schema.parse({
+      ...base,
+      runMode: "new_session_per_run",
+      agentConfig: { prompt, agentName: "Triage" },
+    }) as Record<string, unknown>;
+    const refs: string[] = [];
+    const resolved = await withResolvedScheduledTaskAgent(call, async (ref) => {
+      refs.push(ref);
+      return { ok: true, agentId };
+    });
+    expect(refs).toEqual(["Triage"]);
+    expect(resolveScheduledTaskCreateInput(resolved, sessionId).agentConfig).toMatchObject({
+      agentId,
+      prompt,
+    });
+    expect(resolved.agentConfig).not.toHaveProperty("agentName");
+
+    // Without a name nothing is looked up.
+    const plain = { ...base, runMode: "new_session_per_run", agentConfig: { prompt } };
+    expect(
+      await withResolvedScheduledTaskAgent(plain, async () => {
+        throw new Error("not called");
+      }),
+    ).toBe(plain);
+    await expect(
+      withResolvedScheduledTaskAgent(
+        { ...plain, agentConfig: { prompt, agentName: "Triage", agentId } },
+        async () => ({ ok: true, agentId }),
+      ),
+    ).rejects.toThrow("not both");
+    await expect(
+      withResolvedScheduledTaskAgent(
+        { ...plain, agentConfig: { prompt, agentName: "Nobody" } },
+        async () => ({ ok: false, message: 'No agent named "Nobody"' }),
+      ),
+    ).rejects.toThrow('No agent named "Nobody"');
+  });
+
+  test("an agent name that names no agent, or several, is refused in scheduling words", () => {
+    const missing = scheduledTaskAgentNameRefusal(" Nobody ", { code: "agent_not_found" });
+    expect(missing).toBe(
+      'No agent named "Nobody" is available here to the person this chat acts for. Check the agent\'s name, or give agentConfig.agentId; leave out agentConfig.agentName to schedule without an agent.',
+    );
+    expect(missing).not.toContain("do the work yourself");
+    expect(
+      scheduledTaskAgentNameRefusal("Triage", {
+        code: "agent_name_ambiguous",
+        agentIds: ["a1", "a2"],
+      }),
+    ).toBe(
+      'More than one agent is named "Triage". Give agentConfig.agentId instead, one of: a1, a2.',
+    );
+    expect(scheduledTaskAgentNameRefusal("Triage", { code: "agent_archived" })).toBeNull();
+  });
+
   test("published MCP schema admits the minimal call without injecting separate-agent defaults", () => {
     const schema = contractToolInput(
       scheduledTaskCreateToolInput(),

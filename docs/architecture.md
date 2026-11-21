@@ -3660,6 +3660,11 @@ generation checks. SQL scheduled-run admission and live claim lock the selected
 installation before its sharing row and validate the frozen sharing generation
 and target workspace; neither requires installing another bot locally. Personal Slack Add and Reconnect use distinct creation and
 exact-identity replacement semantics. See [Slack](slack-bot.md).
+A verified Slack event callback is recorded into the Slack event source of the
+bot's home workspace and of every workspace the live share covers
+(`packages/core/src/domain/event-triggers/slack-source.ts`, migration 1538);
+the shared workspaces' deliveries are written after Slack is acknowledged;
+see [Slack events for automations](slack-bot.md#slack-events-for-automations).
 
 Workspace `defaultExecutionTarget` selects the placement of new root chats.
 Explicit session placement and child inheritance take precedence. Schedules

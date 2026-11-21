@@ -8805,8 +8805,10 @@ export type SaveNewSessionDraftRequest = Omit<
 export type ScheduledTaskAgentConfigInput = {
   /**
    * The workspace agent each run's chat is with (an agent's "Starts when"):
-   * it runs with that agent's Instructions, Memory and Can use. Only for a
-   * task that starts a new chat each run. Older servers ignore it.
+   * it runs with that agent's Instructions, Memory and Can use. An
+   * automation's own chat is started with the agent and replaced when the
+   * agent changes; an existing chat must be one of the agent's. Older servers
+   * ignore it.
    */
   agentId?: string | undefined;
   /**

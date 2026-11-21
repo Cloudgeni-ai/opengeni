@@ -218,3 +218,55 @@ export async function readSidebarLinkedApps(
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
 }
+
+export type SidebarAgentSummary = {
+  agentId: string;
+  name: string;
+  /** Its own avatar as stored; null shows its initials. */
+  avatar: unknown;
+  visibility: "workspace" | "private";
+  ownerSubjectId: string | null;
+};
+
+/**
+ * The agents of this workspace among `agentIds`, whoever can see them: the
+ * API keeps the ones the reader may see (shared ones and their own Only me
+ * ones), and a sidebar write drops links to agents that are gone.
+ */
+export async function readSidebarAgents(
+  db: Database,
+  scope: SidebarLayoutScopeKey,
+  agentIds: readonly string[],
+): Promise<Map<string, SidebarAgentSummary>> {
+  const ids = [...new Set(agentIds.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()))];
+  if (!ids.length) return new Map();
+  return await withRlsContext(
+    db,
+    scope,
+    async (tx) => {
+      const result = await tx.execute(sql`select a.id::text as id, a.name, a.avatar,
+          a.visibility, a.owner_subject_id from agents a
+        where a.account_id = ${scope.accountId}::uuid and a.workspace_id = ${scope.workspaceId}::uuid
+          and a.id = any(${`{${ids.join(",")}}`}::uuid[])`);
+      return new Map(
+        rows<{
+          id: string;
+          name: string;
+          avatar: unknown;
+          visibility: string;
+          owner_subject_id: string | null;
+        }>(result).map((row) => [
+          row.id,
+          {
+            agentId: row.id,
+            name: row.name,
+            avatar: row.avatar ?? null,
+            visibility: row.visibility === "private" ? "private" : "workspace",
+            ownerSubjectId: row.owner_subject_id,
+          },
+        ]),
+      );
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}

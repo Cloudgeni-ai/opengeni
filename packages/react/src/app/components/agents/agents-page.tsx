@@ -245,13 +245,11 @@ export function AgentsPage({
                     />
                   }
                   title={agent.name}
+                  // Every shared agent is in Slack, so only Only me (app only) is marked.
                   titleAddon={
-                    <>
-                      {agent.visibility === "private" ? (
-                        <MetaChip variant="soft">Only me</MetaChip>
-                      ) : null}
-                      {agent.slack.length > 0 ? <MetaChip variant="soft">Slack</MetaChip> : null}
-                    </>
+                    agent.visibility === "private" ? (
+                      <MetaChip variant="soft">Only me</MetaChip>
+                    ) : undefined
                   }
                   description={agent.description || undefined}
                   onOpen={() => open(agent)}

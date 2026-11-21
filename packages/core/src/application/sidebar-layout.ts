@@ -1,17 +1,22 @@
 // The customizable sidebar's reads and changes (docs/sidebar-layout.md), shared
 // by the HTTP route and the agent tools. The workspace default is set by
-// workspace admins; each person's own changes sit on top. Every app item is
-// resolved against the reader's own access, so the sidebar never shows an app
-// they can't open, and deleted or archived apps drop out by themselves.
+// workspace admins; each person's own changes sit on top. Every app and agent
+// item is resolved against the reader's own access, so the sidebar never shows
+// an app they can't open or an agent they can't see, and deleted or archived
+// ones drop out by themselves.
 import {
+  agentInitialsAvatar,
   applyPersonalSidebarChanges,
   applyWorkspaceSidebarChanges,
   EMPTY_SIDEBAR_PERSONAL_CHANGES,
   mergeSidebarLayout,
   readWorkspaceSidebarLayout,
   readStoredSidebarPersonalChanges,
+  sidebarLinkedAgentIds,
   sidebarLinkedAppIds,
+  withoutGoneSidebarAgents,
   withoutGoneSidebarApps,
+  SessionAvatar,
   SIDEBAR_LIVE_LIST_DEFAULT_LIMIT,
   SIDEBAR_LIVE_LIST_LABELS,
   SIDEBAR_LIVE_LIST_MAX_LIMIT,
@@ -30,15 +35,18 @@ import {
   type UpdateSidebarLayoutRequest,
 } from "@opengeni/contracts";
 import {
+  readSidebarAgents,
   readSidebarLinkedApps,
   readSidebarApps,
   readSidebarLayouts,
   writeSidebarLayout,
   type Database,
+  type SidebarAgentSummary,
   type SidebarAppSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
+import { agentVisibleTo } from "../domain/agents";
 import { siteViewerForGrant } from "../domain/site-audience";
 
 type SidebarDeps = { db: Database };
@@ -66,6 +74,40 @@ function collectAppIds(items: readonly MergedSidebarItem[], into: Set<string>): 
   }
 }
 
+function collectAgentIds(items: readonly MergedSidebarItem[], into: Set<string>): void {
+  for (const item of items) {
+    if (item.type === "agent") into.add(item.agentId.toLowerCase());
+    if (item.type === "group") collectAgentIds(item.items, into);
+  }
+}
+
+/** Seeing agents takes what reading chats takes, as on the agents pages. */
+function agentsReadable(grant: AccessGrant): boolean {
+  return hasPermission(grant.permissions, "sessions:read");
+}
+
+/** The agents among `ids` this person may see: shared ones and their own Only me ones. */
+async function readVisibleAgents(
+  deps: SidebarDeps,
+  grant: AccessGrant,
+  subjectId: string | null,
+  ids: readonly string[],
+): Promise<Map<string, SidebarAgentSummary>> {
+  if (!ids.length || !agentsReadable(grant)) return new Map();
+  const found = await readSidebarAgents(
+    deps.db,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    ids,
+  );
+  const viewer = { subjectId, admin: false, contributor: false };
+  return new Map([...found].filter(([, agent]) => agentVisibleTo(viewer, agent)));
+}
+
+function agentAvatar(agent: SidebarAgentSummary): SessionAvatar {
+  const parsed = SessionAvatar.safeParse(agent.avatar);
+  return parsed.success ? parsed.data : agentInitialsAvatar(agent.name, agent.agentId);
+}
+
 function listLimits(items: readonly MergedSidebarItem[], into: Map<SidebarLiveListKind, number>) {
   for (const item of items) {
     if (item.type === "live_list")
@@ -79,6 +121,8 @@ function listLimits(items: readonly MergedSidebarItem[], into: Map<SidebarLiveLi
 
 type AppView = {
   apps: Map<string, SidebarAppSummary>;
+  /** The linked agents this person may see. */
+  agents: Map<string, SidebarAgentSummary>;
   lists: Record<SidebarLiveListKind, SidebarAppSummary[]>;
   appsReadable: boolean;
 };
@@ -99,6 +143,18 @@ function resolveChild(item: MergedSidebarChild, view: AppView): ResolvedSidebarC
     }
     case "link":
       return { id: item.id, origin: item.origin, type: "link", url: item.url, label: item.label };
+    case "agent": {
+      const agent = view.agents.get(item.agentId.toLowerCase());
+      if (!agent) return null;
+      return {
+        id: item.id,
+        origin: item.origin,
+        type: "agent",
+        agentId: agent.agentId,
+        label: item.label ?? agent.name,
+        avatar: agentAvatar(agent),
+      };
+    }
     case "live_list": {
       if (!view.appsReadable) return null;
       const limit = item.limit ?? SIDEBAR_LIVE_LIST_DEFAULT_LIMIT;
@@ -142,11 +198,16 @@ function resolveItem(
 async function readAppView(
   deps: SidebarDeps,
   grant: AccessGrant,
+  subjectId: string | null,
   item: readonly MergedSidebarItem[],
 ): Promise<AppView> {
+  const agentIds = new Set<string>();
+  collectAgentIds(item, agentIds);
+  const agents = await readVisibleAgents(deps, grant, subjectId, [...agentIds]);
   const appsReadable = hasPermission(grant.permissions, "artifacts:read");
   const empty: AppView = {
     apps: new Map(),
+    agents,
     lists: { pinned_apps: [], recent_apps: [] },
     appsReadable,
   };
@@ -169,6 +230,7 @@ async function readAppView(
   );
   return {
     apps: read.apps,
+    agents,
     lists: { pinned_apps: read.pinned, recent_apps: read.recent },
     appsReadable,
   };
@@ -206,7 +268,7 @@ async function resolveSidebarLayout(
     subjectId === null ? EMPTY_SIDEBAR_PERSONAL_CHANGES : personal,
   );
   const defaults = admin ? mergeSidebarLayout(workspace, EMPTY_SIDEBAR_PERSONAL_CHANGES) : null;
-  const view = await readAppView(deps, grant, [
+  const view = await readAppView(deps, grant, subjectId, [
     ...merged.items,
     ...merged.hidden.map((entry) => entry.item),
     ...(defaults?.items ?? []),
@@ -234,10 +296,11 @@ async function resolveSidebarLayout(
   };
 }
 
-function addedAppIds(request: UpdateSidebarLayoutRequest): string[] {
+function addedIds(request: UpdateSidebarLayoutRequest, type: "app" | "agent"): string[] {
   const ids: string[] = [];
   const visit = (item: NewSidebarItem | Omit<SidebarAppLinkItem, "id">) => {
-    if (item.type === "app") ids.push(item.appId.toLowerCase());
+    if (item.type === "app" && type === "app") ids.push(item.appId.toLowerCase());
+    if (item.type === "agent" && type === "agent") ids.push(item.agentId.toLowerCase());
     if (item.type === "group") for (const child of item.items ?? []) visit(child);
   };
   for (const change of request.changes) if (change.op === "add") visit(change.item);
@@ -261,7 +324,7 @@ export async function updateSidebarLayoutForGrant(
   if (request.scope === "personal" && subjectId === null)
     throw new HTTPException(403, { message: SIDEBAR_LAYOUT_PERSON_MESSAGE });
   // A new app link must be to an app this caller can open.
-  const newApps = addedAppIds(request);
+  const newApps = addedIds(request, "app");
   if (newApps.length) {
     if (!hasPermission(grant.permissions, "artifacts:read"))
       throw new HTTPException(403, { message: "Adding an app needs access to apps." });
@@ -276,6 +339,18 @@ export async function updateSidebarLayoutForGrant(
         message: `App ${missing} wasn't found or you can't open it.`,
       });
   }
+  // A new agent link must be to an agent this caller can see.
+  const newAgents = addedIds(request, "agent");
+  if (newAgents.length) {
+    if (!agentsReadable(grant))
+      throw new HTTPException(403, { message: "Adding an agent needs access to agents." });
+    const visible = await readVisibleAgents(deps, grant, subjectId, newAgents);
+    const missing = newAgents.find((id) => !visible.has(id));
+    if (missing)
+      throw new HTTPException(422, {
+        message: `Agent ${missing} wasn't found or you can't see it.`,
+      });
+  }
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   for (let attempt = 0; ; attempt += 1) {
     const rows = await readSidebarLayouts(deps.db, scope, subjectId);
@@ -283,8 +358,39 @@ export async function updateSidebarLayoutForGrant(
     const current = target?.revision ?? 0;
     if (request.expectedRevision !== undefined && request.expectedRevision !== current)
       throw new HTTPException(409, { message: SIDEBAR_LAYOUT_CONFLICT_MESSAGE });
-    const workspace = readWorkspaceSidebarLayout(rows.workspace);
-    const personal = readStoredSidebarPersonalChanges(rows.personal?.layout);
+    const stored = readWorkspaceSidebarLayout(rows.workspace);
+    const storedPersonal = readStoredSidebarPersonalChanges(rows.personal?.layout);
+    // Links to agents that no longer exist are dropped on the next write to
+    // the scope that holds them, and a person's own links to an agent that
+    // became someone else's Only me, like apps below (agents aren't archived).
+    const agentLevel =
+      request.scope === "workspace"
+        ? stored.items
+        : storedPersonal.added.map((entry) => entry.item);
+    const linkedAgents = sidebarLinkedAgentIds(agentLevel);
+    // Without access to agents a person can't tell which are theirs to see:
+    // their links stay as they are.
+    const liveAgents = !linkedAgents.length
+      ? null
+      : request.scope === "workspace"
+        ? new Set((await readSidebarAgents(deps.db, scope, linkedAgents)).keys())
+        : agentsReadable(grant)
+          ? new Set((await readVisibleAgents(deps, grant, subjectId, linkedAgents)).keys())
+          : null;
+    const workspace =
+      liveAgents && request.scope === "workspace"
+        ? { ...stored, items: withoutGoneSidebarAgents(stored.items, liveAgents) }
+        : stored;
+    const personal =
+      liveAgents && request.scope === "personal"
+        ? {
+            ...storedPersonal,
+            added: storedPersonal.added.flatMap((entry) => {
+              const [item] = withoutGoneSidebarAgents([entry.item], liveAgents);
+              return item ? [{ ...entry, item }] : [];
+            }),
+          }
+        : storedPersonal;
     // Links to apps that no longer exist are dropped on the next write to
     // the scope that holds them: nobody can see them to remove them, and
     // they shouldn't count toward the limits. A person's own links to an app

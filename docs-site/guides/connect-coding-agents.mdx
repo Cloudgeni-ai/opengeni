@@ -12,16 +12,33 @@ npx opengeni connect
 
 It adds the Opengeni MCP server (`https://app.opengeni.ai/v1/mcp`) to the coding agents it finds (Claude Code, Codex, Cursor, and VS Code with Copilot) and installs a short `opengeni` skill for each, so the agent knows when to hand work to Opengeni. Running it again changes nothing that's already set up.
 
-The first time an agent uses Opengeni, it opens sign-in in your browser. There you pick the organization, what the agent may do, and which workspaces it reaches. The command never sees a password or key.
+Then sign in once in each agent, as the table says. Sign-in opens in your browser, where you pick the organization, what the agent may do, and which workspaces it reaches. The command never sees a password or key.
 
-| Agent             | What `connect` changes                                                                          | Sign in                                            |
-| ----------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Claude Code       | `claude mcp add --transport http --scope user opengeni …`; skill in `~/.claude/skills/opengeni` | Type `/mcp` and select `opengeni`                  |
-| Codex             | `[mcp_servers.opengeni]` in `~/.codex/config.toml`; skill in `~/.agents/skills/opengeni`        | `connect` runs `codex mcp login opengeni`          |
-| Cursor            | `opengeni` in `~/.cursor/mcp.json`; skill in `~/.cursor/skills/opengeni`                        | **Settings → MCP**, **Connect** next to `opengeni` |
-| VS Code (Copilot) | `opengeni` in your user `mcp.json`; skill in `~/.copilot/skills/opengeni`                       | VS Code asks the first time Copilot uses it        |
+| Agent             | What `connect` changes                                                                          | Sign in                                              |
+| ----------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Claude Code       | `claude mcp add --transport http --scope user opengeni …`; skill in `~/.claude/skills/opengeni` | Type `/mcp`, select `opengeni` and sign in           |
+| Codex             | `[mcp_servers.opengeni]` in `~/.codex/config.toml`; skill in `~/.agents/skills/opengeni`        | `connect` runs `codex mcp login opengeni` for you    |
+| Cursor            | `opengeni` in `~/.cursor/mcp.json`; skill in `~/.cursor/skills/opengeni`                        | **Settings → MCP**, select **Connect** by `opengeni` |
+| VS Code (Copilot) | `opengeni` in your user `mcp.json`; skill in `~/.copilot/skills/opengeni`                       | VS Code asks the first time Copilot uses it          |
 
 Options: `--client claude,codex,cursor,vscode` (or `all`) sets up those even when they aren't detected, `--no-skill` skips the skill, `--no-sign-in` skips starting sign-in, and `--base-url <url>` points at a self-hosted Opengeni.
+
+## Set up by hand
+
+If npm can't find the `opengeni` package yet, add the server yourself, then sign in each agent as in the table above.
+
+- **Claude Code:** `claude mcp add --transport http --scope user opengeni https://app.opengeni.ai/v1/mcp`
+- **Codex:** add this to `~/.codex/config.toml`, then run `codex mcp login opengeni`:
+
+  ```toml
+  [mcp_servers.opengeni]
+  url = "https://app.opengeni.ai/v1/mcp"
+  ```
+
+- **Cursor:** in `~/.cursor/mcp.json`, add `"opengeni": { "url": "https://app.opengeni.ai/v1/mcp" }` under `mcpServers`.
+- **VS Code (Copilot):** in your user `mcp.json` (**MCP: Open User Configuration**), add `"opengeni": { "type": "http", "url": "https://app.opengeni.ai/v1/mcp" }` under `servers`.
+
+The [Opengeni plugin](/guides/developer-plugin) also includes the skill. Self-hosted, use your own origin instead of `https://app.opengeni.ai`.
 
 ## What your agent can do
 

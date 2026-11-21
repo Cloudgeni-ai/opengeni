@@ -239,6 +239,8 @@ import {
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
   scheduledTaskOverlapPolicyToolInput,
+  scheduledTaskAgentNameRefusal,
+  withResolvedScheduledTaskAgent,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
 import {
@@ -2635,11 +2637,21 @@ export function buildOpenGeniMcpServer(
         ),
       },
       async (rawArgs) => {
-        const { input: args, timeZoneDefault } = await withAgentScheduleTimeZone(
+        const { input: zonedArgs, timeZoneDefault } = await withAgentScheduleTimeZone(
           deps.db,
           grant,
           rawArgs,
         );
+        // An agent named by name runs as the person this chat acts for may use it.
+        const args = await withResolvedScheduledTaskAgent(zonedArgs, async (ref) => {
+          const resolved = await resolveDelegationAgent(deps, grant, grant.workspaceId, ref);
+          return resolved.ok
+            ? { ok: true, agentId: resolved.agent.id }
+            : {
+                ok: false,
+                message: scheduledTaskAgentNameRefusal(ref, resolved) ?? resolved.message,
+              };
+        });
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
         await requireLimit(deps, {
           accountId: grant.accountId,

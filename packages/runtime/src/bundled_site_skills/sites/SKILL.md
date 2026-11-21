@@ -267,7 +267,7 @@ Read the references the app needs with `skill_read`, for example
 | --- | --- |
 | Every full app: packages, build, local preview with live tools, pages and addresses (`/admin`, `?t=` links), requested tools, the completion gate | `references/build-and-preview.md` |
 | Inline AI results, an embedded conversation, Opengeni UI components or the typed client | `references/ai-and-chat.md` |
-| Saves records or files (app data) | `references/site-data.md` |
+| Saves or reacts to records or files (app data) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (app SQL) | `references/site-sql.md` |
 | Invited or public, with data, tools or an embedded agent | `references/publish-to-web.md` |
 | Moves to another workspace | `references/app-packages.md` |

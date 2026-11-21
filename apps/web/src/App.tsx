@@ -19,7 +19,7 @@
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
 //   /workspaces/:id/automations              → automations list
-//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger)
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source, ?agent, ?agentTrigger, ?returnTo=agent)
 //   /workspaces/:id/automations/:automationId → one automation (overview + runs)
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
@@ -993,6 +993,8 @@ type NewAutomationSearch = {
   agent?: string;
   /** Start from this one of the agent's suggested triggers. */
   agentTrigger?: number;
+  /** Cancel and Save go back to the agent's page. Needs `agent`. */
+  returnTo?: "agent";
 };
 function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
   return {
@@ -1019,6 +1021,7 @@ function newAutomationSearch(search: Record<string, unknown>): NewAutomationSear
     Number(search.agentTrigger) < 10
       ? { agentTrigger: Number(search.agentTrigger) }
       : {}),
+    ...(search.returnTo === "agent" ? { returnTo: "agent" as const } : {}),
   };
 }
 const workspaceAutomationsRoute = createRoute({
@@ -1691,7 +1694,7 @@ function Automations() {
 
 function AutomationNew() {
   const { workspaceId } = workspaceAutomationNewRoute.useParams();
-  const { template, from, sourceSessionId, source, agent, agentTrigger } =
+  const { template, from, sourceSessionId, source, agent, agentTrigger, returnTo } =
     workspaceAutomationNewRoute.useSearch();
   return (
     <LazyAutomationFormRoute
@@ -1704,6 +1707,7 @@ function AutomationNew() {
         eventSourceId: source,
         agentId: agent,
         agentTrigger,
+        returnTo,
       }}
     />
   );

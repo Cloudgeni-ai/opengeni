@@ -28,8 +28,14 @@ export function deploymentGitHubOwnLogins(settings: DeliveryReadingSettings): Se
   return githubOwnLogins([settings.githubAppSlug]);
 }
 
+/** What reading a delivery needs to know about its source. */
+export type DeliveryReadingSource = Pick<
+  EventSourceRecord,
+  "kind" | "status" | "statusReason" | "adapter" | "format"
+>;
+
 function readSourceDelivery(
-  source: EventSourceRecord,
+  source: DeliveryReadingSource,
   settings: DeliveryReadingSettings,
   input: { headers: Headers; body: Uint8Array; receivedAt: Date },
 ): WebhookAdapterReading {
@@ -78,7 +84,7 @@ export type DeliveryOutcome = {
  * event deduplication (`refire`).
  */
 export function readDelivery(input: {
-  source: EventSourceRecord;
+  source: DeliveryReadingSource;
   settings: DeliveryReadingSettings;
   headers: Headers;
   body: Uint8Array;

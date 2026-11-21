@@ -1,7 +1,7 @@
 // Sidebar: the links and groups above your chats (docs/sidebar-layout.md).
 // "Yours" is the workspace default with your own changes (add, hide,
 // reorder, reset); admins also edit the "Workspace default" everyone starts
-// from.
+// from. Groups you can change are renamed in place.
 import {
   AppWindowIcon,
   ArrowDownIcon,
@@ -13,7 +13,15 @@ import {
   PlusIcon,
 } from "lucide-react";
 import { useRouter } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 import type {
   NewSidebarItem,
@@ -21,8 +29,14 @@ import type {
   SidebarLayoutChange,
   SidebarLiveListKind,
 } from "@opengeni/sdk";
-import { isSidebarAppPath, isSidebarExternalUrl } from "@opengeni/contracts/sidebar-layout";
+import { agentInitialsAvatar } from "@opengeni/contracts";
+import {
+  isSidebarAppPath,
+  isSidebarExternalUrl,
+  SIDEBAR_LABEL_MAX_CHARS,
+} from "@opengeni/contracts/sidebar-layout";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
@@ -43,10 +57,11 @@ import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 
 type Scope = "personal" | "workspace";
-type AddKind = "app" | "link" | "group" | "live_list";
+type AddKind = "app" | "agent" | "link" | "group" | "live_list";
 
 const ADD_LABELS: Record<AddKind, string> = {
   app: "App",
+  agent: "Agent",
   link: "Link",
   group: "Group",
   live_list: "List",
@@ -59,8 +74,22 @@ const LIST_OPTIONS: { value: SidebarLiveListKind; label: string }[] = [
 
 const TOP_LEVEL = "__top";
 
-function itemIcon(item: ResolvedSidebarItem, hasPage: (pathname: string) => boolean) {
+function itemIcon(
+  item: ResolvedSidebarItem,
+  hasPage: (pathname: string) => boolean,
+  workspaceId: string,
+) {
   const className = "size-4 shrink-0 text-fg-muted";
+  if (item.type === "agent")
+    return (
+      <SessionAvatar
+        avatar={item.avatar}
+        name={item.label}
+        workspaceId={workspaceId}
+        seed={item.agentId}
+        size="xs"
+      />
+    );
   if (item.type === "group") return <FolderIcon aria-hidden="true" className={className} />;
   if (item.type === "link")
     return inAppLinkPath(item.url, window.location.origin, hasPage) !== null ? (
@@ -79,11 +108,64 @@ function itemDetail(item: ResolvedSidebarItem): string | null {
   return null;
 }
 
+/** A group's name, edited in place: Enter or leaving the field saves, Escape cancels. */
+export function RenameField({
+  label,
+  onSave,
+  onDone,
+}: {
+  label: string;
+  onSave: (label: string) => void;
+  onDone: () => void;
+}) {
+  const [value, setValue] = useState(label);
+  const input = useRef<HTMLInputElement>(null);
+  // The menu that opened it hands focus back to its button as it closes;
+  // take it after that.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      input.current?.focus();
+      input.current?.select();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  // Enter saves and closes the field; the blur that may follow must not save again.
+  const finished = useRef(false);
+  const finish = (next: string | null) => {
+    if (finished.current) return;
+    finished.current = true;
+    if (next && next !== label) onSave(next);
+    onDone();
+  };
+  const save = () => finish(value.trim());
+  return (
+    <TextInput
+      ref={input}
+      aria-label="Group name"
+      value={value}
+      maxLength={SIDEBAR_LABEL_MAX_CHARS}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={save}
+      onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          save();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+        }
+      }}
+      className="h-8"
+    />
+  );
+}
+
 function ItemRow({
   item,
   siblings,
   indent,
   scope,
+  workspaceId,
   onChange,
 }: {
   item: ResolvedSidebarItem;
@@ -91,14 +173,18 @@ function ItemRow({
   siblings: readonly string[];
   indent?: boolean;
   scope: Scope;
+  workspaceId: string;
   onChange: (changes: SidebarLayoutChange[]) => void;
 }) {
   const router = useRouter();
+  const [renaming, setRenaming] = useState(false);
   const detail = itemDetail(item);
   const index = siblings.indexOf(item.id);
   const previous = index > 0 ? siblings[index - 1] : undefined;
   const following = index >= 0 ? siblings[index + 1] : undefined;
   const fromWorkspace = scope === "personal" && item.origin === "workspace";
+  // The default's groups are renamed in the workspace default; yours, here.
+  const canRename = item.type === "group" && !fromWorkspace;
   return (
     <div
       className={
@@ -107,15 +193,25 @@ function ItemRow({
           : "flex min-h-12 items-center gap-3 py-2"
       }
     >
-      {itemIcon(item, (path) => pathHasAppPage(router, path))}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium text-fg">{item.label}</div>
-        {detail || fromWorkspace ? (
-          <div className="truncate text-xs text-fg-muted">
-            {[fromWorkspace ? "Workspace" : null, detail].filter(Boolean).join(" · ")}
-          </div>
-        ) : null}
-      </div>
+      {itemIcon(item, (path) => pathHasAppPage(router, path), workspaceId)}
+      {renaming ? (
+        <div className="min-w-0 flex-1">
+          <RenameField
+            label={item.label}
+            onSave={(label) => onChange([{ op: "update", itemId: item.id, label }])}
+            onDone={() => setRenaming(false)}
+          />
+        </div>
+      ) : (
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium text-fg">{item.label}</div>
+          {detail || fromWorkspace ? (
+            <div className="truncate text-xs text-fg-muted">
+              {[fromWorkspace ? "Workspace" : null, detail].filter(Boolean).join(" · ")}
+            </div>
+          ) : null}
+        </div>
+      )}
       <Button
         type="button"
         variant="ghost"
@@ -138,7 +234,17 @@ function ItemRow({
       >
         <ArrowDownIcon />
       </Button>
-      <MoreMenu label={`More for ${item.label}`} quiet>
+      <MoreMenu
+        label={`More for ${item.label}`}
+        quiet
+        onCloseAutoFocus={(event) => {
+          // Rename focuses its field instead.
+          if (renaming) event.preventDefault();
+        }}
+      >
+        {canRename ? (
+          <DropdownMenuItem onSelect={() => setRenaming(true)}>Rename</DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem
           variant={fromWorkspace ? "default" : "destructive"}
           onSelect={() => onChange([{ op: "remove", itemId: item.id }])}
@@ -153,17 +259,26 @@ function ItemRow({
 function ItemRows({
   items,
   scope,
+  workspaceId,
   onChange,
 }: {
   items: ResolvedSidebarItem[];
   scope: Scope;
+  workspaceId: string;
   onChange: (changes: SidebarLayoutChange[]) => void;
 }) {
   const rows: ReactNode[] = [];
   const topIds = items.map((item) => item.id);
   items.forEach((item) => {
     rows.push(
-      <ItemRow key={item.id} item={item} siblings={topIds} scope={scope} onChange={onChange} />,
+      <ItemRow
+        key={item.id}
+        item={item}
+        siblings={topIds}
+        scope={scope}
+        workspaceId={workspaceId}
+        onChange={onChange}
+      />,
     );
     if (item.type === "group") {
       const childIds = item.items.map((child) => child.id);
@@ -175,6 +290,7 @@ function ItemRows({
             siblings={childIds}
             indent
             scope={scope}
+            workspaceId={workspaceId}
             onChange={onChange}
           />,
         ),
@@ -217,7 +333,53 @@ function useAppOptions(workspaceId: string, query: string) {
   return { options, loading };
 }
 
-function AddForm({
+/** The agents this person can see, to link one. */
+function useAgentOptions(workspaceId: string, enabled: boolean) {
+  const { client } = useAppContext();
+  const [options, setOptions] = useState<{ value: string; label: string; leading: ReactNode }[]>(
+    [],
+  );
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    setLoading(true);
+    setError(null);
+    void client
+      .listAgents(workspaceId)
+      .then((agents) => {
+        if (!current) return;
+        setOptions(
+          agents.map((agent) => ({
+            value: agent.id,
+            label: agent.name,
+            leading: (
+              <SessionAvatar
+                avatar={agent.avatar ?? agentInitialsAvatar(agent.name, agent.id)}
+                name={agent.name}
+                workspaceId={workspaceId}
+                seed={agent.id}
+              />
+            ),
+          })),
+        );
+      })
+      .catch((caught: unknown) => {
+        if (current) setError(userErrorText(caught));
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [attempt, client, enabled, workspaceId]);
+  return { options, loading, error, retry: () => setAttempt((value) => value + 1) };
+}
+
+export function AddForm({
   kind,
   workspaceId,
   groups,
@@ -232,7 +394,9 @@ function AddForm({
 }) {
   const [appQuery, setAppQuery] = useState("");
   const apps = useAppOptions(workspaceId, appQuery);
+  const agents = useAgentOptions(workspaceId, kind === "agent");
   const [appId, setAppId] = useState<string | null>(null);
+  const [agentId, setAgentId] = useState<string | null>(null);
   const [path, setPath] = useState("");
   const [label, setLabel] = useState("");
   const [url, setUrl] = useState("https://");
@@ -249,6 +413,7 @@ function AddForm({
   const labelError =
     submitted && (kind === "link" || kind === "group") && !label.trim() ? "Add a name" : undefined;
   const appError = submitted && kind === "app" && !appId ? "Choose an app" : undefined;
+  const agentError = submitted && kind === "agent" && !agentId ? "Choose an agent" : undefined;
   const submit = (event: FormEvent) => {
     event.preventDefault();
     setSubmitted(true);
@@ -261,6 +426,8 @@ function AddForm({
         ...(path.trim() ? { path: path.trim() } : {}),
         ...(name ? { label: name } : {}),
       };
+    else if (kind === "agent" && agentId)
+      item = { type: "agent", agentId, ...(name ? { label: name } : {}) };
     else if (kind === "link" && name && isSidebarExternalUrl(url.trim()))
       item = { type: "link", url: url.trim(), label: name };
     else if (kind === "group" && name) item = { type: "group", label: name };
@@ -308,6 +475,34 @@ function AddForm({
           </Field>
         </>
       ) : null}
+      {kind === "agent" ? (
+        <Field
+          label="Agent"
+          error={
+            agents.error ? (
+              <>
+                {`Couldn't load agents. ${agents.error} `}
+                <button type="button" className="og-link" onClick={agents.retry}>
+                  Try again
+                </button>
+              </>
+            ) : (
+              agentError
+            )
+          }
+        >
+          <SelectMenu
+            variant="combobox"
+            options={agents.options}
+            value={agentId}
+            onValueChange={setAgentId}
+            placeholder="Choose an agent"
+            searchPlaceholder="Search agents"
+            searching={agents.loading}
+            emptyMessage={agents.error ? "Couldn't load agents" : "No agents found"}
+          />
+        </Field>
+      ) : null}
       {kind === "link" ? (
         <Field label="Address" error={urlError}>
           <TextInput
@@ -323,7 +518,11 @@ function AddForm({
           <SelectMenu options={LIST_OPTIONS} value={list} onValueChange={setList} />
         </Field>
       ) : null}
-      <Field label="Name" optional={kind === "app" || kind === "live_list"} error={labelError}>
+      <Field
+        label="Name"
+        optional={kind === "app" || kind === "agent" || kind === "live_list"}
+        error={labelError}
+      >
         <TextInput
           value={label}
           onChange={(event) => setLabel(event.target.value)}
@@ -375,7 +574,9 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
     try {
       await update({ scope: effectiveScope, changes });
     } catch (error) {
-      toast.error("Couldn't change the sidebar", { description: userErrorText(error) });
+      toast.error("Couldn't change the sidebar", {
+        description: userErrorText(error),
+      });
       throw error;
     }
   };
@@ -440,11 +641,16 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
         {layout ? (
           items.length ? (
             <Section variant="group" aria-label="Sidebar items">
-              <ItemRows items={items} scope={effectiveScope} onChange={onChange} />
+              <ItemRows
+                items={items}
+                scope={effectiveScope}
+                workspaceId={workspaceId}
+                onChange={onChange}
+              />
             </Section>
           ) : (
             <p className="text-sm text-fg-muted">
-              Nothing here yet. Add an app, a link or a group.
+              Nothing here yet. Add an app, an agent, a link or a group.
             </p>
           )
         ) : failed ? (
@@ -454,7 +660,7 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
           <Section title="Hidden" variant="group">
             {layout.hidden.map(({ item }) => (
               <div key={item.id} className="flex min-h-12 items-center gap-3 py-2">
-                {itemIcon(item, (path) => pathHasAppPage(router, path))}
+                {itemIcon(item, (path) => pathHasAppPage(router, path), workspaceId)}
                 <div className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
                   {item.label}
                 </div>

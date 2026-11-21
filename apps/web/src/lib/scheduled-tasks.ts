@@ -506,7 +506,7 @@ export function agentConfigFromFormState(
         };
   return {
     ...retainedConfig,
-    ...(form.agentId && form.runMode === "new_session_per_run" ? { agentId: form.agentId } : {}),
+    ...(form.agentId ? { agentId: form.agentId } : {}),
     prompt: existingTask ? form.prompt : form.prompt.trim(),
     ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     resources: form.resources,

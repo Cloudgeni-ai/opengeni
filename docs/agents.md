@@ -507,19 +507,63 @@ empty for older servers). `PATCH` replaces `toolPermissions` or `skills` as a
 whole.
 
 - **Starts when**: the agent's triggers are ordinary automations with
-  `agentConfig.agentId`. Each run starts a new chat bound to the agent (its
-  Instructions, Memory and Can use), created as the task with the task
-  owner's access to the agent (`agent.subjectId` on session create), so Only
-  me agents work in their owner's Only me automations. Saving checks the
-  agent is one the owner can use, against the automation's agent, run mode
-  and visibility after the edit, and that each run starts a new chat
-  (`existing_session` and `reusable_session` are refused, so a change of
-  agent applies from the next run). Any trigger type in the catalog works,
+  `agentConfig.agentId` (an agent's `scheduled_tasks_create` call may give
+  `agentConfig.agentName`, a name or id, which the tool resolves like
+  `session_create`'s `agentName`), in any chat mode. A chat the scheduler starts
+  (`new_session_per_run`, or the first run of `reusable_session`) is bound to
+  the agent (its Instructions, Memory and Can use), created as the task with
+  the task owner's access to the agent (`agent.subjectId` on session create),
+  so Only me agents work in their owner's Only me automations. A chat's agent
+  never changes, so changing a `reusable_session` automation's agent clears
+  its chat (`reusableSessionId: null`); the next run starts a new chat with
+  the new agent. The task records the chat it left in
+  `metadata._opengeniAgentChatChange` (`{ sessionId, agentId, changedAt }`,
+  `SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY`), the edit writes the audit
+  event `scheduled_task.agent_chat_changed`, and the automation form says so
+  with a link to the previous chat. `existing_session` keeps the agent and
+  needs a chat bound to that agent (`sessions.agent_id`) that the owner can
+  control; any other chat is refused with 422 "That chat isn't with this
+  agent", and the form marks such chats "Not a chat with this agent". Saving
+  checks the agent is one the owner can use, against the automation's agent,
+  run mode, chat and visibility after the edit. Any trigger type in the catalog works,
   including types added later, because the trigger is the automation's own.
   Event runs keep the automation limits: the chain limit, the storm guard
   (`maxRunsPerHour`) and usage limits. The page lists the automations with
-  an on/off switch (pause/resume) and remove, and **Add trigger** opens the
-  automation form with `?agent=<id>`. It asks the server for them
+  an on/off switch (pause/resume) and remove. **Add trigger** opens a small
+  dialog on the page (`agent-trigger-dialog.tsx`, the picker in
+  `agent-trigger-picker.tsx`, pure parts in `agent-trigger-model.ts`). Its
+  picker is built from the source catalog the Add a source page uses
+  (`eventSourceChoices`), so it names no kind itself: **Schedule**, each of
+  the person's event sources (and ready ones they can use without adding,
+  such as This workspace; one that is off or needs attention shows greyed
+  with why and keeps its kind from being offered again), then every kind they can still add, including
+  **Create a webhook**; each shows its app's logo, or its glyph or initial.
+  A kind added to the catalog, or a source of a kind the client doesn't
+  know, shows up with no change here. Picking a source shows its events and
+  optional conditions; picking a kind not added yet shows its setup step in
+  place: Opengeni adds GitHub, Slack or This workspace right there, a
+  webhook is created right there and shows its URL and signing secret,
+  GitHub not yet connected to the workspace makes **Connect GitHub** the
+  one action (Connected tools), and any other kind (a connection to pick or
+  a secret to paste) makes **Add <source>** the one action (the Add a
+  source page). A GitHub event can add one repository. The **Note** is
+  optional: each run gets the event and the agent's Instructions do the
+  rest (an empty note sends "Handle this event." or "Do your scheduled
+  work."). **Chat** (`agent-trigger-chat-field.tsx`) says where runs go:
+  **New chat each run** (the default, `new_session_per_run`), **One chat
+  for this trigger** (`reusable_session`) or **An existing chat**
+  (`existing_session` with `targetSessionId`, offering only chats started
+  with this agent); the dialog's description says which. It saves
+  through `createScheduledTask` with `agentConfig.agentId`, named
+  `<agent>: <when>`, and with an explicit `visibility`: `private` for an
+  Only me agent, otherwise `workspace` (never the organization's default
+  for new schedules). The server's rules for who may create a shared
+  automation still apply; a refused one says so in the dialog. **Open full
+  form** opens the automation form with `?agent=<id>&returnTo=agent`, plus
+  `?source=<id>` for the source picked, for every other setting (the note
+  and chat choice aren't carried over); its back link, Cancel and Save
+  return to the agent's page.
+  The list comes from the server
   (`GET /v1/workspaces/:id/scheduled-tasks?agentId=<id>`, SDK
   `listScheduledTasks({ agentId })`), which filters on
   `agentConfig.agentId`; a server without the filter ignores it and the page
@@ -552,17 +596,30 @@ whole.
   Codex Apps calls carry no provider domain: rules name them by the
   `codex_apps` server id or `*`. A rule a release can't fully read (such as
   a permission added later) asks first rather than being ignored. The
-  page lists the workspace's enabled connections plus a **GitHub** row for
-  Opengeni's own GitHub tools (rules on `github.com`, the same rules the
-  ready-made agents use), unless a listed connection already covers
-  `github.com`. Rules for connections not listed still show and can be
+  page lists only the connections that have a rule, each with the logo the
+  chat composer's Connectors picker shows (`connectionLogoResolver`: the
+  catalog entry's logo, else one filed under its provider's domain, else the
+  name's initial), with its all-tools choice and any tool set on its own;
+  **Choose per tool** lists the rest of its tools, and choosing the reset
+  option removes a rule. **Add rule** picks a connection from a searchable
+  list with logos (the workspace's enabled connections, one per rule key,
+  plus **GitHub** for Opengeni's own GitHub tools, rules on `github.com`,
+  unless a connection already covers it), then all its tools or one tool,
+  then Allow, Ask first or Block. Rules for connections not listed (another
+  person's, or not set up yet) still show, named by their key, and can be
   changed or removed.
 - **Learns**: **Remember across chats** plus the entries of the agent's
   Memory collection, each editable and removable (Knowledge entry save and
   archive).
-- **Skills**: a short list of the Skills it relies on, by name, linked to
-  each Skill. It is a note for the people setting the agent up: every Skill
-  stays available to every chat, so there are no per-Skill switches.
+- **Skills**: a short list of the Skills it relies on, each shown by its
+  name and short description and linked to the Skill's page. One searchable
+  list adds another (name and short description; ones already chosen are not
+  offered). A chosen Skill is saved by its key and shown from the workspace's
+  Skill catalog (matched by key, then by title), so a Skill written in
+  Opengeni shows its name, never its generated `authored-<id>` key; a
+  reference no Skill here matches says so. It is a note for the people
+  setting the agent up: every Skill stays available to every chat, so there
+  are no per-Skill switches.
 
 Not in self-hosted deployments without these pieces: Codex Apps rules need
 the Codex Apps deployment flag, Slack lines need the Opengeni Slack app, and
@@ -583,15 +640,34 @@ has no read approvals; `gh` would fail rather than wait). `git clone` and
 `POST /v1/workspaces/:id/agent-templates/:key/agents` (`{name?, visibility?}`)
 adds one as an ordinary agent with `templateKey` set (SDK
 `listAgentTemplates`, `createAgentFromTemplate`). They are content files in
-`packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`):
-Triage, Bug fixer and PR reviewer, general for any software team, with
-Instructions written for autonomy with judgment (pick up work, fix it, and
-involve a person only when a decision needs one), suggested Can use rules
+`packages/core/src/agent-templates/*.agent.json` (schema `AgentTemplate`),
+listed in gallery order in its `index.ts`: Triage, Bug fixer, PR reviewer,
+CVE scanner, Incident responder and Dependency updater, general for any software team, with
+Instructions written for autonomy with judgment (pick up work with what they
+can reach instead of asking for setup first, hand off to each other by name,
+and involve a person only when blocked or a decision needs one), suggested Can use rules
 (each blocks merging a pull request, through a GitHub connection or
-Opengeni's own GitHub tools) and suggested triggers. Suggested triggers are
+Opengeni's own GitHub tools) and suggested triggers:
+
+| Agent | Does | Hands off to | Suggested triggers |
+| --- | --- | --- | --- |
+| Triage | Sorts new issues and reports | Bug fixer | A GitHub issue opens; a new message in a Slack channel; a Linear issue is created |
+| Bug fixer | Reproduces and fixes a bug in a pull request | PR reviewer | An issue is labelled `bug` |
+| PR reviewer | Reviews pull requests | None | A pull request opens or is ready for review |
+| CVE scanner | Checks lockfiles and container images against known advisories (GitHub advisories, or osv-scanner or trivy in its sandbox), ranks by reachability and severity, fixes safe upgrades in one pull request, reports the rest | PR reviewer | Every Monday at 08:00; a pull request opens or is ready for review |
+| Incident responder | Gathers logs, metrics and recent deploys from connected tools, posts the likely cause and a mitigation | Bug fixer | Any event on a webhook (`*`, for alerts from monitoring); a new message in a Slack channel |
+| Dependency updater | Batches patch and minor upgrades into one pull request a week | PR reviewer | Every Monday at 09:00 |
+
+GitHub events carry no changed file paths, so CVE scanner's pull request
+trigger fires for every pull request and its run stops at once when no
+lockfile, dependency manifest or Dockerfile changed. A new ready-made agent
+is one more content file; no product code names any of them. Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
-opens the automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`)
-so the person picks the repository or source and saves. Ready-made agents
+opens the same dialog filled in from the suggestion (its events,
+conditions, note and name) so the person only picks the source and, for
+GitHub, a repository, then saves; a GitHub, Slack or This workspace source
+it lacks is added on save. Its **Open full form** opens the automation form
+at the suggestion (`?agent=<id>&agentTrigger=<n>&returnTo=agent`). Ready-made agents
 name no internal Skills.
 
 ### Delegation by name
@@ -612,7 +688,8 @@ can hand work to its owner's other Only me agents (the child is bound with
 the child (see Can use above).
 A name two agents share is refused with `agent_name_ambiguous` and their ids;
 an unknown one with `agent_not_found`. Delegated chats keep the nested agent
-depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer".
+depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer"; Incident responder hands
+fixes to "Bug fixer", and CVE scanner and Dependency updater ask "PR reviewer".
 
 ### Follow-ups
 
@@ -627,7 +704,8 @@ The sidebar's **Agents** page (`/workspaces/:id/agents`) replaces **Bot
 templates** and the Slack agents list; `/bot-templates` redirects there.
 
 - Agents page: All / Yours, one row per agent (icon, name, what it helps with,
-  an Only me or Slack badge), **New agent** and **Import** (`.agent.json`, or an
+  and an Only me badge on an agent that stays in the app; every shared agent is
+  in Slack, so there is no Slack badge), **New agent** and **Import** (`.agent.json`, or an
   older `.bot.json` whose setup instructions become the Instructions). Banners
   say that templates and Slack agents became agents (shown when such agents
   exist, dismissible per browser), and a notice suggests renaming when names
