@@ -518,8 +518,20 @@ whole.
   including types added later, because the trigger is the automation's own.
   Event runs keep the automation limits: the chain limit, the storm guard
   (`maxRunsPerHour`) and usage limits. The page lists the automations with
-  an on/off switch (pause/resume) and remove, and **Add trigger** opens the
-  automation form with `?agent=<id>`.
+  an on/off switch (pause/resume) and remove. **Add trigger** opens a small
+  dialog on the page (`agent-trigger-dialog.tsx`, pure parts in
+  `agent-trigger-model.ts`): **On an event** (source, event types, optional
+  conditions) or **On a schedule**, an optional repository for a GitHub
+  event, and an optional Message (default "Handle the event that started
+  this run." or "Do your scheduled work."). It saves through
+  `createScheduledTask` as a new chat per run with `agentConfig.agentId`,
+  named `<agent>: <when>`, and with an explicit `visibility`: `private` for
+  an Only me agent, otherwise `workspace` (never the organization's default
+  for new schedules). The server's rules for who may create a shared
+  automation still apply; a refused one says so in the dialog. With no
+  source of the kind needed, the dialog's one action is **Add <source>**
+  (the Add a source page). **Open full form** opens the automation form
+  with `?agent=<id>` for every other setting.
 - **Can use**: rules `{connector, tool, permission}`. `connector` is a
   connection's server id, a provider domain such as `github.com` (any
   connection to that provider; what ready-made agents use), or `*`; `tool` is
@@ -579,8 +591,10 @@ involve a person only when a decision needs one), suggested Can use rules
 (each blocks merging a pull request, through a GitHub connection or
 Opengeni's own GitHub tools) and suggested triggers. Suggested triggers are
 never created on add: the agent page offers each with **Set up**, which
-opens the automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`)
-so the person picks the repository or source and saves. Ready-made agents
+opens the same dialog filled in from the suggestion (its events,
+conditions, message and name) so the person only picks the source and,
+for GitHub, a repository, then saves. Its **Open full form** opens the
+automation form at the suggestion (`?agent=<id>&agentTrigger=<n>`). Ready-made agents
 name no internal Skills.
 
 ### Delegation by name

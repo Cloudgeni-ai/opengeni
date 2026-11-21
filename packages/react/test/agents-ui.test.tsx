@@ -71,6 +71,8 @@ const { buildCreateSessionRequest } = await import("../src/app/lib/session-creat
 const { composerLaunchAgentId, parseComposerLaunchSearch } =
   await import("../src/app/lib/composer-launch");
 const { sessionAgentRef, sessionAgentSourceLine } = await import("../src/app/lib/session-agent");
+const { AGENT_TRIGGER_SHARED_DENIED } =
+  await import("../src/app/components/agents/agent-trigger-model");
 
 const { WORKSPACE_ID, makeAgent, fakeAgentsClient, appContext, AgentsTestHost } = kit;
 
@@ -1184,7 +1186,13 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   expect(suggested.map((row) => row.textContent)).toEqual([
     expect.stringContaining("When a Linear issue is created"),
   ]);
+  // Set up opens the light dialog at the suggestion; the full form stays one link away.
   await act(async () => button(container, "Set up").click());
+  await flush();
+  const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+  expect(dialog.textContent).toContain("When a Linear issue is created");
+  await act(async () => button(dialog, "Open full form").click());
+  await flush();
   expect(path).toBe(`/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1`);
   // Can use lists each connection and Opengeni's own GitHub tools, whose row
   // holds the ready-made agent's github.com rule.
@@ -1221,6 +1229,139 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   await flush();
   expect(client.calls).toContainEqual(["pauseScheduledTask", WORKSPACE_ID, trigger.id]);
   expect(container.textContent).toContain("release-notes");
+});
+
+const GITHUB_SOURCE = { id: "source-gh", name: "Acme GitHub", kind: "github", status: "active" };
+
+async function openAgentTrigger(
+  options: {
+    agent?: Parameters<typeof makeAgent>[0];
+    eventTriggers?: boolean;
+    eventSources?: (typeof GITHUB_SOURCE)[];
+    createTaskError?: unknown;
+    suggestion?: string;
+  } = {},
+) {
+  const agent = makeAgent({ name: "Triage", templateKey: "triage", ...options.agent });
+  const client = fakeAgentsClient([agent], {
+    templates: [TRIAGE_TEMPLATE],
+    eventSources: options.eventSources ?? [],
+    createTaskError: options.createTaskError,
+  });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost
+      context={appContext(client, {
+        clientConfig: { eventTriggers: { enabled: options.eventTriggers ?? true } },
+      })}
+      onLocation={(location) => (path = location.href)}
+    >
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  if (options.suggestion) {
+    const row = [...container.querySelectorAll<HTMLElement>("[data-agent-suggested-trigger]")].find(
+      (entry) => entry.textContent?.includes(options.suggestion!),
+    )!;
+    await act(async () => button(row, "Set up").click());
+  } else {
+    await act(async () => button(container, "Add trigger").click());
+  }
+  await flush();
+  const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+  return { agent, client, dialog, path: () => path };
+}
+
+function createdTask(client: { calls: unknown[][] }) {
+  return client.calls.find((call) => call[0] === "createScheduledTask")?.[2] as
+    | Record<string, any>
+    | undefined;
+}
+
+test("a suggested trigger is set up in place: its source is filled in and no message is needed", async () => {
+  const { agent, client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+  });
+  expect(dialog.textContent).toContain("When a GitHub issue opens");
+  expect(dialog.textContent).toContain("shared with the workspace");
+  expect(dialog.textContent).toContain("Acme GitHub");
+  // The message is optional and starts at the suggestion's.
+  expect(dialog.querySelector("textarea")!.value).toBe("Triage it.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.name).toBe("Triage: When a GitHub issue opens");
+  expect(request.visibility).toBe("workspace");
+  expect(request.runMode).toBe("new_session_per_run");
+  expect(request.schedule).toEqual({ type: "manual" });
+  expect(request.agentConfig.agentId).toBe(agent.id);
+  expect(request.agentConfig.prompt).toBe("Triage it.");
+  expect(request.events.triggers).toEqual([
+    expect.objectContaining({ sourceId: "source-gh", eventTypes: ["issues.opened"] }),
+  ]);
+  // The new trigger is listed and its suggestion isn't offered again.
+  expect(document.body.querySelector("[role='dialog']")).toBeNull();
+  expect(document.body.querySelectorAll("[data-agent-trigger]").length).toBe(1);
+  expect(
+    [...document.body.querySelectorAll("[data-agent-suggested-trigger]")].map(
+      (row) => row.textContent,
+    ),
+  ).toEqual([expect.stringContaining("When a Linear issue is created")]);
+});
+
+test("without a source of the kind a suggestion needs, adding one is the one action", async () => {
+  const { client, dialog, path } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-missing-source]")?.textContent).toContain(
+    "GitHub",
+  );
+  expect(dialog.querySelector("textarea")).toBeNull();
+  await act(async () => button(dialog, "Add GitHub").click());
+  await flush();
+  expect(path()).toBe(`/workspaces/${WORKSPACE_ID}/automations/sources/new?kind=github`);
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("a blank trigger on a schedule saves with the default message, Only me like its agent", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    agent: { visibility: "private", ownerSubjectId: "user-me" },
+    eventTriggers: false,
+  });
+  expect(dialog.textContent).toContain("Only you see it.");
+  expect(dialog.textContent).not.toContain("On an event");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.visibility).toBe("private");
+  expect(request.agentConfig.prompt).toBe("Do your scheduled work.");
+  expect(request.schedule.type).toBe("calendar");
+  expect(request.name).toStartWith("Triage: ");
+});
+
+test("a blank event trigger asks for a source before saving", async () => {
+  const { client, dialog } = await openAgentTrigger({ eventSources: [GITHUB_SOURCE] });
+  expect(dialog.textContent).toContain("On an event");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).toContain("Choose");
+});
+
+test("a shared trigger the person may not add says so in the dialog", async () => {
+  const forbidden = Object.assign(new Error("Opengeni API 403: missing permission"), {
+    status: 403,
+  });
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    createTaskError: forbidden,
+  });
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(dialog.textContent).toContain(AGENT_TRIGGER_SHARED_DENIED);
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
 });
 
 test("a listed GitHub connection's row also offers Opengeni's own GitHub tools", async () => {

@@ -96,7 +96,9 @@ export function fakeAgentsClient(
     /** Workspace Skills by stable key. */
     skills?: string[];
     /** Event sources automations listen to. */
-    eventSources?: { id: string; name: string }[];
+    eventSources?: { id: string; name: string; kind?: string; status?: string }[];
+    /** Makes createScheduledTask fail with this error. */
+    createTaskError?: unknown;
   } = {},
 ) {
   const agents = new Map(initial.map((agent) => [agent.id, agent]));
@@ -210,6 +212,24 @@ export function fakeAgentsClient(
     async listEventSources(workspaceId: string) {
       calls.push(["listEventSources", workspaceId]);
       return options.eventSources ?? [];
+    },
+    async listReadyEventSources(workspaceId: string) {
+      calls.push(["listReadyEventSources", workspaceId]);
+      return [];
+    },
+    async listEventSourceTypes(workspaceId: string, sourceId: string) {
+      calls.push(["listEventSourceTypes", workspaceId, sourceId]);
+      return [];
+    },
+    async createScheduledTask(workspaceId: string, request: Record<string, unknown>) {
+      calls.push(["createScheduledTask", workspaceId, request]);
+      if (options.createTaskError) throw options.createTaskError;
+      return {
+        id: uuid(),
+        status: "active",
+        ...request,
+        events: request.events ?? null,
+      };
     },
     async listCapabilities(workspaceId: string) {
       calls.push(["listCapabilities", workspaceId]);

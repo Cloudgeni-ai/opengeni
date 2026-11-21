@@ -667,9 +667,12 @@ the chain limit on event-started chats, the storm guard (`maxRunsPerHour`)
 and usage limits. Saving checks the agent is one the owner can use, for the
 automation as it will be after the edit (agent, run mode and visibility),
 and that each run starts a new chat (an `existing_session` or
-`reusable_session` task with an agent is refused). The automation form takes `?agent=<id>` (and `?agentTrigger=<n>`
-for a ready-made agent's suggestion) and binds the new automation to the
-agent. A ready-made agent's suggested triggers are never created on their
+`reusable_session` task with an agent is refused). The agent page's **Add
+trigger** and **Set up** open a small dialog that saves such an automation
+directly, shared like the agent (see `docs/agents.md`). The automation form
+takes `?agent=<id>` (and `?agentTrigger=<n>` for a ready-made agent's
+suggestion) and binds the new automation to the agent; the dialog's **Open
+full form** opens it. A ready-made agent's suggested triggers are never created on their
 own: each waits until the person picks its source and saves.
 
 ## Templates
