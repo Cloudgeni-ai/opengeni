@@ -1309,6 +1309,57 @@ test("multi-file apps travel in packages with their files and keep their provena
   expect(bad.status).toBe(422);
 }, 120_000);
 
+test("upgrades check asset files and an app's own package id first; export measures files before reading them", async () => {
+  const f = await fixture();
+  const own = await buildBoard(f, { sql: false });
+  const pkg = (await f.exportApp(own)).json.package as AppPackage;
+
+  // An app made here is compared by the id its exports carry.
+  const other = { ...structuredClone(pkg), packageId: crypto.randomUUID() };
+  const planned = await upgrade(f, own, { package: other, dryRun: true });
+  expect(planned.status, planned.text).toBe(200);
+  expect(planned.json.plan.package).toEqual({ id: other.packageId, current: pkg.packageId });
+  expect(planned.json.plan.destructive).toEqual([
+    { part: "package", reason: "This package is from a different app" },
+  ]);
+
+  // A bad asset file is a conflict in the plan, and nothing runs.
+  const broken = structuredClone(pkg) as any;
+  broken.data.collections.push({ name: "extra", accessMode: "shared" });
+  broken.app.assets = { files: [{ path: "../escape.js", base64: b64("x") }] };
+  const dry = await upgrade(f, own, { package: broken, dryRun: true });
+  expect(dry.status, dry.text).toBe(200);
+  expect(dry.json.plan.conflicts).toEqual([
+    expect.objectContaining({ part: "version", name: "assets" }),
+  ]);
+  const applied = await upgrade(f, own, { package: broken, idempotencyKey: crypto.randomUUID() });
+  expect(applied.status, applied.text).toBe(409);
+  const data = await f.call(f.author, "GET", `${f.appBase(f.source.id, own)}/data`);
+  expect(data.json.collections.map((c: any) => c.name)).not.toContain("extra");
+
+  // Files too large for a package are refused from the manifest, before any is read.
+  const huge = (n: number) => ({
+    path: `assets/big-${n}.js`,
+    sha256: String(n).repeat(64),
+    sizeBytes: 9_500_000,
+  });
+  // Version history is immutable to the app; the admin skips that trigger to fake big files.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update workspace_artifact_versions set asset_manifest = ${tx.json({
+      token: "t".repeat(22),
+      files: [huge(1), huge(2)],
+    })} where artifact_id = ${own}`;
+  });
+  const tooBig = await f.exportApp(own);
+  expect(tooBig.status, tooBig.text).toBe(413);
+  expect(tooBig.json.error.message).toContain("over 24 MB");
+
+  // Install takes no more than export makes.
+  const padded = { ...structuredClone(pkg), padding: "x".repeat(24 * 1024 * 1024) };
+  expect((await f.install({ package: padded })).status).toBe(413);
+}, 120_000);
+
 test("stored export files are recorded and swept after they expire", async () => {
   const f = await fixture();
   const appId = await buildBoard(f, { sql: false });

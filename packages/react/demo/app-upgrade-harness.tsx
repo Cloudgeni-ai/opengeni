@@ -48,8 +48,7 @@ const plans: Record<string, AppPackageUpgradePlan> = {
     destructive: [
       {
         part: "package",
-        reason:
-          "This package is a different app's, not a newer version of the one this app came from",
+        reason: "This package is from a different app",
       },
     ],
   },

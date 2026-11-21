@@ -36,11 +36,11 @@ import {
   requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import { connectorToolIdentity, readSiteToolAccountInventory } from "../site-tool-routing";
-import { storeSiteAssetFiles } from "../site-assets";
+import { decodeSiteAssetFiles, storeSiteAssetFiles, type DecodedSiteAssets } from "../site-assets";
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
-import { AppPackageError, jsonBytes, reason } from "./service";
+import { AppPackageError, jsonBytes, ownPackageId, reason } from "./service";
 import { appSyncHooks, syncName } from "./syncs";
 
 /**
@@ -94,6 +94,8 @@ type Prepared = {
   migrations: AppPackage["sql"]["migrations"];
   queries: AppPackage["sql"]["queries"];
   sqlEnabled: boolean;
+  /** The package's asset files, checked; null without any (or when they're invalid). */
+  assets: DecodedSiteAssets | null;
 };
 
 /** A version's asset files for comparing: path and content, by path. */
@@ -150,8 +152,11 @@ async function prepare(
 ): Promise<Prepared> {
   if (!deps.objectStorage)
     throw new AppPackageError("unavailable", "File storage isn't configured");
-  if (jsonBytes(raw) > APP_PACKAGE_MAX_BYTES + 1024 * 1024)
-    throw new AppPackageError("too_large", "This package is too large");
+  if (jsonBytes(raw) > APP_PACKAGE_MAX_BYTES)
+    throw new AppPackageError(
+      "too_large",
+      `This package is over ${APP_PACKAGE_MAX_BYTES / (1024 * 1024)} MB`,
+    );
   const { package: pkg, problems } = parseAppPackage(raw);
   const viewer = await siteViewerForGrant(deps.db, grant);
   const [artifact, ref] = await Promise.all([
@@ -201,24 +206,26 @@ async function prepare(
   }
   const added = pkg.tools.filter((tool) => !present.has(toolKey(tool)));
   const toolsChanged = added.length > 0 || removed.length > 0;
+  // The asset files, checked now: a bad one stops the upgrade before
+  // anything runs (and a dry run shows it).
+  let decodedAssets: DecodedSiteAssets | null = null;
+  if (pkg.app.assets)
+    try {
+      decodedAssets = decodeSiteAssetFiles(pkg.app.assets);
+    } catch (error) {
+      if (!(error instanceof WorkspaceArtifactOperationError)) throw error;
+      conflicts.push({ part: "version", name: "assets", reason: error.message });
+    }
   const assets =
-    assetIdentity(ref.assetManifest?.files ?? []) !==
-    assetIdentity(
-      (pkg.app.assets?.files ?? []).map((file) => ({
-        path: file.path,
-        sha256: createHash("sha256").update(Buffer.from(file.base64, "base64")).digest("hex"),
-      })),
-    );
+    assetIdentity(ref.assetManifest?.files ?? []) !== assetIdentity(decodedAssets?.decoded ?? []);
 
-  // Provenance: a package of another app is confirmed like a destructive
-  // change. Unknown on either side (older packages and copies) isn't checked.
-  const currentPackageId = await getAppPackageId(deps.db, grant.workspaceId, appId);
-  if (pkg.packageId && currentPackageId && pkg.packageId !== currentPackageId)
-    destructive.push({
-      part: "package",
-      reason:
-        "This package is a different app's, not a newer version of the one this app came from",
-    });
+  // Provenance: another app's package is confirmed like a destructive
+  // change. An app made here has the id its exports carry; a package
+  // without one isn't checked.
+  const currentPackageId =
+    (await getAppPackageId(deps.db, grant.workspaceId, appId)) ?? ownPackageId(appId);
+  if (pkg.packageId && pkg.packageId !== currentPackageId)
+    destructive.push({ part: "package", reason: "This package is from a different app" });
 
   // Collections: added, changed or unchanged; the app's others are kept.
   const existingCollections = new Map(data.collections.map((entry) => [entry.name, entry]));
@@ -397,6 +404,7 @@ async function prepare(
     migrations,
     queries,
     sqlEnabled: sql.enabled,
+    assets: decodedAssets,
   };
 }
 
@@ -685,7 +693,11 @@ async function publishVersion(
   });
   // A multi-file build's files; the new version gets its own token.
   const assetManifest = prepared.pkg.app.assets
-    ? await storeSiteAssetFiles(deps.objectStorage!, grant.workspaceId, prepared.pkg.app.assets)
+    ? await storeSiteAssetFiles(
+        deps.objectStorage!,
+        grant.workspaceId,
+        prepared.assets ?? prepared.pkg.app.assets,
+      )
     : null;
   const result = await publishWorkspaceArtifactVersion(deps.db, {
     accountId: grant.accountId,

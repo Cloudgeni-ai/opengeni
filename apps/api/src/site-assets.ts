@@ -68,17 +68,18 @@ export async function storeSiteAssetBundle(
   return await storeSiteAssetFiles(storage, workspaceId, bundle);
 }
 
+/** A bundle's files, checked and decoded. */
+export type DecodedSiteAssets = {
+  decoded: Array<{ path: string; bytes: Buffer; sha256: string }>;
+};
+
 /**
- * Validate a parsed bundle and store its files (an upload, or the asset
- * files an app package carries). The manifest gets a fresh token.
+ * A bundle's files checked and decoded, nothing stored (paths, no HTML, no
+ * repeats, base64, sizes). Throws the same refusals as an upload.
  */
-export async function storeSiteAssetFiles(
-  storage: Storage,
-  workspaceId: string,
-  bundle: SiteAssetBundle,
-): Promise<SiteAssetManifest> {
+export function decodeSiteAssetFiles(bundle: SiteAssetBundle): DecodedSiteAssets {
   const seen = new Set<string>();
-  const decoded: Array<{ path: string; bytes: Buffer; sha256: string }> = [];
+  const decoded: DecodedSiteAssets["decoded"] = [];
   let total = 0;
   for (const file of bundle.files) {
     if (/\.html?$/iu.test(file.path))
@@ -107,6 +108,20 @@ export async function storeSiteAssetFiles(
       sha256: createHash("sha256").update(content).digest("hex"),
     });
   }
+  return { decoded };
+}
+
+/**
+ * Validate a parsed bundle (or take checked files) and store its files (an
+ * upload, or the asset files an app package carries). The manifest gets a
+ * fresh token.
+ */
+export async function storeSiteAssetFiles(
+  storage: Storage,
+  workspaceId: string,
+  bundle: SiteAssetBundle | DecodedSiteAssets,
+): Promise<SiteAssetManifest> {
+  const { decoded } = "decoded" in bundle ? bundle : decodeSiteAssetFiles(bundle);
   // Store each distinct content once; a file already there is the same bytes.
   const unique = new Map(decoded.map((file) => [file.sha256, file]));
   const pending = [...unique.values()];

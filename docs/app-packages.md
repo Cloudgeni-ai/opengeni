@@ -46,7 +46,10 @@ files are invalid: its HTML loads them, so the copy would be broken. An
 invalid `packageId` is ignored.
 
 Asset files count toward the 24 MiB package limit with their base64 size,
-before demo data; an app whose files don't fit is refused with 413.
+before demo data; export checks this from the version's manifest before it
+reads any file, and refuses an app whose files don't fit with 413. Install
+and upgrade refuse a package over the same 24 MiB, so every installed copy
+can be exported again.
 
 ## Export
 
@@ -134,9 +137,12 @@ title, sharing and publication stay), and runs only what is new. The plan:
 
 Rules:
 
-- **Another app's package** (both ids known and different) is listed in
-  `destructive` and needs `allowDestructive`, like other risky changes; the
-  409 names it. After an applied upgrade the app comes from the package.
+- **Another app's package** (its `packageId` differs from the app's) is
+  listed in `destructive` and needs `allowDestructive`, like other risky
+  changes; the 409 names it. After an applied upgrade the app comes from the
+  package.
+- **Asset files are checked first.** An invalid file is a conflict in the
+  plan (a dry run shows it), so nothing runs.
 - **Nothing is deleted.** Collections and syncs missing from the package are
   kept and listed. Records, rows and files stay.
 - **Destructive changes need `allowDestructive: true`.** New migrations whose
@@ -172,11 +178,13 @@ Rules:
 
 `workspace_artifacts.package_id` (migration 1545) records the package an app
 was installed or last upgraded from. Export writes it as `packageId`; an app
-made here exports a fixed id derived from its own id (a version 8 UUID), so
-every export of one app, and of every copy installed from it, carries the
-same id. Upgrade compares it (see the rule above). Apps installed before 1545
-and older packages have none, and aren't checked. The console shows nothing
-new; the ids are in the install and upgrade responses.
+made here exports, and is compared by, a fixed id derived from its own id (a
+version 8 UUID), so every export of one app, and of every copy installed from
+it, carries the same id. Upgrade compares it (see the rule above); packages
+without one aren't checked. The id is a claim the package makes, not a
+signature: it guards against mistakes, not a crafted package. A duplicated
+app starts without one. The ids are in the install and upgrade responses; in
+the console, another app's package shows as a note to confirm.
 
 ## Syncs
 

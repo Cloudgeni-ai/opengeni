@@ -620,7 +620,8 @@ export async function clearAppSyncKeys(
 /**
  * For an event run: whose event sources fired it. `workspaceWide` when any
  * of its triggers is on a workspace source; otherwise `owners` are the
- * people whose own (private) sources fired it. Null for any other run.
+ * people whose own (private) sources fired it, none when they no longer
+ * exist. Null for any other run.
  */
 export async function appSyncRunEventSources(
   db: Database,
@@ -628,14 +629,20 @@ export async function appSyncRunEventSources(
   runId: string,
 ): Promise<{ workspaceWide: boolean; owners: string[] } | null> {
   return await withWorkspaceRls(db, workspaceId, async (tx) => {
-    // The sources the run's events came from, as its occurrence recorded them
-    // (a personal sync's trigger also hears its subscribers' own sources, so
-    // the triggers' sources can name the wrong person). An occurrence that
-    // recorded none falls back to its triggers' sources.
-    const rows = await rawRows<{ visibility: string; owner_subject_id: string | null }>(
+    // The sources the run's events came from: every event batched into its
+    // occurrence (the occurrence carries at most 50), since a personal sync's
+    // trigger also hears its subscribers' own sources and the triggers'
+    // sources can name the wrong person. An occurrence without any falls
+    // back to its triggers' sources.
+    const rows = await rawRows<{
+      kind: "occurrence" | "source";
+      visibility: string | null;
+      owner_subject_id: string | null;
+    }>(
       tx,
       sql`with occurrence as (
-            select occurrence.workspace_id, occurrence.events, occurrence.trigger_ids
+            select occurrence.id, occurrence.workspace_id, occurrence.task_id, occurrence.events,
+              occurrence.trigger_ids
             from scheduled_task_runs run
             join scheduled_task_event_occurrences occurrence
               on occurrence.workspace_id = run.workspace_id and occurrence.task_id = run.task_id
@@ -643,7 +650,15 @@ export async function appSyncRunEventSources(
             where run.workspace_id = ${workspaceId}::uuid and run.id = ${runId}::uuid
               and run.trigger_type = 'event'
           ), fired as (
-            select distinct (summary ->> 'sourceId')::uuid as source_id
+            select inbound.source_id
+            from occurrence
+            join scheduled_task_event_inbox inbox
+              on inbox.workspace_id = occurrence.workspace_id and inbox.task_id = occurrence.task_id
+              and inbox.occurrence_id = occurrence.id
+            join inbound_events inbound
+              on inbound.workspace_id = inbox.workspace_id and inbound.id = inbox.event_id
+            union
+            select (summary ->> 'sourceId')::uuid
             from occurrence, jsonb_array_elements(
               case when jsonb_typeof(occurrence.events) = 'array' then occurrence.events
                 else '[]'::jsonb end) summary
@@ -657,15 +672,18 @@ export async function appSyncRunEventSources(
               and trigger.id = any(occurrence.trigger_ids)
             where not exists (select 1 from fired)
           )
-          select source.visibility, source.owner_subject_id
+          select 'occurrence' as kind, null as visibility, null as owner_subject_id from occurrence
+          union all
+          select 'source', source.visibility, source.owner_subject_id
           from heard
           join event_sources source
             on source.workspace_id = ${workspaceId}::uuid and source.id = heard.source_id`,
     );
-    if (rows.length === 0) return null;
+    if (!rows.some((row) => row.kind === "occurrence")) return null;
     const owners = new Set<string>();
     let workspaceWide = false;
     for (const row of rows) {
+      if (row.kind !== "source") continue;
       if (row.visibility === "workspace" || row.owner_subject_id === null) workspaceWide = true;
       else owners.add(row.owner_subject_id);
     }

@@ -27,7 +27,7 @@ import { requiresSignIn, siteCaller, type SiteContext } from "./site-context";
 /**
  * The shell's chrome (footer, connect and join cards, the join confirmation,
  * the human check) follows the viewer's system light or dark setting. The
- * App's own frame keeps its own colors.
+ * app's own frame keeps its own colors.
  */
 const SHELL_COLORS =
   ":root{color-scheme:light dark;--og-bg:#fff;--og-bar:#f6f6f6;--og-line:#e3e3e3;--og-text:#111;--og-muted:#666;--og-note:#555;--og-sub:#444;--og-card:#fff;--og-hover:#f2f2f2;--og-field:#d6d6d6;--og-strong:#111;--og-strong-text:#fff;--og-strong-hover:#333;--og-preview:#7a4b00;--og-preview-bar:#fff4dc;--og-preview-line:#f0d9a8;--og-error:#b42318;--og-shadow:rgba(0,0,0,.14);--og-scrim:rgba(0,0,0,.45)}" +

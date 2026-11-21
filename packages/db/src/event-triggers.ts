@@ -1689,6 +1689,8 @@ type DispatchFacts = {
   consumed_since_armed: boolean;
   recent_occurrences: number;
   oldest_recent_occurrence_at: Date | string | null;
+  task_owner: string | null;
+  sync_owner: string | null;
 };
 
 function byteLength(value: unknown): number {
@@ -1730,6 +1732,7 @@ export async function claimEventTriggerDispatch(
         sql`select task.account_id, task.status as task_status,
             task.deleted_at is not null as task_deleted, task.name as task_name,
             task.authority_revision, task.execution_digest,
+            task.owner_subject_id as task_owner, task.action ->> 'ownerSubjectId' as sync_owner,
             coalesce((select run.error = 'chain_limit' and run.admission_refusal is not null
               from scheduled_task_runs run
               where run.workspace_id = task.workspace_id and run.task_id = task.id
@@ -1828,6 +1831,8 @@ export async function claimEventTriggerDispatch(
             chainDepth: schema.inboundEvents.chainDepth,
           },
           sourceKind: schema.eventSources.kind,
+          sourceVisibility: schema.eventSources.visibility,
+          sourceOwner: schema.eventSources.ownerSubjectId,
         })
         .from(schema.scheduledTaskEventInbox)
         .innerJoin(
@@ -1917,16 +1922,28 @@ export async function claimEventTriggerDispatch(
       let summaryBytes = 2;
       for (const entry of pending) {
         if (carried.length >= EVENT_OCCURRENCE_CARRIED_EVENTS_MAX) break;
+        // Another person's private source (a personal sync's subscriber):
+        // the run history, which the automation's readers see, keeps only
+        // which event it was, never its content.
+        const othersPrivate =
+          entry.sourceVisibility === "private" &&
+          entry.sourceOwner !== null &&
+          entry.sourceOwner !== facts.task_owner &&
+          entry.sourceOwner !== facts.sync_owner;
         const summary = InboundEventSummary.parse({
           id: entry.event.id,
           sourceId: entry.event.sourceId,
           sourceKind: entry.sourceKind,
           type: entry.event.type,
           occurredAt: entry.event.occurredAt.toISOString(),
-          subject: entry.event.subject,
-          summary: entry.event.summary,
-          url: entry.event.url,
-          actor: { kind: entry.event.actorKind, name: entry.event.actorName },
+          ...(othersPrivate
+            ? { subject: null, summary: "", url: null, actor: { kind: "unknown", name: null } }
+            : {
+                subject: entry.event.subject,
+                summary: entry.event.summary,
+                url: entry.event.url,
+                actor: { kind: entry.event.actorKind, name: entry.event.actorName },
+              }),
         });
         const size = byteLength(summary) + 1;
         if (summaryBytes + size > EVENT_OCCURRENCE_SUMMARIES_MAX_BYTES) break;

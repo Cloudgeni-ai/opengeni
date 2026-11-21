@@ -28,8 +28,28 @@ export const PERSONAL_SYNC_SUBSCRIBER_SOURCE_KINDS = ["gmail", "github_personal"
  * only for the person whose source fired (appSyncRunEventSources).
  */
 export function triggerHearsSource(firedSourceId: SQL, options: { activeOnly?: boolean } = {}) {
-  const kinds = sql.raw(PERSONAL_SYNC_SUBSCRIBER_SOURCE_KINDS.map((kind) => `'${kind}'`).join(", "));
-  return sql`((trigger.source_id = ${firedSourceId}
+  const kinds = sql.raw(
+    PERSONAL_SYNC_SUBSCRIBER_SOURCE_KINDS.map((kind) => `'${kind}'`).join(", "),
+  );
+  // The sources such a trigger can name, first, so the lookup stays on the
+  // (workspace_id, source_id) index: the fired one, and the same kind of
+  // private source of each owner of a sync the fired source's owner joined.
+  return sql`(trigger.source_id in (
+      select ${firedSourceId}
+      union all
+      select owned.id from event_sources fired
+      join app_sync_subscriptions subscriber
+        on subscriber.workspace_id = fired.workspace_id
+        and subscriber.subject_id = fired.owner_subject_id
+      join scheduled_tasks synced
+        on synced.workspace_id = subscriber.workspace_id and synced.id = subscriber.task_id
+      join event_sources owned
+        on owned.workspace_id = fired.workspace_id and owned.kind = fired.kind
+        and owned.visibility = 'private'
+        and owned.owner_subject_id = synced.action ->> 'ownerSubjectId'
+      where fired.id = ${firedSourceId}
+        and fired.kind in (${kinds}) and fired.visibility = 'private')
+    and ((trigger.source_id = ${firedSourceId}
       ${options.activeOnly ? sql`and source.status = 'active'` : sql``}
       and ${AUTOMATION_HEARS_SOURCE})
     or (trigger.source_id <> ${firedSourceId}
@@ -43,7 +63,7 @@ export function triggerHearsSource(firedSourceId: SQL, options: { activeOnly?: b
           and subscriber.subject_id = fired.owner_subject_id
         where fired.workspace_id = trigger.workspace_id and fired.id = ${firedSourceId}
           and fired.kind = source.kind and fired.visibility = 'private'
-          and fired.status = 'active')))`;
+          and fired.status = 'active'))))`;
 }
 
 /**

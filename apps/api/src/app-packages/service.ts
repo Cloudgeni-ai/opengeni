@@ -179,9 +179,6 @@ export async function exportAppPackage(
   const data = await describeSiteData(deps, grant, appId);
   const sql = await describeSiteSql(deps, grant, appId);
   const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
-  const assets = ref.assetManifest
-    ? await readSiteAssetBundle(deps.objectStorage, grant.workspaceId, ref.assetManifest)
-    : null;
   const notExported: AppPackageProblem[] = [];
 
   let syncs: AppPackage["syncs"] = [];
@@ -203,7 +200,6 @@ export async function exportAppPackage(
       html: content.html,
       // An HTML-only app has no retained source of its own.
       ...(ref.sourceKey ? { source: content.source } : {}),
-      ...(assets ? { assets } : {}),
     },
     tools: await portableTools(deps, grant, content.requestedTools, notExported),
     data: {
@@ -230,6 +226,19 @@ export async function exportAppPackage(
     syncs,
     ...(sidebar.length > 0 ? { sidebar } : {}),
   };
+  // A multi-file build's files, measured from the manifest before any is read.
+  if (ref.assetManifest) {
+    const encoded = ref.assetManifest.files.reduce(
+      (total, file) => total + Math.ceil(file.sizeBytes / 3) * 4 + file.path.length + 24,
+      0,
+    );
+    if (jsonBytes(pkg) + encoded > APP_PACKAGE_MAX_BYTES) throw tooLarge();
+    pkg.app.assets = await readSiteAssetBundle(
+      deps.objectStorage,
+      grant.workspaceId,
+      ref.assetManifest,
+    );
+  }
 
   const demo = await exportDemoData(deps, grant, appId, request.demoData, {
     collections: data.collections.map((collection) => ({
@@ -247,14 +256,16 @@ export async function exportAppPackage(
       delete pkg.demoData;
       notExported.push({ part: "demo_data", reason: "The package would be too large with it" });
     }
-    if (jsonBytes(pkg) > APP_PACKAGE_MAX_BYTES)
-      throw new AppPackageError(
-        "too_large",
-        `This app is larger than ${APP_PACKAGE_MAX_BYTES / (1024 * 1024)} MB, too large for a package`,
-      );
+    if (jsonBytes(pkg) > APP_PACKAGE_MAX_BYTES) throw tooLarge();
   }
   return { package: pkg, filename: appPackageFilename(artifact.title), notExported };
 }
+
+const tooLarge = () =>
+  new AppPackageError(
+    "too_large",
+    `The package would be over ${APP_PACKAGE_MAX_BYTES / (1024 * 1024)} MB (the app's files and definitions together)`,
+  );
 
 /**
  * The package id of an app made here: derived from its id, so every export
@@ -576,8 +587,11 @@ export async function installAppPackage(
 ): Promise<AppPackageInstallResponse> {
   if (!deps.objectStorage)
     throw new AppPackageError("unavailable", "File storage isn't configured");
-  if (jsonBytes(input.package) > APP_PACKAGE_MAX_BYTES + 1024 * 1024)
-    throw new AppPackageError("too_large", "This package is too large");
+  if (jsonBytes(input.package) > APP_PACKAGE_MAX_BYTES)
+    throw new AppPackageError(
+      "too_large",
+      `This package is over ${APP_PACKAGE_MAX_BYTES / (1024 * 1024)} MB`,
+    );
   const { package: pkg, problems } = parseAppPackage(input.package);
   const notInstalled: AppPackageProblem[] = [...problems];
   const installed: AppPackageInstallResponse["installed"] = {

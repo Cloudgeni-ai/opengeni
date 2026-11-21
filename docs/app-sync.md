@@ -51,12 +51,20 @@ in the automation's run history with its status, error and a `syncSummary`
   opted in to that sync, so each subscriber's own mail or pull requests start
   it for them (`triggerHearsSource` in `event-trigger-listening.ts`). Their
   source's feed is read while they are opted in (opting in wakes it); it stops
-  when they opt out. A shared sync never hears a subscriber's source.
+  when they opt out. A shared sync never hears a subscriber's source. The
+  owner's trigger conditions decide which of their events start it. It keeps
+  doing so while the owner's own source is disabled: that only stops the
+  owner's events.
 - A personal sync's run started only by private sources runs only for those
-  sources' owners (who must be opted in), read from the sources its
-  occurrence recorded for its events; a run any workspace source started runs
-  for everyone opted in. Chain limit, storm guard and usage limits apply as
-  for any event-triggered automation.
+  sources' owners (who must be opted in), read from every event batched into
+  its occurrence. When none of those sources exists any more, it runs for
+  nobody. A run any workspace source started runs for everyone opted in.
+- A subscriber's event is stored on the run with only its id, source, type
+  and time: the run history, which the sync's managers see, never shows
+  another person's mail or pull requests.
+- Chain limit, storm guard and usage limits apply as for any event-triggered
+  automation, per sync: every subscriber shares its runs per hour, so one
+  busy mailbox can delay the others' runs.
 
 ### Shared and personal syncs
 
