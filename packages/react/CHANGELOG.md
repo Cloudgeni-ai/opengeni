@@ -1,5 +1,33 @@
 # @opengeni/react
 
+## 6.35.0
+
+### Minor Changes
+
+- 5fe41ba: Agents gain a lean setup page: Starts when (automations that start a chat with the agent), Can use (Allow, Ask first or Block per connector and tool, for every connection type), Learns (Memory entries you can edit or remove), Who can use and a short Skills list. Agents carry new `toolPermissions`, `skills` and `templateKey` fields, scheduled tasks accept `agentConfig.agentId`, and the SDK adds `listAgentTemplates` and `createAgentFromTemplate` for the ready-made agents in the "Add an agent" gallery. Agents can start a chat with another agent by name or id through `session_create`'s `agentName` parameter. Existing fields and requests are unchanged.
+- 7eda7f0: App data changes start automations and reach workspace webhooks: the `app.record.added`, `app.record.changed`, `app.record.removed` and `app.sql.changed` event types join the "This workspace" trigger source and the workspace webhook types, and `verifyWebhookEvent` accepts them. See docs/site-data.md.
+- 7eda7f0: Apps show a platform connect card to members who still have to connect or reconnect a tool the app declares, in the console and on published apps. Apps can read and drive it with `site.connections` (`status`, `connect`, `showCard`, `onChange`) from `@opengeni/sdk/site`.
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+- e7eb28c: Sites are now called apps in user-facing text, and the first-party `site_*` tools are `app_*` (for example `app_data_query` and `app_publication_update`). The old `site_*` names keep working everywhere a tool is called or selected, but are no longer listed. `FirstPartyMcpToolName` gains the `app_*` names; SDK methods, routes and field names are unchanged.
+- 5c3c4e6: Chats show who they wait on (`Session.waitingOn`) and their Linked items with live status (`listSessionLinks`, `addSessionLink`, `removeSessionLink`, and the `session.waiting_on.changed` and `session.links.changed` events). The workbench Changes tab now draws its own collapsible header per file for every embedder (an additive visual change; no props change), and accepts optional `pullRequest` and `onOpenPullRequest` props for View on GitHub and Open PR; without them the summary bar is unchanged.
+- 8bf1ec2: Customizable sidebar: a workspace default of groups, App links (optionally to an App page), https links and live lists (pinned or recent Apps) that admins set, with each person's own changes on top (add, hide, reorder, reset). New `GET`/`PATCH /v1/workspaces/:workspaceId/sidebar-layout`, `client.getSidebarLayout` and `client.updateSidebarLayout`, and the `sidebar_layout_get`/`sidebar_layout_update` agent tools. Apps opened from the sidebar are pages: they fill the main area with their address in the URL, follow Opengeni's light or dark theme, and stay open when you switch away. Apps can opt into Opengeni's look with `<link rel="stylesheet" href="/__opengeni/ui.css">` (`@opengeni/sdk/site-ui`). Older clients ignore item types they don't know.
+
+### Patch Changes
+
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [e7eb28c]
+- Updated dependencies [5c3c4e6]
+- Updated dependencies [8bf1ec2]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/sdk@6.35.0
+  - @opengeni/connect@6.35.0
+
 ## 6.34.0
 
 ### Minor Changes

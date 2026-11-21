@@ -1,5 +1,31 @@
 # @opengeni/db
 
+## 6.35.0
+
+### Minor Changes
+
+- 7eda7f0: App data changes start automations and reach workspace webhooks: the `app.record.added`, `app.record.changed`, `app.record.removed` and `app.sql.changed` event types join the "This workspace" trigger source and the workspace webhook types, and `verifyWebhookEvent` accepts them. See docs/site-data.md.
+
+### Patch Changes
+
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+- c36504f: Organization usage reads and the Codex Apps refresh now record the plan a refreshed token reports. These three refreshes still wrote the connection row themselves and dropped the plan, so an organization-managed connection whose ChatGPT plan changed kept showing the old one. Migration 1515 adds one refresh write that every refresh path now uses. It stores the credential, compares and swaps the refresh generation, and records the plan (a token that reports none keeps the recorded plan). When the plan changes, it also clears the connection's model cooldowns. The write runs with the caller's own rights, so organization administrators are admitted by the same policy as before.
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [8bf1ec2]
+- Updated dependencies [227502b]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/codemode@6.35.0
+  - @opengeni/xai-subscription@6.35.0
+  - @opengeni/codex@6.35.0
+  - @opengeni/config@6.35.0
+  - @opengeni/observability@6.35.0
+  - @opengeni/network@6.35.0
+  - @opengeni/subscriptions@6.35.0
+
 ## 6.34.0
 
 ### Patch Changes
