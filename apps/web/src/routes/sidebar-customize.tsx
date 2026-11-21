@@ -16,10 +16,8 @@ import { useRouter } from "@tanstack/react-router";
 import {
   useEffect,
   useMemo,
-  useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
@@ -30,11 +28,7 @@ import type {
   SidebarLiveListKind,
 } from "@opengeni/sdk";
 import { agentInitialsAvatar } from "@opengeni/contracts";
-import {
-  isSidebarAppPath,
-  isSidebarExternalUrl,
-  SIDEBAR_LABEL_MAX_CHARS,
-} from "@opengeni/contracts/sidebar-layout";
+import { isSidebarAppPath, isSidebarExternalUrl } from "@opengeni/contracts/sidebar-layout";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { Button } from "@opengeni/react/ui/button";
@@ -55,6 +49,9 @@ import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
 import { pathHasAppPage } from "@/lib/onboarding-return";
+import { RenameField } from "@/components/sidebar-layout/rename-field";
+
+export { RenameField };
 
 type Scope = "personal" | "workspace";
 type AddKind = "app" | "agent" | "link" | "group" | "live_list";
@@ -106,58 +103,6 @@ function itemDetail(item: ResolvedSidebarItem): string | null {
   if (item.type === "link") return item.url.replace(/^https:\/\//u, "");
   if (item.type === "live_list") return `Up to ${item.limit}`;
   return null;
-}
-
-/** A group's name, edited in place: Enter or leaving the field saves, Escape cancels. */
-export function RenameField({
-  label,
-  onSave,
-  onDone,
-}: {
-  label: string;
-  onSave: (label: string) => void;
-  onDone: () => void;
-}) {
-  const [value, setValue] = useState(label);
-  const input = useRef<HTMLInputElement>(null);
-  // The menu that opened it hands focus back to its button as it closes;
-  // take it after that.
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      input.current?.focus();
-      input.current?.select();
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-  // Enter saves and closes the field; the blur that may follow must not save again.
-  const finished = useRef(false);
-  const finish = (next: string | null) => {
-    if (finished.current) return;
-    finished.current = true;
-    if (next && next !== label) onSave(next);
-    onDone();
-  };
-  const save = () => finish(value.trim());
-  return (
-    <TextInput
-      ref={input}
-      aria-label="Group name"
-      value={value}
-      maxLength={SIDEBAR_LABEL_MAX_CHARS}
-      onChange={(event) => setValue(event.target.value)}
-      onBlur={save}
-      onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          save();
-        } else if (event.key === "Escape") {
-          event.preventDefault();
-          finish(null);
-        }
-      }}
-      className="h-8"
-    />
-  );
 }
 
 function ItemRow({

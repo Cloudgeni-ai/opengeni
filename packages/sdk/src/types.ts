@@ -9003,6 +9003,8 @@ export type UpdateScheduledTaskRequest = {
         prompt?: string | undefined;
         model?: string | undefined;
         reasoningEffort?: ReasoningEffort | undefined;
+        /** The agent each run's chat is with; null runs without one. */
+        agentId?: string | null | undefined;
       }
     | undefined;
   status?: ScheduledTaskStatus | undefined;

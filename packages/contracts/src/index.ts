@@ -15078,10 +15078,12 @@ export const UpdateScheduledTaskRequest =
             prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
             model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
             reasoningEffort: ReasoningEffort.optional(),
+            /** The agent each run's chat is with; null runs without one. */
+            agentId: primitives.uuid.nullable().optional(),
           })
           .strict()
           .refine((patch) => Object.keys(patch).length > 0, {
-            message: "agentConfigPatch requires prompt, model or reasoningEffort",
+            message: "agentConfigPatch requires prompt, model, reasoningEffort or agentId",
           })
           .optional(),
         status: ScheduledTaskStatus.optional(),

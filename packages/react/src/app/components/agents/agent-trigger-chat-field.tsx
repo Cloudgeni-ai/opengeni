@@ -5,7 +5,7 @@
  * started with this agent are offered; a failed read says so.
  */
 import { useEffect, useRef, useState } from "react";
-import type { Agent } from "@opengeni/sdk";
+import type { Agent, AgentChat } from "@opengeni/sdk";
 
 import { userErrorText } from "../../../ui/api-error";
 import { Field, FieldStack } from "../../../ui/field";
@@ -14,7 +14,6 @@ import { useAppContext } from "../../app-context";
 import { listAgentChats } from "../../lib/agent-chats";
 import type { AgentTriggerChat } from "./agent-trigger-model";
 
-type AgentChat = { id: string; title?: string | null | undefined };
 type AgentChats =
   | { status: "loading" }
   | { status: "ready"; chats: AgentChat[] }
@@ -78,7 +77,7 @@ export function AgentTriggerChatField({
           <SelectMenu
             variant={(chats?.length ?? 0) > 8 ? "combobox" : "menu"}
             options={(chats ?? []).map((session) => ({
-              value: session.id,
+              value: session.sessionId,
               label: session.title?.trim() || "Untitled chat",
             }))}
             value={value.sessionId || null}

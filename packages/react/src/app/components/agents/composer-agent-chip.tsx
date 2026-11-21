@@ -40,6 +40,27 @@ export type ComposerAgentSelection =
 /** How many agents the menu lists; Browse agents opens the rest. */
 const LISTED = 8;
 
+/**
+ * The chip's selection for an agent id among the listed agents: null for
+ * Opengeni itself, loading while the list loads, an error when it isn't listed.
+ */
+export function composerAgentSelectionFor(
+  agentId: string | null | undefined,
+  agents: AgentSummary[] | undefined,
+  unavailable: { message: string; name?: string | undefined },
+): ComposerAgentSelection | null {
+  if (!agentId) return null;
+  const agent = agents?.find((entry) => entry.id === agentId);
+  if (agent) return { kind: "ready", id: agent.id, name: agent.name, avatar: agentAvatar(agent) };
+  if (agents === undefined) return { kind: "loading", id: agentId };
+  return {
+    kind: "error",
+    id: agentId,
+    message: unavailable.message,
+    ...(unavailable.name ? { name: unavailable.name } : {}),
+  };
+}
+
 export function ComposerAgentChip({
   workspaceId,
   agents,

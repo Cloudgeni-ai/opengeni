@@ -31,6 +31,7 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 import { appPageLocation, appPagePathname } from "./app-page-location";
 import { inAppLinkPath } from "./in-app-link";
+import { RenameField } from "./rename-field";
 import { useSidebarLayout } from "./use-sidebar-layout";
 
 const GROUPS_OPEN_KEY = "opengeni.rail.sidebar-groups";
@@ -54,9 +55,19 @@ type RowActions = {
   canChange: boolean;
 };
 
-function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowActions }) {
+function RowMenu({
+  item,
+  actions,
+  onRename,
+}: {
+  item: ResolvedSidebarItem;
+  actions: RowActions;
+  /** Your own group's Rename; the default's groups are renamed on the Sidebar page. */
+  onRename?: (() => void) | undefined;
+}) {
   const navigate = useNavigate();
   const rail = useRail();
+  const [renaming, setRenaming] = useState(false);
   const index = actions.siblings.indexOf(item.id);
   // Moves name the visible neighbour: the stored level may hold items this
   // person doesn't see, so an index could land elsewhere.
@@ -73,9 +84,30 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
           <MoreHorizontalIcon className="size-3.5" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="right" className="min-w-44">
+      <DropdownMenuContent
+        align="start"
+        side="right"
+        className="min-w-44"
+        onCloseAutoFocus={(event) => {
+          // Rename focuses its field instead.
+          if (renaming) {
+            event.preventDefault();
+            setRenaming(false);
+          }
+        }}
+      >
         {actions.canChange ? (
           <>
+            {onRename ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  setRenaming(true);
+                  onRename();
+                }}
+              >
+                Rename
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               disabled={previous === undefined}
               onSelect={() => actions.change([{ op: "move", itemId: item.id, beforeId: previous }])}
@@ -367,6 +399,52 @@ export function CustomizeRow() {
   );
 }
 
+/** A group's row: opens and closes it, and your own group renames in place. */
+export function GroupRow({
+  item,
+  open,
+  onToggle,
+  actions,
+}: {
+  item: ResolvedSidebarItem;
+  open: boolean;
+  onToggle: () => void;
+  actions: RowActions;
+}) {
+  const [renaming, setRenaming] = useState(false);
+  if (renaming)
+    return (
+      <div className="px-0.5 py-0.5">
+        <RenameField
+          label={item.label}
+          onSave={(label) => actions.change([{ op: "update", itemId: item.id, label }])}
+          onDone={() => setRenaming(false)}
+        />
+      </div>
+    );
+  return (
+    <div className="group/row relative">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={onToggle}
+        className={cn(ROW, "w-full pr-8 text-left")}
+      >
+        <ChevronRightIcon
+          aria-hidden="true"
+          className={cn("size-4 shrink-0 transition-transform", open && "rotate-90")}
+        />
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      </button>
+      <RowMenu
+        item={item}
+        actions={actions}
+        onRename={item.origin === "workspace" ? undefined : () => setRenaming(true)}
+      />
+    </div>
+  );
+}
+
 export function SidebarLayoutSection() {
   const rail = useRail();
   const router = useRouter();
@@ -440,21 +518,12 @@ export function SidebarLayoutSection() {
         const childIds = item.items.map((child) => child.id);
         return (
           <div key={item.id} className="grid gap-0.5">
-            <div className="group/row relative">
-              <button
-                type="button"
-                aria-expanded={open}
-                onClick={() => toggle(item.id, !open)}
-                className={cn(ROW, "w-full pr-8 text-left")}
-              >
-                <ChevronRightIcon
-                  aria-hidden="true"
-                  className={cn("size-4 shrink-0 transition-transform", open && "rotate-90")}
-                />
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              </button>
-              <RowMenu item={item} actions={actions} />
-            </div>
+            <GroupRow
+              item={item}
+              open={open}
+              onToggle={() => toggle(item.id, !open)}
+              actions={actions}
+            />
             {open
               ? item.items.map((child) => (
                   <ChildRows

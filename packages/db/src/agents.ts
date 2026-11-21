@@ -894,7 +894,8 @@ export async function listAgentChats(
     limit: number;
   },
 ): Promise<AgentChatRecord[]> {
-  const limit = Math.max(1, Math.min(100, Math.trunc(input.limit)));
+  // A page is at most 100; callers ask for one more to tell whether more follow.
+  const limit = Math.max(1, Math.min(101, Math.trunc(input.limit)));
   if (input.filter === "yours" && input.viewerSubjectId === null) return [];
   const viewer = input.viewerSubjectId;
   return await withRlsContext(db, home, async (tx) => {

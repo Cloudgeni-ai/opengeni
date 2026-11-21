@@ -11,8 +11,8 @@
  * It saves an ordinary automation shared like the agent; each run starts a
  * new chat with the agent (the server's rule for an agent's automations).
  * "Open full form" opens the automation form at the suggestion, or at the
- * source picked; the note and chat choice aren't carried over. Its Cancel
- * and Save come back here.
+ * source picked, with the note and chat choice. Its Cancel and Save come
+ * back here.
  */
 import { useEffect, useMemo, useState } from "react";
 import { GitBranchIcon } from "lucide-react";
@@ -88,9 +88,14 @@ export interface AgentTriggerDialogProps {
   onCreated: (task: ScheduledTask) => void;
   /**
    * The full New automation form, for settings this dialog doesn't show,
-   * starting at the source picked here when there is one.
+   * starting at the source picked here when there is one, with the note and
+   * chat choice.
    */
-  onOpenFullForm: (start: { sourceId?: string | undefined }) => void;
+  onOpenFullForm: (start: {
+    sourceId?: string | undefined;
+    note?: string | undefined;
+    chat?: AgentTriggerChat | undefined;
+  }) => void;
   /** The "Add a source" page, at the kind a trigger needs. */
   onAddSource: (choice?: EventSourceChoice) => void;
 }
@@ -376,7 +381,15 @@ function AgentTriggerDialogBody({
           type="button"
           className="og-link text-xs"
           data-agent-trigger-full-form=""
-          onClick={() => leave(() => onOpenFullForm({ sourceId: fullFormSourceId }))}
+          onClick={() =>
+            leave(() =>
+              onOpenFullForm({
+                sourceId: fullFormSourceId,
+                note: draft.instructions.trim() || undefined,
+                chat,
+              }),
+            )
+          }
         >
           Open full form
         </button>

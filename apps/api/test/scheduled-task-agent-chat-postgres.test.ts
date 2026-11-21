@@ -300,3 +300,77 @@ test("an agent's automation uses an existing chat only when it is that agent's a
   expect(ownChats.status, JSON.stringify(ownChats.json)).toBe(200);
   expect(ownChats.json.agentConfig.agentId).toBe(planner);
 });
+
+test("agentConfigPatch changes or removes an automation's agent without replacing its config", async () => {
+  const f = await fixture();
+  const planner = await f.agent("Planner");
+  const reviewer = await f.agent("Reviewer");
+  const created = await f.call(f.owner.headers, "POST", "/scheduled-tasks", {
+    name: "Daily plan",
+    schedule,
+    runMode: "reusable_session",
+    agentConfig: f.agentConfig(planner),
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const first = await f.chat(planner);
+  await shared.admin`update scheduled_tasks set reusable_session_id = ${first.id}
+    where id = ${created.json.id}`;
+  const path = `/scheduled-tasks/${created.json.id}`;
+  const materialized = await f.call(f.owner.headers, "GET", path);
+
+  // Another agent: its own chat is replaced at the next run, the prompt kept.
+  const moved = await f.call(f.owner.headers, "PATCH", path, {
+    expectedExecutionDigest: materialized.json.executionDigest,
+    agentConfigPatch: { agentId: reviewer },
+  });
+  expect(moved.status, JSON.stringify(moved.json)).toBe(200);
+  expect(moved.json).toMatchObject({ reusableSessionId: null });
+  expect(moved.json.agentConfig).toMatchObject({ agentId: reviewer, prompt: "Plan the day" });
+  expect(moved.json.metadata[SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY]).toMatchObject({
+    sessionId: first.id,
+    agentId: planner,
+  });
+
+  // An agent nobody here can use is refused.
+  const missing = await f.call(f.owner.headers, "PATCH", path, {
+    expectedExecutionDigest: moved.json.executionDigest,
+    agentConfigPatch: { agentId: crypto.randomUUID() },
+  });
+  expect(missing.status).toBe(422);
+  expect(missing.json.error.message).toBe("That agent is not available in this workspace.");
+
+  // null runs it without an agent.
+  const cleared = await f.call(f.owner.headers, "PATCH", path, {
+    expectedExecutionDigest: moved.json.executionDigest,
+    agentConfigPatch: { agentId: null },
+  });
+  expect(cleared.status, JSON.stringify(cleared.json)).toBe(200);
+  expect(cleared.json.agentConfig.agentId).toBeUndefined();
+  expect(cleared.json.agentConfig.prompt).toBe("Plan the day");
+
+  // An existing-chat automation moves to another agent with one of that agent's chats.
+  const plannerChat = await f.chat(planner);
+  const reviewerChat = await f.chat(reviewer);
+  const inChat = await f.call(f.owner.headers, "POST", "/scheduled-tasks", {
+    name: "Morning check-in",
+    schedule,
+    runMode: "existing_session",
+    targetSessionId: plannerChat.id,
+    agentConfig: { agentId: planner, prompt: "Check in", resources: [], tools: [], metadata: {} },
+  });
+  expect(inChat.status, JSON.stringify(inChat.json)).toBe(201);
+  const chatPath = `/scheduled-tasks/${inChat.json.id}`;
+  const notTheAgentsChat = await f.call(f.owner.headers, "PATCH", chatPath, {
+    expectedExecutionDigest: inChat.json.executionDigest,
+    agentConfigPatch: { agentId: reviewer },
+  });
+  expect(notTheAgentsChat.status).toBe(422);
+  const retargeted = await f.call(f.owner.headers, "PATCH", chatPath, {
+    expectedExecutionDigest: inChat.json.executionDigest,
+    targetSessionId: reviewerChat.id,
+    agentConfigPatch: { agentId: reviewer },
+  });
+  expect(retargeted.status, JSON.stringify(retargeted.json)).toBe(200);
+  expect(retargeted.json).toMatchObject({ targetSessionId: reviewerChat.id });
+  expect(retargeted.json.agentConfig).toMatchObject({ agentId: reviewer, prompt: "Check in" });
+});

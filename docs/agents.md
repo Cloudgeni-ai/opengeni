@@ -553,16 +553,22 @@ whole.
   **New chat each run** (the default, `new_session_per_run`), **One chat
   for this trigger** (`reusable_session`) or **An existing chat**
   (`existing_session` with `targetSessionId`, offering only chats started
-  with this agent); the dialog's description says which. It saves
+  with this agent, read through the server's agent filter
+  `GET /v1/workspaces/:id/agents/:agentId/chats?filter=everyone`, the
+  same list the automation form offers); the dialog's description says which. It saves
   through `createScheduledTask` with `agentConfig.agentId`, named
   `<agent>: <when>`, and with an explicit `visibility`: `private` for an
   Only me agent, otherwise `workspace` (never the organization's default
   for new schedules). The server's rules for who may create a shared
   automation still apply; a refused one says so in the dialog. **Open full
   form** opens the automation form with `?agent=<id>&returnTo=agent`, plus
-  `?source=<id>` for the source picked, for every other setting (the note
-  and chat choice aren't carried over); its back link, Cancel and Save
-  return to the agent's page.
+  `?source=<id>` for the source picked, for every other setting, with the
+  note and chat choice (in history state, `agentTriggerStart`, so the note
+  never enters the address); its back link, Cancel and Save
+  return to the agent's page. The automation form's **Chat** row starts
+  with the chat composer's agent picker, so an automation's agent can be
+  changed (or removed) there; the change is saved like any other edit
+  (`agentConfigPatch.agentId` for an existing chat).
   The list comes from the server
   (`GET /v1/workspaces/:id/scheduled-tasks?agentId=<id>`, SDK
   `listScheduledTasks({ agentId })`), which filters on

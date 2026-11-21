@@ -25,6 +25,32 @@ const client = {
   getSession: async (_workspace: string, id: string) => chats.find((chat) => chat.id === id)!,
   listSessions: async () => chats,
   listSessionPage: async () => ({ pinned: [], sessions: chats, nextCursor: null }),
+  getAgent: async (_workspace: string, id: string) => ({
+    id,
+    name: "Triage",
+    visibility: "workspace",
+    templateKey: null,
+  }),
+  listAgents: async () => [
+    { id: AGENT, name: "Triage", description: "", visibility: "workspace", avatar: null },
+    { id: OTHER_AGENT, name: "Reviewer", description: "", visibility: "workspace", avatar: null },
+  ],
+  // The server filters by agent.
+  listAgentChats: async (_workspace: string, agentId: string) => ({
+    chats: chats
+      .filter((chat) => chat.agentId === agentId)
+      .map((chat) => ({
+        sessionId: chat.id,
+        title: chat.title ?? null,
+        visibility: "workspace" as const,
+        createdBySubjectId: null,
+        source: "app" as const,
+        slack: null,
+        createdAt: "2026-11-21T00:00:00.000Z",
+        updatedAt: "2026-11-21T00:00:00.000Z",
+      })),
+    nextCursor: null,
+  }),
   getSessionTenancyCreateCapabilities: async () => ({
     activated: true,
     canCreatePrivate: privateAllowed,
@@ -524,6 +550,29 @@ test("a new schedule starts with the organization's default audience; an existin
 });
 
 const AGENT = "aaaaaaaa-0000-4000-8000-000000000001";
+const OTHER_AGENT = "aaaaaaaa-0000-4000-8000-000000000002";
+
+test("an automation's agent changes in the agent picker and is saved with it", async () => {
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT };
+  const { container, root } = await render();
+  const chip = container.querySelector<HTMLButtonElement>("[data-composer-agent]")!;
+  expect(chip.textContent).toContain("Triage");
+  await act(async () => {
+    chip.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+    await flush();
+  });
+  const reviewer = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")].find(
+    (item) => item.textContent?.includes("Reviewer"),
+  )!;
+  await act(async () => {
+    reviewer.click();
+    await flush();
+  });
+  expect(chip.textContent).toContain("Reviewer");
+  const request = (await save(container)) as { agentConfig?: { agentId?: string } };
+  expect(request.agentConfig?.agentId).toBe(OTHER_AGENT);
+  await act(async () => root.unmount());
+});
 
 test("an agent's automation can use its own chat or one of the agent's chats", async () => {
   task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
@@ -537,6 +586,22 @@ test("an agent's automation can use its own chat or one of the agent's chats", a
   expect(option("Create a chat for this automation")!.dataset.locked).toBeUndefined();
   // Only the agent's chats are offered.
   expect(option("Source chat")!.dataset.locked).toBeUndefined();
+  expect(option("Destination chat")).toBeUndefined();
+  await act(async () => root.unmount());
+});
+
+test("an agent's automation offers the agent's other chats", async () => {
+  task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
+  task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
+  chats = [
+    ...chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat)),
+    { ...chats[0]!, id: "older-agent-chat", title: "Older agent chat", agentId: AGENT },
+  ];
+  const { container, root } = await render();
+  const option = (label: string) =>
+    [...container.querySelectorAll("option")].find((entry) => entry.textContent === label);
+  // The agent's other chats come from the server's agent filter.
+  expect(option("Older agent chat")!.dataset.locked).toBeUndefined();
   expect(option("Destination chat")).toBeUndefined();
   await act(async () => root.unmount());
 });
@@ -561,8 +626,8 @@ test("an agent's automation aimed at another chat says it isn't the agent's", as
 test("an agent's chats that can't be read show an error, not an empty list", async () => {
   task = { ...task, runMode: "existing_session", targetSessionId: "source-chat" };
   task.agentConfig = { ...task.agentConfig, agentId: AGENT, tools: [], pinnedAccounts: [] };
-  const listSessionPage = client.listSessionPage;
-  client.listSessionPage = async () => {
+  const listAgentChats = client.listAgentChats;
+  client.listAgentChats = async () => {
     throw Object.assign(new Error("Opengeni API 500: down"), { status: 500 });
   };
   try {
@@ -570,8 +635,30 @@ test("an agent's chats that can't be read show an error, not an empty list", asy
     expect(container.textContent).toContain("Chats couldn't load");
     await act(async () => root.unmount());
   } finally {
-    client.listSessionPage = listSessionPage;
+    client.listAgentChats = listAgentChats;
   }
+});
+
+test("Add trigger's note and chat choice start the full form", async () => {
+  chats = chats.map((chat) => (chat.id === "source-chat" ? { ...chat, agentId: AGENT } : chat));
+  const { container, root } = await render({
+    kind: "create",
+    agentId: AGENT,
+    returnTo: "agent",
+    agentTriggerStart: {
+      note: "Label it and reply",
+      chat: { mode: "existing_session", sessionId: "source-chat" },
+    },
+  });
+  // Add trigger's note and chat choice carry into the full form.
+  expect(container.querySelector("textarea")!.value).toBe("Label it and reply");
+  const selected = (label: string) =>
+    [...container.querySelectorAll<HTMLOptionElement>("option")].find(
+      (entry) => entry.textContent === label,
+    )?.selected;
+  expect(selected("Use an existing chat")).toBe(true);
+  expect(selected("Source chat")).toBe(true);
+  await act(async () => root.unmount());
 });
 
 test("an agent's own chat says when a change of agent started a new one", async () => {
