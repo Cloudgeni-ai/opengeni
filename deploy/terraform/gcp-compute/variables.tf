@@ -57,13 +57,13 @@ variable "advertise_public_address" {
 }
 
 variable "machine_type" {
-  description = "Host machine type. Nested virtualization needs an Intel family such as n2 or c3; bare-metal types (c3-*-metal) run the bare-metal memory profile."
+  description = "Host machine type. Nested virtualization needs an Intel family such as n2 or c3; bare-metal types (*-metal, such as c3-highmem-192-metal or c4d-highmem-384-metal) run the bare-metal memory profile, with nested = false, shielded_vm = false and a Hyperdisk boot_disk_type; they choose their own network interface (IDPF)."
   type        = string
   default     = "n2-standard-16"
 }
 
 variable "min_cpu_platform" {
-  description = "Minimum CPU platform, for consistent snapshot CPU features across the group."
+  description = "Minimum CPU platform, for consistent snapshot CPU features across the group. Empty: none, as for a machine type whose platform is fixed (bare metal, AMD families)."
   type        = string
   default     = "Intel Cascade Lake"
 }
@@ -106,6 +106,55 @@ variable "boot_disk_gb" {
   description = "Boot disk size; Firecracker, the kernel, the agent's releases and logs live there."
   type        = number
   default     = 50
+}
+
+variable "boot_disk_type" {
+  description = "Boot disk type. Machine families that take only Hyperdisk (C4, C4D, bare metal) need hyperdisk-balanced."
+  type        = string
+  default     = "pd-balanced"
+}
+
+variable "shielded_vm" {
+  description = "Boot hosts as Shielded VMs (secure boot, vTPM, integrity monitoring). Bare-metal machine types do not support it: false there."
+  type        = bool
+  default     = true
+}
+
+variable "machine" {
+  description = "dedicated: compute has the machine to itself. shared: the machine also runs other work, such as VMs the operator starts beside compute (compute ADR 26): the guard feeds its own service's watchdog instead of the machine's, so a fence kills compute's VMs and never resets the machine, and the sandboxes use only memory_total_mib of its memory."
+  type        = string
+  default     = "dedicated"
+
+  validation {
+    condition     = contains(["dedicated", "shared"], var.machine)
+    error_message = "machine must be dedicated or shared."
+  }
+}
+
+variable "memory_total_mib" {
+  description = "The sandboxes' share of each host's memory in MiB (COMPUTE_MEMORY_TOTAL_MIB), leaving the rest to the machine's other work. Required when machine is shared; 0: all of it."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.memory_total_mib >= 0 && floor(var.memory_total_mib) == var.memory_total_mib
+    error_message = "memory_total_mib must be a whole number of MiB, 0 for all of the host's memory."
+  }
+}
+
+variable "extra_disks" {
+  description = "Further persistent disks attached to each host by device name (/dev/disk/by-id/google-<device_name>), which compute leaves alone: for the machine's other work on a shared machine, such as another VM's disk. Deleted with the instance."
+  type = list(object({
+    device_name = string
+    type        = optional(string, "hyperdisk-balanced")
+    size_gb     = number
+  }))
+  default = []
+
+  validation {
+    condition     = alltrue([for disk in var.extra_disks : !contains(["state", "persistent-disk-0"], disk.device_name)])
+    error_message = "extra_disks may not use the device names state or persistent-disk-0, which the host uses itself."
+  }
 }
 
 variable "state_disk" {
