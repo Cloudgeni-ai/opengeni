@@ -18,6 +18,7 @@ import {
   browserScreenshotError,
   browserTabDiagnosisError,
   browserRouteError,
+  browserNavigationNotAnsweredError,
   browserCreateInput,
   agentBrowserClosingNotice,
   withInitialView,
@@ -1182,6 +1183,48 @@ describe("BrowserSession route discipline", () => {
         requestId: "close-request",
       },
     });
+  });
+
+  test("a website that never answered a tab open is reported as such, not as an outage", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const notAnswered = new BrowserControlRequestError(504, {
+      code: "timeout",
+      message:
+        "browser could not load the requested URL: its server did not respond within 20 seconds",
+      retryable: false,
+    });
+    app.post("/v1/test/open-with-inventory", () => {
+      throw browserRouteError(notAnswered);
+    });
+    const response = await app.request("http://localhost/v1/test/open-with-inventory", {
+      method: "POST",
+      headers: { "x-opengeni-correlation-id": "open-request" },
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 504,
+        code: "upstream_unavailable",
+        message:
+          "The page did not load: the website did not answer within 20 seconds. Try again, or check the address.",
+        retryable: true,
+        requestId: "open-request",
+      },
+    });
+    // Any other controller timeout keeps the ordinary envelope, which never
+    // publishes a driver's free-form message.
+    const other = new BrowserControlRequestError(504, {
+      code: "timeout",
+      message: "browser could not load the requested URL: PRIVATE https://example.test/secret",
+      retryable: false,
+    });
+    expect(browserNavigationNotAnsweredError(other)).toBeNull();
   });
 
   test("preserves a definite tab diagnosis in GET and DOM-read POST API envelopes", async () => {
