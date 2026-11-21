@@ -17,10 +17,13 @@ import {
   readWorkspaceSidebarLayout,
   sidebarItemsShown,
   sidebarLayoutIsOlder,
+  sidebarLinkedAgentIds,
   sidebarLinkedAppIds,
   sidebarPersonalChangesCustomized,
+  withoutGoneSidebarAgents,
   withoutGoneSidebarApps,
   knownSidebarItem,
+  ResolvedSidebarItem,
   type SidebarLayoutChange,
   type MergedSidebarGroup,
 } from "../src/sidebar-layout";
@@ -512,5 +515,132 @@ describe("placement and answer order", () => {
     expect(sidebarLayoutIsOlder(at(2, 1), at(1, 1))).toBe(false);
     expect(sidebarLayoutIsOlder(at(1, 1), at(2, 1))).toBe(true);
     expect(sidebarLayoutIsOlder(at(3, 1), at(2, 2))).toBe(true);
+  });
+});
+
+describe("agent links", () => {
+  const AGENT = "44444444-4444-4444-8444-444444444444";
+  const OTHER = "55555555-5555-4555-8555-555555555555";
+
+  test("an agent link is added, merged and renamed like any link", () => {
+    const added = applyWorkspaceSidebarChanges(
+      EMPTY_SIDEBAR_LAYOUT,
+      parseChanges([
+        { op: "add", item: { type: "agent", agentId: AGENT } },
+        { op: "add", item: { id: "g", type: "group", label: "Team" } },
+        { op: "add", groupId: "g", item: { id: "helper", type: "agent", agentId: OTHER } },
+      ]),
+      ids(),
+    );
+    expect(added.items[0]).toEqual({ id: "agent-n1", type: "agent", agentId: AGENT });
+    const merged = mergeSidebarLayout(added, EMPTY_SIDEBAR_PERSONAL_CHANGES).items;
+    expect((merged[1] as MergedSidebarGroup).items).toEqual([
+      { id: "helper", type: "agent", agentId: OTHER, origin: "workspace" },
+    ]);
+    const renamed = applyWorkspaceSidebarChanges(
+      added,
+      parseChanges([{ op: "update", itemId: "helper", label: "Helper" }]),
+      ids(),
+    );
+    expect((renamed.items[1]!.items as { label?: string }[])[0]!.label).toBe("Helper");
+    // Its own name again.
+    const unnamed = applyWorkspaceSidebarChanges(
+      renamed,
+      parseChanges([{ op: "update", itemId: "helper", label: null }]),
+      ids(),
+    );
+    expect((unnamed.items[1]!.items as { label?: string }[])[0]!.label).toBeUndefined();
+    expect(() =>
+      applyWorkspaceSidebarChanges(
+        added,
+        parseChanges([{ op: "update", itemId: "helper", path: "/x" }]),
+        ids(),
+      ),
+    ).toThrow(SidebarLayoutChangeError);
+    // A person's own agent link, in the default's group.
+    const personal = applyPersonalSidebarChanges(
+      added,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([{ op: "add", groupId: "g", item: { type: "agent", agentId: AGENT } }]),
+      ids(),
+    );
+    const mine = mergeSidebarLayout(added, personal).items[1] as MergedSidebarGroup;
+    expect(mine.items.map((item) => [item.id, item.origin])).toEqual([
+      ["helper", "workspace"],
+      ["my-agent-n1", "personal"],
+    ]);
+  });
+
+  test("an agent link needs an agent id", () => {
+    expect(() => parseChanges([{ op: "add", item: { type: "agent" } }])).toThrow();
+    expect(() =>
+      parseChanges([{ op: "add", item: { type: "agent", agentId: "not-an-id" } }]),
+    ).toThrow();
+    expect(() =>
+      parseChanges([{ op: "add", item: { type: "agent", agentId: AGENT, path: "/x" } }]),
+    ).toThrow();
+  });
+
+  test("renaming a group keeps its items", () => {
+    const layout = engineering();
+    const renamed = applyWorkspaceSidebarChanges(
+      layout,
+      parseChanges([{ op: "update", itemId: "engineering", label: "Build" }]),
+      ids(),
+    );
+    expect(renamed.items[0]!.label).toBe("Build");
+    expect(renamed.items[0]!.items).toEqual(layout.items[0]!.items);
+    // A person renames their own group, not the default's.
+    const personal = applyPersonalSidebarChanges(
+      layout,
+      EMPTY_SIDEBAR_PERSONAL_CHANGES,
+      parseChanges([
+        { op: "add", item: { id: "mine", type: "group", label: "Mine" } },
+        { op: "update", itemId: "my-mine", label: "Ours" },
+      ]),
+      ids(),
+    );
+    expect(personal.added[0]!.item.label).toBe("Ours");
+    expect(() =>
+      applyPersonalSidebarChanges(
+        layout,
+        EMPTY_SIDEBAR_PERSONAL_CHANGES,
+        parseChanges([{ op: "update", itemId: "engineering", label: "Build" }]),
+        ids(),
+      ),
+    ).toThrow(SidebarLayoutChangeError);
+  });
+
+  test("links to gone agents can be dropped", () => {
+    const items = [
+      { id: "a", type: "agent", agentId: AGENT },
+      { id: "g", type: "group", label: "G", items: [{ id: "b", type: "agent", agentId: OTHER }] },
+      { id: "app", type: "app", appId: APP_A },
+    ];
+    expect(sidebarLinkedAgentIds(items).sort()).toEqual([AGENT, OTHER]);
+    expect(sidebarLinkedAppIds(items)).toEqual([APP_A]);
+    const kept = withoutGoneSidebarAgents(items, new Set([OTHER]));
+    expect(kept.map((item) => item.id)).toEqual(["g", "app"]);
+    expect((kept[0]!.items as { id: string }[]).map((item) => item.id)).toEqual(["b"]);
+  });
+
+  test("readers keep resolved agent links, with the agent's name and avatar", () => {
+    const agent = {
+      id: "a",
+      origin: "workspace",
+      type: "agent",
+      agentId: AGENT,
+      label: "Helper",
+      avatar: { kind: "letters", letters: "H", hue: 120 },
+    };
+    expect(ResolvedSidebarItem.safeParse(agent).success).toBe(true);
+    const read = readResolvedSidebarItems([
+      agent,
+      { ...agent, id: "broken", avatar: undefined },
+      { id: "g", origin: "personal", type: "group", label: "G", collapsed: false, items: [agent] },
+    ]);
+    expect(read.map((item) => item.id)).toEqual(["a", "g"]);
+    expect(read[1]!.type === "group" && read[1]!.items.map((item) => item.id)).toEqual(["a"]);
+    expect(flattenSidebarItemsForMobile(read).map((item) => item.type)).toEqual(["agent", "agent"]);
   });
 });

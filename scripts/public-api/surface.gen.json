@@ -25376,12 +25376,12 @@
         "input"
       ],
       "shape": {
-        "$": "union=[\"type=app\",\"type=group\",\"type=link\",\"type=live_list\"]",
+        "$": "union=[\"type=agent\",\"type=app\",\"type=group\",\"type=link\",\"type=live_list\"]",
         "$|type=group": "object",
         "$|type=group.collapsed": "boolean?",
         "$|type=group.id": "string?",
         "$|type=group.items": "array?",
-        "$|type=group.items[]": "union=[\"type=app\",\"type=link\",\"type=live_list\"]",
+        "$|type=group.items[]": "union=[\"type=agent\",\"type=app\",\"type=link\",\"type=live_list\"]",
         "$|type=group.items[]|type=app": "object",
         "$|type=group.items[]|type=app.appId": "string!",
         "$|type=group.items[]|type=app.id": "string?",
@@ -25399,6 +25399,11 @@
         "$|type=group.items[]|type=live_list.limit": "integer?",
         "$|type=group.items[]|type=live_list.list": "ref(SidebarLiveListKind)!",
         "$|type=group.items[]|type=live_list.type": "const!=[\"\\\"live_list\\\"\"]",
+        "$|type=group.items[]|type=agent": "object",
+        "$|type=group.items[]|type=agent.agentId": "string!",
+        "$|type=group.items[]|type=agent.id": "string?",
+        "$|type=group.items[]|type=agent.label": "string?",
+        "$|type=group.items[]|type=agent.type": "const!=[\"\\\"agent\\\"\"]",
         "$|type=group.label": "string!",
         "$|type=group.type": "const!=[\"\\\"group\\\"\"]",
         "$|type=app": "object",
@@ -25417,7 +25422,12 @@
         "$|type=live_list.label": "string?",
         "$|type=live_list.limit": "integer?",
         "$|type=live_list.list": "ref(SidebarLiveListKind)!",
-        "$|type=live_list.type": "const!=[\"\\\"live_list\\\"\"]"
+        "$|type=live_list.type": "const!=[\"\\\"live_list\\\"\"]",
+        "$|type=agent": "object",
+        "$|type=agent.agentId": "string!",
+        "$|type=agent.id": "string?",
+        "$|type=agent.label": "string?",
+        "$|type=agent.type": "const!=[\"\\\"agent\\\"\"]"
       }
     },
     "NotificationUrgency": {
@@ -28511,6 +28521,20 @@
         "$": "enum=[\"\\\"deployment_default\\\"\",\"\\\"inherited\\\"\",\"\\\"legacy_conversion\\\"\",\"\\\"request\\\"\",\"\\\"workspace_default\\\"\"]"
       }
     },
+    "ResolvedSidebarAgentLink": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.agentId": "string!",
+        "$.avatar": "ref(SessionAvatar)!",
+        "$.id": "string!",
+        "$.label": "string!",
+        "$.origin": "ref(ConnectionOwnership)!",
+        "$.type": "const!=[\"\\\"agent\\\"\"]"
+      }
+    },
     "ResolvedSidebarAppLink": {
       "io": [
         "output"
@@ -28530,10 +28554,11 @@
         "output"
       ],
       "shape": {
-        "$": "union=[\"type=app\",\"type=link\",\"type=live_list\"]",
+        "$": "union=[\"type=agent\",\"type=app\",\"type=link\",\"type=live_list\"]",
         "$|type=app": "ref(ResolvedSidebarAppLink)",
         "$|type=link": "ref(ResolvedSidebarExternalLink)",
-        "$|type=live_list": "ref(ResolvedSidebarLiveList)"
+        "$|type=live_list": "ref(ResolvedSidebarLiveList)",
+        "$|type=agent": "ref(ResolvedSidebarAgentLink)"
       }
     },
     "ResolvedSidebarExternalLink": {
@@ -28569,11 +28594,12 @@
         "output"
       ],
       "shape": {
-        "$": "union=[\"type=app\",\"type=group\",\"type=link\",\"type=live_list\"]",
+        "$": "union=[\"type=agent\",\"type=app\",\"type=group\",\"type=link\",\"type=live_list\"]",
         "$|type=group": "ref(ResolvedSidebarGroup)",
         "$|type=app": "ref(ResolvedSidebarAppLink)",
         "$|type=link": "ref(ResolvedSidebarExternalLink)",
-        "$|type=live_list": "ref(ResolvedSidebarLiveList)"
+        "$|type=live_list": "ref(ResolvedSidebarLiveList)",
+        "$|type=agent": "ref(ResolvedSidebarAgentLink)"
       }
     },
     "ResolvedSidebarLiveList": {
@@ -39451,6 +39477,7 @@
       "RepositoryResourceRef": "type",
       "ResolvedAgentCapabilities": "type",
       "ResolvedAgentConfig": "type",
+      "ResolvedSidebarAgentLink": "type",
       "ResolvedSidebarAppLink": "type",
       "ResolvedSidebarChild": "type",
       "ResolvedSidebarExternalLink": "type",

@@ -4,6 +4,8 @@
  * types they don't know, so a newer server never breaks an older client.
  */
 
+import type { SessionAvatar } from "@opengeni/contracts";
+
 /** Where an item comes from: the workspace default, or this person's own. */
 export type SidebarItemOrigin = "workspace" | "personal";
 
@@ -45,7 +47,20 @@ export type ResolvedSidebarLiveList = {
 export type ResolvedSidebarChild =
   | ResolvedSidebarAppLink
   | ResolvedSidebarExternalLink
-  | ResolvedSidebarLiveList;
+  | ResolvedSidebarLiveList
+  | ResolvedSidebarAgentLink;
+
+/** A link to an agent's page; only agents this person can see are listed. */
+export type ResolvedSidebarAgentLink = {
+  id: string;
+  origin: SidebarItemOrigin;
+  type: "agent";
+  agentId: string;
+  /** Its own label, else the agent's name. */
+  label: string;
+  /** The agent's avatar, or its initials when it has none. */
+  avatar: SessionAvatar;
+};
 
 /** A named, collapsible group of links and lists. */
 export type ResolvedSidebarGroup = {
@@ -84,7 +99,8 @@ export type SidebarLayoutResponse = {
 type NewSidebarChild =
   | { id?: string; type: "app"; appId: string; path?: string; label?: string }
   | { id?: string; type: "link"; url: string; label: string }
-  | { id?: string; type: "live_list"; list: SidebarLiveListKind; label?: string; limit?: number };
+  | { id?: string; type: "live_list"; list: SidebarLiveListKind; label?: string; limit?: number }
+  | { id?: string; type: "agent"; agentId: string; label?: string };
 
 /** A new item; the server picks an id when it's omitted. */
 export type NewSidebarItem =

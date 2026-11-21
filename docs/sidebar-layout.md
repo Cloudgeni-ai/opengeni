@@ -15,6 +15,7 @@ in Artifacts. The sidebar shows those pins through a **Pinned apps** list.
 | ----------- | ---------------------------------------------------------------------- |
 | `group`     | A named, collapsible group of the items below. Groups don't nest.      |
 | `app`       | An App, optionally one of its pages (`path: "/releases"`). Its own title unless `label` is set. |
+| `agent`     | An agent's page (`agentId`), with the agent's avatar. Its name unless `label` is set. Opens in place. |
 | `link`      | An `https://` link with a `label`. An outside link opens in a new tab and is marked external; a link to a page of this Opengeni opens in place. |
 | `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (Apps this person opened last), `limit` 1 to 20 (default 5). |
 
@@ -28,8 +29,12 @@ top-level items and 50 per group, a person's own items in a group included.
 
 What a person sees is filtered for them: apps they can't open (Only me apps of
 someone else, archived or deleted apps, or anything when they lack
-`artifacts:read`) are left out, and a group left with nothing they can open
-is left out too (admins still see it, to fill it). On the next change to the
+`artifacts:read`) and agents they can't see (someone else's Only me agent, a
+deleted one, or any agent when they lack `sessions:read`, as on the Agents
+page) are left out, and a group left with nothing they can open is left out
+too (admins still see it, to fill it). An agent link shows the agent's
+current name and avatar (its initials when it has none), so renaming the
+agent renames the link unless the link has its own `label`. On the next change to the
 layout that holds them, links are also dropped from storage, so they don't
 count toward the limits, when:
 
@@ -38,6 +43,11 @@ count toward the limits, when:
   written by hand or by an integration to an id that isn't an app here);
 - the app became someone else's Only me (a person's own items; in the
   default it stays, for the people who can open it).
+
+Agent links follow the same rule: on the next change to the layout that holds
+them, links to a deleted agent are dropped, and a person's own link to an
+agent that became someone else's Only me. A new agent link must name an agent
+the caller can see (422 otherwise; 403 without `sessions:read`).
 
 Links to an archived app are kept, hidden while it's archived, so restoring
 the app brings them back. They still count toward the limits, except that
@@ -90,8 +100,9 @@ before their own changes (`workspace.items`) and `workspace.canEdit: true`.
 - `scope: "workspace"` changes the default (`workspace:admin`, else 403).
 - `changes` (1 to 50, applied in order, all or nothing): `add` (`item`,
   optional `groupId` and a position), `update` (`label`, `path`, `url`,
-  `collapsed`, `limit`), `remove`, `show`, `move` (optional `groupId`, `null`
-  for the top level, and a position) and `reset`.
+  `collapsed`, `limit`; renaming a group is an `update` of its `label`),
+  `remove`, `show`, `move` (optional `groupId`, `null` for the top level, and
+  a position) and `reset`.
 - A position is `beforeId` or `afterId` (an item of the target level) or an
   `index`; see Placement below.
 - With `expectedRevision`, a newer revision is refused with 409 instead of
@@ -152,9 +163,15 @@ Both are in the workspace-admin tool family and need `workspace:read`.
 
 - **Web and the desktop app**: under the primary navigation, above the
   chats. Each row has a menu (Move up, Move down, Hide or Remove, Customize
-  sidebar). Customize sidebar is also in the account menu and opens the
-  Sidebar page (`/workspaces/<id>/sidebar`): Yours, and Workspace default for
-  admins. Groups remember open or closed per browser. The icon-only rail
+  sidebar), and a quiet Customize row under the section shows while the
+  pointer is over it (always on touch screens). Both, the account menu's
+  Customize sidebar and settings search ("sidebar") open the Sidebar page
+  (`/workspaces/<id>/sidebar`): Yours, and Workspace default for admins. Its
+  Add menu adds an App, an Agent (picked from the agents you can see), a
+  Link, a Group or a List; a group's menu has Rename (inline: Enter or
+  leaving the field saves, Escape cancels) for your own groups, and for the
+  default's groups under Workspace default. Groups remember open or closed
+  per browser. The icon-only rail
   leaves the section out. Changes made elsewhere (an agent's tool call,
   another tab or device) show when the window regains focus, on return to
   the tab, or within two minutes.
@@ -163,7 +180,8 @@ Both are in the workspace-admin tool family and need `workspace:read`.
 - **The Opengeni phone app**: in the side menu, under Automations and above
   the pinned chats. Groups show as a heading over their items, like the
   menu's projects (they don't collapse), a live list as a heading over at
-  most 3 apps, and top-level links without one. An app opens in the app's
+  most 3 apps, and top-level links without one. An agent shows its avatar and
+  opens its page on the web, where agents are managed. An app opens in the app's
   viewer at its page (`/native-view/workspaces/<id>/sites/<appId>?page=<path>`;
   a server without `?page=` opens its home page), and an outside link opens
   in the browser. It's read only: changes are made on the web or by an agent.
@@ -197,7 +215,9 @@ is unchanged.
 Readers ignore item types and fields they don't know, and writers keep stored
 items they don't know, so web, desktop and phone clients (and API replicas
 during a rolling deploy) of different versions never break each other's
-layouts. An older client simply doesn't show newer item types.
+layouts. An older client simply doesn't show newer item types: agent links
+are left out of web and phone clients from before they existed, and an older
+API replica keeps them in storage without showing them.
 
 ## Storage
 

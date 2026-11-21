@@ -19,6 +19,7 @@ import {
   LayersIcon,
   LockKeyholeIcon,
   MonitorIcon,
+  PanelLeftIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -444,6 +445,17 @@ export function useSettingsRail(input: {
               icon: page.icon,
               link: <Link to={page.to} params={{ workspaceId }} />,
             })),
+        },
+      ],
+      // The Sidebar page (docs/sidebar-layout.md) opens from the rail and the
+      // account menu; search finds it here too.
+      searchOnly: [
+        {
+          id: "workspace:/workspaces/$workspaceId/sidebar",
+          label: "Sidebar",
+          icon: PanelLeftIcon,
+          link: <Link to="/workspaces/$workspaceId/sidebar" params={{ workspaceId }} />,
+          keywords: ["customize sidebar", "navigation", "links", "groups", "rail", "menu"],
         },
       ],
     });

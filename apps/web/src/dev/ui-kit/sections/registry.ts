@@ -152,6 +152,7 @@ export const SECTION_KEYS = [
   "page-sign-out-recordings",
   "page-admin-step-up",
   "page-github-integration",
+  "page-sidebar",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -1041,6 +1042,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Production Models components with an in-memory API fixture.",
     usedOn: "Settings > Models",
     load: () => import("./page-models-cache"),
+  },
+  {
+    key: "page-sidebar",
+    group: "Pages",
+    title: "Sidebar",
+    purpose:
+      "The rail's links and groups and the Sidebar page, with an in-memory layout: agent links, renaming a group, and Customize.",
+    usedOn: "Rail > links above the chats; Sidebar page",
+    load: () => import("./page-sidebar"),
   },
   {
     key: "page-models-sharing",

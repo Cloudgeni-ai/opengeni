@@ -4,6 +4,7 @@ import {
   BotIcon,
   KeyRoundIcon,
   MonitorIcon,
+  PanelLeftIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -174,6 +175,32 @@ describe("settings search", () => {
     expect(found("vocabulary")).toEqual(["Dictation (Workspace · Computer use)"]);
     // Outside the desktop app there is no Computer use page, so no Dictation either.
     expect(labels("dictation")).toEqual(["Voice input"]);
+  });
+
+  test("finds pages outside settings that a section adds, such as Sidebar", () => {
+    const withSidebar: SettingsRailSection[] = [
+      {
+        ...SECTIONS[0]!,
+        searchOnly: [
+          {
+            id: "workspace:/workspaces/$workspaceId/sidebar",
+            label: "Sidebar",
+            icon: PanelLeftIcon,
+            link: link({}),
+            keywords: ["customize sidebar", "navigation"],
+          },
+        ],
+      },
+      ...SECTIONS.slice(1),
+    ];
+    const found = (query: string) =>
+      searchSettings(settingsSearchEntries(withSidebar), query).map(
+        (entry) => `${entry.label} (${entry.location})`,
+      );
+    expect(found("sidebar")).toEqual(["Sidebar (Workspace)"]);
+    expect(found("customize")).toEqual(["Sidebar (Workspace)"]);
+    // Without it, nothing.
+    expect(labels("sidebar")).toEqual([]);
   });
 
   describe("Security & data", () => {

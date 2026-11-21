@@ -1,7 +1,8 @@
 // Search across settings: every page in the settings rail, plus the settings
 // inside those pages that people look for by name ("voice input", "MCP",
 // "invoices"). The index is built from the rail itself, so search never offers
-// a page the person can't use: a setting is listed only when its page is.
+// a page the person can't use: a setting is listed only when its page is. A
+// section can add pages outside settings that people look for there (Sidebar).
 import { cloneElement, isValidElement, type ReactElement } from "react";
 import type { LucideIcon } from "lucide-react";
 
@@ -380,6 +381,16 @@ export function settingsSearchEntries(
           });
         }
       }
+    }
+    for (const page of section.searchOnly ?? []) {
+      entries.push({
+        id: page.id,
+        label: page.label,
+        location: section.label,
+        icon: page.icon,
+        link: page.link,
+        keywords: page.keywords ?? [],
+      });
     }
   }
   return entries;
