@@ -237,6 +237,12 @@ import {
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
 import {
+  browserExtensionForAgents,
+  browserExtensionSentence,
+  connectedMachineCardReadyMessage,
+  personConnectedMachines,
+} from "./connected-machine-card";
+import {
   exactAgentAttemptClaims,
   sessionFleetContextForCaller,
 } from "../sandbox/agent-fleet-context";
@@ -5461,11 +5467,13 @@ function registerFleetTools(
           kind: "selfhosted",
           status: "card_posted",
           eventId,
-          message: `${
+          message:
             setup.status === "ready"
-              ? `${setup.detail} The Connected Machine card lists them, so the person can choose one for this chat or connect another.`
-              : "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet."
-          } Check sandboxes_list after they confirm. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on the connected machine.`,
+              ? `${connectedMachineCardReadyMessage(
+                  await personConnectedMachines(deps, grant, sessionId),
+                  browserExtensionForAgents(deps.settings),
+                )} Check sandboxes_list after they confirm.`
+              : `The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Check sandboxes_list after they confirm. ${browserExtensionSentence(browserExtensionForAgents(deps.settings))}`,
         });
       }
       return json(
@@ -8702,7 +8710,10 @@ function registerCapabilityDiscoveryTools(
           status: "ready",
           eventId,
           ...shown,
-          message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on a connected machine.`,
+          message: connectedMachineCardReadyMessage(
+            await personConnectedMachines(deps, grant, sessionId),
+            browserExtensionForAgents(deps.settings),
+          ),
         });
       }
       if (githubCardWhenReady) {

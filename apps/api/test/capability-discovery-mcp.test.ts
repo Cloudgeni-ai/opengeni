@@ -1793,15 +1793,32 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         status: "ready",
       });
       expect((mcpJson(ready) as { eventId: string | null }).eventId).toEqual(expect.any(String));
+      // It names the computers the person can use, and claims nothing about
+      // how this app connects another one.
+      const readyMessage = (mcpJson(ready) as { message: string }).message;
+      expect(readyMessage).toContain("Studio Mac (");
+      expect(readyMessage).toContain(
+        "If they mean that one and it isn't listed, it isn't connected",
+      );
+      expect(readyMessage).not.toContain("connect another");
+
+      const provisionReady = await enabled.mcp.callTool({
+        name: "sandbox_provision",
+        arguments: { kind: "selfhosted" },
+      });
+      const provisionMessage = (mcpJson(provisionReady) as { message: string }).message;
+      expect(provisionMessage).toContain("Studio Mac (");
+      expect(provisionMessage).not.toContain("connect another");
 
       const events = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
       ).filter((event) => event.type === "tool.auth_needed");
-      expect(events).toHaveLength(3);
+      expect(events).toHaveLength(4);
       expect(events.map((event) => (event.payload as { toolName: string }).toolName)).toEqual([
         "capability_authorization_request",
         "sandbox_provision",
         "capability_authorization_request",
+        "sandbox_provision",
       ]);
       for (const event of events) {
         expect(event.payload).toMatchObject({
