@@ -487,9 +487,12 @@ export function SiteViewRoute({
       >
         {publishing || fullScreen ? null : (
           <SiteHeader inWindowBar={titleInWindowBar} column={siteColumn} side={layout.position}>
-            {/* In the macOS app the bar's own "Artifacts › title" is the way
-                back, and these controls sit on the bar's right. */}
-            {titleInWindowBar ? null : (
+            {/* In the macOS app these sit on the bar's right; the back link
+                stays (it keeps the list's filters, or the chat it came from)
+                until the bar's own crumb carries them. */}
+            {titleInWindowBar ? (
+              backControl
+            ) : (
               <>
                 {layout.position === "left" ? showChatButton : null}
                 {backControl}
