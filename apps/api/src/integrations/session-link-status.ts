@@ -265,7 +265,7 @@ async function installationToken(
 }
 
 /** A REST reader for one repository through the workspace's GitHub App, or null. */
-async function workspaceGitHubReader(
+export async function workspaceGitHubReader(
   deps: Pick<ApiRouteDeps, "db" | "settings">,
   workspaceId: string,
   owner: string,

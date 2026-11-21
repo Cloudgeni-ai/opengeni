@@ -812,6 +812,7 @@ import type {
   SessionShareLinkState,
   SessionLink,
   SessionLinksResponse,
+  SessionPullRequestResponse,
   AddSessionLinkRequest,
   SharedSession,
   SessionVisibilityChangePreview,
@@ -2070,6 +2071,22 @@ export class OpenGeniClient {
     return await this.requestJson<SessionLinksResponse>(
       "GET",
       `${sessionPath(workspaceId, sessionId)}/links${options.fresh ? "?fresh=true" : ""}`,
+    );
+  }
+
+  /**
+   * A linked pull request's details (files, commits, discussion, checks), read
+   * like its Linked status. `fresh` skips the short cache.
+   */
+  async getSessionPullRequest(
+    workspaceId: string,
+    sessionId: string,
+    linkId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<SessionPullRequestResponse> {
+    return await this.requestJson<SessionPullRequestResponse>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/links/${encodeURIComponent(linkId)}/pull-request${options.fresh ? "?fresh=true" : ""}`,
     );
   }
 

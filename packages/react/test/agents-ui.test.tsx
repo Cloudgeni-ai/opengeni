@@ -308,7 +308,7 @@ test("Yours asks for the reader's own agents and New agent opens the form", asyn
   await flush();
   expect(client.calls).toContainEqual(["listAgents", WORKSPACE_ID, { filter: "yours" }]);
   expect(container.textContent).toContain("You haven't made an agent here yet.");
-  await act(async () => button(container, "New agent").click());
+  await act(async () => button(container, "Blank agent").click());
   expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/new`);
 });
 
@@ -1678,7 +1678,7 @@ test("a listed GitHub connection's row also offers Opengeni's own GitHub tools",
   expect(rows[0]!.textContent).toContain("pull_request_merge");
 });
 
-test("Add an agent offers every ready-made agent's content file not yet added here", async () => {
+test("Add agent offers every ready-made agent's content file not yet added here", async () => {
   const keys = [
     "triage",
     "bug-fixer",
@@ -1714,7 +1714,7 @@ test("Add an agent offers every ready-made agent's content file not yet added he
   }
 });
 
-test("Add an agent adds a ready-made agent once", async () => {
+test("Add agent offers ready-made agents first and adds one", async () => {
   const client = fakeAgentsClient([], { templates: [TRIAGE_TEMPLATE] });
   let path = "";
   const container = await render(
@@ -1722,9 +1722,12 @@ test("Add an agent adds a ready-made agent once", async () => {
       <AgentsPage workspaceId={WORKSPACE_ID} />
     </AgentsTestHost>,
   );
-  expect(container.textContent).toContain("Add an agent");
+  expect(container.textContent).toContain("Add agent");
   expect(container.textContent).toContain("Sorts new issues");
-  await act(async () => button(container, "Add").click());
+  const triage = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(
+    (item) => item.textContent?.includes("Triage"),
+  )!;
+  await act(async () => triage.click());
   await flush();
   expect(client.calls).toContainEqual(["createAgentFromTemplate", WORKSPACE_ID, "triage"]);
   const created = [...client.agents.values()][0]!;

@@ -143,6 +143,7 @@ export function SessionWorkspace(props: {
       {...(props.leadingTabs ? { leadingTabs: props.leadingTabs } : {})}
       {...(props.trailingTabs ? { trailingTabs: props.trailingTabs } : {})}
       {...(initialTab ? { initialTab } : {})}
+      tabVisibility="relevant"
       onActiveTabChange={rememberActiveTab}
       openTabRequest={props.openTabRequest}
       {...(props.pullRequest ? { pullRequest: props.pullRequest } : {})}

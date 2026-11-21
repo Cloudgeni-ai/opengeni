@@ -17,6 +17,7 @@ import type { ChatClient } from "@opengeni/sdk";
 // external embedder uses — that is criterion F1.
 import {
   lazy,
+  memo,
   type ReactNode,
   Suspense,
   useCallback,
@@ -291,6 +292,8 @@ export type WorkspaceMachine = {
   refresh: () => Promise<void>;
 };
 
+export type SandboxWorkspaceTabVisibility = "all" | "relevant";
+
 export type UseSandboxWorkspaceTabsOptions = ClientOverride<ChatClient> & {
   sessionId: string;
   /** Live event log (usually `useSessionEvents().events`). */
@@ -311,6 +314,10 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride<ChatClient> & {
   /** Override the source-driven default tab (e.g. a host landing tab id). When
    *  omitted the workbench picks Changes-vs-Files from capture or live Git. */
   initialTab?: string | null | undefined;
+  /** `"all"` (default) shows every enabled surface as a tab. `"relevant"` shows
+   *  Changes only when there are changes and keeps Files, Terminal, Browser and
+   *  Desktop under the dock's "+" menu until opened (`WorkspaceTab.optional`). */
+  tabVisibility?: SandboxWorkspaceTabVisibility | undefined;
   /** Actually selected dock tab. Inactive data surfaces retain cache but issue no live reads. */
   activeTab?: string | null | undefined;
   /** Whether the dock is visible. Hidden docks retain UI state but must not keep
@@ -417,6 +424,7 @@ export function useSandboxWorkspaceTabs(
     requestedComputerRequestId,
   } = options;
   const initialTab = options.initialTab ?? null;
+  const relevantOnly = options.tabVisibility === "relevant";
   const activeTab = options.activeTab ?? initialTab;
   const workspaceVisible = options.workspaceVisible ?? true;
   const machinesEnabled = options.machinesEnabled ?? true;
@@ -759,6 +767,27 @@ export function useSandboxWorkspaceTabs(
   // null only during the brief pre-first-resolve window (no host override yet).
   const defaultTab = defaultTabRef.current.value;
 
+  const pullRequestUrl = pullRequest?.url;
+  const pullRequestNumber = pullRequest?.number;
+  const stablePullRequest = useMemo<WorkbenchPullRequest | null>(
+    () =>
+      pullRequestUrl
+        ? {
+            url: pullRequestUrl,
+            ...(pullRequestNumber !== undefined ? { number: pullRequestNumber } : {}),
+          }
+        : null,
+    [pullRequestUrl, pullRequestNumber],
+  );
+  const wakeFiles = useCallback(() => requestWarmIntent("warmFiles"), [requestWarmIntent]);
+  const openGuardedFile = useCallback(
+    (path: string) => {
+      requestWarmIntent("warmFiles");
+      onOpenFile?.(path);
+    },
+    [requestWarmIntent, onOpenFile],
+  );
+
   const tabs = useMemo(() => {
     const list: WorkspaceTab[] = [];
 
@@ -768,7 +797,8 @@ export function useSandboxWorkspaceTabs(
         id: WORKBENCH_TAB_CHANGES,
         label: t("sandboxWorkspace.changes"),
         icon: <GitCompareArrowsIcon />,
-        badge: dirtyCount > 0 ? <DirtyBadge count={dirtyCount} /> : undefined,
+        badge: dirtyCount > 0 && !relevantOnly ? <DirtyBadge count={dirtyCount} /> : undefined,
+        ...(relevantOnly && dirtyCount === 0 && !captureHasChanges ? { optional: true } : {}),
         content: (
           <ChangesTabBody
             git={git}
@@ -783,16 +813,9 @@ export function useSandboxWorkspaceTabs(
             capabilitiesState={caps.state}
             capabilitiesError={caps.error}
             onRetry={caps.renegotiate}
-            onWake={() => requestWarmIntent("warmFiles")}
-            {...(filesEnabled && onOpenFile
-              ? {
-                  onOpenFile: (path: string) => {
-                    requestWarmIntent("warmFiles");
-                    onOpenFile(path);
-                  },
-                }
-              : {})}
-            pullRequest={pullRequest ?? null}
+            onWake={wakeFiles}
+            {...(filesEnabled && onOpenFile ? { onOpenFile: openGuardedFile } : {})}
+            pullRequest={stablePullRequest}
             {...(onOpenPullRequest ? { onOpenPullRequest } : {})}
           />
         ),
@@ -804,6 +827,7 @@ export function useSandboxWorkspaceTabs(
         id: WORKBENCH_TAB_FILES,
         label: t("sandboxWorkspace.files"),
         icon: <FileCode2Icon />,
+        ...(relevantOnly ? { optional: true } : {}),
         content: (
           <FilesTabBody
             key={sessionId}
@@ -867,6 +891,7 @@ export function useSandboxWorkspaceTabs(
         id: WORKBENCH_TAB_TERMINAL,
         label: t("sandboxWorkspace.terminal"),
         icon: <SquareTerminalIcon />,
+        ...(relevantOnly ? { optional: true } : {}),
         content: (
           <div className="h-full bg-og-bg p-1">
             <SandboxTerminal
@@ -893,6 +918,7 @@ export function useSandboxWorkspaceTabs(
         id: WORKBENCH_TAB_BROWSER,
         label: t("sandboxWorkspace.browser"),
         icon: <Globe2Icon />,
+        ...(relevantOnly ? { optional: true } : {}),
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Browser" />}>
             <LazyBrowserViewer
@@ -931,6 +957,7 @@ export function useSandboxWorkspaceTabs(
         id: WORKBENCH_TAB_DESKTOP,
         label: t("sandboxWorkspace.desktop"),
         icon: <MonitorIcon />,
+        ...(relevantOnly ? { optional: true } : {}),
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Desktop" />}>
             <LazyComputerViewer
@@ -968,13 +995,14 @@ export function useSandboxWorkspaceTabs(
     captureAvailable,
     captureState.degradedReason,
     dirtyCount,
+    captureHasChanges,
+    relevantOnly,
     warmTerminal,
     requestedFilePath,
     requestedFileRequestId,
     requestedFileLine,
     onOpenFile,
-    pullRequest?.url,
-    pullRequest?.number,
+    stablePullRequest,
     onOpenPullRequest,
     initialFilePath,
     onFilePathChange,
@@ -1009,6 +1037,8 @@ export function useSandboxWorkspaceTabs(
     caps.renegotiate,
     filesWarmRequested,
     requestWarmIntent,
+    wakeFiles,
+    openGuardedFile,
     createLinkedComputer,
     t,
   ]);
@@ -1051,6 +1081,9 @@ export type SandboxWorkspaceProps = ClientOverride<ChatClient> & {
   /** Override the pre-paint default tab (e.g. a host landing tab id). When
    *  omitted the workbench decides from the durable workspace capture. */
   initialTab?: string | undefined;
+  /** `"relevant"` keeps surfaces without content for this chat under the dock's
+   *  "+" menu; see `UseSandboxWorkspaceTabsOptions.tabVisibility`. */
+  tabVisibility?: SandboxWorkspaceTabVisibility | undefined;
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
   /** Open a built-in or host-injected tab. A new requestId reopens the same tab. */
   openTabRequest?: { tab: string; requestId: number } | null | undefined;
@@ -1117,6 +1150,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     leadingTabs,
     trailingTabs,
     initialTab,
+    tabVisibility,
     onActiveTabChange,
     openTabRequest,
     initialFilePath,
@@ -1238,6 +1272,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(surfaces ? { surfaces } : {}),
     ...(machinesEnabled !== undefined ? { machinesEnabled } : {}),
     ...(initialTab ? { initialTab } : {}),
+    ...(tabVisibility ? { tabVisibility } : {}),
     activeTab: activeTabHint,
     workspaceVisible: collapsed !== true,
     ...(onNotify ? { onNotify } : {}),
@@ -1294,6 +1329,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       tabs={tabs}
       {...(activeTab !== undefined ? { activeTab } : {})}
       onActiveTabChange={selectTab}
+      tabScope={sessionId}
       // Browser and Desktop select independent workspace resources, potentially
       // on another placement. Their own viewers report runtime status; the
       // agent-session machine chip must not describe those resources.
@@ -1376,44 +1412,70 @@ function DockActionButton({ onClick, children }: { onClick: () => void; children
  * connecting/offline/empty states so the default tab is never a blank surface.
  * The dock frame is untouched; this is the M5 seam.
  */
-function ChangesTabBody({
+const ChangesTabBody = memo(function ChangesTabBody({
   comparison,
   onComparisonChange,
   ...props
 }: {
   comparison: SandboxGitComparison;
   onComparisonChange: (comparison: SandboxGitComparison) => void;
-} & Parameters<typeof ChangesTabContent>[0]) {
-  const t = useOpenGeniText();
+} & Omit<Parameters<typeof ChangesTabContent>[0], "picker">) {
+  // A stable element keeps the memoized Changes surface from re-rendering on
+  // unrelated session events.
+  const picker = useMemo(
+    () => <ComparisonPicker comparison={comparison} onComparisonChange={onComparisonChange} />,
+    [comparison, onComparisonChange],
+  );
+  if (props.git.diff.length > 0) {
+    return (
+      <div className="h-full min-h-0">
+        <ChangesTabContent comparison={comparison} picker={picker} {...props} />
+      </div>
+    );
+  }
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-og-border bg-og-surface-1 px-2 py-1.5">
-        {(
-          [
-            ["branch", t("sandboxWorkspace.branch")],
-            ["working", t("sandboxWorkspace.uncommitted")],
-            ["staged", t("sandboxWorkspace.staged")],
-          ] as const
-        ).map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            aria-pressed={comparison === value}
-            onClick={() => onComparisonChange(value)}
-            className={cn(
-              "rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-              comparison === value
-                ? "bg-og-surface-2 text-og-fg shadow-sm"
-                : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg",
-            )}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="flex min-h-9 shrink-0 items-center border-b border-og-border px-3 py-1">
+        {picker}
       </div>
       <div className="min-h-0 flex-1">
-        <ChangesTabContent comparison={comparison} {...props} />
+        <ChangesTabContent comparison={comparison} picker={picker} {...props} />
       </div>
+    </div>
+  );
+});
+
+/** Branch · Uncommitted · Staged: plain text choices, the active one in full ink. */
+function ComparisonPicker({
+  comparison,
+  onComparisonChange,
+}: {
+  comparison: SandboxGitComparison;
+  onComparisonChange: (comparison: SandboxGitComparison) => void;
+}) {
+  const t = useOpenGeniText();
+  return (
+    <div className="-ml-1.5 flex shrink-0 items-center" data-changes-comparison>
+      {(
+        [
+          ["branch", t("sandboxWorkspace.branch")],
+          ["working", t("sandboxWorkspace.uncommitted")],
+          ["staged", t("sandboxWorkspace.staged")],
+        ] as const
+      ).map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          aria-pressed={comparison === value}
+          onClick={() => onComparisonChange(value)}
+          className={cn(
+            "rounded-og-sm px-1.5 py-1 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+            comparison === value ? "text-og-fg" : "text-og-fg-subtle hover:text-og-fg",
+          )}
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -1421,6 +1483,7 @@ function ChangesTabBody({
 function ChangesTabContent({
   git,
   comparison,
+  picker,
   captureAvailable,
   captureDegraded,
   captureRevision,
@@ -1437,6 +1500,7 @@ function ChangesTabContent({
 }: {
   git: UseSandboxGitResult;
   comparison: SandboxGitComparison;
+  picker: ReactNode;
   captureAvailable: boolean;
   captureDegraded: boolean;
   captureRevision: number | null;
@@ -1493,6 +1557,7 @@ function ChangesTabContent({
             {...(onOpenFile ? { onOpenFile } : {})}
             pullRequest={pullRequest ?? null}
             {...(onOpenPullRequest ? { onOpenPullRequest } : {})}
+            leading={picker}
           />
         </div>
       </div>

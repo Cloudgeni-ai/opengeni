@@ -177,6 +177,87 @@ function diffDense(count: number): GitFileDiff[] {
   });
 }
 
+const BRANCH_CODE = [
+  "export async function resolveTurnAuthority(input: TurnInput): Promise<Authority | null> {",
+  '  const subject = input.initiator?.kind === "service" ? input.initiator.subjectId : null;',
+  "  if (!subject) return null;",
+  "  for (const grant of await listGrants(input.workspaceId, { includeShared: true })) {",
+  '    if (grant.permissions.includes("sessions:control")) return { kind: "grant", grant };',
+  "  }",
+  "  // Fall back to the scheduler identity when no grant covers the subject.",
+  '  return runIds.length > 0 ? { kind: "scheduler", scheduledTaskId: null, runIds } : null;',
+  "}",
+  "",
+  'const ORG_KEY = { kind: "service" as const, subjectId: "api_key:e0fe5397-c9ac-4545-808d" };',
+  '    expect(automationTurnFor(ORG_KEY, { label: "cloudgeni-production" })).toBeNull();',
+  "    initiatorContext: { label: `${prefix}-standalone`, ...turn.initiatorContext },",
+  "export const DEFAULT_RETRY = { attempts: 3, backoffMs: [250, 1_000, 4_000] } as const;",
+];
+
+/** One realistic hunk: context, deletions, additions, context. */
+function codeHunk(start: number, dels: number, adds: number, seed: number): GitDiffHunk {
+  const lines: GitDiffLine[] = [];
+  const ctx = 3;
+  let oldNo = start;
+  let newNo = start;
+  const text = (i: number) => BRANCH_CODE[(seed + i) % BRANCH_CODE.length]!;
+  for (let i = 0; i < ctx; i++)
+    lines.push({ type: "context", oldNo: oldNo++, newNo: newNo++, text: text(i) });
+  for (let i = 0; i < dels; i++)
+    lines.push({ type: "del", oldNo: oldNo++, newNo: null, text: text(i + 3) });
+  for (let i = 0; i < adds; i++)
+    lines.push({ type: "add", oldNo: null, newNo: newNo++, text: text(i + 7) });
+  for (let i = 0; i < ctx; i++)
+    lines.push({ type: "context", oldNo: oldNo++, newNo: newNo++, text: text(i + 5) });
+  return {
+    oldStart: start,
+    oldLines: ctx * 2 + dels,
+    newStart: start,
+    newLines: ctx * 2 + adds,
+    header: `@@ -${start},${ctx * 2 + dels} +${start},${ctx * 2 + adds} @@`,
+    lines,
+  };
+}
+
+/** A file split into hunks of at most 40 changed lines, far apart. */
+function codeFile(
+  path: string,
+  adds: number,
+  dels: number,
+  status: GitFileDiff["status"] = "modified",
+): GitFileDiff {
+  const hunks: GitDiffHunk[] = [];
+  let remainingAdds = adds;
+  let remainingDels = dels;
+  let start = 240;
+  let seed = path.length;
+  while (remainingAdds > 0 || remainingDels > 0) {
+    const d = Math.min(remainingDels, 40);
+    const a = Math.min(remainingAdds, 40);
+    hunks.push(codeHunk(start, d, a, seed++));
+    remainingAdds -= a;
+    remainingDels -= d;
+    start += 190 + d;
+  }
+  return file(path, adds, dels, hunks, { status });
+}
+
+/**
+ * A branch review shaped like a real one: nine files, +123 −639, mostly
+ * deletions, long files with far-apart hunks.
+ */
+const diffBranch: GitFileDiff[] = [
+  codeFile("apps/api/src/embedded/automation-turn-authority.test.ts", 0, 77),
+  codeFile("apps/api/src/embedded/automation-turn-authority.ts", 7, 17),
+  codeFile("apps/api/src/routes/scheduled-tasks.ts", 0, 7),
+  codeFile("packages/core/src/domain/automations.ts", 2, 24),
+  codeFile("packages/core/src/domain/sessions.ts", 2, 10),
+  codeFile("packages/db/src/legacy-automation-keys.ts", 0, 125, "deleted"),
+  codeFile("packages/db/test/legacy-automation-keys.test.ts", 0, 116, "deleted"),
+  codeFile("apps/worker/src/activities/scheduler.ts", 112, 145),
+  codeFile("apps/worker/test/scheduler.test.ts", 0, 118),
+];
+
 /** A changeset that trips the per-file guards (binary + over-cap). */
 const diffGuard: GitFileDiff[] = [
   file("src/index.ts", 4, 1, [hunk(1, 2)]),
@@ -611,6 +692,17 @@ export const DOCK_STATES: Record<string, DockState> = {
     gitDiff: diffReview,
     tree: treeReview,
     announceFileCount: 3,
+  },
+  // Warm box, a real-sized branch review (nine files, long hunks).
+  "branch-review": {
+    label: "Warm · branch review",
+    capabilities: caps("warm"),
+    capture: captureNone,
+    machines: fleet(machine({ state: "online" })),
+    gitStatus: statusReview,
+    gitDiff: diffBranch,
+    tree: treeReview,
+    announceFileCount: 9,
   },
   // Cold box, capture-served instant paint. Machine offline, "as of" labels.
   "cold-instant": {
