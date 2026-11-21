@@ -47,11 +47,13 @@ import {
 import {
   databaseGatewayCompleter,
   databaseGatewayDecider,
+  databaseGatewayReadDecider,
   readBodyPrefix,
   requestDigest,
   type GatewayCompleter,
   type GatewayDecider,
   type GatewayDecisionIdentity,
+  type GatewayReadDecider,
 } from "./personal-github-gateway-policy";
 
 /**
@@ -100,6 +102,8 @@ export type PersonalGitHubGatewayServices = {
     options?: { everyRepository?: boolean },
   ) => Promise<string>;
   decide: GatewayDecider;
+  /** Reads against the chat's agents' Can use; without it reads pass as before. */
+  decideRead?: GatewayReadDecider;
   complete: GatewayCompleter;
   /** Git smart HTTP for `owner/name` routes (clones through `gh`). */
   git: PersonalGitHubGitBrokerServices;
@@ -850,6 +854,13 @@ export async function handlePersonalGitHubGatewayRequest(
   }
 
   let requestId: string | null = null;
+  if (action.kind === "read" && services.decideRead) {
+    const decision = await services.decideRead(authority.identity, action.title).catch(() => null);
+    if (decision === null) {
+      return gatewayError(502, "Could not check this agent's Can use. Try again.");
+    }
+    if (decision.kind === "refuse") return gatewayError(decision.status, decision.message);
+  }
   if (action.kind === "write") {
     const repositoryNames = checks.map((check) => repositoryLabel(check.repository));
     const where =
@@ -1121,6 +1132,7 @@ export function personalGitHubGatewayServices(deps: ApiRouteDeps): PersonalGitHu
         },
       }),
     decide: databaseGatewayDecider(deps.db),
+    decideRead: databaseGatewayReadDecider(deps.db),
     complete: databaseGatewayCompleter(deps.db),
     git: gatewayGitServices(deps, { openClaims, resolveAuthority }, fetchImpl),
     fetch: fetchImpl,

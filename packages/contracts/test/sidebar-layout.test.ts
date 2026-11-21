@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BUILT_IN_SIDEBAR_LAYOUT,
   EMPTY_SIDEBAR_LAYOUT,
   EMPTY_SIDEBAR_PERSONAL_CHANGES,
   SidebarLayoutChangeError,
@@ -13,6 +14,8 @@ import {
   readResolvedSidebarItems,
   readStoredSidebarLayout,
   readStoredSidebarPersonalChanges,
+  readWorkspaceSidebarLayout,
+  sidebarItemsShown,
   sidebarLinkedAppIds,
   sidebarPersonalChangesCustomized,
   withoutGoneSidebarApps,
@@ -410,6 +413,60 @@ describe("sidebar layout", () => {
     expect((kept[0]!.items as { id: string }[]).map((item) => item.id)).toEqual([
       "releases",
       "status",
+    ]);
+  });
+});
+
+describe("built-in default", () => {
+  test("a workspace without a saved default gets the Pinned apps list; a saved one stays", () => {
+    expect(readWorkspaceSidebarLayout(null)).toEqual(BUILT_IN_SIDEBAR_LAYOUT);
+    expect(readWorkspaceSidebarLayout(undefined).items).toEqual([
+      { id: "pinned-apps", type: "live_list", list: "pinned_apps" },
+    ]);
+    // A saved empty default is the admin's choice, not replaced.
+    expect(readWorkspaceSidebarLayout({ layout: { version: 1, items: [] } }).items).toEqual([]);
+    // Changing it never mutates the shared constant.
+    const changed = applyWorkspaceSidebarChanges(
+      readWorkspaceSidebarLayout(null),
+      parseChanges([{ op: "remove", itemId: "pinned-apps" }]),
+      ids(),
+    );
+    expect(changed.items).toEqual([]);
+    expect(BUILT_IN_SIDEBAR_LAYOUT.items).toHaveLength(1);
+  });
+
+  test("the sidebar leaves out live lists with no apps", () => {
+    const list = (apps: { appId: string; title: string }[]) => ({
+      id: "pinned-apps",
+      origin: "workspace" as const,
+      type: "live_list" as const,
+      list: "pinned_apps" as const,
+      label: "Pinned apps",
+      limit: 5,
+      apps,
+    });
+    const link = {
+      id: "s",
+      origin: "workspace" as const,
+      type: "link" as const,
+      url: "https://status.example.com",
+      label: "Status",
+    };
+    expect(sidebarItemsShown([list([])])).toEqual([]);
+    expect(sidebarItemsShown([list([{ appId: APP_A, title: "A" }])])).toHaveLength(1);
+    expect(
+      sidebarItemsShown([
+        {
+          id: "g",
+          origin: "workspace",
+          type: "group",
+          label: "G",
+          collapsed: false,
+          items: [list([]), link],
+        },
+      ]),
+    ).toEqual([
+      { id: "g", origin: "workspace", type: "group", label: "G", collapsed: false, items: [link] },
     ]);
   });
 });

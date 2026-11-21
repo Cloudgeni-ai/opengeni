@@ -2,11 +2,13 @@ import {
   classifySessionLinkUrl,
   parseGitHubLinkRef,
   type SessionLink,
+  type SessionLinkConnect,
   type SessionLinkLiveStatus,
   type SessionLinkWithStatus,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { listGitHubInstallationAccessForWorkspace } from "@opengeni/db";
+import { viewerLinkProvider, type ViewerLinkRead } from "./session-link-viewer-status";
 import {
   createGitHubAppInstallationTokenWithExpiry,
   getGitHubAppInstallationRepository,
@@ -17,9 +19,12 @@ import {
  * Live status for a chat's Linked items. A GitHub pull request or issue is
  * read through the workspace's GitHub App, the GitHub connection everyone in
  * the workspace shares, and only for repositories the workspace chose for it.
- * Every other link, and any GitHub link the App cannot read, shows its title
- * only (`status: null`). Reads are bounded, cached briefly and never fail the
- * list: a slow or refusing GitHub leaves that one link without status.
+ * A Linear issue or Slack thread is read as the viewer through their own (or a
+ * workspace-shared) connection, cached per viewer; without one the link
+ * carries `connect`. Every other link, and any link that can't be read, shows
+ * its title only (`status: null`). Reads are bounded, cached briefly and never
+ * fail the list: a slow or refusing provider leaves that one link without
+ * status.
  */
 
 const STATUS_TTL_MS = 30_000;
@@ -33,7 +38,11 @@ const MAX_CONCURRENT = 4;
 const CACHE_MAX = 2_000;
 const GITHUB_API = "https://api.github.com";
 
-type CachedStatus = { at: number; status: SessionLinkLiveStatus | null };
+type CachedStatus = {
+  at: number;
+  status: SessionLinkLiveStatus | null;
+  connect?: SessionLinkConnect | null;
+};
 type ResolvedRepository = { installationId: number; repositoryId: number; fullName: string };
 const statusCache = new Map<string, CachedStatus>();
 // Repository metadata (installation, id, canonical name) only; whether the
@@ -327,12 +336,21 @@ export function workspaceSessionLinkStatusReader(
   };
 }
 
+/**
+ * Reads Linear issues and Slack threads as the viewer (see
+ * `session-link-viewer-status.ts`); cached per viewer, never shared.
+ */
+export type SessionLinkViewerReader = {
+  subjectId: string;
+  read: (link: SessionLink) => Promise<ViewerLinkRead>;
+};
+
 /** Each link with its live status, read with bounded concurrency and a short cache. */
 export async function withSessionLinkStatuses(
   workspaceId: string,
   links: readonly SessionLink[],
   reader: SessionLinkStatusReader,
-  options: { fresh?: boolean } = {},
+  options: { fresh?: boolean; viewer?: SessionLinkViewerReader | null } = {},
 ): Promise<SessionLinkWithStatus[]> {
   const results: SessionLinkWithStatus[] = links.map((link) => ({ ...link, status: null }));
   let next = 0;
@@ -340,18 +358,36 @@ export async function withSessionLinkStatuses(
     while (next < links.length) {
       const index = next++;
       const link = links[index]!;
-      const key = `${workspaceId}:${link.url}`;
+      const viewer = viewerLinkProvider(link) ? (options.viewer ?? null) : null;
+      // Read as the viewer: the cache is theirs alone.
+      const key = viewer
+        ? `${workspaceId}:viewer:${viewer.subjectId}:${link.url}`
+        : `${workspaceId}:${link.url}`;
       const cached = statusCache.get(key);
       const maxAge = options.fresh ? FRESH_MIN_INTERVAL_MS : STATUS_TTL_MS;
       if (cached && Date.now() - cached.at < maxAge) {
-        results[index] = { ...link, status: cached.status };
+        results[index] = withRead(link, cached);
         continue;
       }
-      const status = await reader(workspaceId, link).catch(() => null);
-      boundedSet(statusCache, key, { at: Date.now(), status });
-      results[index] = { ...link, status };
+      let entry: CachedStatus;
+      if (viewer) {
+        const read = await viewer.read(link).catch((): ViewerLinkRead => ({ kind: "none" }));
+        entry = {
+          at: Date.now(),
+          status: read.kind === "status" ? read.status : null,
+          connect: read.kind === "connect" ? read.connect : null,
+        };
+      } else {
+        entry = { at: Date.now(), status: await reader(workspaceId, link).catch(() => null) };
+      }
+      boundedSet(statusCache, key, entry);
+      results[index] = withRead(link, entry);
     }
   };
   await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT, links.length) }, worker));
   return results;
+}
+
+function withRead(link: SessionLink, read: CachedStatus): SessionLinkWithStatus {
+  return { ...link, status: read.status, ...(read.connect ? { connect: read.connect } : {}) };
 }

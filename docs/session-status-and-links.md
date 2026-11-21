@@ -70,6 +70,8 @@ seconds):
 | --- | --- |
 | GitHub pull request | Open, draft, merged or closed; checks (passing, failing, running); review (approved, changes requested, review requested). |
 | GitHub issue | Open or done. |
+| Linear issue | Its state (open, done or closed, with the state's name), assignee and title. |
+| Slack thread | Its title or first message, the number of replies and when the last reply came. |
 | Anything else | Title only. |
 
 GitHub status is read through the workspace's GitHub App installation for the
@@ -77,6 +79,16 @@ repository's owner (not the viewer's own GitHub account), and only for
 repositories the workspace chose for that installation; that choice is checked
 on every read. An item the deployment cannot read shows its title only;
 reading never fails the list.
+
+Linear issues and Slack threads are read as the viewer, through the viewer's
+own Linear or Slack connection (`get_issue`, `slack_read_thread`), or one the
+workspace shares; never through another person's own connection. The read
+goes through the same tool gateway as the viewer's own calls, so the
+connection's tool permissions apply (a tool set to Ask first or Block isn't
+read). Status is cached per viewer. A viewer without a connection sees the
+title and a quiet **Connect Linear** or **Connect Slack** link (`connect` on
+the link, `{ name, capabilityId }`). Only signed-in people read live status
+this way; service and API-key callers get titles for these links.
 
 ## Report back when a pull request merges
 
@@ -123,8 +135,10 @@ its own GitHub tools and permissions. Embedders control both with the
   ([github-app.md](github-app.md)) installed on the repository's owner, and
   merge wakes need its webhooks reaching the deployment. Without it, items show
   titles only, and `wakeWhen` adds the link without a wake (`wakeNotSet`).
-- Linear issues, Slack threads and App records show their title only; their
-  live status is not read yet.
+- Live Linear and Slack status needs the Linear and Slack connectors in the
+  deployment's catalog and the viewer connected to them. A Slack MCP server
+  whose results don't include the thread's messages leaves the thread
+  title-only. App records show their title only.
 - A pull request opened outside the GitHub tools (for example with `gh` in the
   sandbox) is not added automatically; the agent adds it with
   `session_links_add`.

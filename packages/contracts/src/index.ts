@@ -37,6 +37,7 @@ import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./session-links";
+export * from "./github-built-in-tools";
 import { SessionWaitingOn } from "./session-links";
 export * from "./turn-serving-policy";
 import {

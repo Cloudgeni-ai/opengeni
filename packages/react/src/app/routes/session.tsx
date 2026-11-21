@@ -1961,7 +1961,15 @@ function SessionDockPanel(props: SessionDockProps) {
           }
         : {}),
       content: (
-        <SessionLinkedPanel state={linkState} canEdit={canControlSession && !sessionArchived} />
+        <SessionLinkedPanel
+          state={linkState}
+          canEdit={canControlSession && !sessionArchived}
+          connectHref={(connect) =>
+            connect.capabilityId
+              ? `/workspaces/${encodeURIComponent(props.workspaceId)}/plugins?suggested_capability=${encodeURIComponent(connect.capabilityId)}`
+              : `/workspaces/${encodeURIComponent(props.workspaceId)}/plugins`
+          }
+        />
       ),
     },
     {

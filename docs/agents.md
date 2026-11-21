@@ -541,8 +541,10 @@ whole.
   Codex Apps calls carry no provider domain: rules name them by the
   `codex_apps` server id or `*`. A rule a release can't fully read (such as
   a permission added later) asks first rather than being ignored. The
-  page lists the workspace's enabled connections; rules for connections not
-  listed (such as a ready-made agent's GitHub rules) still show and can be
+  page lists the workspace's enabled connections plus a **GitHub** row for
+  Opengeni's own GitHub tools (rules on `github.com`, the same rules the
+  ready-made agents use), unless a listed connection already covers
+  `github.com`. Rules for connections not listed still show and can be
   changed or removed.
 - **Learns**: **Remember across chats** plus the entries of the agent's
   Memory collection, each editable and removable (Knowledge entry save and
@@ -555,8 +557,14 @@ Not in self-hosted deployments without these pieces: Codex Apps rules need
 the Codex Apps deployment flag, and Slack lines need the Opengeni Slack app.
 Writes through `git` and `gh` with Your GitHub follow Can use too: a
 `github.com` or `github_personal` rule applies to the GitHub action each
-write maps to (for example `pull_request_merge` for `gh pr merge`). Reads
-such as `git clone` or `gh pr view` aren't checked against Can use.
+write maps to (for example `pull_request_merge` for `gh pr merge`). `gh`
+and GitHub API reads are refused when the agent chain blocks every built-in
+GitHub read tool (for example a `github.com` `*` Block rule). A read can't
+be mapped to one tool reliably, so a Block on a single read tool applies only
+to Opengeni's GitHub tools, and Ask first isn't applied to reads (the gateway
+has no read approvals; `gh` would fail rather than wait). `git clone` and
+`git fetch` aren't checked: the chat's own checkout needs
+them.
 
 ### Ready-made agents
 

@@ -2005,9 +2005,22 @@ export type SessionLinkLiveStatus = {
   title: string | null;
   checks: "passing" | "failing" | "pending" | "none" | null;
   review: "approved" | "changes_requested" | "review_required" | "none" | null;
+  /** Who a Linear issue is assigned to, by name. */
+  assignee?: string | null;
+  /** A Slack thread's reply count. */
+  replies?: number | null;
+  /** When a Slack thread's last reply was posted. */
+  lastReplyAt?: string | null;
 };
 
-export type SessionLinkWithStatus = SessionLink & { status: SessionLinkLiveStatus | null };
+/** The connector a viewer could connect to see a link's live status (Linear, Slack). */
+export type SessionLinkConnect = { name: string; capabilityId: string | null };
+
+export type SessionLinkWithStatus = SessionLink & {
+  status: SessionLinkLiveStatus | null;
+  /** Set when the viewer has no connection that can read this link. */
+  connect?: SessionLinkConnect | null;
+};
 
 export type SessionLinksResponse = { links: SessionLinkWithStatus[] };
 

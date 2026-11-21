@@ -5,6 +5,15 @@ import {
 } from "@opengeni/capabilities";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import type { MCPServer } from "@openai/agents";
+import {
+  GITHUB_REST_READ_TOOL_NAMES,
+  GITHUB_REST_TOOL_NAMES,
+  GITHUB_REST_WRITE_TOOL_NAMES,
+} from "@opengeni/contracts";
+
+// The built-in GitHub tools' names live in contracts so the agent page can
+// list them for Can use; they are re-exported here unchanged.
+export { GITHUB_REST_READ_TOOL_NAMES, GITHUB_REST_TOOL_NAMES, GITHUB_REST_WRITE_TOOL_NAMES };
 
 export const GITHUB_REST_API_ORIGIN = "https://api.github.com";
 export const GITHUB_REST_MCP_APP_SERVER_ID = "github_app";
@@ -92,26 +101,6 @@ export const GITHUB_REST_MCP_PERSONAL_DESCRIPTOR = githubDescriptor(
   "connection",
 );
 
-export const GITHUB_REST_READ_TOOL_NAMES = Object.freeze([
-  "repositories_list",
-  "repository_get",
-  "branches_list",
-  "ref_get",
-  "file_get",
-  "issues_list",
-  "issue_get",
-  "pull_requests_list",
-  "pull_request_get",
-  "pull_request_reviews_list",
-  "checks_summary",
-  "code_search",
-  "workflow_runs_list",
-  "workflow_run_get",
-  "workflow_job_logs_get",
-  "organizations_list",
-  "owner_repositories_list",
-] as const);
-
 /** Reads that name no repository; offered only with account authority. */
 export const GITHUB_REST_ACCOUNT_TOOL_NAMES = Object.freeze([
   "organizations_list",
@@ -125,24 +114,6 @@ export const GITHUB_REST_REPOSITORYLESS_TOOL_NAMES = Object.freeze([
 ] as const);
 
 const ACCOUNT_TOOLS = new Set<string>(GITHUB_REST_ACCOUNT_TOOL_NAMES);
-
-export const GITHUB_REST_WRITE_TOOL_NAMES = Object.freeze([
-  "ref_create",
-  "issue_create",
-  "issue_update",
-  "issue_comment",
-  "pull_request_create",
-  "pull_request_update",
-  "pull_request_comment",
-  "pull_request_request_review",
-  "pull_request_review_submit",
-  "pull_request_merge",
-] as const);
-
-export const GITHUB_REST_TOOL_NAMES = Object.freeze([
-  ...GITHUB_REST_READ_TOOL_NAMES,
-  ...GITHUB_REST_WRITE_TOOL_NAMES,
-] as const);
 
 /**
  * The policy action of personal-GitHub requests that are hard to undo

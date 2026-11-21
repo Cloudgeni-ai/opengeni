@@ -1,8 +1,9 @@
-import { AddSessionLinkRequest } from "@opengeni/contracts";
+import { AddSessionLinkRequest, type AccessGrant, type SessionLink } from "@opengeni/contracts";
 import {
   addSessionLink,
   removeSessionLink,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   SessionLinkLimitError,
   SessionLinkUrlError,
@@ -16,6 +17,30 @@ import {
   workspaceSessionLinkStatusReader,
   type SessionLinkStatusReader,
 } from "../integrations/session-link-status";
+import {
+  type ViewerLinkRead,
+  viewerReadsOwnConnections,
+  viewerSessionLinkReader,
+} from "../integrations/session-link-viewer-status";
+import { requireWorkspaceToolGatewayAuthorization } from "../workspace-tool-gateway";
+
+type ViewerReaderFactory = (
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  links: readonly SessionLink[],
+) => { read: (link: SessionLink) => Promise<ViewerLinkRead>; close: () => Promise<void> };
+
+/** The caller's grant for using their own connections, or null (keys, services, agents). */
+function viewerToolGrant(
+  authorization: Parameters<typeof requireWorkspaceToolGatewayAuthorization>[0],
+): AccessGrant | null {
+  try {
+    const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+    return viewerReadsOwnConnections(grant) ? grant : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * A chat's Linked panel: list its links with live status, and add or remove
@@ -26,11 +51,18 @@ export function registerSessionLinkRoutes(
   app: Hono,
   deps: ApiRouteDeps,
   reader: SessionLinkStatusReader = workspaceSessionLinkStatusReader(deps),
+  viewerReader: ViewerReaderFactory = viewerSessionLinkReader,
 ): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/links", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     await requireSessionAuthorization(deps, grant, {
       sessionId,
       operation: "session.read",
@@ -39,7 +71,21 @@ export function registerSessionLinkRoutes(
     const links = await getSessionLinks(deps.db, workspaceId, sessionId);
     if (!links) throw new HTTPException(404, { message: "Session not found" });
     const fresh = c.req.query("fresh") === "true";
-    return c.json({ links: await withSessionLinkStatuses(workspaceId, links, reader, { fresh }) });
+    // Linear and Slack are read as the viewer, only when the caller is a
+    // person who may use their own connections here.
+    const viewerGrant = viewerToolGrant(authorization);
+    const viewer = viewerGrant ? viewerReader(deps, viewerGrant, links) : null;
+    try {
+      return c.json({
+        links: await withSessionLinkStatuses(workspaceId, links, reader, {
+          fresh,
+          viewer:
+            viewer && viewerGrant ? { subjectId: viewerGrant.subjectId, read: viewer.read } : null,
+        }),
+      });
+    } finally {
+      await viewer?.close();
+    }
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/links", async (c) => {

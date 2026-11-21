@@ -1186,9 +1186,19 @@ test("the agent page's setup: triggers, suggestions, Can use, Memory entries and
   ]);
   await act(async () => button(container, "Set up").click());
   expect(path).toBe(`/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1`);
-  // Can use lists each connection, plus rules for connections not listed here.
+  // Can use lists each connection and Opengeni's own GitHub tools, whose row
+  // holds the ready-made agent's github.com rule.
   expect(container.querySelector("[data-agent-can-use='gmail.com']")).not.toBeNull();
-  expect(container.textContent).toContain("github.com · merge_pull_request");
+  const github = container.querySelector<HTMLElement>("[data-agent-can-use='github.com']")!;
+  expect(github.textContent).toContain("GitHub");
+  expect(github.textContent).toContain("1 tool set on their own");
+  await act(async () =>
+    [...github.querySelectorAll("button")].find((b) => b.textContent?.includes("1 tool"))!.click(),
+  );
+  await flush();
+  expect(github.textContent).toContain("pull_request_merge");
+  expect(github.textContent).toContain("merge_pull_request");
+  expect(container.textContent).not.toContain("github.com · merge_pull_request");
   // Memory entries are listed and can be removed at the version read.
   expect(container.textContent).toContain("Releases go out on Tuesdays.");
   await act(async () =>

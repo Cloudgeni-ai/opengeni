@@ -194,6 +194,31 @@ export const EMPTY_SIDEBAR_LAYOUT: StoredSidebarLayout = {
   items: [],
 };
 
+/** The id of the built-in default's Pinned apps list. */
+export const SIDEBAR_BUILT_IN_PINNED_APPS_ID = "pinned-apps";
+
+/**
+ * The default of a workspace whose admins never changed it: the workspace's
+ * pinned apps. Clients leave out a live list with no apps, so a workspace
+ * without pins sees nothing. The first change to the default starts from
+ * this, so admins can remove it or build around it.
+ */
+export const BUILT_IN_SIDEBAR_LAYOUT: StoredSidebarLayout = {
+  version: SIDEBAR_LAYOUT_VERSION,
+  items: [{ id: SIDEBAR_BUILT_IN_PINNED_APPS_ID, type: "live_list", list: "pinned_apps" }],
+};
+
+/**
+ * The workspace default from its stored row: the built-in default when no
+ * admin ever saved one, else the saved layout as it is (an empty saved
+ * layout stays empty).
+ */
+export function readWorkspaceSidebarLayout(
+  row: { layout: unknown } | null | undefined,
+): StoredSidebarLayout {
+  return row ? readStoredSidebarLayout(row.layout) : structuredClone(BUILT_IN_SIDEBAR_LAYOUT);
+}
+
 export const EMPTY_SIDEBAR_PERSONAL_CHANGES: StoredSidebarPersonalChanges = {
   version: SIDEBAR_LAYOUT_VERSION,
   hidden: [],
@@ -1061,4 +1086,17 @@ export function flattenSidebarItemsForMobile(
           }
         : item,
     );
+}
+
+/**
+ * What the sidebar itself shows: a live list with no apps is left out until
+ * it fills, so the built-in Pinned apps list shows only in a workspace with
+ * pins. Groups stay, as admins set them. The Sidebar page lists every item.
+ */
+export function sidebarItemsShown(items: readonly ResolvedSidebarItem[]): ResolvedSidebarItem[] {
+  const shown = (item: ResolvedSidebarChild) => item.type !== "live_list" || item.apps.length > 0;
+  return items.flatMap((item): ResolvedSidebarItem[] => {
+    if (item.type !== "group") return shown(item) ? [item] : [];
+    return [{ ...item, items: item.items.filter(shown) }];
+  });
 }
