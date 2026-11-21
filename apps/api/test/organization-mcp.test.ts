@@ -816,7 +816,7 @@ describe("organization MCP action inputs", () => {
     expect(byId("steerMessage").request).toEqual(["SteerSessionMessageRequest"]);
     expect(byId("saveWorkspaceSkill").request).toEqual(["SaveWorkspaceSkillRequest"]);
     expect(byId("removeWorkspaceSkill").request).toEqual(["RemoveWorkspaceSkillRequest"]);
-    expect(byId("listScheduledTasks").query).toEqual(["limit", "offset", "sessionId"]);
+    expect(byId("listScheduledTasks").query).toEqual(["agentId", "limit", "offset", "sessionId"]);
     expect(byId("listWorkspaceSkills").query).toEqual(expect.arrayContaining(["cursor", "limit"]));
   });
 
@@ -1044,7 +1044,7 @@ describe("organization MCP action inputs", () => {
       const list = (await call("opengeni_action_describe", { id: "listScheduledTasks" })).value as {
         queryParameters?: string[];
       };
-      expect(list.queryParameters).toEqual(["limit", "offset", "sessionId"]);
+      expect(list.queryParameters).toEqual(["agentId", "limit", "offset", "sessionId"]);
     } finally {
       await client.close();
     }

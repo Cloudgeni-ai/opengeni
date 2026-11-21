@@ -12,7 +12,7 @@ const postgresTest = process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? test : test.
 const signature = "list_shared_slack_event_sources_v1(uuid, uuid, uuid, text)";
 
 postgresTest(
-  "1530 lists the Slack sources of the workspaces a bot is live-shared with, as the runtime",
+  "1537 lists the Slack sources of the workspaces a bot is live-shared with, as the runtime",
   async () => {
     const owned = await acquireOwnerMigratedTestDatabase("shared-slack-event-sources");
     if (!owned) throw new Error("PostgreSQL required");

@@ -2601,12 +2601,35 @@ export type ConnectorActionToolCall = {
    */
   minimumDecision?: "ask" | "block";
   /**
+   * The agent and Can use rule that set `minimumDecision`, so its record and
+   * refusal name them. Absent when another floor set it.
+   */
+  minimumDecisionBy?: ConnectorActionAgentRule;
+  /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation); the ledger admits it once
    * after that rejection.
    */
   deliversDecline?: true;
 };
+
+/** An agent's Can use rule that made a connector call ask or blocked it. */
+export type ConnectorActionAgentRule = {
+  agentId: string;
+  agentName: string;
+  connector: string;
+  tool: string;
+  permission: "ask" | "block";
+};
+
+/** The refusal a model reads for a blocked connector call. */
+export function connectorActionBlockedMessage(agentRule?: ConnectorActionAgentRule | null): string {
+  if (!agentRule || agentRule.permission !== "block") {
+    return "Connector action was not executed: blocked";
+  }
+  const tool = agentRule.tool === "*" ? "all tools" : agentRule.tool;
+  return `Connector action was not executed: blocked by the agent "${agentRule.agentName}" (its Can use rule blocks ${tool} of ${agentRule.connector})`;
+}
 
 export type ConnectorActionPolicyPreparation =
   | { managed: false; decision: "unmanaged" }
@@ -2616,6 +2639,8 @@ export type ConnectorActionPolicyPreparation =
       requestId?: string;
       actionFingerprint?: string;
       approvalStatus?: string;
+      /** Set when an agent's Can use rule decided. */
+      agentRule?: ConnectorActionAgentRule;
     };
 
 export type ConnectorActionExecutionAdmission =
@@ -2632,6 +2657,8 @@ export type ConnectorActionExecutionAdmission =
         | "already_executed"
         | "uncertain_retry"
         | "not_executed";
+      /** With `blocked`, when an agent's Can use rule blocked it. */
+      agentRule?: ConnectorActionAgentRule;
     };
 
 /** Secret-free persistence boundary supplied by the worker for one attempt. */
@@ -8276,7 +8303,7 @@ function connectorActionGatewayLifecycle(input: {
             ));
       if (preparation.managed && preparation.decision === "block") {
         throw new ConnectorActionExecutionError(
-          "Connector action was not executed: blocked",
+          connectorActionBlockedMessage(preparation.agentRule),
           "not_executed",
         );
       }
@@ -8309,7 +8336,9 @@ function connectorActionGatewayLifecycle(input: {
           const admission = await input.connectorActionPolicy!.begin(connectorCall);
           if (!admission.allowed) {
             throw new ConnectorActionExecutionError(
-              `Connector action was not executed: ${admission.reason}`,
+              admission.reason === "blocked"
+                ? connectorActionBlockedMessage(admission.agentRule)
+                : `Connector action was not executed: ${admission.reason}`,
               "not_executed",
             );
           }

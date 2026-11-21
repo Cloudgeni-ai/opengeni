@@ -277,6 +277,48 @@ describe("Linked status read as the viewer", () => {
     expect(fake.opened).toEqual([]);
   });
 
+  test("a GitHub link the app can't read is read with the viewer's own GitHub, for them alone", async () => {
+    const pr = sessionLink("https://github.com/acme/api/pull/4");
+    const workspaceId = crypto.randomUUID();
+    let appReads = 0;
+    const appReader = async () => {
+      appReads += 1;
+      return null;
+    };
+    const asViewer = (subjectId: string, label: string | null) => ({
+      subjectId,
+      read: async () => ({ kind: "none" as const }),
+      readGitHub: async () =>
+        label ? { state: "open" as const, label, title: null, checks: null, review: null } : null,
+    });
+    const [ada] = await withSessionLinkStatuses(workspaceId, [pr], appReader, {
+      viewer: asViewer("user:ada", "Ada's GitHub"),
+    });
+    const [bob] = await withSessionLinkStatuses(workspaceId, [pr], appReader, {
+      viewer: asViewer("user:bob", null),
+    });
+    const [noViewer] = await withSessionLinkStatuses(workspaceId, [pr], appReader);
+    expect(ada!.status?.label).toBe("Ada's GitHub");
+    expect(bob!.status).toBeNull();
+    expect(noViewer!.status).toBeNull();
+    // The app's read is shared and cached once for everyone.
+    expect(appReads).toBe(1);
+    const appStatus = {
+      state: "merged" as const,
+      label: "App",
+      title: null,
+      checks: null,
+      review: null,
+    };
+    const [viaApp] = await withSessionLinkStatuses(
+      crypto.randomUUID(),
+      [pr],
+      async () => appStatus,
+      { viewer: asViewer("user:ada", "Ada's GitHub") },
+    );
+    expect(viaApp!.status?.label).toBe("App");
+  });
+
   test("each viewer's status is cached for them alone", async () => {
     const linear = sessionLink("https://linear.app/acme/issue/ENG-9");
     const workspaceId = crypto.randomUUID();

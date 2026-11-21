@@ -46,6 +46,7 @@ import {
   githubSourceEventTypes,
   type GitHubAppWebhookPort,
 } from "./github-source";
+import { githubReadEventTypeCatalog } from "./github-events";
 import { gmailDeliveryEvents, gmailEventTypeCatalog } from "./gmail-events";
 import { createGmailEventSource } from "./gmail-source";
 import { eventMatchesTrigger } from "./matching";
@@ -55,6 +56,7 @@ import { createSlackEventSource } from "./slack-source";
 import { redactableSecret, webhookAdapterFor, withoutSecretHeaders } from "./webhook-adapters";
 import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-events";
 import { createWorkspaceEventSource } from "./workspace-source";
+import { createGitHubPersonalEventSource } from "./github-personal-source";
 import {
   withMcpEventSourceClient,
   mcpServerDisplayName,
@@ -235,6 +237,14 @@ export async function createEventSourceForViewer(
   }
   if (request.kind === "workspace") {
     const source = await createWorkspaceEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind === "github_personal") {
+    const source = await createGitHubPersonalEventSource({
       ...input,
       ownerSubjectId: input.viewer.subjectId,
       name: request.name,
@@ -495,15 +505,20 @@ export async function updateEventSourceForViewer(input: {
   }
   if (
     request.visibility === "workspace" &&
-    (source.kind === "mcp" || source.kind === "gmail" || source.kind === "workspace")
+    (source.kind === "mcp" ||
+      source.kind === "gmail" ||
+      source.kind === "workspace" ||
+      source.kind === "github_personal")
   ) {
     throw new HTTPException(422, {
       message:
         source.kind === "gmail"
           ? "A Gmail source reads your own mailbox, so it stays private to you"
-          : source.kind === "workspace"
-            ? "This source shows what you may see in the workspace, so it stays private to you"
-            : "An MCP source listens with your own sign-in, so it stays private to you",
+          : source.kind === "github_personal"
+            ? "This source reads with your own GitHub connection, so it stays private to you"
+            : source.kind === "workspace"
+              ? "This source shows what you may see in the workspace, so it stays private to you"
+              : "An MCP source listens with your own sign-in, so it stays private to you",
     });
   }
   if (
@@ -939,6 +954,7 @@ export async function listEventSourceTypes(
   if (input.source.kind === "slack") return slackEventTypeCatalog();
   if (input.source.kind === "gmail") return gmailEventTypeCatalog();
   if (input.source.kind === "workspace") return workspaceEventTypeCatalog();
+  if (input.source.kind === "github_personal") return githubReadEventTypeCatalog();
   if (input.source.kind === "webhook") {
     return webhookEventTypeCatalog(input.source, recent);
   }

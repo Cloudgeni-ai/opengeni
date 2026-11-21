@@ -191,4 +191,24 @@ describe("agent Can use floor", () => {
       managed: false,
     });
   });
+
+  test("records the agent rule only when it decides", () => {
+    const rule = {
+      agentId: "agent-1",
+      agentName: "Reviewer",
+      connector: "github.com",
+      tool: "*",
+      permission: "block" as const,
+    };
+    expect(withMinimumConnectorDecision({ managed: false }, "block", "send", rule)).toMatchObject({
+      decision: "block",
+      agentRule: rule,
+    });
+    const blocked = {
+      managed: true as const,
+      source: "explicit" as const,
+      entry: policy({ policy: "block" }),
+    };
+    expect(withMinimumConnectorDecision(blocked, "block", "send", rule)).toBe(blocked);
+  });
 });

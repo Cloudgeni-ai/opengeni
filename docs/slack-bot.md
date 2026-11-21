@@ -717,7 +717,7 @@ bot must still be the active, verified install, sharing must be on, and the
 saved workspace selection (or all workspaces) must include that workspace. One
 SQL call per callback finds those sources
 (`opengeni_private.list_shared_slack_event_sources_v1`, migration
-`1530_shared_slack_event_sources.sql`, a SECURITY INVOKER read under each
+`1537_shared_slack_event_sources.sql`, a SECURITY INVOKER read under each
 workspace's own RLS context). Turning sharing off or removing a workspace from
 it stops delivery from the next callback; its source stays, and receives again
 if the bot is shared with it again. A failure for one workspace is logged and

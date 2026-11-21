@@ -561,6 +561,11 @@ whole.
   form** opens the automation form with `?agent=<id>&returnTo=agent` for
   every other setting; its back link, Cancel and Save return to the
   agent's page.
+  The list comes from the server
+  (`GET /v1/workspaces/:id/scheduled-tasks?agentId=<id>`, SDK
+  `listScheduledTasks({ agentId })`), which filters on
+  `agentConfig.agentId`; a server without the filter ignores it and the page
+  then filters what it got.
 - **Can use**: rules `{connector, tool, permission}`. `connector` is a
   connection's server id, a provider domain such as `github.com` (any
   connection to that provider; what ready-made agents use), or `*`; `tool` is
@@ -579,6 +584,13 @@ whole.
   workers follow its Can use, and a delegated chat follows both its own
   agent's and the caller's, so handing work over never drops a restriction.
   In an unattended run Ask first refuses the call, as approvals do there.
+  When a rule is what made a call ask or blocked it, the refusal names the
+  agent and its rule (`blocked by the agent "Triage" (its Can use rule
+  blocks pull_request_merge of github.com)`), and the call's record keeps it: `agentRule`
+  (`{agentId, agentName, connector, tool, permission}`) on `ToolActionReview`
+  and `connector_action_requests.agent_rule` (migration `1531`). The other
+  fields are unchanged (`reasonCode` stays `blocked_by_default` or
+  `asks_by_default`), so older clients show the same refusal as before.
   Codex Apps calls carry no provider domain: rules name them by the
   `codex_apps` server id or `*`. A rule a release can't fully read (such as
   a permission added later) asks first rather than being ignored. The
@@ -653,8 +665,11 @@ caller like any worker's. The child keeps the calling chat's privacy, and
 its Memory guidance matches it. Who can use the agent is checked for the
 person the calling chat acts for: an Only me agent only for its owner in Only
 me chats (a shared chat considers shared agents only), and from an open Slack
-chat only agents anyone in the organization can use. The caller's Can use
-still applies in the child (see Can use above).
+chat only agents anyone in the organization can use. An Only me calling chat
+uses its owner's agents whoever runs the turn, so an Only me automation's run
+can hand work to its owner's other Only me agents (the child is bound with
+`agent.subjectId` set to the owner). The caller's Can use still applies in
+the child (see Can use above).
 A name two agents share is refused with `agent_name_ambiguous` and their ids;
 an unknown one with `agent_not_found`. Delegated chats keep the nested agent
 depth limit. Triage hands bugs to "Bug fixer", which asks "PR reviewer".
