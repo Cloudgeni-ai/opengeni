@@ -2309,6 +2309,12 @@ export type Session = {
    * which owns the follow-up. Absent when false and on older servers.
    */
   failureHandled?: boolean | undefined;
+  /**
+   * True when this `requires_action` session waits only on questions it put
+   * to the agent that started it, which still has them. Absent when false and
+   * on older servers.
+   */
+  questionWithAgent?: boolean | undefined;
   /** Personal actively-working label. */
   activelyWorking?: boolean;
   /** Optimistic unread/actively-working revision. */
@@ -2420,6 +2426,7 @@ export type SessionListEntry = Pick<
   | "pinVersion"
   | "unread"
   | "failureHandled"
+  | "questionWithAgent"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"

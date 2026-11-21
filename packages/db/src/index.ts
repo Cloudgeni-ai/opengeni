@@ -1347,6 +1347,7 @@ import {
   childRequiresActionSummary,
   childWaitingCapacityDedupeKey,
   childWaitingCapacitySummary,
+  humanInputQuestionIsPersonOnly,
 } from "./child-lifecycle-notices";
 import {
   CAPACITY_WAIT_NOTICE_KEY,
@@ -36511,6 +36512,8 @@ type SessionRow = typeof schema.sessions.$inferSelect & {
   meaningfulSequence?: number;
   /** See sessionFailureHandledByParentSql. */
   failureHandled?: boolean;
+  /** See sessionQuestionsWithAgentSql. */
+  questionWithAgent?: boolean;
 };
 
 /** A session row with its Skill folders, which a complete `Session` carries. */
@@ -36918,6 +36921,7 @@ async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
   const handledFailures = await sessionIdsWithHandledFailure(db, workspaceId, rows);
+  const questionsWithAgent = await sessionIdsWithQuestionsWithAgent(db, workspaceId, rows);
   const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
     const cursor = cursorBySessionId.get(row.id);
     if (
@@ -36933,6 +36937,7 @@ async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
       lastSequence: cursor.lastSequence,
       meaningfulSequence: cursor.meaningfulSequence,
       ...(handledFailures.has(row.id) ? { failureHandled: true } : {}),
+      ...(questionsWithAgent.has(row.id) ? { questionWithAgent: true } : {}),
     };
   });
   return includeEffectivePolicy
@@ -37125,6 +37130,87 @@ async function sessionIdsWithHandledFailure(
     `,
   );
   return new Set(handled.map((row) => row.id));
+}
+
+/**
+ * Whether everything a session waits on is a question it put to the agent
+ * that started it (`held_for_agent`), and that agent still has it: the
+ * notice is on its way, queued, or in a turn that has not ended, and the
+ * agent's session has not failed or been cancelled. Such a session does not
+ * wait on a person, so person-facing attention leaves it out. The inbox
+ * trigger clears the hold when that turn ends; this check also covers a
+ * notice that can no longer reach an agent. Viewer-independent.
+ */
+function sessionQuestionsWithAgentSql(workspaceId: string | SQL, sessionId: SQL): SQL {
+  return sql`(exists (
+      select 1 from ${schema.sessionHumanInputRequests} asked
+      where asked.workspace_id = ${workspaceId}
+        and asked.session_id = ${sessionId}
+        and asked.status = 'pending'
+    )
+    and not exists (
+      select 1 from ${schema.sessionHumanInputRequests} asked
+      where asked.workspace_id = ${workspaceId}
+        and asked.session_id = ${sessionId}
+        and asked.status = 'pending'
+        and not (asked.held_for_agent and exists (
+          select 1
+          from ${schema.sessionSystemUpdateOutbox} notice
+          join ${schema.sessions} agent
+            on agent.workspace_id = notice.workspace_id
+           and agent.id = notice.target_session_id
+          left join ${schema.sessionSystemUpdates} received
+            on received.workspace_id = notice.workspace_id
+           and received.session_id = notice.target_session_id
+           and received.dedupe_key = notice.dedupe_key
+          where notice.workspace_id = ${workspaceId}
+            and notice.dedupe_key = ${childRequiresActionDedupeKeySql(
+              sql`asked.session_id`,
+              sql`asked.turn_id`,
+              sql`asked.turn_generation`,
+            )}
+            and agent.status not in ('failed', 'cancelled')
+            and (
+              received.state = 'pending'
+              or (received.id is null and notice.status = 'pending')
+              or (received.state = 'delivered' and exists (
+                select 1 from ${schema.sessionTurns} answering
+                where answering.workspace_id = ${workspaceId}
+                  and answering.session_id = notice.target_session_id
+                  and answering.id = received.delivered_turn_id
+                  and answering.finished_at is null
+              ))
+            )
+        ))
+    ))`;
+}
+
+/** `requires_action` sessions among `rows` whose questions are with their agent. */
+async function sessionIdsWithQuestionsWithAgent(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Pick<SessionRow, "id" | "status" | "parentSessionId">[],
+): Promise<Set<string>> {
+  const waitingChildIds = [
+    ...new Set(
+      rows
+        .filter((row) => row.status === "requires_action" && row.parentSessionId)
+        .map((row) => row.id),
+    ),
+  ];
+  if (waitingChildIds.length === 0) return new Set();
+  const withAgent = await rawRows<{ id: string }>(
+    db,
+    sql`
+      select child.id
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and ${anyOf(sql`child.id`, waitingChildIds, "uuid")}
+        and child.status = 'requires_action'
+        and ${sessionQuestionsWithAgentSql(workspaceId, sql`child.id`)}
+    `,
+  );
+  return new Set(withAgent.map((row) => row.id));
 }
 
 /**
@@ -37421,7 +37507,13 @@ export async function sessionTreeStatsForSessions(
                 workspaceId,
                 sql`numbered.id`,
                 sql`numbered.parent_session_id`,
-              )} else false end as failure_handled
+              )} else false end as failure_handled,
+            -- A question still with the agent that started this descendant
+            -- does not wait on the person; see sessionQuestionsWithAgentSql.
+            case when numbered.status = 'requires_action' then not ${sessionQuestionsWithAgentSql(
+              workspaceId,
+              sql`numbered.id`,
+            )} else false end as awaits_person
           from numbered
           left join ${schema.sessionPins} personal
             on ${subjectId ?? null}::text is not null
@@ -37464,7 +37556,7 @@ export async function sessionTreeStatsForSessions(
                 order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
               )
           )::int as "waitingDescendants",
-          count(*) filter (where status = 'requires_action')::int as "attentionDescendants",
+          count(*) filter (where awaits_person)::int as "attentionDescendants",
           count(*) filter (where effective_pause_revision is not null)::int as "pausedDescendants",
           count(*) filter (
             where effective_pause_revision is not null
@@ -37493,7 +37585,7 @@ export async function sessionTreeStatsForSessions(
             where waiting_turn.workspace_id = ${workspaceId}
               and waiting_turn.session_id = counted.id
               and waiting_turn.status = 'requires_action'
-          )) filter (where status = 'requires_action') as "attentionSince",
+          )) filter (where awaits_person) as "attentionSince",
           (
             -- The lookahead row proves more descendants than the budget.
             exists (
@@ -37672,7 +37764,11 @@ function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefine
 /** Exact target grants never imply visibility of relatives. */
 function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): SQL {
   return sql`(
-    ${schema.sessions.status} in ('requires_action', 'failed')
+    ${schema.sessions.status} = 'failed'
+    or (
+      ${schema.sessions.status} = 'requires_action'
+      and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`${schema.sessions.id}`)}
+    )
     or (
       ${schema.sessions.parentSessionId} is null
       and ${sessionRelatedListScope(scope)}
@@ -37686,7 +37782,9 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
           join ${schema.sessions} child on child.parent_session_id = parent.id
           where child.workspace_id = ${schema.sessions.workspaceId}
         )
-        select 1 from attention_tree where status = 'requires_action'
+        select 1 from attention_tree
+        where status = 'requires_action'
+          and not ${sessionQuestionsWithAgentSql(sql`${schema.sessions.workspaceId}`, sql`attention_tree.id`)}
       )
     )
   )`;
@@ -37882,7 +37980,8 @@ async function sessionListTotalsInScope(
         on child.parent_session_id = parent.id
       where parent.related
     ), attention_roots as (
-      select root_id, bool_or(status = 'requires_action') as attention
+      select root_id, bool_or(case when status = 'requires_action'
+        then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)} else false end) as attention
       from nodes group by root_id
     ), root_attention as materialized (
       select root.id, not root.archived and (
@@ -37904,6 +38003,9 @@ async function sessionListTotalsInScope(
           sql`nodes.parent_session_id`,
         )} else false end as failure_handled,
         nodes.actively_working as active_work,
+        case when nodes.status = 'requires_action'
+          then not ${sessionQuestionsWithAgentSql(workspaceId, sql`nodes.id`)}
+          else false end as awaits_person,
         case when nodes.status = 'requires_action' then (
           select min(turn.updated_at) from ${schema.sessionTurns} turn
           where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
@@ -37947,8 +38049,8 @@ async function sessionListTotalsInScope(
         }
     ), grouped as (
       select channel_id as "channelId", count(*)::int as total,
-        count(*) filter (where status = 'requires_action')::int as attention,
-        min(attention_since) as "attentionSince",
+        count(*) filter (where awaits_person)::int as attention,
+        min(attention_since) filter (where awaits_person) as "attentionSince",
         count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
           (status in ('running', 'recovering') or input_wait))::int as active,
@@ -38081,8 +38183,8 @@ async function sessionListTotalsInScope(
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
-        count(*) filter (where node.status = 'requires_action')::int as attention,
-        min(node.attention_since) as "attentionSince",
+        count(*) filter (where node.awaits_person)::int as attention,
+        min(node.attention_since) filter (where node.awaits_person) as "attentionSince",
         count(*) filter (where node.status = 'failed' and node.unread
           and not node.failure_handled)::int as failed,
         count(*) filter (where node.pause_revision is null and
@@ -39756,12 +39858,16 @@ export async function getSessionForSubject(
     const handledFailure = (
       await sessionIdsWithHandledFailure(scopedDb, workspaceId, [row.session])
     ).has(sessionId);
+    const questionWithAgent = (
+      await sessionIdsWithQuestionsWithAgent(scopedDb, workspaceId, [row.session])
+    ).has(sessionId);
     const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
       {
         ...row.session,
         lastSequence: row.cursor.lastSequence,
         meaningfulSequence: row.cursor.lastMeaningfulSequence,
         ...(handledFailure ? { failureHandled: true } : {}),
+        ...(questionWithAgent ? { questionWithAgent: true } : {}),
       },
     ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
@@ -92131,6 +92237,7 @@ export async function applySessionTurnSettlement(
             "pendingApprovalsCodecVersion",
           ),
         );
+        const newHumanInputRequestIds: string[] = [];
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
             if (request.questions.length === 1 && request.questions[0]!.skillReview) {
@@ -92205,12 +92312,16 @@ export async function applySessionTurnSettlement(
                     is not distinct from ${request.expiresAt?.toISOString() ?? null}::timestamptz
                 `,
               })
-              .returning({ id: schema.sessionHumanInputRequests.id });
+              .returning({
+                id: schema.sessionHumanInputRequests.id,
+                inserted: sql<boolean>`(xmax = 0)`,
+              });
             if (!persistedRequest) {
               throw new Error(
                 `Human-input request ${request.id} changed contract or settled before re-freeze`,
               );
             }
+            if (persistedRequest.inserted) newHumanInputRequestIds.push(persistedRequest.id);
           }
         }
         for (const request of interactionInterventionRequests) {
@@ -92261,6 +92372,7 @@ export async function applySessionTurnSettlement(
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               humanInputRequests,
+              newHumanInputRequestIds,
               pendingApprovals: input.runState.pendingApprovals.filter(undecided),
             },
           );
@@ -95094,6 +95206,8 @@ async function enqueueChildRequiresActionOutboxTx(
     turnId: string;
     turnGeneration: number;
     humanInputRequests: Parameters<typeof buildChildRequiresActionPayload>[0]["humanInputRequests"];
+    /** Requests this freeze created; earlier ones keep whether they were held. */
+    newHumanInputRequestIds?: readonly string[];
     pendingApprovals: readonly unknown[];
   },
 ): Promise<boolean> {
@@ -95113,12 +95227,13 @@ async function enqueueChildRequiresActionOutboxTx(
     parentSessionId: session.parentSessionId,
   });
   const summary = childRequiresActionSummary(session.id, payload);
-  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
-    dedupeKey: childRequiresActionDedupeKey({
-      childSessionId: session.id,
-      turnId: input.turnId,
-      turnGeneration: input.turnGeneration,
-    }),
+  const dedupeKey = childRequiresActionDedupeKey({
+    childSessionId: session.id,
+    turnId: input.turnId,
+    turnGeneration: input.turnGeneration,
+  });
+  const enqueued = await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey,
     kind: "child_requires_action",
     classification: "action_required",
     summary: route.escalatedFromSessionId
@@ -95128,6 +95243,62 @@ async function enqueueChildRequiresActionOutboxTx(
     lineage: { turnId: input.turnId },
     route,
   });
+  await holdChildQuestionsForAgentTx(tx, workspaceId, session.id, {
+    turnId: input.turnId,
+    requests: input.humanInputRequests,
+    newRequestIds: input.newHumanInputRequestIds ?? [],
+    // The agent gets the whole pause or none of it: an approval, a question
+    // only a person can answer, or a notice that could not carry every
+    // question (or an earlier notice of this turn) leaves all of it with the
+    // person.
+    hold:
+      enqueued &&
+      route.targetCanAct &&
+      !payload.truncated &&
+      payload.requests.length === input.humanInputRequests.length &&
+      input.humanInputRequests.every((request) =>
+        request.questions.every((question) => !humanInputQuestionIsPersonOnly(question)),
+      ),
+  });
+  return enqueued;
+}
+
+/**
+ * Hold a sub-agent's questions for the agent that receives its
+ * child_requires_action notice, so they reach that agent first. Runs before
+ * the pause's `session.humanInput.requested` events are inserted: the inbox
+ * and push triggers leave a held question out. The inbox trigger clears the
+ * hold, and tells the person, when the agent's turn that received the notice
+ * ends with the question still open. Only requests this freeze created are
+ * held, so one already shown to the person is never hidden again.
+ */
+async function holdChildQuestionsForAgentTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    turnId: string;
+    requests: ReadonlyArray<{ id: string }>;
+    newRequestIds: readonly string[];
+    hold: boolean;
+  },
+): Promise<void> {
+  if (!input.hold) return;
+  const requestIds = new Set(input.requests.map((request) => request.id));
+  const newIds = input.newRequestIds.filter((id) => requestIds.has(id));
+  if (newIds.length === 0) return;
+  await tx
+    .update(schema.sessionHumanInputRequests)
+    .set({ heldForAgent: true })
+    .where(
+      and(
+        eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+        eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+        eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+        eq(schema.sessionHumanInputRequests.status, "pending"),
+        inArray(schema.sessionHumanInputRequests.id, newIds),
+      ),
+    );
 }
 
 async function enqueueChildRequiresActionResolvedOutboxTx(
@@ -95322,6 +95493,15 @@ export function childFailedTurnDedupeKey(childSessionId: string, turnId: string)
 /** SQL form of childFailedTurnDedupeKey; keep the two in step. */
 function childFailedTurnDedupeKeySql(childSessionId: SQL, turnId: SQL): SQL {
   return sql`('child-completion:' || (${childSessionId})::text || ':turn:' || (${turnId})::text)`;
+}
+
+/** SQL twin of childRequiresActionDedupeKey. */
+function childRequiresActionDedupeKeySql(
+  childSessionId: SQL,
+  turnId: SQL,
+  turnGeneration: SQL,
+): SQL {
+  return sql`('child-requires-action:' || (${childSessionId})::text || ':' || (${turnId})::text || ':' || (${turnGeneration})::text)`;
 }
 
 async function enqueueFailedChildOutboxWithoutTurnTx(
@@ -101116,6 +101296,7 @@ function mapSessionFields(
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,
     ...(row.failureHandled ? { failureHandled: true } : {}),
+    ...(row.questionWithAgent ? { questionWithAgent: true } : {}),
     nestedAgentDepth: row.nestedAgentDepth,
     maxNestedAgentDepthOverride: row.maxNestedAgentDepthOverride ?? null,
     effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,

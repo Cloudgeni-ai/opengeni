@@ -26,6 +26,7 @@ import {
   configureChildLifecycleNotices,
   createDb,
   createSession,
+  sessionTreeStatsForSessions,
   getSessionSystemUpdateOutboxByDedupeKey,
   waitForSessionInputWithEvent,
   initializeSessionStartAtomically,
@@ -39,6 +40,7 @@ import {
   recordSessionGoalProgressWithEvent,
   sessionSystemUpdateOutboxKindPayload,
   settleConnectedMachineSessionBackgroundCommand,
+  withWorkspaceRls,
   withWorkspaceSessionActivityRls,
   type SessionSystemUpdateOutboxDelivery,
 } from "../src/index";
@@ -64,7 +66,7 @@ afterAll(async () => {
 
 type Grant = { accountId: string; workspaceId: string; subjectId: string };
 
-async function workspace() {
+async function workspace(subjectPrefix = "subject-") {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "child-lifecycle-notices",
@@ -73,7 +75,7 @@ async function workspace() {
     workspaceExternalSource: "child-lifecycle-notices",
     workspaceExternalId: `workspace-${suffix}`,
     workspaceName: "Child lifecycle notices",
-    subjectId: `subject-${suffix}`,
+    subjectId: `${subjectPrefix}${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
   return {
@@ -407,15 +409,21 @@ const questions = [
 async function freezeChild(
   grant: Grant,
   child: Started,
-  options: { approvals?: unknown[]; requestId?: string; parallelRequestId?: string } = {},
+  options: {
+    approvals?: unknown[];
+    requestId?: string;
+    parallelRequestId?: string;
+    questions?: unknown[];
+  } = {},
 ) {
+  const asked = (options.questions ?? questions) as typeof questions;
   const requestId = options.requestId ?? crypto.randomUUID();
   const parallelRequests = options.parallelRequestId
     ? [
         {
           id: options.parallelRequestId,
           toolCallId: "human-call-2",
-          questions,
+          questions: asked,
           allowSkip: false,
           expiresAt: null,
         },
@@ -433,18 +441,28 @@ async function freezeChild(
       serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
       pendingApprovals: options.approvals ?? [],
       humanInputRequests: [
-        { id: requestId, toolCallId: "human-call-1", questions, allowSkip: false, expiresAt: null },
+        {
+          id: requestId,
+          toolCallId: "human-call-1",
+          questions: asked,
+          allowSkip: false,
+          expiresAt: null,
+        },
         ...parallelRequests,
       ],
     },
     events: [
       {
         type: "session.humanInput.requested",
-        payload: { request: { id: requestId, questions, allowSkip: false, expiresAt: null } },
+        payload: {
+          request: { id: requestId, questions: asked, allowSkip: false, expiresAt: null },
+        },
       },
       ...parallelRequests.map((request) => ({
         type: "session.humanInput.requested" as const,
-        payload: { request: { id: request.id, questions, allowSkip: false, expiresAt: null } },
+        payload: {
+          request: { id: request.id, questions: asked, allowSkip: false, expiresAt: null },
+        },
       })),
       ...(options.approvals && options.approvals.length > 0
         ? [
@@ -2208,5 +2226,161 @@ describe("child lifecycle notices", () => {
     } finally {
       configureChildLifecycleNotices({ enabled: true });
     }
+  });
+});
+
+describe("a sub-agent's question goes to the agent that started it first", () => {
+  async function held(childSessionId: string) {
+    const rows = await shared.admin<Array<{ held: boolean }>>`
+      select held_for_agent as held from session_human_input_requests
+      where session_id = ${childSessionId}::uuid`;
+    return rows.map((row) => row.held);
+  }
+
+  async function inboxQuestions(childSessionId: string) {
+    const rows = await shared.admin<Array<{ status: string }>>`
+      select status from opengeni_private.inbox_items
+      where session_id = ${childSessionId}::uuid and kind = 'question'`;
+    return rows.map((row) => row.status);
+  }
+
+  async function attention(grant: Grant, rootId: string) {
+    const stats = await withWorkspaceRls(client.db, grant.workspaceId, (scoped) =>
+      sessionTreeStatsForSessions(scoped, grant.workspaceId, [rootId]),
+    );
+    return Number(stats.get(rootId)?.attentionDescendants ?? 0);
+  }
+
+  test("an agent-started worker's question reaches its agent, and the person only after that agent's turn ends without an answer", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await freezeChild(grant, child);
+
+    // With the agent: no inbox card, not counted as needing the person.
+    expect(await held(child.session.id)).toEqual([true]);
+    expect(await inboxQuestions(child.session.id)).toEqual([]);
+    expect(await attention(grant, parent.session.id)).toBe(0);
+
+    const row = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: child.session.id,
+        turnId: child.turn.id,
+        turnGeneration: child.turn.executionGeneration,
+      }),
+    ))!;
+    const delivered = await deliver(row);
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // The parent's current turn ends before it sees the notice: still held.
+    await settleIdle(grant, parent);
+    expect(await held(child.session.id)).toEqual([true]);
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn not claimed");
+    expect(await attention(grant, parent.session.id)).toBe(0);
+
+    // The turn that received it ends with the question open: the person gets it.
+    await settleIdle(grant, { session: parent.session, turn: claim.turn, attemptId });
+    expect(await held(child.session.id)).toEqual([false]);
+    expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+    expect(await attention(grant, parent.session.id)).toBe(1);
+  });
+
+  test("a question the agent answers never reaches the person", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    const { requestId } = await freezeChild(grant, child);
+    const row = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: child.session.id,
+        turnId: child.turn.id,
+        turnGeneration: child.turn.executionGeneration,
+      }),
+    ))!;
+    const delivered = await deliver(row);
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    await settleIdle(grant, parent);
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("parent turn not claimed");
+    const answered = await acceptSessionHumanInputResponse(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      requestId,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["staging"] }],
+      },
+      respondedBy: `agent_attempt:${attemptId}`,
+      clientEventId: crypto.randomUUID(),
+    });
+    expect(answered.action).toBe("accepted");
+    await settleIdle(grant, { session: parent.session, turn: claim.turn, attemptId });
+    expect(await inboxQuestions(child.session.id)).toEqual([]);
+  });
+
+  test("a question only a person can answer, or an approval, reaches the person at once", async () => {
+    const grant = await workspace("user:");
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const secretChild = await startSession(grant, { parent, message: "sign in" });
+    await freezeChild(grant, secretChild, {
+      questions: [
+        {
+          id: "github_password",
+          kind: "secret",
+          prompt: "GitHub password",
+          options: [],
+          required: true,
+          allowOther: false,
+          secret: {
+            item: "GitHub",
+            field: "password",
+            fieldKind: "concealed",
+            itemType: "login",
+            website: "https://github.com",
+            username: null,
+            looksLike: null,
+            saveTo: "user",
+            allowGenerate: false,
+            autocomplete: "current-password",
+          },
+        },
+      ],
+    });
+    const approvalChild = await startSession(grant, { parent, message: "write" });
+    await freezeChild(grant, approvalChild, {
+      approvals: [{ id: "tool-call-1", rawItem: { name: "write_file", arguments: "{}" } }],
+    });
+    for (const child of [secretChild, approvalChild]) {
+      expect(await held(child.session.id)).toEqual([false]);
+      expect(await inboxQuestions(child.session.id)).toEqual(["open"]);
+    }
+    expect(await attention(grant, parent.session.id)).toBe(2);
+  });
+
+  test("a root session's question, with no agent above it, reaches the person at once", async () => {
+    const grant = await workspace("user:");
+    const root = await startSession(grant, { message: "standalone" });
+    await freezeChild(grant, root);
+    expect(await held(root.session.id)).toEqual([false]);
+    expect(await inboxQuestions(root.session.id)).toEqual(["open"]);
   });
 });

@@ -8,11 +8,13 @@ import { failureHandledByAgent } from "./session-failure";
 /**
  * `requires_action` that a person can act on. A session the runtime could not
  * start (it carries an admission block) reads as Stuck with its own Retry, so
- * it is not counted as waiting on the person.
+ * it is not counted as waiting on the person, nor is a sub-agent whose
+ * questions are still with the agent that started it (`questionWithAgent`).
  */
 export function awaitsPerson(session: Session): boolean {
   return (
     session.status === "requires_action" &&
+    !session.questionWithAgent &&
     (session.admissionBlock === undefined || session.admissionBlock === null)
   );
 }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Session } from "../types";
 
-import { countNeedsYou, filterNeedsYou, rootNeedsYou } from "./needs-you";
+import { awaitsPerson, countNeedsYou, filterNeedsYou, rootNeedsYou } from "./needs-you";
 
 function session(overrides: Partial<Session> & { id: string }): Session {
   const { id, ...rest } = overrides;
@@ -25,6 +25,14 @@ describe("needs you", () => {
     expect(rootNeedsYou(stuck)).toBe(false);
     expect(countNeedsYou([stuck])).toBe(0);
     expect(filterNeedsYou([stuck])).toEqual([]);
+  });
+
+  test("a sub-agent whose questions are with the agent that started it does not wait on the person", () => {
+    const waiting = { id: "b", status: "requires_action" as const, parentSessionId: "a" };
+    const withAgent = session({ ...waiting, rootSessionId: "a", questionWithAgent: true });
+    expect(awaitsPerson(withAgent)).toBe(false);
+    expect(filterNeedsYou([withAgent])).toEqual([]);
+    expect(awaitsPerson(session({ ...waiting, rootSessionId: "a" }))).toBe(true);
   });
 
   test("a root needs you when it, or a spawned agent, waits on a person or failed", () => {

@@ -127,6 +127,18 @@ function approvalToolName(value: unknown): string | null {
     : null;
 }
 
+/**
+ * A question only a person can answer, never the agent above: a secret, a
+ * Skill review confirmation, or Opengeni's own secret-use approval.
+ */
+export function humanInputQuestionIsPersonOnly(question: HumanInputQuestion): boolean {
+  return (
+    question.kind === "secret" ||
+    question.skillReview != null ||
+    secretUseApprovalIdFromQuestionId(question.id) !== null
+  );
+}
+
 /** Compact, secret-free copy of one question: ids, kind, prompt and option labels. */
 function compactChildQuestion(question: HumanInputQuestion): ChildRequiresActionQuestion {
   return {
