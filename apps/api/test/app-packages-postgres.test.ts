@@ -1031,8 +1031,8 @@ test("destructive changes need allowDestructive, and conflicts stop the upgrade"
     idempotencyKey: crypto.randomUUID(),
   });
   expect(blocked.status, blocked.text).toBe(409);
-  const described = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/data`);
-  expect(described.json.collections.map((c: any) => c.name).sort()).toEqual(["notes", "tasks"]);
+  const sourceData = await f.call(f.author, "GET", `${f.appBase(f.source.id, appId)}/data`);
+  expect(sourceData.json.collections.map((c: any) => c.name).sort()).toEqual(["notes", "tasks"]);
   const dry = await upgrade(f, appId, { package: conflicting, dryRun: true });
   expect(dry.json.plan.migrations.conflicting).toEqual(["create_items"]);
   expect(dry.json.plan.conflicts).toEqual([

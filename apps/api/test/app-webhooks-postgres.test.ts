@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import type { AccessGrant } from "@opengeni/contracts";
 import {
   signTimestampedHmac,
   type ObjectStorageDependency,
