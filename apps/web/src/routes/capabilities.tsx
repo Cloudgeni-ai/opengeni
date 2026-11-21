@@ -94,7 +94,6 @@ import type {
 } from "@/components/capabilities/capabilities-section";
 import { ReadyMadeSection } from "@/components/capabilities/ready-made-section";
 import { SetupTabs, setupTabLabel } from "@/components/capabilities/setup-tabs";
-import { LineTabs, LineTabsContent } from "@opengeni/react/ui/line-tabs";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { SkillsPanel } from "./skills-panel";
 import { partitionSimplifiedInterfaceServices } from "@/components/capabilities/simplified-interface-services";
@@ -2133,7 +2132,7 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
           hidden={pageOpen}
           className="mx-auto w-full max-w-[1200px] px-4 pt-6 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8"
         >
-          <LineTabs value={activeTab} className="min-w-0">
+          <div className="min-w-0">
             {/*
               The catalog stays mounted, hidden, under the pages it opens: its
               header names the macOS window bar only until an open page does.
@@ -2212,7 +2211,7 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
             </Toolbar>
             <CatalogActionContext.Provider value={catalogToolbar}>
               <div className="min-w-0">
-                <LineTabsContent value={activeTab} forceMount>
+                <div>
                   <div hidden={activeTab !== "connections"}>
                     <CatalogHeader
                       title="Connections"
@@ -2536,10 +2535,10 @@ function CapabilitiesBody({ workspaceId, initialSection, readyMadeKind }: Capabi
                       </div>
                     ) : null}
                   </div>
-                </LineTabsContent>
+                </div>
               </div>
             </CatalogActionContext.Provider>
-          </LineTabs>
+          </div>
         </div>
 
         {integrations.map((adapter) => (
@@ -2704,7 +2703,7 @@ function ConnectedServiceList({ services }: { services: ConnectionCatalogService
             name,
             icon: service.logo ?? <LogoTile name={name} />,
             status: option.status,
-            needsAttention: option.state === "attention",
+            needsAttention: option.state === "attention" || option.state === "unavailable",
             onOpen: option.onOpen,
           };
         }),

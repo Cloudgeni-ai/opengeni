@@ -12,6 +12,8 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { cn } from "@opengeni/react/app/lib/utils";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { LoadErrorState } from "@opengeni/react/app/components/common";
 import type { ReadyMadeKind } from "./capabilities-section";
 
 /** Content without a team goes last, under this heading. */
@@ -44,25 +46,23 @@ export function readyMadeGroups(
   entries: readonly ReadyMadeEntry[],
   query = "",
   kind?: ReadyMadeKind,
-): { team: string; entries: ReadyMadeEntry[] }[] {
+): { key: string; team: string; entries: ReadyMadeEntry[] }[] {
   const needle = query.trim().toLowerCase();
-  const groups = new Map<string, ReadyMadeEntry[]>();
+  // Keyed by team, with `null` for no team, so a team named like the
+  // no-team heading still gets its own group.
+  const groups = new Map<string | null, ReadyMadeEntry[]>();
   for (const entry of entries) {
     if (kind && entry.kind !== kind) continue;
     const haystack = `${entry.name} ${entry.description} ${entry.team ?? ""} ${KIND_LABEL[entry.kind]}`;
     if (needle && !haystack.toLowerCase().includes(needle)) continue;
-    const team = entry.team?.trim() || NO_TEAM;
+    const team = entry.team?.trim() || null;
     groups.set(team, [...(groups.get(team) ?? []), entry]);
   }
   return [...groups.entries()]
     .sort(([a], [b]) =>
-      a === NO_TEAM
-        ? 1
-        : b === NO_TEAM
-          ? -1
-          : a.localeCompare(b, undefined, { sensitivity: "base" }),
+      a === null ? 1 : b === null ? -1 : a.localeCompare(b, undefined, { sensitivity: "base" }),
     )
-    .map(([team, grouped]) => ({ team, entries: grouped }));
+    .map(([team, grouped]) => ({ key: team ?? "", team: team ?? NO_TEAM, entries: grouped }));
 }
 
 function metadataString(value: unknown): string | null {
@@ -90,36 +90,48 @@ export function ReadyMadeSection({
   canInstallSkills: boolean;
   onSkillAdded: () => Promise<void>;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
+  const canAddAgents = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
+  const canAddApps = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
+  const [loadError, setLoadError] = useState<Error | null>(null);
+  const [loadRevision, setLoadRevision] = useState(0);
   const [agentTemplates, setAgentTemplates] = useState<AgentTemplate[] | null>(null);
   const [appTemplates, setAppTemplates] = useState<AppTemplate[] | null>(null);
   // Ready-made agents already added here, to the agent they became.
   const [addedAgents, setAddedAgents] = useState<ReadonlyMap<string, string>>(new Map());
-  // Apps added from here in this visit, to the app they became.
+  // Apps added from here, to the app they became. Adding again replays the
+  // same install, so an app added before a reload opens instead of doubling.
   const [addedApps, setAddedApps] = useState<ReadonlyMap<string, string>>(new Map());
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
+    setLoadError(null);
     void Promise.all([
-      client.listAgentTemplates(workspaceId).catch(() => []),
+      client.listAgentTemplates(workspaceId),
+      // Only marks what is already added; without it every row offers Add.
       client.listAgents(workspaceId).catch(() => []),
-      client.listAppTemplates(workspaceId).catch(() => []),
-    ]).then(([templates, agents, apps]) => {
-      if (!live) return;
-      setAgentTemplates(templates);
-      setAddedAgents(
-        new Map(
-          agents.flatMap((agent) => (agent.templateKey ? [[agent.templateKey, agent.id]] : [])),
-        ),
-      );
-      setAppTemplates(apps);
-    });
+      client.listAppTemplates(workspaceId),
+    ]).then(
+      ([templates, agents, apps]) => {
+        if (!live) return;
+        setAgentTemplates(templates);
+        setAddedAgents(
+          new Map(
+            agents.flatMap((agent) => (agent.templateKey ? [[agent.templateKey, agent.id]] : [])),
+          ),
+        );
+        setAppTemplates(apps);
+      },
+      (error: unknown) => {
+        if (live) setLoadError(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
     return () => {
       live = false;
     };
-  }, [client, workspaceId]);
+  }, [client, workspaceId, loadRevision]);
 
   const librarySkills = useMemo(
     () => items.filter((item) => item.kind === "skill" && item.source === "library"),
@@ -144,6 +156,7 @@ export function ReadyMadeSection({
           />
         ),
         added: addedAgents.has(template.key),
+        unavailable: canAddAgents ? undefined : "Ask an admin to add agents",
       })),
       ...(appTemplates ?? []).map((template) => ({
         key: `app:${template.key}`,
@@ -153,6 +166,7 @@ export function ReadyMadeSection({
         team: template.team,
         icon: <LogoTile name={template.name} />,
         added: addedApps.has(template.key),
+        unavailable: canAddApps ? undefined : "Ask an admin to add apps",
       })),
       ...librarySkills.map((item) => ({
         key: `skill:${item.id}`,
@@ -172,6 +186,8 @@ export function ReadyMadeSection({
       addedAgents,
       addedApps,
       canInstallSkills,
+      canAddAgents,
+      canAddApps,
       workspaceId,
     ],
   );
@@ -216,9 +232,17 @@ export function ReadyMadeSection({
         if (!template) return;
         const installed = await client.installAppPackage(workspaceId, {
           package: template.package,
-          idempotencyKey: crypto.randomUUID(),
+          // One key per ready-made app: adding it again returns the same app.
+          idempotencyKey: `ready-made:${template.key}`,
         });
         setAddedApps((current) => new Map(current).set(key, installed.app.id));
+        if (installed.replayed) {
+          void navigate({
+            to: "/workspaces/$workspaceId/artifacts/$artifactId",
+            params: { workspaceId, artifactId: installed.app.id },
+          });
+          return;
+        }
       } else {
         const item = librarySkills.find((each) => each.id === key);
         const libraryId = metadataString(item?.metadata.libraryId);
@@ -245,6 +269,15 @@ export function ReadyMadeSection({
     }
   };
 
+  if (loadError) {
+    return (
+      <LoadErrorState
+        title="Couldn't load ready-made content"
+        error={loadError}
+        onRetry={() => setLoadRevision((value) => value + 1)}
+      />
+    );
+  }
   if (agentTemplates === null || appTemplates === null) {
     return (
       <p role="status" className="text-sm text-fg-muted">
@@ -263,7 +296,7 @@ export function ReadyMadeSection({
   return (
     <div className="grid gap-8">
       {groups.map((group) => (
-        <section key={group.team} aria-label={group.team}>
+        <section key={group.key} aria-label={group.team}>
           <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>{group.team}</h2>
           <div className="og-connection-catalog" data-columns="2">
             {group.entries.map((entry) => {

@@ -30,4 +30,12 @@ describe("ready-made groups", () => {
     expect(readyMadeGroups(entries, "app")[0]!.entries.map((each) => each.key)).toEqual(["notes"]);
     expect(readyMadeGroups(entries, "nothing")).toEqual([]);
   });
+
+  test("a team named like the no-team heading keeps its own group, and kind narrows", () => {
+    const groups = readyMadeGroups([entry("a", "More"), entry("b", null, "app")]);
+    expect(groups.map((group) => group.entries.map((each) => each.key))).toEqual([["a"], ["b"]]);
+    expect(readyMadeGroups([entry("a", "X"), entry("b", "X", "app")], "", "app")).toEqual([
+      { key: "X", team: "X", entries: [entry("b", "X", "app")] },
+    ]);
+  });
 });

@@ -10427,7 +10427,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Ready-made apps for the gallery; add one with `installAppPackage` and its `package`. */
+  /** Ready-made apps; add one with `installAppPackage` and its `package`. */
   async listAppTemplates(
     workspaceId: string,
     options: { signal?: AbortSignal } = {},
