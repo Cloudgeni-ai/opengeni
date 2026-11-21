@@ -5328,7 +5328,8 @@ reviewers:
    Video reconciliation without a usable connection ends at its recovery
    deadline rather than refreshing outside the core lock.
 7. Claude 403 does not rotate accounts and 529 stays in the overload lane, as
-   today.
+   of cutover. The HTTP subscription permission-refusal exception is now
+   documented in [SUB-ELIG-04](../subscription-accounts.md#eligibility).
 8. The cutovers are explicitly ordered and data-independent (above).
 
 #### Findings in earlier merged work

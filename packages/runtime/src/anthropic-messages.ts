@@ -403,6 +403,8 @@ export class AnthropicProviderRejection extends Error {
     readonly request_id?: string,
     readonly suspendedUntil?: string,
     readonly headers: Record<string, string> = {},
+    /** A subscription HTTP permission error, before any stream, with no recognized narrower scope. */
+    readonly subscriptionHttpPermissionRefusal = false,
   ) {
     super(
       code === "anthropic_model_access_suspended"
@@ -435,6 +437,7 @@ function providerRejection(
   status: number,
   detail: unknown,
   responseHeaders: Headers,
+  subscriptionHttpResponse = false,
 ): AnthropicProviderRejection | undefined {
   if (status !== 403) return undefined;
   const requestId = responseHeaders.get("request-id") ?? undefined;
@@ -457,6 +460,7 @@ function providerRejection(
     requestId,
     undefined,
     headers,
+    subscriptionHttpResponse && error.type === "permission_error",
   );
 }
 
@@ -1811,7 +1815,12 @@ export class AnthropicMessagesModel implements Model {
       } catch {
         /* Diagnostics can be truncated. */
       }
-      const rejection = providerRejection(response.status, providerError, response.headers);
+      const rejection = providerRejection(
+        response.status,
+        providerError,
+        response.headers,
+        this.provider.anthropic?.auth === "oauth",
+      );
       if (rejection) throw rejection;
       // An organization admin can switch Claude's web search off; the request
       // then fails as a whole instead of returning a search error.
