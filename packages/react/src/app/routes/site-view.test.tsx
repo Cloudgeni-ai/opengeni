@@ -1150,7 +1150,7 @@ test("in the macOS app the publish form names the window bar, and the app takes 
   // The Site's name is in the bar, and its controls join the bar: no row of
   // their own above the Site.
   const header = () => document.querySelector<HTMLElement>("[data-site-header]");
-  expect(header()?.hasAttribute("data-window-bar-controls")).toBe(true);
+  expect(header()?.closest("[data-window-bar-controls]")).not.toBeNull();
   expect(container.contains(header())).toBe(false);
   expect(header()?.textContent).not.toContain("Opengeni usage");
 
@@ -1166,7 +1166,7 @@ test("in the macOS app the publish form names the window bar, and the app takes 
   await draw(false);
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(bar()).toBe("Opengeni usage");
-  expect(header()?.hasAttribute("data-window-bar-controls")).toBe(true);
+  expect(header()?.closest("[data-window-bar-controls]")).not.toBeNull();
 });
 
 test("a published app's settings open the same form; its back link returns to the app", async () => {

@@ -10,7 +10,15 @@ import {
   CopyIcon,
   PanelLeftIcon,
 } from "lucide-react";
-import { useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "../../ui/button";
@@ -84,6 +92,60 @@ export function windowBarHost(): HTMLElement {
     document.body.prepend(host);
   }
   return host;
+}
+
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/**
+ * A page's own controls at the bar's right end (a Site's publication, "…"
+ * and chat toggle), `right` px from the window's right edge (by default
+ * beside the window's edge). While they show, the bar's title line stops
+ * short of them (`--og-window-bar-title-reserve`), so a long title truncates
+ * instead of running under them.
+ */
+export function WindowBarEndControls({
+  right,
+  children,
+}: {
+  right?: number | null;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useIsomorphicLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const root = document.documentElement;
+    const update = () =>
+      root.style.setProperty(
+        "--og-window-bar-title-reserve",
+        `${Math.max(0, window.innerWidth - element.getBoundingClientRect().left + 8)}px`,
+      );
+    update();
+    window.addEventListener("resize", update);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(element);
+    return () => {
+      window.removeEventListener("resize", update);
+      observer?.disconnect();
+      root.style.removeProperty("--og-window-bar-title-reserve");
+    };
+  }, [right]);
+  if (typeof document === "undefined") return null;
+  // In the bar's host, so they come in the bar's tab order;
+  // `data-window-bar-controls` hides them with the bar's other controls while
+  // a full-window layer covers the page.
+  return createPortal(
+    <div
+      ref={ref}
+      data-window-bar-controls
+      data-window-bar-end=""
+      style={right == null ? undefined : { right: `${right}px` }}
+      className="fixed top-0 right-[calc(var(--og-window-panel-gap,4px)+0.5rem)] z-[47] flex h-[calc(2*var(--og-window-controls-center,22px))] min-h-min items-center gap-0.5 [-webkit-app-region:no-drag] [app-region:no-drag]"
+    >
+      {children}
+    </div>,
+    windowBarHost(),
+  );
 }
 
 /**
@@ -164,7 +226,7 @@ export function WindowBarTitle({
       data-window-drag
       data-titlebar
       data-window-bar-title
-      className="flex min-w-0 shrink-0 items-center gap-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))]"
+      className="flex max-w-[calc(100%-var(--og-window-bar-title-reserve,0px))] min-w-0 shrink-0 items-center gap-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))]"
     >
       {trail.length > 0 ? (
         <nav aria-label="Location" className="flex min-w-0 shrink items-center gap-1">

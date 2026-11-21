@@ -332,7 +332,13 @@ export function SiteSettings({
       description={
         onlyMe ? "Only you can open it." : `Everyone in ${management.workspaceName} can open it.`
       }
-      hint={owner ? undefined : "Only its owner can change this."}
+      hint={
+        !owner
+          ? "Only its owner can change this."
+          : management.canPublish
+            ? undefined
+            : "You need permission to publish to change this."
+      }
       control={
         audience.share ? (
           <Button type="button" size="sm" variant="outline" onClick={audience.share}>

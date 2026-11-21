@@ -2377,6 +2377,9 @@
 :where(.og-root).max-w-\[calc\(100\%-2rem\)\],:where(.og-root) .max-w-\[calc\(100\%-2rem\)\] {
     max-width: calc(100% - 2rem);
   }
+:where(.og-root).max-w-\[calc\(100\%-var\(--og-window-bar-title-reserve\,0px\)\)\],:where(.og-root) .max-w-\[calc\(100\%-var\(--og-window-bar-title-reserve\,0px\)\)\] {
+    max-width: calc(100% - var(--og-window-bar-title-reserve,0px));
+  }
 :where(.og-root).max-w-\[calc\(100vw-2rem\)\],:where(.og-root) .max-w-\[calc\(100vw-2rem\)\] {
     max-width: calc(100vw - 2rem);
   }
@@ -8502,12 +8505,6 @@
       @supports (color: color-mix(in lab, red, red)) {
         outline-color: color-mix(in oklab, var(--color-ring) 55%, transparent);
       }
-    }
-  }
-:where(.og-root).focus-visible\:outline-none,:where(.og-root) .focus-visible\:outline-none {
-    &:focus-visible {
-      --tw-outline-style: none;
-      outline-style: none;
     }
   }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {

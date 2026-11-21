@@ -41,7 +41,6 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { createPortal } from "react-dom";
 import { SiteView } from "../../artifacts";
 import { useArtifactLabels } from "../../components/artifacts/artifact-chrome";
 import type { SiteLiveState } from "../../components/artifacts/artifact-sandbox";
@@ -105,7 +104,7 @@ import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
 import { useWindowBarTitle } from "../../ui/window-bar-title";
-import { windowBarHost } from "../components/window-bar";
+import { WindowBarEndControls } from "../components/window-bar";
 
 // Loaded when someone opens it, from the Artifacts route that already holds
 // the publish form and the Site's management (a separate lazy entry would
@@ -426,7 +425,7 @@ export function SiteViewRoute({
       {/* Focusable, so the menu key or Shift+F10 opens its menu. */}
       <span
         tabIndex={0}
-        className="min-w-0 truncate rounded-sm text-sm font-medium text-fg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        className="min-w-0 truncate rounded-sm text-sm font-medium text-fg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
         title={artifact.title}
       >
         {artifact.title}
@@ -673,20 +672,12 @@ function SiteHeader({
     };
   }, [column, inWindowBar, side]);
   if (inWindowBar) {
-    if (typeof document === "undefined") return null;
-    // In the bar's host, so they come in the bar's tab order;
-    // `data-window-bar-controls` hides them with the bar's other controls
-    // while a full-window layer covers the page.
-    return createPortal(
-      <div
-        data-site-header=""
-        data-window-bar-controls=""
-        style={right === null ? undefined : { right: `${right + 8}px` }}
-        className="fixed top-0 right-[calc(var(--og-window-panel-gap,4px)+0.5rem)] z-[47] flex h-[calc(2*var(--og-window-controls-center,22px))] min-h-min items-center gap-0.5 [-webkit-app-region:no-drag] [app-region:no-drag]"
-      >
-        {children}
-      </div>,
-      windowBarHost(),
+    return (
+      <WindowBarEndControls right={right === null ? null : right + 8}>
+        <div data-site-header="" className="contents">
+          {children}
+        </div>
+      </WindowBarEndControls>
     );
   }
   return (
