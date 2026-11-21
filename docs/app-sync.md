@@ -128,9 +128,12 @@ With `removeMissing: true`, the sync records the keys it writes in
 (every page read, nothing truncated, no failure) it deletes the records whose
 keys that run didn't see, then forgets them; `summary.removed` counts them.
 Only keys this sync wrote are removed (never records people or the app wrote,
-and for a personal sync only that person's own), and a truncated or failed run
-removes nothing. Changing the target, key or mode clears the ledger, and so
-does opting out (for that person).
+and for a personal sync only that person's own). A truncated or failed run, a
+run that skipped any item (no key), and a run that saw no records at all remove
+nothing, so an error body or a renamed key field never empties the target.
+Changing the target, key or mode clears the ledger, and so does opting out
+(for that person). An upgrade that turns `removeMissing` on, or changes the
+arguments, key or target of a sync that has it on, counts as destructive.
 
 ### Filling a Site SQL table
 

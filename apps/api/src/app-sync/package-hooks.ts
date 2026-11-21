@@ -52,6 +52,18 @@ function changedSettings(
   return patch;
 }
 
+/** Settings whose change can make a removeMissing sync delete records. */
+const REMOVAL_SENSITIVE = [
+  "tool",
+  "arguments",
+  "recordsPath",
+  "key",
+  "collection",
+  "target",
+  "paging",
+  "maxRecords",
+] as const;
+
 async function compare(
   deps: ApiRouteDeps,
   grant: AccessGrant,
@@ -75,6 +87,7 @@ async function compare(
     unchanged: [],
     kept: [],
     problems: [],
+    destructive: [],
     patches: new Map(),
     additions: new Map(),
   };
@@ -104,6 +117,19 @@ async function compare(
       continue;
     }
     plan.changed.push(definitionName);
+    // With removeMissing on, a changed source or key can make the next run
+    // delete records it wrote earlier.
+    if (next.removeMissing === true) {
+      const narrowed = REMOVAL_SENSITIVE.filter((setting) => setting in patch);
+      if (existing?.removeMissing !== true || narrowed.length > 0)
+        plan.destructive!.push({
+          name: definitionName,
+          reason:
+            existing?.removeMissing !== true
+              ? "Turns on removing records the tool no longer returns"
+              : `Changes ${narrowed.join(", ")} of a sync that removes records the tool no longer returns`,
+        });
+    }
     // Whoever saves a sync becomes its owner and its shared runs use their
     // connection, so an upgrade changes only syncs the upgrader owns.
     if (view.ownerSubjectId !== grant.subjectId)

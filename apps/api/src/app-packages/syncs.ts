@@ -28,6 +28,8 @@ export type AppSyncUpgradePlan = {
   kept: string[];
   /** Syncs that won't upgrade as planned, and why. */
   problems: Array<{ name: string; reason: string }>;
+  /** Changes that can make a sync delete records it wrote (removeMissing). */
+  destructive?: Array<{ name: string; reason: string }>;
 };
 
 export type AppSyncHooks = {

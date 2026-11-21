@@ -634,7 +634,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "POST" && suffix === "/platform/timings") return await platformTimings(request);
     if (method === "POST" && suffix === "/live/admit") return await liveAdmit(request);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
-    const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
+    const tool = /^\/tools\/([a-z][a-z-]*)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
     const sitePath = suffix === "/v1/config/client" ? suffix : `/v1/workspaces/site-host${suffix}`;
     const matched = matchSiteOperation(method, sitePath);

@@ -346,6 +346,17 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * A signed delivery's id comes from its signature (which covers the time and
+ * the body), so replaying it inside the signature window, or changing an
+ * unsigned id header, can't insert its records again.
+ */
+function signedDeliveryId(headers: Headers): string | null {
+  if (headers.get("authorization") !== null) return null;
+  const signature = headers.get(APP_WEBHOOK_SIGNATURE_HEADER)?.trim();
+  return signature ? `sig:${sha256Hex(signature)}` : null;
+}
+
 /** A sender's delivery id, for idempotent inserts. */
 function deliveryIdOf(headers: Headers): string | null {
   for (const name of ["idempotency-key", "webhook-id", "x-delivery-id"]) {
@@ -490,12 +501,14 @@ export async function receiveAppWebhook(
       nowSeconds: Math.floor((input.now ?? new Date()).getTime() / 1000),
     });
   } catch {
-    verification = { ok: false, reason: "This webhook's secret can't be read on this deployment" };
+    // A deployment problem the managers need to see; kept on the webhook.
+    const reason = "This webhook's secret can't be read on this deployment";
+    await remember("rejected", reason);
+    return { outcome: "rejected", status: 401, reason };
   }
-  if (!verification.ok) {
-    await remember("rejected", verification.reason);
-    return { outcome: "rejected", status: 401, reason: verification.reason };
-  }
+  // Anyone who knows the address can send unauthenticated requests, so they
+  // write nothing (not even the webhook's last-delivery status).
+  if (!verification.ok) return { outcome: "rejected", status: 401, reason: verification.reason };
   if (row.status !== "active") {
     await remember("rejected", "The webhook is paused");
     return { outcome: "rejected", status: 409, reason: "This webhook is paused" };
@@ -520,7 +533,11 @@ export async function receiveAppWebhook(
   try {
     const access = await deliveryAccess(deps, row);
     await requireSharedCollection(access, row.collection);
-    const { operations, skipped } = appWebhookOperations(value, row, deliveryIdOf(input.headers));
+    const { operations, skipped } = appWebhookOperations(
+      value,
+      row,
+      signedDeliveryId(input.headers) ?? deliveryIdOf(input.headers),
+    );
     const written =
       operations.length === 0
         ? { results: [] }

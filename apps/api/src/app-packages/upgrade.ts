@@ -341,6 +341,8 @@ async function prepare(
           unchanged: synced.unchanged,
           kept: synced.kept,
         };
+        for (const entry of synced.destructive ?? [])
+          destructive.push({ part: "sync", name: entry.name, reason: entry.reason });
         for (const entry of synced.problems)
           problems.push({
             part: "sync",

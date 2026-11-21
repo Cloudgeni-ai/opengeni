@@ -63,7 +63,10 @@ without a key are skipped. Without a `key`, the body (or each record of the
 list at `recordsPath`, or the body itself when it is a list) is inserted.
 A delivery id from `Idempotency-Key`, `Webhook-Id` or `X-Delivery-Id` makes
 the insert idempotent (`<id>:<index>` per record of a list), so retries
-don't duplicate records.
+don't duplicate records. A signed delivery's id is derived from its
+signature instead (those headers aren't signed), so replaying it inside the
+signature window inserts nothing new. Requests that fail authentication
+write nothing, not even the webhook's last-delivery status.
 
 ### Writes and change events
 
@@ -75,7 +78,9 @@ pages, and `app.record.*` facts for "This workspace" automations and
 workspace webhooks ([site-data.md](site-data.md#app-change-events-for-automations-and-webhooks)),
 with chain depth 1, so automations they start keep the chain limit and the
 storm guard. The app is read as the webhook's creator sees it: an Only me
-app keeps accepting only while it is still theirs.
+app keeps accepting only while it is still theirs. Otherwise a webhook
+belongs to the app, not to the person who created it: it keeps accepting
+after they leave, and the app's managers pause, rotate or delete it.
 
 ### Management
 

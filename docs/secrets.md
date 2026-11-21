@@ -227,7 +227,10 @@ which keeps the reference text.
   this workspace, never anyone's Only me vault, never a chat's task vault, and
   never the reach of the person or agent whose call it is. Each use records
   `vault.secret.used` with `principalKind: "service_connection"` and the
-  `connectionId`. An item set to ask before each use can't be used here.
+  `connectionId`, plus `onBehalfOf` (the person, chat and turn whose call it
+  was, when known) for the audit trail only. An item set to ask before each
+  use can't be used here. Agents can't add a shared key through their prepared
+  connection setup; an admin adds it.
 - **Fails closed.** Adding one checks the key straight away: a missing item, an
   item out of reach, or a malformed reference is refused with a readable
   message that names nothing secret. If the item later disappears, calls stop

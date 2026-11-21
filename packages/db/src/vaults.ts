@@ -727,6 +727,8 @@ export async function recordVaultSecretUse(
       destination?: string;
       /** The approvals (0952) this use relied on. */
       approvalIds?: string[];
+      /** Who and what caused a non-person use (audit only). */
+      onBehalfOf?: { subjectId?: string; sessionId?: string; turnId?: string };
     };
     items: Array<{
       itemId: string;

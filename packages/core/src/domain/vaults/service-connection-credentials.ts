@@ -117,6 +117,9 @@ export async function resolveServiceConnectionHeaders(
       surface: "mcp",
       toolName: input.toolName ?? input.serverId ?? "connection",
       ...(destination ? { destination } : {}),
+      ...(input.onBehalfOf && Object.keys(input.onBehalfOf).length > 0
+        ? { onBehalfOf: input.onBehalfOf }
+        : {}),
     });
   } catch (error) {
     if (error instanceof SecretReferenceError) {

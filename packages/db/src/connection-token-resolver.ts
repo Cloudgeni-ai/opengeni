@@ -590,6 +590,8 @@ export type CredentialReferenceResolution = {
   serverId: string;
   toolName?: string;
   destinationUrl: string;
+  /** Who and what caused this request, for the vault audit entry only. */
+  onBehalfOf?: { subjectId?: string; sessionId?: string; turnId?: string };
 };
 
 /** A connection this resolve just found broken: only reconnecting fixes it. */
@@ -674,7 +676,11 @@ export function buildConnectionTokenResolver(
     connectionUseAttribution?: ConnectionUseAttribution,
     recordUsage = true,
     acceptedTransports: readonly string[] = [],
-    use: { serverId: string; toolName?: string } = { serverId: "" },
+    use: {
+      serverId: string;
+      toolName?: string;
+      onBehalfOf?: CredentialReferenceResolution["onBehalfOf"];
+    } = { serverId: "" },
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
@@ -741,6 +747,7 @@ export function buildConnectionTokenResolver(
               headers: material.headers,
               serverId: use.serverId,
               ...(use.toolName ? { toolName: use.toolName } : {}),
+              ...(use.onBehalfOf ? { onBehalfOf: use.onBehalfOf } : {}),
               destinationUrl,
             }),
           );
@@ -1073,6 +1080,15 @@ export function buildConnectionTokenResolver(
       {
         serverId: input.serverId,
         ...((input.toolName ?? input.toolId) ? { toolName: input.toolName ?? input.toolId } : {}),
+        onBehalfOf: {
+          ...((subjectId ?? input.subjectId) ? { subjectId: (subjectId ?? input.subjectId)! } : {}),
+          ...(input.connectionUseContext
+            ? {
+                sessionId: input.connectionUseContext.sessionId,
+                turnId: input.connectionUseContext.turnId,
+              }
+            : {}),
+        },
       },
     );
   };

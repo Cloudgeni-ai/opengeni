@@ -807,6 +807,8 @@ async function runForPerson(
         summary.truncated = true;
         break;
       }
+      // A run that lost its lease makes no further tool calls.
+      if (summary.pages > 0) await holdLease(context);
       const result = await callTool({ deps, grant, identity, arguments: args });
       summary.pages += 1;
       // The lease renews per call; a lost lease stops before anything is written.
@@ -858,9 +860,17 @@ async function runForPerson(
         args = argumentsWith(action.arguments, paging.pageArgument, page);
       }
     }
-    // Only a complete run (every page read, nothing cut off, no failure)
-    // shows what the tool no longer returns.
-    if (action.removeMissing && ended && !summary.truncated)
+    // Only a complete, clean run (every page read, nothing cut off or
+    // skipped, no failure, at least one record) shows what the tool no longer
+    // returns. An empty or unreadable answer (an error body, a renamed key
+    // field) never empties the collection.
+    if (
+      action.removeMissing &&
+      ended &&
+      !summary.truncated &&
+      summary.skipped === 0 &&
+      seen.size > 0
+    )
       for (let round = 0; round < 20; round += 1) {
         await holdLease(context);
         const missing = await listMissingAppSyncKeys(deps.db, {

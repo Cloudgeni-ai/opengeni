@@ -1078,6 +1078,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       let references: string[] = [];
       let requestHeaders = credentialHeaders;
       if (vaultReferences) {
+        // An agent's prepared setup chooses the endpoint itself, so it never
+        // binds a vault key: the connection's reach is wider than the agent's.
+        if (actor.preparedOnly)
+          throw new HTTPException(403, {
+            message: "Only a workspace admin can add a shared key from a vault.",
+          });
         if (before.ownership !== "workspace")
           throw new HTTPException(422, {
             message:

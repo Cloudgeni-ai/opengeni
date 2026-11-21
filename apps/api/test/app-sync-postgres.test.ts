@@ -1344,6 +1344,16 @@ test("removeMissing deletes only what this sync wrote, and only after a complete
   expect(failed.lastRun.status).toBe("failed");
   expect(failed.lastRun.summary).toMatchObject({ removed: 0, written: 1 });
   expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "c", "manual"]);
+
+  // An empty answer, or one with items it can't key (an error body, a
+  // renamed key field), never empties the collection.
+  items = [];
+  const empty = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(empty.lastRun.summary).toMatchObject({ removed: 0 });
+  items = [{ id: "a" }, { error: "rate limited" } as unknown as { id: string }];
+  const unkeyed = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
+  expect(unkeyed.lastRun.summary).toMatchObject({ removed: 0, skipped: 1 });
+  expect(await readKeys(f, f.owner, "orders")).toEqual(["a", "c", "manual"]);
 });
 
 test("removeMissing in a personal sync removes only that person's own records", async () => {
