@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 opengeni-artifact-kernel = { path = "../.." }
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 
 [build-dependencies]
 blake3 = "1.8.2"
