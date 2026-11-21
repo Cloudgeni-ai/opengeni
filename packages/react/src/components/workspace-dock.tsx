@@ -861,8 +861,7 @@ function DockChrome({
   const menuAccessory = accessoryInMenu && accessory ? accessory : null;
   const actions = menuActions ?? [];
   // The empty view lists its tabs itself; the menu returns with the first tab.
-  const hasMenu =
-    !landing && (menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null);
+  const hasMenu = !landing && (menuTabs.length > 0 || actions.length > 0 || menuAccessory !== null);
 
   // One pill slides under the selected tab. It's positioned directly (no
   // state), so a switch costs no extra render.
@@ -1021,8 +1020,9 @@ function DockChrome({
                         requestAnimationFrame(() => {
                           const strip = stripRef.current;
                           const target =
-                            strip?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ??
-                            menuTriggerRef.current;
+                            strip?.querySelector<HTMLElement>(
+                              '[role="tab"][aria-selected="true"]',
+                            ) ?? menuTriggerRef.current;
                           target?.focus();
                         });
                       }}

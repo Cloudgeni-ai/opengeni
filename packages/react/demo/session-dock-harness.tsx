@@ -160,65 +160,65 @@ function Harness() {
         onPin={async () => null}
       />
       <div className="min-h-0 flex-1">
-      <SandboxWorkspace
-        sessionId={DOCK_SESSION_ID}
-        events={events}
-        autoSaveId={`og.session-dock.${withPr ? "pr" : "changes"}`}
-        defaultSize={60}
-        tabVisibility="relevant"
-        collapsed={collapsed}
-        onCollapsedChange={setCollapsed}
-        {...(withPr
-          ? { initialTab: "pull-request" }
-          : rememberedTab
-            ? { initialTab: rememberedTab }
+        <SandboxWorkspace
+          sessionId={DOCK_SESSION_ID}
+          events={events}
+          autoSaveId={`og.session-dock.${withPr ? "pr" : "changes"}`}
+          defaultSize={60}
+          tabVisibility="relevant"
+          collapsed={collapsed}
+          onCollapsedChange={setCollapsed}
+          {...(withPr
+            ? { initialTab: "pull-request" }
+            : rememberedTab
+              ? { initialTab: rememberedTab }
+              : {})}
+          {...(withPr
+            ? { pullRequest: { url: PR_URL, number: 482 } }
+            : { onOpenPullRequest: async () => {} })}
+          primary={
+            <section className="flex h-full flex-col justify-end p-6 text-sm text-fg-muted">
+              <p className="max-w-md">
+                Done. The CORS allowlist, helmet and rate limits are in, and monitoring is on.
+              </p>
+            </section>
+          }
+          trailingTabs={[
+            {
+              id: "artifacts",
+              label: "Artifacts",
+              icon: <PanelsTopLeftIcon />,
+              ...(withArtifacts ? {} : { optional: true }),
+              content: (
+                <SessionEditableArtifactsWorkspace
+                  workspaceId={WORKSPACE_ID}
+                  sessionId={DOCK_SESSION_ID}
+                  artifacts={withArtifacts ? artifacts : []}
+                  status="ready"
+                  onRetry={() => {}}
+                />
+              ),
+            },
+          ]}
+          {...(withPr
+            ? {
+                leadingTabs: [
+                  {
+                    id: "pull-request",
+                    label: "PR #482",
+                    icon: <GitPullRequestIcon />,
+                    content: (
+                      <PullRequestView
+                        link={link}
+                        state={{ status: "ready", detail }}
+                        onMerge={async () => {}}
+                      />
+                    ),
+                  },
+                ],
+              }
             : {})}
-        {...(withPr
-          ? { pullRequest: { url: PR_URL, number: 482 } }
-          : { onOpenPullRequest: async () => {} })}
-        primary={
-          <section className="flex h-full flex-col justify-end p-6 text-sm text-fg-muted">
-            <p className="max-w-md">
-              Done. The CORS allowlist, helmet and rate limits are in, and monitoring is on.
-            </p>
-          </section>
-        }
-        trailingTabs={[
-          {
-            id: "artifacts",
-            label: "Artifacts",
-            icon: <PanelsTopLeftIcon />,
-            ...(withArtifacts ? {} : { optional: true }),
-            content: (
-              <SessionEditableArtifactsWorkspace
-                workspaceId={WORKSPACE_ID}
-                sessionId={DOCK_SESSION_ID}
-                artifacts={withArtifacts ? artifacts : []}
-                status="ready"
-                onRetry={() => {}}
-              />
-            ),
-          },
-        ]}
-        {...(withPr
-          ? {
-              leadingTabs: [
-                {
-                  id: "pull-request",
-                  label: "PR #482",
-                  icon: <GitPullRequestIcon />,
-                  content: (
-                    <PullRequestView
-                      link={link}
-                      state={{ status: "ready", detail }}
-                      onMerge={async () => {}}
-                    />
-                  ),
-                },
-              ],
-            }
-          : {})}
-      />
+        />
       </div>
     </div>
   );

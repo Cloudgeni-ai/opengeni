@@ -284,4 +284,3 @@ describe("a linked pull request's detail", () => {
     expect(reads).toBe(4);
   });
 });
-

@@ -1381,9 +1381,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       {...(activeTab !== undefined ? { activeTab } : {})}
       onActiveTabChange={selectTab}
       essentials={tabVisibility === "relevant"}
-      {...(tabVisibility === "relevant"
-        ? { landing: !picked, onStripEmptied: backToLanding }
-        : {})}
+      {...(tabVisibility === "relevant" ? { landing: !picked, onStripEmptied: backToLanding } : {})}
       {...(sessionId ? { tabScope: sessionId } : {})}
       // Browser and Desktop select independent workspace resources, potentially
       // on another placement. Their own viewers report runtime status; the

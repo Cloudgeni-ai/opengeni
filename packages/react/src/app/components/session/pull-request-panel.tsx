@@ -326,7 +326,12 @@ export function PullRequestView({
             {canMerge || onRemove ? <DropdownMenuSeparator /> : null}
             {canMerge ? (
               <DropdownMenuItem asChild>
-                <a href={safeHref(detail.url)} target="_blank" rel="noreferrer noopener" data-pr-github="">
+                <a
+                  href={safeHref(detail.url)}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  data-pr-github=""
+                >
                   View on GitHub
                   <ArrowUpRightIcon aria-hidden className="ml-auto size-3.5" />
                 </a>
@@ -368,7 +373,8 @@ const STATE_TONE: Record<PullRequestState, { dot: string; chip: string }> = {
   closed: { dot: "bg-status-failed", chip: "text-status-failed bg-status-failed/12" },
 };
 
-const CHIP = "inline-flex h-[22px] items-center gap-1.5 rounded-full px-2 text-[11.5px] font-medium";
+const CHIP =
+  "inline-flex h-[22px] items-center gap-1.5 rounded-full px-2 text-[11.5px] font-medium";
 
 /** State, checks and review as small coloured chips above the title. */
 function PullRequestChips({ detail }: { detail: SessionPullRequestDetail }) {
@@ -390,10 +396,7 @@ function PullRequestChips({ detail }: { detail: SessionPullRequestDetail }) {
           ? { Icon: CircleDotIcon, text: "Review requested", className: "text-fg-muted" }
           : null;
   return (
-    <div
-      className="flex min-w-0 flex-wrap items-center gap-1.5"
-      data-pr-state={detail.state}
-    >
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-pr-state={detail.state}>
       <span className={cn(CHIP, tone.chip)}>
         <span
           aria-hidden
