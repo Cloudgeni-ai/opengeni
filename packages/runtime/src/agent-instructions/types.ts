@@ -112,6 +112,8 @@ export type AgentPromptExperiments = {
   knowledgeRetrievalGuidance?: boolean | undefined;
   /** OPENGENI_EXPERIMENT_APPLY_PATCH_THEN: the tool offers `then`, so the prompt suggests it. */
   applyPatchThenGuidance?: boolean | undefined;
+  /** OPENGENI_EXPERIMENT_TOOL_EFFICIENCY: parallel tool calls are requested, so the rule gives an example. */
+  parallelToolCallsGuidance?: boolean | undefined;
 };
 
 /**

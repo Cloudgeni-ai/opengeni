@@ -24659,6 +24659,7 @@ export * from "./workspace-governance-context";
 export * from "./workspace-filesystem-context";
 export * from "./agent-instructions-context";
 export * from "./repository-skills-context";
+export * from "./starting-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

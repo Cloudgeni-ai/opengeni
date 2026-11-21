@@ -1424,6 +1424,14 @@ const SettingsSchema = z.object({
   // creates an empty file, an Invalid Context failure shows the closest region
   // of the file, out-of-order hunks are retried in file order).
   experimentApplyPatchThen: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_APPLY_PATCH_THEN
+  // Tool-efficiency package (off by default while it is measured): lossless
+  // compaction of shell output (ANSI codes, `\r` progress states, repeated
+  // lines, whitespace of whole JSON bodies), parallel tool calls requested
+  // from the provider, long passing test/build output shown as head and tail
+  // with the whole output stored, a starting-context block (git status, a
+  // top-level listing and AGENTS.md) on a session's first turn, and
+  // whitespace-run-tolerant apply_patch context matching.
+  experimentToolEfficiency: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_TOOL_EFFICIENCY
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -6647,6 +6655,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     experimentApplyPatchThen: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_THEN"),
+    experimentToolEfficiency: optional("OPENGENI_EXPERIMENT_TOOL_EFFICIENCY"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),

@@ -1110,16 +1110,33 @@ function rowsWithRepositorySkills(
   turnId: string,
   index: string,
 ): StoredHistoryRow[] {
-  const first = rows.findIndex((row) => row.turnId === turnId);
-  const at = first === -1 ? rows.length : first;
-  const row: StoredHistoryRow = {
-    id: crypto.randomUUID(),
-    position: at < rows.length ? rows[at]!.position : (rows.at(-1)?.position ?? 0) + 1,
-    turnId,
-    item: repositorySkillsContextItem(index),
-    providerArtifactInvalidatedAt: null,
-  };
-  return [...rows.slice(0, at), row, ...rows.slice(at)];
+  return rowsWithContextItems(rows, turnId, [repositorySkillsContextItem(index)]);
+}
+
+/**
+ * The rows as later turns load them once this run stores its context items,
+ * in publication order: each is stored before the turn's first row at that
+ * time, so a later item sits before an earlier one.
+ */
+function rowsWithContextItems(
+  rows: readonly StoredHistoryRow[],
+  turnId: string,
+  items: readonly Record<string, unknown>[],
+): StoredHistoryRow[] {
+  let next = [...rows];
+  for (const item of items) {
+    const first = next.findIndex((row) => row.turnId === turnId);
+    const at = first === -1 ? next.length : first;
+    const row: StoredHistoryRow = {
+      id: crypto.randomUUID(),
+      position: at < next.length ? next[at]!.position : (next.at(-1)?.position ?? 0) + 1,
+      turnId,
+      item,
+      providerArtifactInvalidatedAt: null,
+    };
+    next = [...next.slice(0, at), row, ...next.slice(at)];
+  }
+  return next;
 }
 
 /** Build one inference from canonical history plus attempt-local operational context. */
@@ -1262,7 +1279,11 @@ async function messageInput(
         sandboxEnvelope: envelope,
         ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
       });
-      const { historyWithRepositorySkills: _atHistoryEnd, ...rest } = assembled;
+      const {
+        historyWithRepositorySkills: _atHistoryEnd,
+        historyWithSessionContext: _contextAtHistoryEnd,
+        ...rest
+      } = assembled;
       if (!turnId) return rest;
       return {
         ...rest,
@@ -1279,6 +1300,19 @@ async function messageInput(
           });
           return Array.isArray(withIndex.input)
             ? (withIndex.input.slice(0, withIndex.persistedHistoryCount) as any[])
+            : null;
+        },
+        historyWithSessionContext: async (items: readonly Record<string, unknown>[]) => {
+          const withItems = await runtime.prepareInput(agent, {
+            kind: "message",
+            historyItems: (await project(
+              rowsWithContextItems(stored, turnId, items),
+              false,
+            )) as any,
+            ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+          });
+          return Array.isArray(withItems.input)
+            ? (withItems.input.slice(0, withItems.persistedHistoryCount) as any[])
             : null;
         },
       };

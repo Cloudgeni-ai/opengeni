@@ -49,7 +49,8 @@ export type ModelSocketTiming = {
  * conversation's connection was busy, the server refused the handshake, or
  * the durable step owner selected HTTP for the rest of this turn. There are
  * no fallback cooldowns. `stream_dropped` remains readable for older receipts.
- * `unavailable` means no socket transport was installed.
+ * `unavailable` means no socket transport was installed, and `disabled` that
+ * the deployment turned the socket transport off.
  */
 export type ModelRequestTransport =
   | {
@@ -69,7 +70,8 @@ export type ModelRequestTransport =
         | "turn_fallback"
         | "handshake_failed"
         | "stream_dropped"
-        | "unavailable";
+        | "unavailable"
+        | "disabled";
     };
 
 const HTTP_REASONS = new Set([
@@ -79,6 +81,7 @@ const HTTP_REASONS = new Set([
   "handshake_failed",
   "stream_dropped",
   "unavailable",
+  "disabled",
 ]);
 
 export function formatModelRequestTransport(transport: ModelRequestTransport): string {
@@ -139,6 +142,16 @@ function withTransport(response: Response, transport: ModelRequestTransport): Re
       headers,
     });
   }
+}
+
+/**
+ * Plain HTTP for a deployment that turned the socket transport off: every
+ * response is labelled `http; reason=disabled`, so request receipts tell that
+ * apart from a transport that was never installed.
+ */
+export function disabledResponsesTransport(http: FetchLike): FetchLike {
+  return async (input, init) =>
+    withTransport(await http(input, init), { kind: "http", reason: "disabled" });
 }
 
 /** The subset of the WHATWG/Bun WebSocket this transport uses. */
@@ -913,7 +926,7 @@ export function responsesTransport(
     const body = init?.body;
     if (!url || method !== "POST" || !endpoint.url.test(url)) {
       dispatchObservation.getStore()?.({ kind: "http", reason: "not_eligible" });
-      return await http(input, init);
+      return withTransport(await http(input, init), { kind: "http", reason: "not_eligible" });
     }
     const turn = responsesConversation.getStore();
     const position = turn && turn.requests++ === 0 ? "first" : "later";

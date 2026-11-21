@@ -17,6 +17,7 @@ import { projectCommandReadToolResultForModel } from "./command-read-model-proje
 import { projectKnowledgeToolResultForModel } from "./knowledge-model-projection";
 import { mcpResultModelContent } from "./mcp-result-custom-data";
 import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "./mcp-network";
+import { passingCheckOutput, passingCheckView } from "./passing-check-output";
 
 /**
  * Lossless model-visible tool results.
@@ -454,6 +455,60 @@ function functionOutputParts(output: unknown): FunctionOutputParts | null {
 }
 
 /**
+ * Stores whose sessions show long passing checks as head and tail
+ * (OPENGENI_EXPERIMENT_TOOL_EFFICIENCY). See `passing-check-output.ts`.
+ */
+const passingCheckTrimStores = new WeakSet<ModelToolResultStore>();
+
+/** True when the store can hand the model a way to read a trimmed result back. */
+function canReadBack(readers: StoredToolResultReaders): boolean {
+  return readers.reader === "searchable" || readers.shell;
+}
+
+/**
+ * The view of a passing test or build whose output fits but is long: its
+ * head and tail, with the whole output stored. Null when the result is not
+ * such a check, the session cannot read it back, or storing fails.
+ */
+async function trimmedPassingCheck(input: {
+  toolName: string;
+  callId: string;
+  toolInput: unknown;
+  text: string;
+  store: ModelToolResultStore;
+}): Promise<string | null> {
+  const readers = input.store.readers();
+  if (!canReadBack(readers)) return null;
+  const check = passingCheckOutput(input.toolName, input.toolInput, input.text);
+  if (!check) return null;
+  let stored: StoredToolResult;
+  try {
+    stored = await input.store.store({
+      key: { kind: "call", callId: input.callId },
+      text: input.text,
+    });
+  } catch {
+    return null;
+  }
+  if (readers.reader !== "searchable" && stored.sandboxPath === null) return null;
+  const view = passingCheckView({
+    check,
+    readInstruction: (offset) => readInstruction(stored, offset, readers),
+    storedOffset: Buffer.byteLength(check.prefix, "utf8"),
+  });
+  if (!view) return null;
+  console.info("opengeni.tool_efficiency", {
+    part: "trim",
+    tool: input.toolName,
+    callId: input.callId,
+    bytesBefore: utf8Bytes(input.text),
+    bytesAfter: utf8Bytes(view.text),
+    resultId: stored.resultId,
+  });
+  return view.text;
+}
+
+/**
  * The model's view of one function tool output, or the output itself when its
  * text fits. Shell output keeps its head and tail; other output its start.
  */
@@ -462,11 +517,25 @@ export async function storeOversizedFunctionToolOutput(input: {
   callId: string | undefined;
   output: unknown;
   store: ModelToolResultStore;
+  /** The call's arguments, used to recognise a passing check. */
+  toolInput?: unknown;
 }): Promise<unknown> {
   const parts = functionOutputParts(input.output);
   if (!parts) return input.output;
   const inlineMaxBytes = input.store.inlineMaxBytes();
-  if (utf8Bytes(parts.text) <= inlineMaxBytes) return input.output;
+  if (utf8Bytes(parts.text) <= inlineMaxBytes) {
+    if (!input.callId || !passingCheckTrimStores.has(input.store) || parts.nonText.length > 0) {
+      return input.output;
+    }
+    const trimmed = await trimmedPassingCheck({
+      toolName: input.toolName,
+      callId: input.callId,
+      toolInput: input.toolInput,
+      text: parts.text,
+      store: input.store,
+    });
+    return trimmed ?? input.output;
+  }
   if (!input.callId) {
     const view = unstoredView(parts.text, inlineMaxBytes);
     return parts.nonText.length > 0 ? [...parts.nonText, { type: "text", text: view }] : view;
@@ -517,6 +586,7 @@ export function modelToolResultStoringTool<T extends Tool<any>>(
         callId: typeof callId === "string" && callId.length > 0 ? callId : undefined,
         output,
         store,
+        toolInput: args[1],
       })) as Awaited<ReturnType<typeof invoke>>;
     },
   } as T;
@@ -551,7 +621,9 @@ export function agentModelToolResultStoringTool<T extends Tool<any>>(agent: obje
 export function installModelToolResultStore(
   agent: StoringAgent,
   store: ModelToolResultStore,
+  options: { trimPassingChecks?: boolean } = {},
 ): void {
+  if (options.trimPassingChecks) passingCheckTrimStores.add(store);
   if (agentStores.has(agent)) return;
   agentStores.set(agent, store);
   const getAllTools = agent.getAllTools.bind(agent);

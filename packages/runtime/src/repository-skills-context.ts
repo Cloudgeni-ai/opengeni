@@ -1,5 +1,10 @@
 import type { AgentInputItem, CallModelInputFilter } from "@openai/agents";
-import { latestRepositorySkillsIndex } from "@opengeni/contracts";
+import {
+  hasStartingContext,
+  latestRepositorySkillsIndex,
+  repositorySkillsContextItem,
+  startingContextItem,
+} from "@opengeni/contracts";
 import type { RepositorySkillsIndex } from "./workspace-skills";
 
 /**
@@ -15,7 +20,22 @@ export type PublishRepositorySkills = (
 ) => Promise<string | null>;
 
 /** What one agent's runs show: set once discovery has published the index. */
-export type RepositorySkillsContextState = { visible: string | null };
+export type RepositorySkillsContextState = {
+  visible: string | null;
+  /** The starting context the run published (see `starting-context.ts`). */
+  starting?: string | null;
+  /** The order the run's items were published in, which is how they are stored. */
+  order?: ("repository" | "starting")[];
+};
+
+/**
+ * The durable history as later turns will load it once the run's published
+ * context items are stored: each item, in publication order, sits before the
+ * turn's first row at the time it was stored (so a later item comes first).
+ */
+export type HistoryWithSessionContext = (
+  items: readonly Record<string, unknown>[],
+) => Promise<readonly AgentInputItem[] | null>;
 
 /**
  * The durable history of the run input as later turns will load it once the
@@ -46,9 +66,10 @@ export function repositorySkillsContextInputFilter(
   original: unknown,
   historyLength: number,
   withIndex: HistoryWithRepositorySkills | undefined,
+  withContext?: HistoryWithSessionContext,
 ): CallModelInputFilter | undefined {
   if (
-    !withIndex ||
+    (!withIndex && !withContext) ||
     !Array.isArray(original) ||
     !Number.isSafeInteger(historyLength) ||
     historyLength < 0 ||
@@ -56,19 +77,41 @@ export function repositorySkillsContextInputFilter(
   )
     return undefined;
   const prefix: readonly unknown[] = original.slice(0, historyLength);
-  let built: { index: string; items: Promise<readonly AgentInputItem[] | null> } | undefined;
+  let built: { key: string; items: Promise<readonly AgentInputItem[] | null> } | undefined;
   return async ({ modelData }) => {
     const visible = state.visible;
-    if (visible === null) return modelData;
+    const starting = state.starting ?? null;
+    if (visible === null && starting === null) return modelData;
     const input = modelData.input;
     // The SDK passes the run's original items through by identity (external
     // history ownership); any other input was rewritten.
     if (input.length < historyLength || prefix.some((item, index) => input[index] !== item))
       return modelData;
-    if (latestRepositorySkillsIndex(input) === visible) return modelData;
-    if (built?.index !== visible) built = { index: visible, items: withIndex(visible) };
+    const index =
+      visible !== null && latestRepositorySkillsIndex(input) !== visible ? visible : null;
+    const start = starting !== null && !hasStartingContext(input) ? starting : null;
+    if (index === null && start === null) return modelData;
+    if (start === null) {
+      if (!withIndex) return modelData;
+      if (built?.key !== `index:${index}`)
+        built = { key: `index:${index}`, items: withIndex(index!) };
+    } else {
+      if (!withContext) return modelData;
+      const order: readonly ("repository" | "starting")[] = state.order?.includes("starting")
+        ? state.order
+        : [...(state.order ?? ["repository"]), "starting"];
+      const items = order.flatMap((kind) =>
+        kind === "repository"
+          ? index === null
+            ? []
+            : [repositorySkillsContextItem(index)]
+          : [startingContextItem(start)],
+      );
+      const key = `context:${JSON.stringify(items)}`;
+      if (built?.key !== key) built = { key, items: withContext(items) };
+    }
     const history = await built.items;
-    if (!history) throw new Error("The run's history with its Repository skills index is missing");
+    if (!history) throw new Error("The run's history with its published context is missing");
     return { ...modelData, input: [...history, ...input.slice(historyLength)] };
   };
 }

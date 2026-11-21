@@ -148,6 +148,11 @@ function chatRequest(
   artifactScope?: string,
 ): ModelRequest {
   request = withDeclaredReasoning(request, declaredReasoning);
+  // Chat Completions rejects parallel_tool_calls on a request without tools.
+  if (request.modelSettings?.parallelToolCalls === true && !request.tools?.length) {
+    const { parallelToolCalls: _parallel, ...modelSettings } = request.modelSettings;
+    request = { ...request, modelSettings };
+  }
   const input =
     typeof request.input === "string"
       ? request.input

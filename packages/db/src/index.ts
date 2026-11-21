@@ -489,6 +489,9 @@ import {
   WORKSPACE_FILESYSTEM_CONTEXT_PREFIX,
   readWorkspaceFilesystemContext,
   workspaceFilesystemContextItem,
+  STARTING_CONTEXT_PREFIX,
+  readStartingContext,
+  startingContextItem,
   AGENT_INSTRUCTIONS_CONTEXT_PREFIX,
   agentInstructionsContextItem,
   agentInstructionsContextText,
@@ -45840,6 +45843,14 @@ const AGENT_INSTRUCTIONS_CHANNEL: SessionContextChannel = {
   same: sameAgentInstructionsContext,
 };
 
+const STARTING_CONTEXT_CHANNEL: SessionContextChannel = {
+  label: "Starting context",
+  metadataKey: "opengeniStartingContextHistoryId",
+  contentPrefix: STARTING_CONTEXT_PREFIX,
+  read: readStartingContext,
+  item: startingContextItem,
+};
+
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
 export async function ensureSessionSkillCatalog(
   db: Database,
@@ -45900,6 +45911,55 @@ export async function ensureSessionRepositorySkills(
     db,
     { ...scope, text: index },
     REPOSITORY_SKILLS_CHANNEL,
+  );
+}
+
+/**
+ * Persist the workspace state the run read before the session's first model
+ * request, as a history item before the turn's first history item. Only the
+ * session's first turn writes it: once the session has history from another
+ * turn, or an earlier starting context, nothing is written and the turn
+ * keeps what the model already reads. Retries of the turn reuse its
+ * snapshot. Returns the model-visible text, or null when there is none.
+ */
+export async function ensureSessionStartingContext(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    text: string | null;
+  },
+): Promise<string | null> {
+  const { text, ...scope } = input;
+  const [earlier] = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      scopedDb
+        .select({ id: schema.sessionHistoryItems.id })
+        .from(schema.sessionHistoryItems)
+        .where(
+          and(
+            eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+            eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+            or(
+              isNull(schema.sessionHistoryItems.turnId),
+              ne(schema.sessionHistoryItems.turnId, input.turnId),
+            ),
+          ),
+        )
+        .limit(1),
+  );
+  return await ensureSessionContextSnapshot(
+    db,
+    // A session that already has history is not starting: an earlier item is
+    // kept as it is, and none is added.
+    { ...scope, text: earlier ? null : text },
+    STARTING_CONTEXT_CHANNEL,
   );
 }
 

@@ -3199,6 +3199,38 @@ are retried in file order, and each section reports its own result. See
 `packages/runtime/src/apply-patch-then.ts` and
 `packages/runtime/src/apply-patch-robust.ts`.
 
+One setting, settings.experimentToolEfficiency
+(`OPENGENI_EXPERIMENT_TOOL_EFFICIENCY`, off by default), gates a bundle of
+small tool-efficiency changes:
+
+- `exec_command` and `write_stdin` output (and so a `then` result) is
+  compacted losslessly before any size limit or store decision: ANSI escapes
+  are removed, a line rewritten with `\r` keeps its last state, three or more
+  identical consecutive lines become one line with a count, and a body that
+  is one whole JSON document has its whitespace outside strings removed
+  (except for commands that print a file, such as `cat` or `sed`). See
+  `command-output-compaction.ts`.
+- Requests ask for parallel tool calls (`parallel_tool_calls`; dropped for a
+  Chat Completions request without tools), and the parallel-calls rule in the
+  system prompt gives an example.
+- A test or build command that exited 0 with more than 4,000 bytes of output
+  shows its head and tail; the whole output is stored like an oversized result,
+  with the exact `tool_result_read` call that reads the rest, and the lines of
+  the hidden part that mention a warning, error, failure or skip are listed.
+  It applies only when the session can read the stored result back. See
+  `passing-check-output.ts`.
+- A session's first turn reads the workspace root's Git status, a short
+  top-level listing and its AGENTS.md once, before the first model request,
+  and stores them as one `<opengeni_starting_context>` developer history item
+  before the turn (`starting-context.ts`, `ensureSessionStartingContext`). It
+  is never rewritten, and compaction does not re-add it.
+- A patch section whose context matches nowhere exactly is retried with each
+  hunk matched ignoring trailing whitespace, then indentation, then runs of
+  whitespace, only when every hunk matches exactly one place.
+
+Each part logs `opengeni.tool_efficiency` with its `part` when it changes a
+result.
+
 Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
 to collect complete output from the same invocation until provider terminal/EOF
 proof. Routing retains and atomically captures the raw initial receipt before

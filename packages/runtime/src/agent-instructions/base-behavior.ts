@@ -100,10 +100,22 @@ Answer questions directly and briefly; after making changes, say what changed, h
   );
 }
 
-const RULES_FOR_WORK_HEAD = `# Rules for getting work done
+export const PARALLEL_TOOL_CALLS_RULE =
+  "Run independent tool calls in parallel to save round trips.";
+/** The same rule with an example (OPENGENI_EXPERIMENT_TOOL_EFFICIENCY). */
+export const PARALLEL_TOOL_CALLS_RULE_WITH_EXAMPLE =
+  "Run independent tool calls in parallel to save round trips, for example reading several files or running independent searches in one response.";
 
-- Run independent tool calls in parallel to save round trips.
+function rulesForWorkHead(context: AgentPromptContext): string {
+  const parallel =
+    context.experiments?.parallelToolCallsGuidance === true
+      ? PARALLEL_TOOL_CALLS_RULE_WITH_EXAMPLE
+      : PARALLEL_TOOL_CALLS_RULE;
+  return `# Rules for getting work done
+
+- ${parallel}
 - Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.`;
+}
 
 /**
  * The verification rule. A goal and its completion audit are named only with
@@ -212,7 +224,7 @@ export function renderBaseBehavior(context: AgentPromptContext): string {
     PERSONALITY,
     workingWithTheUser(context),
     [
-      RULES_FOR_WORK_HEAD,
+      rulesForWorkHead(context),
       verificationRule(context),
       context.capabilities.privacyFacts && PRIVACY_FACTS_RULE,
     ]

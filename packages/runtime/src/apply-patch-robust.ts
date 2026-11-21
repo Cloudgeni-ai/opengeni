@@ -279,6 +279,70 @@ export function reorderHunksByFile(content: string, diff: string): string | null
 
 const CONTEXT_FAILURE = /^Failed to apply patch: Invalid (?:EOF )?Context \d+:\n?/;
 
+/**
+ * Line comparisons tried, in order, when a hunk's lines are not in the file
+ * exactly: trailing whitespace ignored, then indentation, then every run of
+ * whitespace read as one space (aligned columns, tabs against spaces).
+ */
+const WHITESPACE_NORMALIZATIONS: ReadonlyArray<(line: string) => string> = [
+  (line) => line.trimEnd(),
+  (line) => line.trim(),
+  (line) => line.replace(/\s+/g, " ").trim(),
+];
+
+/**
+ * The update diff rewritten to quote the file's own lines, when each hunk's
+ * old lines (context and removed lines) match exactly one place in `content`
+ * under the first whitespace normalization that matches them at all, and
+ * those places do not overlap. Added lines are kept as written; a hunk's
+ * `@@` anchor is dropped, because the hunk is placed by its lines. Hunks are
+ * put in file order. Null when any hunk matches nowhere, more than one place,
+ * or already matches exactly (that failure is not about whitespace).
+ */
+export function whitespaceTolerantDiff(content: string, diff: string): string | null {
+  const hunks = splitHunks(diff);
+  if (!hunks.length) return null;
+  const fileLines = content.split("\n");
+  const placed: { hunk: Hunk; at: number }[] = [];
+  let tolerated = false;
+  for (const hunk of hunks) {
+    if (!hunk.old.length || hunk.lines.includes(END_OF_FILE)) return null;
+    let at = occurrences(fileLines, hunk.old, (line) => line);
+    if (at.length > 1) return null;
+    if (!at.length) {
+      for (const normalize of WHITESPACE_NORMALIZATIONS) {
+        at = occurrences(fileLines, hunk.old, normalize);
+        if (at.length) break;
+      }
+      if (at.length !== 1) return null;
+      tolerated = true;
+    }
+    placed.push({ hunk, at: at[0]! });
+  }
+  if (!tolerated) return null;
+  placed.sort((left, right) => left.at - right.at);
+  for (let index = 1; index < placed.length; index += 1) {
+    const previous = placed[index - 1]!;
+    if (previous.at + previous.hunk.old.length > placed[index]!.at) return null;
+  }
+  const lines: string[] = [];
+  for (const { hunk, at } of placed) {
+    let cursor = at;
+    lines.push("@@");
+    for (const line of hunk.lines) {
+      if (line.startsWith("@@")) continue;
+      if (line === "" || line.startsWith(" ") || line.startsWith("-")) {
+        const marker = line.startsWith("-") ? "-" : " ";
+        lines.push(`${marker}${fileLines[cursor]!}`);
+        cursor += 1;
+      } else {
+        lines.push(line);
+      }
+    }
+  }
+  return joinDiff(lines);
+}
+
 function outputText(output: unknown): string {
   return typeof output === "string" ? output : JSON.stringify(output);
 }
@@ -313,9 +377,19 @@ export function labelSectionResult(operation: RobustPatchOperation, output: stri
  * Apply the function `apply_patch` one file section at a time (see the module
  * comment). `readFile` reads the current text of a workspace file, or null.
  */
+export type ApplyPatchRobustOptions = {
+  /**
+   * Retry a section whose context failed with its lines matched to the file
+   * ignoring whitespace differences, when that match is unique
+   * ({@link whitespaceTolerantDiff}; OPENGENI_EXPERIMENT_TOOL_EFFICIENCY).
+   */
+  whitespaceTolerant?: boolean;
+};
+
 export function withApplyPatchRobust(
   tools: Tool<unknown>[],
   readFile: ApplyPatchFileReader,
+  options: ApplyPatchRobustOptions = {},
 ): Tool<unknown>[] {
   return tools.map((capabilityTool) => {
     if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
@@ -352,8 +426,23 @@ export function withApplyPatchRobust(
             const retried = reordered
               ? await applyOne(runContext, { ...operation, diff: reordered }, details)
               : null;
+            const tolerant =
+              options.whitespaceTolerant &&
+              content !== null &&
+              !(retried === APPLIED || retried === "")
+                ? whitespaceTolerantDiff(content, operation.diff)
+                : null;
+            const tolerated = tolerant
+              ? await applyOne(runContext, { ...operation, diff: tolerant }, details)
+              : null;
             if (retried !== null && (retried || APPLIED) === APPLIED) {
               output = APPLIED;
+            } else if (tolerated !== null && (tolerated || APPLIED) === APPLIED) {
+              output = APPLIED;
+              console.info("opengeni.tool_efficiency", {
+                part: "whitespace_tolerant_patch",
+                callId: details?.toolCall?.callId,
+              });
             } else if (content !== null) {
               const context = output.slice(failure[0].length).split("\n");
               output = `${output.trimEnd()}\n${closestContextRegion(content, context, operation.path)}`;
@@ -390,17 +479,24 @@ const MAX_READ_BYTES = 4 * 1024 * 1024;
  * `Capability.clone()` copies this override onto every per-run instance, which
  * reads files from its own bound session.
  */
-export function linkApplyPatchRobust(filesystem: CapabilityLike): void {
+export function linkApplyPatchRobust(
+  filesystem: CapabilityLike,
+  options: ApplyPatchRobustOptions = {},
+): void {
   const filesystemTools = filesystem.tools;
   filesystem.tools = function (this: CapabilityLike & { _session?: unknown; _runAs?: string }) {
     const session = this._session as ReadableSession | undefined;
     const runAs = this._runAs;
-    return withApplyPatchRobust(filesystemTools.call(this), async (path) => {
-      if (!session?.readFile) return null;
-      const data = await session.readFile({ path, ...(runAs ? { runAs } : {}) });
-      const bytes = typeof data === "string" ? data.length : data.byteLength;
-      if (bytes > MAX_READ_BYTES) return null;
-      return typeof data === "string" ? data : new TextDecoder().decode(data);
-    });
+    return withApplyPatchRobust(
+      filesystemTools.call(this),
+      async (path) => {
+        if (!session?.readFile) return null;
+        const data = await session.readFile({ path, ...(runAs ? { runAs } : {}) });
+        const bytes = typeof data === "string" ? data.length : data.byteLength;
+        if (bytes > MAX_READ_BYTES) return null;
+        return typeof data === "string" ? data : new TextDecoder().decode(data);
+      },
+      options,
+    );
   };
 }

@@ -63,6 +63,10 @@ export {
 } from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
+import {
+  PARALLEL_TOOL_CALLS_RULE,
+  PARALLEL_TOOL_CALLS_RULE_WITH_EXAMPLE,
+} from "./agent-instructions/base-behavior";
 import { connectedMachineGuidance } from "./agent-instructions/modules/machines";
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
@@ -758,6 +762,7 @@ import {
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import { APPLY_PATCH_THEN_PARAMETER, linkApplyPatchThen } from "./apply-patch-then";
 import { linkApplyPatchRobust } from "./apply-patch-robust";
+import { withCompactedCommandOutput } from "./command-output-compaction";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
 import {
@@ -775,9 +780,11 @@ import {
   type RepositorySkillsIndex,
   type WorkspaceSkillSearchPath,
 } from "./workspace-skills";
+import { StartingContextCapability } from "./starting-context";
 import {
   repositorySkillsContextInputFilter,
   type HistoryWithRepositorySkills,
+  type HistoryWithSessionContext,
   type PublishRepositorySkills,
   type RepositorySkillsContextState,
 } from "./repository-skills-context";
@@ -785,6 +792,7 @@ export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
 export type { RepositorySkillsIndex } from "./workspace-skills";
 export type {
   HistoryWithRepositorySkills,
+  HistoryWithSessionContext,
   PublishRepositorySkills,
 } from "./repository-skills-context";
 import {
@@ -1417,6 +1425,12 @@ export type PreparedAgentInput = {
    * history.
    */
   historyWithRepositorySkills?: HistoryWithRepositorySkills;
+  /**
+   * The same for every context item the run published (the Repository skills
+   * index and the starting context), in publication order. Defaults to the
+   * items after the history, the latest first.
+   */
+  historyWithSessionContext?: HistoryWithSessionContext;
   sandboxSessionState?: SandboxSessionState;
   modelInputAlreadyProjected?: boolean;
 };
@@ -3144,6 +3158,13 @@ export type BuildAgentOptions = {
    */
   publishRepositorySkills?: PublishRepositorySkills;
   /**
+   * Stores the workspace state read before the session's first model request
+   * (OPENGENI_EXPERIMENT_TOOL_EFFICIENCY; see `starting-context.ts`) and
+   * returns the text the model reads, or null. Pass it only for a session's
+   * first turn; without it nothing is read.
+   */
+  publishStartingContext?: (text: string | null) => Promise<string | null>;
+  /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
    * attempt-quiesced receipt.
@@ -3533,6 +3554,7 @@ export function agentPromptExperimentsFor(settings: Settings): {
   const experiments: AgentPromptExperiments = {
     ...(settings.experimentKnowledgeRetrievalGuidance ? { knowledgeRetrievalGuidance: true } : {}),
     ...(settings.experimentApplyPatchThen ? { applyPatchThenGuidance: true } : {}),
+    ...(settings.experimentToolEfficiency ? { parallelToolCallsGuidance: true } : {}),
   };
   return Object.keys(experiments).length > 0 ? { experiments } : {};
 }
@@ -3543,9 +3565,17 @@ export function agentPromptExperimentsFor(settings: Settings): {
  * modular `sandbox` module reads) the sentence is left out.
  */
 function legacyOperationalInstructions(settings: Settings): string {
-  return agentPromptExperimentsFor(settings).experiments?.applyPatchThenGuidance === true
-    ? OPENGENI_OPERATIONAL_INSTRUCTIONS
-    : OPENGENI_OPERATIONAL_INSTRUCTIONS_WITHOUT_APPLY_PATCH_THEN;
+  const experiments = agentPromptExperimentsFor(settings).experiments;
+  const instructions =
+    experiments?.applyPatchThenGuidance === true
+      ? OPENGENI_OPERATIONAL_INSTRUCTIONS
+      : OPENGENI_OPERATIONAL_INSTRUCTIONS_WITHOUT_APPLY_PATCH_THEN;
+  return experiments?.parallelToolCallsGuidance === true
+    ? instructions.replace(
+        `- ${PARALLEL_TOOL_CALLS_RULE}\n`,
+        `- ${PARALLEL_TOOL_CALLS_RULE_WITH_EXAMPLE}\n`,
+      )
+    : instructions;
 }
 
 function appendDeploymentAgentInstructions(content: string, settings: Settings): string {
@@ -3816,6 +3846,15 @@ const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
 // The repository Skill index each agent's runs published (see
 // repositorySkillsContextInputFilter).
 const agentRepositorySkillsContext = new WeakMap<object, RepositorySkillsContextState>();
+
+/** Record that the run published one context item; the first publication counts. */
+function publishedContext(
+  state: RepositorySkillsContextState,
+  kind: "repository" | "starting",
+): void {
+  const order = (state.order ??= []);
+  if (!order.includes(kind)) order.push(kind);
+}
 // Per-turn model modality used by the literal pre-provider input filter. The
 // durable session history remains canonical; only the request clone is shaped.
 const agentSupportsImageInput = new WeakMap<object, boolean>();
@@ -4389,6 +4428,13 @@ export function buildOpenGeniAgent(
         ...(reasoningSummary === "none" ? {} : { summary: reasoningSummary }),
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
+      // Ask the provider for parallel tool calls explicitly
+      // (settings.experimentToolEfficiency). Without the field some backends,
+      // the ChatGPT/Codex one among them, return one call per response, so
+      // independent reads cost a model round trip each. The runner already
+      // executes the calls of one response concurrently (edits and machine
+      // moves stay in model order).
+      ...(settings.experimentToolEfficiency ? { parallelToolCalls: true } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
@@ -4459,7 +4505,9 @@ export function buildOpenGeniAgent(
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
     installRepeatedToolCallGuard(agent);
     if (options.modelToolResultStore) {
-      installModelToolResultStore(agent, options.modelToolResultStore);
+      installModelToolResultStore(agent, options.modelToolResultStore, {
+        trimPassingChecks: settings.experimentToolEfficiency,
+      });
     }
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
@@ -4503,7 +4551,16 @@ export function buildOpenGeniAgent(
         repositorySkillsContext.visible = options.publishRepositorySkills
           ? await options.publishRepositorySkills(index)
           : null;
+        publishedContext(repositorySkillsContext, "repository");
       },
+      ...(options.publishStartingContext && settings.experimentToolEfficiency
+        ? {
+            publishStartingContext: async (text: string | null) => {
+              repositorySkillsContext.starting = await options.publishStartingContext!(text);
+              publishedContext(repositorySkillsContext, "starting");
+            },
+          }
+        : {}),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -4626,7 +4683,9 @@ export function buildOpenGeniAgent(
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
   installRepeatedToolCallGuard(agent);
   if (options.modelToolResultStore) {
-    installModelToolResultStore(agent, options.modelToolResultStore);
+    installModelToolResultStore(agent, options.modelToolResultStore, {
+      trimPassingChecks: settings.experimentToolEfficiency,
+    });
   }
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
@@ -6259,6 +6318,7 @@ function buildAgentCapabilitiesFromComposition(
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     deferRepositorySkillIndex?: boolean;
     publishRepositorySkills?: (index: RepositorySkillsIndex | null) => Promise<void>;
+    publishStartingContext?: (text: string | null) => Promise<void>;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -6331,6 +6391,7 @@ function buildAgentCapabilitiesFromComposition(
   if (settings.experimentApplyPatchThen) {
     linkApplyPatchRobust(
       filesystemCapability as unknown as Parameters<typeof linkApplyPatchRobust>[0],
+      { whitespaceTolerant: settings.experimentToolEfficiency },
     );
   }
   const caps: ReturnType<typeof Capabilities.default> = [
@@ -6377,6 +6438,14 @@ function buildAgentCapabilitiesFromComposition(
           ...(options.publishRepositorySkills ? { publish: options.publishRepositorySkills } : {}),
         },
       ),
+    );
+  }
+  if (options.publishStartingContext) {
+    caps.push(
+      new StartingContextCapability({
+        run: async (session, args) => await runSandboxLifecycleCommand(session, args),
+        publish: options.publishStartingContext,
+      }),
     );
   }
   if (toolCancellation) {
@@ -6447,6 +6516,18 @@ function buildAgentCapabilitiesFromComposition(
       const original = target.tools;
       target.tools = function () {
         return withLeanExecCommandArguments(original.call(this), { finishFloor });
+      };
+    }
+  }
+  // Lossless shell-output compaction (settings.experimentToolEfficiency).
+  // Outside every other shell wrapper, so the model's view is compacted, and
+  // before `then` is linked below, so a `then` command's output is too.
+  if (settings.experimentToolEfficiency) {
+    for (const capability of caps) {
+      const target = capability as unknown as { tools(): Tool<unknown>[] };
+      const original = target.tools;
+      target.tools = function () {
+        return withCompactedCommandOutput(original.call(this));
       };
     }
   }
@@ -12176,6 +12257,10 @@ export async function prepareRunInput(
         ...sanitizedHistory,
         repositorySkillsContextItem(index) as unknown as AgentInputItem,
       ],
+      historyWithSessionContext: async (items) => [
+        ...sanitizedHistory,
+        ...([...items].reverse() as unknown as AgentInputItem[]),
+      ],
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
@@ -12386,6 +12471,7 @@ function repositorySkillsInputFilterForRun(
         prepared.input,
         prepared.persistedHistoryCount,
         prepared.historyWithRepositorySkills,
+        prepared.historyWithSessionContext,
       )
     : undefined;
 }

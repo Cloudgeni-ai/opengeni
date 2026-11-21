@@ -331,6 +331,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     experimentCutPolling: true,
     experimentOutputCost: true,
     experimentApplyPatchThen: true,
+    experimentToolEfficiency: false,
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
     claudeCodeApiKeyEnabled: false,

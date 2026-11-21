@@ -7,6 +7,7 @@ import {
   ensureSessionReasoningConfiguration,
   ensureSessionAgentInstructions,
   ensureSessionRepositorySkills,
+  ensureSessionStartingContext,
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
   ensureSessionWorkspaceFilesystem,
@@ -996,6 +997,23 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                   index: index?.text ?? null,
                 }),
             }),
+        // A session's first turn reads the workspace's starting state once
+        // (OPENGENI_EXPERIMENT_TOOL_EFFICIENCY); the store writes it only
+        // while the session has no history from another turn.
+        ...(turn.source !== "compaction" && turn.position === 1
+          ? {
+              publishStartingContext: async (text: string | null) =>
+                await ensureSessionStartingContext(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  expectedExecutionGeneration: turn.executionGeneration,
+                  expectedAttemptId: input.attemptId,
+                  text,
+                }),
+            }
+          : {}),
         // W1: `{{secret:…}}` references resolve at the exec boundary, and the
         // session's credential profile adds its variables to every command
         // through the same resolver.

@@ -25,6 +25,7 @@ import {
   type CodexResponsesTransport,
 } from "@opengeni/codex";
 import {
+  disabledResponsesTransport,
   responsesTransport,
   OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   withResponsesContinuationAdmission,
@@ -684,7 +685,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                 provider.id,
                 settings.codexResponsesWebSocketEnabled
                   ? (sharedCodexWebSocketTransport() as unknown as typeof globalThis.fetch)
-                  : globalThis.fetch,
+                  : (disabledResponsesTransport(globalThis.fetch) as typeof globalThis.fetch),
                 settings.codexResponsesWebSocketEnabled,
                 residency,
               ),
