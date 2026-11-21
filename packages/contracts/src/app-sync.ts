@@ -155,8 +155,8 @@ const AppSyncMaxRecords = /* @__PURE__ */ defineSchema(() =>
 /** The fields every stored and requested sync shares. */
 export const AppSyncSettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    /** Required unless the sync fills a Site SQL table (`target`). */
-    collection: AppSyncCollection.optional(),
+    /** The collection it fills; for a Site SQL table (`target`), the table's name. */
+    collection: AppSyncCollection,
     mode: AppSyncMode.default("shared"),
     tool: ToolGatewayIdentity.describe("The connected tool to call."),
     arguments: AppSyncArguments.default({}).describe(
@@ -306,30 +306,6 @@ export const AppSyncStatusResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type AppSyncStatusResponse = z.infer<typeof AppSyncStatusResponse>;
 
-export const AppSyncSubscriptionResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    syncId: primitives.uuid,
-    optedIn: z.boolean(),
-    /** The account the person's runs use, when they chose one. */
-    account: z.string().nullable().optional(),
-  }),
-);
-
-/** `PUT …/syncs/:syncId/subscription`: opt in, on this account when the person has several. */
-export const AppSyncOptInRequest = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      account: z
-        .string()
-        .min(1)
-        .max(256)
-        .optional()
-        .describe("The account to run on (an `accounts[].id` from the opt-in review)."),
-    })
-    .strict(),
-);
-export type AppSyncOptInRequest = z.infer<typeof AppSyncOptInRequest>;
-
 /** One of the person's own accounts a sync can run on. */
 export const AppSyncAccountChoice = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -343,6 +319,37 @@ export const AppSyncAccountChoice = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type AppSyncAccountChoice = z.infer<typeof AppSyncAccountChoice>;
+
+export const AppSyncSubscriptionResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    syncId: primitives.uuid,
+    optedIn: z.boolean(),
+    /** The account the person's runs use, when they chose one. */
+    account: z.string().nullable().optional(),
+    /**
+     * Their accounts of the sync's connector, when they have several and
+     * didn't choose one (runs use their first own account until they do).
+     */
+    accounts: z.array(AppSyncAccountChoice).optional(),
+  }),
+);
+
+/** `PUT …/syncs/:syncId/subscription`: opt in, optionally on one of the person's accounts. */
+export const AppSyncOptInRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      account: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe(
+          "The account to run on (an `accounts[].id` from the opt-in review). Omit to keep an earlier choice, or use the first own account.",
+        ),
+    })
+    .strict(),
+);
+export type AppSyncOptInRequest = z.infer<typeof AppSyncOptInRequest>;
 
 /**
  * What the platform's opt-in confirmation shows: the sync, the tool it calls,

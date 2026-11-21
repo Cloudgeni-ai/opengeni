@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   APP_SYNC_DEFAULT_PAGES,
   APP_SYNC_MAX_RECORDS,
@@ -44,6 +45,7 @@ import {
   eventSourceVisibleTo,
   getEventSource,
   listMissingAppSyncKeys,
+  type AppSyncMissingKey,
   recordAppSyncKeys,
   clearAppSyncSubscriptions,
   EVENT_AUTOMATION_MAX_CHAIN_DEPTH,
@@ -532,8 +534,13 @@ async function holdLease(context: AppSyncRunContext): Promise<void> {
 /** Where one person's run writes: a collection or a Site SQL table. */
 type SyncWriter = {
   write(records: AppSyncRecords["records"]): Promise<number>;
-  /** Remove records by key; keys already gone count as removed. */
-  remove(keys: readonly string[]): Promise<number>;
+  /** A table sync's fingerprint of what it writes for each record (see `remove`). */
+  fingerprints?(records: AppSyncRecords["records"]): string[];
+  /**
+   * Remove records this sync wrote that it is still the last writer of;
+   * returns how many it removed. Others are kept.
+   */
+  remove(keys: readonly AppSyncMissingKey[]): Promise<number>;
 };
 
 async function writeRecords(
@@ -558,7 +565,12 @@ async function writeRecords(
   return written;
 }
 
-/** Delete records by key; a record that is already gone is skipped. */
+/**
+ * Delete records by key, only while this sync is still their last writer: a
+ * record a person, the app or a webhook changed since is kept. Each delete
+ * is fenced on the version read, so a change in between keeps it too.
+ * Records already gone, or kept, are skipped.
+ */
 async function deleteRecords(
   deps: AppSyncDeps,
   access: SiteDataAccess,
@@ -567,25 +579,27 @@ async function deleteRecords(
 ): Promise<number> {
   let removed = 0;
   for (let start = 0; start < keys.length; start += WRITE_BATCH) {
-    let batch = keys.slice(start, start + WRITE_BATCH);
+    const owned: SiteDataWriteOp[] = [];
+    for (const key of keys.slice(start, start + WRITE_BATCH)) {
+      const record = await access.store.get(access.caller, collection, { key });
+      if (record && record.updatedBy === access.caller.actor)
+        owned.push({ op: "delete", collection, key, expectedVersion: record.version });
+    }
+    let batch = owned;
     while (batch.length > 0) {
       try {
-        const result = await writeSiteDataWithAccess(
-          deps,
-          access,
-          batch.map((key): SiteDataWriteOp => ({ op: "delete", collection, key })),
-        );
+        const result = await writeSiteDataWithAccess(deps, access, batch);
         removed += result.results.length;
         break;
       } catch (error) {
         const index = (error as SiteDataError).details?.index;
         if (
           !(error instanceof SiteDataError) ||
-          error.code !== "not_found" ||
+          (error.code !== "not_found" && error.code !== "conflict") ||
           typeof index !== "number"
         )
           throw error;
-        // Already removed (by a person or another run): drop it and go on.
+        // Gone or changed since it was read: keep it and go on.
         batch = batch.filter((_, position) => position !== index);
       }
     }
@@ -609,6 +623,8 @@ function tableWriter(
   target: AppSyncTableTarget,
 ): SyncWriter {
   const others = Object.keys(target.columns).filter((column) => column !== target.keyColumn);
+  const values = (record: AppSyncRecords["records"][number]) =>
+    others.map((column) => sqlValue(readPath(record.data, target.columns[column]!)));
   return {
     // Counts records, not the database's row writes (an index write counts there too).
     write: async (records) => {
@@ -616,22 +632,50 @@ function tableWriter(
         table: target.table,
         keyColumn: target.keyColumn,
         columns: [target.keyColumn, ...others],
-        rows: records.map((record) => [
-          record.key,
-          ...others.map((column) => sqlValue(readPath(record.data, target.columns[column]!))),
-        ]),
+        rows: records.map((record) => [record.key, ...values(record)]),
       });
       return records.length;
     },
+    fingerprints: (records) => records.map((record) => sqlRowFingerprint(values(record))),
+    // A table row names no writer: remove it only while its mapped columns
+    // still hold what the sync wrote.
     remove: async (keys) => {
-      await deleteSiteSqlRowsForSync(deps, access, siteId, {
+      const written = new Map(
+        keys.flatMap((entry) => (entry.hash ? [[entry.key, entry.hash] as const] : [])),
+      );
+      return await deleteSiteSqlRowsForSync(deps, access, siteId, {
         table: target.table,
         keyColumn: target.keyColumn,
-        keys,
+        keys: [...written.keys()],
+        match: {
+          columns: others,
+          owned: (row) =>
+            written.get(String(row[target.keyColumn])) ===
+            sqlRowFingerprint(others.map((column) => row[column])),
+        },
       });
-      return keys.length;
     },
   };
+}
+
+/**
+ * A fingerprint of a row's values as SQLite gives them back: booleans as
+ * 1/0 and everything else as text, so a value reads the same after the
+ * column's type affinity converted it.
+ */
+function sqlRowFingerprint(values: readonly unknown[]): string {
+  const text = values.map((value) =>
+    value === null || value === undefined
+      ? null
+      : typeof value === "boolean"
+        ? value
+          ? "1"
+          : "0"
+        : typeof value === "object"
+          ? JSON.stringify(value)
+          : String(value),
+  );
+  return createHash("sha256").update(JSON.stringify(text)).digest("hex").slice(0, 40);
 }
 
 /** What one execution of a sync knows about the run it serves. */
@@ -718,7 +762,13 @@ async function syncWriter(
     const collection = action.collection;
     return {
       write: (records) => writeRecords(deps, access, collection, records),
-      remove: (keys) => deleteRecords(deps, access, collection, keys),
+      remove: (keys) =>
+        deleteRecords(
+          deps,
+          access,
+          collection,
+          keys.map((entry) => entry.key),
+        ),
     };
   }
   await requireSiteSqlForSync(deps, access, action.siteId);
@@ -834,6 +884,7 @@ async function runForPerson(
           subjectId: ledger,
           pass,
           keys: extracted.records.map((record) => record.key),
+          ...(writer.fingerprints ? { hashes: writer.fingerprints(extracted.records) } : {}),
         });
       if (extracted.truncated) {
         summary.truncated = true;
@@ -886,7 +937,8 @@ async function runForPerson(
           workspaceId: task.workspaceId,
           taskId: task.id,
           subjectId: ledger,
-          keys: missing,
+          // Removed or kept, they are no longer this sync's.
+          keys: missing.map((entry) => entry.key),
         });
       }
     return { summary, error: null };
@@ -1173,7 +1225,8 @@ async function requireTargetFor(
   mode: "shared" | "personal",
 ): Promise<void> {
   if (where.target) {
-    if (where.collection)
+    // A table sync's collection is the table's name (definitions carry it).
+    if (where.collection && where.collection !== where.target.table)
       throw invalid("A sync fills either a collection or a table (target), not both.");
     if (mode !== "shared")
       throw invalid(
@@ -1250,6 +1303,7 @@ async function routeToolForOwner(
   mode: "shared" | "personal",
   previous?: RoutedTool,
   account?: string,
+  keepAccount?: string | null,
 ): Promise<RoutedTool & { ownerAccount: string | null }> {
   const declared = await declaredToolsFor(deps, grant, requested);
   const inherited = previous ? [...previous.declaredTools, connectorToolOf(previous)] : [];
@@ -1281,6 +1335,8 @@ async function routeToolForOwner(
         throw forbidden(
           "Couldn't check your connected accounts. Try saving the sync again shortly.",
         );
+      // Accounts unreadable for now: keep an earlier choice; runs check it.
+      ownerAccount = keepAccount ?? null;
     } else {
       const routed = {
         tool: requested,
@@ -1292,22 +1348,20 @@ async function routeToolForOwner(
         routed,
         "shared",
       );
-      const ownRoute = accounts.find((choice) => choice.id === requested.serverId);
-      // The owner picks the account a shared sync runs on: given, or the
-      // account route they saved it with, or their only account.
+      // An account the owner chose: given now, or chosen earlier and still
+      // theirs. Without one the sync runs as before choosing existed (the
+      // route it was saved with, else the owner's first own account), and
+      // nothing is stored, so older releases still read the sync.
       const picked = account
         ? accounts.find((choice) => choice.id === account)
-        : (ownRoute ?? (accounts.length === 1 ? accounts[0] : undefined));
+        : keepAccount
+          ? accounts.find((choice) => choice.id === keepAccount)
+          : undefined;
       if (account && !picked)
         throw invalid(
           accounts.length > 0
             ? `That account isn't one of yours for ${connectorName ?? "this tool"}. Pick one of: ${choiceList(accounts)}.`
             : `You have no ${connectorName ?? "account for this tool"} connected. Connect it in Opengeni first.`,
-          { accounts },
-        );
-      if (!picked && accounts.length > 1)
-        throw invalid(
-          `You have several ${connectorName ? `${connectorName} accounts` : "accounts for this tool"}. Choose the one this sync runs on with account: ${choiceList(accounts)}.`,
           { accounts },
         );
       if (picked) {
@@ -1444,6 +1498,18 @@ function syncOptions(settings: {
   };
 }
 
+/**
+ * The routed tool as action fields. `ownerAccount` is stored only when the
+ * owner chose one: older releases parse the action strictly, so a sync saved
+ * without the new options keeps the previous shape.
+ */
+function routedFields({
+  ownerAccount,
+  ...routed
+}: RoutedTool & { ownerAccount: string | null }): RoutedTool & { ownerAccount?: string } {
+  return { ...routed, ...(ownerAccount ? { ownerAccount } : {}) };
+}
+
 async function insertSync(
   deps: AppSyncDeps,
   grant: AccessGrant,
@@ -1467,7 +1533,7 @@ async function insertSync(
     ownerSubjectId,
     collection: request.target ? request.target.table : request.collection,
     mode: request.mode,
-    ...routed,
+    ...routedFields(routed),
     arguments: request.arguments,
     recordsPath: request.recordsPath,
     key: request.key,
@@ -1576,6 +1642,8 @@ export async function updateAppSync(
         mode,
         patch.tool ? undefined : action,
         patch.account,
+        // The same owner keeps their earlier choice while it is still theirs.
+        ownerChanged ? null : (action.ownerAccount ?? null),
       )
     : {
         tool: action.tool,
@@ -1599,7 +1667,7 @@ export async function updateAppSync(
     ownerSubjectId: access.subjectId,
     collection: target ? target.table : collection,
     mode,
-    ...routed,
+    ...routedFields(routed),
     ...(patch.arguments !== undefined ? { arguments: patch.arguments } : {}),
     ...(patch.recordsPath !== undefined ? { recordsPath: patch.recordsPath } : {}),
     ...(patch.key !== undefined ? { key: patch.key } : {}),
@@ -1802,9 +1870,10 @@ async function ownAccountChoices(
 
 /**
  * Opt the person (or the person an agent acts for) in to a personal sync,
- * or out. With several accounts of the sync's connector they pick one
- * (`account`); with one it is chosen for them. The choice is kept and every
- * run checks it is still theirs. Refused from inside an App's frame: an App
+ * or out. `account` picks one of their accounts of the sync's connector;
+ * without it an earlier choice is kept while still theirs, else runs use
+ * their first own account (as before), and several accounts are listed in
+ * the answer. Every run checks a chosen account is still theirs. Refused from inside an App's frame: an App
  * asks the platform host, which confirms with the person first.
  */
 export async function setAppSyncOptIn(
@@ -1815,7 +1884,12 @@ export async function setAppSyncOptIn(
   optedIn: boolean,
   surface: SiteDataSurface = {},
   input: unknown = {},
-): Promise<{ syncId: string; optedIn: boolean; account: string | null }> {
+): Promise<{
+  syncId: string;
+  optedIn: boolean;
+  account: string | null;
+  accounts?: AppSyncAccountChoice[];
+}> {
   if (surface.frameSiteId !== undefined && surface.frameSiteId !== null)
     throw forbidden("Opt in to a sync from Opengeni, not from inside the app.");
   const request = parseOrInvalid(AppSyncOptInRequest, input ?? {});
@@ -1826,13 +1900,14 @@ export async function setAppSyncOptIn(
     throw invalid(
       "This sync fills shared data and runs for everyone; there is nothing to opt in to.",
     );
-  let account: string | null = null;
+  // Undefined keeps the stored choice; null clears it (runs use the default).
+  let account: string | null | undefined;
+  let current: string | null = null;
+  let accounts: AppSyncAccountChoice[] | undefined;
   if (optedIn) {
     const choices = await ownAccountChoices(deps, grant, action);
-    if (!choices) {
-      if (request.account)
-        throw forbidden("Couldn't check your connected accounts. Try again shortly.");
-    } else if (request.account) {
+    if (request.account) {
+      if (!choices) throw forbidden("Couldn't check your connected accounts. Try again shortly.");
       if (!choices.accounts.some((choice) => choice.id === request.account))
         throw invalid(
           `That account isn't one of yours for ${choices.connector ?? "this tool"}.${
@@ -1841,12 +1916,26 @@ export async function setAppSyncOptIn(
           { accounts: choices.accounts },
         );
       account = request.account;
-    } else if (choices.accounts.length > 1)
-      throw invalid(
-        `You have several ${choices.connector ? `${choices.connector} accounts` : "accounts for this tool"}. Choose the one this sync runs on with account: ${choiceList(choices.accounts)}.`,
-        { accounts: choices.accounts },
-      );
-    else account = choices.accounts[0]?.id ?? null;
+      current = account;
+    } else {
+      // No choice given: keep the earlier one while it is still theirs, else
+      // runs use their first own account, as before choosing existed.
+      current =
+        (
+          await getAppSyncSubscriptionsForSubject(
+            deps.db,
+            task.workspaceId,
+            [task.id],
+            access.subjectId,
+          )
+        ).get(task.id)?.account ?? null;
+      if (current && choices && !choices.accounts.some((choice) => choice.id === current)) {
+        account = null;
+        current = null;
+      }
+      // Several accounts: say which, so the caller can pick one later.
+      if (choices && choices.accounts.length > 1) accounts = choices.accounts;
+    }
   }
   await setAppSyncSubscription(deps.db, {
     accountId: task.accountId,
@@ -1854,14 +1943,14 @@ export async function setAppSyncOptIn(
     taskId: task.id,
     subjectId: access.subjectId,
     optedIn,
-    ...(optedIn ? { account } : {}),
+    ...(optedIn && account !== undefined ? { account } : {}),
   });
   // Opted out: the keys this sync wrote for them no longer matter.
   if (!optedIn)
     await clearAppSyncKeys(deps.db, task.workspaceId, task.id, access.subjectId).catch(
       () => undefined,
     );
-  return { syncId, optedIn, account };
+  return { syncId, optedIn, account: current, ...(accounts ? { accounts } : {}) };
 }
 
 /**
@@ -1971,7 +2060,7 @@ export async function listAppSyncDefinitions(
     if (!action) return [];
     const definition: AppSyncDefinitionInput = {
       name: task.name,
-      ...(action.target ? {} : { collection: action.collection }),
+      collection: action.collection,
       mode: action.mode,
       // The connector, not one person's account: each installer's sync runs
       // on their own account of it.

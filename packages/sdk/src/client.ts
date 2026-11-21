@@ -10619,7 +10619,8 @@ export class OpenGeniClient {
   /**
    * Opt the caller in to (or out of) a personal data sync. `account` picks
    * which of their accounts of the sync's connector it runs on (an id from
-   * `getAppSyncOptInReview`); needed when they have several.
+   * `getAppSyncOptInReview`). Without it an earlier choice is kept, else
+   * their first own account is used, and `accounts` lists them when several.
    */
   async setAppSyncOptIn(
     workspaceId: string,

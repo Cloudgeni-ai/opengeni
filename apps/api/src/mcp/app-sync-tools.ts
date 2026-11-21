@@ -108,7 +108,7 @@ const SAVE_FIELDS = {
     .max(256)
     .optional()
     .describe(
-      "Shared sync: which of your accounts of the tool's connector it runs on, when you have several (the error lists them).",
+      "Shared sync: which of your accounts of the tool's connector it runs on. Omit to use the one you saved with, else your first own account.",
     ),
   schedule: ScheduledTaskScheduleSpec.optional().describe(
     'When it runs, like any automation: {"type":"interval","everySeconds":3600} (at least 300), {"type":"calendar","hour":7,"minute":0,"timeZone":"Europe/Oslo"}, or {"type":"manual"} for event triggers or app_sync_run only.',
@@ -231,7 +231,7 @@ export function registerAppSyncTools(
           .max(256)
           .optional()
           .describe(
-            "Which of their accounts of the tool's connector it runs on, when they have several (the error lists them).",
+            "Which of their accounts of the tool's connector it runs on. Omit to keep an earlier choice, else their first own account; the answer lists accounts when there are several.",
           ),
       },
     },

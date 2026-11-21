@@ -82,6 +82,10 @@ app keeps accepting only while it is still theirs. Otherwise a webhook
 belongs to the app, not to the person who created it: it keeps accepting
 after they leave, and the app's managers pause, rotate or delete it.
 
+A record a webhook writes is the webhook's from then on: a data sync with
+`removeMissing` never removes it, even when the sync wrote the same key
+before ([app-sync.md](app-sync.md#removing-records-the-tool-no-longer-returns)).
+
 ### Management
 
 Managers of the app (`artifacts:publish`), never from inside the app's frame:

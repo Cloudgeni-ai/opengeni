@@ -151,8 +151,8 @@ When the tool returns one page at a time, add `paging`:
 that a complete run no longer returns. A shared sync can fill an app SQL table
 instead of a collection: `target: {table, keyColumn, columns: {column:
 "dot.path"}}`, where `keyColumn` is the table's primary key or unique. If you
-have several accounts of the tool's connector, pass `account` (the error lists
-them). `events` may use workspace event sources or your own.
+have several accounts of the tool's connector, `account` picks one (else your
+first own account is used). `events` may use workspace event sources or your own.
 
 `mode: "shared"` (default) runs on the saving person's connection and fills
 data everyone shares. `mode: "personal"` fills only each opted-in person's own

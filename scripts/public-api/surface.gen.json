@@ -13417,6 +13417,8 @@
       "shape": {
         "$": "object",
         "$.account": "string? null",
+        "$.accounts": "array?",
+        "$.accounts[]": "ref(AppSyncAccountChoice)",
         "$.optedIn": "boolean!",
         "$.syncId": "string!"
       }

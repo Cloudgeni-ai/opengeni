@@ -504,44 +504,58 @@ export const APP_SYNC_SHARED_KEYS = "";
 
 /**
  * Record that this run pass saw (and wrote) these keys, for one person of a
- * personal sync or `APP_SYNC_SHARED_KEYS`.
+ * personal sync or `APP_SYNC_SHARED_KEYS`. `hashes` (same order as `keys`)
+ * are a table sync's fingerprints of the values written.
  */
 export async function recordAppSyncKeys(
   db: Database,
-  input: Scope & { taskId: string; subjectId: string; pass: string; keys: readonly string[] },
+  input: Scope & {
+    taskId: string;
+    subjectId: string;
+    pass: string;
+    keys: readonly string[];
+    hashes?: readonly (string | null)[];
+  },
 ): Promise<void> {
   if (input.keys.length === 0) return;
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     for (let start = 0; start < input.keys.length; start += 500) {
       const chunk = input.keys.slice(start, start + 500);
-      await tx.execute(sql`insert into app_sync_keys (account_id, workspace_id, task_id, subject_id, record_key, seen_pass)
-        select ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid, ${input.subjectId}, key, ${input.pass}::uuid
+      const hashes = chunk.map((_, index) => input.hashes?.[start + index] ?? null);
+      await tx.execute(sql`insert into app_sync_keys (account_id, workspace_id, task_id, subject_id, record_key, seen_pass, written_hash)
+        select ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.taskId}::uuid, ${input.subjectId}, entry.key, ${input.pass}::uuid, entry.hash
         from unnest(${sql.raw("ARRAY[")}${sql.join(
           chunk.map((key) => sql`${key}`),
           sql`, `,
-        )}${sql.raw("]::text[]")}) as key
+        )}${sql.raw("]::text[]")}, ${sql.raw("ARRAY[")}${sql.join(
+          hashes.map((hash) => sql`${hash}`),
+          sql`, `,
+        )}${sql.raw("]::text[]")}) as entry(key, hash)
         on conflict (workspace_id, task_id, subject_id, record_key) do update
-          set seen_pass = excluded.seen_pass, seen_at = now()`);
+          set seen_pass = excluded.seen_pass, seen_at = now(), written_hash = excluded.written_hash`);
     }
   });
 }
+
+/** A key this sync wrote earlier, with a table sync's fingerprint of what it wrote. */
+export type AppSyncMissingKey = { key: string; hash: string | null };
 
 /** Keys this sync wrote earlier that the pass didn't see, oldest first. */
 export async function listMissingAppSyncKeys(
   db: Database,
   input: { workspaceId: string; taskId: string; subjectId: string; pass: string; limit: number },
-): Promise<string[]> {
+): Promise<AppSyncMissingKey[]> {
   const rows = await withWorkspaceRls(db, input.workspaceId, (tx) =>
-    rawRows<{ record_key: string }>(
+    rawRows<{ record_key: string; written_hash: string | null }>(
       tx,
-      sql`select record_key from app_sync_keys
+      sql`select record_key, written_hash from app_sync_keys
           where workspace_id = ${input.workspaceId}::uuid and task_id = ${input.taskId}::uuid
             and subject_id = ${input.subjectId} and seen_pass <> ${input.pass}::uuid
           order by seen_at, record_key
           limit ${Math.max(1, Math.trunc(input.limit))}`,
     ),
   );
-  return rows.map((row) => row.record_key);
+  return rows.map((row) => ({ key: row.record_key, hash: row.written_hash }));
 }
 
 /** Forget keys whose records were removed. */
