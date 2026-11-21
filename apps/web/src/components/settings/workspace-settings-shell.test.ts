@@ -211,6 +211,7 @@ describe("settings rail", () => {
         "Usage",
         "API keys",
         "Developer",
+        "Meetings",
         "Insights",
         "Secrets",
         "Sandbox environments",

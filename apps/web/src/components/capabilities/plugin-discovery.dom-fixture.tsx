@@ -328,7 +328,7 @@ test("installed attention state remains textual and management uses the exact in
       ".og-connection-installed button",
     )!;
     expect(row.getAttribute("aria-label")).toContain("Needs attention");
-    expect(row.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
+    expect(row.querySelector(".og-capability-catalog-notice")?.textContent).toBe("Needs attention");
     await act(async () => {
       row.focus();
       row.click();

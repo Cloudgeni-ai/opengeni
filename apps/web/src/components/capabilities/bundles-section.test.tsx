@@ -37,7 +37,7 @@ describe("BundlesSection", () => {
             rendered.container
               .querySelector(".og-connection-installed button")
               ?.getAttribute("aria-label"),
-          ).toBe("Research suite · Installed");
+          ).toBe("Research suite · Installed · Workspace");
           expect(rowIds(rendered.container)).toEqual([]);
         } else {
           expect(rowIds(rendered.container)).toEqual([expected]);

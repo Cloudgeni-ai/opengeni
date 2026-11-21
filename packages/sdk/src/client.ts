@@ -9,6 +9,8 @@ import type {
   AppPackageExportResponse,
   AppPackageInstallRequest,
   AppPackageInstallResponse,
+  AppTemplate,
+  ListAppTemplatesResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -10423,6 +10425,21 @@ export class OpenGeniClient {
       undefined,
       options,
     );
+  }
+
+  /** Ready-made apps for the gallery; add one with `installAppPackage` and its `package`. */
+  async listAppTemplates(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppTemplate[]> {
+    const response = await this.requestJson<ListAppTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-templates`,
+      undefined,
+      undefined,
+      options,
+    );
+    return response.templates;
   }
 
   async setWorkspaceArtifactStatus(

@@ -1966,7 +1966,8 @@ sent with, so earlier request bytes never change. See
 [desktop app](design/desktop-app.md#app-shots).
 
 Knowledge is the product destination for retained sources and findings, with
-Library, Instructions and Review tabs on the Knowledge page (`/state`).
+Library, Instructions and Review tabs on the Knowledge page (`/state`), the
+Knowledge tab of Capabilities.
 `apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
 navigation, including old Files, Skills, Memory and Documents links (a Documents
 `?authority=` link keeps its scope as the Library filter). Agent learning has one

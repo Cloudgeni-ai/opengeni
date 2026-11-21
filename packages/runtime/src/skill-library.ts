@@ -44,6 +44,8 @@ export type SkillLibraryEntry = Readonly<{
   version: string;
   description: string;
   category: string;
+  /** The team it is for ("Engineering"); the gallery groups by it. */
+  team?: string;
   tags: readonly string[];
   /** SHA-256 over the complete canonical artifact manifest, not just SKILL.md. */
   contentSha256: string;
@@ -101,6 +103,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "checkov",
     version: "1.0.0",
     category: "infrastructure",
+    team: "Engineering",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "security", "opt-in"]),
     contentSha256: "0331b987cd609946c4b95928fec9982b96b0a8614a95e5e628a531efb8ad8577",
     sourceCommit: "e9734c4aa062e0421a68acb5650bd5bf33ce2e10",
@@ -120,6 +123,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "document-parsing",
     version: "1.0.0",
     category: "documents",
+    team: "Operations",
     tags: Object.freeze(["skill", "documents", "parsing", "markdown", "opt-in"]),
     contentSha256: "5494b5bbb1629001dad8ab823afb2401efc7a6e76679644d211df8a5164f9d1a",
     sourceCommit: "4e3089b1ed43404241a303109f81e2c7933040b2",
@@ -140,6 +144,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "refactor-module",
     version: "0.0.1",
     category: "infrastructure",
+    team: "Engineering",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "modules", "opt-in"]),
     contentSha256: "cc6d70034c4d11ef6a496c0081ca28219cbd310283d77e327914bcd2f27f3a09",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
@@ -159,6 +164,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "social-media-marketing",
     version: "1.0.0",
     category: "marketing",
+    team: "Marketing",
     tags: Object.freeze(["skill", "marketing", "social", "analysis", "opt-in"]),
     contentSha256: "66893de1fd2110f18d9be69b1e0adb61193e0a736a88f0c0725168465d2b06a3",
     sourceCommit: "e9734c4aa062e0421a68acb5650bd5bf33ce2e10",
@@ -179,6 +185,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "terraform-search-import",
     version: "0.1.0",
     category: "infrastructure",
+    team: "Engineering",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "import", "opt-in"]),
     contentSha256: "994d7a48dd6a610daa8a4dbdf4b0f0e52eaf8662a509b6a163bc6e76611227f9",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
@@ -198,6 +205,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "terraform-stacks",
     version: "0.0.1",
     category: "infrastructure",
+    team: "Engineering",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "stacks", "opt-in"]),
     contentSha256: "0a6244ecddf1cce0357db41b41b3b20a1bfa71f331092ebc8bbd15e649733d35",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
@@ -217,6 +225,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "terraform-style-guide",
     version: "1.0.0",
     category: "infrastructure",
+    team: "Engineering",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "style", "opt-in"]),
     contentSha256: "1453c4f11636d2d88c5186a4ce2d7532d4b2056a861ed69653df21e8e45e19cd",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
@@ -236,6 +245,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "terraform-test",
     version: "0.0.2",
     category: "infrastructure",
+    team: "Engineering",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "testing", "opt-in"]),
     contentSha256: "61be0fa43c48f49980fee28c64215f593c4ab55d55a93c8f2e514d9ca566a97b",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
@@ -255,6 +265,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     id: "azure-verified-modules",
     version: "1.0.0",
     category: "infrastructure",
+    team: "Engineering",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "azure", "opt-in"]),
     contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",

@@ -163,6 +163,10 @@ import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-contex
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
+import {
+  capabilitiesSectionFromSearch,
+  type CapabilitiesSection,
+} from "@/components/capabilities/capabilities-section";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
@@ -944,20 +948,24 @@ const workspaceInsightsRoute = createRoute({
   }),
   component: Insights,
 });
+/** `?section=` names a Capabilities tab; `knowledge` is the Knowledge page (`/state`). */
+function capabilitiesSearch(search: Record<string, unknown>): {
+  section?: CapabilitiesSection | "knowledge";
+} {
+  const section =
+    search.section === "knowledge" ? "knowledge" : capabilitiesSectionFromSearch(search.section);
+  return section ? { section } : {};
+}
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
   component: CapabilitiesLegacyRedirect,
 });
 const AUTOMATIONS_SEARCH_UUID =
@@ -1671,6 +1679,9 @@ function CapabilitiesLegacyRedirect() {
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
+  if (section === "knowledge") {
+    return <Navigate to="/workspaces/$workspaceId/state" params={{ workspaceId }} replace />;
+  }
   return (
     <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
   );

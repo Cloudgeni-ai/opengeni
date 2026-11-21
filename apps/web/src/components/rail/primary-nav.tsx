@@ -9,11 +9,15 @@ import { InboxLink } from "@/components/rail/inbox-link";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import {
+  activeRailItem,
   advancedWorkspaceItems,
   isConfigItemActive,
+  KNOWLEDGE_WORKSPACE_ITEM,
+  MEETINGS_WORKSPACE_ITEM,
   PRIMARY_WORKSPACE_ITEMS,
   primaryWorkspaceItems,
   type WorkspaceConfigItem,
+  type WorkspaceConfigTarget,
 } from "@/components/rail/workspace-nav-data";
 import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { Button } from "@opengeni/react/ui/button";
@@ -22,6 +26,15 @@ import { cn } from "@opengeni/react/app/lib/utils";
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
 
 const ADVANCED_EXPANDED_KEY = "opengeni.rail.advanced";
+
+/**
+ * The rail item that shows knowledge waiting for review: Capabilities, whose
+ * Knowledge tab it is in, or Knowledge itself where the simplified interface
+ * lists it.
+ */
+function knowledgeReviewTarget(simplified: boolean): WorkspaceConfigTarget {
+  return simplified ? KNOWLEDGE_WORKSPACE_ITEM.to : "/workspaces/$workspaceId/plugins";
+}
 
 function initialAdvancedExpanded(): boolean {
   if (typeof window === "undefined") return false;
@@ -65,6 +78,13 @@ export function WorkspaceShortcutLinks({
   const { simplified } = useSimplifiedInterface();
   const listed = new Set(primaryWorkspaceItems(simplified).map((item) => item.to));
   const advanced = advancedWorkspaceItems(simplified);
+  const shown = [
+    ...PRIMARY_WORKSPACE_ITEMS.filter((item) => listed.has(item.to)),
+    // A meeting being recorded keeps its link, so the recording can always
+    // be reached and stopped.
+    ...(recording ? [MEETINGS_WORKSPACE_ITEM] : []),
+  ];
+  const activeTarget = activeRailItem(pathname, rail.workspaceId, [...shown, ...advanced]);
   const [advancedExpanded, setAdvancedExpandedState] = useState(initialAdvancedExpanded);
   const setAdvancedExpanded = (next: boolean) => {
     setAdvancedExpandedState(next);
@@ -75,7 +95,7 @@ export function WorkspaceShortcutLinks({
     }
   };
   const needsReview = (item: WorkspaceConfigItem) =>
-    item.to === "/workspaces/$workspaceId/state" && pendingKnowledge;
+    item.to === knowledgeReviewTarget(simplified) && pendingKnowledge;
   const needsAttention = (item: WorkspaceConfigItem) =>
     item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention;
   const link = (item: WorkspaceConfigItem) => (
@@ -88,28 +108,18 @@ export function WorkspaceShortcutLinks({
       workspaceId={rail.workspaceId}
       variant="rail"
       collapsed={rail.collapsed}
-      active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+      active={item.to === activeTarget}
       onNavigate={() => rail.setDrawerOpen(false)}
     />
   );
   // The page you are on, and anything waiting for you, is never folded away.
   const advancedOpen =
     advancedExpanded ||
-    advanced.some(
-      (item) =>
-        isConfigItemActive(pathname, rail.workspaceId, item.to) ||
-        needsReview(item) ||
-        needsAttention(item),
-    );
+    advanced.some((item) => item.to === activeTarget || needsReview(item) || needsAttention(item));
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      {/* A meeting being recorded keeps its link even where the interface leaves
-          Meetings out, so the recording can always be reached and stopped. */}
-      {PRIMARY_WORKSPACE_ITEMS.filter(
-        (item) =>
-          listed.has(item.to) || (recording && item.to === "/workspaces/$workspaceId/meetings"),
-      ).map(link)}
+      {shown.map(link)}
       {advanced.length === 0 ? null : rail.collapsed ? (
         // The icon rail has no room for a group: its pages keep their icons.
         advanced.map(link)
@@ -150,10 +160,11 @@ export function PrimaryNavExtras() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { simplified } = useSimplifiedInterface();
   const items = [...primaryWorkspaceItems(simplified), ...advancedWorkspaceItems(simplified)];
-  const activeWorkspaceItem = items.find((item) =>
-    isConfigItemActive(pathname, rail.workspaceId, item.to),
-  );
-  const activeWorkspaceSection = activeWorkspaceItem?.label;
+  const activeTarget = activeRailItem(pathname, rail.workspaceId, items);
+  const activeWorkspaceSection = items.find((item) => item.to === activeTarget)?.label;
+  const reviewItem = [...PRIMARY_WORKSPACE_ITEMS, KNOWLEDGE_WORKSPACE_ITEM].find(
+    (item) => item.to === knowledgeReviewTarget(simplified),
+  )!;
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
     initialWorkspaceShortcutsExpanded,
   );
@@ -212,19 +223,11 @@ export function PrimaryNavExtras() {
             <>
               {pendingKnowledge ? (
                 <WorkspaceConfigLink
-                  item={
-                    PRIMARY_WORKSPACE_ITEMS.find(
-                      (item) => item.to === "/workspaces/$workspaceId/state",
-                    )!
-                  }
+                  item={reviewItem}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   needsReview
-                  active={isConfigItemActive(
-                    pathname,
-                    rail.workspaceId,
-                    "/workspaces/$workspaceId/state",
-                  )}
+                  active={reviewItem.to === activeTarget}
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />
               ) : null}
@@ -248,11 +251,7 @@ export function PrimaryNavExtras() {
               ) : null}
               {recordingMeeting ? (
                 <WorkspaceConfigLink
-                  item={
-                    PRIMARY_WORKSPACE_ITEMS.find(
-                      (item) => item.to === "/workspaces/$workspaceId/meetings",
-                    )!
-                  }
+                  item={MEETINGS_WORKSPACE_ITEM}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   recording

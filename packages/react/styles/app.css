@@ -513,14 +513,3 @@
 .skills-panel .skill-list-row:hover, .skills-panel .skill-list-row[aria-expanded="true"] { background:var(--color-surface-2,var(--color-surface)); border:0; box-shadow:none; }
 .skills-panel .skill-list-row:focus-visible { outline:2px solid var(--color-brand); outline-offset:2px; }
 @media (max-width:640px) { .skills-panel .skill-list { grid-template-columns:minmax(0,1fr); } }
-
-/* All-results boundaries; tab-specific layouts keep their own spacing. */
-.capability-search-section {
-  margin-top: 28px;
-  padding-top: 24px;
-  border-top: 1px solid var(--color-border);
-}
-.capability-search-section > .og-plugin-discovery,
-.capability-search-section > section {
-  margin-top: 0;
-}

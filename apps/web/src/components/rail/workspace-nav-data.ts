@@ -44,37 +44,48 @@ export type WorkspaceConfigGroup = {
   items: WorkspaceConfigItem[];
 };
 
+const CAPABILITIES_ITEM: WorkspaceConfigItem = {
+  to: "/workspaces/$workspaceId/plugins",
+  icon: "plug",
+  label: "Capabilities",
+  description: "Connections, skills, plugins, and knowledge",
+};
+
+/**
+ * Knowledge is a tab of Capabilities. The simplified interface, whose
+ * Capabilities page shows only connections, lists it under "Advanced".
+ */
+export const KNOWLEDGE_WORKSPACE_ITEM: WorkspaceConfigItem = {
+  to: "/workspaces/$workspaceId/state",
+  icon: "brain-circuit",
+  label: "Knowledge",
+  description: "Knowledge, instructions, and agent learning",
+};
+
+const AUTOMATIONS_ITEM: WorkspaceConfigItem = {
+  to: "/workspaces/$workspaceId/automations",
+  icon: "zap",
+  label: "Automations",
+  description: "Run tasks on a schedule or when something happens",
+};
+
+/** Listed in settings; the rail shows it only while a meeting is being recorded. */
+export const MEETINGS_WORKSPACE_ITEM: WorkspaceConfigItem = {
+  to: "/workspaces/$workspaceId/meetings",
+  icon: "audio-lines",
+  label: "Meetings",
+  description: "Record meetings and read who said what",
+};
+
 /** Product destinations promoted to the primary rail beside New session. */
 export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
-  {
-    to: "/workspaces/$workspaceId/plugins",
-    icon: "plug",
-    label: "Capabilities",
-    description: "Plugins, Skills, and connected tools",
-  },
-  {
-    to: "/workspaces/$workspaceId/state",
-    icon: "brain-circuit",
-    label: "Knowledge",
-    description: "Knowledge, instructions, and agent learning",
-  },
-  {
-    to: "/workspaces/$workspaceId/automations",
-    icon: "zap",
-    label: "Automations",
-    description: "Run tasks on a schedule or when something happens",
-  },
+  CAPABILITIES_ITEM,
+  AUTOMATIONS_ITEM,
   {
     to: "/workspaces/$workspaceId/agents",
     icon: "bot",
     label: "Agents",
     description: "Named agents you can chat with here and in Slack",
-  },
-  {
-    to: "/workspaces/$workspaceId/meetings",
-    icon: "audio-lines",
-    label: "Meetings",
-    description: "Record meetings and read who said what",
   },
   {
     to: "/workspaces/$workspaceId/artifacts",
@@ -172,7 +183,6 @@ const SIMPLIFIED_UNLISTED_DESTINATIONS: ReadonlySet<WorkspaceConfigTarget> = new
 
 /** Destinations the simplified interface keeps but folds under "Advanced" in the rail. */
 const SIMPLIFIED_ADVANCED_DESTINATIONS: ReadonlySet<WorkspaceConfigTarget> = new Set([
-  "/workspaces/$workspaceId/state",
   "/workspaces/$workspaceId/automations",
 ]);
 
@@ -226,7 +236,10 @@ export function primaryWorkspaceItems(simplified: boolean): WorkspaceConfigItem[
 /** The rail destinations the interface folds under "Advanced": none in the full console. */
 export function advancedWorkspaceItems(simplified: boolean): WorkspaceConfigItem[] {
   return simplified
-    ? PRIMARY_WORKSPACE_ITEMS.filter((item) => SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to))
+    ? [
+        KNOWLEDGE_WORKSPACE_ITEM,
+        ...PRIMARY_WORKSPACE_ITEMS.filter((item) => SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to)),
+      ]
     : [];
 }
 
@@ -269,10 +282,29 @@ export function isConfigItemActive(
 const SECTION_ALIASES: Readonly<Record<string, WorkspaceConfigTarget>> = {
   sites: "/workspaces/$workspaceId/artifacts",
   schedules: "/workspaces/$workspaceId/automations",
-  memory: "/workspaces/$workspaceId/state",
-  documents: "/workspaces/$workspaceId/state",
+  // Knowledge is a tab of Capabilities.
+  state: "/workspaces/$workspaceId/plugins",
+  memory: "/workspaces/$workspaceId/plugins",
+  documents: "/workspaces/$workspaceId/plugins",
   "bot-templates": "/workspaces/$workspaceId/agents",
 };
+
+/**
+ * The one listed rail item a page belongs to: the item for its own address,
+ * else the item of the section it is in (Knowledge is in Capabilities).
+ */
+export function activeRailItem(
+  pathname: string,
+  workspaceId: string,
+  items: readonly WorkspaceConfigItem[],
+): WorkspaceConfigTarget | null {
+  const exact = items.find((item) => isConfigItemActive(pathname, workspaceId, item.to));
+  if (exact) return exact.to;
+  const prefix = `/workspaces/${workspaceId}/`;
+  if (!pathname.startsWith(prefix)) return null;
+  const alias = SECTION_ALIASES[pathname.slice(prefix.length).split("/")[0] ?? ""];
+  return alias && items.some((item) => item.to === alias) ? alias : null;
+}
 
 /**
  * The rail section a workspace page is in, by the same names as the rail:
@@ -286,7 +318,7 @@ export function workspaceSectionForPath(
   const prefix = `/workspaces/${workspaceId}/`;
   if (!pathname.startsWith(prefix)) return null;
   const first = pathname.slice(prefix.length).split("/")[0] ?? "";
-  const items = [...PRIMARY_WORKSPACE_ITEMS, ...WORKSPACE_BROWSE_ITEMS];
+  const items = [...PRIMARY_WORKSPACE_ITEMS, MEETINGS_WORKSPACE_ITEM, ...WORKSPACE_BROWSE_ITEMS];
   const target = SECTION_ALIASES[first];
   const item = items.find((each) =>
     target ? each.to === target : configPathSuffix(each.to) === first,

@@ -4,6 +4,7 @@ import {
   BrainCircuitIcon,
   FolderPlusIcon,
   GraduationCapIcon,
+  PlugIcon,
   PlusIcon,
   UploadIcon,
 } from "lucide-react";
@@ -22,6 +23,8 @@ import {
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
+import { SetupTabs } from "@/components/capabilities/setup-tabs";
 import { useAgent } from "@opengeni/react/app/lib/agents";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
@@ -88,6 +91,8 @@ export function KnowledgePage({
   search: KnowledgeSearch;
 }) {
   const context = useAppContext();
+  // The simplified interface keeps Knowledge as its own page.
+  const { simplified } = useSimplifiedInterface();
   const workspace = context.workspaces.find((each) => each.id === workspaceId) ?? null;
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   const workspaceName = personal
@@ -443,18 +448,52 @@ export function KnowledgePage({
       search: { section: "learning" },
     });
   const showAdd = canEdit && !(tab === "library" && libraryEmpty);
+  const knowledgeTabs = (
+    <LineTabsList
+      aria-label="Knowledge"
+      {...(simplified ? {} : { variant: "pill" as const, barClassName: "border-b-0 pb-0" })}
+    >
+      <LineTabsTrigger value="library">{TAB_LABEL.library}</LineTabsTrigger>
+      <LineTabsTrigger value="instructions">{TAB_LABEL.instructions}</LineTabsTrigger>
+      {showReview ? (
+        <LineTabsTrigger
+          value="review"
+          count={waiting ? `${waiting}${queue.partial ? "+" : ""}` : undefined}
+          countTone="attention"
+          countLabel={waiting ? `${waiting} waiting for review` : undefined}
+        >
+          {TAB_LABEL.review}
+        </LineTabsTrigger>
+      ) : null}
+    </LineTabsList>
+  );
 
   return (
-    <ContentPage ref={scroller} width="standard" className="pt-6">
+    // Under Capabilities it keeps the Capabilities page's width, so the
+    // header and tabs stay put when switching tabs.
+    <ContentPage
+      ref={scroller}
+      width="standard"
+      className={simplified ? "pt-6" : "max-w-[1200px] pt-6"}
+    >
       <LineTabs
         value={tab}
         onValueChange={(value) => nav.showTab(value as KnowledgeTab)}
         className="min-w-0"
       >
         <PageHeader
-          icon={<BrainCircuitIcon />}
-          title="Knowledge"
-          description="What your agents know and how they learn"
+          {...(simplified
+            ? {
+                icon: <BrainCircuitIcon />,
+                title: "Knowledge",
+                description: "What your agents know and how they learn",
+              }
+            : {
+                // Knowledge is a tab of Capabilities.
+                icon: <PlugIcon />,
+                title: "Capabilities",
+                description: "What your agents can use and know",
+              })}
           actions={
             <>
               {showAdd ? (
@@ -494,22 +533,10 @@ export function KnowledgePage({
             </>
           }
           tabs={
-            <LineTabsList aria-label="Knowledge">
-              <LineTabsTrigger value="library">{TAB_LABEL.library}</LineTabsTrigger>
-              <LineTabsTrigger value="instructions">{TAB_LABEL.instructions}</LineTabsTrigger>
-              {showReview ? (
-                <LineTabsTrigger
-                  value="review"
-                  count={waiting ? `${waiting}${queue.partial ? "+" : ""}` : undefined}
-                  countTone="attention"
-                  countLabel={waiting ? `${waiting} waiting for review` : undefined}
-                >
-                  {TAB_LABEL.review}
-                </LineTabsTrigger>
-              ) : null}
-            </LineTabsList>
+            simplified ? knowledgeTabs : <SetupTabs workspaceId={workspaceId} active="knowledge" />
           }
         />
+        {simplified ? null : <div className="mt-4">{knowledgeTabs}</div>}
         <LineTabsContent value="library">
           <LibraryTab
             workspaceId={workspaceId}

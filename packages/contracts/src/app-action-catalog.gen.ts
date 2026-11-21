@@ -5629,6 +5629,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAppTemplates",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/app-templates",
+    "request": [],
+    "response": [
+      "AppTemplate",
+      "ListAppTemplatesResponse"
+    ],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "listArtifactCatalog",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog",

@@ -822,6 +822,29 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 
 ## Web Flow
 
+The **Capabilities** page is the one setup page, with tabs **Connections**,
+**Skills**, **Plugins**, **Knowledge** and **Gallery**
+(`apps/web/src/components/capabilities/setup-tabs.tsx`). Each tab is its own
+address: `/plugins?section=skills|plugins|gallery` (no `section` is
+Connections), and Knowledge keeps `/state`, showing the same header and tabs
+(`?section=knowledge` redirects there). Older `/capabilities` links and their
+`?section=` keep working. The simplified interface's Capabilities page shows
+only connections and keeps Knowledge as its own page.
+
+Every tab lists what you have first, then suggestions, in the same row
+(`CapabilityCatalogRow`): logo or initial, name, one line and one action.
+Rows you have show a status line in place of the description, with whose it
+is where that is known ("Installed · Workspace", "Installed · Yours"), and no
+glyph unless they need attention (`ConnectionInstalled`).
+
+**Gallery** lists ready-made agents (`packages/core/src/agent-templates`),
+apps (`packages/core/src/app-templates`, [app packages](app-packages.md#ready-made-apps))
+and reviewed library skills, grouped by each item's own `team` (agent and app
+templates' `team`, a library skill's `metadata.team`), alphabetically, with
+items without one under **More**. One click adds an item through the same
+paths as elsewhere: `createAgentFromTemplate`, `installAppPackage` with the
+template's package, and `installLibrarySkill`. An added item opens instead.
+
 The **Capabilities** view has exactly three top-level sections, in this order:
 **Integrations**, **Connectors**, and **Bundles**. The first two are
 connections - something that holds an identity in another product. The third is

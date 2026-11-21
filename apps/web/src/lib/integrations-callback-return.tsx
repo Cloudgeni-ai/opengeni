@@ -1,6 +1,10 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { slackSettingsSearch } from "@/lib/slack-settings-search";
+import {
+  capabilitiesSectionFromSearch,
+  type CapabilitiesSection,
+} from "@/components/capabilities/capabilities-section";
 
 /**
  * Outcome parameters an integration callback (or a deep link into the
@@ -45,13 +49,16 @@ const MAX_CALLBACK_VALUE_LENGTH = 512;
 export function workspaceIntegrationsCallbackHref(
   workspaceId: string,
   search: string,
-  section?: "skills",
+  section?: CapabilitiesSection | "knowledge",
 ): string {
   const incoming = new URLSearchParams(search);
   const outgoing = new URLSearchParams();
-  if (section === "skills" || incoming.get("section") === "skills") {
-    outgoing.set("section", "skills");
-  }
+  const tab =
+    section ??
+    (incoming.get("section") === "knowledge"
+      ? "knowledge"
+      : capabilitiesSectionFromSearch(incoming.get("section")));
+  if (tab && tab !== "connections") outgoing.set("section", tab);
   const slack = slackSettingsSearch(Object.fromEntries(incoming));
   for (const key of CALLBACK_KEYS) {
     // A Slack outcome owns `reason`/`connectionId`, already sanitized above.

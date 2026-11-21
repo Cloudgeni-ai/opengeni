@@ -82,6 +82,7 @@ export * from "./site-publishing";
 export * from "./app-assets";
 export * from "./site-sql";
 export * from "./app-package";
+export * from "./app-templates";
 export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  activeRailItem,
   PRIMARY_WORKSPACE_ITEMS,
   WORKSPACE_CONFIG_GROUPS,
   interfaceListsDestination,
@@ -33,12 +34,11 @@ describe("workspace rail destinations", () => {
       (item) => item.to,
     );
 
+    // Knowledge is a tab of Capabilities; Meetings is listed in settings.
     expect(primaryTargets).toEqual([
       "/workspaces/$workspaceId/plugins",
-      "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/automations",
       "/workspaces/$workspaceId/agents",
-      "/workspaces/$workspaceId/meetings",
       "/workspaces/$workspaceId/artifacts",
     ]);
     expect(PRIMARY_WORKSPACE_ITEMS.map((item) => item.label)).not.toContain("Documents");
@@ -55,6 +55,24 @@ describe("workspace rail destinations", () => {
         "/workspaces/$workspaceId/artifacts",
       ),
     ).toBe(true);
+  });
+
+  test("a page in another section's tab marks that section", () => {
+    const listed = PRIMARY_WORKSPACE_ITEMS;
+    expect(activeRailItem("/workspaces/ws-1/state", "ws-1", listed)).toBe(
+      "/workspaces/$workspaceId/plugins",
+    );
+    expect(activeRailItem("/workspaces/ws-1/plugins", "ws-1", listed)).toBe(
+      "/workspaces/$workspaceId/plugins",
+    );
+    // Where Knowledge is listed itself (the simplified interface), it is the one marked.
+    expect(
+      activeRailItem("/workspaces/ws-1/state", "ws-1", [
+        ...listed,
+        ...advancedWorkspaceItems(true),
+      ]),
+    ).toBe("/workspaces/$workspaceId/state");
+    expect(activeRailItem("/workspaces/ws-1/sessions/s-1", "ws-1", listed)).toBeNull();
   });
 
   test("settings mode swaps the main rail for the settings rail", () => {

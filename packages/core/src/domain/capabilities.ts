@@ -3472,6 +3472,7 @@ function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogIte
     metadata: {
       libraryId: entry.id,
       version: entry.version,
+      ...(entry.team ? { team: entry.team } : {}),
       contentSha256: entry.contentSha256,
       sourceCommit: entry.sourceCommit,
       sourceUrl: entry.sourceUrl,

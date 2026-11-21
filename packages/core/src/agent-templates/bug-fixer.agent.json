@@ -2,6 +2,7 @@
   "key": "bug-fixer",
   "name": "Bug fixer",
   "description": "Reproduces a bug, fixes it in a pull request, and asks PR reviewer to review it.",
+  "team": "Engineering",
   "avatar": {
     "kind": "icon",
     "icon": "bug",

@@ -307,8 +307,9 @@ as `knowledge.reach.changed`.
 
 ## Browsing Knowledge
 
-The **Knowledge** page (`/state`) has **Library**, **Instructions** and
-**Review** tabs; Review shows only while proposals wait. Entries, collections,
+The **Knowledge** page (`/state`) is the Knowledge tab of Capabilities (the
+simplified interface keeps it as its own page). It has **Library**,
+**Instructions** and **Review** tabs; Review shows only while proposals wait. Entries, collections,
 the Agent learning settings and add/edit flows open as pages with a back link, each
 addressed by URL. Files are a **Files** Type filter in the Library, and
 **Add → Upload files** saves originals that become File entries. Opening a file
@@ -327,8 +328,10 @@ override lives in the session dock's **Agent** tab, next to its identity and
 capabilities; the composer's **+ → Chat settings** opens it. A new chat still
 sets its draft choice in **+ → Chat settings**, and a schedule on its form.
 
-The workspace rail marks Knowledge with an indicator while accessible Knowledge
-proposals await review. That link opens the Review tab directly.
+The workspace rail marks Capabilities (Knowledge, where the simplified
+interface lists it) with an indicator while accessible Knowledge proposals
+await review, and the Knowledge tab shows a dot. That link opens the Review
+tab directly.
 The indicator refreshes after local decisions, on window focus, and every 30 seconds
 while visible; a transient refresh failure preserves the last known pending state.
 

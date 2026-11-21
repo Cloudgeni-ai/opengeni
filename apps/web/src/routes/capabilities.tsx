@@ -16,6 +16,7 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ConnectionCatalog,
+  ConnectionInstalled,
   McpConnectionCard,
   type ConnectionCatalogService,
 } from "@opengeni/react/connect";
@@ -87,12 +88,10 @@ import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
-import {
-  LineTabs,
-  LineTabsContent,
-  LineTabsList,
-  LineTabsTrigger,
-} from "@opengeni/react/ui/line-tabs";
+import type { CapabilitiesSection } from "@/components/capabilities/capabilities-section";
+import { GallerySection } from "@/components/capabilities/gallery-section";
+import { SetupTabs, setupTabLabel } from "@/components/capabilities/setup-tabs";
+import { LineTabs, LineTabsContent } from "@opengeni/react/ui/line-tabs";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { SkillsPanel } from "./skills-panel";
 import { partitionSimplifiedInterfaceServices } from "@/components/capabilities/simplified-interface-services";
@@ -142,7 +141,7 @@ import {
   canManageSlackReactionSummon,
   useSlackIntegration,
 } from "@/components/capabilities/use-slack-integration";
-import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
@@ -301,7 +300,7 @@ export function apiIntegrationAccess(
 
 type CapabilitiesRouteProps = {
   workspaceId: string;
-  initialSection?: "skills";
+  initialSection?: CapabilitiesSection | "knowledge" | undefined;
   legacyRedirect?: boolean;
 };
 
@@ -353,16 +352,17 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
 
   // now, so it scrolls that section into view instead.
   const [filter] = useState<CapabilityFilter>("all");
-  const [chosenTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
-  // The simplified interface shows one thing here: the apps to connect. Skills
-  // opened by their own address still show, with the full page around them.
-  const focused = useSimplifiedInterface().simplified && initialSection !== "skills";
-  const activeTab = focused ? "connections" : chosenTab;
+  // Each tab is its own address (`?section=`), so links and Back keep it.
+  const chosenTab: CapabilitiesSection =
+    initialSection && initialSection !== "knowledge" ? initialSection : "connections";
+  // The simplified interface shows one thing here: the apps to connect. Other
+  // tabs opened by their own address still show, with the full page around them.
+  const focused = useSimplifiedInterface().simplified && chosenTab === "connections";
+  const activeTab = chosenTab;
   // Its own apps come first; the rest of the catalog waits behind one button.
   const [moreAppsShown, setMoreAppsShown] = useState(false);
   const [query, setQuery] = useState("");
   const hasQuery = query.trim().length > 0;
-  const searchingAll = activeTab === "all";
 
   // Detail/connect sheet. We store the id (+ registry flag + a snapshot for
   // registry items not yet in the catalog), NOT the item object: the rendered
@@ -387,10 +387,15 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     },
     [navigate],
   );
-  // Strip one-shot return parameters (OAuth outcomes) but keep the open page.
+  // Strip one-shot return parameters (OAuth outcomes) but keep the tab and the open page.
   const clearReturnParams = useCallback(() => {
-    const open = new URLSearchParams(window.location.search).get("open");
-    const next = open ? `?open=${encodeURIComponent(open)}` : "";
+    const current = new URLSearchParams(window.location.search);
+    const kept = new URLSearchParams();
+    for (const key of ["section", "open"]) {
+      const value = current.get(key);
+      if (value) kept.set(key, value);
+    }
+    const next = kept.size > 0 ? `?${kept.toString()}` : "";
     window.history.replaceState(window.history.state, "", `${window.location.pathname}${next}`);
     void navigate({ href: `${window.location.pathname}${next}`, replace: true });
   }, [navigate]);
@@ -441,15 +446,9 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   const catalogToolbar = useMemo(
     () => ({
       target: catalogActionTarget,
-      activeTitle: searchingAll
-        ? ""
-        : activeTab === "connections"
-          ? "Connections"
-          : activeTab === "skills"
-            ? "Skills"
-            : "Plugins",
+      activeTitle: setupTabLabel(activeTab),
     }),
-    [catalogActionTarget, searchingAll, activeTab],
+    [catalogActionTarget, activeTab],
   );
   const [sheetError, setSheetError] = useState<string | null>(null);
   // A callback outcome that names no catalog item (for example a stale link
@@ -2130,7 +2129,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
           hidden={pageOpen}
           className="mx-auto w-full max-w-[1200px] px-4 pt-6 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8"
         >
-          <LineTabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
+          <LineTabs value={activeTab} className="min-w-0">
             {/*
               The catalog stays mounted, hidden, under the pages it opens: its
               header names the macOS window bar only until an open page does.
@@ -2144,7 +2143,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                 description={
                   focused
                     ? "Connect the tools you already use"
-                    : "Tools, skills, and plugins your agents can use"
+                    : "What your agents can use and know"
                 }
                 actions={
                   <div
@@ -2153,14 +2152,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                   />
                 }
                 tabs={
-                  focused ? undefined : (
-                    <LineTabsList aria-label="Capability types">
-                      <LineTabsTrigger value="all">All</LineTabsTrigger>
-                      <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
-                      <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-                      <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
-                    </LineTabsList>
-                  )
+                  focused ? undefined : <SetupTabs workspaceId={workspaceId} active={activeTab} />
                 }
               />
             </WindowBarTitleBoundary>
@@ -2187,7 +2179,10 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                     onClick={() => {
                       setCallbackNotice(null);
                       setQuery("");
-                      setActiveTab("connections");
+                      void navigate({
+                        to: "/workspaces/$workspaceId/plugins",
+                        params: { workspaceId },
+                      });
                     }}
                   >
                     Show connections
@@ -2208,31 +2203,23 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
               <ToolbarSearch
                 value={query}
                 onValueChange={setQuery}
-                placeholder={
-                  focused
-                    ? "Search apps"
-                    : activeTab === "all"
-                      ? "Search connections, skills, and plugins"
-                      : `Search ${activeTab}`
-                }
+                placeholder={focused ? "Search apps" : `Search ${activeTab}`}
               />
             </Toolbar>
             <CatalogActionContext.Provider value={catalogToolbar}>
               <div className="min-w-0">
                 <LineTabsContent value={activeTab} forceMount>
-                  <div hidden={!searchingAll && activeTab !== "connections"}>
-                    {!searchingAll ? (
-                      <CatalogHeader
-                        title="Connections"
-                        hidden={focused}
-                        action={
-                          <Button type="button" onClick={() => setAddOpen(true)}>
-                            <PlusIcon />
-                            Add connection
-                          </Button>
-                        }
-                      />
-                    ) : null}
+                  <div hidden={activeTab !== "connections"}>
+                    <CatalogHeader
+                      title="Connections"
+                      hidden={focused}
+                      action={
+                        <Button type="button" onClick={() => setAddOpen(true)}>
+                          <PlusIcon />
+                          Add connection
+                        </Button>
+                      }
+                    />
 
                     {nativeConnectCatalog.status === "loading" ? (
                       <p role="status" className="mt-4 text-sm text-fg-muted">
@@ -2270,18 +2257,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                             <ConnectionCatalog
                               grouped={false}
                               columns={2}
-                              {...(searchingAll
-                                ? { resultLimit: 6, onShowMore: () => setActiveTab("connections") }
-                                : {})}
-                              services={
-                                searchingAll
-                                  ? [...searchReviewed, ...searchCommunity]
-                                  : searchReviewed
-                              }
+                              services={searchReviewed}
                             />
                           </section>
                         ) : null}
-                        {!searchingAll && searchCommunity.length > 0 ? (
+                        {searchCommunity.length > 0 ? (
                           <section aria-label="Community" className="mt-6">
                             <h2 className={SECTION_TITLE_CLASS}>Community</h2>
                             <p className="mt-1 mb-2 text-xs leading-4.5 text-fg-muted">
@@ -2294,53 +2274,27 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                             />
                           </section>
                         ) : null}
-                        {searchReviewed.length === 0 &&
-                        (searchingAll || searchCommunity.length === 0) ? (
-                          searchingAll && searchCommunity.length > 0 ? (
-                            <section aria-label="Connections" className="mt-6">
-                              <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Connections</h2>
-                              <ConnectionCatalog
-                                grouped={false}
-                                columns={2}
-                                resultLimit={6}
-                                onShowMore={() => setActiveTab("connections")}
-                                services={searchCommunity}
-                              />
-                            </section>
-                          ) : (
-                            <p role="status" className="mt-6 text-sm leading-5 text-fg-muted">
-                              {`No connections match "${query.trim()}". `}
-                              <button
-                                type="button"
-                                className="font-medium og-link"
-                                onClick={() => setQuery("")}
-                              >
-                                Clear search
-                              </button>
-                            </p>
-                          )
+                        {searchReviewed.length === 0 && searchCommunity.length === 0 ? (
+                          <p role="status" className="mt-6 text-sm leading-5 text-fg-muted">
+                            {`No connections match "${query.trim()}". `}
+                            <button
+                              type="button"
+                              className="font-medium og-link"
+                              onClick={() => setQuery("")}
+                            >
+                              Clear search
+                            </button>
+                          </p>
                         ) : null}
                       </>
-                    ) : searchingAll ? (
-                      <section aria-label="Connections" className="mt-6">
-                        <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Connections</h2>
-                        <ConnectionCatalog
-                          grouped={false}
-                          columns={2}
-                          resultLimit={6}
-                          onShowMore={() => setActiveTab("connections")}
-                          services={[...connectedServices, ...popularServices]}
-                        />
-                      </section>
                     ) : (
                       <>
                         {connectedServices.length > 0 ? (
                           // What you have is a resource list (64px rows, one
                           // column); what you can add below is the catalog.
-                          <section aria-label="Connected" className="mt-6">
-                            <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Connected</h2>
+                          <div className="mt-6">
                             <ConnectedServiceList services={connectedServices} />
-                          </section>
+                          </div>
                         ) : null}
                         {focused && simplifiedApps.apps.length > 0 ? (
                           <section aria-label="Recommended" className="mt-6">
@@ -2398,8 +2352,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
           inside this element rather than beside it: otherwise the accessibility
           tree says they belong to no section at all.
         */}
-                    {!searchingAll &&
-                    (filter === "all" || filter === "api") &&
+                    {(filter === "all" || filter === "api") &&
                     visibleCustomApiInstances.length > 0 ? (
                       <CustomApiSection
                         instances={visibleCustomApiInstances}
@@ -2419,7 +2372,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                       />
                     ) : null}
 
-                    {hasQuery && !searchingAll ? (
+                    {hasQuery ? (
                       <div className="mt-4">
                         <p className="mb-3 text-xs leading-5 text-fg-muted">
                           Still can’t find it?{" "}
@@ -2471,10 +2424,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                       </div>
                     ) : null}
                   </div>
-                  <div
-                    className={searchingAll ? "capability-search-section" : "pt-6"}
-                    hidden={activeTab !== "skills"}
-                  >
+                  <div className="pt-6" hidden={activeTab !== "skills"}>
                     <SkillsPanel
                       refreshRevision={skillsRevision}
                       onSkillsChange={setCanonicalSkills}
@@ -2500,8 +2450,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                   </div>
                   <div
                     ref={bundlesRef}
-                    className={searchingAll ? "capability-search-section" : "pt-6"}
-                    hidden={!searchingAll && activeTab === "connections"}
+                    className="pt-6"
+                    hidden={activeTab !== "skills" && activeTab !== "plugins"}
                   >
                     <BundlesSection
                       refreshRevision={skillsRevision}
@@ -2529,13 +2479,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                             openSkillRef.current?.(skill.id);
                           },
                         }))}
-                      discoveryEnabled={activeTab !== "connections"}
-                      {...(searchingAll
-                        ? {
-                            onShowCategory: (category: "skills" | "plugins") =>
-                              setActiveTab(category),
-                          }
-                        : {})}
+                      discoveryEnabled={activeTab === "skills" || activeTab === "plugins"}
                       onSearchSkills={() => {
                         const search =
                           capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
@@ -2545,7 +2489,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                         search?.focus({ preventScroll: true });
                       }}
                       importSkillRef={importSkillRef}
-                      section={searchingAll ? "all" : activeTab === "skills" ? "skills" : "plugins"}
+                      section={activeTab === "skills" ? "skills" : "plugins"}
                       query={query}
                       client={client}
                       workspaceId={workspaceId}
@@ -2570,6 +2514,21 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                       </div>
                     ) : null}
                   </div>
+                  {activeTab === "gallery" ? (
+                    <div className="pt-6">
+                      <GallerySection
+                        workspaceId={workspaceId}
+                        query={query}
+                        items={items}
+                        canInstallSkills={canManageSkills}
+                        onSkillAdded={async () => {
+                          setSkillsRevision((value) => value + 1);
+                          await refresh();
+                          onRuntimeChanged();
+                        }}
+                      />
+                    </div>
+                  ) : null}
                 </LineTabsContent>
               </div>
             </CatalogActionContext.Provider>
@@ -2719,38 +2678,31 @@ export function integrationQuickConnect(
   return footer.onSetup;
 }
 
-/** Connections you have, as resource rows: logo, name, one line, and a chevron or what needs you. */
+/**
+ * Connections you have, in the same rows as the catalog under them: logo,
+ * name and one status line ("Connected"), and what needs you first.
+ */
 function ConnectedServiceList({ services }: { services: ConnectionCatalogService[] }) {
-  const rows = services.flatMap((service) =>
-    service.options.map((option) => ({
-      key: `${service.id}/${option.id}`,
-      name:
-        service.options.length > 1 && option.name !== service.name
-          ? `${service.name} · ${option.name}`
-          : service.name,
-      logo: service.logo,
-      option,
-    })),
-  );
   return (
-    <RowList label="Connected">
-      {rows.map(({ key, name, logo, option }) => (
-        <ListRow
-          key={key}
-          leading={logo ?? <LogoTile name={name} />}
-          title={name}
-          description={option.description}
-          indicator={
-            option.state === "attention" || option.state === "unavailable"
-              ? { kind: option.state, label: option.status }
-              : option.state === "loading"
-                ? "loading"
-                : "open"
-          }
-          onOpen={option.onOpen}
-        />
-      ))}
-    </RowList>
+    <ConnectionInstalled
+      title="Connected"
+      items={services.flatMap((service) =>
+        service.options.map((option) => {
+          const name =
+            service.options.length > 1 && option.name !== service.name
+              ? `${service.name} · ${option.name}`
+              : service.name;
+          return {
+            id: `${service.id}/${option.id}`,
+            name,
+            icon: service.logo ?? <LogoTile name={name} />,
+            status: option.status,
+            needsAttention: option.state === "attention",
+            onOpen: option.onOpen,
+          };
+        }),
+      )}
+    />
   );
 }
 

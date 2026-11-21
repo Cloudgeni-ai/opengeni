@@ -8,6 +8,7 @@
 import { t } from "@opengeni/react/app/lib/console-text";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  AudioLinesIcon,
   BarChart3Icon,
   CircleUserRoundIcon,
   CodeIcon,
@@ -140,6 +141,13 @@ const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
 
 // Workspace dashboards in the settings rail. They open as their own pages.
 export const ACTIVITY_PAGES = [
+  // Meetings left the main rail, which shows it only while recording.
+  {
+    to: "/workspaces/$workspaceId/meetings" as const,
+    label: "Meetings",
+    icon: AudioLinesIcon,
+    requiresAdmin: false,
+  },
   {
     to: "/workspaces/$workspaceId/insights" as const,
     label: "Insights",
