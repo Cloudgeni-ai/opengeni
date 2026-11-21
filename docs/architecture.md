@@ -2884,7 +2884,7 @@ Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
 Site Data gives each published Site persistent JSON collections and files
-(Postgres `app_data_*` tables behind the backend-neutral `SiteDataStore`,
+(Postgres `site_data_*` tables behind the backend-neutral `SiteDataStore`,
 bytes in object storage). Data belongs to the Site, not a version; collection
 access modes are enforced only in the API, Site frames reach it through the
 existing Site HTTP channel with host-pinned `current` routes only and always
