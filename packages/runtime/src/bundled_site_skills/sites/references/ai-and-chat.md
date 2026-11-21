@@ -21,6 +21,13 @@ const client = createOpenGeniSiteClient();
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
+Declare every workspace tool the app calls in `requestedTools`. Opengeni then
+shows its own connect card to a member who still has to connect or reconnect
+one of them; do not build a connect screen. To show it somewhere specific or
+draw your own, use `client.connections`: `status()` (`{ ready, needed }`, each
+need with a `key` and a `label` such as "Connect Gmail"), `connect(key?)`,
+`showCard()` and `onChange(listener)`.
+
 ### Inline AI: the app chooses the interaction
 
 Use `site.ai.run({ initialMessage: appDefinedPrompt, idempotencyKey: actionId })`

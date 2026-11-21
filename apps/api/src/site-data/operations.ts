@@ -345,6 +345,19 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  return await writeSiteDataWithAccess(deps, access, operations);
+}
+
+/**
+ * Write with an access the caller already resolved: the same quota, rate
+ * window, validation and metering as `writeSiteData`. App data syncs use it
+ * to write as their own principal (see app-sync/service.ts).
+ */
+export async function writeSiteDataWithAccess(
+  deps: SiteDataDeps,
+  access: SiteDataAccess,
+  operations: SiteDataWriteOperation[],
+) {
   await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),

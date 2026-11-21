@@ -510,6 +510,7 @@ export const englishMessages = {
   "automations.picker.choose": "Choose an event",
   "automations.picker.empty": "No matching events. Type the exact event type to use it.",
   "automations.picker.everyEventDescription": "Anything this source sends.",
+  "automations.picker.groupApps": "Apps",
   "automations.picker.groupChats": "Chats",
   "automations.picker.groupMeetings": "Meetings",
   "automations.picker.groupUsage": "Usage",

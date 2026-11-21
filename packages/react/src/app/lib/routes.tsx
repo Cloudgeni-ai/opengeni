@@ -119,6 +119,11 @@ export type SiteViewSearch = {
    * Site's `site.location`; the Site's root when omitted.
    */
   page?: string | undefined;
+  /**
+   * One connect card item to open on arrival (a published App's "Connect"
+   * sends the viewer here). Dropped once used.
+   */
+  connect?: string | undefined;
 } & SiteViewArtifactsReturn;
 
 /**
@@ -142,6 +147,12 @@ export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch 
     page:
       typeof search.page === "string" && search.page.startsWith("/") && search.page !== "/"
         ? search.page
+        : undefined,
+    connect:
+      typeof search.connect === "string" &&
+      search.connect.length > 0 &&
+      search.connect.length <= 512
+        ? search.connect
         : undefined,
     // Every key, set or not: the router merges this over the raw search, so
     // an omitted key would let an unchecked raw value through.

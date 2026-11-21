@@ -923,6 +923,9 @@
 :where(.og-root).inset-x-0,:where(.og-root) .inset-x-0 {
     inset-inline: calc(var(--spacing) * 0);
   }
+:where(.og-root).inset-x-3,:where(.og-root) .inset-x-3 {
+    inset-inline: calc(var(--spacing) * 3);
+  }
 :where(.og-root).inset-y-0,:where(.og-root) .inset-y-0 {
     inset-block: calc(var(--spacing) * 0);
   }
@@ -2376,6 +2379,9 @@
   }
 :where(.og-root).max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\] {
     max-width: min(18rem, calc(100vw - 1.5rem));
+  }
+:where(.og-root).max-w-\[min\(22rem\,calc\(100\%-1\.5rem\)\)\],:where(.og-root) .max-w-\[min\(22rem\,calc\(100\%-1\.5rem\)\)\] {
+    max-width: min(22rem, calc(100% - 1.5rem));
   }
 :where(.og-root).max-w-\[min\(22rem\,calc\(100vw-16px\)\)\],:where(.og-root) .max-w-\[min\(22rem\,calc\(100vw-16px\)\)\] {
     max-width: min(22rem, calc(100vw - 16px));

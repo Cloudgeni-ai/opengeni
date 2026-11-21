@@ -32,6 +32,8 @@ import type {
   ToolGatewaySiteConsentResponse,
   ToolGatewaySiteConsentReview,
   ToolGatewaySiteReadinessResponse,
+  ToolGatewaySiteSetupItem,
+  ToolGatewaySiteSetupResponse,
   ToolGatewayTarget,
   ToolGatewayTargetApprovalRequest,
   ToolGatewayTargetApprovalResponse,
@@ -350,6 +352,14 @@ export type SiteToolBridge = {
   ) => Promise<ToolGatewaySiteReadinessResponse>;
   /** Hear when readiness may have changed; returns an unsubscribe. Only with a pinned Site. */
   subscribeReadiness?: (listener: () => void) => () => void;
+  /** The platform's connect card for the pinned Site (`site.connections`). */
+  connections?: {
+    items: (options: {
+      signal: AbortSignal;
+    }) => Promise<readonly ToolGatewaySiteSetupItem[] | null>;
+    connect: (item: ToolGatewaySiteSetupItem, options: { signal: AbortSignal }) => Promise<boolean>;
+    show?: (options: { signal: AbortSignal }) => Promise<boolean> | boolean;
+  };
 };
 export type CreateSiteToolBridgeOptions = {
   workspaceTools: Pick<OpenGeniWorkspaceTools, "$catalog"> &
@@ -386,6 +396,11 @@ export type CreateSiteToolBridgeOptions = {
    * readiness change, like the bridge's own connects and "Always allow".
    */
   readinessChanges?: (listener: () => void) => () => void;
+  /**
+   * The host's own connect card for this Site: `show` brings it back when the
+   * App asks (`site.connections.showCard()`), even after the viewer closed it.
+   */
+  connectCard?: { show?: (options: { signal: AbortSignal }) => Promise<boolean> | boolean };
 } & (
   | { artifactId: string; siteVersionId: string; requestedTools: readonly ToolGatewayIdentity[] }
   | { artifactId?: never; siteVersionId?: never; requestedTools?: never }
@@ -684,6 +699,53 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
             )
     : null;
   const canReadiness = Boolean(pinned && (input.workspaceTools.$readiness || input.fetchResponse));
+  // The connect card: the same connect and reconnect dialogs a call opens.
+  const connections: SiteToolBridge["connections"] =
+    pinned && input.fetchResponse && (input.connectForToolCall || input.recoverToolCall)
+      ? {
+          items: async ({ signal }) =>
+            (await hostJson<ToolGatewaySiteSetupResponse>("site-setup", pinned, signal)).items,
+          connect: async (item, { signal }) => {
+            const done =
+              item.action === "connect"
+                ? item.capabilityId && input.connectForToolCall
+                  ? await input.connectForToolCall({
+                      connect: {
+                        capabilityId: item.capabilityId,
+                        name: item.connector,
+                        providerDomain: "",
+                      },
+                      signal,
+                    })
+                  : false
+                : item.capabilityId && item.connectionId && input.recoverToolCall
+                  ? await input.recoverToolCall({
+                      failure: {
+                        code: "site_tool_reconnect_required",
+                        system: item.connector,
+                        message: siteToolFailureMessage(
+                          "site_tool_reconnect_required",
+                          item.connector,
+                        ),
+                        reconnect: {
+                          connectionId: item.connectionId,
+                          capabilityId: item.capabilityId,
+                          name: item.connector,
+                          shared: item.shared,
+                        },
+                        retryable: false,
+                        detail: "",
+                        sourceCode: null,
+                      },
+                      signal,
+                    })
+                  : false;
+            if (done) readinessChanged();
+            return done;
+          },
+          ...(input.connectCard?.show ? { show: input.connectCard.show } : {}),
+        }
+      : undefined;
   const bridge: SiteToolBridge = {
     ...(targeted ? { resolve, invoke } : {}),
     ...(canReadiness && readiness
@@ -699,6 +761,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           },
         }
       : {}),
+    ...(connections ? { connections } : {}),
     ...(input.fetchResponse && input.artifactId ? { siteData: true } : {}),
     ...(input.fetchResponse
       ? {

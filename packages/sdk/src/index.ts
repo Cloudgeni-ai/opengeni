@@ -1,4 +1,12 @@
 export type {
+  AppPackage,
+  AppPackageExportRequest,
+  AppPackageExportResponse,
+  AppPackageInstallRequest,
+  AppPackageInstallResponse,
+  AppPackageProblem,
+} from "@opengeni/contracts";
+export type {
   ModelDecisionRequest,
   ModelDecisionResponse,
   DecisionQuestion,
@@ -133,6 +141,20 @@ export type {
   UpdateEventSourceRequest,
   WebhookEventAdapter,
   WorkspaceAutomationTemplate,
+} from "@opengeni/contracts";
+export type {
+  AppSync,
+  AppSyncCreateRequest,
+  AppSyncDefinition,
+  AppSyncLastRun,
+  AppSyncListResponse,
+  AppSyncMode,
+  AppSyncRunResponse,
+  AppSyncRunSummary,
+  AppSyncStatus,
+  AppSyncStatusResponse,
+  AppSyncSubscriptionResponse,
+  AppSyncUpdateRequest,
 } from "@opengeni/contracts";
 export type {
   SiteDataAccessMode,
@@ -533,6 +555,9 @@ export type {
   ToolGatewaySiteReadinessTool,
   ToolGatewaySiteReadinessRequest,
   ToolGatewaySiteReadinessResponse,
+  ToolGatewaySiteSetupItem,
+  ToolGatewaySiteSetupRequest,
+  ToolGatewaySiteSetupResponse,
   ToolGatewaySiteAllowancesResetRequest,
   ToolGatewaySiteAllowancesResetResponse,
   ToolGatewayManifestRequest,

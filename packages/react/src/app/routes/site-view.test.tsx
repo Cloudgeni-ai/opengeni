@@ -93,6 +93,8 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({
   useAppApi: () => ({
     request: async (path: string, init?: RequestInit) => {
+      // The App connect card reads its own list; these tests count the rest.
+      if (path.endsWith("/tools/site-setup")) return { version: 1, items: [] };
       requests.push({ path, init });
       return { id: id(99) };
     },
@@ -137,6 +139,8 @@ mock.module("../lib/console-site", () => ({
   useConsoleSiteViewer: () => ({ kind: "member", id: "user:me" }),
   useConsoleSiteToolBridge: () => () => undefined,
   notifySiteToolReadinessChanged: () => {},
+  subscribeSiteToolReadiness: () => () => {},
+  subscribeSiteConnectCardShow: () => () => {},
 }));
 mock.module("../lib/use-session-list-hint-refresh", () => ({
   useSessionListHintRefresh: (

@@ -35,7 +35,7 @@ const ADDED_SESSION_COLUMNS = [
   "agent_version",
   // Migration 1513 sets existing chats to 0, but new chats pin their revision on the first attempt.
   "first_request_tools_revision",
-  // Migration 1519: who the chat waits on and its Linked items; NULL until set.
+  // Migration 1521: who the chat waits on and its Linked items; NULL until set.
   "links",
   "waiting_on",
 ];

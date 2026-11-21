@@ -32,13 +32,39 @@ export function notifySiteToolReadinessChanged(siteId: string): void {
   }
 }
 
-function subscribeSiteToolReadiness(siteId: string, listener: () => void): () => void {
+export function subscribeSiteToolReadiness(siteId: string, listener: () => void): () => void {
   const listeners = readinessListeners.get(siteId) ?? new Set<() => void>();
   listeners.add(listener);
   readinessListeners.set(siteId, listeners);
   return () => {
     listeners.delete(listener);
     if (listeners.size === 0) readinessListeners.delete(siteId);
+  };
+}
+
+/** Connect cards on screen per App; the App's `site.connections.showCard()` brings them back. */
+const connectCardListeners = new Map<string, Set<() => void>>();
+
+/** Show this App's connect card again (even if closed); false when no card is on screen. */
+export function showSiteConnectCard(siteId: string): boolean {
+  const listeners = [...(connectCardListeners.get(siteId) ?? [])];
+  for (const listener of listeners) {
+    try {
+      listener();
+    } catch {
+      // One card's failure must not stop the others.
+    }
+  }
+  return listeners.length > 0;
+}
+
+export function subscribeSiteConnectCardShow(siteId: string, listener: () => void): () => void {
+  const listeners = connectCardListeners.get(siteId) ?? new Set<() => void>();
+  listeners.add(listener);
+  connectCardListeners.set(siteId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) connectCardListeners.delete(siteId);
   };
 }
 
@@ -56,8 +82,23 @@ export function useConsoleSiteToolBridge(workspaceId: string): SiteToolBridgeFac
             artifactId: site.artifactId,
             siteVersionId: site.siteVersionId,
             requestedTools: site.requestedTools,
-            consent,
+            consent: consent && {
+              ...consent,
+              // The App's own `site.connections.connect()` also refreshes its card.
+              connectForToolCall: async (prompt) => {
+                const done = await consent.connectForToolCall(prompt);
+                if (done) notifySiteToolReadinessChanged(site.artifactId);
+                return done;
+              },
+              recoverToolCall: async (prompt) => {
+                const again = await consent.recoverToolCall(prompt);
+                if (again && prompt.failure.reconnect)
+                  notifySiteToolReadinessChanged(site.artifactId);
+                return again;
+              },
+            },
             readinessChanges: (listener) => subscribeSiteToolReadiness(site.artifactId, listener),
+            connectCard: { show: () => showSiteConnectCard(site.artifactId) },
           })
         : createSiteToolBridge(api, scope);
     },

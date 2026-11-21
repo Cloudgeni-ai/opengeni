@@ -126,6 +126,35 @@ each and 1 GB per app, by default), `rate_limited` (retry later), and
 `site_data_unsupported` (a host or local preview without app data). Local
 sandbox previews have no app data; test the published app.
 
+**Data sync: refresh data without a model run.** When the app only needs data
+copied in from a connected tool (orders, tickets, calendar events, rows of a
+sheet), save a sync instead of a scheduled agent task: `app_sync_save` calls
+one tool with fixed arguments on a schedule or event, keeps the fields you
+name and upserts each record by its key into one collection. Nothing reasons,
+so it is cheaper, faster and gives the same result every run. Steps:
+
+1. Call the tool once yourself and look at its result to pick `recordsPath`
+   (dot path to the list, e.g. `data.items`; omit when the result is the list),
+   `key` (e.g. `id`) and `fields` (omit to keep whole records).
+2. Define the collection: `shared_read` for a shared sync, `per_viewer` with
+   `privateRecords: true` for a personal one.
+3. `app_sync_save` with `siteId`, `name`, `collection`, `tool`
+   (`{serverId, toolName}`), `arguments`, `key` and `schedule` (interval of at
+   least 300 seconds, a calendar time, or `{"type":"manual"}` with `events`).
+4. `app_sync_run` to try it; fix settings from its error. `app_sync_list`,
+   `app_sync_delete` manage them.
+
+`mode: "shared"` (default) runs on the saving person's connection and fills
+data everyone shares. `mode: "personal"` fills only each opted-in person's own
+records from their own account; people opt in with `app_sync_opt_in` (only
+when they ask). Changing a personal sync's tool, arguments, collection or mode
+clears the opt-ins, so people opt in again. Tools that ask for approval first can't run unattended, so
+their runs fail with a readable error. In the page, `await site.data.syncs()`
+returns each sync's `lastRun` (`at`, `status`, `error`) and, for personal
+syncs, whether the viewer `optedIn`: show "Updated 5 minutes ago" or the error
+near the data. Use a scheduled agent task only when a run needs judgment
+(summaries, classification, several tools combined).
+
 Agents and scheduled tasks use the tools: `opengeni__app_data_describe`,
 `app_data_query`, `app_data_write` (batches of up to 100), `app_data_import`
 and `app_data_export` (JSON or CSV), `app_data_reset` (needs

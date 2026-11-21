@@ -220,7 +220,9 @@ import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-comp
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
+import { registerAppSyncTools } from "./app-sync-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
+import { registerAppPackageTools } from "./app-package-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
 import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
@@ -1816,6 +1818,16 @@ export function buildOpenGeniMcpServer(
       json,
       siteAgent,
     );
+    registerAppSyncTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
     // Site SQL tools need a configured gateway (they also reach databases
     // that already exist after the deployment stops offering Site SQL).
     if (siteSqlGatewayConfig(deps.settings) !== null)
@@ -1837,6 +1849,16 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       json,
+    );
+    registerAppPackageTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
     );
     registerSandboxFileArtifactTool(server, deps, grant, sessionId, json);
     registerEditableArtifactAgentTools({

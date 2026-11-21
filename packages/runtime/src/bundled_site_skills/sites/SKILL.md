@@ -234,7 +234,8 @@ server, a tunnel, or a Connected Machine for workspace AI access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
 hosting provider the user did not name. Saved data needs no server either:
 app data gives every published app persistent collections and files,
-and scheduled tasks feed them through agent tools. A separate server is only
+and a data sync (`app_sync_save`) refills them with no model run. A separate
+server is only
 relevant for a genuinely external need: a third-party API that requires a
 secret the viewer's browser must not hold, relational queries or volumes app
 Data cannot serve, or live server-side compute. If the request seems to need
@@ -266,6 +267,7 @@ Read the references the app needs with `skill_read`, for example
 | Saves records or files (app data) | `references/site-data.md` |
 | Needs tables, joins, counts or unique keys (app SQL) | `references/site-sql.md` |
 | Invited or public, with data, tools or an embedded agent | `references/publish-to-web.md` |
+| Moves to another workspace | `references/app-packages.md` |
 
 ## Show a visualization or app inside chat
 

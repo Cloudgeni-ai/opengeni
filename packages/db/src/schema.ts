@@ -5276,11 +5276,11 @@ export const sessions = pgTable(
     // an avatar. Never part of the model's context; copied by forks.
     description: text("description"),
     avatar: jsonb("avatar").$type<SessionAvatar>(),
-    // Who the chat waits on, as the agent said (1519). `turnId` is the turn
+    // Who the chat waits on, as the agent said (1521). `turnId` is the turn
     // that said it: the wait shows only while that turn is the chat's latest
     // and the chat is idle, so a reply or a new turn clears it.
     waitingOn: jsonb("waiting_on").$type<SessionWaitingOn & { turnId: string | null }>(),
-    // The chat's Linked items (1519). NULL means none. Bounded by the contract.
+    // The chat's Linked items (1521). NULL means none. Bounded by the contract.
     links: jsonb("links").$type<SessionLink[]>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
@@ -13120,6 +13120,8 @@ export const scheduledTaskRuns = pgTable(
     actionKind: text("action_kind").notNull().default("agent_turn"),
     knowledgeSyncRunId: uuid("knowledge_sync_run_id"),
     knowledgeSummary: jsonb("knowledge_summary").$type<Record<string, unknown>>(),
+    // App data sync runs: what the run read and wrote (1520).
+    syncSummary: jsonb("sync_summary").$type<Record<string, unknown>>(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     // Stable Temporal producer identity. Activity replay/re-dispatch returns
     // the exact run instead of allocating a second schedule source row.

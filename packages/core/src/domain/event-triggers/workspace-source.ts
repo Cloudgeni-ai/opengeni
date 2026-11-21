@@ -27,7 +27,7 @@ import {
 /**
  * "This workspace": what happens in Opengeni itself, as one person may see
  * it. Its feed reads the workspace's recording events and activity facts
- * (chats finishing, failing, waiting; usage thresholds) from the database as
+ * (chats finishing, failing, waiting; usage thresholds; App data changes) from the database as
  * the source's owner, every 15 seconds while an automation listens. Facts
  * are stamped when written, not when committed, so each read looks back 10
  * minutes and skips what the source already stored, but never before the
@@ -90,6 +90,11 @@ export async function createWorkspaceEventSource(input: {
     visibility: "private",
   });
   return source;
+}
+
+function appUrl(publicBaseUrl: string | undefined, workspaceId: string, appId: string | null) {
+  if (!publicBaseUrl || !appId) return null;
+  return `${publicBaseUrl.replace(/\/+$/u, "")}/workspaces/${workspaceId}/sites/${appId}`;
 }
 
 function chatUrl(publicBaseUrl: string | undefined, workspaceId: string, sessionId: string | null) {
@@ -157,7 +162,11 @@ async function readWorkspaceFeed(
     chatTitle: event.chatTitle,
     automationName: event.automationName,
     subjectLabel: event.subjectLabel,
-    url: chatUrl(deps.settings.publicBaseUrl, source.workspaceId, event.sessionId),
+    url: event.appId
+      ? appUrl(deps.settings.publicBaseUrl, source.workspaceId, event.appId)
+      : chatUrl(deps.settings.publicBaseUrl, source.workspaceId, event.sessionId),
+    appId: event.appId,
+    appTitle: event.appTitle,
   }));
   const body = workspaceDeliveryBody(facts, activity);
   const ids = [...facts.map((fact) => fact.id), ...activity.map((fact) => fact.id)];

@@ -33,6 +33,8 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   appendSiteSqlMigration,
+  recordAppSqlChange,
+  siteDataActorKind,
   clearSiteSqlDefinitions,
   consumeSiteSqlRate,
   deleteSiteSqlQuery,
@@ -1043,6 +1045,32 @@ function bindParams(
   return bound;
 }
 
+/**
+ * An App change event (app.sql.changed) for a committed write. The App's
+ * database commits outside Postgres, so this is best effort after it.
+ */
+async function recordSqlChange(
+  deps: SiteSqlDeps,
+  resolved: Resolved,
+  query: string | null,
+  response: SiteDbRunResponse,
+): Promise<void> {
+  if (!(response.rowsWritten > 0)) return;
+  const { caller } = resolved.access;
+  await recordAppSqlChange(
+    deps.db,
+    resolved.scope,
+    {
+      principal: caller.principal,
+      writerKind: siteDataActorKind(caller),
+      automationId: caller.automationId ?? null,
+      automationRunId: caller.automationRunId ?? null,
+      chainDepth: caller.chainDepth ?? 0,
+    },
+    { query, rowsWritten: response.rowsWritten },
+  );
+}
+
 function runResponse(response: SiteDbRunResponse): SiteSqlRunResponse {
   return {
     columns: response.columns,
@@ -1126,6 +1154,7 @@ export async function runSiteSqlQuery(
     const usage = newUsage();
     addUsage(usage, response);
     await meter(deps, resolved, usage, { countTowardCaps: true });
+    if (query.mode === "write") await recordSqlChange(deps, resolved, query.name, response);
     return runResponse(response);
   });
 }
@@ -1218,6 +1247,7 @@ export async function runSiteSqlStatement(
     const usage = newUsage();
     addUsage(usage, response);
     await meter(deps, resolved, usage, { countTowardCaps: asSiteMember });
+    if (statement.kind === "write") await recordSqlChange(deps, resolved, null, response);
     return runResponse(response);
   });
 }
