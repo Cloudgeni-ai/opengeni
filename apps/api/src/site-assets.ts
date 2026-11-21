@@ -128,12 +128,14 @@ export async function storeSiteAssetBundle(
 /**
  * The manifest for one upload: frozen at its first publish (so a retry or a
  * second publish of the same upload gets the same files and token), built
- * from the uploaded bundle otherwise. Null when the upload has no assets.
+ * from the uploaded bundle otherwise. Null when the upload has no assets, or
+ * was already published without them (assets uploaded later never change
+ * what that upload publishes).
  */
 export async function freezeSiteAssets(
   storage: Storage,
   workspaceId: string,
-  keys: { upload: string; frozen: string },
+  keys: { upload: string; frozen: string; published?: boolean },
 ): Promise<SiteAssetManifest | null> {
   const readFrozen = async () => {
     const frozen = await storage.getObjectBytes(keys.frozen);
@@ -143,6 +145,7 @@ export async function freezeSiteAssets(
   };
   const existing = await readFrozen();
   if (existing) return existing;
+  if (keys.published) return null;
   if (!storage.headObject || !storage.putObjectStreamIfAbsent)
     throw new Error("Object storage cannot freeze app assets");
   const head = await storage.headObject(keys.upload);

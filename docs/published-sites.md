@@ -524,7 +524,7 @@ in `packages/contracts/src/app-assets.ts`.
   (`assets/index-4f2a.js`), made of letters, digits and `._~@+-`, with an
   allowed extension (scripts, styles, JSON and source maps, WebAssembly, fonts,
   images, text, web manifests; never HTML). Limits: 1,000 files, 16 MB each,
-  48 MB together. The API stores each file once per workspace under its
+  32 MB together (the JSON upload at most 48 MB). The API stores each file once per workspace under its
   SHA-256 and keeps a manifest (paths, hashes, sizes and a random 128-bit
   token) on the immutable version row (`workspace_artifact_versions.asset_manifest`).
   A version without one is a single-file app and is served exactly as before.
@@ -536,24 +536,38 @@ in `packages/contracts/src/app-assets.ts`.
   from the API (`/v1/app-assets/<workspaceId>/<versionId>/<token>/<path>`).
   Both send `Cache-Control: public, max-age=31536000, immutable` with the
   content hash as ETag. Earlier versions' files stay available, so a page
-  opened before a new publish keeps loading its chunks.
+  opened before a new publish keeps loading its chunks. The console's
+  `GET .../published-artifacts/:id/html` serves the HTML with the base in
+  place; `GET .../content` returns the stored HTML unchanged plus
+  `assetBaseUrl`, for clients that render it themselves.
+- **What a build must do.** Use relative paths (Bun's default, Vite
+  `base: "./"`). Relative `fetch()` and `history.pushState()` URLs resolve
+  into the files' folder, and routers that read `<base href>` (Vue Router's
+  `createWebHistory()`, Angular) need an explicit base of `/`; apps use the
+  host's address API for pages anyway. Web workers must be inlined (Vite
+  `?worker&inline`, or a `blob:` URL): an opaque-origin frame can't start a
+  worker from a file URL.
 - **Isolation.** App frames are opaque-origin sandboxes that send no cookies,
   so the file routes take no sign-in: the version's token, which only its
   access-checked HTML names, is the capability, and only files in that
   version's manifest are served (the gateway route only for its own app, and
   never for an unpublished or taken-down app). Files are code and media, not
-  data: data still loads per viewer through Site Data and named queries. A
+  data: data still loads per viewer through Site Data and named queries.
+  The API's file route also refuses same-origin and same-site loads and
+  navigations (Fetch Metadata), so where the API shares the console's origin
+  a file can never run as the console's own script. A
   person who once opened a version keeps its token, as they keep its HTML.
   Files carry `Access-Control-Allow-Origin: *` and
   `Cross-Origin-Resource-Policy: cross-origin` so module scripts and fonts
-  load from the opaque frame, `nosniff` and a sandbox CSP. No app CSP was
+  load from the opaque frame, `nosniff` and `default-src 'none'; sandbox`. No app CSP was
   widened: neither the gateway's app document nor the console frame host
   restricts where scripts and styles load from; the sandbox still isolates
   each app from Opengeni and from other apps.
 - **Self-hosted.** The console path needs no Sites domain: the API serves the
   files itself, at `OPENGENI_PUBLIC_BASE_URL` (or the address the request
   reached). Published multi-file apps need the Sites gateway, like any
-  published app.
+  published app; deploy the gateway before the API so it knows the
+  `/_og/a/` route when the first such version is published.
 - **Not supported yet.** App packages refuse to export a multi-file app;
   downloading a version gives only its HTML; the readiness check and the
   content scanner read only the HTML; files are kept with the workspace and

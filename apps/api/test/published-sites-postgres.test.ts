@@ -3494,21 +3494,39 @@ test("a multi-file app serves its files from the gateway and the console, by ver
   // Console: the HTML names the API's public asset route, which needs no credentials.
   const content = await f.api(f.owner, "GET", `${f.sites}/${siteId}/content`);
   expect(content.status, JSON.stringify(content.json)).toBe(200);
-  const consoleBase = new RegExp(
-    `<base href="(http[^"]+/v1/app-assets/${f.workspace.id}/${versionId}/${token}/)">`,
-    "u",
-  ).exec(content.json.html)?.[1];
-  expect(consoleBase).toBeDefined();
+  // The stored HTML as published, plus where its files are.
+  expect(content.json.html).toBe(entry);
+  const consoleBase = String(content.json.assetBaseUrl);
+  expect(consoleBase).toMatch(
+    new RegExp(`^http.+/v1/app-assets/${f.workspace.id}/${versionId}/${token}/$`, "u"),
+  );
   const raw = await f.app.request(`${f.sites}/${siteId}/html?versionId=${versionId}`, {
     headers: f.owner.headers,
   });
   expect(await raw.text()).toContain(`<base href="${consoleBase}">`);
-  const consoleAsset = await f.app.request(`${new URL(consoleBase!).pathname}assets/index-1.css`);
+  const consoleAsset = await f.app.request(`${new URL(consoleBase).pathname}assets/index-1.css`);
   expect(consoleAsset.status).toBe(200);
   expect(await consoleAsset.text()).toBe("body{margin:0}");
   expect(consoleAsset.headers.get("content-type")).toBe("text/css; charset=utf-8");
   expect(consoleAsset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
   expect(consoleAsset.headers.get("access-control-allow-origin")).toBe("*");
+  // Never as the console's own code, and never as a page.
+  for (const headers of [
+    { "sec-fetch-site": "same-origin" },
+    { "sec-fetch-site": "same-site" },
+    { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" },
+  ])
+    expect(
+      (await f.app.request(`${new URL(consoleBase).pathname}assets/index-1.css`, { headers }))
+        .status,
+    ).toBe(404);
+  expect(
+    (
+      await f.app.request(`${new URL(consoleBase).pathname}assets/index-1.css`, {
+        headers: { origin: "null", "sec-fetch-site": "cross-site", "sec-fetch-mode": "cors" },
+      })
+    ).status,
+  ).toBe(200);
   expect(
     (
       await f.app.request(
@@ -3526,6 +3544,7 @@ test("a multi-file app serves its files from the gateway and the console, by ver
   expect(next.status, JSON.stringify(next.json)).toBe(200);
   const single = await f.api(f.owner, "GET", `${f.sites}/${siteId}/content`);
   expect(single.json.html).toBe("<!doctype html><h1>One file</h1>");
+  expect(single.json.assetBaseUrl).toBeUndefined();
   // Files of the earlier version keep loading for pages still open on it.
   expect(
     (await f.gatewayRaw(host, "GET", `/assets/${versionId}/${token}/assets/index-1.js`)).status,

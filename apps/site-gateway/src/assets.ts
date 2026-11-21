@@ -5,10 +5,13 @@ import {
   siteAssetContentType,
 } from "@opengeni/contracts/app-assets";
 import { edgeCache, edgeCacheKey } from "./edge-cache";
-import { SITE_HTML_CSP, applySecurityHeaders } from "./headers";
+import { applySecurityHeaders } from "./headers";
 import { UpstreamError } from "./host-map";
 import { signedApiRequest } from "./signing";
 import { siteCaller, type SiteContext } from "./site-context";
+
+/** Files are never documents: opened directly, nothing in them runs or loads. */
+export const SITE_ASSET_CSP = "default-src 'none'; sandbox";
 
 export function isAssetPath(pathname: string): boolean {
   return pathname.startsWith(`${SITE_GATEWAY_ASSET_PREFIX}/`);
@@ -51,7 +54,7 @@ export async function handleAsset(site: SiteContext, pathname: string): Promise<
   // The opaque-origin frame loads module scripts and fonts with CORS.
   headers.set("Cross-Origin-Resource-Policy", "cross-origin");
   headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Content-Security-Policy", SITE_HTML_CSP);
+  headers.set("Content-Security-Policy", SITE_ASSET_CSP);
   headers.set("Cache-Control", SITE_ASSET_CACHE_CONTROL);
   headers.set("Content-Type", contentType);
 

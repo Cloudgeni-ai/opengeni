@@ -12,7 +12,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
  * `GET /v1/app-assets/<workspaceId>/<versionId>/<token>/<path>`.
  *
  * The frame is opaque-origin and sends no credentials, so this route is
- * public: the version's unguessable token, which only the version's
+ * public (browsers' same-origin and same-site loads and navigations are
+ * refused): the version's unguessable token, which only the version's
  * access-checked content response names, is the capability. It serves only
  * files listed in that version's manifest, with long-term immutable caching.
  * It needs no Sites domain, so self-hosted deployments use it too.
@@ -22,6 +23,14 @@ export function registerAppAssetRoutes(app: Hono, deps: ApiRouteDeps): void {
     req: { url: string; method: string; header: (name: string) => string | undefined };
   }) => {
     const notFound = () => new HTTPException(404, { message: "File not found" });
+    // Only app frames load these files, and their opaque origin is always
+    // cross-site. The API may share the console's origin, whose policy trusts
+    // its own scripts: refusing same-origin and same-site loads keeps an
+    // uploaded file from ever running as the console's own code, and
+    // refusing navigations keeps the route from hosting pages or downloads.
+    const site = context.req.header("sec-fetch-site");
+    if (site === "same-origin" || site === "same-site") throw notFound();
+    if (context.req.header("sec-fetch-mode") === "navigate") throw notFound();
     const storage = deps.objectStorage;
     if (!storage) throw notFound();
     const rest = new URL(context.req.url).pathname.slice(SITE_ASSET_API_PREFIX.length + 1);

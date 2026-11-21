@@ -220,6 +220,8 @@ export async function prepareWorkspaceArtifactPublication(
   const assetManifest = await freezeSiteAssets(storage, grant.workspaceId, {
     upload: paths.assets,
     frozen: paths.frozenAssets,
+    // Like source: an upload first published without assets stays without them.
+    published: row.status === "published",
   });
   return {
     uploadId: row.id,

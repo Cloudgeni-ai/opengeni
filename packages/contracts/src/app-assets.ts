@@ -25,9 +25,13 @@ export const SITE_ASSET_MAX_FILES = 1_000;
 /** Largest single asset file. */
 export const SITE_ASSET_MAX_FILE_BYTES = 16 * 1024 * 1024;
 /** All asset files of one version together. */
-export const SITE_ASSET_MAX_TOTAL_BYTES = 48 * 1024 * 1024;
-/** The uploaded JSON bundle (base64 content is a third larger than the files). */
-export const SITE_ASSET_BUNDLE_MAX_BYTES = 72 * 1024 * 1024;
+export const SITE_ASSET_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+/**
+ * The uploaded JSON bundle (base64 content is a third larger than the
+ * files). The API holds a bundle in memory while it publishes, so this stays
+ * modest; large media belongs in app files.
+ */
+export const SITE_ASSET_BUNDLE_MAX_BYTES = 48 * 1024 * 1024;
 /** Longest asset path. */
 export const SITE_ASSET_PATH_MAX_CHARS = 512;
 
@@ -207,7 +211,9 @@ function leadingDoctypeEnd(html: string): number {
  * The version's HTML with a `<base href>` for its asset folder, placed right
  * after the doctype so it precedes every relative URL in the document (the
  * parser moves it into the head). Ours comes first, so it wins over a base
- * the build may have written.
+ * the build may have written. It deliberately also precedes the page's own
+ * `<meta charset>` and CSP `<meta>`: the tags are ASCII, the response
+ * declares UTF-8, and a CSP `<meta>` applies only to what follows it.
  */
 export function injectSiteAssetBase(html: string, baseHref: string): string {
   const tag = `<base href="${escapeAttribute(baseHref)}">${HASH_LINK_SCRIPT}`;

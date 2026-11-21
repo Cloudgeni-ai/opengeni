@@ -76,7 +76,10 @@ Bun.serve({
     if (path.startsWith("/__opengeni/site-tools/")) return siteTools(request);
     const file = Bun.file(`./dist${path}`);
     if (path !== "/" && !path.endsWith(".html") && (await file.exists())) return new Response(file);
-    const html = (await Bun.file("./dist/index.html").text()).replace("<head>", '<head><base href="/">');
+    const html = (await Bun.file("./dist/index.html").text()).replace(
+      /<head[^>]*>/iu,
+      (head) => `${head}<base href="/">`,
+    );
     return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
   },
 });
@@ -122,7 +125,7 @@ stay one file.
   "Publish one immutable version"); no HTML pages among them (apps are
   single-page), only `.js`, `.mjs`, `.css`, `.json`, `.map`, `.wasm`, fonts,
   images, `.txt` and `.webmanifest`. Paths use letters, digits and `._~@+-`.
-  Up to 1,000 files, 16 MB each and 48 MB together.
+  Up to 1,000 files, 16 MB each and 32 MB together.
 
 ```ts
 // assets.ts: bun assets.ts, then PUT assets.json to assets.putUrl
@@ -138,7 +141,11 @@ await Bun.write("assets.json", JSON.stringify({ files }));
 ```
 
 Keep using the host's address API for pages (below), not `window.location`.
-Bare `#section` links keep working.
+Bare `#section` links keep working. The page's base is the files' folder, so
+use absolute paths in `fetch()` and `history.pushState()`, and give routers
+that read `<base href>` (Vue Router's `createWebHistory()`, Angular) an
+explicit base of `/`. Inline web workers (Vite `?worker&inline`, or a `blob:`
+URL): the app's frame can't start a worker from a file.
 
 ## Plain HTML that calls Opengeni
 

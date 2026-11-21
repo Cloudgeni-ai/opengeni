@@ -269,3 +269,26 @@ test("saved embeds can load versions beyond the bounded history list", async () 
   );
   expect(snapshot.content?.versionId).toBe("ancient");
 });
+
+test("a multi-file version beyond the history list renders with its asset folder as base", async () => {
+  const base = "https://api.example.test/v1/app-assets/space/ancient/AbCdEfGhIjKlMnOpQrStUv/";
+  const snapshot = await loadSiteSnapshot(
+    {
+      getWorkspaceArtifact: async () => ({ ...detail, versionsTruncated: true }),
+      getWorkspaceArtifactHtml: async () => {
+        throw new Error("Wrong path");
+      },
+      getWorkspaceArtifactContent: async () => ({
+        ...content,
+        versionId: "ancient",
+        html: '<!doctype html><script type="module" src="./assets/index.js"></script>',
+        assetBaseUrl: base,
+      }),
+    },
+    "space",
+    "site",
+    { versionId: "ancient" },
+  );
+  expect(snapshot.content?.html).toStartWith(`<!doctype html><base href="${base}">`);
+  expect(snapshot.content?.html).toContain('src="./assets/index.js"');
+});

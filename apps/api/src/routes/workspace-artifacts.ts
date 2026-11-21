@@ -63,6 +63,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { retryWhileMissing } from "@opengeni/storage";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { changeSiteAudience } from "../site-audience-change";
 import { userContentDispositionHeaders } from "../http/user-content";
@@ -565,17 +566,15 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
       ref,
     );
     if (assetBase) {
-      // A multi-file build: the frame needs the version's asset folder as its base.
-      let content: Awaited<ReturnType<typeof readWorkspaceArtifactContent>>;
-      try {
-        content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
-      } catch (error) {
-        throw new HTTPException(503, {
-          message: error instanceof Error ? error.message : "Artifact content is unavailable",
-          cause: error,
-        });
-      }
-      return new Response(injectSiteAssetBase(content.html, assetBase), { headers: htmlHeaders });
+      // A multi-file build: the frame needs the version's asset folder as its
+      // base. Only the entry HTML is read (it is small; the files are not in it).
+      const stored = await retryWhileMissing(
+        async () => await deps.objectStorage!.getObjectBytes(ref.contentKey),
+      );
+      if (!stored) throw new HTTPException(503, { message: "Artifact content is unavailable" });
+      return new Response(injectSiteAssetBase(new TextDecoder().decode(stored.bytes), assetBase), {
+        headers: htmlHeaders,
+      });
     }
     const iterator = readArtifactObject(deps.objectStorage, ref.contentKey);
     return new Response(
@@ -635,7 +634,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           contentType: "text/html",
           contentSha256: ref.version.contentSha256,
           ...content,
-          html: assetBase ? injectSiteAssetBase(content.html, assetBase) : content.html,
+          // The stored HTML as published; a frame renders it with this base
+          // (`injectSiteAssetBase`), as the `/html` route serves it.
+          ...(assetBase ? { assetBaseUrl: assetBase } : {}),
         }),
       );
     } catch (error) {
