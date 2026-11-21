@@ -16,7 +16,7 @@
     "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.3",
+    "@types/bun": "^1.4.4",
     "miniflare": "4.20260730.0",
     "typescript": "7.0.2"
   }
