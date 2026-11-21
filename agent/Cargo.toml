@@ -114,7 +114,7 @@ tower = { version = "0.5", default-features = false }
 # HMAC-SHA256 verify of the `ogs_` viewer token + the `ogr_` producer token (the
 # Rust mirror of the TS mint — the single-source token-verify contract, §10.5). A
 # pure-Rust impl so the musl static build needs no libsodium/OpenSSL.
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 # Constant-time signature comparison (mirrors the TS constantTimeEqual).
 subtle = "2"
