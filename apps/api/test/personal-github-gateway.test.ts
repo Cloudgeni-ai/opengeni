@@ -1048,7 +1048,7 @@ describe("force updates and deletions of refs", () => {
   });
 
   test("a created pull request's answer passes through whole, however large", async () => {
-    const authority = {} as PersonalGitHubGatewayAuthority;
+    const gatewayAuthority = {} as PersonalGitHubGatewayAuthority;
     const linked: string[] = [];
     const link = async (_: unknown, created: { url: string }) => {
       linked.push(created.url);
@@ -1067,7 +1067,12 @@ describe("force updates and deletions of refs", () => {
         }),
         { status: 201 },
       );
-    const answered = await linkingCreatedPullRequest(link, authority, chunked(small, 7), null);
+    const answered = await linkingCreatedPullRequest(
+      link,
+      gatewayAuthority,
+      chunked(small, 7),
+      null,
+    );
     expect(await answered.text()).toBe(small);
     expect(linked).toEqual(["https://github.com/a/b/pull/9"]);
     // Past the read limit and without a content-length: nothing is linked,
