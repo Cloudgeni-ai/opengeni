@@ -16,6 +16,7 @@ import {
   readStoredSidebarPersonalChanges,
   readWorkspaceSidebarLayout,
   sidebarItemsShown,
+  sidebarLayoutIsOlder,
   sidebarLinkedAppIds,
   sidebarPersonalChangesCustomized,
   withoutGoneSidebarApps,
@@ -479,5 +480,37 @@ describe("built-in default", () => {
     // A group with only empty lists goes; an empty group stays, to fill.
     expect(sidebarItemsShown([group([list([])])])).toEqual([]);
     expect(sidebarItemsShown([group([])])).toHaveLength(1);
+  });
+});
+
+describe("placement and answer order", () => {
+  const link = (id: string) => ({ id, type: "link", url: `https://${id}.example.com`, label: id });
+  const start = { version: 1, items: [link("a"), link("b"), link("c")] };
+  const place = (position: Record<string, unknown>) =>
+    applyWorkspaceSidebarChanges(
+      start,
+      parseChanges([{ op: "add", item: link("x"), ...position }]),
+      ids(),
+    ).items.map((item) => item.id);
+
+  test("beforeId wins over afterId, which wins over index; the end when none is given", () => {
+    expect(place({ beforeId: "b", afterId: "c", index: 0 })).toEqual(["a", "x", "b", "c"]);
+    expect(place({ afterId: "a", index: 3 })).toEqual(["a", "x", "b", "c"]);
+    expect(place({ index: 0 })).toEqual(["x", "a", "b", "c"]);
+    expect(place({ index: 99 })).toEqual(["a", "b", "c", "x"]);
+    expect(place({})).toEqual(["a", "b", "c", "x"]);
+    expect(() => place({ beforeId: "nope" })).toThrow(SidebarLayoutChangeError);
+  });
+
+  test("an older answer never replaces a newer one", () => {
+    const at = (personal: number, workspace: number) => ({
+      personal: { revision: personal },
+      workspace: { revision: workspace },
+    });
+    expect(sidebarLayoutIsOlder(at(1, 1), null)).toBe(false);
+    expect(sidebarLayoutIsOlder(at(1, 1), at(1, 1))).toBe(false);
+    expect(sidebarLayoutIsOlder(at(2, 1), at(1, 1))).toBe(false);
+    expect(sidebarLayoutIsOlder(at(1, 1), at(2, 1))).toBe(true);
+    expect(sidebarLayoutIsOlder(at(3, 1), at(2, 2))).toBe(true);
   });
 });

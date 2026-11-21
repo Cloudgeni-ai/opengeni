@@ -19,18 +19,26 @@ in Artifacts. The sidebar shows those pins through a **Pinned apps** list.
 | `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (Apps this person opened last), `limit` 1 to 20 (default 5). |
 
 Item ids are 1 to 64 letters, digits, `-` or `_`; the server makes one when a
-new item has none. A person's own items get ids starting with `my-` (a given id
-is prefixed), and default items can't use that prefix, so an item an admin adds
-later never takes the id of someone's own item. A layout holds at most 50
+new item has none. A person's own items always get ids starting with `my-`: a
+given id without it is prefixed (`docs` is stored as `my-docs`), so use the id
+in the answer for later changes. Default items can't use that prefix, so an
+item an admin adds later never takes the id of someone's own item. A layout
+holds at most 50
 top-level items and 50 per group, a person's own items in a group included.
 
-What a person sees is filtered for them: Apps they can't open (Only me Apps of
-someone else, archived or deleted Apps, or anything when they lack
+What a person sees is filtered for them: apps they can't open (Only me apps of
+someone else, archived or deleted apps, or anything when they lack
 `artifacts:read`) are left out, and a group left with nothing they can open
-is left out too (admins still see it, to fill it). Links to deleted or
-archived Apps are also dropped from storage on the next change to the layout
-that holds them, so they don't count toward the limits; restoring an archived
-App doesn't bring its links back.
+is left out too (admins still see it, to fill it). On the next change to the
+layout that holds them, links are also dropped from storage, so they don't
+count toward the limits, when:
+
+- the app was deleted (in the default or a person's own items);
+- the app became someone else's Only me (a person's own items; in the
+  default it stays, for the people who can open it).
+
+Links to an archived app are kept, hidden while it's archived, so restoring
+the app brings them back.
 
 The built-in default is one **Pinned apps** live list (`pinned_apps`, id
 `pinned-apps`). A live list with no apps is left out of the sidebar, as is a
@@ -79,13 +87,32 @@ before their own changes (`workspace.items`) and `workspace.canEdit: true`.
   `collapsed`, `limit`), `remove`, `show`, `move` (optional `groupId`, `null`
   for the top level, and a position) and `reset`.
 - A position is `beforeId` or `afterId` (an item of the target level) or an
-  `index`; the end when none is given. Prefer a neighbour: the stored level
-  can hold items the caller doesn't see (Apps they can't open), so an index
-  counts those too.
+  `index`; see Placement below.
 - With `expectedRevision`, a newer revision is refused with 409 instead of
   changed on top of. Without it, the change applies to the latest revision.
 - A new App link must name an App the caller can open (422 otherwise);
   an invalid change is a 422 with the reason.
+
+### Placement
+
+Where `add` and `move` put an item:
+
+1. `beforeId` if given, else `afterId`, else `index`, else the end of the
+   level. Give only one; the others are ignored.
+2. The level is the group named by `groupId` (`null` is the top level). Without
+   `groupId`, `add` uses the top level and `move` the item's current level.
+3. A neighbour must be in that level, or the change is refused (422).
+4. `index` counts the stored level, including items the caller can't see
+   (apps they can't open), and past the end means the end. Prefer a
+   neighbour, which is exact.
+5. In a person's own changes, a default item stays in the group the admin
+   put it in (moving it elsewhere is refused); their own items can move
+   between groups and the top level.
+
+Clients keep the newest answer: each scope's `revision` only grows, so when
+two reads or updates overlap and finish out of order, an answer with a lower
+`personal` or `workspace` revision than the one shown is ignored
+(`sidebarLayoutIsOlder` in `@opengeni/contracts/sidebar-layout`).
 
 The SDK has `client.getSidebarLayout(workspaceId)` and
 `client.updateSidebarLayout(workspaceId, request)`. Both routes are app
@@ -123,8 +150,16 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   another tab or device) show when the window regains focus, on return to
   the tab, or within two minutes.
 - **Phone browsers**: groups are flattened into one list and live lists show
-  at most 3 Apps.
-- **The Opengeni phone app** doesn't show the layout yet.
+  at most 3 apps.
+- **The Opengeni phone app**: in the side menu, under Automations and above
+  the pinned chats. Groups show as a heading over their items, like the
+  menu's projects (they don't collapse), a live list as a heading over at
+  most 3 apps, and top-level links without one. An app opens in the app's
+  viewer at its page (`/native-view/workspaces/<id>/sites/<appId>?page=<path>`;
+  a server without `?page=` opens its home page), and an outside link opens
+  in the browser. It's read only: changes are made on the web or by an agent.
+  It refreshes each time the menu opens and on pull to refresh, and shows the
+  last layout at once.
 
 ## Apps as pages
 

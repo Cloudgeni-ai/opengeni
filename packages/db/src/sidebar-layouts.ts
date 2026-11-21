@@ -180,23 +180,33 @@ export async function readSidebarApps(
 }
 
 /**
- * Which of `appIds` are still apps of this workspace (not deleted or
- * archived), whoever may open them. A sidebar write drops links to the rest.
+ * Which of `appIds` a sidebar keeps links to: apps of this workspace that
+ * still exist, archived ones included (restoring an app brings its links
+ * back). With `viewer`, for a person's own links, only apps they could open
+ * apart from archiving: shared ones and their own, not someone else's Only
+ * me. A sidebar write drops links to the rest.
  */
-export async function readLiveSidebarAppIds(
+export async function readKeptSidebarAppIds(
   db: Database,
   scope: SidebarLayoutScopeKey,
   appIds: readonly string[],
+  viewer?: WorkspaceArtifactViewer,
 ): Promise<Set<string>> {
   const ids = [...new Set(appIds.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()))];
   if (!ids.length) return new Set();
+  const viewerSubject = viewer?.subjectId ?? null;
+  const openable = !viewer
+    ? sql``
+    : sql` and (a.visibility = 'workspace_shared'${
+        viewerSubject === null ? sql`` : sql` or a.owner_subject_id = ${viewerSubject}::text`
+      })`;
   return await withRlsContext(
     db,
     scope,
     async (tx) => {
       const result = await tx.execute(sql`select a.id::text as id from workspace_artifacts a
         where a.account_id = ${scope.accountId}::uuid and a.workspace_id = ${scope.workspaceId}::uuid
-          and a.status = 'active' and a.id = any(${`{${ids.join(",")}}`}::uuid[])`);
+          and a.id = any(${`{${ids.join(",")}}`}::uuid[])${openable}`);
       return new Set(rows<{ id: string }>(result).map((row) => row.id));
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },

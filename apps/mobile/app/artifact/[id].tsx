@@ -77,6 +77,8 @@ function ArtifactViewer() {
     workspaceId?: string;
     title?: string;
     from?: string;
+    /** A Site's own page to open at (a sidebar link's path). */
+    page?: string;
   }>();
   const workspaceId = params.workspaceId || currentWorkspaceId || "";
   const kind = KINDS.find((each) => each === params.kind) ?? "file";
@@ -273,7 +275,7 @@ function ArtifactViewer() {
       ) : account ? (
         <WebPageView
           account={account}
-          path={nativeViewPath(workspaceId, item)!}
+          path={nativeViewPath(workspaceId, item, params.page)!}
           fallbackPath={url ? new URL(url).pathname : "/"}
         />
       ) : null;

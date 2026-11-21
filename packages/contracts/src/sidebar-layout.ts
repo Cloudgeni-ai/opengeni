@@ -421,6 +421,12 @@ export function mergeSidebarLayout(
 // Changes
 // ---------------------------------------------------------------------------
 
+/**
+ * A new item's id; the server makes one when it's omitted. A person's own
+ * items always get ids starting with `my-` (`SIDEBAR_PERSONAL_ID_PREFIX`): a
+ * given id without it is prefixed (`docs` becomes `my-docs`), so read the id
+ * back from the answer. Workspace ids can't start with `my-`.
+ */
 const NewItemId = /* @__PURE__ */ defineSchema(() => SidebarItemId.optional());
 
 /** A new item; the server picks an id when it's omitted. */
@@ -451,6 +457,16 @@ export const NewSidebarItem = /* @__PURE__ */ defineSchema(() =>
 );
 export type NewSidebarItem = z.infer<typeof NewSidebarItem>;
 
+/**
+ * One change. Where `add` and `move` put an item (docs/sidebar-layout.md,
+ * "Placement"): `beforeId` if given, else `afterId`, else `index`, else the
+ * end of the level; give only one. A neighbour must be in the target level
+ * (the group named by `groupId`, else the top level for `add` and the item's
+ * current level for `move`). `index` counts the stored level, including items
+ * the caller can't see, and is clamped to its length. In a person's own
+ * changes a default item stays in the group the admin put it in; only their
+ * own items change groups.
+ */
 export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("op", [
     z
@@ -1102,4 +1118,25 @@ export function sidebarItemsShown(items: readonly ResolvedSidebarItem[]): Resolv
     // A group left with nothing to show goes too; one that was empty stays (to fill).
     return children.length > 0 || item.items.length === 0 ? [{ ...item, items: children }] : [];
   });
+}
+
+type SidebarLayoutRevisions = {
+  personal: { revision: number };
+  workspace: { revision: number };
+};
+
+/**
+ * Whether `next` is older than `shown` in either scope, so a client keeps
+ * what it shows: answers to overlapping reads and updates can arrive out of
+ * order, and each scope's revision only grows.
+ */
+export function sidebarLayoutIsOlder(
+  next: SidebarLayoutRevisions,
+  shown: SidebarLayoutRevisions | null | undefined,
+): boolean {
+  if (!shown) return false;
+  return (
+    next.personal.revision < shown.personal.revision ||
+    next.workspace.revision < shown.workspace.revision
+  );
 }

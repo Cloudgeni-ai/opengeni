@@ -191,8 +191,9 @@ test("people only see and add Apps they can open; gone Apps drop out of storage"
     "pinned-apps",
     "open",
   ]);
-  // The next write drops the archived App's link, and Ada's move lands next
-  // to the item she sees even though the stored level held another.
+  // The next write keeps the archived App's link (hidden until it's
+  // restored), and Ada's move lands next to the item she sees even though
+  // the stored level holds another.
   const after = await updateSidebarLayoutForGrant(deps, ws.admin, {
     scope: "workspace",
     changes: [
@@ -200,15 +201,59 @@ test("people only see and add Apps they can open; gone Apps drop out of storage"
     ],
   });
   expect(shape(after.workspace.items ?? [])).toEqual(["pinned-apps", "open", "s"]);
-  const [stored] = await shared.admin`select layout from sidebar_layouts
-    where workspace_id = ${ws.workspaceId}::uuid and subject_id is null`;
-  const storedIds = (stored!.layout as { items: { id: string }[] }).items.map((item) => item.id);
-  expect(storedIds).toEqual(["pinned-apps", "open", "s"]);
+  const storedIds = async () => {
+    const [stored] = await shared!.admin`select layout from sidebar_layouts
+      where workspace_id = ${ws.workspaceId}::uuid and subject_id is null`;
+    return (stored!.layout as { items: { id: string }[] }).items.map((item) => item.id);
+  };
+  expect(await storedIds()).toEqual(["pinned-apps", "open", "old", "s"]);
   const moved = await updateSidebarLayoutForGrant(deps, ws.ada, {
     scope: "personal",
     changes: [{ op: "move", itemId: "s", beforeId: "open" }],
   });
   expect(shape(moved.items)).toEqual(["pinned-apps", "s", "open"]);
+  // Restoring the App brings its link back.
+  await shared.admin`update workspace_artifacts set status = 'active' where id = ${old}::uuid`;
+  expect(shape((await readSidebarLayoutForGrant(deps, ws.ada)).items)).toEqual([
+    "pinned-apps",
+    "s",
+    "open",
+    "old",
+  ]);
+  // A deleted App's link is dropped on the next write.
+  await shared.admin`delete from workspace_artifacts where id = ${old}::uuid`;
+  await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    changes: [{ op: "update", itemId: "s", label: "Status" }],
+  });
+  expect(await storedIds()).toEqual(["pinned-apps", "open", "s"]);
+});
+
+test("a person's own link to an App that became someone else's Only me is dropped", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  const later = await app(ws, null);
+  const kept = await app(ws, null);
+  await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [
+      { op: "add", item: { id: "later", type: "app", appId: later } },
+      { op: "add", item: { id: "kept", type: "app", appId: kept } },
+    ],
+  });
+  await shared.admin`update workspace_artifacts
+    set visibility = 'user_private', owner_subject_id = 'user:bob' where id = ${later}::uuid`;
+  // Hidden from Ada at once, and gone from her storage on her next change.
+  const changed = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [{ op: "move", itemId: "my-kept", index: 0 }],
+  });
+  expect(shape(changed.items)).toEqual(["my-kept", "pinned-apps"]);
+  const [stored] = await shared.admin`select layout from sidebar_layouts
+    where workspace_id = ${ws.workspaceId}::uuid and subject_id = 'user:ada'`;
+  const added = (stored!.layout as { added: { item: { id: string } }[] }).added;
+  expect(added.map((entry) => entry.item.id)).toEqual(["my-kept"]);
 });
 
 test("the built-in default is the Pinned apps list until an admin saves another", async () => {

@@ -619,10 +619,14 @@ const nativeSignInRoute = createRoute({
 // The Opengeni phone app's in-app viewers for a Site and for a document,
 // spreadsheet or presentation: the Site or editor alone, without the web app's
 // rail or header (the app draws its own). The app signs its web view in with
-// the device session.
+// the device session. `?page=` opens an app at one of its pages (a sidebar
+// link's path).
 const nativeSiteViewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "native-view/workspaces/$workspaceId/sites/$siteId",
+  validateSearch: (search: Record<string, unknown>): { page?: string | undefined } => ({
+    page: siteViewSearch(search).page,
+  }),
   component: NativeSiteView,
 });
 const nativeEditableArtifactViewRoute = createRoute({
@@ -1972,12 +1976,14 @@ function EditableArtifact() {
 
 function NativeSiteView() {
   const { workspaceId, siteId } = nativeSiteViewRoute.useParams();
+  const { page } = nativeSiteViewRoute.useSearch();
   return (
     <div className="h-dvh w-dvw overflow-hidden bg-og-bg">
       <LazySiteViewRoute
         key={`${workspaceId}:${siteId}`}
         workspaceId={workspaceId}
         siteId={siteId}
+        page={page}
         embedded
       />
     </div>

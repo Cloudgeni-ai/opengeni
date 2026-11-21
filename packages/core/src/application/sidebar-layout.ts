@@ -29,7 +29,7 @@ import {
   type UpdateSidebarLayoutRequest,
 } from "@opengeni/contracts";
 import {
-  readLiveSidebarAppIds,
+  readKeptSidebarAppIds,
   readSidebarApps,
   readSidebarLayouts,
   writeSidebarLayout,
@@ -284,13 +284,22 @@ export async function updateSidebarLayoutForGrant(
       throw new HTTPException(409, { message: SIDEBAR_LAYOUT_CONFLICT_MESSAGE });
     const workspace = readWorkspaceSidebarLayout(rows.workspace);
     const personal = readStoredSidebarPersonalChanges(rows.personal?.layout);
-    // Links to deleted or archived apps are dropped on the next write to the
-    // scope that holds them: nobody can see them to remove them, and they
-    // shouldn't count toward the limits.
+    // Links to deleted apps are dropped on the next write to the scope that
+    // holds them: nobody can see them to remove them, and they shouldn't
+    // count toward the limits. Archived apps keep their links (hidden until
+    // restored). A person's own links to an app that became someone else's
+    // Only me go too, since they can't open it any more.
     const linked = sidebarLinkedAppIds(
       request.scope === "workspace" ? workspace.items : personal.added.map((entry) => entry.item),
     );
-    const live = linked.length ? await readLiveSidebarAppIds(deps.db, scope, linked) : null;
+    const live = linked.length
+      ? await readKeptSidebarAppIds(
+          deps.db,
+          scope,
+          linked,
+          request.scope === "personal" ? { subjectId } : undefined,
+        )
+      : null;
     const prunedWorkspace =
       live && request.scope === "workspace"
         ? { ...workspace, items: withoutGoneSidebarApps(workspace.items, live) }

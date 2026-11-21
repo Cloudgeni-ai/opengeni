@@ -3,7 +3,7 @@
 // remount (switching pages) draws the last known layout at once.
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import type { SidebarLayoutResponse, UpdateSidebarLayoutRequest } from "@opengeni/sdk";
-import { readResolvedSidebarItems } from "@opengeni/contracts/sidebar-layout";
+import { readResolvedSidebarItems, sidebarLayoutIsOlder } from "@opengeni/contracts/sidebar-layout";
 import { useAppContext } from "@opengeni/react/app/app-context";
 
 type Entry = { layout: SidebarLayoutResponse | null; failed: boolean; loading: boolean };
@@ -51,6 +51,13 @@ function set(key: string, entry: Entry) {
   emit();
 }
 
+/** Show `layout` unless a newer one is already shown (answers can arrive out of order). */
+function show(key: string, layout: SidebarLayoutResponse) {
+  const shown = entries.get(key)?.layout;
+  if (sidebarLayoutIsOlder(layout, shown)) return;
+  set(key, { layout, failed: false, loading: false });
+}
+
 type Client = ReturnType<typeof useAppContext>["client"];
 
 function load(client: Client, key: string, workspaceId: string): Promise<void> {
@@ -67,7 +74,7 @@ function load(client: Client, key: string, workspaceId: string): Promise<void> {
   const request = Promise.resolve()
     .then(() => client.getSidebarLayout(workspaceId))
     .then((layout) => {
-      if (current()) set(key, { layout: normalize(layout), failed: false, loading: false });
+      if (current()) show(key, normalize(layout));
     })
     .catch(() => {
       if (!current()) return;
@@ -114,7 +121,8 @@ export function useSidebarLayout(workspaceId: string, enabled = true) {
       // Any read still running started before this answer: drop it.
       generations.set(key, (generations.get(key) ?? 0) + 1);
       inFlight.delete(key);
-      set(key, { layout, failed: false, loading: false });
+      // Two overlapping updates can finish in either order; the newer stays.
+      show(key, layout);
       return layout;
     },
     [client, key, workspaceId],

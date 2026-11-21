@@ -5,6 +5,7 @@ import {
   createDb,
   createWorkspace,
   createWorkspaceArtifact,
+  readKeptSidebarAppIds,
   readSidebarApps,
   readSidebarLayouts,
   writeSidebarLayout,
@@ -149,4 +150,27 @@ test("only apps the viewer can open are returned; archived and other people's pr
     recentLimit: 0,
   });
   expect(bob.apps.has(theirs.toLowerCase())).toBe(true);
+});
+
+test("a sidebar keeps links to archived apps; a person's own drop other people's private apps", async () => {
+  if (!shared || !client) return;
+  const scope = await workspace("Sidebar kept apps");
+  const open = await app(scope, "Open", null);
+  const archived = await app(scope, "Old", null);
+  const theirs = await app(scope, "Bob's", "user:bob");
+  const gone = crypto.randomUUID();
+  await shared.admin`update workspace_artifacts set status = 'archived' where id = ${archived}::uuid`;
+  const ids = [open, archived, theirs, gone, "not-a-uuid"];
+  const sorted = (set: Set<string>) => [...set].sort();
+  // The workspace default keeps every app that still exists.
+  expect(sorted(await readKeptSidebarAppIds(client.db, scope, ids))).toEqual(
+    [open, archived, theirs].map((id) => id.toLowerCase()).sort(),
+  );
+  // Ada's own links keep shared apps, archived or not, but not Bob's private one.
+  expect(
+    sorted(await readKeptSidebarAppIds(client.db, scope, ids, { subjectId: "user:ada" })),
+  ).toEqual([open, archived].map((id) => id.toLowerCase()).sort());
+  expect(
+    (await readKeptSidebarAppIds(client.db, scope, [theirs], { subjectId: "user:bob" })).size,
+  ).toBe(1);
 });
