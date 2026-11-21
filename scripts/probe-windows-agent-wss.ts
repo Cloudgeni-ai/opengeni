@@ -36,7 +36,13 @@ const gitWindows = "C:\\Program Files\\Git\\usr\\bin\\openssl.exe";
 const ssl = (await Bun.file(gitWindows).exists()) ? gitWindows : "openssl";
 
 async function run(command: string[], env?: Record<string, string | undefined>): Promise<string> {
-  const child = Bun.spawn(command, { cwd: root, env, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn(command, {
+    cwd: root,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+    signal: AbortSignal.timeout(15_000),
+  });
   const [out, err, code] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -57,7 +63,6 @@ let broker: ReturnType<typeof Bun.spawn> | undefined;
 let agent: ReturnType<typeof Bun.spawn> | undefined;
 let api: ReturnType<typeof Bun.serve> | undefined;
 let nats: Awaited<ReturnType<typeof connect>> | undefined;
-let thumbprint: string | undefined;
 try {
   console.log(await run([binary, "--version"]));
   if (platform === "win32") {
@@ -128,22 +133,10 @@ try {
     OPENGENI_ENROLL_TOKEN: enrollmentToken,
     RUST_LOG:
       "info,async_nats::connector=debug,rustls::client=debug,opengeni_agent::supervisor=debug",
-    ...(platform === "win32" ? {} : { SSL_CERT_FILE: ca }),
+    SSL_CERT_FILE: ca,
+    SSL_CERT_DIR: undefined,
   };
-  if (platform === "win32") {
-    const der = join(root, "ca.cer");
-    await run([ssl, "x509", "-in", ca, "-outform", "DER", "-out", der]);
-    thumbprint = await run(
-      [
-        "pwsh",
-        "-NoProfile",
-        "-Command",
-        "(Import-Certificate -FilePath $env:PROBE_CA -CertStoreLocation Cert:\\CurrentUser\\Root).Thumbprint",
-      ],
-      { ...process.env, PROBE_CA: der },
-    );
-    assert.match(thumbprint, /^[A-F0-9]{40}$/i);
-  }
+  console.log("Generated loopback TLS certificate; the agent will verify it using SSL_CERT_FILE");
   const tcpPort = freePort();
   const wsPort = freePort();
   const natsUrl = `wss://127.0.0.1:${wsPort}`;
@@ -284,12 +277,5 @@ authorization {
   await nats?.close();
   if (broker?.exitCode === null) broker.kill();
   await broker?.exited;
-  if (thumbprint)
-    await run([
-      "pwsh",
-      "-NoProfile",
-      "-Command",
-      `Remove-Item Cert:\\CurrentUser\\Root\\${thumbprint}`,
-    ]);
   await rm(root, { recursive: true, force: true, maxRetries: 5 });
 }

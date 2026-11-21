@@ -41,6 +41,7 @@ jobs:
           if ((Get-FileHash $exe).Hash -ne $env:EXPECTED_SHA256) { throw "Release digest mismatch" }
           "PROBE_AGENT_EXE=$exe" >> $env:GITHUB_ENV
       - name: Exercise published agent through authenticated WSS
+        timeout-minutes: 3
         shell: pwsh
         run: |
           $git = Get-Command git.exe
