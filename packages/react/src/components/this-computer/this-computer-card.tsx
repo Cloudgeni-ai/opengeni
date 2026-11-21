@@ -20,6 +20,41 @@ function machineReachable(machine: MachineView): boolean {
   );
 }
 
+type DesktopOs = "macos" | "windows" | "linux";
+
+/**
+ * The device this page runs on, as far as its browser says for sure: a phone
+ * or tablet, a desktop system, or null when it can't tell. A connected
+ * computer on another system is certainly not this device.
+ */
+export function browserDevice(
+  userAgent: string | undefined,
+  maxTouchPoints = 0,
+): { kind: "handheld" } | { kind: "desktop"; os: DesktopOs } | null {
+  if (!userAgent) return null;
+  if (/iPhone|iPad|iPod|Android/u.test(userAgent)) return { kind: "handheld" };
+  // iPadOS asks for desktop pages as a Mac; only its touch screen tells.
+  if (/Macintosh/u.test(userAgent) && maxTouchPoints > 1) return { kind: "handheld" };
+  if (/Windows/u.test(userAgent)) return { kind: "desktop", os: "windows" };
+  if (/Macintosh|Mac OS X/u.test(userAgent)) return { kind: "desktop", os: "macos" };
+  // A Chromebook can run Linux machines inside it, so it may be one.
+  if (/CrOS/u.test(userAgent)) return null;
+  if (/Linux|X11/u.test(userAgent)) return { kind: "desktop", os: "linux" };
+  return null;
+}
+
+function machineOs(os: string): DesktopOs | null {
+  if (os === "macos" || os === "darwin") return "macos";
+  if (os === "windows" || os === "win32") return "windows";
+  if (os === "linux") return "linux";
+  return null;
+}
+
+function currentBrowserDevice(): ReturnType<typeof browserDevice> {
+  if (typeof navigator === "undefined") return null;
+  return browserDevice(navigator.userAgent, navigator.maxTouchPoints);
+}
+
 export interface ThisComputerCardProps {
   /** Why the agent asks, from the request; shown under the title. */
   rationale?: string | null;
@@ -31,6 +66,10 @@ export interface ThisComputerCardProps {
   /**
    * The person's own computers (scope `user`), e.g. from `useMachines`, so
    * the card can say one is ready or offline when this isn't the desktop app.
+   * A ready one completes the card only when it may be this device, or when
+   * this device can't be what the person means (a phone) or can be connected
+   * from here (`onConnect`, `downloads`, `openAppUrl` or `downloadUrl`).
+   * Otherwise the card names it and keeps this device's own text and links.
    */
   machines?: readonly MachineView[] | null;
   /** The app's name, e.g. for "Get … for desktop". */
@@ -95,7 +134,19 @@ export function ThisComputerCard({
   const own = (machines ?? []).filter(
     (machine) => machine.scope === "user" && machine.enrollmentId,
   );
-  const reachable = own.find(machineReachable) ?? null;
+  // Outside the desktop app, the browser can't say which computer it runs on,
+  // only its system. A ready computer on another system isn't this one.
+  const device = computer ? null : currentBrowserDevice();
+  const reachableOwn = own.filter(machineReachable);
+  const reachable =
+    (device?.kind === "desktop"
+      ? reachableOwn.find((machine) => machineOs(machine.os) === device.os)
+      : undefined) ??
+    reachableOwn[0] ??
+    null;
+  const reachableOs = reachable ? machineOs(reachable.os) : null;
+  const elsewhere = device?.kind === "desktop" && reachableOs !== null && reachableOs !== device.os;
+  const hostConnects = Boolean(onConnect || downloads?.length || openAppUrl || downloadUrl);
 
   const readyName =
     use.kind === "on"
@@ -103,17 +154,26 @@ export function ThisComputerCard({
       : use.kind === "hidden" && reachable
         ? reachable.name
         : null;
+  // A ready computer that may not be the one the person means completes the
+  // card only while this device's own connect path stays one click away. A
+  // computer on another system, or a device the host can't connect, leaves
+  // the request open: the card names the ready one and keeps this device's
+  // own text and links.
+  const readyElsewhere =
+    !computer && readyName !== null && device?.kind !== "handheld" && (elsewhere || !hostConnects);
+  const complete = readyName !== null && !readyElsewhere;
+  const doneName = complete ? readyName : null;
 
   // Tell the consumer once when what the person started here finishes.
   const started = useRef(false);
-  const wasReady = useRef(readyName !== null);
+  const wasReady = useRef(doneName !== null);
   useEffect(() => {
-    if (readyName !== null && !wasReady.current && started.current) {
+    if (doneName !== null && !wasReady.current && started.current) {
       started.current = false;
-      onReady?.(readyName);
+      onReady?.(doneName);
     }
-    wasReady.current = readyName !== null;
-  }, [readyName, onReady]);
+    wasReady.current = doneName !== null;
+  }, [doneName, onReady]);
   const setup = () => {
     started.current = true;
     if (onSetup) onSetup();
@@ -129,12 +189,14 @@ export function ThisComputerCard({
   };
 
   let copy: string;
+  // The ready computer, above this device's own text while the request is open.
+  let readyLines: ReactNode = null;
   let action: ReactNode = null;
   // The agent's reason says what turning it on is for; in the plain offer it
   // replaces the generic offer line instead of repeating it.
   let reasonIsCopy = false;
   const machineName = status?.machineName ?? "";
-  if (readyName !== null) {
+  if (complete && readyName !== null) {
     copy = card.canUse(readyName);
   } else if (computer && use.kind !== "hidden") {
     switch (use.kind) {
@@ -179,13 +241,27 @@ export function ThisComputerCard({
           </button>
         );
     }
-  } else if (own.length > 0) {
+  } else if (own.length > 0 && !readyElsewhere) {
     const first = own[0]!;
     copy = card.offline(first.name, productName);
   } else {
-    reasonIsCopy = Boolean(onConnect && rationale);
+    // Beside a ready computer elsewhere, the agent's reason stays on top and
+    // saying it's another computer leads to connecting this one.
+    const other =
+      readyElsewhere && elsewhere && readyName !== null
+        ? catalogText("thisComputer.card.otherComputer", { machineName: readyName })
+        : null;
+    if (readyElsewhere && readyName !== null) {
+      readyLines = (
+        <>
+          <p className="og-tc-card-ready">{card.canUse(readyName)}</p>
+          {other && !onConnect ? <p className="og-tc-card-ready">{other}</p> : null}
+        </>
+      );
+    }
+    reasonIsCopy = Boolean(onConnect && rationale && !readyElsewhere);
     copy = onConnect
-      ? rationale || card.subtitle
+      ? (other ?? (reasonIsCopy ? rationale! : card.subtitle))
       : downloads?.length || openAppUrl
         ? catalogText("thisComputer.card.installThenOpen")
         : card.getApp(productName);
@@ -197,7 +273,7 @@ export function ThisComputerCard({
         </a>
       ) : null;
   }
-  if (!computer && readyName === null && onConnect) {
+  if (!computer && !complete && onConnect) {
     action = (
       <HostConnectAction
         onConnect={async () => {
@@ -214,8 +290,6 @@ export function ThisComputerCard({
     );
   }
 
-  const complete = readyName !== null;
-  const hostConnects = Boolean(onConnect || downloads?.length || openAppUrl || downloadUrl);
   const offerAnother = complete && !computer && hostConnects;
   const anotherLabel = catalogText("thisComputer.card.connectAnother");
   const hasDownloads = Boolean(downloads?.length || openAppUrl);
@@ -294,6 +368,7 @@ export function ThisComputerCard({
           <p className="og-session-capability-copy">{rationale}</p>
         ) : null}
         <div className="og-tc-card-foot" role="status">
+          {readyLines}
           <p data-complete={complete ? "" : undefined}>{copy}</p>
           {action}
         </div>

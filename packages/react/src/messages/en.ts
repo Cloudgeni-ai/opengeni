@@ -5314,6 +5314,7 @@ export const englishMessages = {
   "thisComputer.card.subtitle": "Use your own computer in chats",
   "thisComputer.card.typeLabel": "Computer",
   "thisComputer.card.canUse": "Agents can use {machineName}",
+  "thisComputer.card.otherComputer": "{machineName} is another computer, not this one.",
   "thisComputer.card.offline":
     "{machineName} isn't available right now. Open {productName} on it and make sure it isn't paused.",
   "thisComputer.card.getApp":
