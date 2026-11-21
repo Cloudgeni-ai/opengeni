@@ -102,7 +102,7 @@ x11rb = { version = "0.13", features = ["xtest", "randr", "composite", "damage",
 arboard = { version = "=3.6.1", default-features = false }
 # The relay-dial wss fallback transport (the QUIC/WebTransport preferred path is
 # structured behind a trait; wss is the concrete day-1 impl).
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 # Stream byte buffers (prost re-exports bytes, but the stream pumps use it directly).
 bytes = "1"
 
