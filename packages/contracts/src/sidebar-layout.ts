@@ -421,6 +421,12 @@ export function mergeSidebarLayout(
 // Changes
 // ---------------------------------------------------------------------------
 
+/**
+ * A new item's id; the server makes one when it's omitted. A person's own
+ * items always get ids starting with `my-` (`SIDEBAR_PERSONAL_ID_PREFIX`): a
+ * given id without it is prefixed (`docs` becomes `my-docs`), so read the id
+ * back from the answer. Workspace ids can't start with `my-`.
+ */
 const NewItemId = /* @__PURE__ */ defineSchema(() => SidebarItemId.optional());
 
 /** A new item; the server picks an id when it's omitted. */
@@ -451,6 +457,17 @@ export const NewSidebarItem = /* @__PURE__ */ defineSchema(() =>
 );
 export type NewSidebarItem = z.infer<typeof NewSidebarItem>;
 
+/**
+ * One change. Where `add` and `move` put an item (docs/sidebar-layout.md,
+ * "Placement"): `beforeId` if given, else `afterId`, else `index`, else the
+ * end of the level; give only one. A neighbour must be in the target level
+ * (the group named by `groupId`, else the top level for `add` and the item's
+ * current level for `move`). `index` counts the level including items the
+ * caller can't see (for a person's changes, the default's items they haven't
+ * hidden plus their own), and is clamped to its length. In a person's own
+ * changes a default item stays in the group the admin put it in; only their
+ * own items change groups.
+ */
 export const SidebarLayoutChange = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("op", [
     z
@@ -537,6 +554,14 @@ export class SidebarLayoutChangeError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SidebarLayoutChangeError";
+  }
+}
+
+/** A change that would go over a limit (items in the sidebar or a group). */
+export class SidebarLayoutLimitError extends SidebarLayoutChangeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SidebarLayoutLimitError";
   }
 }
 
@@ -686,14 +711,14 @@ function insertAt<T>(level: T[], item: T, index: number | undefined) {
 
 function checkLimits(items: StoredSidebarItem[]) {
   if (items.length > SIDEBAR_LAYOUT_MAX_ITEMS)
-    throw new SidebarLayoutChangeError(`A sidebar holds at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
+    throw new SidebarLayoutLimitError(`A sidebar holds at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
   for (const item of items)
     if (
       item.type === "group" &&
       Array.isArray(item.items) &&
       item.items.length > SIDEBAR_GROUP_MAX_ITEMS
     )
-      throw new SidebarLayoutChangeError(`A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`);
+      throw new SidebarLayoutLimitError(`A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`);
 }
 
 /** App ids linked anywhere in `items` (lowercase). */
@@ -849,7 +874,7 @@ export function applyPersonalSidebarChanges(
           if (item.type === "group") throw new SidebarLayoutChangeError("Groups don't nest");
           if (!groupExists(groupId)) throw new SidebarLayoutChangeError(`No group "${groupId}"`);
           if (mergedLevelIds(groupId).length >= SIDEBAR_GROUP_MAX_ITEMS)
-            throw new SidebarLayoutChangeError(
+            throw new SidebarLayoutLimitError(
               `A group holds at most ${SIDEBAR_GROUP_MAX_ITEMS} items`,
             );
           const own = next.added.find(
@@ -928,7 +953,7 @@ export function applyPersonalSidebarChanges(
     }
   }
   if (next.added.length > SIDEBAR_LAYOUT_MAX_ITEMS)
-    throw new SidebarLayoutChangeError(`You can add at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
+    throw new SidebarLayoutLimitError(`You can add at most ${SIDEBAR_LAYOUT_MAX_ITEMS} items`);
   checkLimits(next.added.map((entry) => entry.item));
   // Keep only order entries for levels and items that still exist.
   const merged = mergeSidebarLayout(workspace, next);
@@ -1102,4 +1127,28 @@ export function sidebarItemsShown(items: readonly ResolvedSidebarItem[]): Resolv
     // A group left with nothing to show goes too; one that was empty stays (to fill).
     return children.length > 0 || item.items.length === 0 ? [{ ...item, items: children }] : [];
   });
+}
+
+type SidebarLayoutRevisions = {
+  personal?: { revision?: number } | null | undefined;
+  workspace?: { revision?: number } | null | undefined;
+};
+
+/**
+ * Whether `next` is older than `shown` in either scope, so a client keeps
+ * what it shows: answers to overlapping reads and updates can arrive out of
+ * order, and each scope's revision only grows. Two answers each newer in a
+ * different scope (rare) keep the one shown until the next read.
+ */
+export function sidebarLayoutIsOlder(
+  next: SidebarLayoutRevisions,
+  shown: SidebarLayoutRevisions | null | undefined,
+): boolean {
+  if (!shown) return false;
+  const revision = (scope: { revision?: number } | null | undefined) =>
+    typeof scope?.revision === "number" ? scope.revision : 0;
+  return (
+    revision(next.personal) < revision(shown.personal) ||
+    revision(next.workspace) < revision(shown.workspace)
+  );
 }
