@@ -198,6 +198,8 @@ export type AppStateHost = Readonly<{
     email: string;
     password: string;
     rememberMe?: boolean;
+    /** The sign-in form's challenge token when the deployment requires one. */
+    signupChallengeToken?: string;
   }) => Promise<unknown>;
   signUpEmail: (input: {
     name: string;
@@ -2517,6 +2519,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
             email: input.email,
             password: input.password,
             rememberMe: true,
+            ...(input.signupChallengeToken
+              ? { signupChallengeToken: input.signupChallengeToken }
+              : {}),
           }),
       });
       if (signin.status === "stale") return;

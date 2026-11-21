@@ -2,6 +2,7 @@ import { observedSdkVersion } from "./http/sdk-version";
 import {
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
+  verifyEmailSignInChallenge,
   verifySignupChallenge,
   verifySocialSignupChallenge,
 } from "./auth/signup-challenge";
@@ -1424,6 +1425,20 @@ export function createAppComposition(
           .catch(() => null);
         await verifySignupChallenge(deps.settings, input?.signupChallengeToken);
         signupChallengeVerified = true;
+      }
+      if (
+        deps.settings.signupChallengeEnabled &&
+        pathname === "/v1/auth/sign-in/email" &&
+        c.req.method === "POST"
+      ) {
+        // Credential stuffing guesses passwords here; the sign-in form sends
+        // the same challenge token as sign-up. A sign-in creates no account,
+        // so it never grants the sign-up proof.
+        const input = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        await verifyEmailSignInChallenge(deps.settings, input?.signupChallengeToken);
       }
       let signupProviderRequest = c.req.raw;
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {

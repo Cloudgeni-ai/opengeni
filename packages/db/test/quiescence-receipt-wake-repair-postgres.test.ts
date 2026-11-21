@@ -20,6 +20,10 @@ import {
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
+import {
+  classifyQuiescenceReceiptWakeRepairFailure,
+  repairMissingQuiescenceReceiptWakesWith,
+} from "../src/quiescence-receipt-wake-repair";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -212,6 +216,69 @@ async function statusOf(sessionId: string) {
 }
 
 describe("missing quiescence-receipt wake repair", () => {
+  test("a failed row reports its error class and SQLSTATE, without its message", async () => {
+    const failing = await strandedRecovery({
+      closedSecondsAgo: 300,
+      wakeDeliveredSecondsAgo: 1_200,
+      quiesce: true,
+    });
+    const busy = await strandedRecovery({
+      closedSecondsAgo: 300,
+      wakeDeliveredSecondsAgo: 1_200,
+      quiesce: true,
+    });
+    const secret = `customer text ${failing.sessionId}`;
+    const peek = async (db: Parameters<typeof peekSessionWork>[0], ws: string, id: string) => {
+      if (id === failing.sessionId) {
+        const driver = Object.assign(new Error(secret), { name: "PostgresError", code: "40P01" });
+        throw Object.assign(new Error(secret, { cause: driver }), { name: "DrizzleQueryError" });
+      }
+      if (id === busy.sessionId) {
+        throw Object.assign(new Error(secret), { name: "PostgresError", code: "55P03" });
+      }
+      return await peekSessionWork(db, ws, id);
+    };
+    const failures = [];
+    let cursor = null;
+    do {
+      const lap = await repairMissingQuiescenceReceiptWakesWith(peek, client.db, 100, cursor);
+      expect(lap.failed).toBe(lap.failures.length);
+      failures.push(...lap.failures);
+      cursor = lap.cursor;
+    } while (cursor);
+    // The lock conflict stays a silent retry; the deadlock is reported once.
+    expect(failures).toEqual([
+      { errorName: "DrizzleQueryError", sqlState: "40P01", sqlStateClass: "40" },
+    ]);
+    expect(JSON.stringify(failures)).not.toContain(failing.sessionId);
+    expect((await wakeOf(failing.sessionId)).pending).toBe(false);
+    expect((await wakeOf(busy.sessionId)).pending).toBe(false);
+  });
+
+  test("failure classification keeps only safe names and SQLSTATEs", () => {
+    expect(classifyQuiescenceReceiptWakeRepairFailure(new TypeError("row 42 value"))).toEqual({
+      errorName: "TypeError",
+      sqlState: null,
+      sqlStateClass: null,
+    });
+    const named = Object.assign(new Error("x"), { name: "name with data@example.com" });
+    expect(classifyQuiescenceReceiptWakeRepairFailure(named).errorName).toBe("Error");
+    expect(classifyQuiescenceReceiptWakeRepairFailure({ code: "23505" })).toEqual({
+      errorName: "NonError",
+      sqlState: "23505",
+      sqlStateClass: "23",
+    });
+    // Node transport codes are not SQLSTATEs.
+    expect(
+      classifyQuiescenceReceiptWakeRepairFailure(
+        Object.assign(new Error("x"), { code: "ECONNRESET" }),
+      ).sqlState,
+    ).toBeNull();
+    const cyclic: { cause?: unknown } = {};
+    cyclic.cause = cyclic;
+    expect(classifyQuiescenceReceiptWakeRepairFailure(cyclic).sqlState).toBeNull();
+  });
+
   test("a stranded interrupted attempt gets one wake, then is paced", async () => {
     const stranded = await strandedRecovery({
       closedSecondsAgo: 300,

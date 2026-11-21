@@ -411,3 +411,143 @@ test("broker OAuth persists the pass in server state and replays without consumi
     globalThis.fetch = originalFetch;
   }
 }, 120_000);
+
+test("email sign-in requires the challenge when it is enabled, and not when it is off", async () => {
+  if (!shared || !client) return;
+  const enabled = testSettings({
+    databaseUrl: shared.appUrl,
+    productAccessMode: "managed",
+    publicBaseUrl: "http://opengeni.test",
+    betterAuthSecret: "signin-challenge-test-secret-at-least-32-bytes",
+    signupChallengeEnabled: true,
+    signupChallengeHostnames: "opengeni.test",
+    signupChallengeSecretKey: "mock-secret",
+  });
+  const disabled = { ...enabled, signupChallengeEnabled: false };
+  const transport = {
+    sender: "auth@example.test",
+    idempotency: { scope: "test:signin-captcha", retentionSeconds: 86400 },
+    send: async () => ({ status: "sent" as const, providerMessageId: null }),
+  };
+  const appFor = (settings: typeof enabled) =>
+    createApp({
+      settings,
+      db: client!.db,
+      managedAuth: createManagedAuth(settings, client!.db, transport)!,
+      managedEmailTransport: transport,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+  const app = appFor(enabled);
+  const headers = { "content-type": "application/json", origin: "http://opengeni.test" };
+  const post = (target: ReturnType<typeof appFor>, path: string, body: unknown) =>
+    target.request(path, { method: "POST", headers, body: JSON.stringify(body) });
+  const email = `signin-${crypto.randomUUID()}@example.test`;
+  const password = "long-password-123";
+  const originalFetch = globalThis.fetch;
+  const consumed = new Set<string>();
+  let verifications = 0;
+  globalThis.fetch = (async (url, init) => {
+    if (String(url) !== "https://challenges.cloudflare.com/turnstile/v0/siteverify")
+      return originalFetch(url, init);
+    verifications++;
+    const token = JSON.parse(String(init?.body)).response;
+    if (token === "provider-unavailable")
+      return Response.json({ success: false, "error-codes": ["internal-error"] });
+    const success = token !== "invalid" && !consumed.has(token);
+    consumed.add(token);
+    return Response.json({
+      success,
+      action: "signup",
+      hostname: "opengeni.test",
+      challenge_ts: new Date().toISOString(),
+    });
+  }) as typeof fetch;
+  try {
+    expect(
+      (
+        await post(app, "/v1/auth/sign-up/email", {
+          name: "Human",
+          email,
+          password,
+          signupChallengeToken: "signup",
+        })
+      ).status,
+    ).toBe(200);
+    await shared.admin`update auth_users set email_verified = true where email = ${email}`;
+    // Missing, unsolvable, spent and unverifiable tokens are refused before
+    // the password is checked, with sign-up's error shape and codes.
+    for (const [token, status, code, message] of [
+      [undefined, 403, "SIGNUP_CHALLENGE_REQUIRED", "Complete the verification to sign in."],
+      ["", 403, "SIGNUP_CHALLENGE_REQUIRED", "Complete the verification to sign in."],
+      [
+        "invalid",
+        403,
+        "SIGNUP_CHALLENGE_FAILED",
+        "Verification expired or failed. Please try again.",
+      ],
+      [
+        "signup",
+        403,
+        "SIGNUP_CHALLENGE_FAILED",
+        "Verification expired or failed. Please try again.",
+      ],
+      [
+        "provider-unavailable",
+        503,
+        "SIGNUP_CHALLENGE_UNAVAILABLE",
+        "Verification is unavailable. Please try again.",
+      ],
+    ] as const) {
+      const refused = await post(app, "/v1/auth/sign-in/email", {
+        email,
+        password,
+        signupChallengeToken: token,
+      });
+      expect(refused.status).toBe(status);
+      expect(await refused.json()).toMatchObject({
+        error: {
+          status,
+          code: status === 503 ? "upstream_unavailable" : "forbidden",
+          message,
+          retryable: status === 503,
+          details: { managedAuthCode: code },
+        },
+      });
+      expect(refused.headers.getSetCookie().some((v) => v.includes("session_token="))).toBe(false);
+    }
+    // A nonexistent email is refused the same way, so guessing reveals nothing.
+    const unknown = await post(app, "/v1/auth/sign-in/email", {
+      email: `missing-${email}`,
+      password,
+    });
+    expect(unknown.status).toBe(403);
+    // A solved challenge signs in; it is then spent.
+    const signedIn = await post(app, "/v1/auth/sign-in/email", {
+      email,
+      password,
+      rememberMe: true,
+      signupChallengeToken: "signin",
+    });
+    expect(signedIn.status).toBe(200);
+    expect(signedIn.headers.getSetCookie().some((v) => v.includes("session_token="))).toBe(true);
+    // A solved challenge does not make a wrong password succeed.
+    expect(
+      (
+        await post(app, "/v1/auth/sign-in/email", {
+          email,
+          password: "wrong-password-123",
+          signupChallengeToken: "wrong-password",
+        })
+      ).status,
+    ).toBe(401);
+    // With the challenge off, sign-in needs no token and never calls Siteverify.
+    const before = verifications;
+    const plain = await post(appFor(disabled), "/v1/auth/sign-in/email", { email, password });
+    expect(plain.status).toBe(200);
+    expect(plain.headers.getSetCookie().some((v) => v.includes("session_token="))).toBe(true);
+    expect(verifications).toBe(before);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}, 120_000);
