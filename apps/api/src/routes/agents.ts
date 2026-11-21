@@ -17,8 +17,10 @@ import {
   AgentResponse,
   AgentSlackAvailabilityResponse,
   AgentSlackIntroRequest,
+  CreateAgentFromTemplateRequest,
   CreateAgentRequest,
   DeleteAgentResponse,
+  ListAgentTemplatesResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
   ListAgentSlackInstallsResponse,
@@ -54,6 +56,8 @@ import {
   type AgentSlackInstallRecord,
 } from "@opengeni/db";
 import {
+  agentTemplateByKey,
+  agentTemplates,
   agentChatView,
   agentEditableBy,
   agentRevisionView,
@@ -319,6 +323,55 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post(base, async (c) => {
     const context = await requestContext(c, "sessions:create");
     const request = await parseRequestJson(c, CreateAgentRequest);
+    return c.json(await agentBody(context, await createAgentFor(context, request, null)), 201);
+  });
+
+  // --- Ready-made agents ("Add an agent") --------------------------------
+
+  const templatesBase = "/v1/workspaces/:workspaceId/agent-templates";
+
+  app.get(templatesBase, async (c) => {
+    await requestContext(c, "sessions:read");
+    return c.json(ListAgentTemplatesResponse.parse({ templates: agentTemplates() }));
+  });
+
+  /**
+   * Add a ready-made agent: an ordinary agent with the template's
+   * Instructions, Memory, Can use and Skills. Its suggested triggers are not
+   * created; the agent page offers them to set up.
+   */
+  app.post(`${templatesBase}/:templateKey/agents`, async (c) => {
+    const context = await requestContext(c, "sessions:create");
+    const template = agentTemplateByKey(c.req.param("templateKey") ?? "");
+    if (!template) {
+      throw agentError(
+        404,
+        "agent_template_not_found",
+        "There is no ready-made agent with that key.",
+      );
+    }
+    const overrides = await parseRequestJson(c, CreateAgentFromTemplateRequest);
+    const request = CreateAgentRequest.parse({
+      name: overrides.name ?? template.name,
+      description: template.description,
+      avatar: template.avatar,
+      visibility: overrides.visibility ?? "workspace",
+      instructions: template.instructions,
+      memoryEnabled: template.memoryEnabled,
+      toolPermissions: template.toolPermissions,
+      skills: template.skills,
+    });
+    return c.json(
+      await agentBody(context, await createAgentFor(context, request, template.key)),
+      201,
+    );
+  });
+
+  async function createAgentFor(
+    context: RequestContext,
+    request: z.output<typeof CreateAgentRequest>,
+    templateKey: string | null,
+  ): Promise<AgentRecord> {
     const { grant, viewer, home } = context;
     const access = agentVisibilityRecord(request.visibility);
     if (access.organizationAccess) requireOrganizationAccessAdmin(context);
@@ -363,6 +416,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           instructions: request.instructions,
           firstMessage: request.firstMessage,
           memoryEnabled: request.memoryEnabled,
+          toolPermissions: request.toolPermissions,
+          skills: request.skills,
+          templateKey,
           origin: "app",
           sourceSessionId: request.sourceSessionId,
           createdBySubjectId: viewer.subjectId,
@@ -377,13 +433,12 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Read it back with where it is available in Slack.
     await ensureAgentInLinkedSlack(deps, home, created);
-    const agent = await ensureAgentMemory(
+    return await ensureAgentMemory(
       deps,
       context,
       (await getAgent(db, home, created.id)) ?? created,
     );
-    return c.json(await agentBody(context, agent), 201);
-  });
+  }
 
   app.patch(`${base}/:agentId`, async (c) => {
     const context = await requestContext(c, "sessions:create");
@@ -444,6 +499,10 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
         ...(request.firstMessage !== undefined ? { firstMessage: request.firstMessage } : {}),
         ...(request.memoryEnabled !== undefined ? { memoryEnabled: request.memoryEnabled } : {}),
+        ...(request.toolPermissions !== undefined
+          ? { toolPermissions: request.toolPermissions }
+          : {}),
+        ...(request.skills !== undefined ? { skills: request.skills } : {}),
         ...(changesOrganizationAccess ? { organizationAccess: access.organizationAccess } : {}),
         ...(changesVisibility
           ? {

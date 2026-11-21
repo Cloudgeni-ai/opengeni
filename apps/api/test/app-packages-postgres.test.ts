@@ -12,7 +12,13 @@ import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { APP_PACKAGE_FORMAT, type AccessGrant, type AppPackage } from "@opengeni/contracts";
-import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import {
+  readSidebarLayoutForGrant,
+  updateSidebarLayoutForGrant,
+  type ApiRouteDeps,
+  type ObjectStorageDependency,
+  type SessionWorkflowClient,
+} from "@opengeni/core";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   createConnection,
@@ -756,6 +762,61 @@ test("packages carry connector tools, and agents keep the ones their chat has", 
   expect(replay.value.replayed).toBe(true);
   expect(replay.value.app.id).toBe(installed.value.app.id);
   expect(replay.value.notInstalled).toEqual(installed.value.notInstalled);
+}, 120_000);
+
+test("packages carry the app's sidebar links, added once on install", async () => {
+  const f = await fixture();
+  const appId = await buildBoard(f);
+  const admin = {
+    ...f.author.grant,
+    permissions: [...f.author.grant.permissions, "workspace:admin"],
+  } as AccessGrant;
+  await updateSidebarLayoutForGrant(f.deps, admin, {
+    scope: "workspace",
+    changes: [
+      { op: "add", item: { type: "app", appId, label: "Board" } },
+      {
+        op: "add",
+        item: {
+          type: "group",
+          label: "Team",
+          items: [{ type: "app", appId, path: "/releases", label: "Releases" }],
+        },
+      },
+    ],
+  });
+  const exported = await f.exportApp(appId);
+  expect(exported.status, exported.text).toBe(200);
+  const pkg = exported.json.package as AppPackage;
+  expect(pkg.sidebar).toEqual([
+    { label: "Board" },
+    { path: "/releases", label: "Releases", group: "Team" },
+  ]);
+
+  // Not an admin in the target workspace: the links go to their own sidebar.
+  const key = crypto.randomUUID();
+  const installed = await f.install({ package: pkg, idempotencyKey: key });
+  expect(installed.status, installed.text).toBe(201);
+  expect(installed.json.installed.sidebar).toBe(2);
+  expect(installed.json.notInstalled).toEqual([]);
+  const newId = installed.json.app.id as string;
+  const read = await readSidebarLayoutForGrant(f.deps, f.installer.grant);
+  const summary = () =>
+    read.items.map((item) =>
+      item.type === "group"
+        ? {
+            group: item.label,
+            items: item.items.map((child) => child.type === "app" && child.appId),
+          }
+        : item.type === "app" && item.appId,
+    );
+  expect(summary()).toEqual([newId, { group: "Team", items: [newId] }]);
+
+  // A replay adds nothing again.
+  const replay = await f.install({ package: pkg, idempotencyKey: key });
+  expect(replay.json.replayed).toBe(true);
+  expect(replay.json.installed.sidebar).toBe(0);
+  expect((await readSidebarLayoutForGrant(f.deps, f.installer.grant)).items).toHaveLength(2);
 }, 120_000);
 
 test("the same key with a different package installs a different app", async () => {

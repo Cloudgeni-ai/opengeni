@@ -17,14 +17,15 @@ import {
   SiteSqlQueryDefinitionRequest,
   SiteSqlValueSchema,
 } from "./site-sql";
+import { SIDEBAR_LABEL_MAX_CHARS, SidebarAppPath } from "./sidebar-layout";
 import { ToolGatewayIdentity } from "./tool-catalog";
 
 /**
  * An app package: one JSON file that carries an app (a Site) to another
  * workspace. It holds the app's current version (HTML and optional source),
  * the tools it declares, its Site Data collection definitions, its Site SQL
- * migrations and named queries, its syncs, and optional bounded demo data. It
- * never holds the app's real data. See docs/app-packages.md.
+ * migrations and named queries, its syncs, where it sits in the sidebar, and
+ * optional bounded demo data. It never holds the app's real data. See docs/app-packages.md.
  */
 export const APP_PACKAGE_FORMAT = "opengeni.app-package";
 export const APP_PACKAGE_VERSION = 1;
@@ -35,6 +36,7 @@ export const APP_PACKAGE_DEMO_RECORDS_PER_COLLECTION = 1_000;
 export const APP_PACKAGE_DEMO_ROWS_PER_TABLE = 5_000;
 export const APP_PACKAGE_DEMO_MAX_BYTES = 8 * 1024 * 1024;
 export const APP_PACKAGE_SYNCS_MAX = 50;
+export const APP_PACKAGE_SIDEBAR_MAX = 10;
 
 const Name = primitives.string.regex(SITE_SQL_NAME);
 
@@ -67,6 +69,19 @@ export const AppPackageSync = /* @__PURE__ */ defineSchema(() =>
 );
 export type AppPackageSync = z.infer<typeof AppPackageSync>;
 
+/**
+ * Where the app sits in the workspace's default sidebar: one link, optionally
+ * to one of its pages, with its own label and the name of the group it is in.
+ */
+export const AppPackageSidebarItem = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: SidebarAppPath.optional(),
+    label: primitives.string.trim().min(1).max(SIDEBAR_LABEL_MAX_CHARS).optional(),
+    group: primitives.string.trim().min(1).max(SIDEBAR_LABEL_MAX_CHARS).optional(),
+  }),
+);
+export type AppPackageSidebarItem = z.infer<typeof AppPackageSidebarItem>;
+
 export const AppPackageDemoRecord = /* @__PURE__ */ defineSchema(() =>
   z.object({
     key: primitives.string.min(1).max(512).nullable().optional(),
@@ -96,6 +111,8 @@ export type AppPackage = {
   data: { collections: AppPackageCollection[] };
   sql: { migrations: AppPackageMigration[]; queries: AppPackageQuery[] };
   syncs: AppPackageSync[];
+  /** The app's links in the exporting workspace's default sidebar. */
+  sidebar?: AppPackageSidebarItem[] | undefined;
   /** Present only when the author chose to include demo data. */
   demoData?:
     | {
@@ -116,6 +133,7 @@ export type AppPackageProblem = {
     | "migration"
     | "query"
     | "sync"
+    | "sidebar"
     | "demo_data";
   name?: string | undefined;
   reason: string;
@@ -172,6 +190,8 @@ export type AppPackageInstallResponse = {
     migrations: string[];
     queries: string[];
     syncs: string[];
+    /** Sidebar links added, to the default sidebar or the installer's own. */
+    sidebar: number;
     demoRecords: number;
     demoRows: number;
   };
@@ -313,6 +333,15 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
     syncs.length = APP_PACKAGE_SYNCS_MAX;
   }
 
+  const sidebar = list(root.sidebar, AppPackageSidebarItem, "sidebar", "sidebar");
+  if (sidebar.length > APP_PACKAGE_SIDEBAR_MAX) {
+    problems.push({
+      part: "sidebar",
+      reason: `Only the first ${APP_PACKAGE_SIDEBAR_MAX} sidebar links were read`,
+    });
+    sidebar.length = APP_PACKAGE_SIDEBAR_MAX;
+  }
+
   let demoData: AppPackage["demoData"];
   const demo = record(root.demoData);
   if (demo) {
@@ -355,6 +384,7 @@ export function parseAppPackage(value: unknown): ParsedAppPackage {
       data: { collections },
       sql: { migrations, queries },
       syncs,
+      ...(sidebar.length > 0 ? { sidebar } : {}),
       ...(demoData ? { demoData } : {}),
     },
     problems,

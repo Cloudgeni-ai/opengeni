@@ -39,6 +39,7 @@ function contents(exported: AppPackageExportResponse) {
     migrations: pkg.sql.migrations.map((migration) => migration.name),
     queries: pkg.sql.queries.map((query) => query.name),
     syncs: pkg.syncs.length,
+    sidebar: pkg.sidebar?.length ?? 0,
     demoData: pkg.demoData
       ? {
           records: Object.fromEntries(
@@ -97,7 +98,7 @@ export function registerAppPackageTools(
     "app_export",
     {
       description:
-        "Export an app as one package file another workspace can install with app_install: its current version, the tools it uses, its data collections, database migrations and named queries, and its syncs. It carries no data unless you set demoData (only when the person asks for sample data). Returns a download URL for the file (fetch it with curl, then share it with sandbox_file_publish) and what the package holds. Only the app's managers can export it.",
+        "Export an app as one package file another workspace can install with app_install: its current version, the tools it uses, its data collections, database migrations and named queries, its syncs and its sidebar links. It carries no data unless you set demoData (only when the person asks for sample data). Returns a download URL for the file (fetch it with curl, then share it with sandbox_file_publish) and what the package holds. Only the app's managers can export it.",
       inputSchema: contractToolInput(
         z4.object({
           appId: z4.string().uuid().describe("The app (Site) id."),

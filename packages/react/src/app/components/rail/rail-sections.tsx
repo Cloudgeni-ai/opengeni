@@ -31,6 +31,11 @@ export type SessionShellSlots = Readonly<{
   /** Primary navigation after "New session" (inbox, workspace shortcuts). */
   primaryNav?: ReactNode;
   /**
+   * The workspace's customizable links and groups (docs/sidebar-layout.md),
+   * under the primary navigation and above the sessions.
+   */
+  layout?: ReactNode;
+  /**
    * The phone drawer's "Workspace" tab. Without it, phones show the sessions
    * list alone, with no tabs.
    */

@@ -248,11 +248,18 @@ export function classifyPromptCacheWarmMiss(
   const after = current.observation?.request;
   // Compaction keeps the tools, the system prompt and a summary, so a large
   // fixed prefix can keep the prompt above the token ratio; the request's item
-  // count still falls sharply. A system change that compaction brings with it
+  // count still falls sharply, and its first item changes: a compacted history
+  // starts anew, while every in-place change keeps the first item. The previous
+  // call may also be the compaction request itself, which is shorter than the
+  // history built from it. A system change that compaction brings with it (on
+  // Claude, leading system items of the new history join the system prompt)
   // costs nothing beyond the history it replaced.
   if (
     current.inputTokens < previous.inputTokens * CONTEXT_REPLACED_RATIO ||
-    (before && after && after.items < before.items * CONTEXT_REPLACED_RATIO)
+    (before &&
+      after &&
+      (after.items < before.items * CONTEXT_REPLACED_RATIO ||
+        firstDivergentHistoryCheckpoint(before, after) === 1))
   )
     return { class: "context_replaced", ...base };
   if (before && after) {

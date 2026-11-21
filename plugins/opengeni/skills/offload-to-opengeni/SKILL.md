@@ -19,26 +19,29 @@ conversation, your files, or your local machine.
 
 ## Tools
 
-The server has three tools that reach every Opengeni API action. Clients add
-their own prefix (in Claude Code:
-`mcp__plugin_opengeni_opengeni__opengeni_actions_search`); match on the suffix.
+The server has named tools for the common steps. Clients add their own prefix
+(in Claude Code: `mcp__plugin_opengeni_opengeni__delegate`); match on the
+suffix.
 
 | Tool | Use |
 | --- | --- |
-| `opengeni_actions_search` | Find an action: `{ query, limit }`, e.g. `"create session"`, `"session events"`, `"github repositories"`. |
-| `opengeni_action_describe` | Read an action's path parameters and input schema: `{ id }`. |
-| `opengeni_action_call` | Run it: `{ id, pathParameters, query, body }`. |
+| `delegate` | Start an Opengeni chat: `message`, optional `repository` (owner/name), `branch`, `agent`, `sandboxEnvironment`, `title`. |
+| `wait_for` | Wait up to 50 s for a chat: `sessionId`, `cursor`. `done` means it finished with a final answer. |
+| `session_send`, `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Follow up on, find and control chats. |
+| `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; set the default workspace of this connection. |
+| `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change data in the workspace's apps. |
+| `tools_search`, `tool_call` | Use the workspace's connected tools. |
+| `skills_sync`, `skills_list`, `knowledge_search`, `knowledge_get`, `knowledge_save` | Share Skills and Knowledge with the workspace. |
 
-Describe an action before calling it and send only the fields its schema lists.
-Below, "the create-session action" means: find it, describe it, call it. If a
-workspace MCP server with `opengeni__session_*` tools is configured instead,
-use those tools for the same steps.
+For anything else, `opengeni_actions_search`, `opengeni_action_describe` and
+`opengeni_action_call` reach every Opengeni API action.
 
 The first call opens a browser sign-in where the user picks the organization
 and what the agent may do. If the tools are missing or a call fails with an
 authentication error, tell the user to sign in to the `opengeni` server: in
 Claude Code run `/mcp`, select it, and sign in; in Codex run
-`codex mcp login opengeni`. If no server is configured at all, point them to
+`codex mcp login opengeni`. If no server is configured at all, suggest
+`npx opengeni connect` or point them to
 https://docs.opengeni.ai/guides/coding-agents. Never work around
 authentication with API keys, cookies, or other credentials.
 
@@ -61,16 +64,16 @@ The remote agent clones from the Git host, not from this machine.
    (`git rev-parse --abbrev-ref @{upstream}` and `git log @{upstream}..`).
 2. If the work needs unpushed commits or uncommitted changes, ask the user
    before committing or pushing anything. Pushing is their decision.
-3. Pick the workspace (list the workspaces; ask once if there are several).
-   List its GitHub repositories, find this one, and reference it in the
-   session's `resources` with `ref` set to the branch to work on.
-4. If the repository is missing, get the GitHub connect link, give it to the
-   user, and wait for them to connect it. Do not start a session that silently
+3. If the user has several workspaces, `delegate` lists them; ask once and
+   pass `workspaceId`, or call `workspace_use` so later calls use it. Pass
+   the repository as `owner/name` and the branch to work on.
+4. If `delegate` reports the repository is missing, give the user the GitHub
+   connect link it returns (or `opengeni_actions_search` "github connect"), and wait for them to connect it. Do not start a session that silently
    lacks the repository.
 
 ## 3. Write a self-contained brief
 
-`initialMessage` is the only context the remote agent gets. Include:
+`message` is the only context the remote agent gets. Include:
 
 - **Goal**: what to do and why, in a few sentences.
 - **Code**: repository, branch, and the relevant files, commands, or errors.
@@ -86,56 +89,47 @@ The remote agent clones from the Git host, not from this machine.
   test results, open questions).
 
 Never put secrets in a session: no API keys, tokens, passwords, private keys,
-`.env` contents, or connection strings in `initialMessage`, `instructions`,
-`metadata`, or follow-up messages. If the task needs a credential, tell the
+`.env` contents, or connection strings in the message or follow-ups. If the task needs a credential, tell the
 user to add it in Opengeni (Variables or Connections) themselves, and refer to
 it by name.
 
-## 4. Create the session
+## 4. Delegate
 
-Run the create-session action with:
+Call `delegate` with the brief as `message`, a short `title`, and the
+`repository` and `branch` from step 2. Add `agent` or `sandboxEnvironment`
+only when the user named one. Retrying `delegate` with the same input doesn't
+starts a second chat; errors say whether a retry is safe.
 
-- `initialMessage`: the brief.
-- `title`: a short, specific title.
-- `idempotencyKey`: a fresh UUID. If the call fails with an uncertain outcome,
-  retry with the same key and input so you do not create a duplicate.
-- `resources`: the repository resource from step 2, when there is code.
-- `projectId`: only if the user named a project.
+Do not ask for a model or reasoning effort unless the user asked for a
+specific choice; the workspace default and billing path is the user's choice.
 
-Do not set `model`, `reasoningEffort`, or `latencyMode` unless the user asked
-for a specific choice. Omitting them uses the workspace's own default and
-billing path, which is the user's choice to make. Never pick a more expensive
-model on your own. Leave `sandboxBackend` unset for coding work.
+Report the returned `url`, then tell the user what you delegated and how you
+will follow up.
 
-Report the session link,
-`https://app.opengeni.ai/workspaces/<workspaceId>/sessions/<sessionId>` (use
-the MCP server's origin if it is not `app.opengeni.ai`). Then tell the user
-what you delegated and how you will follow up.
+## 5. Wait and fetch results
 
-## 5. Check status and fetch results
-
-- The get-session action returns `status` (`queued`, `running`, `idle`,
-  `requires_action`, `waiting_capacity`, `recovering`, `failed`, `cancelled`)
-  plus queue and goal facts. `queued` or a recent `updatedAt` is not proof of
-  progress.
-- Do not poll in a tight loop. Check when the user asks, when you have other
-  work to interleave, or at most every few minutes for a task the user is
-  waiting on.
-- `requires_action` means the remote agent needs a person (an approval or a
-  question). Approvals cannot be answered through this MCP server: send the
-  user the session link.
-- When the session is `idle` after running, read its events (the
-  session-events action) for the final answer, following the page cursor for
-  more.
+- Call `wait_for` with the `sessionId` and the returned `cursor`; call again
+  with the new cursor while `state` is `running`. Interleave other work
+  rather than looping when the task is long.
+- `done`: relay `finalAnswer`. `needs_attention`: the remote agent needs a
+  person (an approval or a question); send the user the `url`. `failed`:
+  report the error.
+- Stopping your wait stops only your tracking; the chat keeps running. Use
+  `session_pause` to stop it.
 - Verify claims before relaying them as done: fetch the branch, check the pull
   request or CI status, and run the acceptance checks locally when practical.
   Do not merge or deploy without the user's approval.
 
 ## 6. Follow up
 
-- Send corrections or the next step as a message to the same session, with a
-  new `idempotencyKey`. The session keeps its context and sandbox; prefer it
-  over starting a new session for related work.
-- Pause stops work resumably; resume continues it (the session control
-  action).
-- To find an earlier session, list the workspace's sessions.
+- Send corrections or the next step with `session_send`, then `wait_for`
+  with its `cursor` and `turnId`. The chat keeps its context and sandbox; prefer it over
+  starting a new chat for related work.
+- `session_pause` stops work resumably; `session_resume` continues it.
+- `sessions_list` finds earlier chats.
+
+## Tools that need approval
+
+`tools_search` shows which tools need a person's approval. When `tool_call`
+returns `needsApproval`, give the user `approvalUrl`; after they approve,
+call `tool_call` again with the same `operationId`.

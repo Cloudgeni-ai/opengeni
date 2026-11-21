@@ -478,6 +478,52 @@ version's `requestedTools`.
   available self-hosted, so there the card shows only in the console, where it
   works the same. `site.connections` in the console behaves as above.
 
+## Opengeni look for apps
+
+Apps opened in Opengeni follow its light or dark theme: the frame's
+`color-scheme` is Opengeni's, so `prefers-color-scheme` inside the App
+matches it and changes without a reload. (Safari doesn't pass a frame's
+`color-scheme` to `prefers-color-scheme`, so there an App follows the
+system's theme; that differs only when Opengeni's appearance is set to the
+other one.) An App that wants Opengeni's own look opts in with one tag:
+
+```html
+<link rel="stylesheet" href="/__opengeni/ui.css">
+```
+
+A bundler (`bun build ./index.html`, Vite) tries to resolve that link and
+fails, so in a built App use a style that only imports it, which bundlers
+leave alone:
+
+```html
+<style>@import "/__opengeni/ui.css";</style>
+```
+
+Inside Opengeni either is replaced by the stylesheet itself (no request and
+no unstyled first paint). The path `/__opengeni/ui.css` is reserved: a Site's
+own file there is never served. A published Site's gateway serves it at that path,
+and so does the local preview (`createCodemodeSiteRequestHandler`). It styles
+nothing on its own; it defines:
+
+- Tokens that follow the theme: `--og-bg`, `--og-canvas`, `--og-surface`,
+  `--og-surface-2`, `--og-surface-3`, `--og-selection`, `--og-border`,
+  `--og-border-strong`, `--og-fg`, `--og-fg-label`, `--og-fg-muted`,
+  `--og-fg-subtle`, `--og-accent`, `--og-accent-fg`, `--og-primary`,
+  `--og-primary-ink`, `--og-primary-edge`, `--og-danger`, `--og-success`,
+  `--og-warning`, `--og-focus`, `--og-font-sans`, `--og-font-mono`,
+  `--og-radius` and `--og-radius-card`. `data-og-theme="light"` or `"dark"`
+  on `<html>` pins a theme.
+- Classes: `og-app` (on `<body>`: canvas, text and font), `og-page` and
+  `og-page-wide` (960 and 1136px columns), `og-title`, `og-heading`,
+  `og-muted`, `og-subtle`, `og-mono`, `og-stack`, `og-row`, `og-card`,
+  `og-button` (with `og-button-primary`, `og-button-ghost`,
+  `og-button-danger`), `og-input` (inputs, selects and textareas),
+  `og-label`, `og-badge` (with `-success`, `-warning`, `-danger`),
+  `og-table` and `og-link`.
+
+`@opengeni/sdk/site-ui` exports the stylesheet (`SITE_UI_CSS`), its path and
+`resolveSiteUiStylesheet(html)` for hosts that embed Sites themselves.
+
 ## Limits and metering
 
 The Site's limits come from the first profile that exists, in this order:

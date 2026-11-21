@@ -124,7 +124,7 @@ atomic with Postgres, so no hint is published).
 ### App change events for automations and webhooks
 
 Automations and workspace webhooks hear about App data changes through the
-same vocabulary as Opengeni's other events (migration `1516`,
+same vocabulary as Opengeni's other events (migration `1519`,
 `packages/db/src/app-activity-events.ts`):
 
 - `app.record.added`, `app.record.changed`, `app.record.removed`: one fact per
@@ -194,6 +194,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   (for example a person-less scheduled task) is a viewer, whatever credential
   started it. Managers define collections and read everything except
   `privateRecords`. Everyone else who can view the Site is a **viewer**.
+- Agents outside Opengeni (connected agents and personal API keys on the
+  [organization MCP server](mcp-surfaces.md#named-tools-for-connected-agents))
+  are **viewers** unless the person set the connection's App data to Manager
+  (`outside_agent_viewer`), and reach only members-only or unpublished Sites
+  (`outside_agent_members_only`): text from outside visitors must not reach an
+  agent that picks up work. Describe answers them with `access: "viewer"`.
 - Requests from Site HTML always get **viewer** reach, whoever is viewing:
   Site HTML is untrusted (any member with `artifacts:publish` can publish a
   new version of a Site), so the owner's own Site page reads only their own

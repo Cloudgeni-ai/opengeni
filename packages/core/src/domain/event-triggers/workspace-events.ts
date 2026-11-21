@@ -20,7 +20,7 @@ import { oneLine, type NormalizedEventInput } from "./normalize";
  * a chat finished, failed, was stopped, waits for an approval, asked a
  * question or sent a notification, and usage thresholds. A chat event counts
  * as Opengeni's own when an automation run caused it, and carries that run's
- * chain depth. App data changes (migration 1516) come from the same table:
+ * chain depth. App data changes (migration 1519) come from the same table:
  * records added, changed or removed in an App's collection and App SQL
  * writes, with the same causation and chain depth.
  */

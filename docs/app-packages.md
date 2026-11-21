@@ -24,10 +24,11 @@ One JSON file, named `<title>.opengeni-app.json`:
 | `sql.migrations` | Site SQL migrations in applied order (`name`, `sql`) |
 | `sql.queries` | Site SQL named queries (`name`, `sql`, access, parameters) |
 | `syncs` | Data sync definitions, as plain objects (see [Syncs](#syncs)) |
+| `sidebar` | The app's links in the workspace's default [sidebar](sidebar-layout.md): each link's `path` and `label`, and the `group` label it sits in. Absent when it has none |
 | `demoData` | Only when the author asked: `records` of shared collections (`shared`, `shared_read`) and `sqlRows` per table. Per-person (`per_viewer`) and submission (`append_only`) collections belong to the people who wrote them and are listed in `notExported` |
 
 Limits: 24 MiB per package; demo data at most 1,000 records per collection,
-5,000 rows per table and 8 MiB in total; 50 syncs. Parts over a limit are left
+5,000 rows per table and 8 MiB in total; 50 syncs; 10 sidebar links. Parts over a limit are left
 out and listed in the export's `notExported`, not a failed export. SQL tables
 with blob values are left out of demo rows.
 
@@ -58,7 +59,11 @@ Steps, each reported rather than failing the install:
    existing migration name is skipped; the first failure stops the rest), then
    define the queries. Otherwise every SQL part is listed in `notInstalled`.
 4. Create the syncs, paused, through the syncs hook.
-5. Load demo data (default on when the package has some; `demoData: false`
+5. Add the sidebar links for the new app: to the workspace default when the
+   installer is a workspace admin, otherwise to their own sidebar. A link
+   goes into the group of the same label when there is one, else into a new
+   group. Nothing is added when the app already has a link (a replay).
+6. Load demo data (default on when the package has some; `demoData: false`
    declines), only into empty collections and tables.
 
 The idempotency key, together with the package's content, makes the app

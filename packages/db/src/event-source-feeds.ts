@@ -311,7 +311,7 @@ export type WorkspaceActivityEvent = {
   automationName: string | null;
   /** How the workspace names the person the turn ran for. */
   subjectLabel: string | null;
-  /** The App an app.* fact is about (migration 1516), and its title. */
+  /** The App an app.* fact is about (migration 1519), and its title. */
   appId: string | null;
   appTitle: string | null;
 };
@@ -324,7 +324,7 @@ export type WorkspaceActivityEventsRead = {
 
 /**
  * Migration 1105. The activity facts (chats finishing, failing, waiting;
- * usage thresholds; App data changes since 1516) a person may see that a source has not stored yet,
+ * usage thresholds; App data changes since 1519) a person may see that a source has not stored yet,
  * oldest first, written after `since`. It reads as that person, so row
  * security keeps out other people's private chats and usage, exactly as
  * chat history does. Like recording events, facts are stamped when written,

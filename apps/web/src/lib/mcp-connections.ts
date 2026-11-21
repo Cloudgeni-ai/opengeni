@@ -12,7 +12,10 @@ export type McpConnection = OrganizationMcpConnection;
 
 export type McpConnectionsApi = {
   list: () => Promise<OrganizationMcpConnectionList>;
-  update: (id: string, change: { policy: OrganizationAccessPolicy }) => Promise<McpConnection>;
+  update: (
+    id: string,
+    change: { policy?: OrganizationAccessPolicy; appDataAccess?: "viewer" | "manager" },
+  ) => Promise<McpConnection>;
   disconnect: (id: string) => Promise<void>;
 };
 

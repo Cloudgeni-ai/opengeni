@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 import { siteDataReadReach, type SiteDataAccessMode } from "./site-data-policy";
 
-// Migration 1516. App data changes as activity facts: the "This workspace"
+// Migration 1519. App data changes as activity facts: the "This workspace"
 // automation source reads them as its owner (row security narrows them to the
 // Apps and records that person may see), and workspace webhooks subscribed to
 // an app type get them through a trigger. Facts are written only while

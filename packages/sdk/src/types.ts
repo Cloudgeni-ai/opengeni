@@ -4021,6 +4021,12 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  /**
+   * The workspace agent each run's chat is with (an agent's "Starts when"):
+   * its Instructions, Memory and Can use apply. Only for a task that starts
+   * its own chats.
+   */
+  agentId?: string | undefined;
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
   /**
@@ -4586,6 +4592,8 @@ export type FirstPartyMcpToolName =
   | "project_reorder"
   | "project_delete"
   | "session_set_project"
+  | "sidebar_layout_get"
+  | "sidebar_layout_update"
   | "admin_actions_search"
   | "admin_action_describe"
   | "admin_action_call"
@@ -7511,6 +7519,13 @@ export type OrganizationMcpConnection = {
   connectedBy: { subjectId: string; name: string };
   /** What it can do and where. The person's own live access still caps it. */
   policy: OrganizationAccessPolicy;
+  /**
+   * App data: "viewer" (the default) reads and writes like a viewer of each
+   * app; "manager" manages it. Only the person, in a browser, sets manager.
+   */
+  appDataAccess?: "viewer" | "manager";
+  /** The workspace its tools use when a call names none, or null. */
+  defaultWorkspaceId?: string | null;
   createdAt: string;
   lastUsedAt: string | null;
   expiresAt: string;
@@ -7535,7 +7550,9 @@ export type OrganizationMcpConnectionList = {
 };
 
 export type UpdateOrganizationMcpConnectionRequest = {
-  access: OrganizationAccessPolicy;
+  access?: OrganizationAccessPolicy;
+  appDataAccess?: "viewer" | "manager";
+  defaultWorkspaceId?: string | null;
 };
 
 // --- Personal API keys ---------------------------------------------------------------------------
@@ -8693,6 +8710,12 @@ export type SaveNewSessionDraftRequest = Omit<
 
 /** Input shape for agent config on create/update (server applies defaults). */
 export type ScheduledTaskAgentConfigInput = {
+  /**
+   * The workspace agent each run's chat is with (an agent's "Starts when"):
+   * it runs with that agent's Instructions, Memory and Can use. Only for a
+   * task that starts a new chat each run. Older servers ignore it.
+   */
+  agentId?: string | undefined;
   /**
    * Agent configuration frozen into the schedule and used by every run;
    * omitted runs follow the workspace's agent defaults.

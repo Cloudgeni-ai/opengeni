@@ -242,6 +242,58 @@ describe("prompt-cache warm-miss classification", () => {
     ).toMatchObject({ class: "context_replaced" });
   });
 
+  test("a history that starts anew is replaced, even when it is not much shorter", () => {
+    const newStart = (items: number): PromptCacheRequestFingerprint => {
+      const request = fingerprint(items, { system: digest("c") });
+      return { ...request, history: request.history.map(([count]) => [count, digest("e")]) };
+    };
+    // Compaction to 61% of the items; Claude's system prompt took the new
+    // history's leading system items.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 102_617,
+          observation: { request: fingerprint(95) },
+        }),
+        sample({
+          inputTokens: 77_619,
+          cachedTokens: 30_098,
+          occurredAt: at(4),
+          observation: { request: newStart(58) },
+        }),
+      ),
+    ).toMatchObject({ class: "context_replaced" });
+    // The previous call was the compaction request, shorter than the new history.
+    expect(
+      classifyPromptCacheWarmMiss(
+        sample({
+          sourceKey: "previous",
+          inputTokens: 38_043,
+          observation: { request: fingerprint(22) },
+        }),
+        sample({
+          inputTokens: 57_069,
+          cachedTokens: 27_737,
+          occurredAt: at(9),
+          observation: { request: newStart(96) },
+        }),
+      ),
+    ).toMatchObject({ class: "context_replaced" });
+    // A system change that keeps the history's first item is still a defect.
+    expect(
+      classifyPromptCacheWarmMiss(
+        previous,
+        sample({
+          inputTokens: 190_000,
+          cachedTokens: 0,
+          occurredAt: at(4),
+          observation: { request: fingerprint(110, { system: digest("c"), rewrittenFrom: 2 }) },
+        }),
+      ),
+    ).toMatchObject({ class: "system_changed" });
+  });
+
   test("a steady thinking drop does not hide the real cause", () => {
     const dropping = (count: number, extra: Record<string, number> = {}) => ({
       request: fingerprint(100),

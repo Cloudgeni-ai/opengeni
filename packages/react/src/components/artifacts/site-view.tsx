@@ -16,6 +16,7 @@ import {
   artifactLoadErrorView,
   useArtifactLabels,
 } from "./artifact-chrome";
+import { cn } from "../../lib/cn";
 import { ArtifactSandbox } from "./artifact-sandbox";
 import type { SiteLiveState } from "./artifact-sandbox";
 import type { SiteSnapshotClient, SiteToolBridgeFactory } from "./chat-interactive-block";
@@ -84,12 +85,45 @@ export type SiteViewProps = {
   fullScreen?: boolean | undefined;
   onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
   className?: string | undefined;
+  /**
+   * Open the way a page of the app opens: the last copy seen in this tab is
+   * drawn at once (and refreshed behind it), and loading is a quiet blank
+   * canvas instead of a "Loading" card.
+   */
+  instant?: boolean | undefined;
 };
 
 /**
  * A published Site filling its container: the console's session dock and an
  * embedding host's artifact viewer render the same view.
  */
+// The last copy of each Site seen in this tab, per client (so another
+// account never sees it), for `instant` views.
+const SNAPSHOT_CACHE_LIMIT = 8;
+const snapshotCaches = new WeakMap<object, Map<string, Snapshot>>();
+
+function cachedSnapshot(client: object, key: string): Snapshot | null {
+  return snapshotCaches.get(client)?.get(key) ?? null;
+}
+
+function forgetSnapshot(client: object, key: string) {
+  snapshotCaches.get(client)?.delete(key);
+}
+
+/** The Site is gone or this person may no longer open it. */
+function accessLost(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 403 || status === 404;
+}
+
+function rememberSnapshot(client: object, key: string, snapshot: Snapshot) {
+  let cache = snapshotCaches.get(client);
+  if (!cache) snapshotCaches.set(client, (cache = new Map()));
+  cache.delete(key);
+  cache.set(key, snapshot);
+  while (cache.size > SNAPSHOT_CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+}
+
 export function SiteView({
   client,
   workspaceId,
@@ -114,10 +148,14 @@ export function SiteView({
   fullScreen,
   onFullScreenChange,
   className,
+  instant = false,
 }: SiteViewProps) {
   const t = useOpenGeniText();
   const labels = useArtifactLabels();
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const cacheKey = `${workspaceId}/${siteId}`;
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(() =>
+    instant ? cachedSnapshot(client, cacheKey) : null,
+  );
   const [error, setError] = useState<unknown>(null);
   // A newer version is loading (or failed to) behind the one on screen.
   const [refresh, setRefresh] = useState<"idle" | "loading" | "failed">("idle");
@@ -139,6 +177,7 @@ export function SiteView({
           includeArchivedContent: true,
         });
         if (abort.signal.aborted) return;
+        rememberSnapshot(client, `${workspaceId}/${siteId}`, next);
         setSnapshot(next);
         setError(null);
         setRefresh("idle");
@@ -147,23 +186,29 @@ export function SiteView({
       } catch (nextError) {
         if (abort.signal.aborted) return;
         // A failed update keeps the version on screen; the label says so.
-        if (background) {
+        // Losing access doesn't: a copy shown from the cache goes away.
+        if (background && !accessLost(nextError)) {
           setRefresh("failed");
           setFailures((count) => count + 1);
         } else {
+          forgetSnapshot(client, `${workspaceId}/${siteId}`);
           setSnapshot(null);
+          setRefresh("idle");
           setError(nextError);
         }
       }
     },
     [client, siteId, workspaceId],
   );
+  const instantRef = useRef(instant);
+  instantRef.current = instant;
   useEffect(() => {
-    setSnapshot(null);
+    const cached = instantRef.current ? cachedSnapshot(client, `${workspaceId}/${siteId}`) : null;
+    setSnapshot(cached);
     setRefresh("idle");
-    void load();
+    void load(cached !== null);
     return () => readAbort.current?.abort();
-  }, [load]);
+  }, [client, load, siteId, workspaceId]);
   const content = snapshot?.content;
   const shownVersion = content?.versionId ?? null;
   // Follow the host's current version once something is on screen. Only a
@@ -224,7 +269,17 @@ export function SiteView({
       />,
     );
   if (!snapshot || !content)
-    return withStart(<ArtifactLoading label={loadingLabel ?? labels.loadingSite} />);
+    return withStart(
+      instant ? (
+        <div
+          role="status"
+          aria-label={loadingLabel ?? labels.loadingSite}
+          className={cn("min-h-0 flex-1", theme === "dark" ? "bg-canvas" : "bg-white")}
+        />
+      ) : (
+        <ArtifactLoading label={loadingLabel ?? labels.loadingSite} />
+      ),
+    );
   if (snapshot.detail.artifact.status === "archived")
     return withStart(
       <div className="p-4 text-sm text-fg-muted">{archivedMessage ?? labels.siteArchived}</div>,

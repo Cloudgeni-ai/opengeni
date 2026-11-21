@@ -215,7 +215,8 @@ tools, read `references/publish-to-web.md` and review who sees what.
 
 ## Apps
 
-Apps follow these two rules and read the references they need.
+Apps follow these two rules and read the references they need (Opengeni look:
+`references/build-and-preview.md`).
 
 ### Sites have no server; AI comes from the host
 

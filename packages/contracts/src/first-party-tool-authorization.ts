@@ -378,6 +378,8 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   project_reorder: { allOf: ["sessions:create"] },
   project_delete: { allOf: ["sessions:create"] },
   session_set_project: { allOf: ["sessions:control"] },
+  sidebar_layout_get: { allOf: ["workspace:read"] },
+  sidebar_layout_update: { allOf: ["workspace:read"] },
   admin_actions_search: { sessionRequired: true, personSessionRequired: true },
   admin_action_describe: { sessionRequired: true, personSessionRequired: true },
   admin_action_call: { sessionRequired: true, personSessionRequired: true },

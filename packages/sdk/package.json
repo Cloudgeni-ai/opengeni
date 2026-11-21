@@ -66,6 +66,10 @@
       "types": "./src/site-document.ts",
       "default": "./src/site-document.ts"
     },
+    "./site-ui": {
+      "types": "./src/site-ui.ts",
+      "default": "./src/site-ui.ts"
+    },
     "./site": {
       "types": "./src/site.ts",
       "default": "./src/site.ts"

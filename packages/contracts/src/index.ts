@@ -73,6 +73,7 @@ import { AppSyncAction, AppSyncLastRun, AppSyncRunSummary, AppSyncSettings } fro
 export * from "./site-publishing";
 export * from "./site-sql";
 export * from "./app-package";
+export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
 export * from "./claude-subscription-oauth";
@@ -1156,6 +1157,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "sidebar_layout_get",
+  "sidebar_layout_update",
   "admin_actions_search",
   "admin_action_describe",
   "admin_action_call",
@@ -13624,6 +13627,13 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     })
     .strict();
   return {
+    /**
+     * The workspace agent each run's chat is with (an agent's "Starts when"):
+     * it runs with that agent's Instructions, Memory and Can use. Checked
+     * against the task owner's access when the task is saved and at each
+     * run. Only for a task that starts its own chat.
+     */
+    agentId: primitives.uuid.optional(),
     bundledSkillIds: BundledSkillSelection.optional(),
     /** @deprecated Integration Knowledge sync was removed; a request carrying it returns 410. */
     knowledgeSource: KnowledgeSourceSyncAction.optional(),

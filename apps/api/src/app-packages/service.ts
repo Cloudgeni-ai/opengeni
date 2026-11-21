@@ -62,6 +62,7 @@ import { connectorToolIdentities, readSiteToolAccountInventory } from "../site-t
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
+import { exportAppSidebar, installAppSidebar } from "./sidebar";
 import { appSyncHooks, syncName } from "./syncs";
 
 /**
@@ -176,6 +177,7 @@ export async function exportAppPackage(
   } catch (error) {
     notExported.push({ part: "sync", reason: reason(error, "listing syncs") });
   }
+  const sidebar = await exportAppSidebar(deps, grant, appId, notExported);
 
   const pkg: AppPackage = {
     format: APP_PACKAGE_FORMAT,
@@ -211,6 +213,7 @@ export async function exportAppPackage(
       })),
     },
     syncs,
+    ...(sidebar.length > 0 ? { sidebar } : {}),
   };
 
   const demo = await exportDemoData(deps, grant, appId, request.demoData, {
@@ -461,6 +464,7 @@ export async function installAppPackage(
     migrations: [],
     queries: [],
     syncs: [],
+    sidebar: 0,
     demoRecords: 0,
     demoRows: 0,
   };
@@ -643,7 +647,11 @@ export async function installAppPackage(
     }
   }
 
-  // 5. Demo data, only into collections and tables that are still empty.
+  // 5. Its links in the sidebar.
+  if (pkg.sidebar?.length)
+    installed.sidebar = await installAppSidebar(deps, grant, app.id, pkg.sidebar, notInstalled);
+
+  // 6. Demo data, only into collections and tables that are still empty.
   if (wantsDemo && pkg.demoData) {
     installed.demoRecords = await installDemoRecords(
       deps,
