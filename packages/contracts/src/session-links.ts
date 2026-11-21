@@ -8,8 +8,9 @@ import { defineSchema } from "./define-schema";
  * threads, App records, any URL), shown in its Linked panel. The agent adds
  * them with `session_links_add`; a pull request the chat opens through the
  * GitHub tools is added automatically. Each link's live status is read when
- * the list is shown (GitHub through the workspace's GitHub App), so the stored
- * link holds only what identifies it.
+ * the list is shown (GitHub through the workspace's GitHub App; Linear issues
+ * and Slack threads as the viewer, through their own connection), so the
+ * stored link holds only what identifies it.
  *
  * `waitingOn` names the person a chat waits on: the agent says so with
  * `set_waiting_on`, and an open question or approval waits on the person the
@@ -25,6 +26,7 @@ export const SESSION_LINK_TITLE_MAX_LENGTH = 200;
 export const SESSION_LINK_REF_MAX_LENGTH = 300;
 export const SESSION_WAITING_ON_PERSON_MAX_LENGTH = 120;
 export const SESSION_WAITING_ON_REASON_MAX_LENGTH = 280;
+export const SESSION_LINK_ASSIGNEE_MAX_LENGTH = 120;
 
 export const SESSION_LINK_KINDS = ["pull_request", "issue", "thread", "record", "link"] as const;
 export const SessionLinkKind = /* @__PURE__ */ defineSchema(() => z.enum(SESSION_LINK_KINDS));
@@ -83,12 +85,35 @@ export const SessionLinkLiveStatus = /* @__PURE__ */ defineSchema(() =>
     title: z.string().max(SESSION_LINK_TITLE_MAX_LENGTH).nullable(),
     checks: z.enum(["passing", "failing", "pending", "none"]).nullable(),
     review: z.enum(["approved", "changes_requested", "review_required", "none"]).nullable(),
+    /** Who the issue is assigned to (Linear), by name. Absent from older servers. */
+    assignee: z.string().max(SESSION_LINK_ASSIGNEE_MAX_LENGTH).nullable().optional(),
+    /** A thread's reply count (Slack). Absent from older servers. */
+    replies: z.number().int().min(0).nullable().optional(),
+    /** When a thread's last reply was posted (Slack). Absent from older servers. */
+    lastReplyAt: z.string().datetime({ offset: true }).nullable().optional(),
   }),
 );
 export type SessionLinkLiveStatus = z.infer<typeof SessionLinkLiveStatus>;
 
+/**
+ * A link whose status is read through the viewer's own connection, when the
+ * viewer has none: the connector to connect (`capabilityId` when the
+ * workspace offers it), so the panel can offer a quiet Connect.
+ */
+export const SessionLinkConnect = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1).max(80),
+    capabilityId: z.string().min(1).max(300).nullable(),
+  }),
+);
+export type SessionLinkConnect = z.infer<typeof SessionLinkConnect>;
+
 export const SessionLinkWithStatus = /* @__PURE__ */ defineSchema(() =>
-  SessionLink.extend({ status: SessionLinkLiveStatus.nullable() }),
+  SessionLink.extend({
+    status: SessionLinkLiveStatus.nullable(),
+    /** Set when the viewer could see live status after connecting. Absent from older servers. */
+    connect: SessionLinkConnect.nullable().optional(),
+  }),
 );
 export type SessionLinkWithStatus = z.infer<typeof SessionLinkWithStatus>;
 

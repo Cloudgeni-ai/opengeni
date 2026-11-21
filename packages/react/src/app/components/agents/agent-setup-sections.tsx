@@ -4,7 +4,7 @@
  * Can use (Allow, Ask first or Block per tool in its chats, for any
  * connection), Learns (its Memory entries) and Skills. Each saves on its own.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import type {
   Agent,
@@ -15,6 +15,8 @@ import type {
   KnowledgeEntrySummary,
   ScheduledTask,
 } from "@opengeni/sdk";
+
+import { AGENT_BUILT_IN_GITHUB_CONNECTOR, GITHUB_REST_TOOL_NAMES } from "@opengeni/contracts";
 
 import { automationWhenWords } from "../../../components/automations/automation-model";
 import { userErrorText } from "../../../ui/api-error";
@@ -198,44 +200,54 @@ export function withAgentRule(
   return permission === null ? rest : [...rest, { connector, tool, permission }];
 }
 
+/** Opengeni's own GitHub tools (`github_app`, `github_personal`), for their Can use row. */
+const loadBuiltInGitHubTools = async () => [...GITHUB_REST_TOOL_NAMES];
+
 function canUseTarget(item: CapabilityCatalogItem): boolean {
   return item.enabled && item.kind === "mcp" && item.source !== "built_in";
 }
 
 function ConnectorCanUse({
   agent,
-  workspaceId,
-  item,
+  connector,
+  name,
+  loadTools,
   rules,
   saving,
   onChange,
+  defaultLabel = "Connection's setting",
 }: {
   agent: Agent;
-  workspaceId: string;
-  item: CapabilityCatalogItem;
+  /** The rule key: a provider domain or a server id. */
+  connector: string;
+  name: string;
+  /** The connector's tool names, read when "Choose per tool" opens. */
+  loadTools: () => Promise<string[]>;
   rules: readonly AgentToolPermissionRule[];
   saving: boolean;
   onChange: (rules: AgentToolPermissionRule[]) => void;
+  /** The reset choice's name: what applies without a rule. */
+  defaultLabel?: string;
 }) {
-  const { client } = useAppContext();
-  const connector = agentConnectorKey(item);
   const [tools, setTools] = useState<string[] | null>(null);
   const [open, setOpen] = useState(false);
   const own = rules.filter((rule) => rule.connector === connector);
   const all = own.find((rule) => rule.tool === "*")?.permission;
   const toolRules = own.filter((rule) => rule.tool !== "*");
+  // Read once, the first time the list opens.
+  const loadToolsOnce = useRef(loadTools);
+  loadToolsOnce.current = loadTools;
+  const requested = useRef(false);
   useEffect(() => {
-    if (!open || tools !== null) return;
-    client.getConnectorToolPermissions(workspaceId, item.id).then(
-      (response) => setTools(response.tools.map((tool) => tool.name)),
-      () => setTools([]),
-    );
-  }, [client, item.id, open, tools, workspaceId]);
+    if (!open || requested.current) return;
+    requested.current = true;
+    loadToolsOnce.current().then(setTools, () => setTools([]));
+  }, [open]);
   const disabled = !agent.viewer.canEdit || saving;
   return (
     <SettingRow
       data-agent-can-use={connector}
-      label={item.name}
+      label={name}
       description={
         <button
           type="button"
@@ -252,26 +264,26 @@ function ConnectorCanUse({
       controlWidth="select"
       control={
         <PermissionSelect
-          label={`${item.name}: all tools`}
+          label={`${name}: all tools`}
           value={all ?? "default"}
           disabled={disabled}
-          resetLabel="Connection's setting"
+          resetLabel={defaultLabel}
           onChange={(permission) => onChange(withAgentRule(rules, connector, "*", permission))}
         />
       }
     >
       {open
-        ? (tools ?? toolRules.map((rule) => rule.tool)).map((tool) => (
+        ? [...new Set([...(tools ?? []), ...toolRules.map((rule) => rule.tool)])].map((tool) => (
             <SettingRow
               key={tool}
               label={<code className="text-xs">{tool}</code>}
               controlWidth="select"
               control={
                 <PermissionSelect
-                  label={`${item.name}: ${tool}`}
+                  label={`${name}: ${tool}`}
                   value={toolRules.find((rule) => rule.tool === tool)?.permission ?? "default"}
                   disabled={disabled}
-                  resetLabel={all ? "Same as all tools" : "Connection's setting"}
+                  resetLabel={all ? "Same as all tools" : defaultLabel}
                   onChange={(permission) =>
                     onChange(withAgentRule(rules, connector, tool, permission))
                   }
@@ -325,8 +337,14 @@ export function AgentCanUse({
   // Rules for connections not listed here (another person's, or not set up
   // yet, such as a ready-made agent's suggestion) still show and can go.
   const listed = useMemo(() => new Set((items ?? []).map(agentConnectorKey)), [items]);
+  // Opengeni's own GitHub tools have a row of their own (a github.com rule
+  // also covers GitHub connections, so a listed GitHub connection's row
+  // already does).
   const unlisted = agent.toolPermissions.filter(
-    (rule) => items !== null && !listed.has(rule.connector),
+    (rule) =>
+      items !== null &&
+      !listed.has(rule.connector) &&
+      rule.connector !== AGENT_BUILT_IN_GITHUB_CONNECTOR,
   );
   return (
     <DetailSection
@@ -338,13 +356,34 @@ export function AgentCanUse({
         <ConnectorCanUse
           key={item.id}
           agent={agent}
-          workspaceId={workspaceId}
-          item={item}
+          connector={agentConnectorKey(item)}
+          name={item.name}
+          loadTools={() =>
+            client.getConnectorToolPermissions(workspaceId, item.id).then((response) => {
+              const names = response.tools.map((tool) => tool.name);
+              // A github.com rule also covers Opengeni's own GitHub tools.
+              return agentConnectorKey(item) === AGENT_BUILT_IN_GITHUB_CONNECTOR
+                ? [...new Set([...names, ...GITHUB_REST_TOOL_NAMES])]
+                : names;
+            })
+          }
           rules={agent.toolPermissions}
           saving={saving}
           onChange={(rules) => void save(rules)}
         />
       ))}
+      {items !== null && !listed.has(AGENT_BUILT_IN_GITHUB_CONNECTOR) ? (
+        <ConnectorCanUse
+          agent={agent}
+          connector={AGENT_BUILT_IN_GITHUB_CONNECTOR}
+          name="GitHub"
+          loadTools={loadBuiltInGitHubTools}
+          defaultLabel="Default"
+          rules={agent.toolPermissions}
+          saving={saving}
+          onChange={(rules) => void save(rules)}
+        />
+      ) : null}
       {unlisted.map((rule) => (
         <SettingRow
           key={`${rule.connector}:${rule.tool}`}
@@ -365,9 +404,6 @@ export function AgentCanUse({
           }
         />
       ))}
-      {items?.length === 0 && unlisted.length === 0 ? (
-        <p className="m-0 text-sm text-fg-muted">No connections in this workspace yet.</p>
-      ) : null}
     </DetailSection>
   );
 }

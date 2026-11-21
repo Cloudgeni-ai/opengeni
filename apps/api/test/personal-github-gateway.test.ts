@@ -70,12 +70,14 @@ function harness(
   options: {
     authority?: PersonalGitHubGatewayAuthority;
     decision?: GatewayDecision;
+    readDecision?: Extract<GatewayDecision, { kind: "allow" } | { kind: "refuse" }>;
     respond?: (url: string, init: RequestInit) => Response;
   } = {},
 ) {
   const upstream: Upstream[] = [];
   const decisions: GatewayDecisionInput[] = [];
   const completions: string[] = [];
+  const reads: string[] = [];
   const authorized: Array<{
     url: string;
     tool: string;
@@ -93,6 +95,14 @@ function harness(
       decisions.push(input);
       return options.decision ?? { kind: "allow" };
     },
+    ...(options.readDecision
+      ? {
+          decideRead: async (_identity: unknown, title: string) => {
+            reads.push(title);
+            return options.readDecision!;
+          },
+        }
+      : {}),
     complete: async (_identity, requestId, outcome) => {
       completions.push(`${requestId}:${outcome}`);
     },
@@ -112,7 +122,7 @@ function harness(
       "api",
       services,
     );
-  return { services, send, upstream, decisions, completions, authorized };
+  return { services, send, upstream, decisions, completions, authorized, reads };
 }
 
 describe("personal GitHub gateway", () => {
@@ -170,6 +180,33 @@ describe("personal GitHub gateway", () => {
     expect(upstream[0]!.init.redirect).toBe("manual");
     expect(JSON.stringify(upstream)).not.toContain("session-pass");
     expect(decisions).toEqual([]);
+  });
+
+  test("a read the agent's Can use blocks is refused before GitHub sees it", async () => {
+    const blocked = harness({
+      readDecision: {
+        kind: "refuse",
+        status: 403,
+        waiting: false,
+        message: "Blocked by this agent's Can use: Read. Do not retry it.",
+      },
+    });
+    const response = await blocked.send("/repos/acme/widgets/pulls/1");
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { message: string }).message).toContain(
+      "Blocked by this agent's Can use",
+    );
+    expect(blocked.upstream).toEqual([]);
+    expect(blocked.reads).toEqual(["Read"]);
+    const allowed = harness({ readDecision: { kind: "allow" } });
+    expect((await allowed.send("/repos/acme/widgets/pulls/1")).status).toBe(200);
+    expect(allowed.upstream).toHaveLength(1);
+    // Writes go through the write policy, not the read check.
+    await allowed.send("/repos/acme/widgets/issues", {
+      method: "POST",
+      body: JSON.stringify({ title: "x" }),
+    });
+    expect(allowed.reads).toEqual(["Read"]);
   });
 
   test("passes redirects back to gh instead of following them", async () => {

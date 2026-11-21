@@ -129,4 +129,68 @@ describe("Linked panel", () => {
       "Nothing linked yet.",
     );
   });
+
+  test("Linear and Slack lines: state and assignee, replies and last reply", () => {
+    const now = new Date("2026-11-21T12:00:00.000Z");
+    expect(
+      sessionLinkStatusLine(
+        {
+          state: "open",
+          label: "In Progress",
+          title: "Login fails",
+          checks: null,
+          review: null,
+          assignee: "Ada",
+        },
+        now,
+      ),
+    ).toEqual({ text: "In Progress · Ada", tone: "neutral" });
+    expect(
+      sessionLinkStatusLine(
+        { state: "done", label: "Done", title: null, checks: null, review: null },
+        now,
+      )?.tone,
+    ).toBe("good");
+    expect(
+      sessionLinkStatusLine(
+        {
+          state: "unknown",
+          label: null,
+          title: "Deploy is stuck",
+          checks: null,
+          review: null,
+          replies: 3,
+          lastReplyAt: "2026-11-21T10:00:00.000Z",
+        },
+        now,
+      )?.text,
+    ).toBe("3 replies · last reply 2 hours ago");
+    expect(
+      sessionLinkStatusLine(
+        { state: "unknown", label: null, title: null, checks: null, review: null, replies: 0 },
+        now,
+      )?.text,
+    ).toBe("No replies");
+  });
+
+  test("a link the viewer can't read yet offers Connect where the host gives a place", () => {
+    const linear = link("l", "https://linear.app/acme/issue/ENG-1", {
+      kind: "issue",
+      provider: "linear",
+      ref: "ENG-1",
+      connect: { name: "Linear", capabilityId: "mcp:linear" },
+    });
+    const html = renderToStaticMarkup(
+      <LinkedList
+        status="ready"
+        links={[linear]}
+        connectHref={(connect) => `/plugins?suggested_capability=${connect.capabilityId}`}
+      />,
+    );
+    expect(html).toContain("Connect Linear");
+    expect(html).toContain("/plugins?suggested_capability=mcp:linear");
+    expect(renderToStaticMarkup(<LinkedList status="ready" links={[linear]} />)).not.toContain(
+      "Connect",
+    );
+  });
 });

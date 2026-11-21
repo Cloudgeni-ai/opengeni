@@ -339,6 +339,13 @@ export function agentToolPermissionFor(
   return best?.permission ?? null;
 }
 
+/**
+ * The connector key Can use names Opengeni's built-in GitHub tools by. It is
+ * GitHub's domain, so one rule also covers every GitHub connection, as the
+ * ready-made agents' rules do.
+ */
+export const AGENT_BUILT_IN_GITHUB_CONNECTOR = "github.com";
+
 /** What the reader may do with an agent. */
 export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({

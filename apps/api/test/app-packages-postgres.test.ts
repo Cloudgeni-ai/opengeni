@@ -808,15 +808,18 @@ test("packages carry the app's sidebar links, added once on install", async () =
             group: item.label,
             items: item.items.map((child) => child.type === "app" && child.appId),
           }
-        : item.type === "app" && item.appId,
+        : item.type === "live_list"
+          ? `list:${item.list}`
+          : item.type === "app" && item.appId,
     );
-  expect(summary()).toEqual([newId, { group: "Team", items: [newId] }]);
+  // After the built-in default's Pinned apps list (left out of the rail while empty).
+  expect(summary()).toEqual(["list:pinned_apps", newId, { group: "Team", items: [newId] }]);
 
   // A replay adds nothing again.
   const replay = await f.install({ package: pkg, idempotencyKey: key });
   expect(replay.json.replayed).toBe(true);
   expect(replay.json.installed.sidebar).toBe(0);
-  expect((await readSidebarLayoutForGrant(f.deps, f.installer.grant)).items).toHaveLength(2);
+  expect((await readSidebarLayoutForGrant(f.deps, f.installer.grant)).items).toHaveLength(3);
 }, 120_000);
 
 test("the same key with a different package installs a different app", async () => {

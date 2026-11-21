@@ -145,10 +145,10 @@ test("an admin's default reaches everyone; a member's own changes reach only the
       },
     ],
   });
-  expect(shape(mine.items)).toEqual([["eng", ["a", "c", "s"]], "my-docs"]);
+  expect(shape(mine.items)).toEqual(["pinned-apps", ["eng", ["a", "c", "s"]], "my-docs"]);
   expect(mine.personal.customized).toBe(true);
   const bob = await readSidebarLayoutForGrant(deps, ws.bob);
-  expect(shape(bob.items)).toEqual([["eng", ["a", "b", "c", "s"]]]);
+  expect(shape(bob.items)).toEqual(["pinned-apps", ["eng", ["a", "b", "c", "s"]]]);
   expect(bob.workspace.canEdit).toBe(false);
   expect(bob.workspace.items).toBeUndefined();
 });
@@ -181,12 +181,16 @@ test("people only see and add Apps they can open; gone Apps drop out of storage"
   });
   // Bob's private App is in his own sidebar only.
   expect(shape((await readSidebarLayoutForGrant(deps, ws.bob)).items)).toEqual([
+    "pinned-apps",
     "open",
     "old",
     "my-theirs",
   ]);
   await shared.admin`update workspace_artifacts set status = 'archived' where id = ${old}::uuid`;
-  expect(shape((await readSidebarLayoutForGrant(deps, ws.ada)).items)).toEqual(["open"]);
+  expect(shape((await readSidebarLayoutForGrant(deps, ws.ada)).items)).toEqual([
+    "pinned-apps",
+    "open",
+  ]);
   // The next write drops the archived App's link, and Ada's move lands next
   // to the item she sees even though the stored level held another.
   const after = await updateSidebarLayoutForGrant(deps, ws.admin, {
@@ -195,14 +199,49 @@ test("people only see and add Apps they can open; gone Apps drop out of storage"
       { op: "add", item: { id: "s", type: "link", url: "https://s.example.com", label: "S" } },
     ],
   });
-  expect(shape(after.workspace.items ?? [])).toEqual(["open", "s"]);
+  expect(shape(after.workspace.items ?? [])).toEqual(["pinned-apps", "open", "s"]);
   const [stored] = await shared.admin`select layout from sidebar_layouts
     where workspace_id = ${ws.workspaceId}::uuid and subject_id is null`;
   const storedIds = (stored!.layout as { items: { id: string }[] }).items.map((item) => item.id);
-  expect(storedIds).toEqual(["open", "s"]);
+  expect(storedIds).toEqual(["pinned-apps", "open", "s"]);
   const moved = await updateSidebarLayoutForGrant(deps, ws.ada, {
     scope: "personal",
     changes: [{ op: "move", itemId: "s", beforeId: "open" }],
   });
-  expect(shape(moved.items)).toEqual(["s", "open"]);
+  expect(shape(moved.items)).toEqual(["pinned-apps", "s", "open"]);
+});
+
+test("the built-in default is the Pinned apps list until an admin saves another", async () => {
+  if (!shared || !client) return;
+  const ws = await workspace();
+  const deps = { db: client.db };
+  const fresh = await readSidebarLayoutForGrant(deps, ws.ada);
+  expect(fresh.items).toEqual([
+    {
+      id: "pinned-apps",
+      origin: "workspace",
+      type: "live_list",
+      list: "pinned_apps",
+      label: "Pinned apps",
+      limit: 5,
+      apps: [],
+    },
+  ]);
+  expect(fresh.workspace.revision).toBe(0);
+  // A person hides it for themselves only.
+  const hidden = await updateSidebarLayoutForGrant(deps, ws.ada, {
+    scope: "personal",
+    changes: [{ op: "remove", itemId: "pinned-apps" }],
+  });
+  expect(hidden.items).toEqual([]);
+  expect(shape((await readSidebarLayoutForGrant(deps, ws.bob)).items)).toEqual(["pinned-apps"]);
+  // An admin's first change starts from it, and removing it is saved.
+  const removed = await updateSidebarLayoutForGrant(deps, ws.admin, {
+    scope: "workspace",
+    expectedRevision: 0,
+    changes: [{ op: "remove", itemId: "pinned-apps" }],
+  });
+  expect(removed.workspace.revision).toBe(1);
+  expect(removed.workspace.items).toEqual([]);
+  expect((await readSidebarLayoutForGrant(deps, ws.bob)).items).toEqual([]);
 });

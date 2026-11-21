@@ -5,7 +5,7 @@
 import {
   APP_PACKAGE_SIDEBAR_MAX,
   type AccessGrant,
-  readStoredSidebarLayout,
+  readWorkspaceSidebarLayout,
   type AppPackageProblem,
   type AppPackageSidebarItem,
   type ResolvedSidebarItem,
@@ -54,7 +54,7 @@ export async function exportAppSidebar(
       { accountId: grant.accountId, workspaceId: grant.workspaceId },
       null,
     );
-    const layout = readStoredSidebarLayout(rows.workspace?.layout);
+    const layout = readWorkspaceSidebarLayout(rows.workspace);
     const id = appId.toLowerCase();
     const isApp = (item: Record<string, unknown>) =>
       item.type === "app" && typeof item.appId === "string" && item.appId.toLowerCase() === id;

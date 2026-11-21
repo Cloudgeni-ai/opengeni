@@ -8,7 +8,7 @@ import {
   applyWorkspaceSidebarChanges,
   EMPTY_SIDEBAR_PERSONAL_CHANGES,
   mergeSidebarLayout,
-  readStoredSidebarLayout,
+  readWorkspaceSidebarLayout,
   readStoredSidebarPersonalChanges,
   sidebarLinkedAppIds,
   withoutGoneSidebarApps,
@@ -197,7 +197,7 @@ async function resolveSidebarLayout(
   subjectId: string | null,
   rows: Awaited<ReturnType<typeof readSidebarLayouts>>,
 ): Promise<SidebarLayoutResponse> {
-  const workspace = readStoredSidebarLayout(rows.workspace?.layout);
+  const workspace = readWorkspaceSidebarLayout(rows.workspace);
   const personal = readStoredSidebarPersonalChanges(rows.personal?.layout);
   const admin = isAdmin(grant);
   const merged = mergeSidebarLayout(
@@ -282,7 +282,7 @@ export async function updateSidebarLayoutForGrant(
     const current = target?.revision ?? 0;
     if (request.expectedRevision !== undefined && request.expectedRevision !== current)
       throw new HTTPException(409, { message: SIDEBAR_LAYOUT_CONFLICT_MESSAGE });
-    const workspace = readStoredSidebarLayout(rows.workspace?.layout);
+    const workspace = readWorkspaceSidebarLayout(rows.workspace);
     const personal = readStoredSidebarPersonalChanges(rows.personal?.layout);
     // Links to deleted or archived apps are dropped on the next write to the
     // scope that holds them: nobody can see them to remove them, and they
