@@ -425,6 +425,7 @@ const genericControlWriters = new Set([
   "packages/db/src/index.ts#appendSessionEventsAndUpdateSession",
   "packages/db/src/index.ts#appendSessionEventToSandboxGroup",
   "packages/db/src/index.ts#updateSessionTitleWithEvent",
+  "packages/db/src/index.ts#updateSessionCoordinationWithEvent",
   "packages/db/src/index.ts#updateSessionProfileWithEvent",
   // Reopening an archive-cancelled chat does not admit inference: it stays
   // paused until a Resume through the control path.
