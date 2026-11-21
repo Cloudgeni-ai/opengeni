@@ -1016,6 +1016,14 @@ export type SessionCreateRequestOptions = {
    * Trusted entry points only; not part of the public create request.
    */
   firstPartyMcpToolAdditions?: readonly FirstPartyMcpToolName[];
+  /**
+   * Whose agents the new chat may be bound to, when that is not the grant's
+   * subject: the owner of the Only me chat that delegates (an Only me
+   * automation's run acts as a service, yet its chat is its owner's). The
+   * database still requires an Only me agent's chat to be Only me. Trusted
+   * entry points only; not part of the public create request.
+   */
+  agentAccessSubjectId?: string;
 };
 
 const AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY = "agentChildAutomaticTitle" as const;
@@ -1132,6 +1140,8 @@ export async function createAndStartSessionWithOutcome(input: {
   unattended?: boolean;
   /** The agent (agents.id) the chat starts with, at its current revision. */
   boundAgentId?: string;
+  /** Whose agents count for `boundAgentId`, when not the creator (`subjectId`). */
+  boundAgentSubjectId?: string;
   /** The organization agent version the chat runs (`sessions.agent_version`). */
   boundOrgAgent?: {
     agentId: string;
@@ -1429,7 +1439,14 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
-          ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+          ...(input.boundAgentId
+          ? {
+              agent: {
+                id: input.boundAgentId,
+                ...(input.boundAgentSubjectId ? { subjectId: input.boundAgentSubjectId } : {}),
+              },
+            }
+          : {}),
           ...(input.boundOrgAgent ? { orgAgent: input.boundOrgAgent } : {}),
           ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
@@ -1549,7 +1566,14 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
-        ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
+        ...(input.boundAgentId
+          ? {
+              agent: {
+                id: input.boundAgentId,
+                ...(input.boundAgentSubjectId ? { subjectId: input.boundAgentSubjectId } : {}),
+              },
+            }
+          : {}),
         ...(input.boundOrgAgent ? { orgAgent: input.boundOrgAgent } : {}),
         ...(input.unattended ? { unattended: true } : {}),
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
@@ -4538,7 +4562,14 @@ async function createSessionForRequestInFileScope(
       instructions: payload.instructions ?? null,
       // The agent the chat starts with: its Instructions are a prompt layer
       // of their own, never copied into `instructions`.
-      ...(payload.agentId ? { boundAgentId: payload.agentId } : {}),
+      ...(payload.agentId
+        ? {
+            boundAgentId: payload.agentId,
+            ...(requestOptions.agentAccessSubjectId
+              ? { boundAgentSubjectId: requestOptions.agentAccessSubjectId }
+              : {}),
+          }
+        : {}),
       ...(orgAgent
         ? {
             boundOrgAgent: {

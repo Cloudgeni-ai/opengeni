@@ -717,7 +717,7 @@ describe("Slack interaction migration and durable database boundary", () => {
     // A later mark wins over an earlier one.
     await reopenSlackInteractionDeliveryAfter(db, { ...interaction, afterSequence: 1 });
     expect((await row())?.delivery_reopen_after_sequence).toBe(2);
-    const settle = async (settledTurn?: true) => {
+    const settle = async (settledTurn?: true, failed?: true) => {
       await admin`
         update slack_interactions
         set delivery_claim_holder_id = ${holder},
@@ -729,7 +729,9 @@ describe("Slack interaction migration and durable database boundary", () => {
           claimHolderId: holder,
           sequence: 10,
           ...(settledTurn ? { settledTurn } : {}),
-          state: "completed",
+          ...(failed
+            ? { state: "failed" as const, errorCode: "slack_unavailable" }
+            : { state: "completed" as const }),
         }),
       ).toBe(true);
       return await row();
@@ -793,7 +795,26 @@ describe("Slack interaction migration and durable database boundary", () => {
       ...interaction,
       afterSequence: wakeEvent!.sequence - 1,
     });
-    expect((await settle())?.terminal_delivery_state).toBe("completed");
+    expect((await settle(undefined, true))?.terminal_delivery_state).toBe("failed");
+    // The previous release's close (and one from before the mark existed)
+    // still leaves the thread open for the wake: the database keeps the rule.
+    await admin`
+      update slack_interactions set terminal_delivery_state = 'open' where id = ${interaction.id}`;
+    await reopenSlackInteractionDeliveryAfter(db, {
+      ...interaction,
+      afterSequence: wakeEvent!.sequence - 1,
+    });
+    await admin`
+      update slack_interactions
+      set last_delivered_session_event_sequence = 10, terminal_delivery_state = 'completed',
+        delivery_claim_holder_id = null, delivery_claim_expires_at = null,
+        delivery_retry_at = null, delivery_last_error_code = null, updated_at = now()
+      where id = ${interaction.id}`;
+    expect(await row()).toEqual({
+      terminal_delivery_state: "open",
+      last_delivered_session_event_sequence: Math.max(10, wakeEvent!.sequence - 1),
+      delivery_reopen_after_sequence: null,
+    });
     // A wake no longer pending (taken in, cancelled) closes as usual.
     await admin`
       update slack_interactions set terminal_delivery_state = 'open' where id = ${interaction.id}`;

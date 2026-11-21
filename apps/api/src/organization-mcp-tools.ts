@@ -219,8 +219,18 @@ const SkillFileInput = z
 export const SkillsSyncInput = z
   .object({
     direction: z
-      .enum(["upload", "pull"])
-      .describe("upload sends local Skill folders; pull returns the workspace's Skills."),
+      .enum(["upload", "pull", "repository"])
+      .describe(
+        "upload sends local Skill folders; pull returns the workspace's Skills; repository syncs every Skill folder of a public GitHub repository.",
+      ),
+    repository: z
+      .string()
+      .url()
+      .max(2048)
+      .optional()
+      .describe(
+        "For repository: a github.com repository or folder URL, such as https://github.com/owner/repo/tree/main/skills.",
+      ),
     skills: z
       .array(
         z
@@ -1117,14 +1127,32 @@ type CatalogEntry = {
   description?: string;
   inputSchema?: unknown;
   approval?: string;
+  permission?: { decision?: string; fromSetting?: boolean };
   source?: string;
 };
+
+/**
+ * What a call needs, for an outside agent: `none`, `human` (the person
+ * approves each call) or `blocked` (refused), and whether that comes from the
+ * tool itself or from the person's and workspace's tool settings.
+ */
+export function toolsSearchApproval(entry: Pick<CatalogEntry, "approval" | "permission">): {
+  approval: "none" | "human" | "blocked";
+  approvalSource: "tool" | "policy";
+} {
+  const decision = entry.permission?.decision;
+  const approvalSource = entry.permission?.fromSetting === true ? "policy" : "tool";
+  if (decision === "block") return { approval: "blocked", approvalSource };
+  if (decision === "ask" || entry.approval === "human")
+    return { approval: "human", approvalSource };
+  return { approval: "none", approvalSource };
+}
 
 const toolsSearch = tool({
   name: "tools_search",
   title: "Find workspace tools",
   description:
-    "Find the tools Opengeni agents use in this workspace (its connected apps, MCP servers and Opengeni's own), including ones that need the person's approval (approval: human). Call one with tool_call.",
+    "Find the tools Opengeni agents use in this workspace (its connected apps, MCP servers and Opengeni's own), including ones that need the person's approval (approval: human) and ones their tool settings block (approval: blocked). approvalSource says whether that comes from the tool or from tool settings. Call one with tool_call.",
   input: ToolsSearchInput,
   readOnly: true,
   run: async (context, args) =>
@@ -1160,7 +1188,7 @@ const toolsSearch = tool({
           toolName: entry.identity.toolName,
           ...(entry.title ? { title: entry.title } : {}),
           ...(entry.description ? { description: entry.description.slice(0, 1_000) } : {}),
-          approval: entry.approval ?? "none",
+          ...toolsSearchApproval(entry),
           ...(args.includeSchemas && entry.inputSchema ? { inputSchema: entry.inputSchema } : {}),
         })),
       });
@@ -1318,11 +1346,136 @@ function sameFiles(
   return key(left) === key(right);
 }
 
+/**
+ * Save Skill folders as the caller, one result each: Personal unless `scope`
+ * says otherwise, following the workspace's Agent learning setting (Review
+ * first leaves them pending), and skipping unchanged ones.
+ */
+async function uploadSkills(
+  context: OrganizationActionContext,
+  workspaceId: string,
+  listed: SkillSummary[],
+  scope: "user" | "workspace" | "organization",
+  uploads: ReadonlyArray<{
+    name?: string | undefined;
+    files: ReadonlyArray<{ path: string; content: string }>;
+  }>,
+  reason: string,
+): Promise<Array<Record<string, unknown>>> {
+  const results: Array<Record<string, unknown>> = [];
+  for (const upload of uploads) {
+    const main = upload.files.find((file) => file.path === "SKILL.md");
+    const name = upload.name ?? (main ? skillFrontmatterName(main.content) : null);
+    if (!main) {
+      results.push({
+        name: upload.name ?? null,
+        status: "invalid",
+        error: "The folder has no SKILL.md.",
+      });
+      continue;
+    }
+    if (!name) {
+      results.push({
+        name: null,
+        status: "invalid",
+        error: "SKILL.md needs YAML frontmatter between --- lines with name: and description:.",
+      });
+      continue;
+    }
+    const stableKey = skillKey(name);
+    if (!stableKey) {
+      results.push({
+        name,
+        status: "invalid",
+        error: "The Skill's name needs letters or digits.",
+      });
+      continue;
+    }
+    const current = listed.find(
+      (skill) => skill.stableKey === stableKey && skill.scope === scope,
+    );
+    if (current) {
+      const read = await action(context, "readWorkspaceSkill", {
+        pathParameters: { workspaceId, skillId: current.id },
+      });
+      const files = read.ok
+        ? ((
+            read.body as {
+              files?: Array<{ path: string; content: string }>;
+            }
+          ).files ?? [])
+        : null;
+      if (files && sameFiles(files, upload.files)) {
+        results.push({
+          name: stableKey,
+          status: "unchanged",
+          skillId: current.id,
+        });
+        continue;
+      }
+    }
+    const filesDigest = createHash("sha256").update(JSON.stringify(upload.files)).digest("hex");
+    const skillId =
+      current?.id ?? stableUuid("mcp-skill", workspaceId, callerKey(context), scope, stableKey);
+    // The exact head the lifecycle checks: its active revision (null while
+    // only a pending one exists) and scope version; a new Skill starts at 1.
+    const expectedRevisionId = current ? current.activeRevisionId : null;
+    const operationId = stableUuid(
+      "mcp-skill-save",
+      workspaceId,
+      callerKey(context),
+      skillId,
+      String(expectedRevisionId),
+      filesDigest,
+    );
+    const saved = await action(context, "saveWorkspaceSkill", {
+      pathParameters: { workspaceId },
+      body: {
+        operationId,
+        skillId,
+        expectedRevisionId,
+        expectedScopeVersion: current ? current.scopeVersion : 1,
+        scope,
+        stableKey,
+        files: upload.files,
+        deletions: [],
+        reason,
+      },
+    });
+    if (!saved.ok) {
+      const envelope = errorEnvelope(saved.body);
+      results.push({
+        name: stableKey,
+        status:
+          saved.status === 409
+            ? "conflict"
+            : saved.status === 400 || saved.status === 422
+              ? "invalid"
+              : "failed",
+        error: envelope.message ?? errorMessage(saved.status ?? 0, saved.body),
+      });
+      continue;
+    }
+    const receipt = saved.body as {
+      outcome?: string;
+      skillId?: string;
+      revisionId?: string;
+    };
+    results.push({
+      name: stableKey,
+      status: receipt.outcome === "pending" ? "pending_review" : current ? "updated" : "created",
+      skillId: receipt.skillId ?? skillId,
+      ...(receipt.revisionId ? { revisionId: receipt.revisionId } : {}),
+    });
+  }
+  return results;
+}
+
 const skillsSync = tool({
   name: "skills_sync",
   title: "Sync Skills",
   description:
-    "Upload local Skill folders to Opengeni, or pull the workspace's Skills to write locally. Uploads are Personal unless you pass scope, follow the workspace's Agent learning setting (Review first leaves them waiting for the person's review), skip unchanged Skills and report each Skill's result.",
+    "Upload local Skill folders to Opengeni, sync every Skill folder of a GitHub repository (direction repository, read at one commit), or pull the workspace's Skills to write locally. Uploads and syncs are Personal unless you pass scope, follow the workspace's Agent learning setting (Review first leaves them waiting for the person's review), skip unchanged Skills and report each Skill's result.",
   input: SkillsSyncInput,
   readOnly: false,
   run: async (context, args) =>
@@ -1356,115 +1509,65 @@ const skillsSync = tool({
         }
         return json({ skills: pulled });
       }
-      if (args.skills.length === 0) return failure("Pass skills to upload.");
-      const results: Array<Record<string, unknown>> = [];
-      for (const upload of args.skills) {
-        const main = upload.files.find((file) => file.path === "SKILL.md");
-        const name = upload.name ?? (main ? skillFrontmatterName(main.content) : null);
-        if (!main) {
-          results.push({
-            name: upload.name ?? null,
-            status: "invalid",
-            error: "The folder has no SKILL.md.",
-          });
-          continue;
+      if (args.direction === "repository") {
+        if (!args.repository) return failure("Pass repository: a GitHub repository or folder URL.");
+        if (!context.readSkillRepository) {
+          return failure("Syncing from a repository isn't available on this server.");
         }
-        if (!name) {
-          results.push({
-            name: null,
-            status: "invalid",
-            error: "SKILL.md needs YAML frontmatter between --- lines with name: and description:.",
-          });
-          continue;
+        let snapshot: Awaited<ReturnType<NonNullable<typeof context.readSkillRepository>>>;
+        try {
+          snapshot = await context.readSkillRepository(args.repository);
+        } catch (error) {
+          return failure(
+            error instanceof Error && error.message
+              ? `Couldn't read the repository: ${error.message}`
+              : "Couldn't read the repository.",
+          );
         }
-        const stableKey = skillKey(name);
-        if (!stableKey) {
-          results.push({
-            name,
-            status: "invalid",
-            error: "The Skill's name needs letters or digits.",
-          });
-          continue;
-        }
-        const current = listed.skills.find(
-          (skill) => skill.stableKey === stableKey && skill.scope === args.scope,
-        );
-        if (current) {
-          const read = await action(context, "readWorkspaceSkill", {
-            pathParameters: { workspaceId, skillId: current.id },
-          });
-          const files = read.ok
-            ? ((
-                read.body as {
-                  files?: Array<{ path: string; content: string }>;
-                }
-              ).files ?? [])
-            : null;
-          if (files && sameFiles(files, upload.files)) {
-            results.push({
-              name: stableKey,
-              status: "unchanged",
-              skillId: current.id,
-            });
-            continue;
-          }
-        }
-        const filesDigest = createHash("sha256").update(JSON.stringify(upload.files)).digest("hex");
-        const skillId =
-          current?.id ??
-          stableUuid("mcp-skill", workspaceId, callerKey(context), args.scope, stableKey);
-        // The exact head the lifecycle checks: its active revision (null while
-        // only a pending one exists) and scope version; a new Skill starts at 1.
-        const expectedRevisionId = current ? current.activeRevisionId : null;
-        const operationId = stableUuid(
-          "mcp-skill-save",
+        const source = `${snapshot.owner}/${snapshot.repository}@${snapshot.commit.slice(0, 12)}`;
+        const results = await uploadSkills(
+          context,
           workspaceId,
-          callerKey(context),
-          skillId,
-          String(expectedRevisionId),
-          filesDigest,
+          listed.skills,
+          args.scope,
+          snapshot.skills.map((skill) => ({ files: skill.files })),
+          `Synced from ${source}`,
         );
-        const saved = await action(context, "saveWorkspaceSkill", {
-          pathParameters: { workspaceId },
-          body: {
-            operationId,
-            skillId,
-            expectedRevisionId,
-            expectedScopeVersion: current ? current.scopeVersion : 1,
-            scope: args.scope,
-            stableKey,
-            files: upload.files,
-            deletions: [],
-            reason: "Uploaded from a connected agent",
-          },
+        snapshot.skills.forEach((skill, index) => {
+          if (results[index]) results[index] = { ...results[index], path: skill.path };
         });
-        if (!saved.ok) {
-          const envelope = errorEnvelope(saved.body);
-          results.push({
-            name: stableKey,
-            status:
-              saved.status === 409
-                ? "conflict"
-                : saved.status === 400 || saved.status === 422
-                  ? "invalid"
-                  : "failed",
-            error: envelope.message ?? errorMessage(saved.status ?? 0, saved.body),
-          });
-          continue;
-        }
-        const receipt = saved.body as {
-          outcome?: string;
-          skillId?: string;
-          revisionId?: string;
-        };
-        results.push({
-          name: stableKey,
-          status:
-            receipt.outcome === "pending" ? "pending_review" : current ? "updated" : "created",
-          skillId: receipt.skillId ?? skillId,
-          ...(receipt.revisionId ? { revisionId: receipt.revisionId } : {}),
+        return json({
+          scope: args.scope,
+          repository: `https://github.com/${snapshot.owner}/${snapshot.repository}`,
+          commit: snapshot.commit,
+          results: [
+            ...results,
+            ...snapshot.skipped.map((skip) => ({
+              path: skip.path,
+              status: "invalid",
+              error: skip.reason,
+            })),
+          ],
+          ...(snapshot.truncated
+            ? {
+                note: "Only the first 50 Skill folders were synced. Sync a folder URL for the rest.",
+              }
+            : results.some((result) => result.status === "pending_review")
+              ? {
+                  note: "Skills waiting for review appear on the Skills page in Opengeni for the person to approve.",
+                }
+              : {}),
         });
       }
+      if (args.skills.length === 0) return failure("Pass skills to upload.");
+      const results = await uploadSkills(
+        context,
+        workspaceId,
+        listed.skills,
+        args.scope,
+        args.skills,
+        "Uploaded from a connected agent",
+      );
       return json({
         scope: args.scope,
         results,

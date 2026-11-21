@@ -108,4 +108,44 @@ describe("agent Can use", () => {
       "block",
     );
   });
+
+  test("the strictest agent and its rule are named on the call", () => {
+    const canUse = agentCanUseFor({
+      ruleSets: [
+        {
+          agent: { id: "agent-1", name: "Writer" },
+          rules: [{ connector: "*", tool: "*", permission: "ask" }],
+        },
+        {
+          agent: { id: "agent-2", name: "Reviewer" },
+          rules: [{ connector: "route-gmail-1", tool: "send_email", permission: "block" }],
+        },
+      ],
+      bindings: [],
+      servers: [],
+    })!;
+    const result = withAgentCanUse(canUse, call);
+    expect(result.minimumDecision).toBe("block");
+    expect(result.minimumDecisionBy).toEqual({
+      agentId: "agent-2",
+      agentName: "Reviewer",
+      connector: "route-gmail-1",
+      tool: "send_email",
+      permission: "block",
+    });
+    // An existing stricter floor keeps its own reason.
+    const asks = agentCanUseFor({
+      ruleSets: [
+        {
+          agent: { id: "agent-1", name: "Writer" },
+          rules: [{ connector: "*", tool: "*", permission: "ask" }],
+        },
+      ],
+      bindings: [],
+      servers: [],
+    })!;
+    const floored = withAgentCanUse(asks, { ...call, minimumDecision: "block" });
+    expect(floored.minimumDecision).toBe("block");
+    expect(floored.minimumDecisionBy).toBeUndefined();
+  });
 });

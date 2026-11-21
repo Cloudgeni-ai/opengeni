@@ -48,7 +48,10 @@ function saveError(title: string, error: unknown) {
    Starts when.
    -------------------------------------------------------------------------- */
 
-/** The automations whose runs are chats with this agent. */
+/**
+ * The automations whose runs are chats with this agent. The server filters
+ * by agent; this also drops anything an older server returned unfiltered.
+ */
 export function agentTriggers(tasks: readonly ScheduledTask[], agentId: string): ScheduledTask[] {
   return tasks.filter((task) => task.agentConfig.agentId === agentId);
 }
@@ -62,7 +65,7 @@ export function AgentStartsWhen({ agent, workspaceId }: { agent: Agent; workspac
   const [busy, setBusy] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    client.listScheduledTasks(workspaceId, { limit: 200 }).then(
+    client.listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 }).then(
       (list) => live && setTasks(agentTriggers(list, agent.id)),
       () => live && setTasks([]),
     );

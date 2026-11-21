@@ -1,9 +1,11 @@
 /**
  * Token buckets per connected agent (an organization MCP connection, a
  * personal key or an organization key), so one runaway agent can't flood the
- * API or start work without end. In process memory: each API process limits
- * on its own. Idle buckets refill to full and are dropped first once the map
- * is at its size bound, so the map never grows without end.
+ * API or start work without end. This one is in process memory: each API
+ * process limits on its own. Idle buckets refill to full and are dropped
+ * first once the map is at its size bound, so the map never grows without
+ * end. The organization MCP server uses the shared limiter below, with this
+ * one as its fallback.
  */
 export type ConnectionRateLimiter = {
   /** Seconds until the next call is admitted, or 0 when admitted now (and counted). */
@@ -44,6 +46,49 @@ export function createConnectionRateLimiter(options: {
         return Math.max(1, Math.ceil((1 - bucket.tokens) / refillPerMs / 1_000));
       bucket.tokens -= 1;
       return 0;
+    },
+  };
+}
+
+/** A bucket every API process shares; seconds until admitted, or 0. */
+export type SharedConnectionRateLimiter = {
+  admit(input: { accountId: string; key: string }): Promise<number>;
+};
+
+/**
+ * The same buckets counted in Postgres (`admitMcpConnectionRateLimit`), so
+ * every API process shares one budget per connection. When the shared count
+ * can't be read (the database is briefly unreachable), the call is limited
+ * by this process's own bucket instead of failing.
+ */
+export function createSharedConnectionRateLimiter(options: {
+  capacity: number;
+  refillPerSecond: number;
+  admitShared: (input: {
+    accountId: string;
+    key: string;
+    capacity: number;
+    refillPerSecond: number;
+  }) => Promise<number>;
+  onFallback?: (error: unknown) => void;
+}): SharedConnectionRateLimiter {
+  const local = createConnectionRateLimiter({
+    capacity: options.capacity,
+    refillPerSecond: options.refillPerSecond,
+  });
+  return {
+    async admit({ accountId, key }) {
+      try {
+        return await options.admitShared({
+          accountId,
+          key,
+          capacity: options.capacity,
+          refillPerSecond: options.refillPerSecond,
+        });
+      } catch (error) {
+        options.onFallback?.(error);
+        return local.admit(key);
+      }
     },
   };
 }

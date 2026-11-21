@@ -664,6 +664,7 @@ import {
 export { pinSubscriptionCoreSessionCodexAccount } from "./subscription-core-codex-compat";
 export * from "./scheduled-task-access";
 export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
+export { admitMcpConnectionRateLimit } from "./mcp-connection-rate-limits";
 export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -17189,46 +17190,20 @@ export async function closeSlackInteractionDelivery(
      * If a wake was marked meanwhile (see reopenSlackInteractionDeliveryAfter)
      * and its update is still pending, or went to a turn that has not ended
      * by `sequence`, the delivery stays open for the woken answer, skipping to
-     * the wake. A wake whose turn already ended here closes as usual. Omitted
-     * (a failed delivery): always closes.
+     * the wake. A wake whose turn already ended here closes as usual. The
+     * database decides that (trigger slack_interactions_delivery_stays_open_for_wake_v1,
+     * migration 1524), so every release's close behaves the same; a close
+     * with an `errorCode` (a failed delivery) always closes. Kept for callers.
      */
     settledTurn?: boolean;
   },
 ): Promise<boolean> {
-  // Qualified by hand: inside UPDATE ... SET the outer row's columns must not
-  // resolve to the subquery's same-named ones.
-  const reopen =
-    input.settledTurn !== true
-      ? sql`false`
-      : sql`("slack_interactions"."delivery_reopen_after_sequence" is not null and exists (
-          select 1 from session_events wake
-          join session_system_updates wake_update
-            on wake_update.workspace_id = wake.workspace_id
-            and wake_update.session_id = wake.session_id
-            and wake_update.id::text = wake.payload ->> 'updateId'
-          where wake.workspace_id = "slack_interactions"."workspace_id"
-            and wake.session_id = "slack_interactions"."session_id"
-            and wake.sequence = "slack_interactions"."delivery_reopen_after_sequence" + 1
-            and wake.type = 'system.update.pending'
-            and (wake_update.state = 'pending'
-              or (wake_update.state = 'delivered'
-                and wake_update.delivered_turn_id is not null
-                and not exists (
-                  select 1 from session_events done
-                  where done.workspace_id = wake.workspace_id
-                    and done.session_id = wake.session_id
-                    and done.turn_id = wake_update.delivered_turn_id
-                    and done.type in ('turn.completed', 'turn.failed', 'turn.cancelled')
-                    and done.sequence <= ${Math.trunc(input.sequence)}
-                )))
-        ))`;
   return await withRlsContext(db, input, async (scopedDb) => {
     const rows = await scopedDb
       .update(schema.slackInteractions)
       .set({
-        lastDeliveredSessionEventSequence: sql`case when ${reopen} then greatest(${input.sequence}, ${schema.slackInteractions.deliveryReopenAfterSequence}) else ${input.sequence} end`,
-        // A wake asked to reopen after the run this pass settled: stay open for its answer.
-        terminalDeliveryState: sql`case when ${reopen} then 'open' else ${input.state}::text end`,
+        lastDeliveredSessionEventSequence: input.sequence,
+        terminalDeliveryState: input.state,
         deliveryReopenAfterSequence: null,
         deliveryClaimHolderId: null,
         deliveryClaimExpiresAt: null,
@@ -22518,6 +22493,8 @@ export async function listScheduledTasks(
    * null reads shared schedules only.
    */
   viewerSubjectId?: string | null,
+  /** Only automations whose runs are chats with this agent (`agentConfig.agentId`). */
+  filters: { agentId?: string } = {},
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -22527,6 +22504,9 @@ export async function listScheduledTasks(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           isNull(schema.scheduledTasks.deletedAt),
+          ...(filters.agentId
+            ? [sql`${schema.scheduledTasks.agentConfig} ->> 'agentId' = ${filters.agentId}`]
+            : []),
           ...(viewerSubjectId === undefined
             ? []
             : [
@@ -31414,6 +31394,8 @@ export type ConnectorActionInvocation = {
    * explicit Block still blocks; nothing here loosens a decision.
    */
   minimumDecision?: "ask" | "block";
+  /** The agent's Can use rule behind `minimumDecision`, recorded on its request. */
+  minimumDecisionBy?: import("@opengeni/contracts").ToolReviewAgentRule;
   /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation). It is admitted once, from
@@ -31430,6 +31412,8 @@ export type PrepareConnectorActionApprovalResult =
       requestId?: string;
       approvalStatus?: string;
       actionFingerprint: string;
+      /** The agent's Can use rule that made it ask or blocked it. */
+      agentRule?: import("@opengeni/contracts").ToolReviewAgentRule;
     };
 
 export type BeginConnectorActionExecutionResult =
@@ -31452,6 +31436,8 @@ export type BeginConnectorActionExecutionResult =
         | "not_executed";
       requestId: string;
       actionFingerprint: string;
+      /** With `blocked`, the agent's Can use rule that blocked it. */
+      agentRule?: import("@opengeni/contracts").ToolReviewAgentRule;
     };
 
 const CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX = 2048;
@@ -31793,6 +31779,8 @@ async function insertConnectorActionRequest(
       policyVersion: entry?.version ?? null,
       policySource: input.resolved.source,
       policyDecision: connectorActionPolicyDecision(input.resolved),
+      agentRule:
+        input.resolved.source === "default" ? (input.resolved.agentRule ?? null) : null,
       actionFingerprint: input.invocation.actionFingerprint!,
       ...(input.status === "pending"
         ? {
@@ -32325,6 +32313,7 @@ async function priorConnectorActionPreparation(
     approvalStatus: row.status,
     requestId: row.id,
     actionFingerprint: row.actionFingerprint,
+    ...(row.agentRule ? { agentRule: row.agentRule } : {}),
   };
 }
 
@@ -32409,6 +32398,7 @@ export async function prepareConnectorActionApproval(
         }),
         invocation.minimumDecision,
         normalized.toolName,
+        invocation.minimumDecisionBy,
       );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
@@ -32447,6 +32437,7 @@ export async function prepareConnectorActionApproval(
         approvalStatus: row.status,
         requestId: row.id,
         actionFingerprint: row.actionFingerprint,
+        ...(row.agentRule ? { agentRule: row.agentRule } : {}),
       } as const;
     },
   );
@@ -32481,6 +32472,7 @@ export async function previewConnectorActionApproval(
         }),
         invocation.minimumDecision,
         normalized.toolName,
+        invocation.minimumDecisionBy,
       );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
@@ -32492,6 +32484,9 @@ export async function previewConnectorActionApproval(
         managed: true,
         decision: connectorActionPolicyDecision(resolved),
         actionFingerprint: durable.actionFingerprint,
+        ...(resolved.source === "default" && resolved.agentRule
+          ? { agentRule: resolved.agentRule }
+          : {}),
       } as const;
     },
   );
@@ -32551,7 +32546,12 @@ export async function beginConnectorActionExecution(
         ? { defaultDecision: normalized.defaultDecision }
         : {}),
     });
-    return withMinimumConnectorDecision(resolved, invocation.minimumDecision, normalized.toolName);
+    return withMinimumConnectorDecision(
+      resolved,
+      invocation.minimumDecision,
+      normalized.toolName,
+      invocation.minimumDecisionBy,
+    );
   };
   return await runConnectorActionLedgerTransaction(
     db,
@@ -32734,6 +32734,7 @@ export async function beginConnectorActionExecution(
         reason,
         requestId: row.id,
         actionFingerprint: row.actionFingerprint,
+        ...(reason === "blocked" && row.agentRule ? { agentRule: row.agentRule } : {}),
       } as const;
     },
   );

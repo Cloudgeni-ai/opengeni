@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
 import {
+  createdPullRequest,
   gatewayBearer,
   gatewayRepositoryDecision,
   handlePersonalGitHubGatewayRequest,
@@ -999,5 +1000,49 @@ describe("force updates and deletions of refs", () => {
         expect(context.upstream.some((request) => request.init.method === "DELETE")).toBe(false);
       }
     }
+  });
+
+  test("a pull request gh opens is linked to the chat, and the answer passes through", async () => {
+    const linked: unknown[] = [];
+    const created = {
+      html_url: "https://github.com/acme/widgets/pull/7",
+      title: "Fix the widget",
+      number: 7,
+    };
+    const rest = harness({ respond: () => Response.json(created, { status: 201 }) });
+    rest.services.linkPullRequest = async (_authority, pullRequest) => {
+      linked.push(pullRequest);
+    };
+    const response = await rest.send("/repos/acme/widgets/pulls", {
+      method: "POST",
+      body: JSON.stringify({ title: "Fix the widget", head: "f", base: "main" }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual(created);
+    expect(linked).toEqual([{ url: created.html_url, title: "Fix the widget" }]);
+    // A failed link never fails the command, and other writes link nothing.
+    rest.services.linkPullRequest = async () => {
+      throw new Error("down");
+    };
+    expect(
+      (
+        await rest.send("/repos/acme/widgets/pulls", {
+          method: "POST",
+          body: JSON.stringify({ title: "T", head: "f", base: "main" }),
+        })
+      ).status,
+    ).toBe(201);
+    expect(linked).toHaveLength(1);
+  });
+
+  test("reads the created pull request from REST and GraphQL answers", () => {
+    expect(
+      createdPullRequest(
+        { data: { createPullRequest: { pullRequest: { url: "https://github.com/a/b/pull/3" } } } },
+        { variables: { input: { title: "From input" } } },
+      ),
+    ).toEqual({ url: "https://github.com/a/b/pull/3", title: "From input" });
+    expect(createdPullRequest({ html_url: "https://evil.example/a/b/pull/3" }, null)).toBeNull();
+    expect(createdPullRequest(undefined, null)).toBeNull();
   });
 });

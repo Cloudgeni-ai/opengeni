@@ -182,6 +182,130 @@ function buildResolvedImport(
   };
 }
 
+/** At most this many Skill folders are read from one repository. */
+export const SKILL_REPOSITORY_MAX_SKILLS = 50;
+/** The bytes read from one repository across all its Skills. */
+const SKILL_REPOSITORY_MAX_TOTAL_BYTES = 4 * PORTABLE_SKILL_MAX_TOTAL_BYTES;
+
+export type SkillRepositorySnapshot = Readonly<{
+  owner: string;
+  repository: string;
+  ref: string;
+  /** The commit every Skill was read at. */
+  commit: string;
+  /** Each Skill folder (repository-relative, `.` for the root), with its files. */
+  skills: ReadonlyArray<Readonly<{ path: string; files: readonly SkillLibraryFile[] }>>;
+  /** Folders with a SKILL.md that couldn't be read, and why. */
+  skipped: ReadonlyArray<Readonly<{ path: string; reason: string }>>;
+  /** More Skill folders than SKILL_REPOSITORY_MAX_SKILLS were found. */
+  truncated: boolean;
+}>;
+
+/**
+ * Every Skill folder (a folder with a SKILL.md) of a GitHub repository, or
+ * of one folder of it, read at one commit: the files of a folder are those
+ * under it that belong to no deeper Skill folder. A folder that can't be read
+ * (a symbolic link, a submodule, too large, not UTF-8 text) is reported in
+ * `skipped`, and the others are still returned. Accepts the same GitHub URLs
+ * as a Skill import (`/tree/<ref>/<path>` names a branch and folder).
+ */
+export async function readSkillRepository(
+  rawUrl: string,
+  client: GitHubSkillSourceClient,
+): Promise<SkillRepositorySnapshot> {
+  const parsed = parseSkillSource(rawUrl);
+  if (parsed.source !== "github") {
+    throw new HTTPException(422, { message: "Use a github.com repository or folder URL" });
+  }
+  const commit = await client.resolveCommit(parsed.owner, parsed.repository, parsed.ref);
+  if (!gitCommit.test(commit)) {
+    throw new HTTPException(422, { message: "GitHub returned an invalid source commit" });
+  }
+  const tree = await client.listTree(parsed.owner, parsed.repository, commit);
+  const base = parsed.requestedPath && parsed.requestedPath !== "." ? parsed.requestedPath : null;
+  const within = (path: string) => !base || path === base || path.startsWith(`${base}/`);
+  const roots = tree
+    .filter(
+      (entry) =>
+        entry.type === "blob" &&
+        entry.mode !== "120000" &&
+        (entry.path === "SKILL.md" || entry.path.endsWith("/SKILL.md")),
+    )
+    .map((entry) => (entry.path === "SKILL.md" ? "." : entry.path.slice(0, -"/SKILL.md".length)))
+    .filter((root) => (root === "." ? !base : within(root)))
+    .sort();
+  const selected = roots.slice(0, SKILL_REPOSITORY_MAX_SKILLS);
+  const rootSet = new Set(roots);
+  // The deepest Skill folder a path belongs to.
+  const ownerOf = (path: string): string => {
+    const segments = path.split("/");
+    for (let length = segments.length - 1; length > 0; length -= 1) {
+      const candidate = segments.slice(0, length).join("/");
+      if (rootSet.has(candidate)) return candidate;
+    }
+    return ".";
+  };
+  const skills: Array<{ path: string; files: SkillLibraryFile[] }> = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
+  let totalBytes = 0;
+  for (const root of selected) {
+    const prefix = root === "." ? "" : `${root}/`;
+    const inside = tree.filter(
+      (entry) => entry.path.startsWith(prefix) && ownerOf(entry.path) === root,
+    );
+    const unsupported = inside.find(
+      (entry) => entry.type === "commit" || (entry.type === "blob" && entry.mode === "120000"),
+    );
+    if (unsupported) {
+      skipped.push({ path: root, reason: "It has a symbolic link or submodule." });
+      continue;
+    }
+    const blobs = inside.filter((entry) => entry.type === "blob");
+    const declared = blobs.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+    if (blobs.length > PORTABLE_SKILL_MAX_FILES || declared > PORTABLE_SKILL_MAX_TOTAL_BYTES) {
+      skipped.push({ path: root, reason: "It is too large." });
+      continue;
+    }
+    if (totalBytes + declared > SKILL_REPOSITORY_MAX_TOTAL_BYTES) {
+      skipped.push({
+        path: root,
+        reason: "The repository's Skills are too large to read at once.",
+      });
+      continue;
+    }
+    try {
+      const files = await mapConcurrent(blobs, maxConcurrentBlobReads, async (entry) => {
+        const bytes = await client.readBlob(parsed.owner, parsed.repository, entry.sha);
+        if (bytes.byteLength > PORTABLE_SKILL_MAX_FILE_BYTES)
+          throw new SkippedSkill("It is too large.");
+        totalBytes += bytes.byteLength;
+        let content: string;
+        try {
+          content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+        } catch {
+          throw new SkippedSkill(`${relativeSkillPath(entry.path, root)} is not UTF-8 text.`);
+        }
+        return { path: relativeSkillPath(entry.path, root), content };
+      });
+      skills.push({ path: root, files });
+    } catch (error) {
+      if (!(error instanceof SkippedSkill)) throw error;
+      skipped.push({ path: root, reason: error.message });
+    }
+  }
+  return {
+    owner: parsed.owner,
+    repository: parsed.repository,
+    ref: parsed.ref,
+    commit,
+    skills,
+    skipped,
+    truncated: roots.length > selected.length,
+  };
+}
+
+class SkippedSkill extends Error {}
+
 export function portableSkillPluginKey(
   source: Pick<SkillImportPreview, "owner" | "repository" | "sourcePath">,
 ): string {

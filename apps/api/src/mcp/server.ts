@@ -698,6 +698,7 @@ import {
   agentRefToolInput,
   delegatedChatInstructions,
   resolveDelegationAgent,
+  delegationAgentSubject,
 } from "../agent-delegation";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -7198,6 +7199,8 @@ function registerWorkspaceOrchestrationTools(
           const { machineTarget, title, projectId, agentName, ...request } = args;
           // Delegation by name: the child is a chat with that agent.
           let delegated: { agentId: string; instructions?: string } | null = null;
+          // Whose agents the child may run, when not the grant's subject.
+          let agentAccessSubjectId: string | undefined;
           if (agentName !== undefined) {
             // The child inherits the calling chat's privacy; its Memory
             // guidance must match what the knowledge tools will allow.
@@ -7229,6 +7232,10 @@ function registerWorkspaceOrchestrationTools(
               agentId: resolved.agent.id,
               ...(instructions !== undefined ? { instructions } : {}),
             };
+            const agentSubject = delegationAgentSubject(grant, caller);
+            if (agentSubject && agentSubject !== grant.subjectId) {
+              agentAccessSubjectId = agentSubject;
+            }
           }
           const rawRequest = {
             ...request,
@@ -7255,6 +7262,7 @@ function registerWorkspaceOrchestrationTools(
             rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
+            agentAccessSubjectId ? { agentAccessSubjectId } : {},
           );
           return json(
             sessionCreateMutationReceipt(
