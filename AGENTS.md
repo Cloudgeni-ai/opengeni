@@ -828,49 +828,13 @@ a `batch/<id>` branch (CI runs exactly what the combined change affects,
 including integration, end-to-end and browser lanes) and lands each PR as one
 squash commit, so the PR shows as merged. Agent comments, VM attestations and
 reviewer session UUIDs are not admission requirements, and the batcher adds no
-human or agent approval gate beyond the repository's protection policy and the
-model request review below.
+human or agent approval gate beyond the repository's protection policy.
 
 ### Model request changes
 
-A change to what Opengeni sends to model providers lands only with an
-approving review by the maintainer, `@jorgensandhaug`, on the PR's current
-head commit. That covers provider request construction and adapters (request
-bodies, headers, betas, model options, reasoning replay, signatures,
-cache-control placement), history projection and replay into model input,
-compaction requests, system prompt and context assembly, and central
-model-facing tool schema and result shaping. The exact paths are the model
-request section of [`.github/CODEOWNERS`](.github/CODEOWNERS). The merge
-batcher enforces it with its own check: it holds such a PR, even with
-`queue-ready`, until the maintainer approves its head, and every new push needs
-a new approval. The **Model request review** status shows the same verdict on
-the PR.
-
-- Open such a change as a **draft** PR whose description says in plain words
-  what changes on the wire and the possible quality, prompt-caching, behaviour
-  or bug risks. Prompt-cache stability comes first: never change text an
-  earlier request already sent.
-- Its description has a **Prefix impact** line, and the maintainer's approval
-  is recorded only when it does. Run
-  `bun test ./apps/worker/test/prompt-prefix-invariant.test.ts` on the head and
-  paste the pass/fail summary line. Then state the impact in one sentence:
-  either "no text an earlier request already sent changes, in any session
-  state", or which transition now changes which part (instructions, tools or
-  earlier items) and what that costs (for example "every live session pays one
-  cold prefix at deploy"). A change that makes the request depend on new
-  session or workspace state adds that state change to the harness's
-  `TRANSITIONS` in the same PR. Never add a `KNOWN_BREAKS` entry to make a
-  change pass; an entry exists only for a break already on main, and the PR
-  that fixes it removes the entry.
-- Only the maintainer approves it. He gives that approval in chat with his
-  agent, never on GitHub. The agent then records it: an approving review (or,
-  on a PR he authored, a review whose first line is `/approve-model-request`)
-  on the exact head he approved, saying when he approved it. An agent must
-  never record an approval he did not give for that head, and must never work
-  around the gate by splitting, renaming or moving the change out of the
-  guarded paths. A push after his approval needs his approval again.
-- Adding a new place that builds model requests? Add its path to the CODEOWNERS
-  section in the same PR.
+Preserve the prompt-cache prefix: each successive request must repeat the previous request byte for byte and only append; never change text an earlier request already sent.
+Cover model request changes in `apps/worker/test/prompt-prefix-invariant.test.ts`.
+In the PR description, state what the model sees differently and what that means for the prompt cache.
 
 The batcher is the **only normal path to main**. Do not squash or merge a PR to
 main directly, use `--admin`, call a merge API or push main. Do not create,
