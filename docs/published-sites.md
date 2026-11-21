@@ -41,6 +41,12 @@ Agents can do the same with the first-party tools `app_publication_get`,
 `app_publication_update` and `app_hostname_check`, within the same
 permissions as the person they act for.
 
+On a published address the gateway's own parts (the footer with **Report**,
+the connect and join cards, the join confirmation, the human check, and its
+sign-in, message, report and takedown pages) follow the viewer's system
+light or dark setting (`prefers-color-scheme`). The app's own frame keeps the
+colors the app sets.
+
 ## Access modes
 
 | Mode      | Who can open it                                               | Sign-in  |
