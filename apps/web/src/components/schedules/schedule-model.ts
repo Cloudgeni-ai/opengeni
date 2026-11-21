@@ -504,6 +504,25 @@ export function createRequestFromDraft(
   const schedule: ScheduledTaskScheduleSpec = draft.cadence
     ? specFromCadence(draft.cadence, options.now)
     : { type: "manual" };
+  // An agent's automation names its agent; the chat must be the agent's.
+  if (draft.runMode === "existing_session" && draft.agentId)
+    return {
+      name: scheduleName(draft),
+      schedule,
+      runMode: "existing_session",
+      targetSessionId: draft.targetSessionId,
+      ...(draft.visibility === "private" ? { visibility: "private" as const } : {}),
+      overlapPolicy: overlapPolicyForCreate(draft),
+      metadata: taskMetadataFromFormState(draft),
+      agentConfig: {
+        agentId: draft.agentId,
+        prompt: draft.prompt.trim(),
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      ...eventsForCreate(draft),
+    };
   if (draft.runMode === "existing_session")
     return {
       name: scheduleName(draft),

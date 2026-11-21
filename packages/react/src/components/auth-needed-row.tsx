@@ -112,6 +112,20 @@ export function AuthNeededRow({
     () => readCardRun(item.id),
     () => IDLE_RUN,
   );
+  // The same request was made again further down, where its card is live.
+  if (item.askedAgainLater && item.capability) {
+    return (
+      <p className="text-xs text-fg-muted">
+        {item.capability.id === "api:connected-machine"
+          ? t(
+              item.purpose === "chrome"
+                ? "native.timeline.machineRequest.askedAgainChrome"
+                : "native.timeline.machineRequest.askedAgain",
+            )
+          : t("native.timeline.inChatConnect.askedAgain", { name: item.capability.name })}
+      </p>
+    );
+  }
   const recommendation = item.capability ?? null;
   const presentation = authNeededPresentation(t, item, { setupUnavailable });
   const { provider, actionLabel, title, reasonLine, unavailable } = presentation;

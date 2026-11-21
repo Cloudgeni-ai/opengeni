@@ -84,7 +84,7 @@ test("the call's own text can never write the question or its facts", () => {
       pathParameters: { workspaceId: "ws-1", artifactId: "a-1" },
     },
     here,
-    { artifactId: { kind: "Site", name: longName } },
+    { artifactId: { kind: "app", name: longName } },
   );
   expect(site).not.toContain("\n");
   expect(site).toContain('“Plan "A" xxx');
@@ -193,13 +193,13 @@ test("the card lists the server's facts, and Details reads as plain labelled val
 });
 
 test("an action the catalog names by its route reads in words, not as a request line", () => {
-  const site = { kind: "Site", name: "Layoff plan Q4" };
+  const site = { kind: "app", name: "Layoff plan Q4" };
   const unpublish = {
     id: "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
     pathParameters: { workspaceId: "ws-1", artifactId: "a-1" },
   };
   expect(appActionConfirmationTitle(unpublish, here, { artifactId: site })).toBe(
-    "Delete the publication of Site “Layoff plan Q4”?",
+    "Delete the publication of app “Layoff plan Q4”?",
   );
   const restore = {
     id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/restore",

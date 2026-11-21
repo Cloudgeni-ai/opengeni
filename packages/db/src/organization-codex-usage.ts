@@ -15,7 +15,10 @@ import { rawRows, type Database } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import { buildCodexTokenResolver, type CodexAuthDeps } from "./codex-token-resolver";
 import { organizationAdministeredConnection } from "./subscription-core/access";
-import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
+import {
+  persistSubscriptionCoreAdministratorRefresh,
+  resolveSubscriptionConnectionId,
+} from "./subscription-core-repository";
 import { recordSubscriptionUsageReading } from "./subscription-core/usage-reading";
 import { usageReadTransportJoin } from "./usage-read-transport";
 
@@ -378,19 +381,23 @@ function organizationCodexCredentialAccess(
     // fresh authority/health checks below decide whether usage may be fetched.
     recordRefresh: (targetDb, next) =>
       withAdministrator(targetDb, async (tx) => {
-        const rows = await rawRows<Record<string, unknown>>(
+        // The shared refresh write (with the plan the new token reports), on
+        // the row this administrator may refresh.
+        const locked = await rawRows<Record<string, unknown>>(
           tx,
-          sql`
-          update subscription_connections set credential_encrypted = ${next.credentialEncrypted},
-            credential_format = split_part(${next.credentialEncrypted}, ':', 1),
-            expires_at = ${next.expiresAt?.toISOString() ?? null}::timestamptz,
-            last_refresh_at = ${next.lastRefreshAt.toISOString()}::timestamptz,
-            refresh_generation = refresh_generation + 1, updated_at = clock_timestamp()
-          where ${condition()} and refresh_generation = ${next.version}
-          returning id
-        `,
+          sql`select id from subscription_connections where ${condition()} for update`,
         );
-        return rows.length > 0;
+        if (locked.length === 0) return false;
+        return await persistSubscriptionCoreAdministratorRefresh(tx, {
+          provider: "codex",
+          accountId: input.organizationId,
+          connectionId: credentialId,
+          expectedRefreshGeneration: next.version,
+          credentialEncrypted: next.credentialEncrypted,
+          expiresAt: next.expiresAt,
+          lastRefreshAt: next.lastRefreshAt,
+          planType: next.planType ?? null,
+        });
       }),
     setStatus: (targetDb, _scope, status, _error, target) =>
       scoped(targetDb, async (tx) => {

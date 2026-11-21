@@ -24,7 +24,7 @@ export function registerSiteSessionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
       c.req.method === "GET" ? "sessions:read" : "sessions:control",
     );
     if (currentSiteSessionOrigin())
-      throw new HTTPException(403, { message: "A Site page cannot manage chat access" });
+      throw new HTTPException(403, { message: "An app page cannot manage chat access" });
     const { subjectId } = await siteViewerForGrant(deps.db, grant);
     if (!subjectId) throw new HTTPException(403, { message: "Chat owner authority required" });
     return { workspaceId, siteId, subjectId, grant };
@@ -49,7 +49,7 @@ export function registerSiteSessionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
       if (
         !(await setSiteSessionAccess(deps.db, { ...input, sessionId, allowed: method === "put" }))
       )
-        throw new HTTPException(404, { message: "Owned chat and private Site not found" });
+        throw new HTTPException(404, { message: "Owned chat and private app not found" });
       return c.json({ sessionId, siteId: input.siteId, allowed: method === "put" });
     });
   }

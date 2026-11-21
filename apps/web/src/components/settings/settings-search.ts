@@ -1,7 +1,8 @@
 // Search across settings: every page in the settings rail, plus the settings
 // inside those pages that people look for by name ("voice input", "MCP",
 // "invoices"). The index is built from the rail itself, so search never offers
-// a page the person can't use: a setting is listed only when its page is.
+// a page the person can't use: a setting is listed only when its page is. A
+// section can add pages outside settings that people look for there (Sidebar).
 import { cloneElement, isValidElement, type ReactElement } from "react";
 import type { LucideIcon } from "lucide-react";
 
@@ -137,7 +138,13 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "llm",
     "compaction",
   ],
-  "organization:integrations": ["allowed integrations", "connectors", "apps", "tools", "plugins"],
+  "organization:integrations": [
+    "allowed connected tools",
+    "integrations",
+    "connectors",
+    "tools",
+    "plugins",
+  ],
   "organization:agents": [
     "mcp",
     "mcp server",
@@ -206,7 +213,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
     { label: "Sandbox image", keywords: ["docker", "container"] },
     { label: "Voice input", keywords: ["transcription", "dictation", "microphone", "speech"] },
     { label: "Video generation", keywords: ["video"] },
-    { label: "Use connected apps automatically", keywords: ["integrations", "tools"] },
+    {
+      label: "Use connected tools automatically",
+      keywords: ["integrations", "connected apps", "tools"],
+    },
     { label: "Delete workspace", keywords: ["remove workspace", "danger zone"] },
   ],
   "workspace:access": [
@@ -371,6 +381,16 @@ export function settingsSearchEntries(
           });
         }
       }
+    }
+    for (const page of section.searchOnly ?? []) {
+      entries.push({
+        id: page.id,
+        label: page.label,
+        location: section.label,
+        icon: page.icon,
+        link: page.link,
+        keywords: page.keywords ?? [],
+      });
     }
   }
   return entries;

@@ -32,7 +32,7 @@ export function SiteOriginLink({
     <Link
       {...link}
       title={`Created through ${origin.title}`}
-      aria-label={`Created through ${origin.title}. Open Site`}
+      aria-label={`Created through ${origin.title}. Open app`}
       className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-1 text-xs text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-accent"
     >
       <PanelsTopLeftIcon aria-hidden="true" className="size-3.5" />
@@ -52,7 +52,7 @@ export function SiteOriginMenuItem({ session }: { session: Session }) {
   if (!target) return null;
   return (
     <DropdownMenuItem asChild>
-      <Link {...target.link} aria-label={`Created through ${target.origin.title}. Open Site`}>
+      <Link {...target.link} aria-label={`Created through ${target.origin.title}. Open app`}>
         <PanelsTopLeftIcon aria-hidden="true" />
         <span className="min-w-0 truncate">{target.origin.title}</span>
       </Link>

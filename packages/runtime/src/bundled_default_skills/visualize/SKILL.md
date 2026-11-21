@@ -57,7 +57,7 @@ An `opengeni-ui` fenced block holding one JSON object draws the options as cards
 - Ordinary `html` code blocks remain source code. Use the dedicated fence for visuals rendered in chat, including static galleries and diagrams.
 - For workspace tools, include `<script src="/__opengeni/site-tools/client.js"></script>` before your own scripts, then call `createOpenGeniSiteClient()`. Discover exact tool names and schemas before authoring calls. This uses the existing viewer permissions and approval flow. Never put credentials, workspace ids, or deployment URLs in the fragment. Use `sites` for a saved, reusable page or app.
 - Build the visual in the conversation. Use the open project when the user asks for a site, app page, component, or change to existing project files.
-- Do not create a Site or publish a file merely to show a self-contained visualization.
+- Do not create an app or publish a file merely to show a self-contained visualization.
 
 ### Fragment
 
@@ -112,7 +112,7 @@ session panel. Publish screenshots you deliberately present to the user, not
 every temporary capture. Reuse an existing retained reference when showing the
 same image again; never substitute a sandbox filesystem link for its durable
 image reference. Message-owned HTML remains in chat unless explicitly saved as
-a Site; do not create a Site merely to display a PNG.
+an app; do not create an app merely to display a PNG.
 
 ### Images inside HTML
 
@@ -153,7 +153,7 @@ same ID. Public image URLs can be used directly.
 
 This workflow needs no package installation, SDK-source inspection, shell commands,
 or separate preview server. If the tool is unavailable, show that clearly rather
-than guessing endpoints or searching installed packages. For saved Sites using
+than guessing endpoints or searching installed packages. For saved apps using
 this workflow, include the Files tool identity in their requested tools.
 
 ### External resources
@@ -163,10 +163,10 @@ this workflow, include the Files tool identity in their requested tools.
 ## Exporting an existing visualization
 
 - Keep the reply fragment as the editable inline source. When the user asks to save or export it, write a standalone HTML document in the sandbox, include assets/base.css and assets/helpers.html from this skill plus the fragment, and publish the exact file with sandbox_file_publish.
-- A downloaded HTML file has no workspace tool host. For an offline export, embed the displayed data and images; keep live tool access in a Site. Do not claim live tools work in a standalone download.
-- When the user asks to publish or host an existing visualization, use sites. A Site can be a small HTML component or a React application; follow that Skill for preview, tool access, and publication.
-- For a general website request, build a responsive Site directly rather than applying the inline visualization workflow.
-- Do not claim an export or Site was published before its tool confirms success.
+- A downloaded HTML file has no workspace tool host. For an offline export, embed the displayed data and images; keep live tool access in an app. Do not claim live tools work in a standalone download.
+- When the user asks to publish or host an existing visualization, use sites. An app can be a small HTML component or a React application; follow that Skill for preview, tool access, and publication.
+- For a general website request, build a responsive app directly rather than applying the inline visualization workflow.
+- Do not claim an export or app was published before its tool confirms success.
 
 ## Composition
 
@@ -181,7 +181,7 @@ Choose the smallest composition that fits.
 - Include a few thoughtfully chosen design alternatives whenever they would help the user explore a mockup, without waiting for the user to ask. Use compact, labeled local controls for these alternatives. Do not assume a Tweak helper or host annotation API exists. Do not add design controls to charts, explainers, or simulations unless requested.
 - "In the widget" means the in-conversation visualization, not a widget inside the depicted product.
 - Sketch a new idea from the product context already in the conversation; don't search a project just to sketch.
-- When the user wants the mockup on top of an existing product whose source or running build you can reach (an open repository, prototype code from earlier work, a running local app), build it from that product instead: make the change in the real source on a scratch branch or worktree, with sample data where the backend is missing, then build or run it and show the compiled result. Show it as screenshots in the reply, or, when the user should click through it, package the built page as a Site (read `sites`) and embed it with `opengeni-site`. Never retype the product's shell, components, or styles into a fragment, and never copy its compiled HTML or CSS into one by hand.
+- When the user wants the mockup on top of an existing product whose source or running build you can reach (an open repository, prototype code from earlier work, a running local app), build it from that product instead: make the change in the real source on a scratch branch or worktree, with sample data where the backend is missing, then build or run it and show the compiled result. Show it as screenshots in the reply, or, when the user should click through it, package the built page as an app (read `sites`) and embed it with `opengeni-site`. Never retype the product's shell, components, or styles into a fragment, and never copy its compiled HTML or CSS into one by hand.
 - When you do draw the product in a fragment, match its chrome, navigation, typography, colors, and content. If its design is unavailable, infer one from the platform and request.
 - NEVER use visualization CSS variables or utility classes inside a mockup (for example, `--card`, `--font-size-base`, `.card`, or `.btn`). Define root-scoped, product-specific colors, typography, surfaces, and controls instead. This rule overrides all general visualization guidance.
 - Keep only the surrounding conversation surface transparent. Give product windows, cards, menus, and popovers opaque backgrounds, and stack overlays above the product content.

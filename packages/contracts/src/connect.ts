@@ -408,3 +408,101 @@ function microsoftApprovalLinkFor(link: string | undefined, appId: string): stri
     return null;
   }
 }
+
+/**
+ * A provider's OAuth error response (RFC 6749 section 5.2, RFC 7591 section
+ * 3.2.2), bounded and cleaned so it can be shown to the person connecting.
+ */
+export type OAuthProviderError = { error: string; description?: string };
+
+/** Longest provider description passed on; longer text is cut. */
+export const OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX = 300;
+
+const OAUTH_PROVIDER_ERROR_CODE = /^[A-Za-z0-9_.-]{1,80}$/;
+
+/**
+ * The provider's `error` and `error_description` from a parsed OAuth error
+ * body, or null when it has no valid `error` code. The description loses
+ * control characters and repeated whitespace and is cut to
+ * {@link OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX} characters.
+ */
+export function oauthProviderError(payload: unknown): OAuthProviderError | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const error = typeof record.error === "string" ? record.error.trim() : "";
+  if (!OAUTH_PROVIDER_ERROR_CODE.test(error)) return null;
+  const description = oauthProviderErrorDescription(record.error_description);
+  return description ? { error, description } : { error };
+}
+
+/** A provider's free-text error description, cleaned and bounded, or undefined. */
+export function oauthProviderErrorDescription(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  // Control characters and line breaks become spaces; invisible format
+  // characters (bidi overrides, zero-width, BOM) go, so the text cannot
+  // reorder or hide what is shown around it.
+  const cleaned = value
+    .replace(/[\p{Cc}\u2028\u2029]/gu, " ")
+    .replace(/\p{Cf}/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!cleaned) return undefined;
+  // Count code points, so a cut never splits a character in two.
+  const characters = Array.from(cleaned);
+  return characters.length > OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX
+    ? `${characters
+        .slice(0, OAUTH_PROVIDER_ERROR_DESCRIPTION_MAX - 1)
+        .join("")
+        .trimEnd()}…`
+    : cleaned;
+}
+
+/**
+ * What a provider's refusal means for the person connecting:
+ * - `app_not_allowed`: the provider accepts sign-ins only from apps it has
+ *   approved, so the provider must allow this app first.
+ * - `app_registration_required`: the provider doesn't let apps register
+ *   themselves, so this app must be registered with it first.
+ * - `access_not_accepted`: the provider refused the access asked for.
+ * - `provider_unavailable`: the provider failed or is temporarily down.
+ */
+export type OAuthProviderRefusal =
+  | "app_not_allowed"
+  | "app_registration_required"
+  | "access_not_accepted"
+  | "provider_unavailable";
+
+export const OAUTH_PROVIDER_REFUSALS: readonly OAuthProviderRefusal[] = [
+  "app_not_allowed",
+  "app_registration_required",
+  "access_not_accepted",
+  "provider_unavailable",
+];
+
+const OAUTH_PROVIDER_REFUSAL_BY_ERROR: Readonly<Record<string, OAuthProviderRefusal>> = {
+  invalid_redirect_uri: "app_not_allowed",
+  unauthorized_client: "app_not_allowed",
+  unapproved_software_statement: "app_not_allowed",
+  invalid_scope: "access_not_accepted",
+  server_error: "provider_unavailable",
+  temporarily_unavailable: "provider_unavailable",
+};
+
+/**
+ * The OAuth error codes {@link oauthProviderRefusal} understands. A callback
+ * keeps one of these as its attempt's error code; any other provider code is
+ * not kept, so stored codes stay a small, known set.
+ */
+export const KNOWN_OAUTH_PROVIDER_ERRORS: ReadonlySet<string> = new Set(
+  Object.keys(OAUTH_PROVIDER_REFUSAL_BY_ERROR),
+);
+
+/** The plain meaning of a provider's OAuth error code, or null when it has none. */
+export function oauthProviderRefusal(
+  error: string | null | undefined,
+): OAuthProviderRefusal | null {
+  if (!error) return null;
+  return Object.hasOwn(OAUTH_PROVIDER_REFUSAL_BY_ERROR, error)
+    ? OAUTH_PROVIDER_REFUSAL_BY_ERROR[error]!
+    : null;
+}

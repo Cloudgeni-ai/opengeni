@@ -34,6 +34,7 @@ import {
 } from "../recording-transcription-request";
 import { createFfmpegAudioNormalizer, type TranscriptionAudioNormalizer } from "./normalize";
 import { errorMessage } from "@opengeni/contracts/values";
+import { measureRecordingTiming } from "@opengeni/observability";
 
 /**
  * Dictation's view of a provider: the provider and the one model dictation
@@ -457,12 +458,14 @@ export function createTranscriptionService(input: {
         // produced. That bills any usage shape we cannot price, and bounds
         // what is sent upstream to the configured maximum recording length.
         // Models that take only some containers get the same WAV.
-        const normalized = await normalizeAudio({
-          audio,
-          mimeType,
-          maxDurationSeconds: limits.maxDurationSeconds,
-          ...(request.signal ? { signal: request.signal } : {}),
-        });
+        const normalized = await measureRecordingTiming("audio_normalize", () =>
+          normalizeAudio({
+            audio,
+            mimeType,
+            maxDurationSeconds: limits.maxDurationSeconds,
+            ...(request.signal ? { signal: request.signal } : {}),
+          }),
+        );
         audio = normalized.bytes;
         providerMimeType = "audio/wav";
         audioSeconds = normalized.durationSeconds;

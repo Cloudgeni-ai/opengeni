@@ -161,6 +161,11 @@ export async function beginTargetToolGatewayCall(
     argumentsDigest: string;
     approvalAuthorityDigest: string;
     approvalRequired: boolean;
+    /**
+     * Accept this person's stored, unconsumed approval for this exact
+     * operation without its token (every binding below must still match).
+     */
+    claimStored?: boolean;
   },
 ): Promise<boolean> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
@@ -191,7 +196,7 @@ export async function beginTargetToolGatewayCall(
       row.authorityDigest !== input.approvalAuthorityDigest ||
       row.expiresAt.getTime() <= Date.now() ||
       (input.tokenHash !== undefined && row.tokenHash !== input.tokenHash) ||
-      (input.approvalRequired && input.tokenHash === undefined)
+      (input.approvalRequired && input.tokenHash === undefined && input.claimStored !== true)
     )
       return false;
     await tx

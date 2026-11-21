@@ -166,3 +166,78 @@ describe("activity facts as events", () => {
     });
   });
 });
+
+describe("App data change facts as events", () => {
+  const appFact = (overrides: Partial<WorkspaceActivityFact> = {}) =>
+    fact({
+      type: "app.record.added",
+      sessionId: null,
+      turnId: null,
+      appId: "8b0c7f0e-6666-4c2b-9a51-000000000006",
+      appTitle: "Leads",
+      data: {
+        collection: "contacts",
+        recordId: "r1",
+        recordKey: "ada@example.com",
+      },
+      url: "https://opengeni.example/workspaces/w/sites/a",
+      ...overrides,
+    });
+
+  test("a person's write is theirs and names the App and collection", () => {
+    const event = workspaceActivityEvent(appFact(), ada);
+    expect(event).toMatchObject({
+      type: "app.record.added",
+      subject: "ada@example.com",
+      summary: "Record added in Leads / contacts",
+      actor: { kind: "person", name: "Ada" },
+      chainDepth: 0,
+      data: {
+        appId: appFact().appId,
+        appTitle: "Leads",
+        collection: "contacts",
+        writtenByYou: true,
+      },
+    });
+    expect(workspaceActivityEvent(appFact(), bob).data).toMatchObject({
+      writtenByYou: false,
+    });
+  });
+
+  test("an automation's write is Opengeni's own and keeps its chain depth", () => {
+    const event = workspaceActivityEvent(
+      appFact({
+        automationId: "a1",
+        automationRunId: "run-1",
+        automationName: "Sync",
+        chainDepth: 2,
+      }),
+      ada,
+    );
+    expect(event.actor).toEqual({ kind: "opengeni", name: "Sync" });
+    expect(event.chainDepth).toBe(2);
+    expect(event.data).toMatchObject({
+      automationId: "a1",
+      automationRunId: "run-1",
+    });
+  });
+
+  test("a write without a person, such as a guest or key, has an unknown actor", () => {
+    expect(workspaceActivityEvent(appFact({ subjectId: null }), ada).actor).toEqual({
+      kind: "unknown",
+      name: null,
+    });
+  });
+
+  test("every App event type is offered with fields", () => {
+    const types = workspaceEventTypeCatalog().map((entry) => entry.type);
+    expect(types).toEqual(
+      expect.arrayContaining([
+        "app.record.added",
+        "app.record.changed",
+        "app.record.removed",
+        "app.sql.changed",
+      ]),
+    );
+  });
+});

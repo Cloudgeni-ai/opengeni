@@ -441,6 +441,41 @@ describe("organization agents at runtime", () => {
     expect((await org.row(child.id)).agent_version).toBeNull();
   }, 180_000);
 
+  test("a person's agent chat's worker inherits the agent too", async () => {
+    // With an initiating person the worker goes through
+    // create_agent_child_session, which must accept the inherited binding.
+    const org = await organization();
+    const agentId = await org.agent("helper", [{ instructions: "Help." }]);
+    const person = {
+      subjectId: org.subjectId,
+      createdBy: { kind: "subject", subjectId: org.subjectId },
+    };
+    const parent = await org.chat({ agentId, version: 1, promptVersion: 1 }, person);
+    const turn = await org.claim(parent.id);
+    const child = await org.chat(null, {
+      subjectId: org.subjectId,
+      parentSessionId: parent.id,
+      createdByActor: {
+        type: "agent_attempt",
+        attemptId: turn.activeAttemptId!,
+        sessionId: parent.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+      },
+    });
+    expect(await org.row(child.id)).toEqual({
+      agent_id: agentId,
+      agent_version: 1,
+      agent_prompt_version: null,
+      agent_prompt_revision: null,
+      agent_overrides: null,
+    });
+    const [provenance] = await shared.admin<{ agent_creation_attempt_id: string | null }[]>`
+      select agent_creation_attempt_id::text from sessions where id = ${child.id}`;
+    expect(provenance?.agent_creation_attempt_id).toBe(turn.activeAttemptId!);
+    await org.settle(parent.id, turn);
+  }, 180_000);
+
   test("a moved worker chat gets new Instructions only when the new version shares them", async () => {
     const org = await organization();
     const agentId = await org.agent("movable", [

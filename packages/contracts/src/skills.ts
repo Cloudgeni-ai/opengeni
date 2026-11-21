@@ -91,6 +91,12 @@ export type SkillSaveInput = SkillWriteContext & {
   files: SkillFile[];
   scope?: SkillScope;
   reason: string;
+  /**
+   * "follow": a person's save that takes the mode Agent learning gives its
+   * destination, as an agent's save does (Review first leaves it pending, Off
+   * refuses it). Sent for Skills a connected agent uploads.
+   */
+  learningPolicy?: "follow";
 };
 export type SkillRevisionInput = SkillWriteContext & {
   removalOperationId?: string | undefined;

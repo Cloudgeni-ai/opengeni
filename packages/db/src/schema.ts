@@ -34,6 +34,7 @@ import type {
   SlackUserLinkAccessRequest,
   SubscriptionPersonalAuthorityV2,
   TimelineAnnotation,
+  SiteAssetManifest,
   ToolGatewayIdentity,
   UserResourceDelegation,
   VaultPolicy,
@@ -51,7 +52,9 @@ import type {
   ApiIntegrationAuthPreview,
   ResolvedAgentConfig,
   SessionAvatar,
+  SessionLink,
   SessionToolPolicy,
+  SessionWaitingOn,
 } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
@@ -91,6 +94,7 @@ export * from "./managed-auth-session-set-schema";
 export * from "./secret-approvals-schema";
 export * from "./credential-profiles-schema";
 export * from "./slack-api-rate-limit-schema";
+export * from "./mcp-connection-rate-limit-schema";
 export * from "./organization-recovery-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
@@ -553,6 +557,8 @@ export const workspaceArtifactVersions = pgTable(
     sourceSha256: text("source_sha256"),
     sourceSizeBytes: bigint("source_size_bytes", { mode: "number" }),
     requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
+    /** Asset files of a multi-file build (migration 1522); null for a single-file app. */
+    assetManifest: jsonb("asset_manifest").$type<SiteAssetManifest>(),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
@@ -3694,6 +3700,9 @@ export const slackInteractions = pgTable(
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
       .notNull()
       .default("open"),
+    // A wake asked to reopen the delivery while it was open: a run settling at
+    // or before this sequence leaves it open for the woken answer.
+    deliveryReopenAfterSequence: integer("delivery_reopen_after_sequence"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -5271,6 +5280,12 @@ export const sessions = pgTable(
     // an avatar. Never part of the model's context; copied by forks.
     description: text("description"),
     avatar: jsonb("avatar").$type<SessionAvatar>(),
+    // Who the chat waits on, as the agent said (1521). `turnId` is the turn
+    // that said it: the wait shows only while that turn is the chat's latest
+    // and the chat is idle, so a reply or a new turn clears it.
+    waitingOn: jsonb("waiting_on").$type<SessionWaitingOn & { turnId: string | null }>(),
+    // The chat's Linked items (1521). NULL means none. Bounded by the contract.
+    links: jsonb("links").$type<SessionLink[]>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a
@@ -9104,6 +9119,12 @@ export const connectorActionRequests = pgTable(
     policyVersion: integer("policy_version"),
     policySource: text("policy_source").$type<"explicit" | "default" | "ambiguous">().notNull(),
     policyDecision: text("policy_decision").$type<ConnectorActionPolicyDecision>().notNull(),
+    /**
+     * The agent and Can use rule that made the call ask or blocked it; null
+     * when the connection's own settings decided (`policy_source` stays
+     * `default` for an agent rule, as before this column).
+     */
+    agentRule: jsonb("agent_rule").$type<import("@opengeni/contracts").ToolReviewAgentRule>(),
     actionFingerprint: text("action_fingerprint").notNull(),
     reviewArguments: text("review_arguments"),
     reviewContext: jsonb("review_context").$type<import("@opengeni/contracts").ToolReviewContext>(),
@@ -13114,6 +13135,8 @@ export const scheduledTaskRuns = pgTable(
     actionKind: text("action_kind").notNull().default("agent_turn"),
     knowledgeSyncRunId: uuid("knowledge_sync_run_id"),
     knowledgeSummary: jsonb("knowledge_summary").$type<Record<string, unknown>>(),
+    // App data sync runs: what the run read and wrote (1520).
+    syncSummary: jsonb("sync_summary").$type<Record<string, unknown>>(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     // Stable Temporal producer identity. Activity replay/re-dispatch returns
     // the exact run instead of allocating a second schedule source row.

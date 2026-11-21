@@ -32,16 +32,16 @@ export function SitesUsageSection({
   if (!showModels && !showPlatform) return null;
   return (
     // `open` even inside the settings shell, whose default `group` would box it.
-    <Section title="Sites" variant="open" contentClassName="gap-6">
+    <Section title="Apps" variant="open" contentClassName="gap-6">
       {models.state === "ready" ? (
         <SiteAiUsageTable usage={models.usage} />
       ) : models.state === "failed" ? (
-        <p className="text-sm text-fg-muted">Couldn't load Site model costs.</p>
+        <p className="text-sm text-fg-muted">Couldn't load app model costs.</p>
       ) : null}
       {platform.state === "ready" ? (
         <SitePlatformUsageView usage={platform.usage} />
       ) : platform.state === "failed" ? (
-        <p className="text-sm text-fg-muted">Couldn't load Site platform activity.</p>
+        <p className="text-sm text-fg-muted">Couldn't load app platform activity.</p>
       ) : null}
     </Section>
   );

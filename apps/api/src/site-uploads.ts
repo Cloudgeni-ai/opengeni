@@ -17,6 +17,7 @@ import {
 } from "./workspace-artifact-content";
 import { userContentSignedGetUrlOptions } from "./http/user-content";
 import { declareSiteToolsForEveryViewer } from "./site-tool-routing";
+import { freezeSiteAssets } from "./site-assets";
 type Storage = NonNullable<ObjectStorageDependency>;
 export const MAX_SITE_SOURCE_BYTES = 64 * 1024 * 1024;
 
@@ -29,7 +30,7 @@ export async function validateSiteSource(storage: Storage, key: string, sizeByte
   const content = await retryWhileMissing(() => storage.getObjectBytes(key));
   if (!content) {
     throw new WorkspaceArtifactOperationError(
-      "Site source is not available yet. Retry publication with the same upload.",
+      "App source is not available yet. Retry publication with the same upload.",
     );
   }
   try {
@@ -47,8 +48,10 @@ function keys(workspaceId: string, id: string) {
   return {
     html: `${base}/uploads/${id}/index.html`,
     source: `${base}/uploads/${id}/source.json`,
+    assets: `${base}/uploads/${id}/assets.json`,
     frozenHtml: `${base}/blobs/${id}.html`,
     frozenSource: `${base}/sources/${id}.json`,
+    frozenAssets: `${base}/asset-manifests/${id}.json`,
   };
 }
 function owner(grant: AccessGrant) {
@@ -63,9 +66,9 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
   await Promise.allSettled(
     expired.flatMap((row) => {
       const paths = keys(row.workspaceId, row.id);
-      return (row.status === "published" ? [paths.html, paths.source] : Object.values(paths)).map(
-        (key) => storage.deleteObject(key),
-      );
+      return (
+        row.status === "published" ? [paths.html, paths.source, paths.assets] : Object.values(paths)
+      ).map((key) => storage.deleteObject(key));
     }),
   );
   const row = await createWorkspaceArtifactUpload(deps.db, {
@@ -75,16 +78,20 @@ export async function prepareWorkspaceArtifactUpload(deps: ApiRouteDeps, grant: 
   });
   const paths = keys(grant.workspaceId, row.id);
   const audience = grant.principalKind === "agent_attempt" ? "sandbox" : "public";
-  const [html, source] = await Promise.all([
+  const [html, source, assets] = await Promise.all([
     storage.createPutUrl({ key: paths.html, contentType: "text/html", audience }),
     storage.createPutUrl({ key: paths.source, contentType: "application/json", audience }),
+    storage.createPutUrl({ key: paths.assets, contentType: "application/json", audience }),
   ]);
   return {
     uploadId: row.id,
     html: { putUrl: html.url, requiredHeaders: html.requiredHeaders },
     source: { putUrl: source.url, requiredHeaders: source.requiredHeaders },
+    // A multi-file build: every file beside the entry HTML, as JSON
+    // {files: [{path, base64}]} (see @opengeni/contracts/app-assets).
+    assets: { putUrl: assets.url, requiredHeaders: assets.requiredHeaders },
     expiresAt: new Date(
-      Math.min(html.expiresAt.getTime(), source.expiresAt.getTime()),
+      Math.min(html.expiresAt.getTime(), source.expiresAt.getTime(), assets.expiresAt.getTime()),
     ).toISOString(),
   };
 }
@@ -95,10 +102,10 @@ export async function* readArtifactObject(
   expectedHead?: Awaited<ReturnType<NonNullable<Storage["headObject"]>>>,
 ) {
   if (!storage.headObject || !storage.getObjectRange)
-    throw new Error("Object storage cannot stream Site content");
+    throw new Error("Object storage cannot stream app content");
   const head = expectedHead ?? (await storage.headObject(key));
   if (!head || !head.VersionToken || head.ContentLength === undefined)
-    throw new Error("Site content is unavailable");
+    throw new Error("App content is unavailable");
   for (let start = 0; start < head.ContentLength; start += 1024 * 1024) {
     const endInclusive = Math.min(head.ContentLength - 1, start + 1024 * 1024 - 1);
     const part = await storage.getObjectRange({
@@ -112,7 +119,7 @@ export async function* readArtifactObject(
       part.versionToken !== head.VersionToken ||
       part.bytes.length !== endInclusive - start + 1
     )
-      throw new Error("Site object changed during transfer");
+      throw new Error("App object changed during transfer");
     yield part.bytes;
   }
 }
@@ -124,15 +131,15 @@ async function freeze(
   optional = false,
 ) {
   if (!storage.headObject || !storage.putObjectStreamIfAbsent)
-    throw new Error("Object storage cannot freeze Site uploads");
+    throw new Error("Object storage cannot freeze app uploads");
   const existing = await storage.headObject(to);
   if (existing) return existing.ContentLength!;
   const head = await storage.headObject(from);
   if (!head && optional) return null;
   if (!head || !head.ContentLength)
-    throw new WorkspaceArtifactOperationError("Upload HTML before publishing the Site");
+    throw new WorkspaceArtifactOperationError("Upload HTML before publishing the app");
   if (head.ContentLength > storage.maxSinglePutSizeBytes)
-    throw new Error("Site exceeds the storage upload limit");
+    throw new Error("App exceeds the storage upload limit");
   const decoder = new TextDecoder("utf-8", { fatal: true });
   async function* chunks() {
     for await (const part of readArtifactObject(storage, from, head)) {
@@ -153,7 +160,7 @@ async function freeze(
   const stored = await retryWhileMissing(() => storage.headObject!(to));
   if (!stored || stored.ContentLength === undefined) {
     throw new WorkspaceArtifactOperationError(
-      "Frozen Site upload is unavailable. Retry publication with the same upload.",
+      "Frozen app upload is unavailable. Retry publication with the same upload.",
     );
   }
   return stored.ContentLength;
@@ -200,7 +207,7 @@ export async function prepareWorkspaceArtifactPublication(
     row.status === "expired" ||
     (row.status === "pending" && row.expiresAt.getTime() <= Date.now())
   )
-    throw new WorkspaceArtifactOperationError("Site upload expired or unavailable");
+    throw new WorkspaceArtifactOperationError("App upload expired or unavailable");
   const paths = keys(grant.workspaceId, row.id);
   const sizeBytes = await freeze(storage, paths.html, paths.frozenHtml, "text/html; charset=utf-8");
   const sourceSizeBytes =
@@ -210,6 +217,12 @@ export async function prepareWorkspaceArtifactPublication(
   if (sourceSizeBytes !== null) {
     await validateSiteSource(storage, paths.frozenSource, sourceSizeBytes);
   }
+  const assetManifest = await freezeSiteAssets(storage, grant.workspaceId, {
+    upload: paths.assets,
+    frozen: paths.frozenAssets,
+    // Like source: an upload first published without assets stays without them.
+    published: row.status === "published",
+  });
   return {
     uploadId: row.id,
     contentKey: paths.frozenHtml,
@@ -218,6 +231,7 @@ export async function prepareWorkspaceArtifactPublication(
     sourceKey: sourceSizeBytes === null ? null : paths.frozenSource,
     sourceSha256: null,
     sourceSizeBytes,
+    assetManifest,
     ...(input.requestedTools === undefined ? {} : { requestedTools: input.requestedTools }),
     ...declared,
     persistContent: async () => {},

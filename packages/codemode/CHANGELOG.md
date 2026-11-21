@@ -1,5 +1,34 @@
 # @opengeni/codemode
 
+## 6.35.0
+
+### Patch Changes
+
+- 8bf1ec2: Customizable sidebar: a workspace default of groups, App links (optionally to an App page), https links and live lists (pinned or recent Apps) that admins set, with each person's own changes on top (add, hide, reorder, reset). New `GET`/`PATCH /v1/workspaces/:workspaceId/sidebar-layout`, `client.getSidebarLayout` and `client.updateSidebarLayout`, and the `sidebar_layout_get`/`sidebar_layout_update` agent tools. Apps opened from the sidebar are pages: they fill the main area with their address in the URL, follow Opengeni's light or dark theme, and stay open when you switch away. Apps can opt into Opengeni's look with `<link rel="stylesheet" href="/__opengeni/ui.css">` (`@opengeni/sdk/site-ui`). Older clients ignore item types they don't know.
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [e7eb28c]
+- Updated dependencies [5c3c4e6]
+- Updated dependencies [8bf1ec2]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/sdk@6.35.0
+  - @opengeni/tool-gateway@6.35.0
+
+## 6.34.0
+
+### Patch Changes
+
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/contracts@6.34.0
+  - @opengeni/sdk@6.34.0
+  - @opengeni/tool-gateway@6.34.0
+
 ## 6.33.0
 
 ### Patch Changes

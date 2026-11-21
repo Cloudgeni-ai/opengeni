@@ -7,6 +7,8 @@ import { Link } from "@tanstack/react-router";
  * -> an optional Name -> one closed Settings section.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY } from "@opengeni/contracts";
+import type { Agent, AgentTemplate } from "@opengeni/sdk";
 import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
@@ -66,6 +68,7 @@ import {
   scheduledLearningDestinationKey,
 } from "@/lib/scheduled-tasks";
 import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
+import { listAgentChats } from "@opengeni/react/app/lib/agent-chats";
 import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 import { cn } from "@opengeni/react/app/lib/utils";
@@ -117,8 +120,43 @@ export type ScheduleFormMode =
       sourceSessionId?: string;
       /** Start with a trigger on this event source. */
       eventSourceId?: string;
+      /** Each run is a chat with this agent (its "Starts when"). */
+      agentId?: string;
+      /** Start from this one of the agent's suggested triggers. */
+      agentTrigger?: number;
+      /** Cancel and Save go back to the agent's page (its "Starts when"). */
+      returnTo?: "agent";
     }
   | { kind: "edit"; scheduleId: string };
+
+/** The agent a new automation starts chats with, and its suggested trigger. */
+type AgentBinding =
+  | { status: "none" }
+  | { status: "loading" }
+  | { status: "error"; error: Error }
+  | { status: "ready"; agent: Agent; template: AutomationTemplate | undefined };
+
+/** An agent's suggested trigger as the template a new automation starts from. */
+export function agentTriggerTemplate(
+  agent: Pick<Agent, "name" | "templateKey">,
+  templates: readonly AgentTemplate[],
+  index: number | undefined,
+): AutomationTemplate | undefined {
+  if (index === undefined || !agent.templateKey) return undefined;
+  const suggestion = templates.find((entry) => entry.key === agent.templateKey)?.suggestedTriggers[
+    index
+  ];
+  if (!suggestion) return undefined;
+  return {
+    id: `agent-${agent.templateKey}-${index}`,
+    name: `${agent.name}: ${suggestion.name}`,
+    description: suggestion.name,
+    instructions: suggestion.instructions,
+    schedule: suggestion.schedule,
+    triggers: suggestion.triggers,
+    when: suggestion.name,
+  };
+}
 
 type Source =
   | { status: "none" }
@@ -132,6 +170,14 @@ type SavedTemplate =
   | { status: "loading" }
   | { status: "error"; error: Error }
   | { status: "ready"; template: AutomationTemplate | undefined };
+
+/**
+ * The agent whose page Cancel and Save go back to: a new automation opened
+ * from an agent's page ("Open full form" on Add trigger) returns there.
+ */
+export function scheduleFormReturnAgent(mode: ScheduleFormMode): string | undefined {
+  return mode.kind === "create" && mode.returnTo === "agent" ? mode.agentId : undefined;
+}
 
 export function ScheduleFormPage({
   workspaceId,
@@ -155,6 +201,43 @@ export function ScheduleFormPage({
   const [saved, setSaved] = useState<SavedTemplate>(() =>
     savedTemplateId ? { status: "loading" } : { status: "none" },
   );
+  const agentId = mode.kind === "create" ? mode.agentId : undefined;
+  const agentTrigger = mode.kind === "create" ? mode.agentTrigger : undefined;
+  const [agentBinding, setAgentBinding] = useState<AgentBinding>(() =>
+    agentId ? { status: "loading" } : { status: "none" },
+  );
+
+  useEffect(() => {
+    if (!agentId) {
+      setAgentBinding({ status: "none" });
+      return;
+    }
+    let live = true;
+    setAgentBinding({ status: "loading" });
+    void (async () => {
+      const agent = await client.getAgent(workspaceId, agentId);
+      const templates =
+        agentTrigger !== undefined && agent.templateKey
+          ? await client.listAgentTemplates(workspaceId)
+          : [];
+      return { agent, template: agentTriggerTemplate(agent, templates, agentTrigger) };
+    })().then(
+      (ready) => {
+        if (live) setAgentBinding({ status: "ready", ...ready });
+      },
+      (error: unknown) => {
+        if (live) {
+          setAgentBinding({
+            status: "error",
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [agentId, agentTrigger, attempt, client, workspaceId]);
 
   useEffect(() => {
     if (!savedTemplateId) {
@@ -209,10 +292,49 @@ export function ScheduleFormPage({
     };
   }, [attempt, client, sourceId, workspaceId]);
 
+  const returnAgentId = scheduleFormReturnAgent(mode);
   const back =
     mode.kind === "edit"
       ? { label: "Automation", onClick: () => go.detail(mode.scheduleId) }
-      : { label: "Automations", onClick: go.list };
+      : returnAgentId
+        ? {
+            label: agentBinding.status === "ready" ? agentBinding.agent.name : "Agent",
+            onClick: () => go.agent(returnAgentId),
+          }
+        : { label: "Automations", onClick: go.list };
+
+  if (agentBinding.status === "loading" || agentBinding.status === "error") {
+    return (
+      <FormPage
+        title="New automation"
+        submitLabel="Create automation"
+        back={back}
+        onCancel={back.onClick}
+        loading={agentBinding.status === "loading"}
+        loadingFields={4}
+        submitDisabled
+      >
+        {agentBinding.status === "error" ? (
+          <ErrorMessage
+            title="Couldn't load the agent"
+            {...apiErrorDetails(agentBinding.error)}
+            action={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setAttempt((n) => n + 1)}
+              >
+                Try again
+              </Button>
+            }
+          >
+            {userErrorText(agentBinding.error)}
+          </ErrorMessage>
+        ) : null}
+      </FormPage>
+    );
+  }
 
   if (saved.status === "loading" || saved.status === "error") {
     return (
@@ -291,9 +413,11 @@ export function ScheduleFormPage({
   const chosen =
     mode.kind !== "create"
       ? undefined
-      : saved.status === "ready"
-        ? saved.template
-        : templateById(mode.template, eventTriggers);
+      : agentBinding.status === "ready" && agentBinding.template
+        ? agentBinding.template
+        : saved.status === "ready"
+          ? saved.template
+          : templateById(mode.template, eventTriggers);
   // A template on events opens blank where events don't run.
   const template = chosen
     ? automationTemplatesFor([chosen], { eventTriggers, workspaceEvents: true })[0]
@@ -305,6 +429,8 @@ export function ScheduleFormPage({
       mode={mode}
       task={task}
       template={template}
+      agent={agentBinding.status === "ready" ? agentBinding.agent : undefined}
+      onCreated={returnAgentId ? () => go.agent(returnAgentId, { replace: true }) : undefined}
       back={
         mode.kind === "edit" && task
           ? { label: task.name, onClick: back.onClick }
@@ -319,6 +445,16 @@ export function ScheduleFormPage({
 /* ----------------------------------------------------------------------------
    The agent schedule form.
    -------------------------------------------------------------------------- */
+
+const NOT_AGENT_CHAT = "Not a chat with this agent.";
+
+/** The chat an automation left when its agent changed, as the server recorded it. */
+function agentChatChangeOf(task: ScheduledTask | null | undefined): { sessionId: string } | null {
+  const value = task?.metadata[SCHEDULED_TASK_AGENT_CHAT_CHANGE_METADATA_KEY];
+  if (!value || typeof value !== "object") return null;
+  const sessionId = (value as { sessionId?: unknown }).sessionId;
+  return typeof sessionId === "string" ? { sessionId } : null;
+}
 
 function scheduledLearningScope(
   form: ScheduleDraft,
@@ -386,7 +522,9 @@ function AgentScheduleForm({
   mode,
   task,
   template,
+  agent,
   back,
+  onCreated,
 }: {
   workspaceId: string;
   mode: ScheduleFormMode;
@@ -394,7 +532,11 @@ function AgentScheduleForm({
   task: ScheduledTask | null;
   /** The template a new automation starts from. */
   template: AutomationTemplate | undefined;
+  /** A new automation whose runs are chats with this agent. */
+  agent?: Agent | undefined;
   back: { label: string; onClick: () => void };
+  /** Where a created automation goes instead of its own page. */
+  onCreated?: ((task: ScheduledTask) => void) | undefined;
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -459,6 +601,19 @@ function AgentScheduleForm({
   // default model until someone picks one, and are then saved without a model
   // so each run resolves the default afresh.
   const [initial] = useState<ScheduleDraft>(() => {
+    const base = initialDraft();
+    // An agent's trigger starts a new chat with the agent on every run.
+    return agent
+      ? {
+          ...base,
+          agentId: agent.id,
+          runMode: "new_session_per_run",
+          name: base.name || agent.name,
+          ...(agent.visibility === "private" ? { visibility: "private" as const } : {}),
+        }
+      : base;
+  });
+  function initialDraft(): ScheduleDraft {
     const defaults: DraftDefaults = {
       includeOpenGeniTool: canAttachOpenGeniTool,
       // The simplified interface has one model policy: a new schedule names it instead of
@@ -514,7 +669,7 @@ function AgentScheduleForm({
     }
     if (template) return draftFromTemplate(template, defaults);
     return newScheduleDraft(defaults);
-  });
+  }
   const [draft, setDraft] = useState<ScheduleDraft>(() => {
     const workspaceDefaultToolIds =
       initial.workspaceDefaultToolIds ??
@@ -534,6 +689,7 @@ function AgentScheduleForm({
     editing && task?.runMode === "reusable_session" ? task.reusableSessionId : null;
   const materializedSessionId =
     draft.runMode === "reusable_session" ? savedReusableSessionId : null;
+  const agentChatChange = editing ? agentChatChangeOf(task) : null;
   const inheritsChatSettings =
     draft.runMode === "existing_session" || Boolean(materializedSessionId);
   const [errors, setErrors] = useState<FormErrors>({});
@@ -641,6 +797,7 @@ function AgentScheduleForm({
   const needsSessions = inheritsChatSettings && access.canTargetSessions;
   const sourceSessionId = mode.kind === "create" ? mode.sourceSessionId : undefined;
   const targetSessionId = materializedSessionId ?? draft.targetSessionId;
+  const agentId = draft.agentId;
   useEffect(() => {
     if (!needsSessions) return;
     let live = true;
@@ -649,7 +806,11 @@ function AgentScheduleForm({
     void Promise.allSettled([
       materializedSessionId
         ? Promise.resolve([] as Session[])
-        : client.listSessions(workspaceId, { limit: 100 }),
+        : // An agent's automation posts only into that agent's chats: list those,
+          // reading past the newest page until there are enough.
+          agentId
+          ? listAgentChats(client, workspaceId, agentId)
+          : client.listSessions(workspaceId, { limit: 100 }),
       targetSessionId
         ? client.getSession(workspaceId, targetSessionId, { fresh: true })
         : Promise.resolve(null),
@@ -680,7 +841,15 @@ function AgentScheduleForm({
     return () => {
       live = false;
     };
-  }, [client, materializedSessionId, needsSessions, targetSessionId, workspaceId, sessionsRetry]);
+  }, [
+    agentId,
+    client,
+    materializedSessionId,
+    needsSessions,
+    targetSessionId,
+    workspaceId,
+    sessionsRetry,
+  ]);
 
   /* ----- who can see it */
   const [canCreatePrivate, setCanCreatePrivate] = useState<boolean | null>(null);
@@ -1028,6 +1197,12 @@ function AgentScheduleForm({
     }
     if (draft.runMode === "existing_session" && !draft.targetSessionId) {
       next.target = "Pick the chat each run posts into.";
+    } else if (
+      draft.runMode === "existing_session" &&
+      draft.agentId &&
+      sessions.find((session) => session.id === draft.targetSessionId)?.agentId !== draft.agentId
+    ) {
+      next.target = NOT_AGENT_CHAT;
     }
     if (!inheritsChatSettings && draft.executionTarget === "machine" && !draft.machineSandboxId) {
       next.machine = "Pick a connected machine.";
@@ -1158,7 +1333,8 @@ function AgentScheduleForm({
             }
           : undefined,
     });
-    go.detail(created.id, { replace: true });
+    if (onCreated) onCreated(created);
+    else go.detail(created.id, { replace: true });
     return true;
   };
 
@@ -1226,6 +1402,10 @@ function AgentScheduleForm({
       value: session.id,
       label: sessionDisplayTitle(session),
       meta: session.status,
+      // An agent's automation posts only into that agent's chats.
+      ...(draft.agentId && session.agentId !== draft.agentId
+        ? { disabled: true, disabledReason: NOT_AGENT_CHAT }
+        : {}),
     })),
   ];
 
@@ -1236,6 +1416,8 @@ function AgentScheduleForm({
         description={
           editing ? (
             task?.name
+          ) : agent ? (
+            `Each run starts a chat with ${agent.name}.`
           ) : offerAgent ? (
             <>
               Rather describe it? <HelpLink onClick={ask.open}>Create with {productName}</HelpLink>
@@ -1315,6 +1497,20 @@ function AgentScheduleForm({
                   "Open this automation's chat"
                 )}{" "}
                 to change its model, tools or machine.
+              </p>
+            ) : null}
+            {eachRun === "reusable_session" && agentChatChange ? (
+              <p className="m-0 text-xs leading-4.5 text-fg-muted">
+                Its agent changed, so it has a new chat.{" "}
+                {access.canTargetSessions ? (
+                  <Link
+                    className="underline underline-offset-2"
+                    to="/workspaces/$workspaceId/sessions/$sessionId"
+                    params={{ workspaceId, sessionId: agentChatChange.sessionId }}
+                  >
+                    Previous chat
+                  </Link>
+                ) : null}
               </p>
             ) : null}
           </Field>

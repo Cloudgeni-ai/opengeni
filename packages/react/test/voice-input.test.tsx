@@ -154,6 +154,13 @@ describe("useVoiceInput: dictations as recordings", () => {
 
   test("waits for a dictation the server is still hearing", async () => {
     const server = new FakeServer();
+    const timings = mock(
+      async (..._args: Parameters<NonNullable<typeof server.client.reportRecordingTimings>>) => {
+        // A failed diagnostic upload must not hold the composer or lose the text.
+        throw new Error("timing endpoint unavailable");
+      },
+    );
+    server.client.reportRecordingTimings = timings;
     server.heard = null;
     const { platform } = fakePlatform(server);
     const { hook, draft } = await renderDurable(server, platform);
@@ -171,6 +178,16 @@ describe("useVoiceInput: dictations as recordings", () => {
     server.complete(id, "slow words");
     await waitFor(() => hook.result.current.status === "idle");
     expect(draft.value).toBe("slow words");
+    await waitFor(() =>
+      timings.mock.calls.some(([, , report]) => report.stopToComposerMs !== undefined),
+    );
+    const report = timings.mock.calls.find(([, , timing]) => timing.stopToComposerMs !== undefined);
+    expect(report?.slice(0, 2)).toEqual(["ws-1", id]);
+    const timing = report![2];
+    expect(timing.purpose).toBe("dictation");
+    expect(timing.transcriptWaitMs).toBeGreaterThan(0);
+    expect(timing.stopToTranscriptMs).toBeGreaterThanOrEqual(timing.transcriptWaitMs!);
+    expect(timing.stopToComposerMs).toBeGreaterThanOrEqual(timing.stopToTranscriptMs!);
     await hook.unmount();
   });
 

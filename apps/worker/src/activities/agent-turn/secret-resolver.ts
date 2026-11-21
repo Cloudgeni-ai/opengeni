@@ -43,6 +43,11 @@ export function secretsCapabilityEnabled(agentConfig: ResolvedAgentConfig | null
 export type AttemptVaultAccess = {
   providers: VaultProviderRegistry;
   attemptBudget: ProviderCallBudget;
+  /**
+   * Connected vaults as the workspace reaches them with no acting person:
+   * what a shared service connection's key resolves through.
+   */
+  serviceProviders?: VaultProviderRegistry;
 };
 
 export function createAttemptVaultAccess(input: {
@@ -55,17 +60,20 @@ export function createAttemptVaultAccess(input: {
   externalVaultProviders?: ExternalVaultProviderFactories | null;
   executionContext?: Pick<VaultProviderAuthority, "sessionId" | "turnId" | "attemptId" | "siteId">;
 }): AttemptVaultAccess {
-  return {
-    providers: createWorkspaceVaultProviderRegistry({
+  const registry = (subjectId: string | null) =>
+    createWorkspaceVaultProviderRegistry({
       db: input.db,
       settings: input.settings,
       workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
+      subjectId,
       hostVaultProvider: input.hostVaultProvider ?? null,
       onePasswordVaultProvider: input.onePasswordVaultProvider ?? null,
       externalVaultProviders: input.externalVaultProviders ?? null,
       ...(input.executionContext ? { executionContext: input.executionContext } : {}),
-    }),
+    });
+  return {
+    providers: registry(input.subjectId),
+    serviceProviders: registry(null),
     attemptBudget: createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt),
   };
 }

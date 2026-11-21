@@ -262,6 +262,21 @@ async function connectionRow(connectionId: string) {
   return row!;
 }
 
+async function connectionPlan(connectionId: string) {
+  const [row] = await shared!.admin<{ plan_type: string | null; refresh_generation: string }[]>`
+    select plan_type, refresh_generation::text as refresh_generation
+    from subscription_connections where id = ${connectionId}::uuid`;
+  return row!;
+}
+
+/** An id_token whose claims report `planType` (unsigned: only its payload is read). */
+function idTokenWithPlan(planType: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({ "https://api.openai.com/auth": { chatgpt_plan_type: planType } }),
+  ).toString("base64url");
+  return `header.${payload}.signature`;
+}
+
 function readCredential(org: Org, workspaceId: string, connectionId: string) {
   return withRlsContext(client!.db, { accountId: org.accountId, workspaceId }, (tx) =>
     rawRows<{ status: string; credential_encrypted: string | null }>(
@@ -376,6 +391,28 @@ function authorizationCases(harness: "template" | "owner-migrated") {
     expect(Number((await connectionRow(connectionId)).refresh_generation)).toBe(
       generationBefore + 1,
     );
+
+    // The rotated id_token's plan is recorded with the credential, through
+    // the shared refresh writer.
+    await shared!.admin`update subscription_connections set expires_at = now() - interval '1 hour'
+      where id = ${connectionId}::uuid`;
+    const planChanged = subscriptionCoreCodexAppsRequestAuth(
+      client!.db,
+      settings,
+      { ...scope, connectionId },
+      {
+        refresh: async () => ({
+          accessToken: "access-rotated",
+          refreshToken: "refresh-rotated",
+          idToken: idTokenWithPlan("free"),
+        }),
+      },
+    );
+    await planChanged.withAuthorization(async (token) => token);
+    expect(await connectionPlan(connectionId)).toEqual({
+      plan_type: "free",
+      refresh_generation: String(generationBefore + 2),
+    });
 
     // A permanent OAuth refusal marks the connection for a new sign-in.
     await shared!.admin`update subscription_connections set expires_at = now() - interval '1 hour'

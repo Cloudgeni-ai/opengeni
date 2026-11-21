@@ -48,8 +48,10 @@ import { toolDisclosureItem } from "./provider-history-adapter";
 import { isProviderToolName, providerValidCallName } from "./provider-tool-names";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import {
+  firstPartyAliasModelToolName,
   isFormerMcpToolName,
   looseToolName,
+  mcpToolReferenceAliases,
   mcpToolReferenceMatches,
   wireNamePart,
   type McpToolReference,
@@ -2532,9 +2534,16 @@ export class LazyToolRuntime {
       }
       if (shortPrefix === null) return false;
       const own = name.includes("__") ? name.slice(name.lastIndexOf("__") + 2) : name;
-      return (
+      if (
         own.startsWith(shortPrefix) ||
         (reference !== undefined && wireNamePart(reference.toolName).startsWith(shortPrefix))
+      ) {
+        return true;
+      }
+      // A tool's hidden alias (its former name) finds the current tool.
+      return (
+        reference !== undefined &&
+        mcpToolReferenceAliases(reference).some((alias) => alias.startsWith(shortPrefix))
       );
     };
     const inGroup = (tool: Tool & { name: string }) =>
@@ -2994,7 +3003,13 @@ function transformGenericDispatchCall(
     return [restoreDirectDeferredCallArgumentTypes(candidate, runtime)];
   }
   const dispatch = parseJsonObject(candidate.arguments);
-  const name = dispatch && typeof dispatch.name === "string" ? dispatch.name : null;
+  const requestedName = dispatch && typeof dispatch.name === "string" ? dispatch.name : null;
+  // A first-party tool's hidden alias (its former name) dispatches the current tool.
+  const aliasName =
+    requestedName !== null && !runtime.resolveFunctionTool(requestedName)
+      ? firstPartyAliasModelToolName(requestedName)
+      : undefined;
+  const name = aliasName ?? requestedName;
   const args = dispatch?.arguments;
   const originalCallId = callId(candidate);
   if (!name || !isRecord(args) || !runtime.resolveFunctionTool(name) || !originalCallId) {

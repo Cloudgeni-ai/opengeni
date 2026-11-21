@@ -58,6 +58,11 @@ export type SiteToolConnect = {
   capabilityId: string | null;
   name: string;
   providerDomain: string;
+  /**
+   * The connector takes an API key, not a sign-in: a workspace admin adds
+   * one shared key from a vault (a shared service connection) instead.
+   */
+  apiKey?: true;
 };
 
 export type SiteToolRouting =
@@ -112,7 +117,7 @@ export const siteToolNotAvailableForViewer = () =>
   new ApiHttpError(404, {
     code: "not_found",
     message:
-      "This Site uses an account that isn't yours, so it can't run this for you. Ask the Site's owner to publish it again so it can use your own account.",
+      "This app uses an account that isn't yours, so it can't run this for you. Ask the app's owner to publish it again so it can use your own account.",
     retryable: false,
     outcomeUnknown: false,
     details: { code: "site_tool_not_available_for_viewer" },
@@ -202,6 +207,7 @@ export async function readSiteToolAccountInventory(
         capabilityServers.find((candidate) => candidate.id === server.id)?.capabilityId ?? null,
       name: server.name ?? server.id,
       providerDomain: ref.providerDomain,
+      ...(ref.kind === "api_key" ? { apiKey: true as const } : {}),
     });
   }
   const accounts = bindings.flatMap((binding) => {
@@ -431,13 +437,61 @@ export async function declareSiteToolsForEveryViewer(
       claims.turnId,
     ).catch((error: unknown) => {
       throw new WorkspaceArtifactOperationError(
-        "Couldn't read this turn's connected accounts, so the Site's tools couldn't be shared with other viewers. Nothing was published; publish again.",
+        "Couldn't read this turn's connected accounts, so the app's tools couldn't be shared with other viewers. Nothing was published; publish again.",
         { cause: error },
       );
     });
     return siteToolDeclarationsForEveryViewer({ accounts: bindings ?? [] }, declared);
   }
   return siteToolDeclarationsForEveryViewer(await readAccounts(deps, grant), declared);
+}
+
+/**
+ * One declared tool as it means anything outside this workspace and person:
+ * its connector-level identity (`{ serverId: <connector>, toolName }`) when it
+ * is an account route, else itself. An account route of the reader's own maps
+ * through their bindings; another member's through the single connector
+ * identity the same declarations pair with it for that tool. A route nothing
+ * explains stays as it is. Route ids are never parsed.
+ */
+export function connectorToolIdentity(
+  inventory: Pick<SiteToolAccountInventory, "canonical" | "plain" | "accounts">,
+  declared: readonly ToolGatewayIdentity[],
+  identity: ToolGatewayIdentity,
+): ToolGatewayIdentity {
+  const own = inventory.accounts.find((account) => account.serverId === identity.serverId);
+  if (own) return { serverId: own.canonicalServerId, toolName: identity.toolName };
+  if (inventory.canonical.has(identity.serverId) || inventory.plain.has(identity.serverId))
+    return identity;
+  const paired = declared.filter(
+    (item) =>
+      item.toolName === identity.toolName &&
+      item.serverId !== identity.serverId &&
+      inventory.canonical.has(item.serverId),
+  );
+  return paired.length === 1 ? paired[0]! : identity;
+}
+
+/**
+ * Declared tools with every account route replaced by its connector-level
+ * identity (`connectorToolIdentity`), without duplicates: what a copy in
+ * another workspace should declare, so each of its viewers uses their own
+ * account. Used by App packages; reusable wherever a tool leaves its workspace.
+ */
+export function connectorToolIdentities(
+  inventory: Pick<SiteToolAccountInventory, "canonical" | "plain" | "accounts">,
+  declared: readonly ToolGatewayIdentity[],
+): ToolGatewayIdentity[] {
+  const seen = new Set<string>();
+  const result: ToolGatewayIdentity[] = [];
+  for (const item of declared) {
+    const mapped = connectorToolIdentity(inventory, declared, item);
+    const key = JSON.stringify([mapped.serverId, mapped.toolName]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(mapped);
+  }
+  return result;
 }
 
 /**

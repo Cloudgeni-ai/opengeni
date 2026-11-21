@@ -110,6 +110,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     kind: "opengeni",
     matches: (tool) =>
       tool === "set_session_title" ||
+      tool === "set_waiting_on" ||
       tool === "set_other_session_title" ||
       tool === "bot_template_save" ||
       tool === "notify_user" ||
@@ -119,6 +120,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "wait_for_input" ||
       tool.startsWith("goal_") ||
       tool.startsWith("project_") ||
+      tool.startsWith("sidebar_layout_") ||
       tool.startsWith("session_") ||
       tool.startsWith("sessions_") ||
       tool.startsWith("work_claim_"),
@@ -161,7 +163,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     id: "workspace",
     name: "Workspace operations",
     description:
-      "Use sandboxes, sandbox environments, variables, automations and their event sources, artifacts, and Site Data.",
+      "Use sandboxes, sandbox environments, variables, automations and their event sources, artifacts, and app data.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("sandbox") ||
@@ -176,6 +178,16 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "events_get" ||
       tool.startsWith("artifacts_") ||
       tool.startsWith("editable_artifact_") ||
+      tool.startsWith("app_data_") ||
+      tool.startsWith("app_files_") ||
+      tool.startsWith("app_publication_") ||
+      tool === "app_hostname_check" ||
+      tool.startsWith("app_sql_") ||
+      tool.startsWith("app_sync_") ||
+      tool.startsWith("app_webhook_") ||
+      tool === "app_export" ||
+      tool === "app_install" ||
+      tool === "app_upgrade" ||
       tool.startsWith("site_data_") ||
       tool.startsWith("site_files_") ||
       tool.startsWith("site_publication_") ||

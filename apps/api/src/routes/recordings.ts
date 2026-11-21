@@ -8,6 +8,8 @@ import {
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
   RecordingCapturePurpose,
+  RecordingClientTimings,
+  RECORDING_UPLOAD_BATCH_MAX,
   FinalizeRecordingRequest,
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
@@ -86,6 +88,12 @@ import {
   voiceInputCreditBillingActive,
   type VoiceInputPricing,
 } from "@opengeni/config";
+import {
+  recordRecordingTiming,
+  recordingTimingContext,
+  startRecordingTiming,
+  type RecordingTimingStage,
+} from "@opengeni/observability";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
@@ -116,6 +124,39 @@ const TRANSCRIPT_WAIT_MAX_SECONDS = 25;
 const TRANSCRIPT_WAIT_FAST_CHECK_MILLISECONDS = 100;
 const TRANSCRIPT_WAIT_FAST_SECONDS = 5;
 const TRANSCRIPT_WAIT_SLOW_CHECK_MILLISECONDS = 1_000;
+
+const putTimingsSchema = z.object({
+  purpose: RecordingCapturePurpose,
+  puts: z
+    .array(
+      z.tuple([
+        z.number().int().nonnegative(),
+        z
+          .number()
+          .min(0)
+          .max(7 * 24 * 60 * 60 * 1_000),
+      ]),
+    )
+    .max(RECORDING_UPLOAD_BATCH_MAX),
+});
+
+function readPutTimings(query: string | undefined) {
+  if (!query || query.length > 4_096) return undefined;
+  try {
+    return putTimingsSchema.safeParse(JSON.parse(query)).data;
+  } catch {
+    // Advisory data: malformed observations never change upload acceptance.
+    return undefined;
+  }
+}
+
+const clientTimingStages = {
+  stopToLastPutMs: "stop_to_last_put",
+  finalizeMs: "client_finalize",
+  transcriptWaitMs: "client_transcript_wait",
+  stopToTranscriptMs: "stop_to_transcript",
+  stopToComposerMs: "stop_to_composer",
+} as const satisfies Record<Exclude<keyof RecordingClientTimings, "purpose">, RecordingTimingStage>;
 
 /** The type the worker stored a prepared track with, read from its key's extension. */
 function preparedTrackContentType(objectKey: string): string {
@@ -1209,6 +1250,21 @@ export function registerRecordingRoutes(
         chunkNumbers: present,
       }),
     );
+    const timing = observability ? readPutTimings(c.req.query("putTimings")) : undefined;
+    if (timing) {
+      const context = recordingTimingContext(recordingId, timing.purpose);
+      const durations = new Map(timing.puts);
+      for (const row of updated) {
+        const duration = durations.get(row.chunkNumber);
+        if (row.state !== "uploaded" || duration === undefined) continue;
+        recordRecordingTiming(observability, context, "chunk_put", duration, {
+          recordingTimingSource: "client",
+          chunkNumber: row.chunkNumber,
+          trackNumber: body.trackNumber,
+          audioBytes: row.byteLength,
+        });
+      }
+    }
     // About every half minute of a meeting's audio, make sure its speakers
     // are being told apart while it records (starting it again is a no-op).
     if (deps.workflowClient.startRecordingSpeakerScan && present.some((n) => n % 30 === 0)) {
@@ -1233,50 +1289,83 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
     const current = await guard(() => getRecording(db, { ...actor, recordingId }));
-    // Capture always ends here. A transcript the payer can't pay for is stored
-    // failed with the refusal's code, so the meeting says what to fix and can
-    // be transcribed again once it is fixed, instead of staying unfinished.
-    const { refused, ...transcription } = await versionChoice(
-      actor,
-      current,
-      current.transcription,
-    );
-    const result = await guard(() =>
-      finalizeRecording(db, {
-        ...actor,
+    const end = startRecordingTiming(
+      observability,
+      recordingTimingContext(
         recordingId,
-        endedAt: body.endedAt ? new Date(body.endedAt) : undefined,
-        tracks: body.tracks,
-        transcription,
-        versionId: crypto.randomUUID(),
-        transcriptRefusedCode: refused ? refusalCode(refused) : undefined,
-      }),
+        current.purpose === "dictation" ? "dictation" : "meeting",
+      ),
+      "finalize",
     );
-    // Finalizing again restarts a lost start; a running workflow is left alone.
-    if (result.version.state === "queued" || result.version.state === "processing") {
-      await startTranscript(actor.accountId, result.recording, result.version.id);
-    }
-    // A live charge whose debit failed is paid now rather than on the
-    // workspace's next voice use. Best effort: the recording is finalized.
-    const billing = deps.transcription?.billing;
-    if (
-      billing?.reconcile &&
-      result.recording.tracks.some(
-        (track) =>
-          track.live && liveChargedInCredits(registry.get(track.live.providerId), actor.accountId),
-      )
-    ) {
-      await billing
-        .reconcile({ accountId: actor.accountId, workspaceId: actor.workspaceId })
-        .catch((error: unknown) => {
-          observability?.error("live transcript debits weren't reconciled at finalize", {
-            workspaceId: actor.workspaceId,
-            recordingId,
-            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+    let finalized = false;
+    try {
+      // Capture always ends here. A transcript the payer can't pay for is stored
+      // failed with the refusal's code, so the meeting says what to fix and can
+      // be transcribed again once it is fixed, instead of staying unfinished.
+      const { refused, ...transcription } = await versionChoice(
+        actor,
+        current,
+        current.transcription,
+      );
+      const result = await guard(() =>
+        finalizeRecording(db, {
+          ...actor,
+          recordingId,
+          endedAt: body.endedAt ? new Date(body.endedAt) : undefined,
+          tracks: body.tracks,
+          transcription,
+          versionId: crypto.randomUUID(),
+          transcriptRefusedCode: refused ? refusalCode(refused) : undefined,
+        }),
+      );
+      // Finalizing again restarts a lost start; a running workflow is left alone.
+      if (result.version.state === "queued" || result.version.state === "processing") {
+        await startTranscript(actor.accountId, result.recording, result.version.id);
+      }
+      // A live charge whose debit failed is paid now rather than on the
+      // workspace's next voice use. Best effort: the recording is finalized.
+      const billing = deps.transcription?.billing;
+      if (
+        billing?.reconcile &&
+        result.recording.tracks.some(
+          (track) =>
+            track.live &&
+            liveChargedInCredits(registry.get(track.live.providerId), actor.accountId),
+        )
+      ) {
+        await billing
+          .reconcile({ accountId: actor.accountId, workspaceId: actor.workspaceId })
+          .catch((error: unknown) => {
+            observability?.error("live transcript debits weren't reconciled at finalize", {
+              workspaceId: actor.workspaceId,
+              recordingId,
+              error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+            });
           });
-        });
+      }
+      finalized = true;
+      return c.json({ recording: result.recording, transcript: result.version });
+    } finally {
+      end(finalized ? "complete" : "failed");
     }
-    return c.json({ recording: result.recording, transcript: result.version });
+  });
+
+  app.post(`${base}/:recordingId/timings`, async (c) => {
+    // Authenticated diagnostic data, not a read or mutation of the recording.
+    // A dictation must already be deleted when its composer insertion is measured.
+    await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:create");
+    const recordingId = recordingIdParam(c);
+    const body = await parseRequestJson(c, RecordingClientTimings);
+    const context = recordingTimingContext(recordingId, body.purpose);
+    for (const key of Object.keys(clientTimingStages) as Array<keyof typeof clientTimingStages>) {
+      const duration = body[key];
+      if (duration !== undefined) {
+        recordRecordingTiming(observability, context, clientTimingStages[key], duration, {
+          recordingTimingSource: "client",
+        });
+      }
+    }
+    return c.body(null, 204);
   });
 
   app.get(`${base}/:recordingId/transcripts`, async (c) => {
@@ -1289,23 +1378,54 @@ export function registerRecordingRoutes(
       throw invalid(`waitSeconds must be between 0 and ${TRANSCRIPT_WAIT_MAX_SECONDS}`);
     }
     const list = () => guard(() => listRecordingTranscriptVersions(db, { ...actor, recordingId }));
+    const timing = recordingTimingContext(recordingId);
+    const workStarted = performance.now();
+    let sleepingMs = 0;
+    let endWait: ReturnType<typeof startRecordingTiming> | undefined;
     let versions = await list();
     // Answer the moment the awaited version (or the newest) is heard or fails,
     // so a client learns its text is ready without checking every second.
     const started = Date.now();
     const deadline = started + wait * 1_000;
     const signal = c.req.raw.signal;
-    while (Date.now() < deadline && !signal.aborted) {
-      const awaited = waitFor
+    const awaitedVersion = () =>
+      waitFor
         ? versions.find((version) => version.id === waitFor)
         : [...versions].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-      if (!awaited || awaited.state === "complete" || awaited.state === "failed") break;
-      const check =
-        Date.now() - started < TRANSCRIPT_WAIT_FAST_SECONDS * 1_000
-          ? TRANSCRIPT_WAIT_FAST_CHECK_MILLISECONDS
-          : TRANSCRIPT_WAIT_SLOW_CHECK_MILLISECONDS;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(check, deadline - Date.now())));
-      versions = await list();
+    try {
+      while (Date.now() < deadline && !signal.aborted) {
+        const awaited = awaitedVersion();
+        if (!awaited || awaited.state === "complete" || awaited.state === "failed") break;
+        const check =
+          Date.now() - started < TRANSCRIPT_WAIT_FAST_SECONDS * 1_000
+            ? TRANSCRIPT_WAIT_FAST_CHECK_MILLISECONDS
+            : TRANSCRIPT_WAIT_SLOW_CHECK_MILLISECONDS;
+        endWait ??= startRecordingTiming(observability, timing, "transcript_long_poll_wait");
+        const sleepStarted = performance.now();
+        await new Promise((resolve) => setTimeout(resolve, Math.min(check, deadline - Date.now())));
+        sleepingMs += performance.now() - sleepStarted;
+        versions = await list();
+      }
+      const awaited = endWait ? awaitedVersion() : undefined;
+      endWait?.(
+        signal.aborted
+          ? "cancelled"
+          : awaited?.state === "failed"
+            ? "failed"
+            : awaited?.state === "complete" || !awaited
+              ? "ready"
+              : "timeout",
+      );
+    } catch (error) {
+      endWait?.("failed");
+      throw error;
+    } finally {
+      recordRecordingTiming(
+        observability,
+        timing,
+        "transcript_list_work",
+        performance.now() - workStarted - sleepingMs,
+      );
     }
     return c.json({ versions });
   });

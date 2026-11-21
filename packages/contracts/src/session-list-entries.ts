@@ -90,6 +90,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     rootSessionId: session.rootSessionId,
     effectiveControl: session.effectiveControl,
     inputWait: session.inputWait,
+    ...(session.waitingOn ? { waitingOn: session.waitingOn } : {}),
     lastSequence: session.lastSequence,
     pinned: session.pinned ?? false,
     pinnedAt: session.pinnedAt ?? null,

@@ -1,7 +1,9 @@
 import {
+  getAgent,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
   canonicalSecretPermissions,
+  type AgentRecord,
 } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -38,6 +40,7 @@ import {
   type SessionSystemUpdatePayload,
   type ToolRef,
   type TurnInitiator,
+  SESSION_INSTRUCTIONS_MAX_CHARACTERS,
 } from "@opengeni/contracts";
 import {
   openGeniSlackBotMetadata,
@@ -67,12 +70,16 @@ import {
   type ProductUsageMetricsSink,
 } from "@opengeni/core";
 import {
+  getSessionEvent,
+  getSlackInteractionForSession,
+  reopenSlackInteractionDeliveryAfter,
   appendSessionEvents,
   addSessionSystemUpdateWithSourceMutation,
   getEventOccurrenceForScheduledTaskRun,
   bindScheduledTaskRunSessionInTransaction,
   checkSessionUsageLimitAdmission,
   createScheduledTaskRun,
+  enqueueAppSyncRun,
   recordScheduledTaskAdmissionFailure,
   recordScheduledTaskAdmissionRefusal,
   type ScheduledTaskAdmissionRefusalReason,
@@ -139,7 +146,12 @@ import {
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
-import { agentRunAdmissionDenial, fundedBillingOrigin } from "@opengeni/core";
+import {
+  agentMemoryAccess,
+  agentMemoryGuidance,
+  agentRunAdmissionDenial,
+  fundedBillingOrigin,
+} from "@opengeni/core";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -430,6 +442,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         triggerType: input.triggerType,
         producerKey: stableProducerKey,
       });
+      // An App data sync runs no model: the run is queued for the API's
+      // executor, which calls the tool and writes the App's data.
+      if (priorRun?.actionKind === "app_sync") {
+        if (priorRun.status === "queued" || priorRun.status === "dispatched") {
+          await enqueueAppSyncRun(db, {
+            accountId: priorRun.accountId,
+            workspaceId: priorRun.workspaceId,
+            taskId: priorRun.taskId,
+            runId: priorRun.id,
+          });
+          return { action: "handed_off", runId: priorRun.id };
+        }
+        return scheduledRunTerminalResult(priorRun.error);
+      }
       if (priorRun?.actionKind === "agent_turn") {
         if (priorRun.admissionDiagnostic || priorRun.admissionRefusal) {
           return scheduledAdmissionRefusalResult(priorRun);
@@ -530,6 +556,27 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // unbounded retry loop for work that no longer exists.
       if (!task) {
         return { action: "deleted" };
+      }
+      if (task.action.kind === "app_sync") {
+        if (task.status !== "active") {
+          return { action: "blocked", reason: "scheduled_task_paused" };
+        }
+        const run = await createScheduledTaskRun(db, {
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          triggerType: input.triggerType,
+          producerKey: stableProducerKey,
+        });
+        if (run.status === "queued" || run.status === "dispatched") {
+          await enqueueAppSyncRun(db, {
+            accountId: run.accountId,
+            workspaceId: run.workspaceId,
+            taskId: run.taskId,
+            runId: run.id,
+          });
+          return { action: "handed_off", runId: run.id };
+        }
+        return scheduledRunTerminalResult(run.error);
       }
       // Schedules only run agent turns. A Knowledge source sync task can only
       // be a stray row from a release before its removal; it never runs and
@@ -1679,6 +1726,22 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             let sessionCreated = true;
             const taskMetadata = { ...task.agentConfig.metadata };
             delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
+            // An agent's "Starts when": the run is a chat with that agent,
+            // with its Instructions, Memory and Can use, checked as the
+            // task's owner when the session binds.
+            const runAgent = task.agentConfig.agentId
+              ? await getAgent(
+                  dispatchDb,
+                  { accountId: task.accountId, workspaceId: task.workspaceId },
+                  task.agentConfig.agentId,
+                )
+              : null;
+            const runInstructions = runAgent
+              ? scheduledAgentRunInstructions(runAgent, resolvedAgentInstructions, {
+                  private: task.visibility === "private",
+                  ownerSubjectId: task.ownerSubjectId,
+                })
+              : resolvedAgentInstructions;
             try {
               const sessionInput: Parameters<typeof createSession>[1] = {
                 accountId: task.accountId,
@@ -1693,8 +1756,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
                 ...(resolvedAgentConfig ? { agentConfig: resolvedAgentConfig } : {}),
-                ...(resolvedAgentInstructions !== undefined
-                  ? { instructions: resolvedAgentInstructions }
+                ...(runInstructions !== undefined ? { instructions: runInstructions } : {}),
+                ...(task.agentConfig.agentId
+                  ? {
+                      agent: {
+                        id: task.agentConfig.agentId,
+                        subjectId: task.ownerSubjectId,
+                      },
+                    }
                   : {}),
                 ...scheduledGeneratedChatSettings(task.agentConfig, creatorSessionPolicy),
                 ...(task.visibility === "private"
@@ -2362,9 +2431,62 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
     },
   };
   return {
-    dispatchScheduledTaskRun: (input: DispatchScheduledTaskRunInput) =>
-      retryScheduledTaskAdmission(() => activities.dispatchScheduledTaskRun(input)),
+    dispatchScheduledTaskRun: async (input: DispatchScheduledTaskRunInput) => {
+      const result = await retryScheduledTaskAdmission(() =>
+        activities.dispatchScheduledTaskRun(input),
+      );
+      // A one-time event automation (such as a Linked panel wake) woke an
+      // existing chat that started in a Slack thread: its answer goes back to
+      // that thread. Recurring automations into the chat don't. Best effort;
+      // see docs/session-status-and-links.md.
+      if (input.triggerType === "event" && result.action === "signal") {
+        const { db, observability } = await services();
+        await reopenSlackThreadForOneTimeWake(db, {
+          ...result,
+          taskId: input.taskId,
+        }).catch((error: unknown) =>
+          observability.warn("Reopening the Slack thread for an event wake failed", {
+            sessionId: result.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+      return result;
+    },
   };
+}
+
+/**
+ * Reopen the Slack thread delivery of a chat a one-time event automation just
+ * woke, from just before the wake's message, so only the woken run's answer
+ * posts there. Recurring automations into the chat leave the thread alone.
+ */
+export async function reopenSlackThreadForOneTimeWake(
+  db: Database,
+  wake: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    triggerEventId: string;
+    taskId: string;
+  },
+): Promise<"reopened" | "marked" | null> {
+  const task = await getScheduledTask(db, wake.workspaceId, wake.taskId);
+  if (!task?.events?.once) return null;
+  const interaction = await getSlackInteractionForSession(db, {
+    accountId: wake.accountId,
+    workspaceId: wake.workspaceId,
+    sessionId: wake.sessionId,
+  });
+  if (!interaction) return null;
+  const trigger = await getSessionEvent(db, wake.workspaceId, wake.triggerEventId);
+  if (!trigger || trigger.sessionId !== wake.sessionId) return null;
+  return await reopenSlackInteractionDeliveryAfter(db, {
+    id: interaction.id,
+    accountId: interaction.accountId,
+    workspaceId: interaction.workspaceId,
+    afterSequence: trigger.sequence - 1,
+  });
 }
 
 class IncidentTelemetryPreflightBlockedError extends Error {
@@ -3526,4 +3648,22 @@ export function scheduledGeneratedChatSettings(
       : {}),
     ...(agentConfig.skills?.length ? { skills: SessionSkills.parse(agentConfig.skills) } : {}),
   };
+}
+
+/**
+ * A run with an agent gets that agent's Memory guidance after the task's own
+ * instructions, as an app chat with the agent does. Unchanged when Memory is
+ * off or there is no room (the knowledge tools still enforce the rules).
+ */
+function scheduledAgentRunInstructions(
+  agent: AgentRecord,
+  instructions: string | undefined,
+  chat: { private: boolean; ownerSubjectId: string | null },
+): string | undefined {
+  if (!agent.memoryEnabled) return instructions;
+  const guidance = agentMemoryGuidance(agentMemoryAccess(agent, { ...chat, memoryOff: false }));
+  if (!guidance) return instructions;
+  const own = instructions?.trim() ?? "";
+  const combined = own ? `${own}\n\n${guidance}` : guidance;
+  return combined.length <= SESSION_INSTRUCTIONS_MAX_CHARACTERS ? combined : instructions;
 }

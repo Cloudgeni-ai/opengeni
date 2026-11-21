@@ -130,6 +130,10 @@ const organizationMcpSurfaceFiles = new Set([
   // EU-only: the calling-workspace check covers the organization MCP endpoint too.
   "apps/api/src/mcp/workspace-content-flow.ts",
   "apps/api/src/organization-mcp.ts",
+  // Named tools on the organization MCP endpoint, and `opengeni connect`, which points coding agents at it.
+  "apps/api/src/organization-mcp-tools.ts",
+  "packages/cli/src/connect.ts",
+  "packages/cli/test/connect.test.ts",
   // Disconnect audit: an agent connected to the organization MCP endpoint disconnects.
   "apps/api/test/disconnect-audit-postgres.test.ts",
   // Organization admins list and disconnect agents connected to the organization MCP endpoint.

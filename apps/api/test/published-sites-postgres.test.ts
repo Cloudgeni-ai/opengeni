@@ -879,7 +879,7 @@ test("a public Site on a login-only deployment carries a sign-in notice in its p
   expect(opened.json.warnings).toEqual([
     expect.objectContaining({
       code: "public_sign_in_required",
-      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      message: "On this deployment, public apps still ask visitors to sign in to Opengeni.",
       fix: null,
     }),
   ]);
@@ -1584,7 +1584,16 @@ test("published page tools: declarations, audiences, live membership and approva
     expect(
       (await f.gateway(f.host, "GET", "/site/config", { session: invited })).json.viewer.kind,
     ).toBe("invited");
-    for (const method of ["catalog", "declarations", "resolve", "call", "invoke"]) {
+    // Hyphenated shell-only methods reach the tools route too (not unsupported).
+    for (const method of [
+      "catalog",
+      "declarations",
+      "resolve",
+      "call",
+      "invoke",
+      "sync-review",
+      "sync-opt-in",
+    ]) {
       expect(
         (await f.gateway(f.host, "POST", `/tools/${method}`, { visitor, body: {} })).status,
       ).toBe(403);
@@ -1656,7 +1665,7 @@ test("published page tools: a saved Allow makes a recommended-Ask connection too
       });
     const asked = await invokeAsked();
     expect(asked.status, JSON.stringify(asked.json)).toBe(409);
-    expect(asked.json.error.message).toBe("Open this Site in Opengeni to confirm this action.");
+    expect(asked.json.error.message).toBe("Open this app in Opengeni to confirm this action.");
     expect(asked.json.error.details.code).toBe("site_tool_consent_requires_opengeni");
     expect(f.provider.calls).toHaveLength(2);
     // Another person's allowance, or one for another connection, changes nothing.
@@ -3093,7 +3102,7 @@ test("abuse reports and flagged scans reach the platform, at most once an hour p
     {
       kind: "site_abuse_notice",
       to: "abuse@example.test",
-      subject: `[Opengeni Sites] An abuse report: ${site.host}`,
+      subject: `[Opengeni apps] An abuse report: ${site.host}`,
     },
   ]);
 }, 60_000);
@@ -3412,6 +3421,145 @@ test("a viewer's event stream and pages carry only the Site-safe projection", as
   for (const event of bare.json as Array<{ payload: unknown }>) expect(event.payload).toEqual({});
 }, 60_000);
 
+test("a multi-file app serves its files from the gateway and the console, by version token", async () => {
+  const f = await fixture();
+  const storage = f.deps.objectStorage!;
+  const put = async (url: string, body: string) =>
+    await storage.putObject({
+      key: url.replace("https://storage.example.test/", ""),
+      contentType: "application/octet-stream",
+      body: new TextEncoder().encode(body),
+    } as Parameters<typeof storage.putObject>[0]);
+  const upload = await f.api(f.owner, "POST", `${f.sites}/uploads`);
+  expect(upload.status, JSON.stringify(upload.json)).toBe(200);
+  const entry = `<!doctype html><html><head><script type="module" src="./assets/index-1.js"></script><link rel="stylesheet" href="./assets/index-1.css"></head><body><div id="root"></div></body></html>`;
+  const chunk = "export const page = 'reports';";
+  await put(upload.json.html.putUrl, entry);
+  await put(
+    upload.json.assets.putUrl,
+    JSON.stringify({
+      files: [
+        {
+          path: "assets/index-1.js",
+          base64: Buffer.from("import('./reports-2.js')").toString("base64"),
+        },
+        { path: "assets/reports-2.js", base64: Buffer.from(chunk).toString("base64") },
+        { path: "assets/index-1.css", base64: Buffer.from("body{margin:0}").toString("base64") },
+      ],
+    }),
+  );
+  const created = await f.api(f.owner, "POST", f.sites, {
+    title: "Split app",
+    uploadId: upload.json.uploadId,
+    idempotencyKey: crypto.randomUUID(),
+    visibility: "workspace",
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const siteId = String(created.json.artifact.id);
+  const versionId = String(created.json.version.id);
+  const published = await f.publication(f.owner, siteId, "PUT", { access: "public" });
+  expect(published.status, JSON.stringify(published.json)).toBe(201);
+  const host = String(published.json.hostname);
+  const visitor = visitorId();
+
+  // Published: the HTML names this host's asset folder, with the version's token.
+  const html = await f.gateway(host, "GET", `/versions/${versionId}/html`, { visitor });
+  expect(html.status).toBe(200);
+  const base = /<base href="\/_og\/a\/([^/]+)\/([^/]+)\/">/u.exec(String(html.json));
+  expect(base?.[1]).toBe(versionId);
+  const token = base![2]!;
+  expect(String(html.json)).toContain('src="./assets/index-1.js"');
+  const asset = await f.gatewayRaw(
+    host,
+    "GET",
+    `/assets/${versionId}/${token}/assets/reports-2.js`,
+  );
+  expect(asset.status).toBe(200);
+  expect(await asset.text()).toBe(chunk);
+  expect(asset.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+  // The gateway sets its own caching; the console route below is cached by browsers directly.
+  expect(asset.headers.get("access-control-allow-origin")).toBe("*");
+  const etag = asset.headers.get("etag")!;
+  const revalidated = await f.gatewayRaw(
+    host,
+    "GET",
+    `/assets/${versionId}/${token}/assets/reports-2.js`,
+    { headers: { "if-none-match": etag } },
+  );
+  expect(revalidated.status).toBe(304);
+  // A wrong token, an unlisted file or another app's host finds nothing (malformed
+  // addresses are covered by the address parser's and the gateway's own tests).
+  for (const path of [
+    `/assets/${versionId}/${"x".repeat(22)}/assets/reports-2.js`,
+    `/assets/${versionId}/${token}/assets/missing.js`,
+  ])
+    expect((await f.gatewayRaw(host, "GET", path)).status).toBe(404);
+  const other = await f.live("Other app", { access: "public" });
+  expect(
+    (await f.gatewayRaw(other.host, "GET", `/assets/${versionId}/${token}/assets/reports-2.js`))
+      .status,
+  ).toBe(404);
+
+  // Console: the HTML names the API's public asset route, which needs no credentials.
+  const content = await f.api(f.owner, "GET", `${f.sites}/${siteId}/content`);
+  expect(content.status, JSON.stringify(content.json)).toBe(200);
+  // The stored HTML as published, plus where its files are.
+  expect(content.json.html).toBe(entry);
+  const consoleBase = String(content.json.assetBaseUrl);
+  expect(consoleBase).toMatch(
+    new RegExp(`^http.+/v1/app-assets/${f.workspace.id}/${versionId}/${token}/$`, "u"),
+  );
+  const raw = await f.app.request(`${f.sites}/${siteId}/html?versionId=${versionId}`, {
+    headers: f.owner.headers,
+  });
+  expect(await raw.text()).toContain(`<base href="${consoleBase}">`);
+  const consoleAsset = await f.app.request(`${new URL(consoleBase).pathname}assets/index-1.css`);
+  expect(consoleAsset.status).toBe(200);
+  expect(await consoleAsset.text()).toBe("body{margin:0}");
+  expect(consoleAsset.headers.get("content-type")).toBe("text/css; charset=utf-8");
+  expect(consoleAsset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  expect(consoleAsset.headers.get("access-control-allow-origin")).toBe("*");
+  // Never as the console's own code, and never as a page.
+  for (const headers of [
+    { "sec-fetch-site": "same-origin" },
+    { "sec-fetch-site": "same-site" },
+    { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" },
+  ])
+    expect(
+      (await f.app.request(`${new URL(consoleBase).pathname}assets/index-1.css`, { headers }))
+        .status,
+    ).toBe(404);
+  expect(
+    (
+      await f.app.request(`${new URL(consoleBase).pathname}assets/index-1.css`, {
+        headers: { origin: "null", "sec-fetch-site": "cross-site", "sec-fetch-mode": "cors" },
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await f.app.request(
+        `/v1/app-assets/${f.workspace.id}/${versionId}/${"y".repeat(22)}/assets/index-1.css`,
+      )
+    ).status,
+  ).toBe(404);
+
+  // A new single-file version is served byte for byte, without a base.
+  const next = await f.api(f.owner, "POST", `${f.sites}/${siteId}/versions`, {
+    html: "<!doctype html><h1>One file</h1>",
+    expectedCurrentVersionId: versionId,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(next.status, JSON.stringify(next.json)).toBe(200);
+  const single = await f.api(f.owner, "GET", `${f.sites}/${siteId}/content`);
+  expect(single.json.html).toBe("<!doctype html><h1>One file</h1>");
+  expect(single.json.assetBaseUrl).toBeUndefined();
+  // Files of the earlier version keep loading for pages still open on it.
+  expect(
+    (await f.gatewayRaw(host, "GET", `/assets/${versionId}/${token}/assets/index-1.js`)).status,
+  ).toBe(200);
+}, 60_000);
+
 test("version HTML is this Site's immutable bytes, without cookies; scanning is off by default", async () => {
   const f = await fixture();
   const site = await f.live("Versions", { access: "public" });
@@ -3468,9 +3616,9 @@ test("version HTML is this Site's immutable bytes, without cookies; scanning is 
 }, 60_000);
 
 const SITE_PUBLICATION_TOOLS = [
-  "site_publication_get",
-  "site_publication_update",
-  "site_hostname_check",
+  "app_publication_get",
+  "app_publication_update",
+  "app_hostname_check",
 ];
 
 const SITE_ARTIFACT_TOOLS = [
@@ -4082,7 +4230,7 @@ test("an assistant the workspace can't pay for is unavailable to outsiders, not 
   };
   const unavailable = (refused: { status: number; json: any }, reason: string) => {
     expect(refused.status, JSON.stringify(refused.json)).toBe(403);
-    expect(refused.json.error.message).toBe("This Site's assistant isn't available right now");
+    expect(refused.json.error.message).toBe("This app's assistant isn't available right now");
     expect(refused.json.error.details).toMatchObject({
       code: "not_available_for_viewer",
       feature: "agent",
@@ -4263,10 +4411,7 @@ test("published members inherit normal compute while guests retain their service
       expect(row!.first_party_mcp_tools).toContain("sessions_list");
     } else {
       expect(row!.sandbox_backend).toBe("none");
-      expect([...row!.first_party_mcp_tools].sort()).toEqual([
-        "site_data_query",
-        "site_data_write",
-      ]);
+      expect([...row!.first_party_mcp_tools].sort()).toEqual(["app_data_query", "app_data_write"]);
     }
   }
 });
@@ -4358,7 +4503,7 @@ test("legacy Site continuations restore only viewer-bound data tools and no sand
     const sent = await send();
     expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
     const after = await snapshot();
-    expect(after.first_party_mcp_tools).toEqual(["site_data_query", "site_data_write"]);
+    expect(after.first_party_mcp_tools).toEqual(["app_data_query", "app_data_write"]);
     expect(after.first_party_mcp_permissions).toEqual(["artifacts:read", "artifacts:publish"]);
     expect(after.tools).toEqual([{ kind: "mcp", id: "opengeni" }]);
     expect(after.tool_policy).toEqual({
@@ -4419,8 +4564,9 @@ test("legacy Site continuations restore only viewer-bound data tools and no sand
     try {
       const tools = await client.listTools();
       expect(
-        tools.tools.map((tool) => tool.name).filter((name) => name.startsWith("site_")),
-      ).toEqual(["site_data_query", "site_data_write"]);
+        tools.tools.map((tool) => tool.name).filter((name) => name.startsWith("app_")),
+      ).toEqual(["app_data_query", "app_data_write"]);
+      // The calls below use the former name, a hidden alias of app_data_query.
       const own = await client.callTool({
         name: "site_data_query",
         arguments: { siteId: site.id, collection: "board" },

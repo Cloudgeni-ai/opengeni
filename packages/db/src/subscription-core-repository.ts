@@ -20,6 +20,7 @@ import {
   subscriptionCoreProvider,
   subscriptionCoreProviderIds,
 } from "./subscription-core-providers";
+import { subscriptionCoreConnectionKind } from "./subscription-core/provider";
 
 /**
  * A connection's model list read in every id form of its models (the
@@ -845,8 +846,7 @@ export async function persistSubscriptionCoreRefreshWithPlan(
   if ((input.sessionId === null) !== (input.turnId === null)) {
     throw new Error("A subscription refresh names both its session and turn, or neither");
   }
-  const trimmed = input.planType?.trim() ?? "";
-  const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
+  const planType = subscriptionRefreshPlanValue(input.planType);
   const [row] = await rawRows<{ persisted: boolean }>(
     db,
     sql`select opengeni_private.persist_subscription_core_refresh_with_plan(${input.provider},
@@ -858,6 +858,50 @@ export async function persistSubscriptionCoreRefreshWithPlan(
     ) as persisted`,
   );
   return row?.persisted === true;
+}
+
+/**
+ * An organization administrator's refresh of an organization-managed
+ * connection (an organization usage read). The same refresh write as
+ * persistSubscriptionCoreRefreshWithPlan (migration 1515): the rotated
+ * credential, the plan it reports (null keeps the recorded plan), the
+ * refresh-generation compare-and-swap and the model-cooldown reset on a plan
+ * change. The routine runs with the caller's rights, so the organization
+ * update policy decides whether the write is admitted; the caller holds the
+ * per-connection refresh lock and has locked the row it may refresh.
+ */
+export async function persistSubscriptionCoreAdministratorRefresh(
+  db: Database,
+  input: {
+    provider: ProviderId;
+    accountId: string;
+    connectionId: string;
+    expectedRefreshGeneration: number;
+    credentialEncrypted: string;
+    expiresAt: Date | null;
+    lastRefreshAt: Date;
+    planType: string | null;
+  },
+): Promise<boolean> {
+  const kind = subscriptionCoreConnectionKind(subscriptionCoreProvider(input.provider));
+  assertPositiveGeneration(input.expectedRefreshGeneration);
+  const [row] = await rawRows<{ persisted: boolean }>(
+    db,
+    sql`select opengeni_private.write_subscription_connection_refresh(${input.provider}, ${kind},
+      ${input.accountId}::uuid, ${input.connectionId}::uuid,
+      ${input.expectedRefreshGeneration}::bigint, ${input.credentialEncrypted},
+      ${input.expiresAt?.toISOString() ?? null}::timestamptz,
+      ${input.lastRefreshAt.toISOString()}::timestamptz,
+      ${subscriptionRefreshPlanValue(input.planType)}
+    ) as persisted`,
+  );
+  return row?.persisted === true;
+}
+
+/** A plan the refresh writer accepts, or null (keep the recorded plan). */
+function subscriptionRefreshPlanValue(planType: string | null | undefined): string | null {
+  const trimmed = planType?.trim() ?? "";
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
 }
 
 /** Renew only the exact, still-live chat-turn lease generation. */

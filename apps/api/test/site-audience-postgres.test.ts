@@ -297,7 +297,7 @@ test("an Only me Site is hidden from other members and admins until its owner sh
   );
   expect(pin.status).toBe(404);
   await expect(resolveSiteSessionOrigin(db.db, f.other.grant, siteId, versionId)).rejects.toThrow(
-    "Site origin not found",
+    "App origin not found",
   );
   expect(await resolveSiteSessionOrigin(db.db, f.owner.grant, siteId, versionId)).toMatchObject({
     siteId,
@@ -580,7 +580,7 @@ test("an agent changes who can see its person's Site, as they can from the Site 
   const id = site.artifact.id;
   const agent = await agentFilePublish(f, f.owner.subjectId);
   try {
-    expect(agent.description).toContain("an existing file or Site");
+    expect(agent.description).toContain("an existing file or app");
     // Shared at the same link: no second Site.
     const opened = await agent.share(id, "workspace");
     expect(opened.isError, opened.text).toBe(false);
@@ -590,7 +590,7 @@ test("an agent changes who can see its person's Site, as they can from the Site 
       title: "Mockup",
       access: {
         visibility: "workspace",
-        whoCanOpen: "Everyone in the workspace “Team workspace” can open this Site.",
+        whoCanOpen: "Everyone in the workspace “Team workspace” can open this app.",
       },
     });
     expect(await f.listIds(f.other)).toEqual([id]);
@@ -628,12 +628,12 @@ test("an agent changes who can see its person's Site, as they can from the Site 
     const hidden = await others.share(id, "workspace");
     expect(hidden).toEqual({
       isError: true,
-      text: "No file or Site you can open has this artifactId.",
+      text: "No file or app you can open has this artifactId.",
     });
     const team = await f.publish("Team page");
     const notOwner = await others.share(team.artifact.id, "private");
     expect(notOwner.isError).toBe(true);
-    expect(notOwner.text).toContain("Only the person who owns this Site");
+    expect(notOwner.text).toContain("Only the person who owns this app");
     expect((await personless.share(team.artifact.id, "private")).isError).toBe(true);
     expect(await f.listIds(f.other)).toEqual([team.artifact.id]);
   } finally {

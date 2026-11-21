@@ -109,6 +109,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path.startsWith("/v1/webhooks/events/")) {
     return true;
   }
+  // App webhooks: the webhook's secret (bearer or signature), checked by the
+  // intake over the raw body before reading anything.
+  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/apps/")) {
+    return true;
+  }
   // The GitHub App's webhooks: GitHub's signature with the App's webhook secret.
   if (c.req.method === "POST" && path === "/v1/webhooks/github") {
     return true;
@@ -153,6 +158,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   // the images are public vendor logos, digest-keyed by content, and the route
   // itself enforces the catalog-assets/ prefix lock and extension whitelist.
   if (path.startsWith("/v1/catalog-assets/")) {
+    return true;
+  }
+  // Asset files of multi-file app versions, loaded by opaque-origin app
+  // frames that carry no credentials. The version's unguessable token in the
+  // path is the only authority (routes/app-assets.ts).
+  if ((c.req.method === "GET" || c.req.method === "HEAD") && path.startsWith("/v1/app-assets/")) {
     return true;
   }
   // A bot's avatar picture, fetched by Slack without credentials. The signed

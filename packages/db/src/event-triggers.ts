@@ -23,6 +23,7 @@ import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { AUTOMATION_HEARS_SOURCE } from "./event-trigger-listening";
 import * as schema from "./schema";
 
 // Migration 0929. Event sources deliver into a workspace; each raw delivery is
@@ -268,7 +269,7 @@ export async function createEventSource(
                       ? eq(schema.eventSources.connectionId, input.connectionId)
                       : isNull(schema.eventSources.connectionId),
                   )
-                : input.kind === "workspace"
+                : input.kind === "workspace" || input.kind === "github_personal"
                   ? eq(schema.eventSources.ownerSubjectId, input.ownerSubjectId ?? "")
                   : eq(schema.eventSources.externalKey, input.externalKey ?? ""),
             ),
@@ -318,7 +319,7 @@ export async function createEventSource(
  * "This workspace" reads Opengeni's own recording events the same way.
  */
 export function eventSourceKindHasFeed(kind: EventSourceKind): boolean {
-  return kind === "gmail" || kind === "workspace";
+  return kind === "gmail" || kind === "workspace" || kind === "github_personal";
 }
 
 /** Have the feed pump read these sources' feeds now. */
@@ -956,8 +957,7 @@ async function queueMatchingEvents(
       where trigger.workspace_id = ${input.workspaceId} and trigger.source_id = ${input.sourceId}
         and trigger.status = 'active' and task.status = 'active' and task.deleted_at is null
         and settings.completed_at is null
-        and (source.visibility = 'workspace' or source.owner_subject_id is null
-          or source.owner_subject_id = task.owner_subject_id)
+        and ${AUTOMATION_HEARS_SOURCE}
       order by trigger.task_id, trigger.position`,
   );
   const queued = new Map<string, Map<string, { triggerIds: string[]; occurredAt: Date }>>();

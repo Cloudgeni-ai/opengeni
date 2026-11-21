@@ -2740,7 +2740,14 @@ export class SandboxChannelAService {
     // Selector precedence: refs > staged > worktree.
     let range = "";
     let rangeSetup = "";
-    if (req.fromRef && req.toRef) range = `${shellQuote(req.fromRef)} ${shellQuote(req.toRef)}`;
+    if (req.fromRef && req.mergeBase) {
+      // Resolve the merge base in the same provider operation as the diff. A
+      // missing ref or unrelated history fails the read, like any bad ref.
+      const tip = req.toRef ? shellQuote(req.toRef) : "HEAD";
+      rangeSetup = `opengeni_git_base="$(git merge-base ${shellQuote(req.fromRef)} ${tip})" || exit 128; `;
+      range = req.toRef ? `"$opengeni_git_base" ${tip}` : '"$opengeni_git_base"';
+    } else if (req.fromRef && req.toRef)
+      range = `${shellQuote(req.fromRef)} ${shellQuote(req.toRef)}`;
     else if (req.fromRef) {
       if (req.fromRef === "HEAD") {
         // An unborn repository has no HEAD tree. `--cached` compares its index
@@ -3089,6 +3096,7 @@ export class SandboxChannelAService {
       includeUntracked: false,
       fromRef: `${req.ref}^`,
       toRef: req.ref,
+      mergeBase: false,
       pathspec: [],
       contextLines: 3,
       maxBytesPerFile: req.maxBytesPerFile,

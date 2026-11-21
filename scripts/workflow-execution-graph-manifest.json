@@ -10,7 +10,11 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "4acdfbd22ff72cc944799dc2320762f438d20f72c1ecb03aaac71171132f3010"
+      "sha256": "507d3feb7c696841bcfd3515b94e23aa0ca186296bb933992032143e786d1510"
+    },
+    {
+      "path": ".github/workflows/agent-windows-arm64.yml",
+      "sha256": "9cf56550fe86632a51aa2d1b5a73ee9802cc08bd277a85e0b0359b8d17d8ff79"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -70,19 +74,11 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "205a6aa9d47a33d191d9c55973aeec39765c207bad18e4a87357241f4f95e3ce"
+      "sha256": "69173fa6a798b641ab190de06352523d27647875465ef3247cb470c2ac06f6b3"
     },
     {
       "path": ".github/workflows/merge-content.yml",
       "sha256": "ccf67b8f6bcedacf010900f04da6add275adacc38db197da587e490a204d475c"
-    },
-    {
-      "path": ".github/workflows/model-request-review-signal.yml",
-      "sha256": "5f2fa7b87f9177c7e37e0069c9d40663b2aa4839af4298d33a014fbcaa4dcc52"
-    },
-    {
-      "path": ".github/workflows/model-request-review.yml",
-      "sha256": "a07b0841fd2f469fa2efc4d12cd6cb5723dfdc888ce67e0cffbd5a84f62b54cd"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -394,12 +390,6 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
-      "step": "Build (Windows MSVC)",
-      "sha256": "47e82ccc9bf5233331015516e93808bcc105a3425b80ddbb85ededac49b20c3b"
-    },
-    {
-      "workflow": ".github/workflows/agent-release.yml",
-      "job": "build",
       "step": "Build interaction helpers (Linux glibc)",
       "sha256": "6bb244b0b2cb2d791b5f75a1a25f752f875d7cbfc8a5cd7faea807dcf5148d95"
     },
@@ -412,14 +402,8 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
-      "step": "Build interaction helpers (Windows x64)",
-      "sha256": "b3a144317b4213f203462e7db7c74868b38075315007781220c15592bb942bfd"
-    },
-    {
-      "workflow": ".github/workflows/agent-release.yml",
-      "job": "build",
-      "step": "Check the Windows binaries run on stock Windows",
-      "sha256": "69aa4d3a792aa0bcb5cf61f79fd93251138a1c1a867da96b35bc916487424ba3"
+      "step": "Build Windows x64 agent and interaction runtime",
+      "sha256": "096270196509cef71e536b159d7bb4eeacdd55af64c3d92a3d8195d420a2cab7"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -443,7 +427,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Install workspace dependencies",
-      "sha256": "8087ab5145312bf0747fbb8f871326960427169b20a5eff1b178cdc3704fe5ff"
+      "sha256": "c17932c388d4c03d171169818905bee42f836a6364962a3519b5f1dcf25cb544"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -540,6 +524,24 @@
       "job": "publish",
       "step": "Sign SHA256SUMS (if the key is present)",
       "sha256": "7971410990bd08d1f099e7ecd379b342714e1cc090bbd339c70abbc7b6c86690"
+    },
+    {
+      "workflow": ".github/workflows/agent-windows-arm64.yml",
+      "job": "build",
+      "step": "Build the Windows ARM64 agent and interaction runtime",
+      "sha256": "5a78c5b2a2fb6b34b21bfc8075e71ed5f54dbaa2454272fd2ac51d906852d5d7"
+    },
+    {
+      "workflow": ".github/workflows/agent-windows-arm64.yml",
+      "job": "build",
+      "step": "Install agent build and smoke dependencies",
+      "sha256": "914bbe5db1704efcee2f5743f04d27a7bb6e56ec17b96bba0a5cbd5e6fccc9ea"
+    },
+    {
+      "workflow": ".github/workflows/agent-windows-arm64.yml",
+      "job": "build",
+      "step": "Start the runtime from the standalone agent",
+      "sha256": "bc3229570196029190079b6cdc8288d90d5414f95e6af126ecf82fb2b9c13558"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -1494,24 +1496,6 @@
       "job": "content",
       "step": "Recompute landed merge content",
       "sha256": "58808325ef978e67fac85965381b0808323d1adb509b66a3bba9530e37523799"
-    },
-    {
-      "workflow": ".github/workflows/model-request-review-signal.yml",
-      "job": "signal",
-      "step": "Signal",
-      "sha256": "e27d316b41b4aa16da78e4c1fa112cdca9fc2ccd6366055ca121f1db0f261d18"
-    },
-    {
-      "workflow": ".github/workflows/model-request-review.yml",
-      "job": "evaluate",
-      "step": "Report the gate after a review",
-      "sha256": "46e796d352e300fa0a32c942c4df2954c2f2524ab157354831316cd1ad536ea3"
-    },
-    {
-      "workflow": ".github/workflows/model-request-review.yml",
-      "job": "evaluate",
-      "step": "Report the gate for a pushed or opened PR",
-      "sha256": "9329ab82c7bdbbd705a5d390d2d2b27cc53a23091353c5b96318da3461ca616a"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",

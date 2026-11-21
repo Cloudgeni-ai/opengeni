@@ -886,6 +886,11 @@
   color: var(--og-color-status-idle);
   font-weight: 500;
 }
+/* A ready computer that isn't this device: each line on its own, above what
+   this device can do. */
+.og-tc-card-foot > p.og-tc-card-ready {
+  flex-basis: 100%;
+}
 .og-tc-card-foot > :is(button, a) {
   display: inline-flex;
   align-items: center;

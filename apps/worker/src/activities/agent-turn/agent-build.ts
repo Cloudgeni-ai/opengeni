@@ -744,6 +744,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     governance: workspaceGovernance ?? null,
   });
+  // Where this turn's workspace is. The layout below and the agent's manifest
+  // are both built from it, so the model reads the workspace the box applies.
+  const workspacePlacement = {
+    ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
+    ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
+      ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
+      : {}),
+  };
   // The active workspace's layout names its machine's root. It reaches the
   // model the same way, so moving the session to another machine adds an item
   // before the next turn instead of rewriting the system prompt (which
@@ -757,11 +765,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedExecutionGeneration: turn.executionGeneration,
     expectedAttemptId: input.attemptId,
     layout: workspaceFilesystemLayout(eventing.modelRunSettings, runtimeResources, {
-      ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
+      ...workspacePlacement,
       ...(session.agent ? { renderer: session.agent.renderer } : {}),
-      ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
-        ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
-        : {}),
     }),
   });
   // An agent edit made since this chat's system prompt was built reaches the
@@ -1066,10 +1071,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(activeSandboxBackend !== "selfhosted" && repositoryRemoval
           ? { repositoryRemoval }
           : {}),
-        ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
-        ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
-          ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
-          : {}),
+        ...workspacePlacement,
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,

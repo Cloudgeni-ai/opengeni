@@ -2643,16 +2643,16 @@ describe("OpenGeniClient", () => {
     ).rejects.toThrow("does not support filtered session lists");
   });
 
-  test("Site-filtered lists require explicit server support, including with other filters", async () => {
+  test("App-filtered lists require explicit server support, including with other filters", async () => {
     const old = makeClient(() =>
       jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
     );
     await expect(
       old.client.listSessions(WORKSPACE_ID, { originSiteId: SESSION_ID }),
-    ).rejects.toThrow("does not support Site-filtered session lists");
+    ).rejects.toThrow("does not support app-filtered session lists");
     await expect(
       old.client.listSessionPage(WORKSPACE_ID, { originSiteId: SESSION_ID, channelId: null }),
-    ).rejects.toThrow("does not support Site-filtered session lists");
+    ).rejects.toThrow("does not support app-filtered session lists");
     const modern = makeClient(() =>
       jsonResponse({
         pinned: [],
@@ -2672,7 +2672,7 @@ describe("OpenGeniClient", () => {
     ).resolves.toMatchObject({ originSiteId: SESSION_ID });
   });
 
-  test("rails can include Site conversations or receive them as Site rows", async () => {
+  test("rails can include app conversations or receive them as app rows", async () => {
     const siteGroups = [
       {
         siteId: SESSION_ID,
@@ -2712,13 +2712,13 @@ describe("OpenGeniClient", () => {
     expect(requests[2]!.url).not.toContain("siteConversations");
   });
 
-  test("Site access lists fail closed on older servers and owner management uses native routes", async () => {
+  test("App access lists fail closed on older servers and owner management uses native routes", async () => {
     const old = makeClient(() =>
       jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
     );
     await expect(
       old.client.listSessionPage(WORKSPACE_ID, { siteAccessId: SESSION_ID }),
-    ).rejects.toThrow("Site access-filtered");
+    ).rejects.toThrow("app access-filtered");
     const modern = makeClient(() =>
       jsonResponse({
         pinned: [],

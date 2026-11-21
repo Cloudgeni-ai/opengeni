@@ -2255,6 +2255,31 @@ describe("buildTimeline", () => {
     );
   });
 
+  test("strips all UTM keys from assistant links without changing the source or other URL parts", () => {
+    reset();
+    const labelled =
+      "[The guide](https://example.com/guide?utm_campaign=launch&lang=en&lang=nb&utm_source=newsletter&q=a%20b+c#steps)";
+    const bare = "https://example.com/page?utm_medium=email&utm_medium=other#top";
+    const selfLabelled = "https://example.com/article?UTM%5FCONTENT=sidebar&id=7#footnote";
+    const code = "`https://example.com/example?utm_term=keep`";
+    const text = [labelled, `<${bare}>`, `[${selfLabelled}](${selfLabelled})`, code].join("\n");
+    const source = event("agent.message.completed", { text, phase: "final_answer" });
+    const userSource = event("user.message", { text: bare });
+
+    const items = buildTimeline(englishText, [source, userSource]);
+
+    expect(items.find((item) => item.kind === "agent-message")?.text).toBe(
+      [
+        "[The guide](https://example.com/guide?lang=en&lang=nb&q=a%20b+c#steps)",
+        "<https://example.com/page#top>",
+        "[https://example.com/article?id=7#footnote](https://example.com/article?id=7#footnote)",
+        code,
+      ].join("\n"),
+    );
+    expect(source.payload).toMatchObject({ text });
+    expect(items.find((item) => item.kind === "user-message")?.text).toBe(bare);
+  });
+
   test("keeps ordinary words that contain cite", () => {
     reset();
     const text = "Please cite turn 3 of the excited recital; citeturn4 stays.";
@@ -4429,6 +4454,83 @@ describe("buildTimeline", () => {
     expect(cards([first, askedAgain, finished, later])).toEqual([[later.id, false, false]]);
     // Finished from the only card there was: it stays, saying so.
     expect(cards([first, finishedFrom(first)])).toEqual([[first.id, false, true]]);
+  });
+
+  test("only the newest card for the same connection stays a full card; a turn shows it once", () => {
+    reset();
+    const card = (turnId: string, id: string, name: string, rationale: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id,
+            name,
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale,
+            requiredVariables: [],
+          },
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "mcp:slack", "Slack", "Read the report."),
+      card("turn-1", "mcp:linear", "Linear", "Update the issue."),
+      card("turn-1", "mcp:slack", "Slack", "Search for duplicates."),
+      card("turn-2", "mcp:slack", "Slack", "Annotate the report."),
+      card("turn-3", "mcp:linear", "Linear", "Label the issue."),
+      card("turn-3", "mcp:linear", "Linear", "Set its priority."),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.turnId, item.capability?.rationale, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["turn-1", "Update the issue.", true],
+      ["turn-1", "Search for duplicates.", true],
+      ["turn-2", "Annotate the report.", false],
+      ["turn-3", "Set its priority.", false],
+    ]);
+  });
+
+  test("connection cards with inputs are never folded", () => {
+    reset();
+    const card = (turnId: string, rationale: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "mcp:jira",
+            name: "Jira",
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale,
+            requiredVariables: [],
+            inputs: [{ id: "site", label: "Site" }],
+          },
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "Connect the first site."),
+      card("turn-1", "Connect the second site."),
+      card("turn-2", "Connect the third site."),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.capability?.rationale, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["Connect the first site.", false],
+      ["Connect the second site.", false],
+      ["Connect the third site.", false],
+    ]);
   });
 
   test("a Chrome setup card keeps its purpose and repeats separately from machine requests", () => {

@@ -29,7 +29,7 @@ const SDK_LINE_EXTENSIONS: ReadonlyArray<readonly [line: string, addition: strin
 
 /**
  * Stands in for the SDK's filesystem section, which Opengeni turns off
- * (`filesystemInstructions: false`): that section names the active machine's
+ * (`manifestInstructions: false`): that section names the active machine's
  * root, so moving a session to another machine rewrote the system prompt and
  * invalidated the whole cached history. The layout itself is a history item.
  */

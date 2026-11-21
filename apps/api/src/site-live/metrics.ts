@@ -14,12 +14,12 @@ import {
 
 export const SITE_RUNTIME_REQUEST_METRIC = {
   name: "opengeni_site_runtime_request_duration_seconds",
-  help: "Time the API spends answering one gateway-signed Site request (/v1/site-runtime), by Site operation and status class.",
+  help: "Time the API spends answering one gateway-signed app request (/v1/site-runtime), by app operation and status class.",
 } as const;
 
 export const SITE_CLIENT_TIMING_METRIC = {
   name: "opengeni_site_client_timing_seconds",
-  help: "Speed measured in published Site pages and by the Site gateway, reported in sampled batches: app_load (shell start to app ready), first_data (first Site Data or SQL answer), bridge (one bridge call, by operation), gateway (gateway handling, by route).",
+  help: "Speed measured in published app pages and by the app gateway, reported in sampled batches: app_load (shell start to app ready), first_data (first app data or SQL answer), bridge (one bridge call, by operation), gateway (gateway handling, by route).",
 } as const;
 
 export const SITE_CLIENT_TIMING_EVENTS_METRIC = {
@@ -29,7 +29,7 @@ export const SITE_CLIENT_TIMING_EVENTS_METRIC = {
 
 export const SITE_DB_OPERATION_METRIC = {
   name: "opengeni_site_db_operation_duration_seconds",
-  help: "Round trip from the API to a Site's SQL Durable Object through the gateway, by operation and outcome.",
+  help: "Round trip from the API to an app's SQL Durable Object through the gateway, by operation and outcome.",
 } as const;
 
 export const SITE_TIMING_BUCKETS = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
@@ -82,7 +82,7 @@ export function siteRuntimeOpLabel(method: string, suffix: string): string {
   if (method === "POST" && suffix === "/platform/timings") return "platform.timings";
   if (method === "POST" && suffix === "/site/reports") return "site.reports";
   if (method === "POST" && suffix === "/live/admit") return "live.admit";
-  const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
+  const tool = /^\/tools\/([a-z][a-z-]*)$/u.exec(suffix);
   if (tool) return siteOpLabel(tool[1]);
   const sitePath = suffix === "/v1/config/client" ? suffix : `/v1/workspaces/site-host${suffix}`;
   return matchSiteOperation(method, sitePath)?.operation.id ?? "other";

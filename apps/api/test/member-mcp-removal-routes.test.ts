@@ -213,6 +213,48 @@ describe("members remove only the custom MCP servers they added", () => {
     expect((await call(member, "DELETE", removePath(own))).status).toBe(409);
   });
 
+  test("an admin deletes a server that was never set up here", async () => {
+    // Added, but its first Connect never finished: only the entry exists.
+    const id = `mcp:removal-never-connected-${crypto.randomUUID()}`;
+    const created = await call(member, "POST", "/capabilities", {
+      id,
+      kind: "mcp",
+      name: "Removal never connected",
+      endpointUrl: `https://tools-${crypto.randomUUID()}.example/mcp`,
+    });
+    expect(created.status).toBe(201);
+    expect(await installation(id)).toBeNull();
+    expect((await removableBy(member)).get(id)).toBe(false);
+    expect((await removableBy(admin)).get(id)).toBe(true);
+    // There is no installation to remove.
+    expect((await call(admin, "DELETE", removePath(id))).status).toBe(409);
+
+    const deletePath = `/capabilities/${encodeURIComponent(id)}`;
+    const refused = await call(member, "DELETE", deletePath);
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain("Only an admin can delete");
+    expect((await call(reader, "DELETE", deletePath)).status).toBe(403);
+    expect(await catalogRowExists(id)).toBe(true);
+
+    expect((await call(admin, "DELETE", deletePath)).status).toBe(204);
+    expect(await catalogRowExists(id)).toBe(false);
+    expect((await removableBy(admin)).has(id)).toBe(false);
+    expect((await call(admin, "DELETE", deletePath)).status).toBe(404);
+  });
+
+  test("deleting a server an admin turned off takes its installation too", async () => {
+    const id = await addServerAs(member, "delete-turned-off");
+    expect(
+      (await call(admin, "POST", `/capabilities/${encodeURIComponent(id)}/disable`, {})).status,
+    ).toBe(200);
+    expect((await removableBy(admin)).get(id)).toBe(true);
+    expect((await call(admin, "DELETE", `/capabilities/${encodeURIComponent(id)}`)).status).toBe(
+      204,
+    );
+    expect(await installation(id)).toBeNull();
+    expect(await catalogRowExists(id)).toBe(false);
+  });
+
   test("an admin removes any custom server", async () => {
     const own = await addServerAs(member, "admin-removes-member");
     const others = await addServerAs(otherMember, "admin-removes-other");
@@ -275,6 +317,9 @@ describe("members remove only the custom MCP servers they added", () => {
       const refused = await call(admin, "DELETE", removePath(id));
       expect(refused.status).toBe(409);
       expect(await refused.text()).toContain("Only a custom MCP server added in this workspace");
+      expect((await call(admin, "DELETE", `/capabilities/${encodeURIComponent(id)}`)).status).toBe(
+        409,
+      );
       expect((await installation(id))?.status).toBe("disabled");
     } finally {
       await shared!.admin`delete from organization_connectors

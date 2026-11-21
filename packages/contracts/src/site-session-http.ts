@@ -3,7 +3,7 @@ import { matchSiteOperation, type SiteOperation } from "./site-operations";
 const SITE_WORKSPACE_PREFIX = "/v1/workspaces/site-host";
 /** Site Data and Site SQL routes under any published Site: `<prefix>/published-artifacts/<id>/data|files|sql`. */
 const SITE_DATA_PATH =
-  /^\/v1\/workspaces\/site-host\/published-artifacts\/([^/]+)\/(?:data|files|sql)(?:\/|$)/u;
+  /^\/v1\/workspaces\/site-host\/published-artifacts\/([^/]+)\/(?:data|files|sql|notify)(?:\/|$)/u;
 /** The list filter a frame without a published Site gets: it names no Site, so lists nothing. */
 export const SITE_NO_ORIGIN_ID = "00000000-0000-0000-0000-000000000000";
 
@@ -44,10 +44,10 @@ export type SiteConversationSite = {
  * model-visible context (`modelContext`), never authority.
  */
 export function siteConversationContext(site: SiteConversationSite): string {
-  const title = site.title.replace(/\s+/gu, " ").trim().slice(0, 200) || "Untitled Site";
+  const title = site.title.replace(/\s+/gu, " ").trim().slice(0, 200) || "Untitled app";
   return [
-    `The person is working on the Opengeni Site “${title}” (Site id ${site.siteId}), shown beside this chat at version ${site.revision} (version id ${site.versionId}).`,
-    "When they ask for a change to “the Site”, “this page” or a part of it, they mean this Site: read its current source, then publish the change as a new version of this Site.",
+    `The person is working on the Opengeni app “${title}” (App id ${site.siteId}), shown beside this chat at version ${site.revision} (version id ${site.versionId}).`,
+    "When they ask for a change to “the app”, “this page” or a part of it, they mean this app: read its current source, then publish the change as a new version of this app.",
     "A published version goes live immediately and the preview beside this chat reloads; earlier versions can be restored.",
   ].join(" ");
 }
@@ -57,7 +57,7 @@ export class SiteSessionPathError extends Error {
   readonly code = "site_session_path_unsupported";
 
   constructor() {
-    super("Unsupported Site session API path");
+    super("Unsupported app session API path");
     this.name = "SiteSessionPathError";
   }
 }
@@ -67,7 +67,7 @@ export class SiteDataUnsupportedError extends Error {
   readonly code = "site_data_unsupported";
 
   constructor() {
-    super("This Site host does not provide Site Data");
+    super("This app host does not provide app data");
     this.name = "SiteDataUnsupportedError";
   }
 }

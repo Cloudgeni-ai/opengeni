@@ -223,6 +223,10 @@ import {
 } from "./slack-routing";
 import { slackTextNamesAgent } from "./slack-agent-address";
 import {
+  postSlackRouteChoiceWithAgentsCard,
+  slackRouteChoiceQuestion,
+} from "./slack-route-choice-card";
+import {
   buildSlackAgentSuggestionAskedMessage,
   buildSlackAgentSuggestionMessage,
   loadSlackAgentsForConnection,
@@ -851,16 +855,21 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
-    // The workspace's Slack event source, when it has one, records channel
-    // activity for automations. Conversations below never depend on it.
+    // The Slack event sources of the bot's home workspace and of the
+    // workspaces its organization shares it with record channel activity for
+    // automations. Conversations below never depend on them, and Slack's
+    // acknowledgement never waits on the shared workspaces' deliveries.
     try {
-      await recordSlackEvent({
+      const recorded = await recordSlackEvent({
         db: deps.db,
         settings: deps.settings,
+        accountId: installation.accountId,
         workspaceId: installation.workspaceId,
+        connectionId: installation.connectionId,
         teamId,
         body: signed.rawBytes,
       });
+      void recorded.shared;
     } catch (error) {
       console.error("[slack-interactions] recording the Slack event failed", {
         workspaceId: installation.workspaceId,
@@ -2657,9 +2666,18 @@ async function askSlackRouteChoice(
   entry: SlackInteractionInboxEntry,
   candidates: readonly SlackRoutableWorkspace[],
   agents: readonly SlackRoutingAgent[] = [],
+  agentRecords: readonly SlackAgentRecord[] = [],
 ): Promise<void> {
   if (agents.length > 0) {
-    await askSlackRouteChoiceWithAgents(deps, client, home, entry, candidates, agents);
+    await askSlackRouteChoiceWithAgents(
+      deps,
+      client,
+      home,
+      entry,
+      candidates,
+      agents,
+      agentRecords,
+    );
     return;
   }
   const offered = candidates.slice(0, MAX_SLACK_ROUTE_PROMPT_BUTTONS);
@@ -2747,8 +2765,8 @@ async function askSlackRouteChoice(
 }
 
 /**
- * The picker in a channel of an installation with Slack agents: "Who answers
- * in #channel", with the agents first and then Opengeni in each workspace.
+ * The picker in a channel of an installation with Slack agents: "Who should
+ * answer in #channel?", one menu with an Agents group and a Workspaces group.
  * Same prompt row, same ledger and the same re-authorization on the answer.
  */
 async function askSlackRouteChoiceWithAgents(
@@ -2758,6 +2776,7 @@ async function askSlackRouteChoiceWithAgents(
   entry: SlackInteractionInboxEntry,
   candidates: readonly SlackRoutableWorkspace[],
   agents: readonly SlackRoutingAgent[],
+  agentRecords: readonly SlackAgentRecord[],
 ): Promise<void> {
   const offered: SlackRoutableWorkspace[] = [
     ...agents.slice(0, MAX_SLACK_ROUTE_PROMPT_BUTTONS).map((agent) => ({
@@ -2790,51 +2809,30 @@ async function askSlackRouteChoiceWithAgents(
   });
   if (!opened) return;
   const channel = `<#${opened.prompt.slackChannelId}>`;
-  const question = `Who should answer in ${channel}?`;
-  const blocks: SlackMessageBlock[] = [
-    { type: "section", text: { type: "mrkdwn", text: question } },
-    {
-      type: "actions",
-      block_id: "opengeni-route-choice",
-      elements: [
-        ...opened.prompt.options.map((option) => ({
-          type: "button" as const,
-          action_id: "opengeni.route.select",
-          value: option.id,
-          text: {
-            type: "plain_text" as const,
-            // Rendered from the stored option, so a replay posts the same bytes.
-            text: option.candidateSlackAgentId
-              ? option.candidateLabel
-              : boundedSlackRouteLabel(`Opengeni in ${option.candidateLabel}`),
-          },
-        })),
-        {
-          type: "button" as const,
-          action_id: "opengeni.route.cancel",
-          value: opened.prompt.options[0]?.id ?? opened.prompt.id,
-          text: { type: "plain_text" as const, text: "Not now" },
-        },
-      ],
-    },
-  ];
-  const url = slackWorkspaceUrl(deps, home.workspaceId);
-  blocks.push({
-    type: "context",
-    elements: [
-      {
-        type: "mrkdwn",
-        text: url
-          ? `Remembered for ${channel}. Change it in <${url}|Opengeni> under Capabilities, then Slack.`
-          : `Remembered for ${channel}. Change it in Opengeni under Capabilities, then Slack.`,
-      },
-    ],
-  });
-  await client.postMessage({
+  await postSlackRouteChoiceWithAgentsCard(client, {
     operationId: opened.prompt.messageOperationId,
     userId: opened.prompt.slackUserId,
-    text: boundedOutput(question),
-    blocks,
+    text: boundedOutput(slackRouteChoiceQuestion(channel)),
+    channel,
+    // Rendered from the stored options, so a replay posts the same bytes.
+    options: opened.prompt.options,
+    cancelValue: opened.prompt.options[0]?.id ?? opened.prompt.id,
+    settingsUrl: slackWorkspaceUrl(deps, home.workspaceId),
+    agentEmoji: new Map(
+      agentRecords.flatMap((agent) =>
+        agent.avatar.kind === "emoji" ? [[agent.id, agent.avatar.emoji] as const] : [],
+      ),
+    ),
+    boundLabel: boundedSlackRouteLabel,
+    alreadyPosted: async () =>
+      (
+        await getSlackBotPostOperation(
+          deps.db,
+          home.workspaceId,
+          entry.connectionId,
+          opened.prompt.messageOperationId,
+        )
+      )?.status === "completed",
   });
 }
 
@@ -3168,6 +3166,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       entry,
       resolution.candidates,
       resolution.agents ?? [],
+      slackAgents.records,
     );
     return;
   }
@@ -8105,6 +8104,8 @@ async function deliverSlackSessionEvents(
       ...interaction,
       claimHolderId,
       sequence: lastSequence,
+      // A wake marked meanwhile for a later turn keeps the thread open.
+      settledTurn: true,
       state: terminal,
     });
   } else {
@@ -8433,7 +8434,12 @@ export function normalizedBlockActionInteraction(
   const threadTs = boundedString(message?.thread_ts, 64);
   const actionTs = boundedString(action?.action_ts, 64) ?? boundedString(payload.action_ts, 64);
   const actionId = boundedString(action?.action_id, 128);
-  const handleId = boundedString(action?.value, 64);
+  // A button carries its handle as `value`; a menu, as its selected option's.
+  const handleId =
+    boundedString(action?.value, 64) ??
+    (action?.type === "static_select"
+      ? boundedString(record(action.selected_option)?.value, 64)
+      : null);
   if (
     !teamId ||
     !userId ||

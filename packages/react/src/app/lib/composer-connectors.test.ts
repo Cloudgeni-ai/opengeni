@@ -2,11 +2,14 @@ import { newSessionDraftToolPolicy } from "./session-tools";
 import { sessionPolicyPickerIds } from "./session-tools";
 import { describe, expect, test } from "bun:test";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "../types";
+import type { McpServerOption } from "./session-tools";
 import {
   addsConnectorOutsideDefaults,
   connectorSelectionUpdate,
   changedConnectorExclusions,
   composerConnectorOptions,
+  connectionLogoResolver,
+  connectorLogoSources,
   followWorkspaceConnectorPolicy,
   newSessionConnectorCustomizeState,
 } from "./composer-connectors";
@@ -298,5 +301,29 @@ describe("connector selection policy", () => {
       mode: "workspace_default",
       expectedVersion: 4,
     });
+  });
+});
+
+describe("connection logos", () => {
+  test("the picker and the agent page resolve a logo the same way: own, then by domain", () => {
+    const items = [
+      item("mail", { logoAssetPath: "mail.svg", providerDomain: "mail.example" }),
+      item("bare", { logoAssetPath: null, providerDomain: "mail.example" }),
+      item("none", { logoAssetPath: null }),
+    ];
+    const resolve = connectionLogoResolver(items, asset);
+    expect(resolve(items[0], "mail.example")).toBe("/v1/catalog-assets/mail.svg");
+    expect(resolve(items[1], "mail.example")).toBe("/v1/catalog-assets/mail.svg");
+    expect(resolve(undefined, "www.mail.example")).toBe("/v1/catalog-assets/mail.svg");
+    expect(resolve(items[2], null)).toBeNull();
+    const logos = connectorLogoSources(
+      [
+        { id: "bare", name: "Bare", providerDomain: "mail.example" },
+        { id: "none", name: "None" },
+      ] as McpServerOption[],
+      items,
+      asset,
+    );
+    expect([...logos]).toEqual([["bare", "/v1/catalog-assets/mail.svg"]]);
   });
 });

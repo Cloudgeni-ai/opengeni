@@ -154,6 +154,19 @@ export const AttemptToolCatalogEntry = /* @__PURE__ */ defineSchema(() =>
       icons: z.array(AttemptToolCatalogIcon).max(16).optional(),
       source: z.enum(["opengeni", "files", "docs", "mcp", "codex_apps", "interaction"]),
       approval: z.enum(["none", "human", "policy"]),
+      /**
+       * The effective tool permission from the person's and workspace's tool
+       * settings, for a connection-backed tool (`approval: "policy"` or a
+       * setting that asks). `fromSetting` is false when no setting names the
+       * tool and the provider's recommendation applies. Absent elsewhere.
+       */
+      permission: z
+        .object({
+          decision: z.enum(["allow", "ask", "block"]),
+          fromSetting: z.boolean(),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );
@@ -594,7 +607,7 @@ export const ToolGatewayTargetApprovalRequest = /* @__PURE__ */ defineSchema(() 
         ctx.addIssue({
           code: "custom",
           path: ["rememberForSite"],
-          message: "rememberForSite requires a Site context",
+          message: "rememberForSite requires an app context",
         });
     }),
 );
@@ -797,6 +810,85 @@ export const ToolGatewaySiteReadinessResponse = /* @__PURE__ */ defineSchema(() 
     .strict(),
 );
 export type ToolGatewaySiteReadinessResponse = z.infer<typeof ToolGatewaySiteReadinessResponse>;
+
+/**
+ * The connect card for a pinned App (Site) version: the connected tools its
+ * declared tools use that this viewer still has to connect or reconnect,
+ * one item per connector or account. Built by the platform from the
+ * version's own declarations and the same readiness checks a call uses.
+ * Advisory only: it never prepares a call or contacts a provider.
+ */
+export const ToolGatewaySiteSetupRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      siteArtifactId: primitives.uuid,
+      siteVersionId: primitives.uuid,
+    })
+    .strict(),
+);
+export type ToolGatewaySiteSetupRequest = z.infer<typeof ToolGatewaySiteSetupRequest>;
+export const ToolGatewaySiteSetupAction = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // The viewer has no account for the connector yet.
+    "connect",
+    // The viewer's account must sign in again, or allow more access.
+    "reconnect",
+  ]),
+);
+export type ToolGatewaySiteSetupAction = z.infer<typeof ToolGatewaySiteSetupAction>;
+export const ToolGatewaySiteSetupSharedKey = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // The viewer is a workspace admin: they add one shared key from a vault.
+    "add",
+    // Someone else: a workspace admin has to add the key.
+    "ask_admin",
+  ]),
+);
+export type ToolGatewaySiteSetupSharedKey = z.infer<typeof ToolGatewaySiteSetupSharedKey>;
+export const ToolGatewaySiteSetupItem = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Stable for this viewer, connector and account: the card's dismissal key. */
+      key: primitives.string.max(512),
+      action: ToolGatewaySiteSetupAction,
+      /** The connector ("Gmail"). */
+      connector: primitives.string.max(200),
+      /** The catalog capability that connects it, when the catalog has one. */
+      capabilityId: primitives.string.max(512).nullable(),
+      /** The account to sign in again, for `reconnect`. */
+      connectionId: primitives.string.max(512).nullable(),
+      /** The account's name, for `reconnect`. */
+      account: primitives.string.max(320).nullable(),
+      /** The account is shared with the workspace rather than the viewer's own. */
+      shared: z.boolean(),
+      /**
+       * Set on the extra `connect` item for a connector that takes an API key
+       * when the app's shared syncs wait on it: the workspace connects it
+       * once, with a shared key from a vault (a shared service connection).
+       * Each person's own use keeps its ordinary `connect` item.
+       */
+      sharedKey: ToolGatewaySiteSetupSharedKey.optional(),
+      /** The declared tools that wait on it. */
+      tools: z.array(ToolGatewayIdentity).max(SITE_READINESS_TARGETS_MAX),
+      /**
+       * Where a published App sends the viewer to finish this in Opengeni (the
+       * App in the console, its connect dialog open); null in the console.
+       */
+      openUrl: primitives.string.max(4096).nullable(),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteSetupItem = z.infer<typeof ToolGatewaySiteSetupItem>;
+export const ToolGatewaySiteSetupResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      /** Empty when everything the App uses is ready (or nothing can be connected here). */
+      items: z.array(ToolGatewaySiteSetupItem).max(SITE_READINESS_TARGETS_MAX),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteSetupResponse = z.infer<typeof ToolGatewaySiteSetupResponse>;
 
 /** Remove every "Always allow for this Site" choice the caller made on one Site. */
 export const ToolGatewaySiteAllowancesResetRequest = /* @__PURE__ */ defineSchema(() =>

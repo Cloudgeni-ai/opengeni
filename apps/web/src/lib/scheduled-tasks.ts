@@ -60,6 +60,8 @@ export function normalizeCalendarDays(
 }
 
 export type ScheduledTaskFormState = {
+  /** Each run is a chat with this agent (an agent's "Starts when"). */
+  agentId?: string;
   agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
   agentLearningVersion?: number;
   agentLearningBaselineScope?: "workspace" | "personal";
@@ -337,6 +339,8 @@ export function formStateFromScheduledTask(
     ...(task.agentConfig.agent?.capabilities !== undefined
       ? { agentCapabilities: task.agentConfig.agent.capabilities }
       : {}),
+    // The agent each run starts a chat with; continuing a chat drops it.
+    ...(task.agentConfig.agentId ? { agentId: task.agentConfig.agentId } : {}),
   };
 }
 
@@ -480,6 +484,7 @@ export function agentConfigFromFormState(
     slackBotConnectionId: _bot,
     slackBotChannelId: _channel,
     agent: _agent,
+    agentId: _agentId,
     // Pins travel as their own request field, never inside the config.
     pinnedAccounts: _pins,
     pinnedAccountsRequired: _pinsRequired,
@@ -489,6 +494,7 @@ export function agentConfigFromFormState(
     pinnedAccounts: undefined,
     pinnedAccountsRequired: undefined,
     toolPolicy: undefined,
+    agentId: undefined,
     ...existingTask?.agentConfig,
   };
   const agent =
@@ -500,6 +506,7 @@ export function agentConfigFromFormState(
         };
   return {
     ...retainedConfig,
+    ...(form.agentId ? { agentId: form.agentId } : {}),
     prompt: existingTask ? form.prompt : form.prompt.trim(),
     ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     resources: form.resources,

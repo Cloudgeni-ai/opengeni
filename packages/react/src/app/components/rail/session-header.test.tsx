@@ -12,9 +12,11 @@ import { SessionHeader } from "./session-header";
 
 // The header only renders inside the session shell, which always has the app
 // context; its chat actions (copy link, pin) run through it. None of these
-// tests run one, so any read of the context fails loudly.
+// tests run one, so any read of the context fails loudly. The viewer is known
+// (the waiting-on label compares against it).
 const appContext = new Proxy({} as AppContextValue, {
   get(_target, key) {
+    if (key === "accessContext") return { subjectId: "viewer-subject" };
     throw new Error(`The SessionHeader test's app context has no ${String(key)}`);
   },
 });
@@ -337,7 +339,7 @@ test("narrow headers keep a compact lifecycle dot instead of hiding status", asy
   const compact = () => container.querySelector<HTMLElement>("[data-compact-session-status]");
   try {
     for (const [status, label] of [
-      ["running", "Running"],
+      ["running", "Working"],
       ["failed", "Failed"],
       ["requires_action", "Waiting on you"],
       ["waiting_capacity", "Limit reached"],
@@ -469,7 +471,7 @@ test("an archived chat reads as Archived, never cancelled, paused or waiting", a
     );
     expect(compact()?.textContent).toBe("Archived");
     expect(badge()?.textContent).toBe("Archived");
-    expect(container.textContent).not.toContain("Idle");
+    expect(container.textContent).not.toContain("Done");
   } finally {
     await act(async () => root.unmount());
     container.remove();

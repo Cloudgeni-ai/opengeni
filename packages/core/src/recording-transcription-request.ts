@@ -10,6 +10,7 @@ import {
   type RecordingTranscriptionRequest,
   type RecordingTranscriptionResult,
 } from "./recording-transcription";
+import { recordActiveRecordingTiming, startActiveRecordingTiming } from "@opengeni/observability";
 
 /** A request that failed, or that its provider hasn't answered in the time it documents. */
 export type RecordingTranscriptionRequestFailure = {
@@ -142,7 +143,16 @@ export async function sendRecordingTranscriptionRequest(input: {
         );
         return;
       }
-      later(delay, () => send(index + 1));
+      const retryStarted = performance.now();
+      later(delay, () => {
+        recordActiveRecordingTiming("provider_retry_wait", performance.now() - retryStarted, {
+          provider: provider.id,
+          model: request.model,
+          providerAttempt: index + 2,
+          reason: overdue ? "overdue" : "transient_failure",
+        });
+        send(index + 1);
+      });
     };
     const send = (index: number) => {
       // An abort while waiting to retry has already settled it. One before
@@ -163,16 +173,31 @@ export async function sendRecordingTranscriptionRequest(input: {
         done: Promise.resolve(),
       };
       sent.push(entry);
+      let endTiming: ReturnType<typeof startActiveRecordingTiming>;
       entry.done = Promise.resolve()
-        .then(() =>
-          provider.transcribe({ ...request, ...(scope ? { scope } : {}), signal }, credentials),
-        )
+        .then(() => {
+          endTiming = startActiveRecordingTiming("provider_request", {
+            provider: provider.id,
+            model: request.model,
+            providerAttempt: index + 1,
+            providerRequestId: scope?.requestId,
+            audioBytes: request.audio.bytes.byteLength,
+            audioSeconds:
+              input.audioMilliseconds === null ? undefined : input.audioMilliseconds / 1_000,
+          });
+          return provider.transcribe(
+            { ...request, ...(scope ? { scope } : {}), signal },
+            credentials,
+          );
+        })
         .then(
           (result) => {
+            endTiming?.(signal.aborted ? "cancelled" : "complete");
             entry.settled = true;
             finish(() => resolve(result));
           },
           (error: unknown) => {
+            endTiming?.(signal.aborted ? "cancelled" : "failed");
             entry.settled = true;
             if (finished) return;
             if (parent?.aborted) {

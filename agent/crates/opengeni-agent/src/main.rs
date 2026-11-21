@@ -106,8 +106,9 @@ fn main() -> std::process::ExitCode {
     #[cfg(unix)]
     let caught = reconnect_signal::catch_until_handled();
     if browser_bridge::is_native_host_invocation() {
-        init_native_host_tracing();
-        return match browser_bridge::run_native_host() {
+        let config_dir = browser_bridge::native_host_config_dir();
+        init_native_host_tracing(config_dir.as_deref().ok());
+        return match browser_bridge::run_native_host(config_dir) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
                 error!(%error, "browser native host exited with an error");
@@ -266,15 +267,15 @@ fn install_panic_logging() {
 /// there is read as a frame length and Chrome drops the connection. Its logs go
 /// to stderr without terminal colors, and, because Chrome discards a host's
 /// stderr, also to the size-bounded `<config>/logs/browser-native-host.log`.
-fn init_native_host_tracing() {
+fn init_native_host_tracing(config_dir: Option<&Path>) {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,opengeni_agent=info"));
-    let log = config::config_dir().ok().and_then(|dir| {
+    let log = config_dir.and_then(|dir| {
         log_file::RotatingLogFile::open(
-            &log_file::log_directory(&dir),
+            &log_file::log_directory(dir),
             log_file::NATIVE_HOST_LOG,
             log_file::MAX_NATIVE_HOST_LOG_BYTES,
         )
@@ -349,12 +350,12 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         }
         Command::Codemode(args) => codemode::run(args).await.map_err(to_boxed),
         Command::Uninstall(args) => uninstall::run(&args).map_err(string_err),
-        Command::BrowserNativeHost(_) => {
-            tokio::task::spawn_blocking(browser_bridge::run_native_host)
-                .await
-                .map_err(to_boxed)?
-                .map_err(to_boxed)
-        }
+        Command::BrowserNativeHost(_) => tokio::task::spawn_blocking(|| {
+            browser_bridge::run_native_host(browser_bridge::native_host_config_dir())
+        })
+        .await
+        .map_err(to_boxed)?
+        .map_err(to_boxed),
     }
 }
 
@@ -528,11 +529,14 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // bridge then has to point at this copy, since no service install wrote it,
     // unless the app's people don't use the extension: then this agent leaves the
     // bridge to the other agents on the computer.
+    let config_dir = config::config_dir().ok();
     if hosted_by_desktop_app() {
         if hosted_browser_extension_value(
             std::env::var_os(DESKTOP_BROWSER_EXTENSION_ENV).as_deref(),
         ) {
-            register_hosted_native_host();
+            if let Some(directory) = &config_dir {
+                register_hosted_native_host(directory);
+            }
         } else {
             release_hosted_native_host();
         }
@@ -596,7 +600,6 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             SCREEN_CONTROL_OFF_REASON,
         )));
     }
-    let config_dir = config::config_dir().ok();
     install_shell_tools(config_dir.as_deref(), instance_lock_guard.is_some());
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) = attach_browser_controller(
@@ -1244,9 +1247,7 @@ fn screen_control_turned_off_value(value: Option<&std::ffi::OsStr>) -> bool {
 fn release_hosted_native_host() {
     let (Ok(binary), Some(home)) = (
         update::installed_executable(),
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .filter(|home| !home.is_empty())
-            .map(std::path::PathBuf::from),
+        browser_bridge::native_host_home(),
     ) else {
         return;
     };
@@ -1260,7 +1261,7 @@ fn release_hosted_native_host() {
     }
 }
 
-fn register_hosted_native_host() {
+fn register_hosted_native_host(config_dir: &Path) {
     let binary = match update::installed_executable() {
         Ok(binary) => binary,
         Err(error) => {
@@ -1268,10 +1269,7 @@ fn register_hosted_native_host() {
             return;
         }
     };
-    let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .filter(|home| !home.is_empty())
-        .map(std::path::PathBuf::from)
-    else {
+    let Some(home) = browser_bridge::native_host_home() else {
         warn!("no home directory; the attached-browser bridge is not registered");
         return;
     };
@@ -1279,6 +1277,7 @@ fn register_hosted_native_host() {
         binary,
         &home,
         &browser_bridge::extension_ids_from_env(),
+        Some(config_dir),
     ) {
         Ok(manifests) => {
             for manifest in manifests {

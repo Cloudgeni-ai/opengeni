@@ -122,7 +122,7 @@ describe("filesystem function tool schemas", () => {
         .tools()
         .find((tool) => tool.name === "apply_patch");
       if (!patch || patch.type !== "function") throw new Error("No apply_patch function");
-      expect(Object.keys(patch.parameters.properties ?? {})).toEqual(["patch"]);
+      expect(Object.keys(patch.parameters.properties ?? {})).toEqual(["patch", "then"]);
       expect(patch.parameters.properties?.patch).toMatchObject({ type: "string" });
       expect(patch.parameters.required).toEqual(["patch"]);
       expect(patch.description).toContain("*** Begin Patch");

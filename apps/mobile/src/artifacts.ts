@@ -22,7 +22,7 @@ export type ArtifactKindFilter = "all" | Exclude<ArtifactCatalogKind, "file">;
 /** The type chips, in the web library's order. Files show under All. */
 export const ARTIFACT_KIND_FILTERS: readonly { kind: ArtifactKindFilter; label: string }[] = [
   { kind: "all", label: "All" },
-  { kind: "site", label: "Sites" },
+  { kind: "site", label: "Apps" },
   { kind: "document", label: "Documents" },
   { kind: "presentation", label: "Presentations" },
   { kind: "spreadsheet", label: "Spreadsheets" },
@@ -30,7 +30,7 @@ export const ARTIFACT_KIND_FILTERS: readonly { kind: ArtifactKindFilter; label: 
 ];
 
 export const ARTIFACT_KIND_LABEL: Record<ArtifactCatalogKind, string> = {
-  site: "Site",
+  site: "App",
   document: "Document",
   presentation: "Presentation",
   spreadsheet: "Spreadsheet",
@@ -79,7 +79,7 @@ export function emptyListWords(
   if (query.trim()) return { title: `No ${noun} match “${query.trim()}”`, body: "" };
   return {
     title: kind === "all" ? "No artifacts yet" : `No ${noun} yet`,
-    body: "Sites, documents, presentations and files your agents make show up here.",
+    body: "Apps, documents, presentations and files your agents make show up here.",
   };
 }
 
@@ -117,14 +117,19 @@ export function viewerMode(kind: ArtifactCatalogKind): ArtifactViewerMode {
 /**
  * The web app's chromeless page the viewer shows a Site or an editable
  * artifact in (the app draws the header). Images and files are drawn natively.
+ * `page` opens a Site at one of its own pages (a sidebar link's path).
  */
 export function nativeViewPath(
   workspaceId: string,
   item: Pick<ArtifactCatalogItem, "kind" | "id">,
+  page?: string | undefined,
 ): string | null {
   const ws = encodeURIComponent(workspaceId);
   const id = encodeURIComponent(item.id);
-  if (item.kind === "site") return `/native-view/workspaces/${ws}/sites/${id}`;
+  if (item.kind === "site") {
+    const at = typeof page === "string" && page.startsWith("/") && page !== "/" ? page : null;
+    return `/native-view/workspaces/${ws}/sites/${id}${at ? `?page=${encodeURIComponent(at)}` : ""}`;
+  }
   if (isEditableKind(item.kind)) return `/native-view/workspaces/${ws}/artifacts/editable/${id}`;
   return null;
 }
@@ -182,10 +187,13 @@ export function viewerPath(params: {
   title?: string | undefined;
   /** The chat it was opened from: its menu has no Open chat back into it. */
   from?: string | undefined;
+  /** A Site's own page to open at (a sidebar link's path). */
+  page?: string | undefined;
 }): string {
   const query = new URLSearchParams({ kind: params.kind, workspaceId: params.workspaceId });
   if (params.title) query.set("title", params.title.slice(0, 200));
   if (params.from) query.set("from", params.from);
+  if (params.page) query.set("page", params.page);
   return `/artifact/${encodeURIComponent(params.id)}?${query.toString()}`;
 }
 

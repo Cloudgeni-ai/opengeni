@@ -11,6 +11,8 @@ import {
   claimSessionWorkForAttempt,
   commitWarmingToWarm,
   createDb,
+  createEnrollment,
+  createSandbox,
   createSession,
   forceDrainOverLimitViewerOnlyBoxes,
   getSession,
@@ -1406,6 +1408,58 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     });
 
     await hold.release();
+  }, 60_000);
+
+  test("a machine-home session reaches a controller on its managed box while a machine is selected", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "selected-machine",
+      enrollmentId: enrollment.id,
+    });
+    // The session's home is a machine; a browser was started on its managed
+    // group box, then the session selected a Connected Machine (offline here).
+    await admin`
+      update sessions
+      set sandbox_backend = 'selfhosted', active_sandbox_id = ${machine.id},
+        active_epoch = active_epoch + 1
+      where workspace_id = ${workspaceId} and id = ${sessionId}
+    `;
+    const session = await getSession(db, workspaceId, sessionId);
+    const box = await readLease(db, workspaceId, sandboxGroupId);
+    expect(box?.instanceId).toBeTruthy();
+    const run = async (managedHome: boolean) =>
+      await withChannelA(
+        { db, settings: localDeploymentSettings, bus: new MemoryEventBus() },
+        {
+          accountId,
+          workspaceId,
+          session: session!,
+          subjectId: "browser",
+          operation: "browser.control",
+          ...(managedHome ? { managedHome: true } : {}),
+        },
+        async (handle) => handle.lease?.instanceId ?? null,
+      );
+
+    // Ordinary operations follow the selected machine.
+    await expect(run(false)).rejects.toThrow();
+    // A controller placed on the managed box still reaches that exact box.
+    expect(await run(true)).toBe(box!.instanceId);
   }, 60_000);
 
   test("releasing the viewer → the reaper drains the box (liveness = turn OR viewer)", async () => {

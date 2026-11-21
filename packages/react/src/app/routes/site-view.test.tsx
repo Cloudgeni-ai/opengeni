@@ -93,6 +93,9 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({
   useAppApi: () => ({
     request: async (path: string, init?: RequestInit) => {
+      // The App connect and sync join cards read their own lists; these tests count the rest.
+      if (path.endsWith("/tools/site-setup")) return { version: 1, items: [] };
+      if (path.endsWith("/data/syncs")) return { syncs: [] };
       requests.push({ path, init });
       return { id: id(99) };
     },
@@ -137,6 +140,8 @@ mock.module("../lib/console-site", () => ({
   useConsoleSiteViewer: () => ({ kind: "member", id: "user:me" }),
   useConsoleSiteToolBridge: () => () => undefined,
   notifySiteToolReadinessChanged: () => {},
+  subscribeSiteToolReadiness: () => () => {},
+  subscribeSiteConnectCardShow: () => () => {},
 }));
 mock.module("../lib/use-session-list-hint-refresh", () => ({
   useSessionListHintRefresh: (
@@ -207,7 +212,7 @@ mock.module("../components/artifacts/site-publishing", () => ({
           Publish now
         </button>
         <button type="button" onClick={props.onBack as () => void}>
-          Back to the Site
+          Back to the app
         </button>
       </form>
     );
@@ -441,7 +446,7 @@ const siteRoute = (search: object, replace?: boolean) => ({
   ...(replace === undefined ? {} : { replace }),
 });
 
-test("shows the Site with its newest conversation open as a regular chat, without a list", async () => {
+test("shows the app with its newest conversation open as a regular chat, without a list", async () => {
   conversations = [
     conversation(2, "Weekly active users by plan", 180),
     conversation(1, "Time filters across all graphs", 2),
@@ -493,7 +498,7 @@ test("the open conversation stays put when another one becomes newer", async () 
   expect(heading(container)).toBe("Weekly active users by plan");
 });
 
-test("opening the Site records it once, so its sidebar row moves up", async () => {
+test("opening the app records it once, so its sidebar row moves up", async () => {
   conversations = [];
   opens.length = 0;
   let announced = 0;
@@ -518,7 +523,7 @@ test("a chosen conversation is the one open", async () => {
   expect(heading(container)).toBe("Weekly active users by plan");
 });
 
-test("an older conversation of this Site, beyond the first page, stays open", async () => {
+test("an older conversation of this app, beyond the first page, stays open", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   fullSessions = { [id(7)]: conversation(7, "Spring pricing review", 60 * 24 * 90) };
   const { container } = await render(id(7));
@@ -529,10 +534,10 @@ test("an older conversation of this Site, beyond the first page, stays open", as
   expect(navigations).toEqual([]);
 });
 
-test("a link to another Site's conversation, a sub-agent or an archived one falls back to the Site", async () => {
+test("a link to another app's conversation, a sub-agent or an archived one falls back to the app", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   fullSessions = {
-    [id(5)]: conversation(5, "Another Site's chat", 10, otherSiteId),
+    [id(5)]: conversation(5, "Another app's chat", 10, otherSiteId),
     [id(6)]: { ...conversation(6, "A spawned helper", 10), parentSessionId: id(1) } as Session,
     [id(8)]: { ...conversation(8, "Archived", 10), archived: true } as Session,
   };
@@ -544,7 +549,7 @@ test("a link to another Site's conversation, a sub-agent or an archived one fall
   expect(sessionReads).toEqual([id(5), id(6), id(8)]);
 });
 
-test("a link to a conversation that no longer exists falls back to the Site", async () => {
+test("a link to a conversation that no longer exists falls back to the app", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container, rerender } = await render(id(9));
   expect(navigations).toEqual([siteRoute({}, true)]);
@@ -552,7 +557,7 @@ test("a link to a conversation that no longer exists falls back to the Site", as
   expect(openConversation(container)).toBe(id(1));
 });
 
-test("a new conversation is created as the Site's own, then opened with its first prompt", async () => {
+test("a new conversation is created as the app's own, then opened with its first prompt", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container, rerender } = await render(id(1));
   const newButton = button(container, "New")!;
@@ -635,12 +640,12 @@ test("choosing a conversation ends composing", async () => {
   expect(openConversation(container)).toBe(id(2));
 });
 
-test("the menu opens the conversation as a full chat or the Site's details", async () => {
+test("the menu opens the conversation as a full chat or the app's details", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
   await act(async () => link(container, "Open as a full chat")!.click());
-  await act(async () => link(container, "Site details")!.click());
+  await act(async () => link(container, "App details")!.click());
   expect(navigations).toEqual([
     {
       to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -654,11 +659,11 @@ test("the menu opens the conversation as a full chat or the Site's details", asy
     },
   ]);
   expect(container.querySelector("[data-site-view]")?.getAttribute("data-archived-message")).toBe(
-    "This Site is archived. Restore it from Site details.",
+    "This app is archived. Restore it from app details.",
   );
 });
 
-test("an archived Site links to its details, where it can be restored", async () => {
+test("an archived app links to its details, where it can be restored", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   conversations = [];
   siteDetails = async () => ({
@@ -667,8 +672,8 @@ test("an archived Site links to its details, where it can be restored", async ()
   });
   const { container } = await render();
   expect(container.querySelector("[data-site-view]")).toBeNull();
-  expect(container.textContent).toContain("This Site is archived.");
-  await act(async () => link(container, "Restore it from Site details")!.click());
+  expect(container.textContent).toContain("This app is archived.");
+  await act(async () => link(container, "Restore it from app details")!.click());
   expect(navigations.at(-1)).toEqual({
     to: "/workspaces/$workspaceId/artifacts/$artifactId",
     params: { workspaceId, artifactId: siteId },
@@ -676,16 +681,16 @@ test("an archived Site links to its details, where it can be restored", async ()
   });
 });
 
-test("someone who can't restore an archived Site isn't told to restore it", async () => {
+test("someone who can't restore an archived app isn't told to restore it", async () => {
   conversations = [];
   siteDetails = async () => ({
     ...siteAt(4),
     artifact: { ...siteAt(4).artifact, status: "archived" },
   });
   const { container } = await render();
-  expect(container.textContent).toContain("This Site is archived.");
+  expect(container.textContent).toContain("This app is archived.");
   expect(container.textContent).not.toContain("Restore");
-  await act(async () => link(container, "View Site details")!.click());
+  await act(async () => link(container, "View app details")!.click());
   // Without a tab the address opens the Site view again; details pick the
   // first tab this person can see.
   expect(navigations.at(-1)).toEqual({
@@ -695,7 +700,7 @@ test("someone who can't restore an archived Site isn't told to restore it", asyn
   });
 });
 
-test("without permission to start chats there is no New, and an empty Site says so", async () => {
+test("without permission to start chats there is no New, and an empty app says so", async () => {
   permissions = [];
   conversations = [];
   const { container } = await render();
@@ -704,16 +709,16 @@ test("without permission to start chats there is no New, and an empty Site says 
   expect(container.textContent).toContain("No conversations yet.");
 });
 
-test("an empty Site waits for its details, and offers to retry when they fail", async () => {
+test("an empty app waits for its details, and offers to retry when they fail", async () => {
   conversations = [];
   let release: (() => void) | undefined;
   siteDetails = () => new Promise((_resolve, reject) => (release = () => reject(new Error("x"))));
   const { container } = await render();
-  expect(container.textContent).toContain("Loading Site");
+  expect(container.textContent).toContain("Loading app");
   expect(container.textContent).not.toContain("No conversations yet.");
   await act(async () => release!());
   await settle();
-  expect(container.textContent).toContain("Couldn’t load this Site.");
+  expect(container.textContent).toContain("Couldn’t load this app.");
   siteDetails = async () => siteAt(4);
   await act(async () => button(container, "Try again")!.click());
   await settle();
@@ -808,7 +813,7 @@ test("choosing a conversation shows a hidden chat; opening the page keeps it hid
   expect(panel(container).hidden).toBe(true);
 });
 
-test("the chat never takes the room the Site needs, unless the window is narrower still", async () => {
+test("the chat never takes the room the app needs, unless the window is narrower still", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   localStorage.setItem(storageKey, JSON.stringify({ width: 720, collapsed: false }));
   const measure = HTMLElement.prototype.getBoundingClientRect;
@@ -897,7 +902,7 @@ test("a rollback restored from the version chip reloads the preview", async () =
   expect(shownVersion(container)).toBe("version-4");
 });
 
-test("the chip offers Undo only to people who may publish the Site", async () => {
+test("the chip offers Undo only to people who may publish the app", async () => {
   conversations = [];
   await render();
   expect(versionMenuProps.at(-1)).toMatchObject({ workspaceId, siteId, canPublish: false });
@@ -907,7 +912,7 @@ test("the chip offers Undo only to people who may publish the Site", async () =>
   expect(versionMenuProps.at(-1)).toMatchObject({ canPublish: true });
 });
 
-test("a version published elsewhere shows within a few seconds while the Site is open", async () => {
+test("a version published elsewhere shows within a few seconds while the app is open", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   permissions = ["sessions:create", "artifacts:publish"];
   const timers: Array<{ run: () => void; ms: number }> = [];
@@ -937,7 +942,7 @@ test("a version published elsewhere shows within a few seconds while the Site is
   }
 });
 
-test("a failed check says the Site is reconnecting, and the next one makes it live again", async () => {
+test("a failed check says the app is reconnecting, and the next one makes it live again", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
   const onEvent = conversationProps.at(-1)!.onEvent as (event: { type: string }) => void;
@@ -955,24 +960,24 @@ test("a failed check says the Site is reconnecting, and the next one makes it li
   expect(siteViewProps.at(-1)).toMatchObject({ watch: "live" });
 });
 
-test("every message in the side chat says which Site and version it is about", async () => {
+test("every message in the side chat says which app and version it is about", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   permissions = ["sessions:create", "artifacts:publish"];
   siteDetails = async () => siteAt(4, "Spend  dashboard");
   await render();
   const context = (conversationProps.at(-1)!.messageContext as () => string | undefined)()!;
-  expect(context).toContain(`“Spend dashboard” (Site id ${siteId})`);
+  expect(context).toContain(`“Spend dashboard” (App id ${siteId})`);
   expect(context).toContain("at version 4 (version id version-4)");
-  expect(context).toContain("publish the change as a new version of this Site");
+  expect(context).toContain("publish the change as a new version of this app");
 });
 
-test("someone who can't publish the Site gets no editing context, as from the API", async () => {
+test("someone who can't publish the app gets no editing context, as from the API", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   await render();
   expect((conversationProps.at(-1)!.messageContext as () => string | undefined)()).toBeUndefined();
 });
 
-test("Edit with Opengeni opens a new conversation beside the Site, composer focused", async () => {
+test("Edit with Opengeni opens a new conversation beside the app, composer focused", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   // Even with the chat hidden last time.
   localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
@@ -986,19 +991,19 @@ test("Edit with Opengeni opens a new conversation beside the Site, composer focu
   expect(navigations).toEqual([siteRoute({}, true)]);
 });
 
-test("Edit with Opengeni waits for the Site before focusing the composer", async () => {
+test("Edit with Opengeni waits for the app before focusing the composer", async () => {
   conversations = [];
   let release: (() => void) | undefined;
   siteDetails = () => new Promise((resolve) => (release = () => resolve(siteAt(4))));
   const { container } = await render(undefined, { startNew: true });
-  expect(container.textContent).toContain("Loading Site");
+  expect(container.textContent).toContain("Loading app");
   await act(async () => release!());
   await settle();
   await settle();
   expect(document.activeElement?.hasAttribute("data-composer-input")).toBe(true);
 });
 
-test("Edit with Opengeni on a Site already open starts a new conversation once", async () => {
+test("Edit with Opengeni on an app already open starts a new conversation once", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container, rerender } = await render(id(1));
   expect(openConversation(container)).toBe(id(1));
@@ -1021,7 +1026,7 @@ const publicationText = (container: HTMLElement) => {
 const siteHidden = (container: HTMLElement) =>
   container.querySelector("[data-site-view]")!.parentElement!.classList.contains("hidden");
 
-test("an unpublished Site offers Publish, which opens its publish form beside the chat", async () => {
+test("an unpublished app offers Publish, which opens its publish form beside the chat", async () => {
   conversations = [conversation(1, "Make the header blue", 2)];
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = notPublished;
@@ -1065,7 +1070,7 @@ test("an unpublished Site offers Publish, which opens its publish form beside th
   expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
 });
 
-test("in the macOS app the publish form names the window bar, and the Site takes it back", async () => {
+test("in the macOS app the publish form names the window bar, and the app takes it back", async () => {
   conversations = [];
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = notPublished;
@@ -1091,13 +1096,13 @@ test("in the macOS app the publish form names the window bar, and the Site takes
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
   expect(bar()).toBe("Publish to web");
 
-  await act(async () => button(container, "Back to the Site")!.click());
+  await act(async () => button(container, "Back to the app")!.click());
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(bar()).toBe("Opengeni usage");
   expect(siteViewProps.at(-1)!.showTitle).toBe(false);
 });
 
-test("a published Site's settings open the same form; its back link returns to the Site", async () => {
+test("a published app's settings open the same form; its back link returns to the app", async () => {
   conversations = [];
   permissions = ["sessions:create", "artifacts:publish"];
   publicationLink = async () => published;
@@ -1117,7 +1122,7 @@ test("a published Site's settings open the same form; its back link returns to t
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
   expect(document.activeElement?.textContent).toBe("Publish to web");
 
-  await act(async () => button(container, "Back to the Site")!.click());
+  await act(async () => button(container, "Back to the app")!.click());
   expect(container.querySelector("[data-publish-page]")).toBeNull();
   expect(siteHidden(container)).toBe(false);
   expect(publications).toHaveLength(0);
@@ -1224,7 +1229,7 @@ const cover = (container: HTMLElement) =>
 const chatOverlay = (container: HTMLElement) =>
   container.querySelector("[data-testid='chat-viewport-drop-overlay']");
 
-test("a screenshot dropped on the Site goes to the chat, not the Site's frame", async () => {
+test("a screenshot dropped on the app goes to the chat, not the app's frame", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
   const shot = new File(["png"], "Screenshot.png", { type: "image/png" });
@@ -1248,7 +1253,7 @@ test("a screenshot dropped on the Site goes to the chat, not the Site's frame", 
   expect(cover(container)).toBeNull();
 });
 
-test("a drag that leaves the Site clears the chat's highlight; text drags are left alone", async () => {
+test("a drag that leaves the app clears the chat's highlight; text drags are left alone", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
   const shot = new File(["png"], "Screenshot.png", { type: "image/png" });
@@ -1266,7 +1271,7 @@ test("a drag that leaves the Site clears the chat's highlight; text drags are le
   expect(cover(container)).toBeNull();
 });
 
-test("with the chat hidden, or no chat to take files, the Site keeps its drops", async () => {
+test("with the chat hidden, or no chat to take files, the app keeps its drops", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
   const shot = new File(["png"], "Screenshot.png", { type: "image/png" });
@@ -1291,34 +1296,34 @@ const siteActions = (container: HTMLElement) =>
     ),
   ].map((item) => item.textContent);
 
-test("the Site's own menu copies its title, duplicates it and opens its details", async () => {
+test("the app's own menu copies its title, duplicates it and opens its details", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
   expect(container.querySelector("[data-site-actions-menu]")?.getAttribute("aria-label")).toBe(
-    "More Site actions",
+    "More app actions",
   );
   // Without a sidebar listing the Site, its Pin and Archive have nowhere to act.
   expect(siteActions(container)).toEqual([
     "Copy title",
     "Duplicate",
-    "Site details",
+    "App details",
     "Reset allowed actions",
   ]);
   // The chat's menu keeps to the chat.
   const chatMenu = [...container.querySelectorAll("[role='menu']")].filter(
     (menu) => !menu.closest("[data-site-actions-root]"),
   );
-  for (const menu of chatMenu) expect(menu.textContent).not.toContain("Site details");
+  for (const menu of chatMenu) expect(menu.textContent).not.toContain("App details");
 });
 
-test("people who can't publish get no Duplicate in the Site's menu", async () => {
+test("people who can't publish get no Duplicate in the app's menu", async () => {
   permissions = ["sessions:create"];
   const { container } = await render();
-  expect(siteActions(container)).toEqual(["Copy title", "Site details", "Reset allowed actions"]);
+  expect(siteActions(container)).toEqual(["Copy title", "App details", "Reset allowed actions"]);
 });
 
-test("the Site's menu pins and archives through the sidebar's own actions", async () => {
+test("the app's menu pins and archives through the sidebar's own actions", async () => {
   const { publishSiteSidebarBridge } = await import("../lib/site-sidebar-bridge");
   const pins: [string, boolean][] = [];
   const archived: string[] = [];
@@ -1333,7 +1338,7 @@ test("the Site's menu pins and archives through the sidebar's own actions", asyn
     expect(siteActions(container)).toEqual([
       "Copy title",
       "Unpin",
-      "Site details",
+      "App details",
       "Reset allowed actions",
       "Archive",
     ]);
@@ -1346,7 +1351,7 @@ test("the Site's menu pins and archives through the sidebar's own actions", asyn
   }
 });
 
-test("a Site with nothing published yet offers no Duplicate", async () => {
+test("an app with nothing published yet offers no Duplicate", async () => {
   permissions = ["sessions:create", "artifacts:publish"];
   siteDetails = async () => ({
     artifact: { title: "Opengeni usage", status: "active", currentVersion: null },
@@ -1354,5 +1359,5 @@ test("a Site with nothing published yet offers no Duplicate", async () => {
     events: [],
   });
   const { container } = await render();
-  expect(siteActions(container)).toEqual(["Copy title", "Site details"]);
+  expect(siteActions(container)).toEqual(["Copy title", "App details"]);
 });

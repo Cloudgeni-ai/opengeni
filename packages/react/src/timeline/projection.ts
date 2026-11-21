@@ -2269,7 +2269,7 @@ export function buildTimeline(
     }
   }
   if (pendingTurnSteps) items.push(pendingTurnSteps);
-  markRepeatedMachineRequests(items);
+  markRepeatedCapabilityRequests(items);
   markRepeatedAccessRequests(items);
   markFinishedAuthCards(items);
   dropRepeatedAccessRequests(items);
@@ -2664,23 +2664,38 @@ function mergeToolCallRaw(existingValue: unknown, nextValue: unknown): unknown {
   };
 }
 
-const CONNECTED_MACHINE_CARD_ID = "api:connected-machine";
-
 /**
- * An agent that is refused a machine often asks again in later turns. Only the
- * newest Connected Machine card for the same request stays a full card; earlier
- * ones become a short note, so a chat never piles up copies of the same card.
- * Cards that name different machines, or ask for Chrome rather than a machine,
- * are separate requests.
+ * An agent that is still waiting for a connection often asks for it again, in
+ * the same turn or a later one. Only the newest card for the same request
+ * stays a full card; earlier ones become a short note, so a chat never piles
+ * up copies of the same card. Cards for different connections, Connected
+ * Machine cards that name different machines, and Chrome rather than a machine
+ * are separate requests. A proposed custom setup is never folded. Within one
+ * turn a request shows once: earlier copies there are left out altogether.
  */
-function markRepeatedMachineRequests(items: TimelineItem[]): void {
-  const seen = new Set<string>();
+function markRepeatedCapabilityRequests(items: TimelineItem[]): void {
+  // The turn of each request's latest card or note kept so far.
+  const kept = new Map<string, string | null>();
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
-    if (item.kind !== "auth-needed" || item.capability?.id !== CONNECTED_MACHINE_CARD_ID) continue;
-    const key = `${item.purpose ?? ""}:${item.requestedSandboxId ?? ""}`;
-    if (seen.has(key)) item.askedAgainLater = true;
-    else seen.add(key);
+    // Cards with inputs stay: two of them can ask for different sites or
+    // instances, and one being filled in must not fold away.
+    if (
+      item.kind !== "auth-needed" ||
+      !item.capability ||
+      item.setupRequest ||
+      item.capability.inputs?.length
+    )
+      continue;
+    const key = `${item.capability.id}:${item.purpose ?? ""}:${item.requestedSandboxId ?? ""}`;
+    if (!kept.has(key)) {
+      kept.set(key, item.turnId);
+    } else if (item.turnId !== null && kept.get(key) === item.turnId) {
+      items.splice(index, 1);
+    } else {
+      item.askedAgainLater = true;
+      kept.set(key, item.turnId);
+    }
   }
 }
 
@@ -2776,12 +2791,15 @@ function dropRepeatedAccessRequests(items: TimelineItem[]): void {
  * search results where it can; any tag left over, for example in an answer
  * stored before that, would otherwise show as raw markup. Code keeps them.
  *
- * Source links lose the tracking a hosted web search tags onto them
- * (`utm_source=openai` and the `_t_q` search query); the page's own
- * parameters stay. Stored history keeps the links as the model wrote them.
+ * Displayed links omit UTM tracking as well as the hosted-search query on
+ * recognized provider links. This is shared by web/native rendering and copy;
+ * stored history keeps the links as the model wrote them.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return withoutProviderTrackingInText(rewriteClaudeCiteTags(withoutProviderCitationHandles(text)));
+  return withoutProviderTrackingInText(
+    rewriteClaudeCiteTags(withoutProviderCitationHandles(text)),
+    "all-utm",
+  );
 }
 
 /**

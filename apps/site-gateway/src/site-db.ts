@@ -177,7 +177,7 @@ export async function handleSiteDbInternal(
       503,
       {
         code: "site_db_unavailable",
-        message: "The Site database is temporarily unavailable",
+        message: "The app database is temporarily unavailable",
         retryable: true,
         outcomeUnknown: target.operation !== "inspect" && target.operation !== "export",
       },

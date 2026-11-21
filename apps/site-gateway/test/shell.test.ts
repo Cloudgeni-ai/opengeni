@@ -129,5 +129,7 @@ test("the committed shell bundle is up to date and small", async () => {
     "utf8",
   );
   expect(committed).toBe(await buildShellModule());
-  expect(committed.length).toBeLessThan(40 * 1024);
+  // It is inlined in every App page; the platform's connect card brought it
+  // past 40 KiB, and the personal sync join card and confirmation past 48 KiB.
+  expect(committed.length).toBeLessThan(52 * 1024);
 });

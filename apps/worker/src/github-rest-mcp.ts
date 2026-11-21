@@ -81,6 +81,8 @@ export async function buildGitHubRestMcpForTurn(input: {
   resolveCredential: ResolveCredential;
   /** Worker telemetry; defaults to the console. */
   warn?: (message: string, attributes: Record<string, string>) => void;
+  /** A pull request this turn opened, to add to the chat's Linked panel. */
+  onPullRequestCreated?: (pullRequest: { url: string; title: string | null }) => Promise<void>;
 }): Promise<GitHubRestMcpRuntime> {
   if (!input.settings.githubRestMcpEnabled) {
     return {
@@ -149,12 +151,15 @@ export async function buildGitHubRestMcpForTurn(input: {
     const appResolver = workspaceAppAuthorityResolver(input, appRepositories);
     localMcpServers.push({
       id: GITHUB_REST_MCP_APP_SERVER_ID,
-      server: new GitHubRestMcpServer({
-        serverId: GITHUB_REST_MCP_APP_SERVER_ID,
-        authorityKind: "workspace_app",
-        repositories: appRepositories,
-        resolveAuthority: appResolver,
-      }),
+      server: withPullRequestCreatedHook(
+        input,
+        new GitHubRestMcpServer({
+          serverId: GITHUB_REST_MCP_APP_SERVER_ID,
+          authorityKind: "workspace_app",
+          repositories: appRepositories,
+          resolveAuthority: appResolver,
+        }),
+      ),
     });
     configs.push(internalMcpConfig(GITHUB_REST_MCP_APP_SERVER_ID, "GitHub — Opengeni bot"));
     toolRefs.push({ kind: "mcp", id: GITHUB_REST_MCP_APP_SERVER_ID });
@@ -168,19 +173,22 @@ export async function buildGitHubRestMcpForTurn(input: {
       personalAllRepositories?.connectionId ?? personalRepositories[0]!.connectionId;
     localMcpServers.push({
       id: GITHUB_REST_MCP_PERSONAL_SERVER_ID,
-      server: new GitHubRestMcpServer({
-        serverId: GITHUB_REST_MCP_PERSONAL_SERVER_ID,
-        authorityKind: "personal_oauth",
-        repositories: personalRepositories,
-        resolveAuthority: personalAuthorityResolver(input),
-        account: {
-          connectionId,
-          resolveAuthority: personalAccountAuthorityResolver(input),
-        },
-        ...(personalAllRepositories
-          ? { resolveRepository: personalRepositoryResolver(input) }
-          : {}),
-      }),
+      server: withPullRequestCreatedHook(
+        input,
+        new GitHubRestMcpServer({
+          serverId: GITHUB_REST_MCP_PERSONAL_SERVER_ID,
+          authorityKind: "personal_oauth",
+          repositories: personalRepositories,
+          resolveAuthority: personalAuthorityResolver(input),
+          account: {
+            connectionId,
+            resolveAuthority: personalAccountAuthorityResolver(input),
+          },
+          ...(personalAllRepositories
+            ? { resolveRepository: personalRepositoryResolver(input) }
+            : {}),
+        }),
+      ),
     });
     configs.push(internalMcpConfig(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "GitHub — My account"));
     toolRefs.push({ kind: "mcp", id: GITHUB_REST_MCP_PERSONAL_SERVER_ID });
@@ -203,6 +211,53 @@ export async function buildGitHubRestMcpForTurn(input: {
     localMcpServers,
     connectorBindings,
   };
+}
+
+/** The pull request a successful `pull_request_create` result names, or null. */
+export function createdPullRequestFromResult(
+  result: unknown,
+): { url: string; title: string | null } | null {
+  if (!result || typeof result !== "object") return null;
+  const record = result as { isError?: unknown; structuredContent?: unknown };
+  if (record.isError === true) return null;
+  const content = record.structuredContent as { data?: unknown } | undefined;
+  const data = (content?.data ?? content) as { htmlUrl?: unknown; title?: unknown } | undefined;
+  const url = typeof data?.htmlUrl === "string" ? data.htmlUrl : null;
+  if (!url || !/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/u.test(url)) return null;
+  return { url, title: typeof data?.title === "string" ? data.title : null };
+}
+
+/**
+ * Tell `onPullRequestCreated` about each pull request the server opens. Best
+ * effort: linking never changes or fails the tool's own result.
+ */
+function withPullRequestCreatedHook(
+  input: {
+    onPullRequestCreated?: (pullRequest: { url: string; title: string | null }) => Promise<void>;
+    warn?: (message: string, attributes: Record<string, string>) => void;
+    sessionId: string;
+  },
+  server: GitHubRestMcpServer,
+): GitHubRestMcpServer {
+  const onCreated = input.onPullRequestCreated;
+  if (!onCreated) return server;
+  const callToolResult = server.callToolResult.bind(server);
+  server.callToolResult = async (toolName, args, meta) => {
+    const result = await callToolResult(toolName, args, meta);
+    if (toolName === "pull_request_create") {
+      const created = createdPullRequestFromResult(result);
+      if (created) {
+        await onCreated(created).catch((error: unknown) =>
+          (input.warn ?? console.warn)("Linking an opened pull request failed", {
+            sessionId: input.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    }
+    return result;
+  };
+  return server;
 }
 
 function internalMcpConfig(id: string, name: string): Settings["mcpServers"][number] {

@@ -210,7 +210,7 @@ test("a taken address blocks publishing, and a save race shows the conflict on t
   });
   const page = await renderPage({ client: client as never, load: { state: "none" } });
   await waitForCheck();
-  expect(page.host.textContent).toContain("Another Site uses this name");
+  expect(page.host.textContent).toContain("Another app uses this name");
   await act(async () => button(page.host, "Publish")!.click());
   await flush();
   expect(calls.updates).toHaveLength(0);
@@ -222,12 +222,12 @@ test("a taken address blocks publishing, and a save race shows the conflict on t
   await act(async () => button(page.host, "Publish")!.click());
   await flush();
   expect(calls.updates).toHaveLength(1);
-  expect(page.host.textContent).toContain("Another Site uses this name.");
+  expect(page.host.textContent).toContain("Another app uses this name.");
   expect(page.published).toHaveLength(0);
   await page.unmount();
 });
 
-test("unavailable, forbidden and Only me Sites show one notice instead of the form", async () => {
+test("unavailable, forbidden and Only me apps show one notice instead of the form", async () => {
   const { client } = fakeClient();
   const unavailable = await renderPage({
     client: client as never,
@@ -242,7 +242,7 @@ test("unavailable, forbidden and Only me Sites show one notice instead of the fo
     load: { state: "none" },
     canManage: false,
   });
-  expect(viewer.host.textContent).toContain("You can't publish this Site");
+  expect(viewer.host.textContent).toContain("You can't publish this app");
   await viewer.unmount();
 
   let shared = 0;
@@ -253,7 +253,7 @@ test("unavailable, forbidden and Only me Sites show one notice instead of the fo
     onShareWithWorkspace: () => (shared += 1),
   });
   // A forbidden answer on a private Site is the owner's own Only me Site.
-  expect(onlyMe.host.textContent).toContain("You can't publish this Site");
+  expect(onlyMe.host.textContent).toContain("You can't publish this app");
   await onlyMe.unmount();
 
   const privateNone = await renderPage({
@@ -262,13 +262,13 @@ test("unavailable, forbidden and Only me Sites show one notice instead of the fo
     site: { id: "site", title: "Team CRM", visibility: "private" },
     onShareWithWorkspace: () => (shared += 1),
   });
-  expect(privateNone.host.textContent).toContain("Share this Site with the workspace first");
+  expect(privateNone.host.textContent).toContain("Share this app with the workspace first");
   await act(async () => button(privateNone.host, "Share with workspace")!.click());
   expect(shared).toBe(1);
   await privateNone.unmount();
 });
 
-test("take down asks for a reason, and a taken-down Site offers Restore", async () => {
+test("take down asks for a reason, and a taken-down app offers Restore", async () => {
   const { client, calls } = fakeClient();
   const page = await renderPage({
     client: client as never,
@@ -332,7 +332,7 @@ test("take down asks for a reason, and a taken-down Site offers Restore", async 
   await byPlatform.unmount();
 });
 
-test("a taken-down Site keeps its address, and only admins restore an admin's takedown", async () => {
+test("a taken-down app keeps its address, and only admins restore an admin's takedown", async () => {
   const { client } = fakeClient();
   const byAdmin = published({
     status: "suspended",
@@ -344,7 +344,7 @@ test("a taken-down Site keeps its address, and only admins restore an admin's ta
     isAdmin: false,
   });
   expect(owner.host.querySelector("input")?.disabled).toBe(true);
-  expect(owner.host.textContent).toContain("Restore the Site to change its address.");
+  expect(owner.host.textContent).toContain("Restore the app to change its address.");
   expect(owner.host.textContent).toContain("A workspace admin can restore it.");
   expect(button(owner.host, "Restore")).toBeUndefined();
   await owner.unmount();
@@ -367,7 +367,7 @@ const withAgent = (patch: Partial<SitePublication> = {}) =>
 const input = (root: ParentNode, label: string) =>
   root.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
 
-test("invited and public Sites show one Site limit, an optional per-person limit and usage", async () => {
+test("invited and public apps show one app limit, an optional per-person limit and usage", async () => {
   const { client, calls } = fakeClient();
   const page = await renderPage({
     client: client as never,
@@ -375,7 +375,7 @@ test("invited and public Sites show one Site limit, an optional per-person limit
   });
   const text = page.host.textContent ?? "";
   expect(text).toContain("Agent for people outside the workspace");
-  expect(text).toContain("People outside the workspace can only use this Site's own data.");
+  expect(text).toContain("People outside the workspace can only use this app's own data.");
   expect(text).toContain("$1.20 of $10 used this month");
   // No workspace tools for people outside the workspace, and no guard fields.
   expect(text).not.toContain("Let everyone use these tools");
@@ -419,7 +419,7 @@ test("turning the outside agent off hides its limits and saves it", async () => 
   await page.unmount();
 });
 
-test("non-admins see the outside limits but can't change them; members Sites have none", async () => {
+test("non-admins see the outside limits but can't change them; members apps have none", async () => {
   const { client } = fakeClient();
   const member = await renderPage({
     client: client as never,
@@ -493,9 +493,9 @@ test("readiness warnings open to a list with one-click fixes", async () => {
           {
             code: "workspace_tools_members_only",
             message:
-              "The page uses workspace tools, which work only inside Opengeni; public visitors on the published Site can't use them.",
+              "The page uses workspace tools, which work only inside Opengeni; public visitors on the published app can't use them.",
             suggestion:
-              "Build the page on Site Data and Site SQL instead, or publish to members only.",
+              "Build the page on app data and app SQL instead, or publish to members only.",
             fix: null,
           },
         ],
@@ -510,7 +510,7 @@ test("readiness warnings open to a list with one-click fixes", async () => {
   expect(line.getAttribute("aria-expanded")).toBe("true");
   expect(page.host.textContent).toContain("Public visitors can't add to votes.");
   expect(page.host.textContent).toContain(
-    "Build the page on Site Data and Site SQL instead, or publish to members only.",
+    "Build the page on app data and app SQL instead, or publish to members only.",
   );
   await act(async () => button(page.host, "Fix")!.click());
   await flush();
@@ -523,9 +523,9 @@ test("a login-only deployment's sign-in notice shows on its own, not as somethin
   const { client } = fakeClient();
   const notice = {
     code: "public_sign_in_required" as const,
-    message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+    message: "On this deployment, public apps still ask visitors to sign in to Opengeni.",
     suggestion:
-      "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the Site or its link.",
+      "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the app or its link.",
     fix: null,
   };
   const alone = await renderPage({
@@ -536,7 +536,7 @@ test("a login-only deployment's sign-in notice shows on its own, not as somethin
   expect(alone.host.textContent).toContain(notice.message);
   expect(alone.host.textContent).toContain(notice.suggestion);
   expect(alone.host.textContent).toContain(
-    "Anyone who signs in to Opengeni. On this deployment, every Site asks visitors to sign in.",
+    "Anyone who signs in to Opengeni. On this deployment, every app asks visitors to sign in.",
   );
   expect(alone.host.textContent).not.toContain("won't work for public visitors");
   expect(button(alone.host, "Fix")).toBeUndefined();
@@ -565,7 +565,7 @@ test("a login-only deployment's sign-in notice shows on its own, not as somethin
   await both.unmount();
 });
 
-test("View as visitor opens the Site as its visitors' role", async () => {
+test("View as visitor opens the app as its visitors' role", async () => {
   const { client } = fakeClient();
   const page = await renderPage({
     client: client as never,
@@ -588,7 +588,7 @@ test("a platform refusal explains itself instead of failing the form", async () 
         JSON.stringify({
           error: {
             code: "payment_required",
-            message: "Sites allowance used up",
+            message: "Apps allowance used up",
             details: { code: "site_platform_quota_exhausted" },
           },
         }),
@@ -600,7 +600,7 @@ test("a platform refusal explains itself instead of failing the form", async () 
   await waitForCheck();
   await act(async () => button(page.host, "Publish")!.click());
   await flush();
-  expect(page.host.textContent).toContain("Sites allowance used up");
+  expect(page.host.textContent).toContain("Apps allowance used up");
   expect(page.host.textContent).toContain("Add credits to publish again.");
   expect(page.published).toHaveLength(0);
   await page.unmount();
@@ -621,7 +621,7 @@ test("a non-admin's first publish leaves limits to the workspace default", async
   await page.unmount();
 });
 
-test("the header's Publish button is only for a Site that isn't on the web", async () => {
+test("the header's Publish button is only for an app that isn't on the web", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -640,7 +640,7 @@ test("the header's Publish button is only for a Site that isn't on the web", asy
   host.remove();
 });
 
-test("in Settings a published Site's form has no back link and Discard restores the saved values", async () => {
+test("in Settings a published app's form has no back link and Discard restores the saved values", async () => {
   const { client } = fakeClient();
   const page = await renderPage({
     client: client as never,
@@ -676,7 +676,7 @@ test("in Settings a first publish offers Publish without Cancel", async () => {
   await page.unmount();
 });
 
-test("as a page of its own, a published Site's form is its Web address, and a submit says it succeeded", async () => {
+test("as a page of its own, a published app's form is its Web address, and a submit says it succeeded", async () => {
   const { client } = fakeClient();
   let submitted = 0;
   let back = 0;
@@ -714,7 +714,7 @@ test("as a page of its own, a published Site's form is its Web address, and a su
   await act(async () => button(refused.host, "Publish")!.click());
   await flush();
   expect(submitted).toBe(1);
-  expect(refused.host.textContent).toContain("Another Site uses this name.");
+  expect(refused.host.textContent).toContain("Another app uses this name.");
   await refused.unmount();
 
   const settings = await renderPage({

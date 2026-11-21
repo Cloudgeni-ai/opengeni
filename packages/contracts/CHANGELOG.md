@@ -1,5 +1,29 @@
 # @opengeni/contracts
 
+## 6.35.0
+
+### Minor Changes
+
+- 5fe41ba: Agents gain a lean setup page: Starts when (automations that start a chat with the agent), Can use (Allow, Ask first or Block per connector and tool, for every connection type), Learns (Memory entries you can edit or remove), Who can use and a short Skills list. Agents carry new `toolPermissions`, `skills` and `templateKey` fields, scheduled tasks accept `agentConfig.agentId`, and the SDK adds `listAgentTemplates` and `createAgentFromTemplate` for the ready-made agents in the "Add an agent" gallery. Agents can start a chat with another agent by name or id through `session_create`'s `agentName` parameter. Existing fields and requests are unchanged.
+- 7eda7f0: App data changes start automations and reach workspace webhooks: the `app.record.added`, `app.record.changed`, `app.record.removed` and `app.sql.changed` event types join the "This workspace" trigger source and the workspace webhook types, and `verifyWebhookEvent` accepts them. See docs/site-data.md.
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+- fa938cd: `npx opengeni connect` adds the Opengeni MCP server and a short `opengeni` skill to Claude Code, Codex, Cursor and VS Code with Copilot. The organization MCP server lists named tools for connected agents (`delegate`, `wait_for`, session, app, tool, Skill and Knowledge tools). `updateOrganizationMcpConnection` accepts `appDataAccess` and `defaultWorkspaceId`, and `access` is now optional.
+- 8bf1ec2: Customizable sidebar: a workspace default of groups, App links (optionally to an App page), https links and live lists (pinned or recent Apps) that admins set, with each person's own changes on top (add, hide, reorder, reset). New `GET`/`PATCH /v1/workspaces/:workspaceId/sidebar-layout`, `client.getSidebarLayout` and `client.updateSidebarLayout`, and the `sidebar_layout_get`/`sidebar_layout_update` agent tools. Apps opened from the sidebar are pages: they fill the main area with their address in the URL, follow Opengeni's light or dark theme, and stay open when you switch away. Apps can opt into Opengeni's look with `<link rel="stylesheet" href="/__opengeni/ui.css">` (`@opengeni/sdk/site-ui`). Older clients ignore item types they don't know.
+
+### Patch Changes
+
+- 74f4771: The prompt-cache warm-miss classifier now classes a call whose history's first item changed as `context_replaced`. On Claude a compacted history's leading system items join the system prompt, so the first call after compaction was reported as `system_changed` and counted toward the prefix-changed alert whenever the item count stayed above 60% of the previous call, or when the previous call was the shorter compaction request itself. A system change that keeps the first history item is still `system_changed`.
+
+## 6.34.0
+
+### Minor Changes
+
+- e292b4a: Add SuperOffice CRM to the catalog: SuperOffice's hosted MCP server, with its six update tools asking for approval by default. When a service refuses a connection's sign-in setup, the connect dialog now says why, for example that the service only accepts apps it has approved, instead of a generic failure; the API passes the provider's OAuth error in the error details, and a provider outage during registration is now a retryable `upstream_unavailable` error. A refused sign-in that returns a standard OAuth code with a plain meaning (`invalid_redirect_uri`, `unauthorized_client`, `unapproved_software_statement`, `invalid_scope`, `server_error`, `temporarily_unavailable`) now keeps that code as the attempt's `error.code` instead of `provider_denied`. Admins can remove a custom MCP server that never connected, through the new `DELETE /v1/workspaces/:workspaceId/capabilities/:capabilityId` route and `deleteCustomMcpServer` on the SDK.
+
+### Patch Changes
+
+- 9a84b63: Assistant links in web and native chat no longer show or open with UTM tracking parameters. Other URL parameters, fragments, stored messages, and model inputs are unchanged.
+
 ## 6.33.0
 
 ### Minor Changes

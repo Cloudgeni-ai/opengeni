@@ -130,7 +130,14 @@ import { canonicalProviderDomain } from "./provider-domain";
 import { nangoIntegrationForConnectTarget, startNangoConnect } from "./nango-connect";
 import { finishCapabilityAfterConnect } from "./connect-capability-finish";
 import { microsoftAuthorizationNotGranted } from "./microsoft-admin-consent";
-import { microsoftAdminConsentUrl } from "@opengeni/contracts/connect";
+import {
+  KNOWN_OAUTH_PROVIDER_ERRORS,
+  microsoftAdminConsentUrl,
+  oauthProviderError,
+  oauthProviderRefusal,
+  type OAuthProviderError,
+  type OAuthProviderRefusal,
+} from "@opengeni/contracts/connect";
 import {
   ACCOUNT_FAILURES,
   decideOAuthAccountConnection,
@@ -367,6 +374,25 @@ class OAuthMetadataUpstreamError extends Error {
   constructor(readonly upstreamStatus: number) {
     super(`OAuth metadata endpoint returned HTTP ${upstreamStatus}`);
     this.name = "OAuthMetadataUpstreamError";
+  }
+}
+
+/**
+ * The provider refused a setup request with an OAuth error. Carries the
+ * provider's bounded `error` and `error_description` and their plain meaning,
+ * so the connect dialog can say why instead of a generic failure.
+ */
+export class OAuthProviderRefusalError extends HTTPException {
+  constructor(
+    message: string,
+    readonly providerError: OAuthProviderError | null,
+    readonly refusal: OAuthProviderRefusal | null,
+    // 422 for a refusal; 502 or 429 when the provider failed or is busy, so
+    // the error says a retry may help.
+    status: 422 | 429 | 502 = 422,
+  ) {
+    super(status, { message });
+    this.name = "OAuthProviderRefusalError";
   }
 }
 
@@ -1118,6 +1144,13 @@ async function completeMcpOAuthCallbackWithinDeadline(
       // clicks Cancel) instead of a code. Report that as a refusal, not as an
       // expired attempt, and never echo the provider's own text.
       const cancelled = input.error === "access_denied";
+      // A refusal the connect dialog can explain keeps the provider's code;
+      // anything else stays the generic `provider_denied`.
+      const providerRefused = input.error ? oauthProviderError({ error: input.error }) : null;
+      const explainedCode =
+        providerRefused && !cancelled && KNOWN_OAUTH_PROVIDER_ERRORS.has(providerRefused.error)
+          ? providerRefused.error
+          : null;
       const microsoft = input.error
         ? microsoftAuthorizationFailure(settings, state, {
             error: input.error,
@@ -1136,8 +1169,10 @@ async function completeMcpOAuthCallbackWithinDeadline(
             state: microsoft?.state ?? (cancelled ? "cancelled" : "failed"),
             nextAction: { type: "none" },
             error: microsoft?.error ?? {
-              code: input.error ? "provider_denied" : "missing_code",
-              message: "Authorization was not completed. Start a new connection attempt.",
+              code: explainedCode ?? (input.error ? "provider_denied" : "missing_code"),
+              message: explainedCode
+                ? `The provider refused the sign-in (${explainedCode}). Start a new connection attempt.`
+                : "Authorization was not completed. Start a new connection attempt.",
               retryable: false,
             },
           }),
@@ -2656,17 +2691,41 @@ async function dynamicClientRegistration(
     signal,
   });
   if (!response.ok) {
-    await cancelResponseBody(response);
-    if (response.status === 401 || response.status === 403) {
-      // The provider admits only clients it has approved (Dropbox, for one).
-      // Retrying cannot help; the deployment needs a client registered with it.
-      throw new HTTPException(422, {
-        message: `${new URL(as.issuer).host} doesn't let apps register themselves for sign-in. This deployment needs an OAuth client registered with ${new URL(as.issuer).host} before you can connect.`,
-      });
+    const providerError = await readOAuthProviderError(
+      response,
+      "OAuth dynamic registration error response",
+      signal,
+    );
+    const host = new URL(as.issuer).host;
+    const said = providerError
+      ? ` ${host} said: ${providerError.error}${providerError.description ? ` (${providerError.description.replace(/[.!?]$/u, "")})` : ""}.`
+      : "";
+    const known = oauthProviderRefusal(providerError?.error);
+    if (response.status === 429 || response.status >= 500 || known === "provider_unavailable") {
+      throw new OAuthProviderRefusalError(
+        `${host} could not register this app (HTTP ${response.status}). Try again later.${said}`,
+        providerError,
+        "provider_unavailable",
+        response.status === 429 ? 429 : 502,
+      );
     }
-    throw new HTTPException(422, {
-      message: `dynamic client registration failed with HTTP ${response.status}`,
-    });
+    // 401/403: the provider admits only clients it has approved (Dropbox, for
+    // one), unless its code says something more specific.
+    const refusal =
+      known ??
+      (response.status === 401 || response.status === 403 ? "app_registration_required" : null);
+    throw new OAuthProviderRefusalError(
+      refusal === "app_not_allowed"
+        ? // An allow-list of redirect URIs (SuperOffice, for one): only the
+          // provider can add this deployment's callback.
+          `${host} only accepts sign-ins from apps it has approved. Ask ${host} to allow this app's sign-in address.${said}`
+        : refusal === "app_registration_required"
+          ? // Retrying cannot help; the deployment needs a client registered with it.
+            `${host} doesn't let apps register themselves for sign-in. This deployment needs an OAuth client registered with ${host} before you can connect.${said}`
+          : `dynamic client registration failed with HTTP ${response.status}.${said}`,
+      providerError,
+      refusal,
+    );
   }
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
     response,
@@ -3344,6 +3403,7 @@ function isDatabaseStatementTimeout(error: unknown): boolean {
 function oauthStartApiError(error: OAuthStartStageError): ApiHttpError {
   const timeout = error.reason === "timeout";
   const metadataUpstream = error.cause instanceof OAuthMetadataUpstreamError ? error.cause : null;
+  const providerRefusal = error.cause instanceof OAuthProviderRefusalError ? error.cause : null;
   const status = timeout
     ? 408
     : metadataUpstream
@@ -3352,7 +3412,7 @@ function oauthStartApiError(error: OAuthStartStageError): ApiHttpError {
         ? error.cause.status
         : 422;
   return new ApiHttpError(status, {
-    code: timeout || status >= 500 ? "upstream_unavailable" : "validation_failed",
+    code: timeout || status >= 500 || status === 429 ? "upstream_unavailable" : "validation_failed",
     retryable:
       timeout ||
       status === 429 ||
@@ -3369,6 +3429,16 @@ function oauthStartApiError(error: OAuthStartStageError): ApiHttpError {
     details: {
       oauthStage: error.stage,
       oauthReason: error.reason,
+      // The provider's own reason, so the connect dialog can say why.
+      ...(providerRefusal?.refusal ? { providerRefusal: providerRefusal.refusal } : {}),
+      ...(providerRefusal?.providerError
+        ? {
+            providerError: providerRefusal.providerError.error,
+            ...(providerRefusal.providerError.description
+              ? { providerErrorDescription: providerRefusal.providerError.description }
+              : {}),
+          }
+        : {}),
     },
   });
 }
@@ -3440,25 +3510,37 @@ async function oauthErrorFromResponse(
   response: Response,
   signal?: AbortSignal,
 ): Promise<string | null> {
+  return (
+    (await readOAuthProviderError(response, "OAuth token error response", signal))?.error ?? null
+  );
+}
+
+/**
+ * The provider's OAuth error (`error`, `error_description`) from a failed
+ * response, read within the OAuth response bound, or null when the body is not
+ * an OAuth error JSON object. Always consumes or cancels the body.
+ */
+async function readOAuthProviderError(
+  response: Response,
+  label: string,
+  signal?: AbortSignal,
+): Promise<OAuthProviderError | null> {
   const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().includes("application/json")) {
+  // application/json and +json types such as application/problem+json.
+  if (!/^application\/(?:[\w.-]+\+)?json\b/iu.test(contentType.trim())) {
     await cancelResponseBody(response);
     return null;
   }
   // Consume the original response, not a clone. The pinned transport owns a
   // per-response dispatcher, so leaving the original body unread would retain
-  // its socket pool after a token endpoint error.
+  // its socket pool after an error response.
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
     response,
     OAUTH_MAX_RESPONSE_BYTES,
-    "OAuth token error response",
+    label,
     { ...(signal ? { signal } : {}) },
   ).catch(() => null);
-  const error = stringValue(payload?.error);
-  if (!error || !/^[a-zA-Z0-9_.-]{1,80}$/.test(error)) {
-    return null;
-  }
-  return error;
+  return oauthProviderError(payload);
 }
 
 async function verifyMcpToolsList(

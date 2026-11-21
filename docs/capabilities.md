@@ -38,6 +38,10 @@ one they turned on, while it is on
 or changing it hands to whoever did so); one an admin or another person turned
 on, one with no recorded installer and one an admin turned off stay with
 admins. `GET …/capabilities` returns `canRemove` on each item for the caller.
+An integration admin deletes a custom MCP server that is not on, such as one
+whose first Connect failed and so has no installation, with
+`DELETE …/capabilities/:id`: its catalog entry and any installation go;
+connected accounts stay. `canRemove` is true for admins on such a server.
 Turning a server off for everyone (`POST …/capabilities/:id/disable`) stays
 with admins; servers a plugin brings go with their plugin, a server the
 organization serves here is turned off here instead (`canRemove: false`), and
@@ -329,6 +333,8 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/mcp
 The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like hosted vault values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values - installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
+
+Header values given here are stored as written: a `{{secret:…}}` reference is not resolved. To keep a server's key in a workspace or organization vault, connect it as a shared service connection instead (an admin's **Add a shared key**, or the connect flow with ownership `workspace`); Opengeni stores the reference and reads the value only when it calls the tool. See [Shared service connections](secrets.md#shared-service-connections).
 
 The generic `capability_catalog_items` and `capability_installations` tables are
 MCP-only. Skills, Plugins, and Integration Definitions are projected

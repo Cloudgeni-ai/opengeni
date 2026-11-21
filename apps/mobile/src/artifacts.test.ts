@@ -43,7 +43,7 @@ const ids = (menu: { id: string }[]) => menu.map((entry) => entry.id);
 test("the type chips match the web library", () => {
   expect(ARTIFACT_KIND_FILTERS.map((each) => each.label)).toEqual([
     "All",
-    "Sites",
+    "Apps",
     "Documents",
     "Presentations",
     "Spreadsheets",
@@ -142,7 +142,7 @@ test("each card says when it was last edited", () => {
 test("the empty list speaks to the filter and search", () => {
   expect(emptyListWords("all", "").title).toBe("No artifacts yet");
   expect(emptyListWords("presentation", "").title).toBe("No presentations yet");
-  expect(emptyListWords("site", " metronor ").title).toBe("No sites match “metronor”");
+  expect(emptyListWords("site", " metronor ").title).toBe("No apps match “metronor”");
 });
 
 test("chat links open the viewer; chats and sandbox files don't", () => {
@@ -167,10 +167,20 @@ test("viewer addresses carry the kind, workspace, title and source chat", () => 
   expect(
     viewerPath({ id: "a 1", kind: "site", workspaceId: "work", title: "Sales", from: "s1" }),
   ).toBe("/artifact/a%201?kind=site&workspaceId=work&title=Sales&from=s1");
+  expect(viewerPath({ id: "a", kind: "site", workspaceId: "work", page: "/releases" })).toBe(
+    "/artifact/a?kind=site&workspaceId=work&page=%2Freleases",
+  );
 });
 
 test("Sites and editors show in the web app's chromeless pages; images and files natively", () => {
   expect(nativeViewPath("work", { kind: "site", id: "s1" })).toBe(
+    "/native-view/workspaces/work/sites/s1",
+  );
+  // A sidebar link opens an app at one of its pages.
+  expect(nativeViewPath("work", { kind: "site", id: "s1" }, "/releases?tab=open")).toBe(
+    "/native-view/workspaces/work/sites/s1?page=%2Freleases%3Ftab%3Dopen",
+  );
+  expect(nativeViewPath("work", { kind: "site", id: "s1" }, "/")).toBe(
     "/native-view/workspaces/work/sites/s1",
   );
   expect(nativeViewPath("work", { kind: "spreadsheet", id: "e1" })).toBe(

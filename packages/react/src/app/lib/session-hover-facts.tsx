@@ -88,7 +88,7 @@ function lifecycleStatus(session: RailSession, waiting: boolean): SessionHoverFa
     default:
       return waiting
         ? { label: "Waiting", tone: "progress", live: false }
-        : { label: "Idle", tone: "success", live: false };
+        : { label: "Done", tone: "success", live: false };
   }
 }
 

@@ -6,11 +6,11 @@ page exists so you pick the right one in one read.
 
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
-| **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in or a personal API key acting as the person, capped by the connection's or key's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
+| **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Named tools for the common steps (`delegate`, `wait_for`, sessions, apps, tools, Skills, Knowledge) plus every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in or a personal API key acting as the person, capped by the connection's or key's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
 | **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing Opengeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | Opengeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval choices apply uniformly; capable clients receive durable pending handles for review | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
-| **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview. Saved data uses `site.data`/`site.files` over the same bridge, not tools; agents manage it with the first-party `site_data_*` and `site_files_*` tools ([Site Data](site-data.md)). The optional per-Site database is reached only through named queries (`site.sql.run`); owners manage its schema, queries and data with the `site_sql_*` tools (`site_sql_inspect`, `site_sql_enable`, `site_sql_migrate`, `site_sql_define_query`, `site_sql_query`, `site_sql_run`, `site_sql_execute`, `site_sql_export`, `site_sql_import`, `site_sql_reset`; [Site SQL](site-data.md#site-sql-optional-cloudflare-storage)). Site HTTP is limited to the `SITE_OPERATIONS` allowlist. Agents publish Sites to their own hostname with `site_publication_get`, `site_publication_update`, `site_publication_apply_fix` (applies a readiness warning's safe fix) and `site_hostname_check`; on a published host the Sites gateway serves the same bridge over site-runtime ([Published Sites](published-sites.md)) |
+| **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview. Saved data uses `site.data`/`site.files` over the same bridge, not tools; agents manage it with the first-party `app_data_*` and `app_files_*` tools ([Site Data](site-data.md)). The optional per-Site database is reached only through named queries (`site.sql.run`); owners manage its schema, queries and data with the `app_sql_*` tools (`app_sql_inspect`, `app_sql_enable`, `app_sql_migrate`, `app_sql_define_query`, `app_sql_query`, `app_sql_run`, `app_sql_execute`, `app_sql_export`, `app_sql_import`, `app_sql_reset`; [Site SQL](site-data.md#site-sql-optional-cloudflare-storage)). Agents move an App to another workspace with `app_export` and `app_install`, and upgrade one from a newer package with `app_upgrade` ([App packages](app-packages.md)). Site HTTP is limited to the `SITE_OPERATIONS` allowlist. Agents publish Sites to their own hostname with `app_publication_get`, `app_publication_update`, `app_publication_apply_fix` (applies a readiness warning's safe fix) and `app_hostname_check`; on a published host the Sites gateway serves the same bridge over site-runtime ([Published Sites](published-sites.md)) |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Dedicated compatibility endpoint; the same Files implementation is also included in the unified gateway | Caller's bearer with `files:read` | A narrowly configured client needs only file materialization |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Hosted Slack MCP supports personal or workspace ownership; Gmail, Google Drive and Google Calendar connections are personal only. Personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
@@ -135,6 +135,108 @@ Full access; SDK
 disconnect them, except that only an owner disconnects an owner's (each listed
 agent carries `canDisconnect`); only the person changes what their agent can
 do. Migration `0601` is rolling.
+
+#### Named tools for connected agents
+
+Next to the three generic tools, the server lists named tools for what a
+coding agent on someone's computer usually does
+(`apps/api/src/organization-mcp-tools.ts`). Each one is a thin wrapper that
+runs the same routes as the generic tools, as the person and capped by the
+connection's access setting; none adds authority.
+
+| Tool | What it does |
+| --- | --- |
+| `delegate` | Starts a chat: `message`, optional `agent` (id or name), `repository` (`owner/name`, or a URL), `branch`, `sandboxEnvironment` (id or name), `title`, `visibility`, `idempotencyKey`, `workspaceId`. Returns `sessionId`, `url` and a `cursor` |
+| `wait_for` | Waits up to 50 s (`maxWaitSeconds`, default 50) for a chat after `cursor`. `state` is `done` (the turn finished with a final answer, returned as `finalAnswer`), `needs_attention` (a person must answer in the chat), `failed` or `running` (also while it waits for model capacity); call again with the returned `cursor`. Pass `turnId` from `session_send` so a turn already running when you sent doesn't count |
+| `session_send` | Queues a follow-up, or changes the running turn with `mode: "steer"`; returns the `cursor` and, when known, the `turnId` to wait for |
+| `sessions_list`, `session_get`, `session_events`, `session_pause`, `session_resume` | Find, read and control chats |
+| `agents_list`, `sandbox_environments_list`, `workspaces_list`, `workspace_use` | Choices for `delegate`; `workspace_use` sets the connection's default workspace |
+| `apps_list`, `app_describe`, `app_query`, `app_write` | Read and change app data ([App data](site-data.md)); `app_query` runs a named query when given `sqlQuery` |
+| `tools_search`, `tool_call` | Search and call the workspace's connected tools; each result's `approval` (`none`, `human`, `blocked`) and `approvalSource` (`tool`, or `policy` when the person's or workspace's tool settings decide) say whether a call needs approval |
+| `skills_sync`, `skills_list` | Upload local Skill folders (`direction: "upload"`), pull the workspace's (`direction: "pull"`), or sync every Skill folder of a GitHub repository (`direction: "repository"`, `repository`: a repository or folder URL) |
+| `knowledge_search`, `knowledge_get`, `knowledge_save` | Search, read and save Knowledge |
+
+`sites_list`, `site_describe`, `site_query`, `site_write` and
+`session_wait_for` still work as hidden aliases; they aren't listed.
+
+- **Workspace.** A call with no `workspaceId` uses the connection's default
+  workspace (set with `workspace_use`, or `defaultWorkspaceId` on the
+  connection), else the only workspace the connection reaches. With several
+  and no default, the error lists them.
+- **Retries.** `delegate`, `session_send`, `knowledge_save` and
+  `skills_sync` derive their idempotency key from the caller, workspace and
+  input when the agent sends none, so retrying the same call in the same
+  clock hour doesn't start the same work twice (the returned
+  `idempotencyKey` makes it exact across hours; a new key sends the same
+  text again on purpose). `tool_call` repeats safely with the same
+  `operationId`. Errors carry the key, `retrySafe` (repeating with it
+  doesn't duplicate work) and `retryable` (whether repeating could help).
+- **Visibility.** A delegated chat uses the person's default chat visibility;
+  Only me falls back to the workspace when the workspace doesn't allow it.
+  Stopping a local wait only stops tracking; `session_pause` stops the chat.
+- **App data.** A connected agent is a viewer of app data by default: it
+  reads and writes what each app's collection rules let a viewer, and
+  managing collections (define, reset, import, export, settings) is refused
+  with `outside_agent_viewer` until the person sets App data to Manager for
+  that agent (Connected agents, or `appDataAccess` on
+  `PATCH /v1/organizations/:id/mcp-connections/:connectionId`; only the
+  person in the browser can choose Manager, not an agent acting for them).
+  Outside agents only reach apps that are published to members or were never
+  published (a suspended or unpublished public app still counts as public): an app anyone can open may hold text from outsiders
+  that an agent picking up work would read as instructions, so those are
+  refused with `outside_agent_members_only`. A personal API key on this
+  server is treated like a connected agent with viewer access; the same key
+  on the REST API acts as the person, as before.
+- **Approvals.** `tool_call` on a tool that needs approval returns
+  `needsApproval`, an `approvalUrl` (`/workspaces/:id/tool-approval` in the
+  web app, showing the exact tool and arguments) and an `operationId`. After
+  the person approves there, calling `tool_call` again with the same input
+  and `operationId` runs the approved call once. Connected agents can't
+  approve tool calls themselves (the approval routes refuse them), so the
+  person always decides.
+- **Skills.** Uploads go to the person's own Skills unless `scope` is
+  `workspace` or `organization`, follow Agent learning like an agent's save
+  (Review first leaves them pending review, Off refuses them), skip
+  unchanged Skills and return one result per Skill (`created`, `updated`,
+  `unchanged`, `pending_review`, `invalid` with the YAML or frontmatter
+  error, `conflict`, `failed`). Approving, rejecting or restoring a Skill
+  revision is the person's review, so connected agents are refused those.
+  Pulling returns each Skill's files. `direction: "repository"` reads every
+  folder with a `SKILL.md` in a public GitHub repository (or one folder of
+  it, `/tree/<ref>/<path>`) at one commit, at most 50, and saves them the
+  same way, with "Synced from owner/repo@commit" as the change reason; the
+  result names the commit and each Skill's `path`, and lists folders it
+  couldn't read. It reads at most 40 files per sync: GitHub's public request
+  limit (about 60 an hour) is per server address and shared by everyone on
+  it, so folders past that are listed as skipped (sync a folder URL, or
+  upload). Private repositories are synced with `upload` from a local
+  checkout; self-hosted servers need outbound access to `api.github.com`.
+- **Rate limits.** Each connection (or personal key) may make 120 calls in a
+  burst refilling at 2 per second, and 20 `delegate` calls refilling at one
+  per 30 seconds (chats started through the generic action tools count only
+  toward the first). Over the limit a call returns an error saying how many seconds to wait;
+  nothing ran, so the retry is safe. The limits are shared by every API
+  process: each connection's buckets are kept in Postgres
+  (`mcp_connection_rate_limits`, migration `1530`), so more replicas don't
+  raise them. While Postgres can't be reached, each process counts on its
+  own.
+- **Not yet.** MCP Tasks (long-running calls) and MCP event notifications are
+  not supported; use `wait_for`.
+
+`npx opengeni connect` adds the server to Claude Code, Codex, Cursor and VS
+Code with Copilot on the computer, and installs a short `opengeni` skill
+for each ([setup guide](../docs-site/guides/connect-coding-agents.mdx), which
+also gives the hand setup for each agent). The unscoped `opengeni` package is
+published best-effort with stable releases (`scripts/publish-unscoped-first.ts`)
+and never with canaries, so it can be missing from npm; the guide doesn't
+depend on it.
+Migration `1516` (rolling) adds the per-connection settings table
+`organization_mcp_connection_settings` and the Skill save that follows Agent
+learning.
+
+When self-hosted, sign-in needs `OPENGENI_PUBLIC_BASE_URL` set to the public
+origin (approval links use it too), the rate limits are shared across API
+replicas through the deployment's Postgres, and `npx opengeni connect --base-url <origin>` points the agents at it.
 
 #### Auto-connect (Enterprise-Managed Authorization)
 
@@ -429,6 +531,11 @@ the first-party bridge's own rule for what each tool needs
 (`LocalMcpBridgeAdapter.toolScopeNeed`); an account whose access is fixed (a
 Nango-held one) reads `unavailable` with `unavailableReason: "account"` instead. `POST tools/site-allowances/reset` removes the caller's own "Always
 allow" choices on one Site (people only).
+
+`POST tools/site-setup` (`{siteArtifactId, siteVersionId}`) runs that
+readiness over every tool the Site version declares and groups what the
+viewer must connect or reconnect into the App connect card's items; see
+"Connect card" in `docs/site-runtime-api.md`.
 
 In a chat, the same bridge rule decides the `tool.auth_needed` notice for a
 tool the account lacks access for: `insufficient_scope` with `scopes` (the
@@ -727,6 +834,28 @@ A call to a tool's former name (the `mcp_<digest>__tool` or
 `account-…__tool` form of earlier releases) does not run: it returns that
 tool's current name, and `tool_invoke` answers it with code `tool_renamed`.
 A call waiting for approval across that rename still binds to its tool.
+
+A renamed first-party tool keeps its former name as a hidden alias
+(`FIRST_PARTY_MCP_TOOL_ALIASES` in `@opengeni/contracts`; the `site_*` tools
+became `app_*` when Sites were renamed apps). Embedding products and saved
+references call tools by name, so an alias keeps working everywhere a name is
+resolved, and is never listed or selected by default. The first-party MCP
+server runs a `tools/call` by alias as the current tool, and `tools/list`
+shows only current names. The workspace tool gateway, site tool allowlists
+and approvals normalize an alias identity to the current one. An app version
+that declares a former name keeps working on every bridge path: per-tool
+resolve, invoke and manifest, published hostnames, the browser SDK's
+declared-tool check (`@opengeni/contracts/first-party-tool-aliases`, bundled
+into the SDK) and "Always allow" choices saved under the former name.
+`session_create`'s explicit `firstPartyMcpTools` takes current names only.
+Codemode paths
+(`opengeni.site_data_query`), `tool_search` names, Skill `tools:` lists and
+`tool_list` prefixes find the current tool. A model call by an alias, bare or
+`opengeni__`-prefixed and also through `tool_invoke`, runs the current tool
+and is recorded under its current name. Saved session, schedule and agent
+selections and deployment allowlists map an alias to its successor
+(`RETIRED_TOOL_SUCCESSORS`). Remove an alias only when no client can still
+send it.
 `tool_list({view:"groups"})` returns source/resource groups with counts and examples;
 pass an exact returned `group` to browse its tools. The default tools view returns compact
 names and description previews, with a default page of 20, a maximum of 40,

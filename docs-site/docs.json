@@ -69,6 +69,8 @@
           "guides/excel-add-in",
           "guides/microsoft-teams",
           "guides/microsoft-dynamics",
+          "guides/superoffice",
+          "guides/connect-coding-agents",
           "guides/developer-plugin",
           "guides/self-host",
           "run-locally",
@@ -171,7 +173,7 @@
     },
     {
       "source": "/guides/coding-agents",
-      "destination": "/guides/developer-plugin"
+      "destination": "/guides/connect-coding-agents"
     }
   ]
 }

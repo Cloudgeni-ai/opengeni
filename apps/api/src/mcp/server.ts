@@ -12,11 +12,23 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
-import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
+import {
+  assertGoalResumeAllowed,
+  createGitHubPersonalEventSource,
+  MissingPermissionRefusal,
+  personalGitHubReader,
+} from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
+import { registerSidebarLayoutTools } from "./sidebar-layout-tools";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
+import { listEventSources as listSessionLinkEventSources } from "@opengeni/db";
+import { sessionLinkGitHubWakeTarget } from "../integrations/session-link-status";
+import {
+  registerSessionCoordinationTools,
+  type SessionLinkWake,
+} from "./session-coordination-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
   connectableIntegrationDefinitions,
@@ -109,11 +121,13 @@ import {
   FIRST_PARTY_MCP_CALLER_META_KEY,
   FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   TOOL_DISCOVERY_CARD_META_KEY,
+  firstPartyMcpToolAliasTarget,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
   beginRigChangeVerificationAttempt,
   getSession,
+  getSessionAgentMemoryState,
   getScheduledTaskRevisionAuthoritySubject,
   getSessionGoal,
   getSessionMcpMonitoringSummary,
@@ -212,7 +226,10 @@ import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-comp
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
+import { registerAppSyncTools } from "./app-sync-tools";
+import { registerAppWebhookTools } from "./app-webhook-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
+import { registerAppPackageTools } from "./app-package-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
 import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
@@ -224,8 +241,16 @@ import {
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
   scheduledTaskOverlapPolicyToolInput,
+  scheduledTaskAgentNameRefusal,
+  withResolvedScheduledTaskAgent,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
+import {
+  browserExtensionForAgents,
+  browserExtensionSentence,
+  connectedMachineCardReadyMessage,
+  personConnectedMachines,
+} from "./connected-machine-card";
 import {
   exactAgentAttemptClaims,
   sessionFleetContextForCaller,
@@ -493,6 +518,7 @@ import {
   requireVisibleScheduledTask,
   scheduledTaskAccess,
   scheduledTaskViewerForGrant,
+  eventSourceAccess as sessionLinkEventSourceAccess,
   siteViewerForGrant,
   resolveNewSiteAudience,
   resolveNewProjectAudience,
@@ -677,6 +703,12 @@ import {
   type OtherWorkspaceSessionTool,
 } from "./session-other-workspace";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  agentRefToolInput,
+  delegatedChatInstructions,
+  resolveDelegationAgent,
+  delegationAgentSubject,
+} from "../agent-delegation";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export type McpServerOptions = {
@@ -802,6 +834,15 @@ function orchestrationFailureCode(tool: OrchestrationToolName, error: HTTPExcept
                 ? "unavailable"
                 : "rejected";
   return `${tool}_${suffix}`.slice(0, ORCHESTRATION_FAILURE_CODE_MAX_LENGTH);
+}
+
+function agentDelegationFailureResult(code: string, message: string) {
+  const envelope = { error: { code, message: boundedOrchestrationFailureMessage(message) } };
+  return markToolArgumentRejection({
+    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    structuredContent: envelope,
+    isError: true as const,
+  });
 }
 
 function sessionCreateValidationFailureResult(error: z4.ZodError) {
@@ -1208,6 +1249,7 @@ function buildSessionCreateToolInput(
       // deterministic failure instead of the omission path's safe own-box fallback.
       sandbox: z4.union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })]).optional(),
       agent: sessionCreateAgentInput,
+      agentName: agentRefToolInput().optional(),
     })
     .strict();
   return contractToolInput(sessionCreateInput, sessionCreateInput, {
@@ -1254,6 +1296,22 @@ export class PolicyMcpServer extends FirstPartyMcpServer {
         throw error;
       }
     };
+    // Hidden aliases (FIRST_PARTY_MCP_TOOL_ALIASES): a call by a tool's former
+    // name runs the registered tool under its current name. Lookups by name
+    // resolve the alias; listing enumerates only registered names, so
+    // tools/list never shows one. `_registeredTools` is the MCP SDK's private
+    // table: apps/api/test/first-party-tool-aliases.test.ts fails if an SDK
+    // upgrade changes it.
+    const tools = this as unknown as { _registeredTools: Record<string, RegisteredTool> };
+    tools._registeredTools = new Proxy(tools._registeredTools, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && !Object.hasOwn(target, property)) {
+          const current = firstPartyMcpToolAliasTarget(property);
+          if (current !== undefined && Object.hasOwn(target, current)) return target[current];
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
   }
 
   /**
@@ -1625,6 +1683,28 @@ export function buildOpenGeniMcpServer(
       json,
     });
   }
+  // Who the chat waits on and what it works on (session-coordination-tools.ts).
+  // A link's wake is set up with the schedule tools below, when this chat
+  // may create event automations.
+  let sessionLinkWake: SessionLinkWake | null = null;
+  if (sessionId !== null) {
+    registerSessionCoordinationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      wake: () => sessionLinkWake,
+      wakeTarget: async (link) =>
+        await sessionLinkGitHubWakeTarget(deps, grant.workspaceId, link, async () => {
+          const { subjectId } = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+          return subjectId ? { accountId: grant.accountId, subjectId } : null;
+        }),
+      json,
+    });
+  }
   // Notifications reach the person who started this session: their inbox and,
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
@@ -1695,7 +1775,7 @@ export function buildOpenGeniMcpServer(
     "artifacts_list",
     {
       description:
-        "List the published Sites you can see in this workspace (shared with the workspace, or Only me Sites that belong to the person you act for) and their current versions and audience.",
+        "List the published apps you can see in this workspace (shared with the workspace, or Only me apps that belong to the person you act for) and their current versions and audience.",
       inputSchema: {},
     },
     async () => {
@@ -1758,6 +1838,26 @@ export function buildOpenGeniMcpServer(
       json,
       siteAgent,
     );
+    registerAppSyncTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
+    registerAppWebhookTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
+    );
     // Site SQL tools need a configured gateway (they also reach databases
     // that already exist after the deployment stops offering Site SQL).
     if (siteSqlGatewayConfig(deps.settings) !== null)
@@ -1779,6 +1879,16 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       json,
+    );
+    registerAppPackageTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+      siteAgent,
     );
     registerSandboxFileArtifactTool(server, deps, grant, sessionId, json);
     registerEditableArtifactAgentTools({
@@ -1840,6 +1950,7 @@ export function buildOpenGeniMcpServer(
   );
 
   registerProjectTools(server, deps, grant, can, json);
+  if (can("workspace:read")) registerSidebarLayoutTools(server, deps, grant, json);
   if (sessionId !== null && can("workspace:read")) {
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
   }
@@ -2538,11 +2649,21 @@ export function buildOpenGeniMcpServer(
         ),
       },
       async (rawArgs) => {
-        const { input: args, timeZoneDefault } = await withAgentScheduleTimeZone(
+        const { input: zonedArgs, timeZoneDefault } = await withAgentScheduleTimeZone(
           deps.db,
           grant,
           rawArgs,
         );
+        // An agent named by name runs as the person this chat acts for may use it.
+        const args = await withResolvedScheduledTaskAgent(zonedArgs, async (ref) => {
+          const resolved = await resolveDelegationAgent(deps, grant, grant.workspaceId, ref);
+          return resolved.ok
+            ? { ok: true, agentId: resolved.agent.id }
+            : {
+                ok: false,
+                message: scheduledTaskAgentNameRefusal(ref, resolved) ?? resolved.message,
+              };
+        });
         const payload = resolveScheduledTaskCreateInput(args, sessionId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -2589,6 +2710,145 @@ export function buildOpenGeniMcpServer(
         );
       },
     );
+
+    // session_links_add's wakeWhen: the same create path as above, with a
+    // one-time GitHub event trigger into this chat.
+    if (eventTriggers && sessionId !== null) {
+      sessionLinkWake = async (wake) => {
+        // Asking again for the same wake reuses the pending automation.
+        const pending = (
+          await listScheduledTasks(deps.db, grant.workspaceId, 100, 0, sessionId)
+        ).find(
+          (task) =>
+            task.targetSessionId === sessionId &&
+            task.status === "active" &&
+            task.name === wake.name &&
+            task.events?.once === true &&
+            task.events.completedAt === null,
+        );
+        if (pending) {
+          return { automationId: pending.id, name: pending.name, once: true, existing: true };
+        }
+        const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
+        // The workspace's GitHub App source, or, where only the person's own
+        // GitHub connection can read the repository, their "GitHub (your
+        // connection)" source, added on first use.
+        const sources = await listSessionLinkEventSources(
+          deps.db,
+          grant.workspaceId,
+          viewer.subjectId,
+        );
+        const usable = (kind: "github" | "github_personal") =>
+          sources.find(
+            (candidate) =>
+              candidate.kind === kind &&
+              (kind === "github" || candidate.ownerSubjectId === viewer.subjectId) &&
+              sessionLinkEventSourceAccess(viewer, candidate) !== "none",
+          );
+        let kind: "github" | "github_personal" =
+          wake.via === "personal" ? "github_personal" : "github";
+        let source: { id: string } | undefined = usable(kind);
+        // The App reads the repository but the workspace has no GitHub event
+        // source: the person's own connection can still watch it.
+        const repository = wake.conditions.find(
+          (condition) => condition.field === "data.repository.full_name",
+        )?.value;
+        if (
+          !source &&
+          kind === "github" &&
+          viewer.subjectId &&
+          typeof repository === "string" &&
+          (await personalGitHubReader(
+            { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              subjectId: viewer.subjectId,
+              repository,
+            },
+          ).catch(() => null))
+        ) {
+          kind = "github_personal";
+          source = usable(kind);
+        }
+        if (!source && kind === "github_personal" && viewer.subjectId) {
+          source = await createGitHubPersonalEventSource({
+            db: deps.db,
+            settings: deps.settings,
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            createdBySubjectId: grant.subjectId,
+            ownerSubjectId: viewer.subjectId,
+          }).catch((error: unknown) => {
+            throw new ToolArgumentError(
+              `${errorMessage(error)} The link was added without a wake.`,
+            );
+          });
+        }
+        if (!source) {
+          throw new ToolArgumentError(
+            "No GitHub event source is available. A person adds it in Automations (it needs the workspace's GitHub app); the link was added without a wake.",
+          );
+        }
+        const payload = resolveScheduledTaskCreateInput(
+          {
+            name: wake.name,
+            prompt: wake.prompt,
+            events: {
+              once: true,
+              triggers: [
+                {
+                  sourceId: source.id,
+                  eventTypes: [wake.eventType],
+                  conditions: wake.conditions,
+                  // A merge or release made through Opengeni's own GitHub App
+                  // (an agent or the merge queue) still reports back.
+                  includeOwnEvents: true,
+                },
+              ],
+            },
+          },
+          sessionId,
+        );
+        await requireLimit(deps, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          action: "schedule:create",
+          quantity: 1,
+        });
+        const task = await createValidatedScheduledTask({
+          settings: deps.settings,
+          db: deps.db,
+          objectStorage: deps.objectStorage,
+          grant,
+          payload,
+          toolsProvided: false,
+          sessionAuthorization: deps.sessionAuthorization,
+          authorizationSurface: "first_party_mcp",
+          eventSourceFetch: deps.eventSourceFetch,
+          githubPersonalFetch: deps.githubPersonalFetch,
+        });
+        try {
+          await syncCreatedScheduledTask({
+            db: deps.db,
+            workflowClient: deps.workflowClient,
+            task,
+          });
+        } catch (error) {
+          if (!(error instanceof ScheduledTaskSyncError) || error.persistenceRestored) {
+            throw error;
+          }
+          // The automation is saved; its schedule sync is retried. Don't create it again.
+          return {
+            automationId: task.id,
+            name: task.name,
+            once: true,
+            partialFailure: { stage: "schedule_sync", retryable: true },
+          };
+        }
+        return { automationId: task.id, name: task.name, once: true };
+      };
+    }
 
     server.registerTool(
       "scheduled_tasks_update",
@@ -2958,7 +3218,7 @@ function registerSandboxFileArtifactTool(
     {
       // Sites take the same artifactId path, so they are named only where the
       // grant may change one.
-      description: `Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file${hasPermission(grant.permissions, "artifacts:publish") ? " or Site" : ""}, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.`,
+      description: `Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file${hasPermission(grant.permissions, "artifacts:publish") ? " or app" : ""}, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.`,
       inputSchema: {
         path: z4.string().min(1).max(4_096).optional(),
         artifactId: z4.string().uuid().optional(),
@@ -4240,7 +4500,7 @@ function registerWorkspaceArtifactTools(
       });
   const mutation = async (response: WorkspaceArtifactMutationResponse) => ({
     ...(await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession)),
-    artifactReference: `[Open Site](artifact:${response.artifact.id})`,
+    artifactReference: `[Open app](artifact:${response.artifact.id})`,
   });
   // A published Site follows its Site here exactly as through the API routes:
   // the same hook resyncs the edge and scans a version that became current.
@@ -4293,7 +4553,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_prepare_upload",
     {
       description:
-        "Get signed upload URLs for a Site's HTML and optional source JSON. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source upload may be omitted for HTML-only Sites.",
+        "Get signed upload URLs for an app's HTML, optional source JSON and, for a multi-file build, optional assets JSON {files: [{path, base64}]} holding every build file beside the entry HTML. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source and assets uploads may be omitted for single-file apps.",
       inputSchema: {},
     },
     async () => {
@@ -4337,7 +4597,7 @@ function registerWorkspaceArtifactTools(
         detail,
         version: projectedVersion,
         downloads,
-        artifactReference: `[Open Site](artifact:${artifactId})`,
+        artifactReference: `[Open app](artifact:${artifactId})`,
       });
     },
   );
@@ -4346,7 +4606,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
+        'Create and publish an app from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the app page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -5289,11 +5549,13 @@ function registerFleetTools(
           kind: "selfhosted",
           status: "card_posted",
           eventId,
-          message: `${
+          message:
             setup.status === "ready"
-              ? `${setup.detail} The Connected Machine card lists them, so the person can choose one for this chat or connect another.`
-              : "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet."
-          } Check sandboxes_list after they confirm. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on the connected machine.`,
+              ? `${connectedMachineCardReadyMessage(
+                  await personConnectedMachines(deps, grant, sessionId),
+                  browserExtensionForAgents(deps.settings),
+                )} Check sandboxes_list after they confirm.`
+              : `The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Check sandboxes_list after they confirm. ${browserExtensionSentence(browserExtensionForAgents(deps.settings))}`,
         });
       }
       return json(
@@ -6191,7 +6453,7 @@ function registerWorkspaceOrchestrationTools(
             .uuid()
             .optional()
             .describe(
-              "Conversations created through this Site, regardless of their project. Keep unchanged when paging.",
+              "Conversations created through this app, regardless of their project. Keep unchanged when paging.",
             ),
           recentHours: z4.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).optional(),
           projectId: z4
@@ -7001,7 +7263,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and queue a related follow-up to a worker you already spawned with session_queue_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and queue a related follow-up to a worker you already spawned with session_queue_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. To hand work to another agent of this workspace, give agentName (its name or id): the child runs with that agent's Instructions, Memory and Can use. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         // `selfhosted` is reached through machineTarget, so it is not offered
         // as a bare backend choice.
         inputSchema: sessionCreateToolInput(
@@ -7015,9 +7277,50 @@ function registerWorkspaceOrchestrationTools(
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const { machineTarget, title, projectId, ...request } = args;
+          const { machineTarget, title, projectId, agentName, ...request } = args;
+          // Delegation by name: the child is a chat with that agent.
+          let delegated: { agentId: string; instructions?: string } | null = null;
+          // Whose agents the child may run, when not the grant's subject.
+          let agentAccessSubjectId: string | undefined;
+          if (agentName !== undefined) {
+            // The child inherits the calling chat's privacy; its Memory
+            // guidance must match what the knowledge tools will allow.
+            const caller =
+              callerSessionId !== null
+                ? ((
+                    await getSessionAgentMemoryState(deps.db, {
+                      workspaceId: grant.workspaceId,
+                      sessionId: callerSessionId,
+                    })
+                  )?.chat ?? null)
+                : null;
+            const resolved = await resolveDelegationAgent(
+              deps,
+              grant,
+              grant.workspaceId,
+              agentName,
+              caller,
+            );
+            if (!resolved.ok) return agentDelegationFailureResult(resolved.code, resolved.message);
+            const instructions = delegatedChatInstructions(resolved.agent, {
+              instructions: request.instructions,
+              ownerSubjectId: caller?.ownerSubjectId ?? grant.subjectId ?? null,
+              private: caller?.private ?? false,
+              slackDm: caller?.slackDm ?? false,
+              memoryOff: request.memoryScope === "off" || (caller?.memoryOff ?? false),
+            });
+            delegated = {
+              agentId: resolved.agent.id,
+              ...(instructions !== undefined ? { instructions } : {}),
+            };
+            const agentSubject = delegationAgentSubject(grant, caller);
+            if (agentSubject && agentSubject !== grant.subjectId) {
+              agentAccessSubjectId = agentSubject;
+            }
+          }
           const rawRequest = {
             ...request,
+            ...(delegated ?? {}),
             ...(projectId !== undefined ? { channelId: projectId } : {}),
             ...(machineTarget
               ? {
@@ -7040,6 +7343,7 @@ function registerWorkspaceOrchestrationTools(
             rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
+            agentAccessSubjectId ? { agentAccessSubjectId } : {},
           );
           return json(
             sessionCreateMutationReceipt(
@@ -8495,7 +8799,10 @@ function registerCapabilityDiscoveryTools(
           status: "ready",
           eventId,
           ...shown,
-          message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on a connected machine.`,
+          message: connectedMachineCardReadyMessage(
+            await personConnectedMachines(deps, grant, sessionId),
+            browserExtensionForAgents(deps.settings),
+          ),
         });
       }
       if (githubCardWhenReady) {

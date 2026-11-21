@@ -12,6 +12,7 @@ import {
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import { githubPersonalFeed } from "./github-personal-source";
 import { gmailFeed } from "./gmail-source";
 import type { McpEventsFetch } from "./mcp-event-source-client";
 import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
@@ -21,7 +22,8 @@ import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Reads the sources whose events Opengeni takes from the app's own change
- * history (Gmail), or from its own database ("This workspace"). One step reads one source's feed as the source's owner,
+ * history (Gmail), by reading GitHub with a person's own connection ("GitHub
+ * (your connection)"), or from its own database ("This workspace"). One step reads one source's feed as the source's owner,
  * records what changed since its cursor and advances the cursor, while a
  * runnable automation listens to the source. A feed nothing listens to
  * forgets its cursor and idles; triggers and source changes wake it.
@@ -38,6 +40,8 @@ export type EventSourceFeedPumpDeps = {
   bus: EventBus;
   /** Replaces the pinned integration transport, for tests. */
   fetch?: McpEventsFetch | undefined;
+  /** Replaces fetch for "GitHub (your connection)" reads, for tests. */
+  githubFetch?: typeof fetch | undefined;
   observability?: Pick<Observability, "warn" | "error"> | undefined;
   now?: () => Date;
 };
@@ -70,6 +74,7 @@ export type EventSourceFeedAdapter = {
 const FEED_ADAPTERS: Partial<Record<EventSourceRecord["kind"], EventSourceFeedAdapter>> = {
   gmail: gmailFeed,
   workspace: workspaceFeed,
+  github_personal: githubPersonalFeed,
 };
 
 const LEASE_MS = 5 * 60_000;

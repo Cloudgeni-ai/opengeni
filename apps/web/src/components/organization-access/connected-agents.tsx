@@ -153,7 +153,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     if (refused || listFailed)
       return (
         <DetailPage
-          back={{ label: "Connected apps", onClick: () => onNavigate({}) }}
+          back={{ label: "Connected agents", onClick: () => onNavigate({}) }}
           className={FLUSH_DETAIL_PAGE_CLASS}
         >
           {refused ? (
@@ -271,7 +271,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     );
   } else if (visible === null) {
     body = (
-      <RowList label="Connected apps" columns={COLUMNS} busy flush>
+      <RowList label="Connected agents" columns={COLUMNS} busy flush>
         <ListRowSkeleton count={2} />
       </RowList>
     );
@@ -285,7 +285,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     );
   } else {
     body = (
-      <RowList label="Connected apps" columns={COLUMNS} nameLabel="App" flush>
+      <RowList label="Connected agents" columns={COLUMNS} nameLabel="Agent" flush>
         {visible.map((connection) => {
           const status = mcpConnectionStatus(connection);
           return (
@@ -349,7 +349,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
         />
       ) : null}
       <Section
-        title={canManageAll ? "All apps" : "Your apps"}
+        title={canManageAll ? "All agents" : "Your agents"}
         description={
           canManageAll
             ? "Outside agents people connected to this organization."
@@ -495,13 +495,13 @@ export function ConnectedAgentPage({
     () => Boolean(connection && draft && !samePolicy(connection.policy, draft)),
     [connection, draft],
   );
-  const back = { label: "Connected apps", onClick: onClose };
+  const back = { label: "Connected agents", onClick: onClose };
 
   if (!connection || !draft) {
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         {loading ? (
-          <RowList label="Connected app" busy flush>
+          <RowList label="Connected agent" busy flush>
             <ListRowSkeleton count={1} />
           </RowList>
         ) : (
@@ -651,6 +651,36 @@ export function ConnectedAgentPage({
                 {scopeSummary(connection.policy.workspaceScope, workspaces)}
               </dd>
             </dl>
+          )}
+        </DetailSection>
+        <DetailSection
+          title="App data"
+          description={
+            mine
+              ? "Viewer reads and writes like someone viewing each app. Manager can also change its collections and settings."
+              : `${connection.connectedBy.name} chooses this.`
+          }
+        >
+          {mine ? (
+            <SegmentedControl
+              aria-label="App data"
+              options={[
+                { value: "viewer", label: "Viewer" },
+                { value: "manager", label: "Manager" },
+              ]}
+              value={connection.appDataAccess ?? "viewer"}
+              onValueChange={async (appDataAccess: "viewer" | "manager") => {
+                try {
+                  onSaved(await api.update(connection.id, { appDataAccess }));
+                } catch (caught) {
+                  toast.error(`The change wasn't saved. ${userErrorText(caught, "Try again.")}`);
+                }
+              }}
+            />
+          ) : (
+            <p className="m-0 text-sm leading-5 text-fg">
+              {connection.appDataAccess === "manager" ? "Manager" : "Viewer"}
+            </p>
           )}
         </DetailSection>
       </DetailPageBody>

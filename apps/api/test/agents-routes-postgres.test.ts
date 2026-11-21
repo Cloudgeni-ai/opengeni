@@ -130,6 +130,62 @@ afterAll(async () => {
 }, 180_000);
 
 describe("agents through the API (real PostgreSQL)", () => {
+  test("ready-made agents, Can use and Skills", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("agents templates");
+    await member(workspace, "user:alice");
+    const alice = await bearer(workspace, "user:alice", PERSON);
+    const root = `/v1/workspaces/${workspace.workspaceId}`;
+
+    const listed = await call(alice, "GET", `${root}/agent-templates`);
+    expect(listed.status).toBe(200);
+    expect(listed.json.templates.map((template: { key: string }) => template.key)).toEqual([
+      "triage",
+      "bug-fixer",
+      "pr-reviewer",
+      "cve-scanner",
+      "incident-responder",
+      "dependency-updater",
+    ]);
+    const missing = await call(alice, "POST", `${root}/agent-templates/nope/agents`, {});
+    expect(missing.status).toBe(404);
+
+    const added = await call(alice, "POST", `${root}/agent-templates/bug-fixer/agents`, {});
+    expect(added.status).toBe(201);
+    const agent = added.json.agent;
+    expect(agent).toMatchObject({
+      name: "Bug fixer",
+      templateKey: "bug-fixer",
+      visibility: "workspace",
+      toolPermissions: [
+        { connector: "github.com", tool: "merge_pull_request", permission: "block" },
+        { connector: "github.com", tool: "pull_request_merge", permission: "block" },
+      ],
+      skills: [],
+    });
+    // Suggested triggers are not created until someone sets them up.
+    const tasks = await call(alice, "GET", `${root}/scheduled-tasks`);
+    expect(JSON.stringify(tasks.json)).not.toContain(agent.id);
+
+    const invalid = await call(alice, "PATCH", `${root}/agents/${agent.id}`, {
+      expectedVersion: agent.version,
+      toolPermissions: [{ connector: "gmail.com", tool: "*", permission: "sometimes" }],
+    });
+    expect(invalid.status).toBe(400);
+    const changed = await call(alice, "PATCH", `${root}/agents/${agent.id}`, {
+      expectedVersion: agent.version,
+      toolPermissions: [{ connector: "gmail.com", tool: "send_email", permission: "ask" }],
+      skills: [{ name: "release-notes" }],
+    });
+    expect(changed.status).toBe(200);
+    expect(changed.json.agent).toMatchObject({
+      toolPermissions: [{ connector: "gmail.com", tool: "send_email", permission: "ask" }],
+      skills: [{ name: "release-notes" }],
+    });
+    const read = await call(alice, "GET", `${root}/agents/${agent.id}`);
+    expect(read.json.agent.toolPermissions).toEqual(changed.json.agent.toolPermissions);
+  });
+
   test("create, read, change with revisions and versions, delete", async () => {
     if (!shared) return;
     const workspace = await freshWorkspace("agents crud");

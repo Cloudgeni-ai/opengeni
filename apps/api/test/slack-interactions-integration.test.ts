@@ -72,6 +72,7 @@ import {
   personalConnectionDelegationSourceForGrant,
   createSlackEventSource,
   createSessionForRequest,
+  settleSlackEventRecordings,
   updateSessionTitle,
   type ApiRouteDeps,
   type AppDependencies,
@@ -12447,6 +12448,104 @@ describe("Slack event source", () => {
       where source_id = ${source.id} and convert_from(body, 'UTF8') like '%Something private%'`;
     expect(private_!.count).toBe(0);
   }, 90_000);
+
+  test("reaches the workspaces the organization shares the bot with, until sharing stops", async () => {
+    if (!available) return;
+    const value = await fixture({ eventTriggers: true, routedWorkspaceName: "Support" });
+    const target = value.routed!;
+    const add = async (workspaceId: string) =>
+      await createSlackEventSource({
+        db: client.db,
+        accountId: value.owner.accountId,
+        workspaceId,
+        createdBySubjectId: value.owner.subjectId,
+      });
+    // Not shared yet: the other workspace has no Slack bot.
+    await expect(add(target.workspaceId)).rejects.toThrow("Connect Slack to this workspace first");
+    await shared!.admin`
+      insert into opengeni_private.organization_slack_bot_access(
+        connection_id, account_id, home_workspace_id, enabled, generation, updated_by_subject_id)
+      values (${value.connectionId}, ${value.owner.accountId}, ${value.owner.workspaceId},
+        true, 1, ${value.owner.subjectId})`;
+    const homeSource = await add(value.owner.workspaceId);
+    const sharedSource = await add(target.workspaceId);
+    expect(sharedSource).toMatchObject({
+      kind: "slack",
+      workspaceId: target.workspaceId,
+      externalKey: `team:${value.teamId}`,
+      visibility: "workspace",
+    });
+    // Adding it again returns the same source.
+    expect((await add(target.workspaceId)).id).toBe(sharedSource.id);
+
+    const post = async (eventId: string, ts: string, text: string) => {
+      const response = await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/events",
+          JSON.stringify({
+            type: "event_callback",
+            team_id: value.teamId,
+            api_app_id: "A_OPENGENI",
+            event_id: eventId,
+            event_time: 1_761_200_000,
+            authorizations: [{ team_id: value.teamId, user_id: value.botUserId, is_bot: true }],
+            event: {
+              type: "message",
+              channel: "C_SUPPORT",
+              channel_type: "channel",
+              user: value.otherSlackUserId,
+              text,
+              ts,
+            },
+          }),
+          "application/json",
+        ),
+      );
+      expect(response.status).toBe(200);
+      // Slack is answered first; the shared workspaces' deliveries land after.
+      await settleSlackEventRecordings();
+    };
+    const summaries = async (workspaceId: string, sourceId: string) =>
+      (await listInboundEvents(client.db, workspaceId, { sourceIds: [sourceId], limit: 10 })).events
+        .map((event) => event.summary)
+        .sort();
+    const setAccess = async (enabled: boolean, workspaceIds: string[] | null) =>
+      await shared!.admin`
+        update opengeni_private.organization_slack_bot_access
+        set enabled = ${enabled}, workspace_ids = ${workspaceIds}::uuid[], generation = generation + 1
+        where connection_id = ${value.connectionId}`;
+
+    await post("Ev_1", "1761200001.000100", "Shared with every workspace");
+    // Narrowed to another workspace: the shared one no longer hears.
+    await setAccess(true, [crypto.randomUUID()]);
+    await post("Ev_2", "1761200002.000100", "Narrowed elsewhere");
+    await setAccess(true, [target.workspaceId]);
+    await post("Ev_3", "1761200003.000100", "Shared with this workspace");
+    // Revoked: only the home workspace still hears.
+    await setAccess(false, null);
+    await post("Ev_4", "1761200004.000100", "Sharing turned off");
+
+    const message = (text: string) => `Message in channel C_SUPPORT: ${text}`;
+    expect(await summaries(value.owner.workspaceId, homeSource.id)).toEqual(
+      [
+        "Shared with every workspace",
+        "Narrowed elsewhere",
+        "Shared with this workspace",
+        "Sharing turned off",
+      ]
+        .map(message)
+        .sort(),
+    );
+    expect(await summaries(target.workspaceId, sharedSource.id)).toEqual(
+      ["Shared with every workspace", "Shared with this workspace"].map(message).sort(),
+    );
+    // A revoked share also stops new shared sources.
+    const other = await createWorkspace(client.db, {
+      accountId: value.owner.accountId,
+      name: "Unshared",
+    });
+    await expect(add(other.id)).rejects.toThrow("Connect Slack to this workspace first");
+  }, 90_000);
 });
 
 describe("Slack agents", () => {
@@ -13135,6 +13234,87 @@ describe("Slack agents", () => {
       );
     }
     expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+  }, 90_000);
+
+  test("the channel picker offers agents and workspaces as separate menu groups", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture();
+    await mention(value, "C_WHO_ANSWERS", "1765000003.000100", "what changed this week?");
+
+    const card = value.slack.posts.find((post) => post.text.startsWith("Who should answer"));
+    expect(card).toBeDefined();
+    type Menu = {
+      type: string;
+      option_groups?: Array<{
+        label: { text: string };
+        options: Array<{ text: { text: string }; value: string }>;
+      }>;
+      text?: { text: string };
+    };
+    const blocks = card!.blocks as Array<{ type: string; elements?: Menu[] }>;
+    const row = blocks.find((block) => block.type === "actions")!.elements!;
+    expect(row.map((element) => element.type)).toEqual(["static_select", "button"]);
+    expect(row[1]!.text!.text).toBe("Not now");
+    const groups = row[0]!.option_groups!.map((group) => [
+      group.label.text,
+      group.options.map((option) => option.text.text),
+    ]);
+    const names = await shared!.admin<{ name: string }[]>`
+      select name from workspaces
+      where id in (${value.owner.workspaceId}, ${value.routed!.workspaceId})`;
+    // The fixture agents' avatar is the 📊 emoji.
+    expect(groups[0]).toEqual(["Agents", ["📊 Analytics", "📊 Ops Desk"]]);
+    expect(groups[1]![0]).toBe("Workspaces");
+    expect([...(groups[1]![1] as string[])].sort()).toEqual(names.map((r) => r.name).sort());
+    expect(JSON.stringify(card!.blocks)).not.toContain("Opengeni in ");
+
+    // Asking again while the card is open re-posts through the same operation
+    // and puts no second card up.
+    const cards = value.slack.posts.length;
+    await mention(value, "C_WHO_ANSWERS", "1765000003.000200", "and another thing");
+    expect(value.slack.posts).toHaveLength(cards);
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+
+    // Picking the agent in the menu starts its chat and remembers it.
+    const chosen = row[0]!.option_groups![0]!.options[0]!.value;
+    const response = await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/interactions",
+        new URLSearchParams({
+          payload: JSON.stringify({
+            type: "block_actions",
+            team: { id: value.teamId },
+            user: { id: value.ownerSlackUserId },
+            channel: { id: card!.channel },
+            message: { ts: card!.timestamp },
+            actions: [
+              {
+                type: "static_select",
+                action_id: "opengeni.route.select",
+                block_id: "opengeni-route-choice",
+                action_ts: "1765000003.000300",
+                selected_option: {
+                  text: { type: "plain_text", text: "📊 Analytics" },
+                  value: chosen,
+                },
+              },
+            ],
+          }),
+        }).toString(),
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    expect(response.status).toBe(200);
+    await drainAll(value.deps);
+    const [chat] = await agentInteractions(value.routed!.workspaceId);
+    expect(chat).toMatchObject({ slack_agent_id: analytics.id });
+    const stored = await getSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      { connectionId: value.connectionId, slackChannelId: "C_WHO_ANSWERS" },
+    );
+    expect(stored?.slackAgentId).toBe(analytics.id);
   }, 90_000);
 
   test("with no agents, routing reads a +name as ordinary text", async () => {

@@ -87,7 +87,7 @@ export function availabilityMessage(availability: SiteHostnameAvailability): str
   if (availability.message) return availability.message;
   switch (availability.problem) {
     case "taken":
-      return "Another Site uses this name.";
+      return "Another app uses this name.";
     case "held":
       return "This name was released recently and is held for its workspace.";
     case null:
@@ -128,7 +128,7 @@ export const ACCESS_CHOICES: readonly {
     title: "Anyone with the link",
     description: ({ loginOnly }) =>
       loginOnly
-        ? "Anyone who signs in to Opengeni. On this deployment, every Site asks visitors to sign in."
+        ? "Anyone who signs in to Opengeni. On this deployment, every app asks visitors to sign in."
         : "No sign-in needed. Visitors who don't sign in are guests.",
   },
 ];
@@ -428,13 +428,13 @@ export function platformRefusal(error: unknown): { title: string; body: string }
   const code = siteErrorCode(error);
   if (code === SITE_PLATFORM_QUOTA_ERROR_CODE)
     return {
-      title: "Sites allowance used up",
-      body: "This workspace has used this month's Sites allowance and has no credits left. Add credits to publish again.",
+      title: "Apps allowance used up",
+      body: "This workspace has used this month's apps allowance and has no credits left. Add credits to publish again.",
     };
   if (code === SITE_PLATFORM_BRAKE_ERROR_CODE)
     return {
       title: "Publishing is paused",
-      body: "Opengeni paused publishing while it reviews unusual Site usage. Try again later.",
+      body: "Opengeni paused publishing while it reviews unusual app usage. Try again later.",
     };
   return null;
 }

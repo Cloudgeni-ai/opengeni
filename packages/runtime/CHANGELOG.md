@@ -1,5 +1,61 @@
 # @opengeni/runtime
 
+## 6.35.0
+
+### Patch Changes
+
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [e7eb28c]
+- Updated dependencies [5c3c4e6]
+- Updated dependencies [8bf1ec2]
+- Updated dependencies [227502b]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/sdk@6.35.0
+  - @opengeni/codemode@6.35.0
+  - @opengeni/xai-subscription@6.35.0
+  - @opengeni/capabilities@6.35.0
+  - @opengeni/codex@6.35.0
+  - @opengeni/config@6.35.0
+  - @opengeni/decisions@6.35.0
+  - @opengeni/interaction@6.35.0
+  - @opengeni/observability@6.35.0
+  - @opengeni/tool-gateway@6.35.0
+  - @opengeni/vaults@6.35.0
+  - @opengeni/jev@6.35.0
+  - @opengeni/agent-proto@6.35.0
+  - @opengeni/network@6.35.0
+
+## 6.34.0
+
+### Patch Changes
+
+- 8f1d49b: Keep unchanged operational notices from accumulating when a turn resumes after compaction, and stop duplicate notices from displacing conversation history at the next checkpoint.
+- Updated dependencies [71c05a3]
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/config@6.34.0
+  - @opengeni/contracts@6.34.0
+  - @opengeni/sdk@6.34.0
+  - @opengeni/capabilities@6.34.0
+  - @opengeni/codemode@6.34.0
+  - @opengeni/codex@6.34.0
+  - @opengeni/decisions@6.34.0
+  - @opengeni/interaction@6.34.0
+  - @opengeni/observability@6.34.0
+  - @opengeni/tool-gateway@6.34.0
+  - @opengeni/vaults@6.34.0
+  - @opengeni/jev@6.34.0
+  - @opengeni/agent-proto@6.34.0
+  - @opengeni/network@6.34.0
+  - @opengeni/xai-subscription@6.34.0
+
 ## 6.33.0
 
 ### Minor Changes

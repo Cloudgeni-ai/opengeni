@@ -3,12 +3,18 @@ import {
   CreateSessionRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DelegatedAccessTokenPayload,
+  FIRST_PARTY_MCP_TOOL_ALIASES,
+  FIRST_PARTY_MCP_TOOL_ALIAS_NAMES,
   FIRST_PARTY_MCP_TOOL_NAMES,
   RETIRED_AGENT_LEARNING_TOOL_NAMES,
   RETIRED_SECRET_TOOL_NAMES,
   RETIRED_SESSION_TOOL_NAMES,
   SESSION_APP_ACTION_TOOL_NAMES,
   currentAgentLearningToolSelection,
+  currentFirstPartyToolIdentity,
+  currentFirstPartyToolReference,
+  firstPartyMcpToolAliasTarget,
+  renamedFirstPartyMcpToolSuccessor,
 } from "../src";
 
 const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
@@ -97,9 +103,52 @@ describe("first-party MCP tool-name contract", () => {
           !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name) &&
           !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name) &&
           !(RETIRED_SECRET_TOOL_NAMES as readonly string[]).includes(name) &&
-          !(RETIRED_SESSION_TOOL_NAMES as readonly string[]).includes(name),
+          !(RETIRED_SESSION_TOOL_NAMES as readonly string[]).includes(name) &&
+          firstPartyMcpToolAliasTarget(name) === undefined,
       ),
     ).toEqual([...EXPLICIT_ONLY_CONNECTOR_TOOLS]);
+  });
+
+  test("every hidden alias (a former tool name) still resolves to its current tool", () => {
+    expect(FIRST_PARTY_MCP_TOOL_ALIAS_NAMES.length).toBe(24);
+    for (const alias of FIRST_PARTY_MCP_TOOL_ALIAS_NAMES) {
+      const current = FIRST_PARTY_MCP_TOOL_ALIASES[alias];
+      expect(alias.startsWith("site_")).toBe(true);
+      expect(current).toBe(`app_${alias.slice("site_".length)}` as typeof current);
+      // Accepted at the API and token boundaries, never listed or selected by default.
+      expect(FIRST_PARTY_MCP_TOOL_NAMES).toContain(alias);
+      expect(FIRST_PARTY_MCP_TOOL_NAMES).toContain(current);
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain(alias);
+      expect(firstPartyMcpToolAliasTarget(alias)).toBe(current);
+      expect(firstPartyMcpToolAliasTarget(current)).toBeUndefined();
+      // A saved selection or allowlist naming the alias selects the current tool.
+      expect(renamedFirstPartyMcpToolSuccessor(alias)).toBe(current);
+      expect(currentAgentLearningToolSelection([alias])).toEqual([current]);
+      // Saved references in every spelling reach the current tool.
+      expect(currentFirstPartyToolReference(alias)).toBe(current);
+      expect(currentFirstPartyToolReference(`opengeni__${alias}`)).toBe(`opengeni__${current}`);
+      expect(currentFirstPartyToolReference(`opengeni.${alias}`)).toBe(`opengeni.${current}`);
+      expect(
+        currentFirstPartyToolIdentity<{ serverId: string; toolName: string }>({
+          serverId: "opengeni",
+          toolName: alias,
+        }),
+      ).toEqual({
+        serverId: "opengeni",
+        toolName: current,
+      });
+      expect(
+        currentFirstPartyToolIdentity<{ serverId: string; toolName: string }>({
+          serverId: "other",
+          toolName: alias,
+        }),
+      ).toEqual({
+        serverId: "other",
+        toolName: alias,
+      });
+    }
+    expect(currentFirstPartyToolReference("app_data_query")).toBeUndefined();
+    expect(currentFirstPartyToolReference("site_unknown")).toBeUndefined();
   });
 
   test("maps a stored session_send_message selection to session_queue_message without keeping the old name", () => {

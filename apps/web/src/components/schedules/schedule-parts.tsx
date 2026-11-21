@@ -156,6 +156,12 @@ export function useScheduleNavigation(workspaceId: string) {
         params: { workspaceId, sourceId },
         replace: options.replace,
       }),
+    agent: (agentId: string, options: { replace?: boolean } = {}) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/agents/$agentId",
+        params: { workspaceId, agentId },
+        replace: options.replace,
+      }),
     newSource: (kind?: string) =>
       void navigate({
         to: "/workspaces/$workspaceId/automations/sources/new",

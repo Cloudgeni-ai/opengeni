@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
-import type { Permission } from "@opengeni/contracts";
+import type { Permission, SiteAssetManifest } from "@opengeni/contracts";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
 import { rawMembershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
@@ -497,6 +497,7 @@ export async function getPublishedSiteVersion(
   contentSha256: string | null;
   sizeBytes: number;
   requestedTools: Array<{ serverId: string; toolName: string }>;
+  assetManifest: SiteAssetManifest | null;
 } | null> {
   if (!UUID.test(siteId) || !UUID.test(versionId)) return null;
   return await withRlsContext(db, scope, async (tx) => {
@@ -506,9 +507,10 @@ export async function getPublishedSiteVersion(
       content_sha256: string | null;
       size_bytes: string | number;
       requested_tools: unknown;
+      asset_manifest: SiteAssetManifest | null;
     }>(
       tx,
-      sql`select id, content_key, content_sha256, size_bytes, requested_tools
+      sql`select id, content_key, content_sha256, size_bytes, requested_tools, asset_manifest
         from workspace_artifact_versions
         where workspace_id = ${scope.workspaceId} and artifact_id = ${siteId} and id = ${versionId}`,
     );
@@ -521,6 +523,7 @@ export async function getPublishedSiteVersion(
           requestedTools: Array.isArray(row.requested_tools)
             ? (row.requested_tools as Array<{ serverId: string; toolName: string }>)
             : [],
+          assetManifest: row.asset_manifest ?? null,
         }
       : null;
   });
@@ -542,6 +545,7 @@ export async function getServableSiteVersion(
   contentSha256: string | null;
   sizeBytes: number;
   requestedTools: Array<{ serverId: string; toolName: string }>;
+  assetManifest: SiteAssetManifest | null;
 } | null> {
   if (!UUID.test(input.siteId) || !UUID.test(input.versionId)) return null;
   if (input.versionId !== input.currentVersionId) {
@@ -673,14 +677,14 @@ export async function upsertSitePublication(
     defaults: { access: SitePublicationAccess; noindex: boolean };
   },
 ): Promise<UpsertSitePublicationResult> {
-  if (!UUID.test(input.siteId)) throw new SitePublishingError("not_found", "Site not found");
+  if (!UUID.test(input.siteId)) throw new SitePublishingError("not_found", "App not found");
   return await withRlsContext(db, scope, async (tx) => {
     const existing = await publicationRow(tx, scope, input.siteId, true);
     const { changes } = input;
     if (existing?.status === "suspended" && changes.status !== undefined)
       throw new SitePublishingError(
         "forbidden",
-        "This Site was taken down; restore it before publishing it again",
+        "This app was taken down; restore it before publishing it again",
       );
     // A taken-down Site keeps its hostname: moving it would put the same Site
     // back online under a new name.
@@ -691,7 +695,7 @@ export async function upsertSitePublication(
     )
       throw new SitePublishingError(
         "forbidden",
-        "This Site was taken down; its hostname cannot change until it is restored",
+        "This app was taken down; its hostname cannot change until it is restored",
       );
     const label = changes.label ?? existing?.label ?? input.defaultLabel;
     const previousLabel = existing && existing.label !== label ? existing.label : null;
@@ -783,10 +787,10 @@ export async function suspendSitePublication(
   siteId: string,
   input: { by: SiteSuspendedBy; reason: string; subject: string },
 ): Promise<SitePublicationRecord> {
-  if (!UUID.test(siteId)) throw new SitePublishingError("not_found", "Site not published");
+  if (!UUID.test(siteId)) throw new SitePublishingError("not_found", "App not published");
   return await withRlsContext(db, scope, async (tx) => {
     const existing = await publicationRow(tx, scope, siteId, true);
-    if (!existing) throw new SitePublishingError("not_found", "Site not published");
+    if (!existing) throw new SitePublishingError("not_found", "App not published");
     if (
       existing.status === "suspended" &&
       (existing.suspendedBy === "platform" ||
@@ -833,21 +837,21 @@ export async function restoreSitePublication(
   siteId: string,
   input: { by: SiteSuspendedBy; subject: string },
 ): Promise<SitePublicationRecord> {
-  if (!UUID.test(siteId)) throw new SitePublishingError("not_found", "Site not published");
+  if (!UUID.test(siteId)) throw new SitePublishingError("not_found", "App not published");
   return await withRlsContext(db, scope, async (tx) => {
     const existing = await publicationRow(tx, scope, siteId, true);
-    if (!existing) throw new SitePublishingError("not_found", "Site not published");
+    if (!existing) throw new SitePublishingError("not_found", "App not published");
     if (existing.status !== "suspended")
-      throw new SitePublishingError("conflict", "This Site is not taken down");
+      throw new SitePublishingError("conflict", "This app is not taken down");
     if (existing.suspendedBy === "platform" && input.by !== "platform")
       throw new SitePublishingError(
         "forbidden",
-        "This Site was taken down by the platform; contact support to restore it",
+        "This app was taken down by the platform; contact support to restore it",
       );
     if (existing.suspendedBy === "admin" && input.by === "owner")
       throw new SitePublishingError(
         "forbidden",
-        "A workspace admin took this Site down; only a workspace admin can restore it",
+        "A workspace admin took this app down; only a workspace admin can restore it",
       );
     const [row] = await rawRows<PublicationRow>(
       tx,
@@ -2614,7 +2618,7 @@ export async function findSitePublicationGlobally(
   if (!UUID.test(siteId)) return null;
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
-    await requireOperatorRole(tx, "Finding a Site by id");
+    await requireOperatorRole(tx, "Finding an app by id");
     const [row] = await rawRows<{ account_id: string; workspace_id: string; label: string }>(
       tx,
       sql`select account_id, workspace_id, label from site_publications where site_id = ${siteId}`,

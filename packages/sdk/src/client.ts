@@ -5,6 +5,14 @@ import type {
   ModelDecisionResponse,
 } from "@opengeni/contracts";
 import type {
+  AppPackageExportRequest,
+  AppPackageExportResponse,
+  AppPackageInstallRequest,
+  AppPackageInstallResponse,
+  AppPackageUpgradeRequest,
+  AppPackageUpgradeResponse,
+} from "@opengeni/contracts";
+import type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
   ListBillingCreditNotificationsResponse,
@@ -89,6 +97,7 @@ import type {
   ArtifactLinkResolution,
   ArtifactPinResponse,
 } from "./artifact-catalog";
+import type { SidebarLayoutResponse, UpdateSidebarLayoutRequest } from "./sidebar-layout";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   Agent,
@@ -101,6 +110,9 @@ import type {
   AgentSlackIntroResponse,
   AgentSummary,
   CreateAgentRequest,
+  CreateAgentFromTemplateRequest,
+  AgentTemplate,
+  ListAgentTemplatesResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -141,6 +153,24 @@ import type {
   UpdateAutomationTemplateRequest,
   UpdateEventSourceRequest,
   WorkspaceAutomationTemplate,
+} from "@opengeni/contracts";
+import type {
+  AppSync,
+  AppSyncCreateRequest,
+  AppSyncListResponse,
+  AppSyncOptInReview,
+  AppSyncRunResponse,
+  AppSyncStatusResponse,
+  AppSyncSubscriptionResponse,
+  AppSyncUpdateRequest,
+} from "@opengeni/contracts";
+import type {
+  AppNotifyRequest,
+  AppNotifyResponse,
+  AppWebhookCreateRequest,
+  AppWebhookListResponse,
+  AppWebhookSaveResponse,
+  AppWebhookUpdateRequest,
 } from "@opengeni/contracts";
 import type {
   SiteDataCollectionDefinitionRequest,
@@ -777,6 +807,9 @@ import type {
   SessionShareLink,
   SessionShareLinkList,
   SessionShareLinkState,
+  SessionLink,
+  SessionLinksResponse,
+  AddSessionLinkRequest,
   SharedSession,
   SessionVisibilityChangePreview,
   SessionScopeSubjectId,
@@ -2021,6 +2054,47 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * A chat's Linked items (issues, pull requests, threads, records, URLs) with
+   * live status where the deployment can read it. `fresh` skips the short
+   * status cache.
+   */
+  async listSessionLinks(
+    workspaceId: string,
+    sessionId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<SessionLinksResponse> {
+    return await this.requestJson<SessionLinksResponse>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/links${options.fresh ? "?fresh=true" : ""}`,
+    );
+  }
+
+  /** Link something to a chat; the same URL again updates its title. */
+  async addSessionLink(
+    workspaceId: string,
+    sessionId: string,
+    request: AddSessionLinkRequest,
+  ): Promise<SessionLink> {
+    return await this.requestJson<SessionLink>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/links`,
+      request,
+    );
+  }
+
+  /** Remove a link from a chat. */
+  async removeSessionLink(
+    workspaceId: string,
+    sessionId: string,
+    linkId: string,
+  ): Promise<{ removed: boolean }> {
+    return await this.requestJson<{ removed: boolean }>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/links/${encodeURIComponent(linkId)}`,
+    );
+  }
+
   /** The person's live share links in a workspace, newest first. */
   async listSessionShareLinks(workspaceId: string): Promise<SessionShareLinkList> {
     return await this.requestJson<SessionShareLinkList>(
@@ -2438,14 +2512,14 @@ export class OpenGeniClient {
       (!response.originSiteId ||
         (options.originSiteId !== "current" && response.originSiteId !== options.originSiteId))
     ) {
-      throw unsupportedSessionPage("Site-filtered session lists");
+      throw unsupportedSessionPage("app-filtered session lists");
     }
     if (
       options.siteAccessId &&
       (!response.siteAccessId ||
         (options.siteAccessId !== "current" && options.siteAccessId !== response.siteAccessId))
     )
-      throw unsupportedSessionPage("Site access-filtered session lists");
+      throw unsupportedSessionPage("app access-filtered session lists");
     return response;
   }
 
@@ -3288,7 +3362,13 @@ export class OpenGeniClient {
 
   async listScheduledTasks(
     workspaceId: string,
-    options: { limit?: number; offset?: number; sessionId?: string } = {},
+    options: {
+      limit?: number;
+      offset?: number;
+      sessionId?: string;
+      /** Only automations whose runs are chats with this agent. */
+      agentId?: string;
+    } = {},
   ): Promise<ScheduledTask[]> {
     return await this.requestJson<ScheduledTask[]>(
       "GET",
@@ -3297,6 +3377,7 @@ export class OpenGeniClient {
       {
         ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
         ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+        ...(options.agentId ? { agentId: options.agentId } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );
@@ -8767,6 +8848,29 @@ export class OpenGeniClient {
     return response.agent;
   }
 
+  /** Ready-made agents people can add ("Add an agent"). */
+  async listAgentTemplates(workspaceId: string): Promise<AgentTemplate[]> {
+    const response = await this.requestJson<ListAgentTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-templates`,
+    );
+    return response.templates;
+  }
+
+  /** Add a ready-made agent. Its suggested triggers are not created. */
+  async createAgentFromTemplate(
+    workspaceId: string,
+    templateKey: string,
+    request: CreateAgentFromTemplateRequest = {},
+  ): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/agents`,
+      request,
+    );
+    return response.agent;
+  }
+
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */
   async deleteAgent(workspaceId: string, agentId: string): Promise<DeleteAgentResponse> {
     return await this.requestJson<DeleteAgentResponse>(
@@ -10090,6 +10194,20 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Delete a custom MCP server added in this workspace: its catalog entry and,
+   * if it was set up here, its installation. This removes a server that never
+   * connected, which `removeCapabilityInstallation` cannot. Connected accounts
+   * are kept. Integration admins only (otherwise 403 `capabilities:manage`);
+   * `canRemove` on a catalog item that is not on says whether the viewer may.
+   */
+  async deleteCustomMcpServer(workspaceId: string, capabilityId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}`,
+    );
+  }
+
   /** Read-only, permission-filtered workspace or session output discovery. */
   async listArtifactCatalog(
     workspaceId: string,
@@ -10130,6 +10248,42 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog/${encodeURIComponent(kind)}/${encodeURIComponent(artifactId)}/pin`,
       { pinned },
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * The sidebar as this person sees it: the workspace default with their own
+   * changes on top, limited to apps they can open. Needs `workspace:read`.
+   */
+  async getSidebarLayout(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SidebarLayoutResponse> {
+    return this.requestJson<SidebarLayoutResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Change this person's own sidebar (`scope: "personal"`) or the workspace
+   * default (`scope: "workspace"`, workspace admins). The changes apply
+   * together; answers the updated sidebar.
+   */
+  async updateSidebarLayout(
+    workspaceId: string,
+    request: UpdateSidebarLayoutRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SidebarLayoutResponse> {
+    return this.requestJson<SidebarLayoutResponse>(
+      "PATCH",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sidebar-layout`,
+      request,
       undefined,
       options,
     );
@@ -10251,6 +10405,57 @@ export class OpenGeniClient {
     );
   }
 
+  /** One package file of an app's current version (docs/app-packages.md). */
+  async exportAppPackage(
+    workspaceId: string,
+    appId: string,
+    request: AppPackageExportRequest = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageExportResponse> {
+    return await this.requestJson<AppPackageExportResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(appId)}/package`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Installs a package file as a new app in this workspace (docs/app-packages.md). */
+  async installAppPackage(
+    workspaceId: string,
+    request: AppPackageInstallRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageInstallResponse> {
+    return await this.requestJson<AppPackageInstallResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-packages/install`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Upgrades an app from a newer package (docs/app-packages.md#upgrade):
+   * `dryRun` returns the plan; otherwise the package's version becomes the
+   * app's new version and only its new data definitions run.
+   */
+  async upgradeAppPackage(
+    workspaceId: string,
+    appId: string,
+    request: AppPackageUpgradeRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageUpgradeResponse> {
+    return await this.requestJson<AppPackageUpgradeResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(appId)}/package/upgrade`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   async setWorkspaceArtifactStatus(
     workspaceId: string,
     artifactId: string,
@@ -10329,6 +10534,227 @@ export class OpenGeniClient {
       "GET",
       `${siteDataPath(workspaceId, siteId)}/data`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** An App's data syncs with their last run. Needs a manager of the App. */
+  async listAppSyncs(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncListResponse> {
+    return await this.requestJson<AppSyncListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/syncs`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Create a data sync: call a connected tool on a schedule or event, keep
+   * chosen fields and upsert them by key into a collection. No model runs.
+   * The caller owns it; a shared sync runs on their connection.
+   */
+  async createAppSync(
+    workspaceId: string,
+    siteId: string,
+    request: AppSyncCreateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSync> {
+    return await this.requestJson<AppSync>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/syncs`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change a data sync; only the given fields change and the caller becomes its owner. */
+  async updateAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    request: AppSyncUpdateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSync> {
+    return await this.requestJson<AppSync>(
+      "PATCH",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a data sync. Records it wrote stay. */
+  async deleteAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: string }> {
+    return await this.requestJson<{ deleted: string }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run a data sync now and wait for its result. */
+  async runAppSync(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncRunResponse> {
+    return await this.requestJson<AppSyncRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/run`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Opt the caller in to (or out of) a personal data sync. `account` picks
+   * which of their accounts of the sync's connector it runs on (an id from
+   * `getAppSyncOptInReview`). Without it an earlier choice is kept, else
+   * their first own account is used, and `accounts` lists them when several.
+   */
+  async setAppSyncOptIn(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    optedIn: boolean,
+    options: { signal?: AbortSignal; account?: string } = {},
+  ): Promise<AppSyncSubscriptionResponse> {
+    const { account, ...requestOptions } = options;
+    return await this.requestJson<AppSyncSubscriptionResponse>(
+      optedIn ? "PUT" : "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/subscription`,
+      optedIn && account ? { account } : undefined,
+      undefined,
+      requestOptions,
+    );
+  }
+
+  /**
+   * What the caller confirms before opting in to a personal data sync: the
+   * tool and connector, their accounts of it, and the collection it fills.
+   */
+  async getAppSyncOptInReview(
+    workspaceId: string,
+    siteId: string,
+    syncId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncOptInReview> {
+    return await this.requestJson<AppSyncOptInReview>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/syncs/${encodeURIComponent(syncId)}/opt-in`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Each data sync's last run as the caller sees it (what the App's page reads). */
+  async getAppSyncStatus(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppSyncStatusResponse> {
+    return await this.requestJson<AppSyncStatusResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/data/syncs`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** The app's inbound webhooks, with their addresses. Needs a manager of the app. */
+  async listAppWebhooks(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookListResponse> {
+    return await this.requestJson<AppWebhookListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create an inbound webhook; the response carries its secret, shown once. */
+  async createAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    request: AppWebhookCreateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/webhooks`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change a webhook; `rotateSecret: true` returns a new secret, shown once. */
+  async updateAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    request: AppWebhookUpdateRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppWebhookSaveResponse> {
+    return await this.requestJson<AppWebhookSaveResponse>(
+      "PATCH",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a webhook; its address stops accepting deliveries. */
+  async deleteAppWebhook(
+    workspaceId: string,
+    siteId: string,
+    webhookId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Send a notification from the app as the caller (what `site.notify` does from its page). */
+  async notifyFromApp(
+    workspaceId: string,
+    siteId: string,
+    request: AppNotifyRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppNotifyResponse> {
+    return await this.requestJson<AppNotifyResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/notify`,
+      request,
       undefined,
       options,
     );

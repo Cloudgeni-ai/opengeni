@@ -462,11 +462,14 @@ the start of every later request:
   governance item after the Skill catalog.
 - The active workspace's filesystem layout names its root, which differs
   between a managed sandbox (`/workspace`) and each Connected Machine (its
-  host-native working directory). The SDK's `# Filesystem` section is turned
-  off (`filesystemInstructions: false`); the system prompt keeps a static
-  section that points at the latest `<opengeni_workspace_filesystem>` developer
-  item, written like governance before the turn that first sees a new layout
-  and frozen for that turn's attempts. A `sandbox_swap` within a turn returns
+  host-native working directory). The SDK renders nothing from the manifest
+  into the system prompt (`manifestInstructions: false`); the system prompt
+  keeps a static section that points at the latest
+  `<opengeni_workspace_filesystem>` developer item. That item is the turn's
+  manifest (`buildManifest`, the same placement the agent's box applies)
+  without files, rendered by `workspaceFilesystemLayout`; it is written like
+  governance before the turn that first sees a new layout and frozen for that
+  turn's attempts. A `sandbox_swap` within a turn returns
   the new `workspaceRoot` in its tool result; the next turn appends the new
   layout. Compaction re-adds only the latest layout item after governance.
   Before this, every machine swap rewrote the end of the system prompt and
@@ -523,9 +526,15 @@ the first diverging checkpoint), `thinking_dropped`, `account_changed`,
 first: more than 5 minutes after the previous call (the cache lifetime Opengeni
 requests by default) the prefix may have expired anyway, so no request change
 is blamed. `context_replaced` needs the prompt to fall below 60% of the
-previous one in tokens or in items: compaction keeps the tools, the system
-prompt and a summary, so a large fixed prefix can hold the token count up while
-the item count collapses. Each fingerprint records the deployment revision that built the
+previous one in tokens or in items, or the history's first item to change:
+compaction keeps the tools, the system prompt and a summary, so a large fixed
+prefix can hold the token count up while the item count collapses, and a
+compacted history starts anew, while every in-place change keeps its first
+item. The first-item test also covers a call whose baseline was the compaction
+request itself, which is shorter than the history built from it. On Claude a
+compacted history's leading system items join the system prompt, so the system
+digest changes with it; that costs nothing beyond the replaced history and is
+not `system_changed`. Each fingerprint records the deployment revision that built the
 request, so a tools or system change between two deployments is
 `release_changed` (a release that edits model-facing text costs each live
 session one cold prefix) and the same change within one deployment is
@@ -647,6 +656,11 @@ tokens after each compaction instead of about 20,000.
 Turn-scoped operational notices are retained verbatim only for the turn running
 the compaction, or when one is the newest input; older notices are left to the
 checkpoint, because each applies only to its own turn.
+Preparing another stream in the same turn reuses the last durable notice when
+its text is unchanged. A checkpoint also retains only one copy of each run of
+unchanged notices from that turn, so copies written by older workers do not
+crowd out other history. An actual change still appears in order, and ordinary
+requests never remove or rewrite prior notices.
 Existing budget-driven omission and text truncation still apply. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.

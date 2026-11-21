@@ -122,11 +122,12 @@ public key) fixes the unpacked build's extension ID.
 Then `bun scripts/build.ts --store --brand path/to/brand.json --out path/to/dist`
 writes `<packageName>-store.zip` for the product's own Chrome Web Store item.
 Every name a person sees (manifest, popup, toolbar titles and connection
-messages) comes from the brand. The native host identifier and protocol stay
-the same, so the brand works with the Opengeni agent unchanged; list the
-store's item ID in the agent's allowed extensions (`browserExtensionIds` in
-the desktop kit, or `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` for standalone
-installs).
+messages) comes from the brand. Branded builds use the native host
+`ai.opengeni.browser.<extension-id>`; Opengeni Browser keeps
+`ai.opengeni.browser`. The protocol is the same. List each branded store or
+unpacked extension ID in `browserExtensionIds` in the desktop kit, or in
+`OPENGENI_AGENT_BROWSER_EXTENSION_IDS` for standalone service installs.
+Update the branded extension and its agent together so both use the new name.
 
 ## Publish an update
 

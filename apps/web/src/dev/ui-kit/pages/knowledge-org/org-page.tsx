@@ -147,9 +147,9 @@ function navEntries(questions: OrgQuestions, peopleTitle: string, local: boolean
     },
     {
       id: "integrations",
-      label: "Integrations",
+      label: "Connected tools",
       icon: BlocksIcon,
-      description: "Which integrations workspaces may connect.",
+      description: "Which connected tools workspaces may connect.",
     },
     {
       id: "identity",

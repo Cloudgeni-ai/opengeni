@@ -14,6 +14,7 @@ import { HelpMenu } from "@/components/help-menu";
 import { BillingMenuItem } from "@/components/billing-menu-item";
 import { ConsoleMenuItem } from "@/components/console-menu-item";
 import { MyThingsMenuItem } from "@/components/my-things-menu-item";
+import { CustomizeSidebarMenuItem } from "@/components/sidebar-layout/customize-sidebar-menu-item";
 import {
   accountMenuAriaLabel,
   OrganizationInvitationsDialog,
@@ -168,6 +169,7 @@ export function RailFooter() {
                 {managed || newOrganization.item ? <DropdownMenuSeparator /> : null}
                 <AppearanceSubmenu />
                 <SimplifiedInterfaceMenuItem />
+                <CustomizeSidebarMenuItem workspaceId={rail.workspaceId} />
                 <HelpMenu
                   documentationUrl={context.clientConfig.documentationUrl}
                   supportEmail={context.clientConfig.supportEmail}

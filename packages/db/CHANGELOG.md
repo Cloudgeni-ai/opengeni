@@ -1,5 +1,51 @@
 # @opengeni/db
 
+## 6.35.0
+
+### Minor Changes
+
+- 7eda7f0: App data changes start automations and reach workspace webhooks: the `app.record.added`, `app.record.changed`, `app.record.removed` and `app.sql.changed` event types join the "This workspace" trigger source and the workspace webhook types, and `verifyWebhookEvent` accepts them. See docs/site-data.md.
+
+### Patch Changes
+
+- 7eda7f0: Export an app as one package file and install it into another workspace as a new app with empty data (or the author's demo data), including its links in the sidebar. Adds the `app_export` and `app_install` agent tools, `exportAppPackage` and `installAppPackage` in the SDK, and Install app and Export app in the console. See docs/app-packages.md.
+- c36504f: Organization usage reads and the Codex Apps refresh now record the plan a refreshed token reports. These three refreshes still wrote the connection row themselves and dropped the plan, so an organization-managed connection whose ChatGPT plan changed kept showing the old one. Migration 1515 adds one refresh write that every refresh path now uses. It stores the credential, compares and swaps the refresh generation, and records the plan (a token that reports none keeps the recorded plan). When the plan changes, it also clears the connection's model cooldowns. The write runs with the caller's own rights, so organization administrators are admitted by the same policy as before.
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [8bf1ec2]
+- Updated dependencies [227502b]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/codemode@6.35.0
+  - @opengeni/xai-subscription@6.35.0
+  - @opengeni/codex@6.35.0
+  - @opengeni/config@6.35.0
+  - @opengeni/observability@6.35.0
+  - @opengeni/network@6.35.0
+  - @opengeni/subscriptions@6.35.0
+
+## 6.34.0
+
+### Patch Changes
+
+- 393f876: Keep terminal turn writes fast as billing history grows by using indexed credit and usage lookups instead of scanning unrelated billing history under runtime row-level security.
+- 71c05a3: While the card verification gate is on, a new Free or plan-less organization's agent can use a sandbox for 10 minutes (`cardTrialBoxSeconds`, one box at a time) before an owner must add a card. Terminals, desktops, viewers and background processes still need the card, and the reaper drains leftover boxes once the trial is used.
+- 17ae971: Look up recorded child answers by session and sequence rather than scanning unrelated completed events during turn settlement.
+- e292b4a: Add SuperOffice CRM to the catalog: SuperOffice's hosted MCP server, with its six update tools asking for approval by default. When a service refuses a connection's sign-in setup, the connect dialog now says why, for example that the service only accepts apps it has approved, instead of a generic failure; the API passes the provider's OAuth error in the error details, and a provider outage during registration is now a retryable `upstream_unavailable` error. A refused sign-in that returns a standard OAuth code with a plain meaning (`invalid_redirect_uri`, `unauthorized_client`, `unapproved_software_statement`, `invalid_scope`, `server_error`, `temporarily_unavailable`) now keeps that code as the attempt's `error.code` instead of `provider_denied`. Admins can remove a custom MCP server that never connected, through the new `DELETE /v1/workspaces/:workspaceId/capabilities/:capabilityId` route and `deleteCustomMcpServer` on the SDK.
+- Updated dependencies [71c05a3]
+- Updated dependencies [9a84b63]
+- Updated dependencies [e292b4a]
+  - @opengeni/config@6.34.0
+  - @opengeni/contracts@6.34.0
+  - @opengeni/codemode@6.34.0
+  - @opengeni/codex@6.34.0
+  - @opengeni/observability@6.34.0
+  - @opengeni/network@6.34.0
+  - @opengeni/subscriptions@6.34.0
+  - @opengeni/xai-subscription@6.34.0
+
 ## 6.33.0
 
 ### Patch Changes

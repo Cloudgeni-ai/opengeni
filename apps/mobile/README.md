@@ -67,6 +67,12 @@ the other places swap in place above it, so switching never grows the stack.
 The chats menu opens from the header's menu button or, on iOS, with a swipe
 right from the left edge of any of these places.
 
+The chats menu also shows the workspace's sidebar links, as the web rail does
+above the chats: groups as headings, app links (opened in the app viewer at
+their page), outside links (opened in the browser) and live lists such as
+Pinned apps (at most 3 apps each). They're changed on the web or by an agent;
+see [Sidebar layout](../../docs/sidebar-layout.md#clients).
+
 ## Artifacts
 
 **Artifacts** lists the workspace's Sites, documents, presentations,

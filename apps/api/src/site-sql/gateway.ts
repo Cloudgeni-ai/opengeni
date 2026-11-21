@@ -193,8 +193,8 @@ async function callSiteDbOnce<T>(
       503,
       "unavailable",
       timedOut
-        ? "The Site database did not answer in time"
-        : "The Site database is temporarily unavailable",
+        ? "The app database did not answer in time"
+        : "The app database is temporarily unavailable",
       !READ_ONLY.has(operation),
     );
   }
@@ -208,7 +208,7 @@ async function callSiteDbOnce<T>(
   // A database not yet in the EU is served from its earlier location (apps/site-gateway, "Location").
   const relocationError = response.headers.get(SITE_DB_RELOCATION_ERROR_HEADER);
   if (relocationError && shouldLogNotInEu(siteId))
-    console.warn("[site-sql] Site database is not in the EU yet", {
+    console.warn("[site-sql] app database is not in the EU yet", {
       siteId,
       location: response.headers.get(SITE_DB_LOCATION_HEADER),
       reason: relocationError,
@@ -217,14 +217,14 @@ async function callSiteDbOnce<T>(
   const error = (parsed as Partial<SiteDbErrorBody> | null)?.error;
   const code = typeof error?.code === "string" ? error.code : "unavailable";
   const message =
-    typeof error?.message === "string" ? error.message : "The Site database request failed";
+    typeof error?.message === "string" ? error.message : "The app database request failed";
   // The gateway's own refusals (signature, missing binding) are configuration
   // problems, not the caller's: report them as unavailable.
   if (response.status === 401 || response.status === 404 || response.status >= 500)
     throw new SiteDbCallError(
       503,
       "unavailable",
-      response.status >= 500 ? message : "Site SQL is not reachable on this deployment",
+      response.status >= 500 ? message : "App SQL is not reachable on this deployment",
       // The gateway says when nothing ran (a database briefly held while it moves).
       response.status >= 500 && !READ_ONLY.has(operation) && error?.outcomeUnknown !== false,
     );

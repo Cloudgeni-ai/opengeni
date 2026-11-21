@@ -20,6 +20,9 @@ import {
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
   normalizeWorkspaceArtifactSlug,
+  injectSiteAssetBase,
+  siteAssetApiBase,
+  type SiteAssetManifest,
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
@@ -60,6 +63,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { retryWhileMissing } from "@opengeni/storage";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { changeSiteAudience } from "../site-audience-change";
 import { userContentDispositionHeaders } from "../http/user-content";
@@ -138,6 +142,26 @@ export function workspaceArtifactErrorResponse(context: Context, error: unknown)
     );
   }
   throw error;
+}
+
+/**
+ * Where the console frame loads a multi-file version's files: the API's
+ * public asset route (it needs no Sites domain). Null for a single-file app.
+ * The API's public address, else the address this request reached it on.
+ */
+export function siteVersionAssetBaseUrl(
+  publicBaseUrl: string | undefined,
+  requestUrl: string,
+  workspaceId: string,
+  ref: { version: { id: string }; assetManifest: SiteAssetManifest | null },
+): string | null {
+  if (!ref.assetManifest) return null;
+  return siteAssetApiBase(
+    publicBaseUrl ?? new URL(requestUrl).origin,
+    workspaceId,
+    ref.version.id,
+    ref.assetManifest.token,
+  );
 }
 
 function prepareContent(
@@ -257,7 +281,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     if (currentSiteSessionOrigin())
-      throw new HTTPException(403, { message: "A Site page cannot record opening a Site" });
+      throw new HTTPException(403, { message: "An app page cannot record opening an app" });
     const siteId = artifactId(context);
     const viewer = await siteViewerForGrant(deps.db, grant);
     if (!viewer.subjectId)
@@ -285,7 +309,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     if (currentSiteSessionOrigin())
-      throw new HTTPException(403, { message: "A Site page cannot change the sidebar" });
+      throw new HTTPException(403, { message: "An app page cannot change the sidebar" });
     const siteId = artifactId(context);
     const change = await body(context, UpdateSiteSidebarStateRequest);
     const viewer = await siteViewerForGrant(deps.db, grant);
@@ -316,7 +340,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
     if (currentSiteSessionOrigin())
-      throw new HTTPException(403, { message: "A Site page cannot change the sidebar" });
+      throw new HTTPException(403, { message: "An app page cannot change the sidebar" });
     const siteId = artifactId(context);
     const change = await body(context, UpdateSiteProjectRequest);
     const viewer = await siteViewerForGrant(deps.db, grant);
@@ -329,7 +353,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
       channelId: change.fromChannelId,
     });
     if (sessionIds.length > SITE_PROJECT_MOVE_LIMIT)
-      throw new HTTPException(422, { message: "This Site has too many conversations to move" });
+      throw new HTTPException(422, { message: "This app has too many conversations to move" });
     if (sessionIds.length > 0) {
       const decisions = await requireSessionAuthorizations(deps, grant, {
         sessionIds,
@@ -340,7 +364,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         if (decision.status === "fulfilled") continue;
         if (decision.reason instanceof SessionAuthorizationDeniedError)
           throw new HTTPException(403, {
-            message: "You can't move every conversation of this Site",
+            message: "You can't move every conversation of this app",
           });
         throw decision.reason;
       }
@@ -522,6 +546,36 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     } catch (error) {
       return workspaceArtifactErrorResponse(context, error);
     }
+    const htmlHeaders = {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "private, no-store",
+      // A Site runs its own scripts, but only inside an opaque origin: no
+      // same-origin access to the console, and no cross-site embedding.
+      "Content-Security-Policy": "sandbox allow-scripts",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      "X-Content-Type-Options": "nosniff",
+      // Clients read this HTML with fetch and render it in their own frame
+      // (the console uses srcdoc). Opening the raw URL downloads it rather
+      // than running a publisher-authored page at an app-origin URL.
+      ...userContentDispositionHeaders("text/html", "site.html"),
+    };
+    const assetBase = siteVersionAssetBaseUrl(
+      deps.settings.publicBaseUrl,
+      context.req.url,
+      workspaceId,
+      ref,
+    );
+    if (assetBase) {
+      // A multi-file build: the frame needs the version's asset folder as its
+      // base. Only the entry HTML is read (it is small; the files are not in it).
+      const stored = await retryWhileMissing(
+        async () => await deps.objectStorage!.getObjectBytes(ref.contentKey),
+      );
+      if (!stored) throw new HTTPException(503, { message: "Artifact content is unavailable" });
+      return new Response(injectSiteAssetBase(new TextDecoder().decode(stored.bytes), assetBase), {
+        headers: htmlHeaders,
+      });
+    }
     const iterator = readArtifactObject(deps.objectStorage, ref.contentKey);
     return new Response(
       new ReadableStream({
@@ -538,21 +592,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           await iterator.return();
         },
       }),
-      {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "private, no-store",
-          // A Site runs its own scripts, but only inside an opaque origin: no
-          // same-origin access to the console, and no cross-site embedding.
-          "Content-Security-Policy": "sandbox allow-scripts",
-          "Cross-Origin-Resource-Policy": "same-origin",
-          "X-Content-Type-Options": "nosniff",
-          // Clients read this HTML with fetch and render it in their own frame
-          // (the console uses srcdoc). Opening the raw URL downloads it rather
-          // than running a publisher-authored page at an app-origin URL.
-          ...userContentDispositionHeaders("text/html", "site.html"),
-        },
-      },
+      { headers: htmlHeaders },
     );
   });
 
@@ -581,6 +621,12 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           cause: error,
         });
       }
+      const assetBase = siteVersionAssetBaseUrl(
+        deps.settings.publicBaseUrl,
+        context.req.url,
+        workspaceId,
+        ref,
+      );
       return context.json(
         WorkspaceArtifactContentResponse.parse({
           artifactId: ref.artifactId,
@@ -588,6 +634,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           contentType: "text/html",
           contentSha256: ref.version.contentSha256,
           ...content,
+          // The stored HTML as published; a frame renders it with this base
+          // (`injectSiteAssetBase`), as the `/html` route serves it.
+          ...(assetBase ? { assetBaseUrl: assetBase } : {}),
         }),
       );
     } catch (error) {

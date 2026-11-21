@@ -51,6 +51,39 @@ const { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } =
 const { MessageTimeline } = await import("../src");
 const { TimelineRow } = await import("../src/components/message-timeline");
 
+test("assistant links render and copy with clean destinations and bare labels", async () => {
+  const r = await renderComponent(
+    <MessageTimeline
+      events={[
+        timelineEvent("agent.message.completed", {
+          phase: "final_answer",
+          text: "[Guide](https://example.com/guide?page=2&amp;utm_campaign=launch#steps)\n\nhttps://example.com/page?utm_medium=search",
+        }),
+      ]}
+    />,
+  );
+  try {
+    await flush();
+    expect(
+      [...r.container.querySelectorAll('a[href^="https://example.com/"]')].map((link) => [
+        link.getAttribute("href"),
+        link.textContent,
+      ]),
+    ).toEqual([
+      ["https://example.com/guide?page=2#steps", "Guide"],
+      ["https://example.com/page", "https://example.com/page"],
+    ]);
+    const copy = r.container.querySelector<HTMLButtonElement>('button[aria-label="Copy message"]');
+    expect(copy).not.toBeNull();
+    await act(async () => copy!.click());
+    expect(await navigator.clipboard.readText()).toBe(
+      "[Guide](https://example.com/guide?page=2#steps)\n\nhttps://example.com/page",
+    );
+  } finally {
+    await r.unmount();
+  }
+});
+
 test("account-qualified native and Codemode calls render persisted labels after replay", async () => {
   for (const origin of ["native", "codemode"]) {
     const name = "a".repeat(64);

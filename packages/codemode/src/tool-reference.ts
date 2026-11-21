@@ -1,4 +1,8 @@
-import type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
+import {
+  currentFirstPartyToolReference,
+  type AttemptToolCatalog,
+  type AttemptToolCatalogEntry,
+} from "@opengeni/contracts";
 
 /**
  * Resolve the name an agent uses to ask for a Codemode tool.
@@ -55,6 +59,16 @@ export function resolveCatalogTool(
         candidates: found.map((entry) => entry.codemodePath.join(".")).sort(),
       };
     }
+  }
+  // A first-party tool's hidden alias (its former name) resolves to the tool.
+  const current = currentFirstPartyToolReference(reference);
+  if (current !== undefined) {
+    const resolved = resolveCatalogTool(
+      { entries: catalog.entries.filter((entry) => entry.identity.serverId === "opengeni") },
+      current,
+      options,
+    );
+    if ("entry" in resolved) return resolved;
   }
   if (options.allowPlainName === false) {
     const named = catalog.entries.filter((entry) => plainNameMatches(entry, reference));

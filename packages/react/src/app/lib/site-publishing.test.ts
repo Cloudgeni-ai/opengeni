@@ -49,7 +49,7 @@ const apiError = (status: number, code: string) =>
     mutation: false,
   });
 
-describe("Site publishing helpers", () => {
+describe("App publishing helpers", () => {
   test("suggests a valid label from the title and validates with the contract", () => {
     expect(suggestedLabel("Team CRM", "4k9x")).toBe("team-crm-4k9x");
     expect(normalizeLabelInput("  Team CRM ")).toBe("team-crm");
@@ -67,7 +67,7 @@ describe("Site publishing helpers", () => {
     ).toBeNull();
     expect(
       availabilityMessage({ ...base, available: false, problem: "taken", message: null }),
-    ).toBe("Another Site uses this name.");
+    ).toBe("Another app uses this name.");
     expect(
       availabilityMessage({ ...base, available: false, problem: "held", message: "Held." }),
     ).toBe("Held.");
@@ -86,7 +86,7 @@ describe("Site publishing helpers", () => {
     expect(sitePublicationLoadFromError(new Error("offline")).state).toBe("error");
   });
 
-  test("a first publish sends every choice and turns the Site on", () => {
+  test("a first publish sends every choice and turns the app on", () => {
     const draft = draftFromPublication(null, "team-crm-4k9x");
     expect(publicationRequest(draft, null, { publish: true })).toEqual({
       label: "team-crm-4k9x",
@@ -139,7 +139,7 @@ describe("Site publishing helpers", () => {
     );
   });
 
-  test("changed outside limits are saved as overrides on the Site's profile, by admins only", () => {
+  test("changed outside limits are saved as overrides on the app's profile, by admins only", () => {
     const invited = { ...saved, access: "invited" as const };
     const draft = {
       ...draftFromPublication(invited, "x"),
@@ -193,7 +193,7 @@ describe("Site publishing helpers", () => {
     ).toEqual({});
   });
 
-  test("the usage line follows the Site limit's period", () => {
+  test("the usage line follows the app limit's period", () => {
     const usage = {
       agentMicrosThisMonth: 1_200_000,
       agentMicrosToday: 400_000,
@@ -242,7 +242,7 @@ describe("Site publishing helpers", () => {
     expect(readinessTitle([warning], "invited")).toBe("1 thing won't work for invited people");
     const notice = {
       code: "public_sign_in_required" as const,
-      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      message: "On this deployment, public apps still ask visitors to sign in to Opengeni.",
       suggestion: "Anyone with the link can open it after signing in.",
       fix: null,
     };
@@ -270,7 +270,7 @@ describe("Site publishing helpers", () => {
       );
     expect(
       platformRefusal(refusal(402, "payment_required", "site_platform_quota_exhausted"))?.title,
-    ).toBe("Sites allowance used up");
+    ).toBe("Apps allowance used up");
     expect(
       platformRefusal(refusal(503, "limit_exceeded", "site_platform_brake_engaged"))?.title,
     ).toBe("Publishing is paused");

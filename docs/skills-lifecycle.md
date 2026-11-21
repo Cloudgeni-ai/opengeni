@@ -159,6 +159,12 @@ content API. Approval uses the same human-authorized Skill endpoint and revision
 fences as the Skills page. Deleted and settled proposals do not reappear from
 historical tool outputs. The chat does not need to enter `requires_action`.
 
+A person's save may ask to follow Agent learning (`learningPolicy: "follow"`).
+The Skill content route sends it for agents outside Opengeni acting as the
+person (`skills_sync` on the organization MCP server), and migration `1516`
+gives such a save the destination's Skills mode, as for an agent: Review first
+leaves it pending, Off refuses it with `42501`.
+
 HTTP callers must authenticate and authorize workspace/scope management before
 constructing a human actor. `principalKind: human_session` is a trusted boundary
 fact, not a model argument. Humans bypass Learning, not authorization. Existing

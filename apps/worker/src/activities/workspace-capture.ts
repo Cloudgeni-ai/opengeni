@@ -312,6 +312,7 @@ export async function readCaptureRepository(
       staged: false,
       includeUntracked: true,
       fromRef: "HEAD",
+      mergeBase: false,
       pathspec: [],
       contextLines: 3,
       maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
@@ -325,6 +326,10 @@ export async function readCaptureRepository(
           staged: false,
           includeUntracked: true,
           fromRef: "origin/HEAD",
+          // The branch's own changes, like a pull request. A plain diff against
+          // origin/HEAD also lists every later change on the default branch
+          // (reversed) once the checkout falls behind it.
+          mergeBase: true,
           pathspec: [],
           contextLines: 3,
           maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,

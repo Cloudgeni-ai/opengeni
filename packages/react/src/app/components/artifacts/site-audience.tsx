@@ -37,16 +37,16 @@ type AudienceCopy = {
 };
 
 const SITE_COPY: AudienceCopy = {
-  noun: "Site",
-  Noun: "Site",
-  onlyMeDescription: "Only you can see and open this Site.",
+  noun: "app",
+  Noun: "App",
+  onlyMeDescription: "Only you can see and open this app.",
   workspaceDescription: (workspaceName) =>
-    `Everyone in ${workspaceName} can see and open this Site.`,
+    `Everyone in ${workspaceName} can see and open this app.`,
   shareConfirm: (workspaceName) =>
-    `Everyone in ${workspaceName} will be able to open this Site and see its versions. The chat it was made in keeps its own audience.`,
+    `Everyone in ${workspaceName} will be able to open this app and see its versions. The chat it was made in keeps its own audience.`,
   limitConfirm:
-    "Only you will be able to see or open this Site. Other people in the workspace lose access to it.",
-  whoCan: "Who can see this Site",
+    "Only you will be able to see or open this app. Other people in the workspace lose access to it.",
+  whoCan: "Who can see this app",
   changeLabel: "Change who can see it",
   limitedToast: "Only you can see it now.",
 };

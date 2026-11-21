@@ -27,6 +27,37 @@ supply the matching filtered catalogue. The SDK contains no product-specific
 service list. Hosts may compose other capability categories without adopting the
 console's entire capabilities page.
 
+## App connect card
+
+Apps (Sites) don't build their own connect screens. The console's app view and
+the published-App shell show a platform card, "Connect <tool>" with one button
+per connected tool the app declares that the viewer still has to connect or
+reconnect, built from `tools/site-setup` (`site-runtime` `tools/setup`) and
+the same readiness as `tools/readiness`. In the console its button runs the
+ordinary `McpConnectionCard` connect or reconnect dialog; on a published app
+it opens the app in the console with `?connect=<key>`, which opens that
+dialog. Account choice stays in the call's own confirmation. Apps can read
+and drive it with `site.connections`; see "Connect card" in
+[the published Sites API reference](site-runtime-api.md).
+
+Card states for a declared tool:
+
+- **Ready**: the viewer has an account, or the workspace has a shared one,
+  including a shared service connection (a shared key from a vault). No item.
+- **Connect** / **Reconnect**: one button, as above.
+  A connector that takes an API key keeps this button for each person's own
+  use (their tool calls and personal syncs, which never use a shared key).
+- **Add a shared key for <tool>** (`sharedKey: "add"`): an extra item when the
+  app's shared syncs wait on a connector that takes an API key, and the
+  viewer is a workspace admin who may use secrets. The button opens a dialog
+  to pick a workspace or organization
+  vault and an item (and the header, defaulting to the connector's own or
+  `Authorization: Bearer`), then connects it for the workspace with the
+  item's reference ([Shared service connections](secrets.md#shared-service-connections)).
+- **Ask an admin to connect <tool>** (`sharedKey: "ask_admin"`): the same
+  connector for anyone else, shown as text with nothing to click; on a
+  published app it has no `openUrl`.
+
 ## OAuth details and conversation use
 
 `McpConnectionCard` without a session ID configures only a connection: it never

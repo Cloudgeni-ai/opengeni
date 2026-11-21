@@ -126,7 +126,9 @@ export type ChannelAServices = {
   db: Database;
   settings: Settings;
   bus: EventBus;
-  objectStorage?: ObjectStorage | null;
+  /** Restores a parked sandbox's workspace archive when this operation starts it
+   * again; required so no route can forget it. */
+  objectStorage: ObjectStorage | null | undefined;
   observability?: Observability | undefined;
   /** Wakes a session waiting on a background command a request settles.
    * Absent: the periodic wake dispatcher delivers the committed wake. */
@@ -196,6 +198,11 @@ export type ChannelAContext = {
   allowOperationReplay?: boolean | undefined;
   /** Exact existing interaction provider; may not spawn/rotate on image drift. */
   retainedInstanceId?: string | undefined;
+  /** The callback addresses the session's own managed group box (a browser or
+   * desktop placed there), not its current route. A machine-home session then
+   * reaches that box even while it routes to a Connected Machine, exactly as
+   * it does when no machine is selected. */
+  managedHome?: boolean | undefined;
 };
 
 export type ChannelAOperationFailureReason =
@@ -879,13 +886,15 @@ async function withChannelAOperation<T>(
     try {
       ctx.waitSignal?.throwIfAborted();
       const pointer = await readActiveSandbox(db, workspaceId, session.id);
-      if (!pointer?.activeSandboxId) {
+      if (!pointer?.activeSandboxId || (ctx.managedHome === true && !machineOnlyHome)) {
         if (machineOnlyHome) {
           throw new HTTPException(409, { message: "sandbox not available" });
         }
         // A machine-home session with no selected machine uses the deployment's
-        // managed group box, exactly like the worker turn path. Keep the durable
-        // home label honest; only this request's effective backend changes.
+        // managed group box, exactly like the worker turn path. A request for a
+        // controller placed on that box goes there even while a machine is
+        // selected. Keep the durable home label honest; only this request's
+        // effective backend changes.
         const groupBackend = managedSessionGroupBackend(
           settings.sandboxBackend,
           session.sandboxBackend,

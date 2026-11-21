@@ -97,6 +97,9 @@ export function unavailableSessionMcpServerIds(
 
 const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
   set_session_title: "Rename this session",
+  set_waiting_on: "Say who it waits on",
+  session_links_add: "Link an item",
+  session_links_remove: "Remove a link",
   notify_user: "Notify you",
   call_user: "Call you",
   notification_withdraw: "Withdraw a notification",

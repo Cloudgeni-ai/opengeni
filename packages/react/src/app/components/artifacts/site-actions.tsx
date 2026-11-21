@@ -99,7 +99,7 @@ function PublishedSiteItem({
         }}
       >
         <ArrowUpRightIcon aria-hidden="true" />
-        Open published Site
+        Open published app
       </a>
     </Item>
   );

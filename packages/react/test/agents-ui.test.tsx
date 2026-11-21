@@ -68,9 +68,12 @@ const { duplicateAgentNames, parseAgentFile, agentErrorCode, agentFile, agentFil
 const { useComposerAgent, AGENT_ONLY_ME_UNAVAILABLE } =
   await import("../src/app/lib/composer-agent");
 const { buildCreateSessionRequest } = await import("../src/app/lib/session-create");
+const { userErrorText } = await import("../src/ui/api-error");
 const { composerLaunchAgentId, parseComposerLaunchSearch } =
   await import("../src/app/lib/composer-launch");
 const { sessionAgentRef, sessionAgentSourceLine } = await import("../src/app/lib/session-agent");
+const { AGENT_TRIGGER_SHARED_DENIED } =
+  await import("../src/app/components/agents/agent-trigger-model");
 
 const { WORKSPACE_ID, makeAgent, fakeAgentsClient, appContext, AgentsTestHost } = kit;
 
@@ -260,7 +263,7 @@ test("saving an agent whose Memory has no collection yet sends Memory again, so 
 
 // --- Agents page ---------------------------------------------------------------
 
-test("the Agents page lists agents with their Slack badge and the moved-here notes", async () => {
+test("the Agents page lists agents, marks Only me ones, and shows the moved-here notes", async () => {
   const client = fakeAgentsClient([
     makeAgent({ name: "Data team", origin: "slack_agent", slack: [slackAvailability()] }),
     makeAgent({ name: "Release manager", origin: "bot_template", visibility: "private" }),
@@ -275,8 +278,11 @@ test("the Agents page lists agents with their Slack badge and the moved-here not
   expect(container.textContent).toContain(BOT_TEMPLATES_MOVED);
   expect(container.textContent).toContain(SLACK_AGENTS_MOVED);
   expect(container.textContent).toContain("More than one agent is called “Release manager”.");
-  expect(container.textContent).toContain("Slack");
-  expect(container.textContent).toContain("Only me");
+  // Every shared agent is in Slack: no per-agent Slack badge, only Only me.
+  const badges = [...container.querySelectorAll('[data-slot="meta-chip"]')].map(
+    (chip) => chip.textContent,
+  );
+  expect(badges).toEqual(["Only me"]);
   // Dismissed notes stay dismissed.
   const dismiss = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
     (element) => element.getAttribute("aria-label") === "Dismiss",
@@ -322,7 +328,7 @@ function slackAvailability() {
   };
 }
 
-test("the agent page shows its chats, what it follows, Memory and where it is available", async () => {
+test("the agent page shows its chats, what it follows, Memory and its setup sections", async () => {
   const agent = makeAgent({
     name: "Data team",
     instructions: "Answer metric questions from the dashboards.",
@@ -366,7 +372,9 @@ test("the agent page shows its chats, what it follows, Memory and where it is av
     "Answer metric questions from the dashboards.",
     "Remember across chats",
     "People in Platform",
-    "Opengeni app",
+    "Starts when",
+    "Can use",
+    "Skills",
     "Slack part",
     "Delete agent",
   ]) {
@@ -1102,4 +1110,591 @@ test("a Show more from the previous filter never lands in the new list", async (
   expect(container.textContent).toContain("Everyone's chat");
   expect(container.textContent).not.toContain("Older mine");
   expect(container.textContent).not.toContain("Mine");
+});
+
+const TRIAGE_TEMPLATE = {
+  key: "triage",
+  name: "Triage",
+  description: "Sorts new issues and hands real bugs to Bug fixer.",
+  avatar: null,
+  instructions: "Triage new work.",
+  memoryEnabled: true,
+  toolPermissions: [],
+  skills: [],
+  suggestedTriggers: [
+    {
+      name: "When a GitHub issue opens",
+      instructions: "Triage it.",
+      schedule: null,
+      triggers: [{ source: { kind: "github" }, eventTypes: ["issues.opened"] }],
+    },
+    {
+      name: "When a Linear issue is created",
+      instructions: "Triage it.",
+      schedule: null,
+      triggers: [
+        {
+          source: { kind: "webhook", adapter: "custom", preset: "linear" },
+          eventTypes: ["Issue.create"],
+        },
+      ],
+    },
+  ],
+};
+
+test("the agent page's setup: triggers, suggestions, Can use, Memory entries and Skills", async () => {
+  const agent = makeAgent({
+    name: "Triage",
+    templateKey: "triage",
+    memory: { enabled: true, collectionId: "c1", scope: "workspace", reviewFirst: false },
+    toolPermissions: [{ connector: "github.com", tool: "merge_pull_request", permission: "block" }],
+    skills: [{ name: "release-notes" }],
+  });
+  const trigger = {
+    id: "eeeeeeee-eeee-4eee-8eee-000000000001",
+    name: "Triage: When a GitHub issue opens",
+    status: "active",
+    schedule: { type: "manual" },
+    events: {
+      triggers: [{ source: { kind: "github" }, eventTypes: ["issues.opened"], conditions: [] }],
+    },
+    agentConfig: { agentId: agent.id },
+  };
+  const client = fakeAgentsClient([agent], {
+    templates: [TRIAGE_TEMPLATE],
+    tasks: [trigger, { ...trigger, id: "other", name: "Unrelated", agentConfig: {} }],
+    capabilities: [
+      {
+        id: "cap-gmail",
+        name: "Gmail",
+        kind: "mcp",
+        source: "integration",
+        enabled: true,
+        providerDomain: "gmail.com",
+        connectionRef: { providerDomain: "gmail.com" },
+        tools: [{ kind: "mcp", id: "gmail" }],
+      },
+    ],
+    skills: ["release-notes"],
+    memoryEntries: [
+      {
+        id: "m1",
+        version: 3,
+        revision: { title: "Release day", preview: "Releases go out on Tuesdays." },
+      },
+    ],
+  });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={appContext(client)} onLocation={(location) => (path = location.href)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  // Only this agent's automations are its triggers, and a set-up suggestion isn't offered again.
+  // The server filters them by agent.
+  expect(client.calls).toContainEqual([
+    "listScheduledTasks",
+    WORKSPACE_ID,
+    { agentId: agent.id, limit: 200 },
+  ]);
+  expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
+  const suggested = [...container.querySelectorAll("[data-agent-suggested-trigger]")];
+  expect(suggested.map((row) => row.textContent)).toEqual([
+    expect.stringContaining("When a Linear issue is created"),
+  ]);
+  // Set up opens the light dialog at the suggestion; the full form stays one link away.
+  await act(async () => button(container, "Set up").click());
+  await flush();
+  const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+  expect(dialog.textContent).toContain("When a Linear issue is created");
+  await act(async () => button(dialog, "Open full form").click());
+  await flush();
+  expect(path).toBe(
+    `/workspaces/${WORKSPACE_ID}/automations/new?agent=${agent.id}&agentTrigger=1&returnTo=agent`,
+  );
+  // Can use lists only connections with a rule: Opengeni's own GitHub tools,
+  // whose row holds the ready-made agent's github.com rule, and not Gmail.
+  expect(container.querySelector("[data-agent-can-use='gmail.com']")).toBeNull();
+  const github = container.querySelector<HTMLElement>("[data-agent-can-use='github.com']")!;
+  expect(github.textContent).toContain("GitHub");
+  expect(github.querySelector("[data-slot='logo-tile']")).not.toBeNull();
+  expect(github.textContent).toContain("merge_pull_request");
+  await act(async () =>
+    [...github.querySelectorAll("button")]
+      .find((b) => b.textContent?.includes("Choose per tool"))!
+      .click(),
+  );
+  await flush();
+  expect(github.textContent).toContain("pull_request_merge");
+  expect(github.textContent).toContain("merge_pull_request");
+  expect(container.textContent).not.toContain("github.com · merge_pull_request");
+  // Memory entries are listed and can be removed at the version read.
+  expect(container.textContent).toContain("Releases go out on Tuesdays.");
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>("[aria-label='Remove Release day']")!.click(),
+  );
+  await flush();
+  expect(client.calls).toContainEqual([
+    "archiveKnowledgeEntry",
+    WORKSPACE_ID,
+    "m1",
+    { operationId: expect.any(String), expectedVersion: 3 },
+  ]);
+  expect(container.textContent).not.toContain("Releases go out on Tuesdays.");
+  // Pausing a trigger pauses its automation.
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>("[aria-label='Triage: When a GitHub issue opens on']")!
+      .click(),
+  );
+  await flush();
+  expect(client.calls).toContainEqual(["pauseScheduledTask", WORKSPACE_ID, trigger.id]);
+  // Skills show by name, linked to the Skill's page.
+  const skill = [...container.querySelectorAll("a")].find(
+    (link) => link.textContent === "Release notes",
+  )!;
+  expect(skill.getAttribute("href")).toBe(
+    `/workspaces/${WORKSPACE_ID}/plugins?section=skills&open=skill%3Askill-release-notes`,
+  );
+});
+
+const GITHUB_SOURCE = {
+  id: "source-gh",
+  name: "Acme GitHub",
+  kind: "github",
+  status: "active",
+} as {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  statusReason?: string | null;
+  statusReasonCode?: string | null;
+};
+
+async function openAgentTrigger(
+  options: {
+    agent?: Parameters<typeof makeAgent>[0];
+    eventTriggers?: boolean;
+    eventSources?: (typeof GITHUB_SOURCE)[];
+    createTaskError?: unknown;
+    createSourceError?: unknown;
+    sessionsError?: unknown;
+    sessionsPageSize?: number;
+    suggestion?: string;
+    githubStatus?: string;
+    /** Chats in the workspace, given the agent's id. */
+    sessions?: (agentId: string) => { id: string; title: string; agentId?: string | null }[];
+  } = {},
+) {
+  const agent = makeAgent({ name: "Triage", templateKey: "triage", ...options.agent });
+  const client = fakeAgentsClient([agent], {
+    templates: [TRIAGE_TEMPLATE],
+    eventSources: options.eventSources ?? [],
+    createTaskError: options.createTaskError,
+    createSourceError: options.createSourceError,
+    sessionsError: options.sessionsError,
+    sessionsPageSize: options.sessionsPageSize,
+    sessions: options.sessions?.(agent.id),
+  });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost
+      context={appContext(client, {
+        clientConfig: { eventTriggers: { enabled: options.eventTriggers ?? true } },
+        ...(options.githubStatus ? { githubStatus: { status: options.githubStatus } } : {}),
+      })}
+      onLocation={(location) => (path = location.href)}
+    >
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  if (options.suggestion) {
+    const row = [...container.querySelectorAll<HTMLElement>("[data-agent-suggested-trigger]")].find(
+      (entry) => entry.textContent?.includes(options.suggestion!),
+    )!;
+    await act(async () => button(row, "Set up").click());
+  } else {
+    await act(async () => button(container, "Add trigger").click());
+  }
+  await flush();
+  const dialog = document.body.querySelector<HTMLElement>("[role='dialog']")!;
+  return { agent, client, dialog, path: () => path };
+}
+
+function createdTask(client: { calls: unknown[][] }) {
+  return client.calls.find((call) => call[0] === "createScheduledTask")?.[2] as
+    | Record<string, any>
+    | undefined;
+}
+
+test("a suggested trigger is set up in place: its source is filled in and no message is needed", async () => {
+  const { agent, client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+  });
+  expect(dialog.textContent).toContain("When a GitHub issue opens");
+  expect(dialog.textContent).toContain("Visible to the workspace.");
+  expect(dialog.textContent).toContain("Acme GitHub");
+  // The message is optional and starts at the suggestion's.
+  expect(dialog.querySelector("textarea")!.value).toBe("Triage it.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.name).toBe("Triage: When a GitHub issue opens");
+  expect(request.visibility).toBe("workspace");
+  expect(request.runMode).toBe("new_session_per_run");
+  expect(request.schedule).toEqual({ type: "manual" });
+  expect(request.agentConfig.agentId).toBe(agent.id);
+  expect(request.agentConfig.prompt).toBe("Triage it.");
+  expect(request.events.triggers).toEqual([
+    expect.objectContaining({ sourceId: "source-gh", eventTypes: ["issues.opened"] }),
+  ]);
+  // The new trigger is listed and its suggestion isn't offered again.
+  expect(document.body.querySelector("[role='dialog']")).toBeNull();
+  expect(document.body.querySelectorAll("[data-agent-trigger]").length).toBe(1);
+  expect(
+    [...document.body.querySelectorAll("[data-agent-suggested-trigger]")].map(
+      (row) => row.textContent,
+    ),
+  ).toEqual([expect.stringContaining("When a Linear issue is created")]);
+});
+
+test("a suggestion's GitHub source is added on save once GitHub is connected", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "bound",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='create']")?.textContent).toContain(
+    "GitHub",
+  );
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const added = client.calls.find((call) => call[0] === "createEventSource");
+  expect(added?.[2]).toEqual({ kind: "github" });
+  expect(createdTask(client)!.events.triggers[0].sourceId).toEqual(expect.any(String));
+});
+
+test("without GitHub connected, connecting it is the one action", async () => {
+  const { client, dialog, path } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "unbound",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='connect_github']")).not.toBeNull();
+  expect(dialog.querySelector("textarea")).toBeNull();
+  await act(async () => button(dialog, "Connect GitHub").click());
+  await flush();
+  expect(decodeURIComponent(path())).toBe(
+    `/workspaces/${WORKSPACE_ID}/plugins?open=integration:github`,
+  );
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("a kind that needs its own setup opens Add a source at that kind", async () => {
+  const { client, dialog, path } = await openAgentTrigger({
+    suggestion: "When a Linear issue is created",
+  });
+  expect(dialog.querySelector("[data-agent-trigger-setup='add_source']")?.textContent).toContain(
+    "Linear",
+  );
+  await act(async () => button(dialog, "Add Linear").click());
+  await flush();
+  expect(path()).toBe(`/workspaces/${WORKSPACE_ID}/automations/sources/new?kind=linear`);
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("a blank trigger on a schedule saves with the default message, Only me like its agent", async () => {
+  const { client, dialog } = await openAgentTrigger({
+    agent: { visibility: "private", ownerSubjectId: "user-me" },
+    eventTriggers: false,
+  });
+  expect(dialog.textContent).toContain("Each run starts a new chat with Triage. Only you see it.");
+  expect(dialog.querySelector("[role='radiogroup']")).toBeNull();
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.visibility).toBe("private");
+  expect(request.agentConfig.prompt).toBe("Do your scheduled work.");
+  expect(request.schedule.type).toBe("calendar");
+  expect(request.name).toStartWith("Triage: ");
+});
+
+function pickTrigger(dialog: HTMLElement, key: string) {
+  const tile = dialog.querySelector<HTMLButtonElement>(`[data-agent-trigger-option='${key}']`);
+  if (!tile) throw new Error(`no trigger option ${key}`);
+  return act(async () => tile.click());
+}
+
+test("the picker lists a schedule, the person's sources and every kind of source", async () => {
+  const { client, dialog } = await openAgentTrigger({ eventSources: [GITHUB_SOURCE] });
+  const options = [...dialog.querySelectorAll<HTMLElement>("[data-agent-trigger-option]")].map(
+    (tile) => tile.dataset.agentTriggerOption,
+  );
+  expect(options[0]).toBe("schedule");
+  expect(options).toContain("source:source-gh");
+  for (const kind of ["slack", "gmail", "linear", "webhook", "mcp"]) {
+    expect(options).toContain(`new:${kind}`);
+  }
+  // Nothing is picked yet; saving says so.
+  expect(dialog.querySelector("textarea")).toBeNull();
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).toContain("Choose what starts it.");
+  // A source asks for its events before saving.
+  await pickTrigger(dialog, "source:source-gh");
+  await flush();
+  expect(dialog.querySelector("textarea")?.placeholder).toBe("Handle this event.");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+});
+
+test("Create a webhook makes its URL right there, then its events start the agent", async () => {
+  const { client, dialog } = await openAgentTrigger({});
+  await pickTrigger(dialog, "new:webhook");
+  await flush();
+  expect(dialog.querySelector("[data-agent-trigger-setup='create_webhook']")).not.toBeNull();
+  await act(async () => button(dialog, "Create webhook").click());
+  await flush();
+  expect(client.calls.find((call) => call[0] === "createEventSource")?.[2]).toEqual(
+    expect.objectContaining({ kind: "webhook", adapter: "standard", visibility: "workspace" }),
+  );
+  const shown = [
+    ...dialog.querySelectorAll<HTMLInputElement>("[data-agent-trigger-webhook] input"),
+  ].map((input) => input.value);
+  expect(shown).toEqual([expect.stringContaining("https://hooks.example.com/"), "whsec_test"]);
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+  expect(button(dialog, "Add trigger")).toBeTruthy();
+});
+
+async function chooseFrom(dialog: HTMLElement, current: string, option: string) {
+  const trigger = [...dialog.querySelectorAll<HTMLElement>("[role='combobox']")].find((entry) =>
+    entry.textContent?.includes(current),
+  );
+  if (!trigger) throw new Error(`no menu showing ${current}`);
+  await act(async () => trigger.click());
+  await flush();
+  const items = [...document.querySelectorAll<HTMLElement>("[role='option']")];
+  const offered = items.map((entry) => entry.textContent);
+  const item = items.find((entry) => entry.textContent?.includes(option));
+  if (!item) throw new Error(`no option ${option}`);
+  await act(async () => item.click());
+  await flush();
+  return offered;
+}
+
+test("a trigger's runs start a new chat by default, or continue one of this agent's chats", async () => {
+  const { agent, client, dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessions: (agentId) => [
+      { id: "chat-triage", title: "Weekly triage", agentId },
+      { id: "chat-other", title: "Someone else's agent", agentId: "another-agent" },
+      { id: "chat-plain", title: "Plain chat", agentId: null },
+    ],
+  });
+  expect(dialog.textContent).toContain("Each run starts a new chat with Triage");
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  // Only chats with this agent are offered, and one must be picked.
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).toContain("Choose a chat.");
+  expect(await chooseFrom(dialog, "Choose a chat", "Weekly triage")).toEqual([
+    expect.stringContaining("Weekly triage"),
+  ]);
+  expect(dialog.textContent).toContain("Each run continues a chat with Triage");
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  const request = createdTask(client)!;
+  expect(request.runMode).toBe("existing_session");
+  expect(request.targetSessionId).toBe("chat-triage");
+  expect(request.agentConfig.agentId).toBe(agent.id);
+});
+
+test("a shared trigger the person may not add says so in the dialog", async () => {
+  const forbidden = Object.assign(new Error("Opengeni API 403: missing permission"), {
+    status: 403,
+  });
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    createTaskError: forbidden,
+  });
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(dialog.textContent).toContain(AGENT_TRIGGER_SHARED_DENIED);
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+});
+
+test("a suggestion's source that can't be added says why, not the shared-automation refusal", async () => {
+  const forbidden = Object.assign(new Error("Opengeni API 403: missing permission"), {
+    status: 403,
+  });
+  const { client, dialog } = await openAgentTrigger({
+    suggestion: "When a GitHub issue opens",
+    githubStatus: "bound",
+    createSourceError: forbidden,
+  });
+  await act(async () => button(dialog, "Add trigger").click());
+  await flush();
+  expect(client.calls.some((call) => call[0] === "createEventSource")).toBe(true);
+  expect(createdTask(client)).toBeUndefined();
+  expect(dialog.textContent).not.toContain(AGENT_TRIGGER_SHARED_DENIED);
+  expect(dialog.textContent).toContain(userErrorText(forbidden));
+  expect(document.body.querySelector("[role='dialog']")).not.toBeNull();
+});
+
+test("a paused GitHub source shows greyed with why, and GitHub isn't offered as new", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [
+      { ...GITHUB_SOURCE, status: "disabled", statusReasonCode: "turned_off", statusReason: null },
+    ],
+  });
+  const tile = dialog.querySelector<HTMLButtonElement>(
+    "[data-agent-trigger-option='source:source-gh']",
+  )!;
+  expect(tile.disabled).toBe(true);
+  expect(tile.textContent).toContain("Turned off.");
+  expect(dialog.querySelector("[data-agent-trigger-option='new:github']")).toBeNull();
+  await act(async () => tile.click());
+  await flush();
+  expect(tile.getAttribute("aria-checked")).toBe("false");
+});
+
+test("Open full form starts the form at the source picked", async () => {
+  const { dialog, path } = await openAgentTrigger({ eventSources: [GITHUB_SOURCE] });
+  await pickTrigger(dialog, "source:source-gh");
+  await flush();
+  const link = dialog.querySelector<HTMLButtonElement>("[data-agent-trigger-full-form]")!;
+  await act(async () => link.click());
+  await flush();
+  const url = new URL(path(), "https://example.test");
+  expect(url.pathname).toBe(`/workspaces/${WORKSPACE_ID}/automations/new`);
+  expect(url.searchParams.get("source")).toBe("source-gh");
+  expect(url.searchParams.get("returnTo")).toBe("agent");
+});
+
+test("An existing chat finds the agent's chats past the first page", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessionsPageSize: 2,
+    sessions: (agentId) => [
+      { id: "chat-1", title: "Other 1", agentId: "another-agent" },
+      { id: "chat-2", title: "Other 2", agentId: null },
+      { id: "chat-3", title: "Old triage", agentId },
+    ],
+  });
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  expect(await chooseFrom(dialog, "Choose a chat", "Old triage")).toEqual([
+    expect.stringContaining("Old triage"),
+  ]);
+});
+
+test("An existing chat that can't be read says so, not that there are none", async () => {
+  const { dialog } = await openAgentTrigger({
+    eventSources: [GITHUB_SOURCE],
+    suggestion: "When a GitHub issue opens",
+    sessionsError: new Error("Opengeni API 500: down"),
+  });
+  await chooseFrom(dialog, "New chat each run", "An existing chat");
+  expect(dialog.textContent).toContain("Couldn't load chats with Triage.");
+  expect(dialog.textContent).not.toContain("No chats with Triage yet.");
+  expect(button(dialog, "Try again")).toBeTruthy();
+});
+
+test("a listed GitHub connection's row also offers Opengeni's own GitHub tools", async () => {
+  const agent = makeAgent({
+    name: "Fixer",
+    toolPermissions: [{ connector: "github.com", tool: "*", permission: "ask" }],
+  });
+  const client = fakeAgentsClient([agent], {
+    capabilities: [
+      {
+        id: "cap-github",
+        name: "GitHub MCP",
+        kind: "mcp",
+        source: "integration",
+        enabled: true,
+        providerDomain: "github.com",
+        connectionRef: { providerDomain: "github.com" },
+        tools: [{ kind: "mcp", id: "github" }],
+      },
+    ],
+    connectorTools: { "cap-github": ["search_code"] },
+  });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  await flush();
+  const rows = container.querySelectorAll<HTMLElement>("[data-agent-can-use='github.com']");
+  expect(rows).toHaveLength(1);
+  const perTool = [...rows[0]!.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes("Choose per tool"),
+  )!;
+  await act(async () => perTool.click());
+  await flush();
+  expect(rows[0]!.textContent).toContain("search_code");
+  // The toggle names the tool list it opens.
+  expect(document.getElementById(perTool.getAttribute("aria-controls")!)?.textContent).toContain(
+    "search_code",
+  );
+  expect(rows[0]!.textContent).toContain("pull_request_merge");
+});
+
+test("Add an agent offers every ready-made agent's content file not yet added here", async () => {
+  const keys = [
+    "triage",
+    "bug-fixer",
+    "pr-reviewer",
+    "cve-scanner",
+    "incident-responder",
+    "dependency-updater",
+  ];
+  const templates = await Promise.all(
+    keys.map(
+      async (key) =>
+        (await import(`../../core/src/agent-templates/${key}.agent.json`)).default as {
+          name: string;
+          description: string;
+        },
+    ),
+  );
+  const client = fakeAgentsClient([makeAgent({ name: "Triage", templateKey: "triage" })], {
+    templates,
+  });
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  await flush();
+  const text = container.textContent ?? "";
+  // Triage is already here, so it isn't offered again.
+  expect(text).not.toContain(templates[0]!.description);
+  for (const template of templates.slice(1)) {
+    expect(text).toContain(template.name);
+    expect(text).toContain(template.description);
+  }
+});
+
+test("Add an agent adds a ready-made agent once", async () => {
+  const client = fakeAgentsClient([], { templates: [TRIAGE_TEMPLATE] });
+  let path = "";
+  const container = await render(
+    <AgentsTestHost context={appContext(client)} onLocation={(location) => (path = location.href)}>
+      <AgentsPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  expect(container.textContent).toContain("Add an agent");
+  expect(container.textContent).toContain("Sorts new issues");
+  await act(async () => button(container, "Add").click());
+  await flush();
+  expect(client.calls).toContainEqual(["createAgentFromTemplate", WORKSPACE_ID, "triage"]);
+  const created = [...client.agents.values()][0]!;
+  expect(path).toBe(`/workspaces/${WORKSPACE_ID}/agents/${created.id}`);
 });

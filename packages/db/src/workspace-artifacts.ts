@@ -1,6 +1,7 @@
 import {
   WorkspaceArtifactRequestedTools,
   type McpConnectionAccountBinding,
+  type SiteAssetManifest,
   type ToolGatewayIdentity,
   type WorkspaceArtifact,
   type WorkspaceArtifactDetailResponse,
@@ -100,7 +101,7 @@ export async function getWorkspaceSiteSessionOrigin(
         ),
       )
       .limit(1);
-    if (!origin) throw new WorkspaceArtifactNotFoundError("Site origin not found");
+    if (!origin) throw new WorkspaceArtifactNotFoundError("App origin not found");
     return origin;
   });
 }
@@ -158,7 +159,7 @@ async function retainArtifactUpload(tx: Database, input: PublishMetadata) {
       ),
     )
     .returning();
-  if (!row) throw new WorkspaceArtifactOperationError("Site upload expired or unavailable");
+  if (!row) throw new WorkspaceArtifactOperationError("App upload expired or unavailable");
 }
 
 /** Claim expired uploads before deleting blobs; publication takes the same row lock. */
@@ -185,7 +186,9 @@ type ArtifactMutationToolName =
   | "artifacts_publish"
   | "artifacts_rollback"
   | "artifacts_archive"
-  | "artifacts_restore";
+  | "artifacts_restore"
+  | "app_install"
+  | "app_upgrade";
 
 export class WorkspaceArtifactNotFoundError extends Error {
   readonly name = "WorkspaceArtifactNotFoundError";
@@ -217,7 +220,7 @@ export async function recordSiteOpened(
         ),
       )
       .limit(1);
-    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    if (!site) throw new WorkspaceArtifactNotFoundError("App not found");
     const [row] = await scoped
       .insert(schema.siteOpens)
       .values({
@@ -287,7 +290,7 @@ export async function setSiteSidebarState(
         ),
       )
       .limit(1);
-    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    if (!site) throw new WorkspaceArtifactNotFoundError("App not found");
     const stamp = (next: boolean | undefined, column: "pinned_at" | "archived_at") =>
       next === undefined
         ? sql.raw(`site_sidebar_states.${column}`)
@@ -635,6 +638,7 @@ export async function getWorkspaceArtifactContentRef(
   version: WorkspaceArtifactVersion;
   contentKey: string;
   sourceKey: string | null;
+  assetManifest: SiteAssetManifest | null;
 }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const artifact = await artifactRow(scopedDb, workspaceId, artifactId, viewer);
@@ -659,7 +663,35 @@ export async function getWorkspaceArtifactContentRef(
       version: versionFromRow(version),
       contentKey: version.contentKey,
       sourceKey: version.sourceKey,
+      assetManifest: version.assetManifest ?? null,
     };
+  });
+}
+
+/**
+ * The asset manifest of one version, for the console's asset route. That
+ * route has no signed-in caller (app frames send no credentials): the
+ * version's unguessable token in the URL is the capability, checked by the
+ * caller against this manifest. Null for an unknown version or a
+ * single-file app.
+ */
+export async function getSiteVersionAssetManifest(
+  db: Database,
+  workspaceId: string,
+  versionId: string,
+): Promise<SiteAssetManifest | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ assetManifest: schema.workspaceArtifactVersions.assetManifest })
+      .from(schema.workspaceArtifactVersions)
+      .where(
+        and(
+          eq(schema.workspaceArtifactVersions.workspaceId, workspaceId),
+          eq(schema.workspaceArtifactVersions.id, versionId),
+        ),
+      )
+      .limit(1);
+    return row?.assetManifest ?? null;
   });
 }
 
@@ -674,6 +706,8 @@ type PublishMetadata = {
   sourceSha256: string | null;
   sourceSizeBytes: number | null;
   requestedTools?: ToolGatewayIdentity[];
+  /** Asset files of a multi-file build; omitted or null for a single-file app. */
+  assetManifest?: SiteAssetManifest | null;
   /** `requestedTools` as the caller declared them, before the server paired connector identities. */
   declaredRequestedTools?: ToolGatewayIdentity[];
   operationKey: string;
@@ -844,20 +878,54 @@ async function assertAttemptAuthority(
   }
 }
 
+type AttemptToolCatalogScope = Pick<
+  PublishMetadata,
+  | "accountId"
+  | "workspaceId"
+  | "sourceSessionId"
+  | "sourceTurnId"
+  | "sourceAttemptId"
+  | "sourceExecutionGeneration"
+>;
+
 async function assertArtifactRequestedToolsInAttemptCatalog(
   scopedDb: any,
-  input: Pick<
-    PublishMetadata,
-    | "accountId"
-    | "workspaceId"
-    | "sourceSessionId"
-    | "sourceTurnId"
-    | "sourceAttemptId"
-    | "sourceExecutionGeneration"
-  >,
+  input: AttemptToolCatalogScope,
   requestedTools: readonly ToolGatewayIdentity[],
 ): Promise<void> {
-  if (input.sourceAttemptId === null || requestedTools.length === 0) return;
+  const missing = await requestedToolsMissingFromAttemptCatalog(scopedDb, input, requestedTools);
+  if (missing.length > 0)
+    throw new WorkspaceArtifactOperationError(
+      "Artifact requested tools must be present in the exact attempt tool catalog",
+    );
+}
+
+/**
+ * The requested tools an agent attempt may not declare: neither in its exact
+ * tool catalog nor a connector identity paired with one of its own account
+ * routes. Empty for a caller that is not an attempt. Throws when the
+ * attempt's catalog can't be read.
+ */
+export async function artifactRequestedToolsMissingFromAttemptCatalog(
+  db: Database,
+  input: AttemptToolCatalogScope,
+  requestedTools: readonly ToolGatewayIdentity[],
+): Promise<ToolGatewayIdentity[]> {
+  if (input.sourceAttemptId === null || requestedTools.length === 0) return [];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await requestedToolsMissingFromAttemptCatalog(scopedDb, input, requestedTools),
+  );
+}
+
+async function requestedToolsMissingFromAttemptCatalog(
+  scopedDb: any,
+  input: AttemptToolCatalogScope,
+  requestedTools: readonly ToolGatewayIdentity[],
+): Promise<ToolGatewayIdentity[]> {
+  if (input.sourceAttemptId === null || requestedTools.length === 0) return [];
   if (
     input.sourceSessionId === null ||
     input.sourceTurnId === null ||
@@ -894,7 +962,7 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     );
   }
   const missing = requestedTools.filter((identity) => !allowed.has(toolIdentityKey(identity)));
-  if (missing.length === 0) return;
+  if (missing.length === 0) return [];
   // A connector identity paired with one of the attempt's own account routes
   // (`account-<hash>`, which is all an agent sees) is the same tool: the
   // turn's frozen account bindings name the connector behind each route.
@@ -921,11 +989,7 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
         binding.canonicalServerId === identity.serverId &&
         allowed.has(toolIdentityKey({ serverId: binding.serverId, toolName: identity.toolName })),
     );
-  if (!missing.every(paired)) {
-    throw new WorkspaceArtifactOperationError(
-      "Artifact requested tools must be present in the exact attempt tool catalog",
-    );
-  }
+  return missing.filter((identity) => !paired(identity));
 }
 
 function toolIdentityKey(identity: ToolGatewayIdentity): string {
@@ -1187,6 +1251,7 @@ export async function createWorkspaceArtifact(
               sourceSha256: input.sourceSha256,
               sourceSizeBytes: input.sourceSizeBytes,
               requestedTools: input.requestedTools ?? [],
+              assetManifest: input.assetManifest ?? null,
               operationKey: input.operationKey,
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
@@ -1346,6 +1411,8 @@ export async function duplicateWorkspaceArtifact(
             sourceSha256: source.sourceSha256,
             sourceSizeBytes: source.sourceSizeBytes,
             requestedTools,
+            // The copy serves the same immutable files under its own version.
+            assetManifest: source.assetManifest,
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
@@ -1467,6 +1534,7 @@ export async function publishWorkspaceArtifactVersion(
               sourceSha256: input.sourceSha256,
               sourceSizeBytes: input.sourceSizeBytes,
               requestedTools: input.requestedTools ?? current.requestedTools,
+              assetManifest: input.assetManifest ?? null,
               operationKey: input.operationKey,
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
@@ -1750,7 +1818,7 @@ export async function updateWorkspaceArtifactVisibility(
     if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
     if (input.viewer.subjectId === null || artifact.ownerSubjectId !== input.viewer.subjectId)
       throw new WorkspaceArtifactOwnerRequiredError(
-        "Only the person who owns this Site can change who can see it",
+        "Only the person who owns this app can change who can see it",
       );
     const [updated] =
       artifact.visibility === input.visibility

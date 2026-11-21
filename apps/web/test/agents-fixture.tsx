@@ -29,10 +29,18 @@ import {
 import { getNewSessionSendBlocker } from "@opengeni/react/app/lib/composer-send-blocking";
 import { emptyAttachments, idleComposer } from "../src/dev/composer-chrome-fixtures";
 import { AgentRoute, AgentsRoute, NewAgentRoute } from "../src/routes/agents";
+import triageTemplate from "../../../packages/core/src/agent-templates/triage.agent.json";
+import bugFixerTemplate from "../../../packages/core/src/agent-templates/bug-fixer.agent.json";
+import prReviewerTemplate from "../../../packages/core/src/agent-templates/pr-reviewer.agent.json";
+import cveScannerTemplate from "../../../packages/core/src/agent-templates/cve-scanner.agent.json";
+import incidentResponderTemplate from "../../../packages/core/src/agent-templates/incident-responder.agent.json";
+import dependencyUpdaterTemplate from "../../../packages/core/src/agent-templates/dependency-updater.agent.json";
 import "../src/styles.css";
 
 const params = new URLSearchParams(location.search);
 const view = params.get("view") ?? "agents";
+// `&template=<key>`: the agent-template view shows that ready-made agent just added.
+const addedTemplateKey = params.get("template") ?? "cve-scanner";
 // `&private=off`: a workspace where Only me chats aren't available.
 const privateChats = params.get("private") !== "off";
 const SLACK_CONNECTION = "55555555-5555-4555-8555-555555555555";
@@ -89,7 +97,80 @@ const duplicate = makeAgent({
   createdBySubjectId: "user-kari",
   viewer: { canEdit: false, canManageSlack: false, canOpenInSlack: false },
 });
-const agents: Agent[] = [releases, onboarding, notes, duplicate];
+// Added from the "Add an agent" gallery: its suggested triggers, Can use and Memory.
+const triage = makeAgent({
+  id: "aaaaaaaa-0000-4000-8000-000000000005",
+  name: "Triage",
+  description: triageTemplate.description,
+  avatar: { kind: "icon", icon: "bot", hue: 30 },
+  instructions: triageTemplate.instructions,
+  templateKey: "triage",
+  memory: { enabled: true, collectionId: "c5", scope: "workspace", reviewFirst: false },
+  toolPermissions: [
+    { connector: "github.com", tool: "merge_pull_request", permission: "block" },
+    { connector: "gmail.com", tool: "*", permission: "ask" },
+  ],
+  skills: [{ name: "incident-runbook" }],
+});
+const TEMPLATES = [
+  triageTemplate,
+  bugFixerTemplate,
+  prReviewerTemplate,
+  cveScannerTemplate,
+  incidentResponderTemplate,
+  dependencyUpdaterTemplate,
+];
+// Every shared agent is in each linked Slack workspace, as in production.
+for (const agent of [onboarding, duplicate, triage]) {
+  agent.slack = [{ ...releases.slack[0]!, handle: agent.name.toLowerCase().replaceAll(" ", "-") }];
+}
+const addedTemplate = TEMPLATES.find((template) => template.key === addedTemplateKey)!;
+// A ready-made agent just added from the gallery (only on the agent-template view).
+const added = makeAgent({
+  id: "aaaaaaaa-0000-4000-8000-000000000006",
+  name: addedTemplate.name,
+  description: addedTemplate.description,
+  avatar: addedTemplate.avatar as Agent["avatar"],
+  instructions: addedTemplate.instructions,
+  templateKey: addedTemplate.key,
+  memory: { enabled: true, collectionId: null, scope: "workspace", reviewFirst: false },
+  toolPermissions: addedTemplate.toolPermissions as Agent["toolPermissions"],
+});
+const agents: Agent[] = [
+  releases,
+  onboarding,
+  notes,
+  duplicate,
+  triage,
+  ...(view === "agent-template" ? [added] : []),
+];
+const TRIAGE_TRIGGER = {
+  id: "eeeeeeee-0000-4000-8000-000000000001",
+  name: "Triage: When a GitHub issue opens",
+  status: "active",
+  schedule: { type: "manual" },
+  events: {
+    once: false,
+    triggers: [
+      {
+        sourceId: "ffffffff-0000-4000-8000-000000000001",
+        eventTypes: ["issues.opened"],
+        conditions: [],
+      },
+    ],
+  },
+  agentConfig: { agentId: triage.id },
+};
+const capability = (id: string, name: string, domain: string) => ({
+  id,
+  name,
+  kind: "mcp",
+  source: "integration",
+  enabled: true,
+  providerDomain: domain,
+  connectionRef: { providerDomain: domain },
+  tools: [{ kind: "mcp", id }],
+});
 
 const chats: AgentChat[] = [
   {
@@ -156,6 +237,34 @@ const client = fakeAgentsClient(agents, {
   },
   yours: (agent) => agent.createdBySubjectId === "user-me",
   canCreatePrivate: privateChats,
+  templates: TEMPLATES,
+  tasks: [TRIAGE_TRIGGER],
+  capabilities: [
+    capability("github", "GitHub", "github.com"),
+    capability("gmail", "Gmail", "gmail.com"),
+    capability("linear", "Linear", "linear.app"),
+  ],
+  connectorTools: { gmail: ["list_messages", "read_message", "send_email"] },
+  memoryEntries: [
+    {
+      id: "m1",
+      version: 2,
+      revision: {
+        title: "Duplicates of the login timeout",
+        preview: "Reports mentioning 'session expired' after 5 minutes are the same bug as #412.",
+      },
+    },
+    {
+      id: "m2",
+      version: 1,
+      revision: {
+        title: "Who owns billing issues",
+        preview: "Billing and invoices go to the payments team; label them payments.",
+      },
+    },
+  ],
+  skills: ["incident-runbook", "release-notes"],
+  eventSources: [{ id: "ffffffff-0000-4000-8000-000000000001", name: "acme/web on GitHub" }],
 });
 // Every shared agent is in Slack on its own; an Only me agent stays in the
 // app. Meeting notes has only its owner's chat.
@@ -343,6 +452,10 @@ function Screen() {
   switch (view) {
     case "agent":
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={releases.id} />;
+    case "agent-setup":
+      return <AgentRoute workspaceId={WORKSPACE_ID} agentId={triage.id} />;
+    case "agent-template":
+      return <AgentRoute workspaceId={WORKSPACE_ID} agentId={added.id} />;
     case "agent-private":
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={notes.id} />;
     case "make-agent":

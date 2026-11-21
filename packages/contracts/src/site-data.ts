@@ -21,7 +21,7 @@ export const SiteDataGuestAccess = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["none", "read", "append", "own"])
     .describe(
-      "Published Sites only: what anonymous guests may do. none (default): nothing. read: read what viewers read. append: add records and read their own. own: add, read, change and delete their own.",
+      "Published apps only: what anonymous guests may do. none (default): nothing. read: read what viewers read. append: add records and read their own. own: add, read, change and delete their own.",
     ),
 );
 export type SiteDataGuestAccess = z.infer<typeof SiteDataGuestAccess>;
@@ -174,10 +174,10 @@ export const SiteDataCollectionDefinitionRequest = /* @__PURE__ */ defineSchema(
   z.object({
     accessMode: SiteDataAccessMode,
     privateRecords: primitives.optionalBoolean.describe(
-      "per_viewer only: keep records private even from the Site's managers.",
+      "per_viewer only: keep records private even from the app's managers.",
     ),
     guestAccess: SiteDataGuestAccess.optional().describe(
-      "Anonymous guests of a public published Site; omitted keeps the current rule (none for a new collection).",
+      "Anonymous guests of a public published app; omitted keeps the current rule (none for a new collection).",
     ),
     jsonSchema: z
       .record(primitives.string, z.unknown())
@@ -307,6 +307,12 @@ export type SiteDataDescribeResponse = {
     workspaceBytes: number;
   };
   limits: SiteDataLimitsResponse;
+  /**
+   * Present as "viewer" when the caller reads the app like a viewer (a
+   * connected outside agent without app management), so record counts cover
+   * the whole app but writes follow each collection's viewer rules.
+   */
+  access?: "viewer";
 };
 
 export type SiteDataFileResponse = {

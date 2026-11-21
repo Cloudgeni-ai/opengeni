@@ -3,7 +3,10 @@
 // for a reviewed catalog service (Google Calendar) or for a server someone
 // added by hand. Catalog and connection state come from a synthetic client,
 // so nothing reaches an API or the service.
-//   ?service=calendar|added|gmail-step-up|gmail-fixed   ?theme=light|dark
+//   ?service=calendar|added|superoffice|gmail-step-up|gmail-approval|gmail-pinned|gmail-fixed   ?theme=light|dark
+// superoffice: the reviewed SuperOffice CRM entry; pressing Connect shows how
+// the dialog reads when the service refuses the sign-in setup
+// (invalid_redirect_uri), from the API error the server sends.
 // gmail-step-up: a connected account that needs more access for one tool, as
 // the session renders it (the stock row naming the action, for that exact
 // account). The agent hit it twice: the chat shows one card.
@@ -21,6 +24,7 @@ import { useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import type { ConnectTransport } from "@opengeni/connect";
 import {
+  OpenGeniApiError,
   toolReviewAction,
   toolReviewFields,
   type CapabilityCatalogItem,
@@ -46,6 +50,7 @@ import { SessionRowContent } from "@opengeni/react/app/components/rail/session-r
 import { summarizeRailRow } from "@opengeni/react/app/lib/sessions-group";
 import { sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
 import { MockOpenGeniClient } from "./mock";
+import superOfficeLogoUrl from "../../../data/catalog/logos/superoffice-com-eb567914b177.png?url";
 import "./styles.css";
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
@@ -54,6 +59,7 @@ const params = new URLSearchParams(window.location.search);
 const serviceParam = params.get("service");
 const service =
   serviceParam === "added" ||
+  serviceParam === "superoffice" ||
   serviceParam === "gmail-step-up" ||
   serviceParam === "gmail-fixed" ||
   serviceParam === "gmail-approval" ||
@@ -116,7 +122,66 @@ const ADDED = {
   metadata: {},
 } as unknown as CapabilityCatalogItem;
 
-const item = service === "added" ? ADDED : CALENDAR;
+// The catalog entry as data/catalog/curated.json defines it.
+const SUPEROFFICE = {
+  id: "mcp:integrations-sh:superoffice-com-eb567914b177",
+  kind: "mcp",
+  source: "registry",
+  authKind: "oauth2",
+  name: "SuperOffice CRM",
+  enabled: false,
+  stale: false,
+  mcpUrl: "https://mcp.superoffice.com/mcp",
+  providerDomain: "mcp.superoffice.com",
+  logoAssetPath: "catalog-assets/logos/superoffice-com-eb567914b177.png",
+  description:
+    "Read and update companies, contacts, sales, projects, appointments and tickets in SuperOffice CRM Online.",
+  metadata: {
+    presentation: {
+      providerName: "SuperOffice",
+      introduction: "Let agents work with the SuperOffice CRM Online tenant you sign in to.",
+      capabilities: [
+        {
+          title: "Find customer information",
+          description:
+            "Search and read companies, contacts, sales, projects, appointments and tickets.",
+        },
+        {
+          title: "Update records",
+          description:
+            "Update companies, contacts, sales, projects, appointments and tickets. Updates ask for approval by default.",
+        },
+      ],
+      permissionSummary:
+        "Agents act as your SuperOffice user and see only what you can see. Reading needs CRM Suite Plus; updating needs CRM Suite Super.",
+    },
+  },
+} as unknown as CapabilityCatalogItem;
+
+const item = service === "added" ? ADDED : service === "superoffice" ? SUPEROFFICE : CALENDAR;
+
+// What the API answers today when SuperOffice's registration refuses this
+// deployment's callback address.
+const superOfficeRefusal = () =>
+  new OpenGeniApiError(
+    422,
+    JSON.stringify({
+      error: {
+        code: "validation_failed",
+        message:
+          "mcp.superoffice.com only accepts sign-ins from apps it has approved. Ask mcp.superoffice.com to allow this app's sign-in address. mcp.superoffice.com said: invalid_redirect_uri (Redirect URI 'https://app.opengeni.ai/v1/integrations/oauth/callback' is not allowed.).",
+        retryable: false,
+        details: {
+          oauthStage: "client_registration",
+          oauthReason: "http_422",
+          providerRefusal: "app_not_allowed",
+          providerError: "invalid_redirect_uri",
+          providerErrorDescription:
+            "Redirect URI 'https://app.opengeni.ai/v1/integrations/oauth/callback' is not allowed.",
+        },
+      },
+    }),
+  );
 
 // Nothing is pending and a connect never starts here: the preview shows the
 // card and its setup dialog before the person presses Connect.
@@ -125,6 +190,7 @@ const transport = {
   accounts: async () => [],
   pending: async () => [],
   begin: async () => {
+    if (service === "superoffice") throw superOfficeRefusal();
     throw new Error("Connecting is not part of this preview");
   },
   get: async () => {
@@ -156,6 +222,7 @@ class PreviewClient extends MockOpenGeniClient {
     return [] as never;
   }
   async downloadCatalogAsset(): Promise<Blob> {
+    if (service === "superoffice") return await (await fetch(superOfficeLogoUrl)).blob();
     throw new Error("No catalog assets in this preview");
   }
 }
@@ -259,7 +326,12 @@ function events(): SessionEvent[] {
     return log.events;
   }
   log.push("user.message", {
-    text: service === "added" ? "Close the ticket about the login bug." : "Am I free on Friday?",
+    text:
+      service === "added"
+        ? "Close the ticket about the login bug."
+        : service === "superoffice"
+          ? "Move the Acme renewal sale to next week."
+          : "Am I free on Friday?",
   });
   log.push(
     "tool.auth_needed",
@@ -277,7 +349,9 @@ function events(): SessionEvent[] {
         rationale:
           service === "added"
             ? "Connect Tickets so I can close the ticket."
-            : "Connect your Google Calendar so I can check Friday.",
+            : service === "superoffice"
+              ? "Connect SuperOffice so I can update the sale."
+              : "Connect your Google Calendar so I can check Friday.",
         requiredVariables: [],
       },
     },

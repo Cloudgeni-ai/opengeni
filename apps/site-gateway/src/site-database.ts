@@ -250,7 +250,7 @@ function lostResponse(operation: SiteDbOperation): Response {
     {
       error: {
         code: "internal",
-        message: "The Site database is temporarily unavailable",
+        message: "The app database is temporarily unavailable",
         retryable: true,
         outcomeUnknown: !readOnly,
       },
@@ -368,8 +368,8 @@ function toSiteDbError(error: unknown): SiteDbError {
     return new SiteDbError("conflict", message);
   if (/SQLITE_[A-Z]+/u.test(message) && !INTERNAL_SQLITE.test(message))
     return new SiteDbError("sql_error", message);
-  console.error("site-gateway: Site database internal error", error);
-  return new SiteDbError("internal", "The Site database failed; try again");
+  console.error("site-gateway: app database internal error", error);
+  return new SiteDbError("internal", "The app database failed; try again");
 }
 
 /** Run `fn`, turning thrown failures into SiteDbErrors. */
@@ -456,7 +456,7 @@ export class SiteDatabase {
       return errorResponse("not_found", "Unknown operation");
     if (role === "primary") {
       const site = request.headers.get(SITE_DB_SITE_HEADER) ?? "";
-      if (!UUID.test(site)) return errorResponse("validation", "The Site id is missing");
+      if (!UUID.test(site)) return errorResponse("validation", "The app id is missing");
       const body = await request.arrayBuffer();
       const erasing = erasesDatabase(operation, requestBody(body));
       let home: Home;
@@ -464,8 +464,8 @@ export class SiteDatabase {
         // A well-formed reset needs no copy: the legacy database is erased instead.
         home = await this.home(site, erasing && operation === "reset");
       } catch (error) {
-        console.error("site-gateway: Site database location check failed", error);
-        return unavailable("The Site database is temporarily unavailable");
+        console.error("site-gateway: app database location check failed", error);
+        return unavailable("The app database is temporarily unavailable");
       }
       if (home.location === "legacy") return this.relayToLegacy(site, operation, body, home.reason);
       const response = await this.serve(operation, body);
@@ -474,7 +474,7 @@ export class SiteDatabase {
         // reset or rebuild never leaves the old data behind.
         // When that fails, later requests retry it (`home`); the reset stands.
         await this.eraseLegacy(site).catch((error: unknown) => {
-          console.error(`site-gateway: could not erase the legacy Site database ${site}`, error);
+          console.error(`site-gateway: could not erase the legacy app database ${site}`, error);
           const record = this.kv.get<HomeRecord>(HOME_KEY);
           if (record) this.kv.put(HOME_KEY, { ...record, erasePending: true } satisfies HomeRecord);
         });
@@ -494,7 +494,7 @@ export class SiteDatabase {
     // The EU object relays only while no copy runs, so only earlier gateway
     // releases are held off by a fence.
     if (role !== "relay" && this.kv.get<FenceRecord>(FENCE_KEY))
-      return unavailable("The Site database is moving to its EU location; try again shortly");
+      return unavailable("The app database is moving to its EU location; try again shortly");
     return located(await this.serve(operation, await request.arrayBuffer()), "legacy");
   }
 
@@ -595,7 +595,7 @@ export class SiteDatabase {
     try {
       response = await call;
     } catch (error) {
-      console.error("site-gateway: legacy Site database unreachable", error);
+      console.error("site-gateway: legacy app database unreachable", error);
       return lostResponse(operation);
     } finally {
       this.relays.delete(call);
@@ -625,7 +625,7 @@ export class SiteDatabase {
         if (home.erasePending && Date.now() >= this.eraseRetryAt) {
           this.eraseRetryAt = Date.now() + MARK_RETRY_MS;
           await this.eraseLegacy(site).catch((error: unknown) =>
-            console.error(`site-gateway: could not erase the legacy Site database ${site}`, error),
+            console.error(`site-gateway: could not erase the legacy app database ${site}`, error),
           );
         }
         return { location: "eu" };
@@ -732,7 +732,7 @@ export class SiteDatabase {
     } catch (error) {
       const waiting = this.notReady(error);
       if (waiting) return waiting;
-      console.error(`site-gateway: could not start moving Site database ${site}`, error);
+      console.error(`site-gateway: could not start moving app database ${site}`, error);
       return this.recordFailure(
         error instanceof RelocationError
           ? error.message
@@ -781,7 +781,7 @@ export class SiteDatabase {
       const difference = compareStates(source, await relocationState(this.sql, this.kv));
       if (difference) throw new RelocationError(`The copy did not match: ${difference}`);
     } catch (error) {
-      console.error(`site-gateway: Site database ${site} did not move to the EU`, error);
+      console.error(`site-gateway: app database ${site} did not move to the EU`, error);
       await this.wipeKeepingLocation();
       await this.release(site, token);
       this.kv.delete(ATTEMPT_KEY);
@@ -813,7 +813,7 @@ export class SiteDatabase {
       await this.relocationCall(site, "release", { token });
       this.kv.delete(RELEASE_KEY);
     } catch (error) {
-      console.error(`site-gateway: could not release the legacy Site database ${site}`, error);
+      console.error(`site-gateway: could not release the legacy app database ${site}`, error);
       this.kv.put(RELEASE_KEY, token);
     }
   }
@@ -826,7 +826,7 @@ export class SiteDatabase {
     } catch (error) {
       // The copy is the database now; the legacy object stays fenced, and a
       // later request tries again.
-      console.error(`site-gateway: could not mark the legacy Site database ${site} moved`, error);
+      console.error(`site-gateway: could not mark the legacy app database ${site} moved`, error);
     }
   }
 
@@ -880,7 +880,7 @@ export class SiteDatabase {
       );
       return new Response(response.body, { status: response.status, headers: response.headers });
     } catch (error) {
-      console.error("site-gateway: EU Site database unreachable", error);
+      console.error("site-gateway: EU app database unreachable", error);
       return lostResponse(operation);
     }
   }
@@ -949,7 +949,7 @@ export class SiteDatabase {
           // The database was reset or rebuilt in the EU (or is being reset
           // before it moved): delete everything here, keeping only the marker
           // that sends earlier gateway releases to the EU object.
-          if (!UUID.test(site)) throw new SiteDbError("validation", "The Site id is missing");
+          if (!UUID.test(site)) throw new SiteDbError("validation", "The app id is missing");
           const moved = this.kv.get<MovedRecord>(MOVED_KEY);
           await this.state.storage.deleteAll();
           this.kv.put(MOVED_KEY, {
@@ -1064,7 +1064,7 @@ export class SiteDatabase {
     if (size > maxDatabaseBytes && size > sizeBefore)
       throw new SiteDbError(
         "quota_exceeded",
-        `This Site's database would exceed its ${maxDatabaseBytes} byte storage limit`,
+        `This app's database would exceed its ${maxDatabaseBytes} byte storage limit`,
       );
   }
 
@@ -1281,15 +1281,35 @@ export class SiteDatabase {
       if (!Array.isArray(row) || row.length !== width || !row.every(isSqlValue))
         throw new SiteDbError("validation", "Every row needs one scalar value per column");
     const maxDatabaseBytes = this.maxDatabaseBytes(body.maxDatabaseBytes);
+    const update = body.onConflict === "update";
+    if (
+      update &&
+      (typeof body.conflictColumn !== "string" || !body.columns.includes(body.conflictColumn))
+    )
+      throw new SiteDbError("validation", "Give the key column to update rows by");
     const verb =
       body.onConflict === "replace"
         ? "INSERT OR REPLACE"
         : body.onConflict === "ignore"
           ? "INSERT OR IGNORE"
           : "INSERT";
+    const others = body.columns.filter((column) => column !== body.conflictColumn);
+    // An upsert by key: the key column must be the primary key or unique.
+    const upsert = update
+      ? ` ON CONFLICT (${quoteSiteSqlIdentifier(body.conflictColumn!)}) ${
+          others.length > 0
+            ? `DO UPDATE SET ${others
+                .map(
+                  (column) =>
+                    `${quoteSiteSqlIdentifier(column)} = excluded.${quoteSiteSqlIdentifier(column)}`,
+                )
+                .join(", ")}`
+            : "DO NOTHING"
+        }`
+      : "";
     const statement = `${verb} INTO ${quoteSiteSqlIdentifier(body.table)} (${body.columns
       .map(quoteSiteSqlIdentifier)
-      .join(", ")}) VALUES (${body.columns.map(() => "?").join(", ")})`;
+      .join(", ")}) VALUES (${body.columns.map(() => "?").join(", ")})${upsert}`;
     return guarded(() =>
       this.state.storage.transactionSync(() => {
         const sizeBefore = this.sql.databaseSize;

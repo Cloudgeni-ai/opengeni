@@ -452,6 +452,21 @@ export function CatalogItemPage({
       </Button>
     );
   }
+  if (!item.enabled && !organizationTurnedOff && item.kind === "mcp" && item.canRemove === true) {
+    // A custom server that isn't on, for example one whose first Connect
+    // failed: an admin removes what is left of it.
+    menu.push(
+      <DropdownMenuItem
+        key="remove-server"
+        variant="destructive"
+        disabled={busy}
+        onSelect={() => onAction({ type: "remove_server", item })}
+      >
+        <TrashIcon />
+        Remove from this workspace
+      </DropdownMenuItem>,
+    );
+  }
 
   // --- The one section where you set it up, when setting it up needs input. ---
   const ownershipChoice =

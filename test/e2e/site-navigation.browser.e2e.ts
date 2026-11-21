@@ -135,9 +135,9 @@ describe("Site navigation", () => {
     try {
       await open(page, sessionPath);
       await page.frameLocator("iframe").first().locator("body").waitFor();
-      expect(await expands()).toEqual(["Expand Site to full window"]);
-      const expand = page.getByRole("button", { name: "Expand Site to full window" });
-      expect(await expand.getAttribute("title")).toBe("Expand Site to full window");
+      expect(await expands()).toEqual(["Expand app to full window"]);
+      const expand = page.getByRole("button", { name: "Expand app to full window" });
+      expect(await expand.getAttribute("title")).toBe("Expand app to full window");
 
       // It fills the window with the Site; Esc comes back.
       await expand.click();
@@ -152,7 +152,7 @@ describe("Site navigation", () => {
       await page.getByRole("tab", { name: "Files" }).click();
       expect(await expands()).toEqual(["Maximize dock"]);
       await page.getByRole("tab", { name: "Artifacts" }).click();
-      expect(await expands()).toEqual(["Expand Site to full window"]);
+      expect(await expands()).toEqual(["Expand app to full window"]);
     } finally {
       await page.close();
     }

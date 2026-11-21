@@ -141,6 +141,7 @@ export const SECTION_KEYS = [
   "page-models-sharing",
   "page-schedules",
   "page-schedule-form",
+  "page-agent-trigger",
   "page-meetings",
   "page-meeting-reminders",
   "page-dictation",
@@ -152,6 +153,7 @@ export const SECTION_KEYS = [
   "page-sign-out-recordings",
   "page-admin-step-up",
   "page-github-integration",
+  "page-sidebar",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -398,7 +400,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Selection",
     title: "Setting row",
     purpose: "One setting, one row, exactly one control, aligned with its neighbours.",
-    usedOn: "General, Model account page, Organization security, Integrations",
+    usedOn: "General, Model account page, Organization security, connected tools",
     recommended: "a",
     whyRecommended: "Every control lines up, and labels stop truncating on phones.",
     alternatives: [
@@ -444,7 +446,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Selection",
     title: "Switch",
     purpose: "Immediate on/off that saves on change.",
-    usedOn: "Settings, Model accounts, Integrations, Schedules, composer menus",
+    usedOn: "Settings, Model accounts, connected tools, Schedules, composer menus",
     recommended: "a",
     whyRecommended:
       "One size, one focus ring, one disabled look, and a visible off state in both themes.",
@@ -1012,10 +1014,10 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "page-connected-agents",
     group: "Pages",
-    title: "Connected apps",
+    title: "Connected agents",
     purpose:
       "How to add the Opengeni MCP server to a coding agent, then the outside agents working in the organization over MCP: whose they are, what they can do and where.",
-    usedOn: "Organization settings > Connected apps, agent sign-in",
+    usedOn: "Organization settings > Connected agents, agent sign-in",
     load: () => import("./page-connected-agents"),
   },
   {
@@ -1041,6 +1043,24 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Production Models components with an in-memory API fixture.",
     usedOn: "Settings > Models",
     load: () => import("./page-models-cache"),
+  },
+  {
+    key: "page-sidebar",
+    group: "Pages",
+    title: "Sidebar",
+    purpose:
+      "The rail's links and groups and the Sidebar page, with an in-memory layout: agent links, renaming a group, and Customize.",
+    usedOn: "Rail > links above the chats; Sidebar page",
+    load: () => import("./page-sidebar"),
+  },
+  {
+    key: "page-agent-trigger",
+    group: "Pages",
+    title: "Agent: Add trigger",
+    purpose:
+      "Production Starts when section and its Add trigger dialog with an in-memory API fixture.",
+    usedOn: "Agents > agent > Starts when",
+    load: () => import("./page-agent-trigger"),
   },
   {
     key: "page-models-sharing",
@@ -1114,7 +1134,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     title: "Organization connectors",
     purpose:
       "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
-    usedOn: "Organization settings > Integrations",
+    usedOn: "Organization settings > Connected tools",
     load: () => import("./page-org-connectors"),
   },
   {
@@ -1156,7 +1176,7 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "page-github-integration",
     group: "Pages",
-    title: "GitHub integration",
+    title: "GitHub connected tool",
     purpose:
       "GitHub's two identities, Your GitHub and the Opengeni app, each with one action, in production components.",
     usedOn: "Capabilities > GitHub",

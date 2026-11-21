@@ -99,7 +99,7 @@ async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z
 function siteIdParam(context: Context): string {
   const parsed = SiteIdParam.safeParse(context.req.param("artifactId"));
   if (!parsed.success)
-    throw sitePublishingError(404, "not_found", "site_not_found", "Site not found");
+    throw sitePublishingError(404, "not_found", "site_not_found", "App not found");
   return parsed.data;
 }
 
@@ -169,7 +169,7 @@ async function siteAuthPerson(
       403,
       "forbidden",
       "site_person_required",
-      "Only a signed-in person can sign in to a Site",
+      "Only a signed-in person can sign in to an app",
     );
   return { subjectId: access.subjectId, email: null, name: access.subjectLabel?.trim() || null };
 }
@@ -190,7 +190,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         404,
         "not_found",
         "site_not_published",
-        "This Site is not published",
+        "This app is not published",
       );
     return context.json(await sitePublicationView(deps, management.scope, publication));
   });
@@ -210,7 +210,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         404,
         "not_found",
         "site_not_published",
-        "This Site is not published",
+        "This app is not published",
       );
     const link: SitePublicationLink = {
       siteId: publication.siteId,
@@ -251,7 +251,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         404,
         "not_found",
         "site_not_published",
-        "This Site is not published",
+        "This app is not published",
       );
     try {
       await applySitePublishWarningFix(deps, grant, management.scope, management.record.id, fix);
@@ -279,14 +279,14 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         404,
         "not_found",
         "site_not_published",
-        "This Site is not published",
+        "This app is not published",
       );
     if (existing.status === "suspended")
       throw sitePublishingError(
         409,
         "conflict",
         "site_suspended",
-        "This Site was taken down; restore it first",
+        "This app was taken down; restore it first",
       );
     const result = await runSitePublishing(() =>
       upsertSitePublication(deps.db, management.scope, {
@@ -427,7 +427,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     const grant = await grantFor(context, "artifacts:read");
     const siteId = context.req.query("siteId");
     if (siteId !== undefined && !SiteIdParam.safeParse(siteId).success)
-      throw invalid("siteId must be a Site id");
+      throw invalid("siteId must be an app id");
     const label = (context.req.param("label") ?? "").toLowerCase();
     return context.json(
       await siteHostnameAvailability(
@@ -491,7 +491,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
           403,
           "forbidden",
           "site_admin_required",
-          "Only a workspace admin can change Site limits",
+          "Only a workspace admin can change app limits",
         );
       throw error;
     }
@@ -538,7 +538,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     const request = await body(context, SiteAuthAuthorizeRequest);
     const person = await siteAuthPerson(context, deps);
     const notFound = () =>
-      sitePublishingError(404, "not_found", "site_not_found", "This Site is not available");
+      sitePublishingError(404, "not_found", "site_not_found", "This app is not available");
     const label = parseSiteHostname(request.host, domain);
     if (!label) throw notFound();
     const hostname = siteHostname(label, domain);
@@ -552,7 +552,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (!publication || !site || publication.status !== "active" || !siteServable(site))
       throw notFound();
     if (request.redirectUri !== `https://${hostname}${SITE_GATEWAY_CALLBACK_PATH}`)
-      throw invalid("redirectUri must be this Site's sign-in callback");
+      throw invalid("redirectUri must be this app's sign-in callback");
     const kind = signedInSiteViewerKind({
       access: effectiveSiteAccess(publication.access, deps.settings),
       member: await isSiteWorkspaceMember(deps.db, scope, person.subjectId),
@@ -564,7 +564,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         403,
         "forbidden",
         "site_access_denied",
-        "You do not have access to this Site",
+        "You do not have access to this app",
       );
     const rate = await consumeSiteRuntimeRate(deps.db, scope, {
       siteId: site.id,

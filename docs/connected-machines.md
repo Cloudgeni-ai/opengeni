@@ -483,7 +483,8 @@ that host-side restriction. Store uploads omit the development-only manifest
 
 A product built on Opengeni can ship its own branded build of the extension
 (see `apps/browser-extension/README.md`) as its own Chrome Web Store item. The
-agent then also accepts that item's origin: the desktop kit's
+agent registers a separate `ai.opengeni.browser.<extension-id>` host that only
+accepts that item's origin. Configure the ID with the desktop kit's
 `browserExtensionIds`, or `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` (comma-separated
 IDs) when running `opengeni-agent service install`. On the server,
 `OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`
@@ -491,14 +492,19 @@ make agents, the chat's machine card and `/v1/config/client` name and link that
 extension instead of Opengeni Browser.
 
 Where the browser finds the native host depends on the platform. On macOS and
-Linux the agent writes `ai.opengeni.browser.json` into each Chromium-family
-browser's per-user `NativeMessagingHosts` directory. On Windows, browsers look
-the host up in the per-user registry instead: the agent writes the one manifest
-to `%LOCALAPPDATA%\Opengeni\NativeMessagingHosts\ai.opengeni.browser.json` and
-sets the default value of
-`HKCU\Software\Google\Chrome\NativeMessagingHosts\ai.opengeni.browser` (and the
-matching keys for Chromium, Edge and Brave when those browsers are present) to
-that path. Removal deletes only keys that still name this agent's manifest.
+Linux the agent writes `<host-name>.json` into each Chromium-family browser's
+per-user `NativeMessagingHosts` directory. On Windows, browsers look the host up
+in the per-user registry instead: the agent writes the manifest to
+`%LOCALAPPDATA%\Opengeni\NativeMessagingHosts\<host-name>.json` and sets the default
+value of `HKCU\Software\Google\Chrome\NativeMessagingHosts\<host-name>` (and the
+matching keys for Chromium, Edge and Brave when present) to that path. Removal
+leaves registrations that belong to another executable alone.
+For an app-hosted agent, installation also records its config directory for
+the executable named in the manifest. The native host uses that directory even
+though Chrome does not inherit the desktop app's environment. Standalone service
+installs keep their normal config discovery. If an older branded app overwrote
+the standalone registration, run `opengeni-agent service install` using the
+standalone executable to restore it after updating the branded app.
 When the extension cannot reach the agent, its popup says why: no agent is set
 up on this computer, the agent is too old for the extension, or it is not
 running.

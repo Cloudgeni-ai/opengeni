@@ -221,7 +221,6 @@ import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
-  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
@@ -332,6 +331,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import {
+  firstPartyAliasModelToolName,
   isFormerMcpToolName,
   keepsServerPrefixedToolNames,
   mcpServerNamespace,
@@ -581,7 +581,10 @@ import { z } from "zod";
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import { sandboxBaseInstructions } from "./sandbox-base-instructions";
-import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
+import {
+  OPENGENI_OPERATIONAL_INSTRUCTIONS,
+  OPENGENI_OPERATIONAL_INSTRUCTIONS_WITHOUT_APPLY_PATCH_THEN,
+} from "./operational-instructions";
 import {
   agentSharesWorkspace,
   agentInstructionsLayerContent,
@@ -753,6 +756,8 @@ import {
   type RetainableSessionImageOutputHook,
 } from "./retained-session-image";
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
+import { APPLY_PATCH_THEN_PARAMETER, linkApplyPatchThen } from "./apply-patch-then";
+import { linkApplyPatchRobust } from "./apply-patch-robust";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
 import {
@@ -1379,6 +1384,8 @@ export type AgentSegmentInput =
       text?: string;
       /** Ephemeral platform context: system role, never conversation history. */
       internalContext?: string;
+      /** Last durable operational notice of this turn, supplied by history assembly. */
+      lastOperationalNotice?: string;
       // Canonical conversation truth. When omitted, this is a fresh first
       // message; ordinary messages never deserialize an SDK RunState.
       historyItems?: AgentInputItem[] | null;
@@ -2589,12 +2596,40 @@ export type ConnectorActionToolCall = {
   defaultDecision?: "allow" | "ask";
   actionName?: string;
   /**
+   * Ask, or block, even when the connection's settings allow: an agent's Can
+   * use rule. Never loosens a decision; added by the worker's policy hooks.
+   */
+  minimumDecision?: "ask" | "block";
+  /**
+   * The agent and Can use rule that set `minimumDecision`, so its record and
+   * refusal name them. Absent when another floor set it.
+   */
+  minimumDecisionBy?: ConnectorActionAgentRule;
+  /**
    * This execution only tells the provider that the person declined the
    * question it asked mid-call (MCP elicitation); the ledger admits it once
    * after that rejection.
    */
   deliversDecline?: true;
 };
+
+/** An agent's Can use rule that made a connector call ask or blocked it. */
+export type ConnectorActionAgentRule = {
+  agentId: string;
+  agentName: string;
+  connector: string;
+  tool: string;
+  permission: "ask" | "block";
+};
+
+/** The refusal a model reads for a blocked connector call. */
+export function connectorActionBlockedMessage(agentRule?: ConnectorActionAgentRule | null): string {
+  if (!agentRule || agentRule.permission !== "block") {
+    return "Connector action was not executed: blocked";
+  }
+  const tool = agentRule.tool === "*" ? "all tools" : agentRule.tool;
+  return `Connector action was not executed: blocked by the agent "${agentRule.agentName}" (its Can use rule blocks ${tool} of ${agentRule.connector})`;
+}
 
 export type ConnectorActionPolicyPreparation =
   | { managed: false; decision: "unmanaged" }
@@ -2604,6 +2639,8 @@ export type ConnectorActionPolicyPreparation =
       requestId?: string;
       actionFingerprint?: string;
       approvalStatus?: string;
+      /** Set when an agent's Can use rule decided. */
+      agentRule?: ConnectorActionAgentRule;
     };
 
 export type ConnectorActionExecutionAdmission =
@@ -2620,6 +2657,8 @@ export type ConnectorActionExecutionAdmission =
         | "already_executed"
         | "uncertain_retry"
         | "not_executed";
+      /** With `blocked`, when an agent's Can use rule blocked it. */
+      agentRule?: ConnectorActionAgentRule;
     };
 
 /** Secret-free persistence boundary supplied by the worker for one attempt. */
@@ -3491,9 +3530,22 @@ export function repositoryIdentitiesFor(
 export function agentPromptExperimentsFor(settings: Settings): {
   experiments?: AgentPromptExperiments;
 } {
-  return settings.experimentKnowledgeRetrievalGuidance
-    ? { experiments: { knowledgeRetrievalGuidance: true } }
-    : {};
+  const experiments: AgentPromptExperiments = {
+    ...(settings.experimentKnowledgeRetrievalGuidance ? { knowledgeRetrievalGuidance: true } : {}),
+    ...(settings.experimentApplyPatchThen ? { applyPatchThenGuidance: true } : {}),
+  };
+  return Object.keys(experiments).length > 0 ? { experiments } : {};
+}
+
+/**
+ * The legacy operational contract. Its file-editing paragraph suggests the
+ * apply_patch `then` argument; with that argument off (the same setting the
+ * modular `sandbox` module reads) the sentence is left out.
+ */
+function legacyOperationalInstructions(settings: Settings): string {
+  return agentPromptExperimentsFor(settings).experiments?.applyPatchThenGuidance === true
+    ? OPENGENI_OPERATIONAL_INSTRUCTIONS
+    : OPENGENI_OPERATIONAL_INSTRUCTIONS_WITHOUT_APPLY_PATCH_THEN;
 }
 
 function appendDeploymentAgentInstructions(content: string, settings: Settings): string {
@@ -3554,6 +3606,7 @@ export function inspectPersistentAgentInstructions(
     return inspectModularAgentInstructions(settings, options.agentConfig, options);
   }
   const personaTemplate = options.instructionsTemplate ?? settings.agentInstructionsTemplate;
+  const operationalInstructions = legacyOperationalInstructions(settings);
   const personaAndCore = appendDeploymentAgentInstructions(
     composeAgentInstructions(
       personaTemplate,
@@ -3573,7 +3626,7 @@ export function inspectPersistentAgentInstructions(
     {
       id: "operational_contract",
       title: "Operational contract",
-      content: OPENGENI_OPERATIONAL_INSTRUCTIONS,
+      content: operationalInstructions,
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
   ];
@@ -3669,8 +3722,8 @@ export function inspectPersistentAgentInstructions(
     // persona is not. An agent chat extends it through the agent's
     // instructions, which every chat of that agent shares.
     let stable = sharedPersona
-      ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
-      : OPENGENI_OPERATIONAL_INSTRUCTIONS;
+      ? `${operationalInstructions}\n\n${personaAndCore}`
+      : operationalInstructions;
     if (sharedPersona && agentLayer) {
       const through = layers.findIndex((layer) => layer.id === "agent_instructions");
       const directives = layers.slice(2, through);
@@ -4419,9 +4472,6 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
-    throw new Error("A Connected Machine agent requires its reported workspace root");
-  }
   const repositorySkillsContext: RepositorySkillsContextState = { visible: null };
   const agent = new SandboxAgent({
     ...baseConfig,
@@ -4431,20 +4481,13 @@ export function buildOpenGeniAgent(
       resources,
       options.sandboxEnvironment,
       options.fileResourceDownloads,
-      options.activeSandboxBackend === "selfhosted"
-        ? {
-            root: options.sandboxWorkspaceRoot!,
-            includeResourceEntries: false,
-          }
-        : // File mounts are for the box this turn runs on, which is also the
-          // backend its pre-signed downloads were decided for.
-          { sandboxBackend: options.activeSandboxBackend ?? settings.sandboxBackend },
+      options,
     ),
-    instructionManifest: (manifest: Manifest) =>
-      manifestWithoutFileResourceEntries(manifest, resources),
-    // The layout names the active machine's root, so it reaches the model as a
-    // history item (`workspaceFilesystemLayout`), never in the system prompt.
-    filesystemInstructions: false,
+    // The model reads the workspace from the layout history item
+    // (`workspaceFilesystemLayout`), never from the system prompt: the layout
+    // names the active machine's root, and per-turn file mounts are described
+    // by the turn's attachment notice.
+    manifestInstructions: false,
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.sandboxEnvironment ? { sandboxEnvironment: options.sandboxEnvironment } : {}),
       ...(options.authorizeAttemptExecution
@@ -5378,11 +5421,7 @@ function installMcpApprovalPolicy(
       }
       // Opengeni's own servers have no workspace connector policy: only a tool
       // they ask approval for goes through the ledger, as on the gateway path.
-      if (
-        !policy.connectorBacked &&
-        !legacyApproval &&
-        attemptToolSource(policy.serverId) !== "mcp"
-      ) {
+      if (!policy.connectorBacked && !legacyApproval && !connectorPolicyGoverns(policy.serverId)) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -5830,7 +5869,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
-        attemptToolSource(server.id) === "mcp" ||
+        connectorPolicyGoverns(server.id) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -6045,23 +6084,51 @@ const STATIC_NEVER_APPROVAL: Extract<Tool<unknown>, { type: "function" }>["needs
 const APPLY_PATCH_EXAMPLE =
   "*** Begin Patch\n*** Add File: notes/example.txt\n+first line\n+second line\n*** End Patch";
 
+/** The `then` variant's example shows that one patch can change several files. */
+const APPLY_PATCH_WITH_THEN_EXAMPLE =
+  '*** Begin Patch\n*** Update File: src/app.py\n@@\n-greeting = "hi"\n+greeting = "hello"\n*** Add File: notes/example.txt\n+first line\n*** End Patch';
+
+const APPLY_PATCH_FILE_SECTIONS =
+  'File sections: "*** Add File: <path>" followed by lines each prefixed with "+"; "*** Delete File: <path>"; "*** Update File: <path>" (optionally followed by "*** Move to: <path>") with "@@" hunks whose lines start with " " (context), "-" (remove), or "+" (add).';
+
 const APPLY_PATCH_DESCRIPTION = [
   "Create, update, move, or delete files in the sandbox workspace.",
   'Pass exactly one argument, `patch`: a single string in apply_patch format that starts with "*** Begin Patch" and ends with "*** End Patch".',
-  'File sections: "*** Add File: <path>" followed by lines each prefixed with "+"; "*** Delete File: <path>"; "*** Update File: <path>" (optionally followed by "*** Move to: <path>") with "@@" hunks whose lines start with " " (context), "-" (remove), or "+" (add).',
+  APPLY_PATCH_FILE_SECTIONS,
   `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })}`,
 ].join(" ");
 
+/** The description when the tool also offers `then` (see apply-patch-then.ts). */
+const APPLY_PATCH_WITH_THEN_DESCRIPTION = [
+  "Create, update, move, or delete files in the sandbox workspace.",
+  'Pass `patch`: a single string in apply_patch format that starts with "*** Begin Patch" and ends with "*** End Patch".',
+  APPLY_PATCH_FILE_SECTIONS,
+  "One patch can change several files.",
+  `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_WITH_THEN_EXAMPLE })}`,
+].join(" ");
+
+const APPLY_PATCH_PATCH_PARAMETER = {
+  type: "string",
+  description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_EXAMPLE)}`,
+} as const;
+
+const APPLY_PATCH_WITH_THEN_PATCH_PARAMETER = {
+  type: "string",
+  description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_WITH_THEN_EXAMPLE)}`,
+} as const;
+
 const APPLY_PATCH_PARAMETERS = {
   type: "object",
-  properties: {
-    patch: {
-      type: "string",
-      description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_EXAMPLE)}`,
-    },
-  },
+  properties: { patch: APPLY_PATCH_PATCH_PARAMETER },
   required: ["patch"],
   // The SDK parser still accepts its legacy structured/tuple forms at runtime.
+  additionalProperties: true,
+} as const;
+
+const APPLY_PATCH_WITH_THEN_PARAMETERS = {
+  type: "object",
+  properties: { patch: APPLY_PATCH_WITH_THEN_PATCH_PARAMETER, then: APPLY_PATCH_THEN_PARAMETER },
+  required: ["patch"],
   additionalProperties: true,
 } as const;
 
@@ -6095,7 +6162,10 @@ function unrecognizedApplyPatchArgumentsError(input: string): string | null {
  * never-approval policy, and answer unrecognized argument objects with a
  * corrective tool error the model can retry from.
  */
-function withModelFacingApplyPatchFunction(tools: Tool<unknown>[]): Tool<unknown>[] {
+function withModelFacingApplyPatchFunction(
+  tools: Tool<unknown>[],
+  options: { then?: boolean } = {},
+): Tool<unknown>[] {
   return tools.map((capabilityTool) => {
     if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
       return capabilityTool;
@@ -6103,8 +6173,10 @@ function withModelFacingApplyPatchFunction(tools: Tool<unknown>[]): Tool<unknown
     const invoke = capabilityTool.invoke;
     return {
       ...capabilityTool,
-      description: APPLY_PATCH_DESCRIPTION,
-      parameters: APPLY_PATCH_PARAMETERS as unknown as typeof capabilityTool.parameters,
+      description: options.then ? APPLY_PATCH_WITH_THEN_DESCRIPTION : APPLY_PATCH_DESCRIPTION,
+      parameters: (options.then
+        ? APPLY_PATCH_WITH_THEN_PARAMETERS
+        : APPLY_PATCH_PARAMETERS) as unknown as typeof capabilityTool.parameters,
       strict: false,
       needsApproval: STATIC_NEVER_APPROVAL,
       invoke: async (runContext, input, details) => {
@@ -6229,7 +6301,9 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
-    const typedTools = withModelFacingApplyPatchFunction(withCodexAddFileApplyPatch(tools));
+    const typedTools = withModelFacingApplyPatchFunction(withCodexAddFileApplyPatch(tools), {
+      then: settings.experimentApplyPatchThen,
+    });
     const transportTools =
       options.structuredToolTransport === false
         ? withStructuredViewImageFunctionResults(typedTools)
@@ -6249,6 +6323,15 @@ function buildAgentCapabilitiesFromComposition(
   showHeifImagesAsJpeg(filesystemCapability);
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
+  }
+  // Per-section apply_patch is the innermost call-level wrapper: turn
+  // cancellation (secret references and `secretfile` in content lines), attempt
+  // authorization and the routing fences below see the whole patch once,
+  // before any section is applied.
+  if (settings.experimentApplyPatchThen) {
+    linkApplyPatchRobust(
+      filesystemCapability as unknown as Parameters<typeof linkApplyPatchRobust>[0],
+    );
   }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
@@ -6366,6 +6449,15 @@ function buildAgentCapabilitiesFromComposition(
         return withLeanExecCommandArguments(original.call(this), { finishFloor });
       };
     }
+  }
+  // `then` on the function apply_patch runs through the final exec_command
+  // above, so this link is installed after every other tool wrapper.
+  const shellCapability = caps.find((capability) => capability.type === "shell");
+  if (settings.experimentApplyPatchThen && shellCapability) {
+    linkApplyPatchThen(
+      filesystemCapability as unknown as Parameters<typeof linkApplyPatchThen>[0],
+      shellCapability as unknown as Parameters<typeof linkApplyPatchThen>[1],
+    );
   }
   return caps;
 }
@@ -8051,7 +8143,7 @@ function installAttemptConnectorActionGatewayLifecycle(
     const legacyMcpApproval =
       Boolean(config) && !config!.connectionRef && definition.approval === "human";
     const workspaceConnectorPolicy = Boolean(
-      connectorActionPolicy && config && attemptToolSource(config.id) === "mcp",
+      connectorActionPolicy && config && connectorPolicyGoverns(config.id),
     );
     if (!binding && !config?.connectionRef && !legacyMcpApproval && !workspaceConnectorPolicy)
       return definition;
@@ -8211,7 +8303,7 @@ function connectorActionGatewayLifecycle(input: {
             ));
       if (preparation.managed && preparation.decision === "block") {
         throw new ConnectorActionExecutionError(
-          "Connector action was not executed: blocked",
+          connectorActionBlockedMessage(preparation.agentRule),
           "not_executed",
         );
       }
@@ -8244,7 +8336,9 @@ function connectorActionGatewayLifecycle(input: {
           const admission = await input.connectorActionPolicy!.begin(connectorCall);
           if (!admission.allowed) {
             throw new ConnectorActionExecutionError(
-              `Connector action was not executed: ${admission.reason}`,
+              admission.reason === "blocked"
+                ? connectorActionBlockedMessage(admission.agentRule)
+                : `Connector action was not executed: ${admission.reason}`,
               "not_executed",
             );
           }
@@ -8591,6 +8685,17 @@ function configureMcpOperationRecovery(
 function configuredMcpOperationRecovery(server: PrefixedMcpServer, toolName: string) {
   const recovery = mcpOperationRecoveryByServer.get(server);
   return recovery && Object.hasOwn(recovery.policy, toolName) ? recovery : undefined;
+}
+
+/**
+ * Whether a server's tool calls go through the workspace connector policy
+ * (tool permissions, an agent's Can use, approvals): every third-party MCP
+ * server, and the Codex Apps gateway, whose connectors are third-party too.
+ * Codex Apps defaults to Allow, so only a person's or agent's rule changes it.
+ */
+function connectorPolicyGoverns(serverId: string): boolean {
+  const source = attemptToolSource(serverId);
+  return source === "mcp" || source === "codex_apps";
 }
 
 function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
@@ -12021,16 +12126,15 @@ export async function prepareRunInput(
       .filter((part): part is string => part !== undefined)
       .join("\n\n");
     if (internalContext) {
-      trailingMessages.push({
-        type: "message",
-        role: "system",
-        content:
-          TURN_OPERATIONAL_NOTICE_PREFIX +
-          "This status applies to the execution turn where this notice first appears. " +
-          "On later turns it is historical context, not current availability or authorization. " +
-          "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
-          internalContext,
-      } as AgentInputItem);
+      const content =
+        TURN_OPERATIONAL_NOTICE_PREFIX +
+        "This status applies to the execution turn where this notice first appears. " +
+        "On later turns it is historical context, not current availability or authorization. " +
+        "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
+        internalContext;
+      if (content !== input.lastOperationalNotice) {
+        trailingMessages.push({ type: "message", role: "system", content } as AgentInputItem);
+      }
     }
     if (input.text?.trim()) {
       trailingMessages.push({
@@ -13135,6 +13239,49 @@ async function resolveBareFirstPartyToolCall(
 }
 
 /**
+ * A call to a first-party tool by its hidden alias (a former name kept so
+ * saved references keep working, e.g. `site_data_query` or
+ * `opengeni__site_data_query` for `app_data_query`) runs the current tool.
+ * Like a bare-name call, the call is renamed to the current model name before
+ * dispatch, so history, events, display and approvals show the tool that runs.
+ * With `keepName` (a stored call bound under its original name) the tool is
+ * returned under the alias instead.
+ */
+async function resolveFirstPartyAliasToolCall(
+  agent: Agent<any, any>,
+  input: { name: string; toolCall?: unknown },
+  resolveCurrent: ReturnType<typeof createResolveMissingFunctionTool> | null,
+  keepName: boolean,
+) {
+  const modelName = firstPartyAliasModelToolName(input.name);
+  if (modelName === undefined) return null;
+  const tool = resolveCurrent
+    ? await resolveCurrent({ name: modelName })
+    : (await agent.getMcpTools(new RunContext())).find(
+        (candidate) => candidate.type === "function" && candidate.name === modelName,
+      );
+  if (!tool || tool.type !== "function" || tool.name !== modelName) return null;
+  if (keepName) return { ...tool, name: input.name };
+  const call = input.toolCall;
+  if (
+    call &&
+    typeof call === "object" &&
+    (call as { type?: unknown }).type === "function_call" &&
+    (call as { name?: unknown }).name === input.name
+  ) {
+    const record = call as Record<string, unknown>;
+    record.name = modelName;
+    delete record.namespace;
+    const runtime = lazyToolRuntimeForAgent(agent);
+    if (runtime) {
+      const restored = restoreDirectDeferredCallArgumentTypes(record, runtime);
+      if (restored !== record) record.arguments = restored.arguments;
+    }
+  }
+  return tool;
+}
+
+/**
  * Two servers offering one model name must never fail the run. The first
  * owner keeps the name; the later tool is unavailable this attempt.
  */
@@ -13211,6 +13358,17 @@ function mcpToolResolverForAgent(
     if (current) return current;
     const bare = await resolveBareFirstPartyToolCall(agent, input, resolveCurrent);
     if (bare) return bare;
+    try {
+      const alias = await resolveFirstPartyAliasToolCall(
+        agent,
+        input,
+        resolveCurrent,
+        formerNames === "bind",
+      );
+      if (alias) return alias as FunctionTool<any, any, any>;
+    } catch {
+      // The current tool cannot be listed; keep the not-found result.
+    }
     let renamed: string | undefined;
     try {
       renamed = await currentNameOfFormerMcpTool(agent, input.name);
@@ -14098,21 +14256,36 @@ function ensureManifest(
   });
 }
 
+/**
+ * Where a turn's workspace is: the backend of the box it runs on (the
+ * deployment's own when absent) and, on a Connected Machine, the root that
+ * machine reported.
+ */
+export type WorkspacePlacement = {
+  activeSandboxBackend?: Settings["sandboxBackend"];
+  sandboxWorkspaceRoot?: string;
+};
+
+/**
+ * The manifest of a turn's workspace: its root and the resources Opengeni
+ * puts there. A managed sandbox has `/workspace` with repositories and files
+ * mounted. A Connected Machine is the person's own machine: its reported root
+ * and no resource entries (repositories are not cloned there, and files reach
+ * it by download only). File mounts follow the box the turn runs on, which is
+ * also the backend its pre-signed downloads were decided for.
+ */
 export function buildManifest(
   settings: Settings,
   resources: ResourceRef[],
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
-  options: {
-    root?: string;
-    includeResourceEntries?: boolean;
-    /**
-     * The backend whose box applies this manifest. File mounts follow it,
-     * like the turn's pre-signed downloads; defaults to settings.sandboxBackend.
-     */
-    sandboxBackend?: Settings["sandboxBackend"];
-  } = {},
+  placement: WorkspacePlacement = {},
 ): Manifest {
+  const onConnectedMachine = placement.activeSandboxBackend === "selfhosted";
+  if (onConnectedMachine && !placement.sandboxWorkspaceRoot) {
+    throw new Error("A Connected Machine workspace requires its reported workspace root");
+  }
+  const boxBackend = placement.activeSandboxBackend ?? settings.sandboxBackend;
   assertUniqueResourceMountPaths(resources);
   const entries: Record<string, any> = {};
   const downloadsByFileId = new Map(
@@ -14121,7 +14294,7 @@ export function buildManifest(
       download,
     ]),
   );
-  for (const resource of options.includeResourceEntries === false ? [] : resources) {
+  for (const resource of onConnectedMachine ? [] : resources) {
     if (resource.kind === "repository") {
       const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
@@ -14140,23 +14313,18 @@ export function buildManifest(
       const download = downloadsByFileId.get(resource.fileId);
       entries[mountPath] = download
         ? sandboxDownloadDirectory(download, mountPath)
-        : objectStorageFileMount(
-            settings,
-            options.sandboxBackend ?? settings.sandboxBackend,
-            `files/${resource.fileId}/original`,
-          );
+        : objectStorageFileMount(settings, boxBackend, `files/${resource.fileId}/original`);
     }
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
   // that carry them at create/apply time, which broke every Modal session.
-
-  // sandbox-safe in-memory or staged local-dir sources, so no host path grant
-  // is required here.
+  // Every entry is a sandbox-safe in-memory or staged local-dir source, so no
+  // host path grant is required.
   // RM-3: the manifest env holds deployment constants only. Any other key is a
   // regression (user secrets are delivered per command), so drop it here.
   const keepEnvironmentName = sandboxManifestEnvironmentNamePredicate(settings);
   return new Manifest({
-    root: options.root ?? "/workspace",
+    root: onConnectedMachine ? placement.sandboxWorkspaceRoot! : "/workspace",
     entries,
     environment: Object.fromEntries(
       Object.entries(environment).filter(([name]) => keepEnvironmentName(name)),
@@ -14165,79 +14333,41 @@ export function buildManifest(
 }
 
 /**
- * The manifest the SDK renders into the system instructions (remote mount
- * policy and filesystem layout): the runtime manifest without file resource
- * entries. Files are attached per turn, so listing them there would change the
- * cached instruction prefix on every turn with a file. The session still
- * materializes the full manifest, and the turn's attachment notice at the end
- * of the input tells the model where each file is and how to treat it. Entries
- * under the default file root are dropped too, because a resumed sandbox's
- * manifest state can still hold files attached on earlier turns.
- */
-export function manifestWithoutFileResourceEntries(
-  manifest: Manifest,
-  resources: readonly ResourceRef[],
-): Manifest {
-  const filePaths = new Set(
-    resources.flatMap((resource) =>
-      resource.kind === "file" ? [resourceMountPath(resource)] : [],
-    ),
-  );
-  const fileRoot = `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/`;
-  const entries = Object.entries(manifest.entries).filter(
-    ([path]) => !filePaths.has(path) && !path.startsWith(fileRoot),
-  );
-  if (entries.length === Object.keys(manifest.entries).length) return manifest;
-  return new Manifest({ ...manifest, entries: Object.fromEntries(entries) });
-}
-
-/**
- * The filesystem layout of a turn's active workspace as the model reads it:
- * the instruction manifest (without file resources) rendered the way the SDK
- * renders its filesystem section. It names the active machine's root, so it is
- * delivered as a session history item (`ensureSessionWorkspaceFilesystem`)
- * instead of in the system prompt, where moving the session to another machine
- * would rewrite every cached request prefix. Null without a sandbox.
+ * The filesystem layout of a turn's workspace as the model reads it: the
+ * turn's manifest (`buildManifest`, same placement) rendered the way the SDK
+ * renders its filesystem section. It is the only place the model learns the
+ * workspace: the system prompt has none of it (`manifestInstructions: false`),
+ * because the root changes when the session moves to another machine and
+ * every cached request prefix would change with it. The worker delivers it as
+ * a session history item (`ensureSessionWorkspaceFilesystem`). Null without a
+ * sandbox.
+ *
+ * Files are left out: they are attached per turn and the turn's attachment
+ * notice describes them, so the layout of a turn with a file is the layout of
+ * a turn without one. (A file entry would also need the turn's pre-signed
+ * download where storage cannot be mounted, which the layout has no use for.)
  */
 export function workspaceFilesystemLayout(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    activeSandboxBackend?: Settings["sandboxBackend"];
-    sandboxWorkspaceRoot?: string;
+  options: WorkspacePlacement & {
     /** The configured agent's renderer; omitted for a plain chat. */
     renderer?: AgentRenderer;
   } = {},
 ): string | null {
   if (settings.sandboxBackend === "none") return null;
-  if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) return null;
-  // The layout never lists file resources, so they are left out before the
-  // manifest is built: a file entry needs the turn's pre-signed download where
-  // the storage cannot be mounted (Azure Blob on a native bucket-mount backend,
-  // AWS S3, GCS), and the layout has none to give.
-  const layoutResources = resources.filter((resource) => resource.kind !== "file");
   const manifest = buildManifest(
     settings,
-    layoutResources,
+    resources.filter((resource) => resource.kind !== "file"),
     {},
     [],
-    options.activeSandboxBackend === "selfhosted"
-      ? { root: options.sandboxWorkspaceRoot!, includeResourceEntries: false }
-      : {},
+    options,
   );
-  const layout = renderManifestDescription(
-    manifestWithoutFileResourceEntries(manifest, layoutResources),
-    {
-      depth: 3,
-    },
-  ).text;
+  const layout = renderManifestDescription(manifest, { depth: 3 }).text;
   // The system prompt describes the deployment's own kind of compute
   // (promptSandboxBackend). A session that moved onto a Connected Machine
   // learns what that means here, with the layout that changes with the move.
-  if (
-    options.activeSandboxBackend !== "selfhosted" ||
-    promptSandboxBackend(settings, "selfhosted") === "selfhosted"
-  )
+  if (options.activeSandboxBackend !== "selfhosted" || settings.sandboxBackend === "selfhosted")
     return layout;
   return [
     layout,

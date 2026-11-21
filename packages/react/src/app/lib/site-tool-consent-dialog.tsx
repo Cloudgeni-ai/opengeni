@@ -202,9 +202,7 @@ export function SiteToolConsentDialog({
         <p className="text-sm text-danger">Couldn't read this from the selected account.</p>
       ) : null}
       <CheckboxField
-        label={
-          account ? "Always allow on this Site from this account" : "Always allow on this Site"
-        }
+        label={account ? "Always allow on this app from this account" : "Always allow on this app"}
         checked={alwaysAllow}
         onCheckedChange={setAlwaysAllow}
       />

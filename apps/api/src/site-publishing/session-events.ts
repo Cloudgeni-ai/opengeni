@@ -187,7 +187,7 @@ export function siteSessionEventSseTransform(): TransformStream<Uint8Array, Uint
     buffer = buffer.slice(start);
     if (output) controller.enqueue(encoder.encode(output));
     if (buffer.length > SSE_BUFFER_MAX_CHARS)
-      throw new Error("Session event stream frame exceeds the Site projection buffer");
+      throw new Error("Session event stream frame exceeds the app projection buffer");
   };
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {

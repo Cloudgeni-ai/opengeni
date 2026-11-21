@@ -12,8 +12,10 @@ import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   ArchiveIcon,
   ArrowLeftIcon,
+  CircleArrowUpIcon,
   CopyIcon,
   CopyPlusIcon,
+  DownloadIcon,
   InfoIcon,
   LinkIcon,
   Maximize2Icon,
@@ -65,6 +67,7 @@ import {
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
 import { useSiteActions } from "../components/artifacts/site-actions";
+import { useExportApp, useUpgradeApp } from "../components/artifacts/app-package";
 import { useSiteSidebarActions } from "../lib/site-sidebar-bridge";
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
@@ -103,6 +106,8 @@ import {
   type SiteChatPanelLayout,
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
+import { AppConnectCard } from "../lib/app-connect-card";
+import { AppSyncJoinCard, AppSyncOptInHost } from "../lib/app-sync-opt-in";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
@@ -169,6 +174,7 @@ export function SiteViewRoute({
   startNew = false,
   page,
   artifactsReturn,
+  connect,
   embedded = false,
 }: {
   workspaceId: string;
@@ -189,6 +195,8 @@ export function SiteViewRoute({
    * with a Back to it, and the Site's own moves keep it.
    */
   artifactsReturn?: SiteViewArtifactsReturn | undefined;
+  /** Open this connect card item's dialog once (`?connect=`, from a published App). */
+  connect?: string | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
@@ -232,6 +240,35 @@ export function SiteViewRoute({
     [consoleToolBridge, siteId, subscribeDataChanges],
   );
   const artifact = live.detail?.artifact;
+  // The connect card's `?connect=` is used once, then dropped from the address.
+  const connectHandled = useCallback(
+    () =>
+      void navigate({
+        to: SITE_ROUTE,
+        params: { workspaceId, siteId },
+        search: {
+          ...back,
+          ...(conversation ? { conversation } : {}),
+          ...(page ? { page } : {}),
+        },
+        replace: true,
+      }),
+    [back, conversation, navigate, page, siteId, workspaceId],
+  );
+  const connectCard =
+    artifact?.status === "active" ? (
+      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex flex-col items-end gap-2">
+        <AppSyncJoinCard workspaceId={workspaceId} siteId={siteId} />
+        <AppConnectCard
+          workspaceId={workspaceId}
+          siteId={siteId}
+          versionId={artifact.currentVersion?.id ?? null}
+          connectKey={connect}
+          onConnectKeyHandled={connectHandled}
+        />
+        <AppSyncOptInHost workspaceId={workspaceId} siteId={siteId} />
+      </div>
+    ) : null;
   // The publish form, open for this Site; another Site starts without it.
   const siteKey = `${workspaceId}/${siteId}`;
   const [publishingFor, setPublishingFor] = useState<string | null>(null);
@@ -280,6 +317,10 @@ export function SiteViewRoute({
     [artifact, live.failed],
   );
   const { check } = live;
+  // Embedded (the phone app's viewer) there is no page URL to keep the Site's
+  // address in, so it lives here, starting at `page`.
+  const [embeddedLocation, setEmbeddedLocation] = useState(page ?? "/");
+  const onEmbeddedLocationChange = useCallback((href: string) => setEmbeddedLocation(href), []);
   const backControl = back ? (
     <ArtifactsBackLink workspaceId={workspaceId} artifactsReturn={back} />
   ) : undefined;
@@ -288,20 +329,22 @@ export function SiteViewRoute({
   if (embedded) {
     return (
       <div
-        className="flex h-full min-h-0 min-w-0 flex-col"
+        className="relative flex h-full min-h-0 min-w-0 flex-col"
         data-workspace-scroll-owner="self-managed"
       >
+        {connectCard}
         <SiteView
           client={client}
           workspaceId={workspaceId}
           siteId={siteId}
           toolBridge={toolBridge}
           viewer={viewer}
-          siteLocation={page ?? "/"}
+          siteLocation={embeddedLocation}
+          onSiteLocationChange={onEmbeddedLocationChange}
           showToolbar={false}
           versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
           watch={live.watch}
-          archivedMessage="This Site is archived."
+          archivedMessage="This app is archived."
         />
       </div>
     );
@@ -344,14 +387,14 @@ export function SiteViewRoute({
               </div>
             ) : null}
             <p className="p-4 text-sm text-fg-muted">
-              This Site is archived.{" "}
+              This app is archived.{" "}
               <Link
                 to="/workspaces/$workspaceId/artifacts/$artifactId"
                 params={{ workspaceId, artifactId: siteId }}
                 search={{ tab: "settings" }}
                 className="font-medium text-fg underline underline-offset-2"
               >
-                {canPublish ? "Restore it from Site details" : "View Site details"}
+                {canPublish ? "Restore it from app details" : "View app details"}
               </Link>
             </p>
           </>
@@ -421,12 +464,13 @@ export function SiteViewRoute({
               onFullScreenChange={setFullScreen}
               archivedMessage={
                 canPublish
-                  ? "This Site is archived. Restore it from Site details."
-                  : "This Site is archived."
+                  ? "This app is archived. Restore it from app details."
+                  : "This app is archived."
               }
             />
           </div>
         )}
+        {publishing ? null : connectCard}
         <ChatFileDropCover relay={relay} enabled={!layout.collapsed} />
       </div>
       <ChatFileDropRelayProvider relay={relay}>
@@ -500,6 +544,8 @@ function SiteActionsMenu({
   const site = useSiteActions(workspaceId, origin, { hasVersion });
   const sidebar = useSiteSidebarActions(workspaceId, origin);
   const resetAllowed = useResetSiteToolAllowances(workspaceId, origin.siteId, versionId);
+  const exportApp = useExportApp(workspaceId);
+  const upgradeApp = useUpgradeApp(workspaceId, origin.siteId);
   return (
     <span data-site-actions-root="" className="contents">
       <DropdownMenu>
@@ -508,7 +554,7 @@ function SiteActionsMenu({
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="More Site actions"
+            aria-label="More app actions"
             title="More"
             data-site-actions-menu=""
             className="size-8 rounded-md text-fg-muted hover:text-fg pointer-coarse:size-11"
@@ -533,10 +579,25 @@ function SiteActionsMenu({
               {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
             </DropdownMenuItem>
           ) : null}
+          {site.duplicate && exportApp ? (
+            <DropdownMenuItem
+              disabled={exportApp.busy}
+              onSelect={() => void exportApp.run(origin.siteId)}
+            >
+              <DownloadIcon aria-hidden="true" />
+              Export app
+            </DropdownMenuItem>
+          ) : null}
+          {site.duplicate && upgradeApp ? (
+            <DropdownMenuItem onSelect={upgradeApp.open}>
+              <CircleArrowUpIcon aria-hidden="true" />
+              Upgrade from package
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem asChild>
             <Link {...site.details}>
               <InfoIcon aria-hidden="true" />
-              Site details
+              App details
             </Link>
           </DropdownMenuItem>
           {resetAllowed ? (
@@ -556,6 +617,7 @@ function SiteActionsMenu({
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
+      {upgradeApp?.element}
     </span>
   );
 }
@@ -942,7 +1004,7 @@ function SiteChatPanel({
       idempotencyKey: string,
       options: NewConversationCreateOptions,
     ): Promise<string> => {
-      if (!versionId) throw new Error("This Site has no published version yet.");
+      if (!versionId) throw new Error("This app has no published version yet.");
       const voice = options.startMode === "realtime";
       let clientEventId = clientEventIds.current.get(idempotencyKey);
       if (!voice && !clientEventId) {
@@ -1144,9 +1206,9 @@ function SiteChatPanel({
                 className="min-h-0 flex-1 px-3 pb-3"
               />
             ) : site.status === "loading" ? (
-              <PanelLoading label="Loading Site" />
+              <PanelLoading label="Loading app" />
             ) : site.status === "error" ? (
-              <Retry message="Couldn’t load this Site." onRetry={retrySite} />
+              <Retry message="Couldn’t load this app." onRetry={retrySite} />
             ) : (
               <p className="px-4 py-4 text-sm text-fg-muted">No conversations yet.</p>
             )

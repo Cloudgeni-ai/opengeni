@@ -81,3 +81,40 @@ test("with only a download page, the steps still happen on the other computer", 
   );
   await r.unmount();
 });
+
+test("connecting this device beside a ready computer elsewhere reports this device once it is ready", async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", {
+    value: { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", maxTouchPoints: 0 },
+    configurable: true,
+    writable: true,
+  });
+  const mini = { ...(ready as unknown as object[])[0], name: "Mac mini", os: "macos" };
+  const pc = { ...mini, sandboxId: "win", enrollmentId: "enr-win", name: "Desk PC", os: "windows" };
+  const readied: string[] = [];
+  const render = (machines: object[]) => (
+    <ThisComputerCard
+      productName="Acme"
+      machines={machines as never}
+      onConnect={async () => {}}
+      onReady={(name) => readied.push(name)}
+    />
+  );
+  const r = await renderComponent(render([mini]));
+  try {
+    expect(r.container.textContent).toContain("Mac mini is another computer, not this one.");
+    const button = [...r.container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Use this computer",
+    )!;
+    await act(async () => button.click());
+    expect(readied).toEqual([]);
+
+    await r.rerender(render([mini, pc]));
+    expect(r.container.textContent).toContain("Agents can use Desk PC");
+    expect(r.container.textContent).not.toContain("another computer, not this one");
+    expect(readied).toEqual(["Desk PC"]);
+  } finally {
+    await r.unmount();
+    if (original) Object.defineProperty(globalThis, "navigator", original);
+  }
+});

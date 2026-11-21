@@ -1,5 +1,5 @@
 import type { ConnectorActionPolicySnapshotEntry } from "./schema";
-import type { McpConnectionAccountBinding } from "@opengeni/contracts";
+import type { McpConnectionAccountBinding, ToolReviewAgentRule } from "@opengeni/contracts";
 import { stableJson } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 
@@ -67,8 +67,11 @@ export type ResolvedConnectorActionPolicy =
       managed: true;
       source: "default";
       entry: null;
-      decision: "allow" | "ask";
+      /** `block` only from a minimum decision (an agent's Can use Block). */
+      decision: "allow" | "ask" | "block";
       actionName: string;
+      /** The agent's Can use rule that set the minimum decision, when one did. */
+      agentRule?: ToolReviewAgentRule;
     }
   | {
       managed: true;
@@ -124,6 +127,33 @@ export function resolveConnectorActionPolicy(
     return { managed: true, source: "ambiguous", entry: null, decision: "block" };
   }
   return { managed: true, source: "explicit", entry: selected.entry };
+}
+
+const DECISION_STRICTNESS = { allow: 0, ask: 1, block: 2 } as const;
+
+/**
+ * Raise a resolved policy to at least `minimum`: an agent's Can use Ask
+ * first or Block, or a gateway that always asks. Never loosens: a stricter
+ * choice already resolved stays, and an explicit Block still blocks.
+ */
+export function withMinimumConnectorDecision(
+  resolved: ResolvedConnectorActionPolicy,
+  minimum: "ask" | "block" | undefined,
+  actionName: string,
+  /** Who set `minimum`: an agent's Can use rule, recorded with the request. */
+  minimumBy?: ToolReviewAgentRule,
+): ResolvedConnectorActionPolicy {
+  if (minimum === undefined) return resolved;
+  const current = resolved.managed ? connectorActionPolicyDecision(resolved) : "allow";
+  if (DECISION_STRICTNESS[current] >= DECISION_STRICTNESS[minimum]) return resolved;
+  return {
+    managed: true,
+    source: "default",
+    entry: null,
+    decision: minimum,
+    actionName,
+    ...(minimumBy && minimumBy.permission === minimum ? { agentRule: minimumBy } : {}),
+  };
 }
 
 export function connectorActionPolicyDecision(

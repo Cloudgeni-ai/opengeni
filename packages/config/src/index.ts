@@ -72,6 +72,7 @@ import {
   type CompatibleModelReasoning,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  firstPartyMcpToolAliasTarget,
   normalizeSitesDomain,
   OpenGeniSlackBotDisplayName,
   SandboxBackend,
@@ -1416,6 +1417,13 @@ const SettingsSchema = z.object({
   // Lean non-strict `exec_command` schema: only `cmd` and `max_output_tokens`
   // are required (on by default after an A/B; set false to disable).
   experimentOutputCost: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_OUTPUT_COST
+  // The function `apply_patch` package (on by default; set false to restore the
+  // plain tool): an optional `then` command run once after the patch applies,
+  // through exec_command, with its result in the same tool output; one prompt
+  // sentence suggesting it; and per-section application (an empty Add File
+  // creates an empty file, an Invalid Context failure shows the closest region
+  // of the file, out-of-order hunks are retried in file order).
+  experimentApplyPatchThen: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_APPLY_PATCH_THEN
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -6638,6 +6646,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
+    experimentApplyPatchThen: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_THEN"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),
@@ -12674,6 +12683,12 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
  * - `organizationsYoungerThanMs`: only for the `new` tier, which applies to a
  *   Free self-serve organization created less than this long
  *   ago. Omitted or 0 turns the `new` tier off.
+ * - `cardTrialBoxSeconds`: while the card verification gate is on, the
+ *   metered box time an unpaid organization without a verified card gets for
+ *   agent turns before it must add one, over its whole life (not per day).
+ *   One such box runs at a time; terminals, processes, desktops and viewers
+ *   still need the card to start a box. Once it is used the reaper drains
+ *   boxes no turn holds. Omitted or 0: no box without a card.
  */
 export type SandboxPlanLimit = {
   viewerOnlyBoxesPerOrganization?: number;
@@ -12684,6 +12699,7 @@ export type SandboxPlanLimit = {
   boxSecondsPerPersonPerDay?: number;
   idleDrainAllHolders?: boolean;
   organizationsYoungerThanMs?: number;
+  cardTrialBoxSeconds?: number;
 };
 
 /**
@@ -12716,18 +12732,25 @@ const SANDBOX_PLAN_LIMIT_COUNT_FIELDS = [
   "boxSecondsPerOrganizationPerDay",
   "boxSecondsPerPersonPerDay",
   "organizationsYoungerThanMs",
+  "cardTrialBoxSeconds",
 ] as const;
 
 /** 12 box-hours: the daily box-time budget of an unpaid organization and person. */
 const UNPAID_BOX_SECONDS_PER_DAY = 12 * 60 * 60;
 
-/** The running, per-person, daily and idle bounds every unpaid tier shares. */
+/** 10 box-minutes: what an unpaid organization's agent gets before a card is
+ * required, while the card verification gate is on. */
+const UNPAID_CARD_TRIAL_BOX_SECONDS = 10 * 60;
+
+/** The running, per-person, daily, idle and card-trial bounds every unpaid
+ * tier shares. */
 const UNPAID_SANDBOX_BOUNDS = {
   runningBoxesPerOrganization: 2,
   runningBoxesPerPerson: 2,
   boxSecondsPerOrganizationPerDay: UNPAID_BOX_SECONDS_PER_DAY,
   boxSecondsPerPersonPerDay: UNPAID_BOX_SECONDS_PER_DAY,
   idleDrainAllHolders: true,
+  cardTrialBoxSeconds: UNPAID_CARD_TRIAL_BOX_SECONDS,
 } as const satisfies SandboxPlanLimit;
 
 export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
@@ -13028,6 +13051,7 @@ export const UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS = [
   "boxSecondsPerOrganizationPerDay",
   "boxSecondsPerPersonPerDay",
   "idleDrainAllHolders",
+  "cardTrialBoxSeconds",
 ] as const satisfies readonly (keyof SandboxPlanLimit)[];
 
 /** `limit` for an organization that has paid: without the unpaid-only bounds. */
@@ -13755,11 +13779,13 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   validateRecordingTranscriptionSettings(settings);
+  // A former first-party name (site_*) is the same tool as its successor (app_*).
+  const currentToolName = (tool: string) => firstPartyMcpToolAliasTarget(tool) ?? tool;
   const allowedFirstPartyMcpTools = new Set(
-    settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
+    (settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES).map(currentToolName),
   );
   const disallowedDefaults = (settings.defaultFirstPartyMcpTools ?? []).filter(
-    (tool) => !allowedFirstPartyMcpTools.has(tool),
+    (tool) => !allowedFirstPartyMcpTools.has(currentToolName(tool)),
   );
   if (disallowedDefaults.length > 0) {
     throw new Error(

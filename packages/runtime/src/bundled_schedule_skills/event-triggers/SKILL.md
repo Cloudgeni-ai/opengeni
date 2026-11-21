@@ -13,7 +13,8 @@ after its instructions.
 
 1. `event_sources_list` lists the sources you can use, and under `readyToAdd`
    the ones that need no setup: MCP servers the user is signed in to that offer
-   events, their Gmail, and This workspace for meetings. A `readyToAdd` id works
+   events, their Gmail, and This workspace for meetings and app data changes
+   (`app.record.added` and the like). A `readyToAdd` id works
    wherever a source id does; the user's source is added the first time it is
    used. If the app the user means is in neither list and it sends webhooks,
    add it yourself with `event_sources_create_webhook` (below). A person adds

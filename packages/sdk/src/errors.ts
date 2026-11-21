@@ -521,13 +521,13 @@ export function formatErrorMessage(
     ) {
       message = "Private conversations are unavailable. Ask an administrator to enable them.";
     } else if (error.details?.code === "not_available_for_viewer") {
-      message = "This Site's assistant is not available for this viewer.";
+      message = "This app's assistant is not available for this viewer.";
     } else if (error.details?.code === "site_budget_exhausted") {
-      message = "This Site's assistant has reached its usage limit for now.";
+      message = "This app's assistant has reached its usage limit for now.";
     } else if (error.details?.code === "site_budget_busy") {
-      message = "This Site's assistant is busy. Try again in a moment.";
+      message = "This app's assistant is busy. Try again in a moment.";
     } else if (error.details?.code === "site_platform_brake_engaged") {
-      message = "This Site's assistant is paused for visitors right now.";
+      message = "This app's assistant is paused for visitors right now.";
     } else if (error.code === "allowance_exhausted") {
       message = "Usage limit reached. Wait for the reset or ask an administrator for more usage.";
     } else if (error.code === "seat_limit_reached") {

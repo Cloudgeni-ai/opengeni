@@ -219,15 +219,29 @@ export type SlackMessageBlock =
   | {
       type: "actions";
       block_id: string;
-      elements: Array<{
-        type: "button";
-        action_id: string;
-        value: string;
-        text: { type: "plain_text"; text: string; emoji?: boolean };
-        /** A link button: Slack opens it and still sends the action. */
-        url?: string;
-        style?: "primary" | "danger";
-      }>;
+      elements: Array<
+        | {
+            type: "button";
+            action_id: string;
+            value: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            /** A link button: Slack opens it and still sends the action. */
+            url?: string;
+            style?: "primary" | "danger";
+          }
+        | {
+            type: "static_select";
+            action_id: string;
+            placeholder: { type: "plain_text"; text: string; emoji?: boolean };
+            option_groups: Array<{
+              label: { type: "plain_text"; text: string; emoji?: boolean };
+              options: Array<{
+                text: { type: "plain_text"; text: string; emoji?: boolean };
+                value: string;
+              }>;
+            }>;
+          }
+      >;
     }
   | {
       type: "context";

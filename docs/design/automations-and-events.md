@@ -218,6 +218,11 @@ has.
     follows the workspace's GitHub connection: its routes, one per bound
     installation, are recomputed whenever a binding changes or the source is
     added again (which repairs lost routes).
+  - Adding it needs that connection. Without one, the web app's add form
+    says GitHub isn't connected and offers **Connect GitHub** (the workspace's
+    GitHub connection in Connected tools, the same Connect flow), instead of
+    the server's "Connect GitHub to this workspace first" error
+    (`apps/web/src/components/schedules/event-source-connect-first.tsx`).
   - The route table has no tenant RLS, so a GitHub route keeps no
     installation id: its key is an HMAC-SHA-256 of the installation under a
     route secret derived from the deployment's encryption key. A deployment
@@ -239,11 +244,17 @@ has.
     deployment's own Apps (`<slug>[bot]`) mark own events.
 - **Slack**: the existing Slack events receiver keeps its conversational
   behaviour and additionally records the callback for the workspace the Slack
-  team is installed in, when that workspace has a Slack source. The receiver's
-  installation routing already names that workspace, so the source needs no
-  ingress route.
-  - One Slack source per workspace, shared with the workspace like the channels
-    the app is in.
+  team is installed in (the bot's home), when that workspace has a Slack
+  source. The receiver's installation routing already names that workspace,
+  so the source needs no ingress route.
+  - A workspace the organization shares the bot with (Slack bot availability,
+    see [Slack](../slack-bot.md#slack-events-for-automations)) can add a Slack
+    source too, and the same callback is recorded there as well, for as long
+    as the share covers that workspace. One SQL call per callback finds those
+    sources under each workspace's own RLS context (migration 1530); turning
+    sharing off or narrowing it stops delivery at the next callback.
+  - One Slack source per Slack team in a workspace, shared with the workspace
+    like the channels the app is in.
   - Types: `message.posted` (messages and thread replies), `message.edited`,
     `message.deleted`, `reaction.added`, `member.joined_channel`,
     `member.left_channel`. Data carries the channel id and type, the Slack user
@@ -254,7 +265,8 @@ has.
   - Own events are read from the callback itself (its `api_app_id` and the
     authorized bot user), so a stored delivery reads the same on replay.
   - Recording never affects the conversation: a failure is logged and the
-    callback is handled as before.
+    callback is handled as before. A failure for one workspace never stops
+    the others.
 - **Gmail**: one person's mailbox, read with the Gmail connection their chats
   use. Gmail only pushes changes through an operator-owned Pub/Sub topic, so
   instead of depending on that setup the source has a **feed**: Opengeni reads
@@ -285,6 +297,42 @@ has.
   the feed retries every 15 minutes and the first good read unblocks them.
   Other failures back off and block after an hour. Adding another app of this
   kind is one adapter.
+
+### GitHub (your connection)
+
+Where the workspace has no GitHub app (or it can't read a repository), a
+person's own GitHub connection (Your GitHub) can still tell a chat that a
+pull request merged or a release was published: a source of kind
+`github_personal` (migrations `1533` to `1536`), named "GitHub (your
+connection)". A chat's merge wake (`session_links_add` with `wakeWhen`,
+[session-status-and-links.md](../session-status-and-links.md)) adds it on
+first use; `POST /event-sources {kind: "github_personal"}` does too.
+
+- **One source per person, private to them.** Creating it again returns the
+  existing one; it needs their active Your GitHub connection, and a
+  workspace-level caller gets 422. It can't be shared with the workspace.
+- **A feed that reads only what its triggers name.** GitHub sends nothing
+  for a personal connection, so the feed (`github-personal-source.ts`) reads
+  GitHub's REST API as the owner every two minutes while an automation
+  listens: for a `pull_request.closed` trigger whose conditions name
+  `data.repository.full_name` and `data.pull_request.number` (equals), that
+  pull request; for a `release.published` trigger naming the repository, its
+  latest releases. Only repositories the person allowed Opengeni to use are
+  read, and only with GET, as for the person's other Your GitHub work. Triggers
+  without those conditions never fire; at most the 25 newest pull requests
+  and 10 newest repositories are read, and one repository failing doesn't
+  hold up the others.
+- **Same events as the app's.** A merge or release that happened after the
+  trigger was created (less two minutes, as GitHub's times have whole
+  seconds) is shaped like the app webhook's event (`shape` in
+  `github-events.ts`), so the same conditions match, and is recorded once
+  per merge or release (its delivery's dedupe key); the feed keeps no
+  cursor. Types: `pull_request.closed` and `release.published`.
+- **Failures.** A disconnected Your GitHub (or GitHub refusing its sign-in)
+  blocks the source's triggers with a reconnect reason; other GitHub errors
+  (such as its rate limit) are retried, and when every read fails they back
+  off and block after an hour, like other feeds. Its deliveries can't be
+  replayed.
 
 ### This workspace
 
@@ -476,7 +524,10 @@ and the person's sources page shows only what they use.
 An event run is a scheduled-task run with `triggerType: "event"` and producer
 key `scheduled-task-event:<occurrenceId>`, started as the same Temporal fire
 workflow with that key as its workflow id, so a retried start is one run. It
-acts with the automation's own authority, like a scheduled fire.
+acts with the automation's own authority, like a scheduled fire. An App data
+sync (action `app_sync`, [app-sync.md](../app-sync.md)) takes event triggers
+from workspace sources the same way: the fire queues the run for the sync
+executor, no chat is created and the events are not passed to the tool.
 
 Its `scheduled_occurrence` chat update carries an `events` field: the
 occurrence id, how many events the batch accounts for, whether events may have
@@ -591,6 +642,14 @@ Runs inherit access like scheduled runs: they follow the destination chat, or
 the workspace defaults and the owner's own access for a separate agent, unless
 the owner explicitly narrows them.
 
+### Linked pull request wakes
+
+`session_links_add` with `wakeWhen` creates a one-time event automation on the
+current chat for a linked GitHub pull request's merge or its repository's next
+release, through the ordinary `scheduled_tasks_create` path (no second engine).
+A one-time event automation's wake of a chat that started in Slack reopens
+the thread delivery from the wake; recurring ones don't. See [../session-status-and-links.md](../session-status-and-links.md).
+
 ## Surfaces
 
 - **HTTP and SDK.** Scheduled task create and update take `events:
@@ -642,6 +701,30 @@ the owner explicitly narrows them.
   generated from the event's JSON Schema, with JSON as the fallback. The web
   app's form and the panel share the "When" field and the automation model.
 - **Agent tools.** See [Agent tools](#agent-tools).
+
+## Agent triggers
+
+An agent's **Starts when** (docs/agents.md) is a list of ordinary
+automations whose `agentConfig.agentId` names the agent. A chat the
+scheduler starts for it (each run, or the first run of the automation's own
+chat) is bound to that agent, so it runs with the agent's Instructions,
+Memory and Can use; the run is created as the task, with the task owner's
+access to the agent. An existing chat must already be bound to the same
+agent. Every trigger type the catalog offers works, including
+types added later, because the trigger is the automation's own: nothing is
+agent-specific in intake or delivery. The runs keep every automation limit:
+the chain limit on event-started chats, the storm guard (`maxRunsPerHour`)
+and usage limits. Saving checks the agent is one the owner can use, for the
+automation as it will be after the edit (agent, run mode, chat and
+visibility); changing the agent of an automation with its own chat starts a
+new chat with the new agent (see `docs/agents.md`). The agent page's **Add
+trigger** and **Set up** open a small dialog that saves such an automation
+directly, shared like the agent (see `docs/agents.md`). The automation form
+takes `?agent=<id>` (and `?agentTrigger=<n>` for a ready-made agent's
+suggestion) and binds the new automation to the agent; the dialog's **Open
+full form** opens it with `?returnTo=agent`, so Cancel and Save return to
+the agent's page. A ready-made agent's suggested triggers are never created on their
+own: each waits until the person picks its source and saves.
 
 ## Templates
 

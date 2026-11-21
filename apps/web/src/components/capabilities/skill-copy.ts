@@ -4,26 +4,8 @@
    SKILL.md frontmatter; people read a name and one plain sentence.
    -------------------------------------------------------------------------- */
 
-const SMALL_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"]);
-
-/** "agent-browser" -> "Agent browser". Names that already read as names are kept. */
-export function humanizeName(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return trimmed;
-  // Already written for people: has a space or an uppercase letter past the first.
-  if (/\s/.test(trimmed) || /[A-Z]/.test(trimmed.slice(1))) return trimmed;
-  const words = trimmed.split(/[-_.]+/).filter(Boolean);
-  if (!words.length) return trimmed;
-  return words
-    .map((word, index) =>
-      index === 0
-        ? word.charAt(0).toUpperCase() + word.slice(1)
-        : SMALL_WORDS.has(word)
-          ? word
-          : word.toLowerCase(),
-    )
-    .join(" ");
-}
+/** "agent-browser" -> "Agent browser"; shared with the agent page's Skills. */
+export { humanizeName } from "@opengeni/react/app/lib/skill-names";
 
 /** The SKILL.md body without its YAML frontmatter. */
 export function skillBody(markdown: string | null | undefined): string {

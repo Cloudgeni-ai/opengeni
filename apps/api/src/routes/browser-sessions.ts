@@ -397,6 +397,7 @@ export function registerBrowserSessionRoutes(
     db: deps.db,
     settings: deps.settings,
     bus: deps.bus,
+    objectStorage: deps.objectStorage,
     observability: deps.observability,
   };
 
@@ -4202,6 +4203,7 @@ export function registerBrowserSessionRoutes(
           operation,
           retryControllerTransport: operation === "browser.read" || operation === "browser.action",
           allowOperationReplay,
+          ...(expectedPlacement?.kind === "sandbox_group" ? { managedHome: true } : {}),
           ...(expectedPlacementInstanceId &&
           (expectedPlacement?.kind === "sandbox_group" ||
             expectedPlacement?.kind === "external_provider")

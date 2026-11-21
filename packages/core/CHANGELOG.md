@@ -1,5 +1,63 @@
 # @opengeni/core
 
+## 6.35.0
+
+### Minor Changes
+
+- 7eda7f0: App data changes start automations and reach workspace webhooks: the `app.record.added`, `app.record.changed`, `app.record.removed` and `app.sql.changed` event types join the "This workspace" trigger source and the workspace webhook types, and `verifyWebhookEvent` accepts them. See docs/site-data.md.
+- fa938cd: `npx opengeni connect` adds the Opengeni MCP server and a short `opengeni` skill to Claude Code, Codex, Cursor and VS Code with Copilot. The organization MCP server lists named tools for connected agents (`delegate`, `wait_for`, session, app, tool, Skill and Knowledge tools). `updateOrganizationMcpConnection` accepts `appDataAccess` and `defaultWorkspaceId`, and `access` is now optional.
+
+### Patch Changes
+
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [74f4771]
+- Updated dependencies [8bf1ec2]
+- Updated dependencies [c36504f]
+- Updated dependencies [227502b]
+  - @opengeni/contracts@6.35.0
+  - @opengeni/db@6.35.0
+  - @opengeni/runtime@6.35.0
+  - @opengeni/xai-subscription@6.35.0
+  - @opengeni/capabilities@6.35.0
+  - @opengeni/codex@6.35.0
+  - @opengeni/config@6.35.0
+  - @opengeni/documents@6.35.0
+  - @opengeni/events@6.35.0
+  - @opengeni/observability@6.35.0
+  - @opengeni/storage@6.35.0
+  - @opengeni/tool-gateway@6.35.0
+  - @opengeni/vaults@6.35.0
+  - @opengeni/network@6.35.0
+
+## 6.34.0
+
+### Patch Changes
+
+- e292b4a: Add SuperOffice CRM to the catalog: SuperOffice's hosted MCP server, with its six update tools asking for approval by default. When a service refuses a connection's sign-in setup, the connect dialog now says why, for example that the service only accepts apps it has approved, instead of a generic failure; the API passes the provider's OAuth error in the error details, and a provider outage during registration is now a retryable `upstream_unavailable` error. A refused sign-in that returns a standard OAuth code with a plain meaning (`invalid_redirect_uri`, `unauthorized_client`, `unapproved_software_statement`, `invalid_scope`, `server_error`, `temporarily_unavailable`) now keeps that code as the attempt's `error.code` instead of `provider_denied`. Admins can remove a custom MCP server that never connected, through the new `DELETE /v1/workspaces/:workspaceId/capabilities/:capabilityId` route and `deleteCustomMcpServer` on the SDK.
+- Updated dependencies [393f876]
+- Updated dependencies [71c05a3]
+- Updated dependencies [9a84b63]
+- Updated dependencies [17ae971]
+- Updated dependencies [e292b4a]
+- Updated dependencies [8f1d49b]
+  - @opengeni/db@6.34.0
+  - @opengeni/config@6.34.0
+  - @opengeni/contracts@6.34.0
+  - @opengeni/runtime@6.34.0
+  - @opengeni/documents@6.34.0
+  - @opengeni/events@6.34.0
+  - @opengeni/storage@6.34.0
+  - @opengeni/capabilities@6.34.0
+  - @opengeni/codex@6.34.0
+  - @opengeni/observability@6.34.0
+  - @opengeni/tool-gateway@6.34.0
+  - @opengeni/vaults@6.34.0
+  - @opengeni/network@6.34.0
+  - @opengeni/xai-subscription@6.34.0
+
 ## 6.33.0
 
 ### Patch Changes

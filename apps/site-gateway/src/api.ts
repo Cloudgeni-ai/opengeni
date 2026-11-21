@@ -152,20 +152,20 @@ export async function handleApi(site: SiteContext): Promise<Response> {
   if (!isSameOriginRequest(request, site.siteOrigin))
     return jsonError(
       403,
-      { code: "site_cross_origin", message: "Site API calls must come from the Site's own page" },
+      { code: "site_cross_origin", message: "App API calls must come from the app's own page" },
       security,
     );
   const route = classifyApiRequest(request.method, url.pathname);
   if (!route)
     return jsonError(
       403,
-      { code: "site_operation_not_allowed", message: "This operation is not available to Sites" },
+      { code: "site_operation_not_allowed", message: "This operation is not available to apps" },
       security,
     );
   if (requiresSignIn(site.config, site.record) && !site.session)
     return jsonError(
       401,
-      { code: "site_sign_in_required", message: "Sign in to use this Site" },
+      { code: "site_sign_in_required", message: "Sign in to use this app" },
       security,
     );
   if (!(await underRateLimit(site)))
@@ -215,7 +215,7 @@ export async function handleApi(site: SiteContext): Promise<Response> {
       502,
       {
         code: "site_upstream_unavailable",
-        message: "The Site service is temporarily unavailable",
+        message: "The app service is temporarily unavailable",
         retryable: true,
         outcomeUnknown: method !== "GET" && method !== "HEAD",
       },
@@ -226,7 +226,7 @@ export async function handleApi(site: SiteContext): Promise<Response> {
     await response.body?.cancel();
     return jsonError(
       502,
-      { code: "site_upstream_redirect", message: "The Site service answered unexpectedly" },
+      { code: "site_upstream_redirect", message: "The app service answered unexpectedly" },
       security,
     );
   }

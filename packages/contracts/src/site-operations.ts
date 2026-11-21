@@ -111,6 +111,8 @@ export const SITE_OPERATIONS: readonly SiteOperation[] = Object.freeze([
     pattern: /^\/published-artifacts\/current\/sql\/queries\/[A-Za-z][A-Za-z0-9_-]{0,63}$/u,
   },
   { id: "site.report", method: "POST", pattern: /^\/site\/reports$/u },
+  // site.notify: a normal Opengeni notification from the App's page.
+  { id: "site.notify", method: "POST", pattern: /^\/published-artifacts\/current\/notify$/u },
 ] satisfies SiteOperation[]);
 
 /**
@@ -124,6 +126,11 @@ export const SITE_TOOL_METHODS = Object.freeze([
   "resolve",
   "invoke",
   "readiness",
+  // The platform's connect card for the App: what the viewer still has to connect.
+  "setup",
+  // The platform's personal sync confirmation: what the viewer joins, then the opt-in.
+  "sync-review",
+  "sync-opt-in",
 ] as const);
 export type SiteToolMethod = (typeof SITE_TOOL_METHODS)[number];
 

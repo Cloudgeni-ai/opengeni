@@ -175,6 +175,17 @@ describe("scheduled task form projection", () => {
     expect(newScheduledTaskFormState(true).slackBotChannelId).toBe("");
   });
 
+  test("keeps the automation's agent in every chat mode", () => {
+    const task = scheduledTask();
+    const agentId = "aaaaaaaa-0000-4000-8000-000000000009";
+    task.agentConfig.agentId = agentId;
+    const form = formStateFromScheduledTask(task);
+    expect(form.agentId).toBe(agentId);
+    expect(agentConfigFromFormState(form, task).agentId).toBe(agentId);
+    for (const runMode of ["existing_session", "reusable_session"] as const)
+      expect(agentConfigFromFormState({ ...form, runMode }, task).agentId).toBe(agentId);
+  });
+
   test("keeps the human description separate from agent instructions", () => {
     const task = scheduledTask();
     task.metadata = {
