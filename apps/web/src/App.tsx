@@ -1955,6 +1955,7 @@ function SiteViewPage() {
       page={search.page}
       artifactsReturn={siteViewArtifactsReturn(search)}
       connect={search.connect}
+      publishing={search.publishing === true}
     />
   );
 }
