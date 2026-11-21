@@ -1,5 +1,21 @@
 # @opengeni/agent-host
 
+## 6.35.0
+
+### Patch Changes
+
+- b626e29: Branded browser extensions use their own native host registration so they can run alongside Opengeni Browser and connect to their own desktop runtime. Update the branded extension and its agent together; the standard Opengeni Browser host name is unchanged.
+- Updated dependencies [5fe41ba]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [7eda7f0]
+- Updated dependencies [fa938cd]
+- Updated dependencies [e7eb28c]
+- Updated dependencies [5c3c4e6]
+- Updated dependencies [8bf1ec2]
+  - @opengeni/sdk@6.35.0
+
 ## 6.34.0
 
 ### Patch Changes
