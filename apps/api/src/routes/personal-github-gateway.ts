@@ -423,6 +423,8 @@ function upstreamHeaders(request: Request, authorization: string, streamed: bool
 const REST_PULL_REQUEST_CREATE = /^\/repos\/[^/]+\/[^/]+\/pulls\/?$/u;
 /** A created pull request's response is read whole only up to this size. */
 const CREATED_PULL_REQUEST_MAX_BYTES = 4 * 1024 * 1024;
+/** How long GitHub's answer waits for the link before going on without it. */
+const LINK_WAIT_MS = 2_000;
 
 /**
  * Pass GitHub's answer to a pull request create through unchanged, and link
@@ -467,7 +469,16 @@ export async function linkingCreatedPullRequest(
       offset += chunk.byteLength;
     }
     const created = createdPullRequest(parseJsonBody(bytes), requestBody);
-    if (created) await link(authority, created).catch(() => undefined);
+    // A slow link never holds up GitHub's answer for long.
+    if (created) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        link(authority, created).catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, LINK_WAIT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
   }
   const body = new ReadableStream<Uint8Array>({
     start(controller) {

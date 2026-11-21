@@ -656,6 +656,7 @@ describe("organization MCP named tool helpers", () => {
     down = true;
     expect(await limiter.admit({ accountId: "acc", key: "connection:a" })).toBe(0);
     expect(await limiter.admit({ accountId: "acc", key: "connection:a" })).toBeGreaterThan(0);
-    expect(fallbacks).toHaveLength(2);
+    // Told once, not on every call that falls back.
+    expect(fallbacks).toHaveLength(1);
   });
 });

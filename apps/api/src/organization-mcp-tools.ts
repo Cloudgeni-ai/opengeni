@@ -1364,6 +1364,8 @@ async function uploadSkills(
   reason: string,
 ): Promise<Array<Record<string, unknown>>> {
   const results: Array<Record<string, unknown>> = [];
+  // Two folders naming the same Skill would save over each other in one sync.
+  const seen = new Set<string>();
   for (const upload of uploads) {
     const main = upload.files.find((file) => file.path === "SKILL.md");
     const name = upload.name ?? (main ? skillFrontmatterName(main.content) : null);
@@ -1392,6 +1394,15 @@ async function uploadSkills(
       });
       continue;
     }
+    if (seen.has(stableKey)) {
+      results.push({
+        name,
+        status: "invalid",
+        error: "Another folder in this sync has a Skill with the same name.",
+      });
+      continue;
+    }
+    seen.add(stableKey);
     const current = listed.find((skill) => skill.stableKey === stableKey && skill.scope === scope);
     if (current) {
       const read = await action(context, "readWorkspaceSkill", {

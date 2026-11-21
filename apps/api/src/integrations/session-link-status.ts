@@ -389,14 +389,22 @@ export function personalGitHubSessionLinkReader(
   deps: Pick<ApiRouteDeps, "db" | "settings" | "githubPersonalFetch">,
   person: { accountId: string; workspaceId: string; subjectId: string },
 ): (link: SessionLink) => Promise<SessionLinkLiveStatus | null> {
+  // One lookup per repository for the whole list.
+  const readers = new Map<string, ReturnType<typeof personalGitHubReader>>();
   return async (link) => {
     if (link.provider !== "github") return null;
     const ref = classifySessionLinkUrl(link.url)?.github ?? parseGitHubLinkRef(link.ref);
     if (!ref) return null;
-    const read = await personalGitHubReader(
-      { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
-      { ...person, repository: `${ref.owner}/${ref.repo}` },
-    );
+    const repository = `${ref.owner}/${ref.repo}`.toLowerCase();
+    let pending = readers.get(repository);
+    if (!pending) {
+      pending = personalGitHubReader(
+        { db: deps.db, settings: deps.settings, fetch: deps.githubPersonalFetch },
+        { ...person, repository: `${ref.owner}/${ref.repo}` },
+      ).catch(() => null);
+      readers.set(repository, pending);
+    }
+    const read = await pending;
     if (!read) return null;
     const status =
       link.kind === "issue"

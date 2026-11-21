@@ -76,6 +76,7 @@ export function createSharedConnectionRateLimiter(options: {
     capacity: options.capacity,
     refillPerSecond: options.refillPerSecond,
   });
+  let lastFallbackNotice = Number.NEGATIVE_INFINITY;
   return {
     async admit({ accountId, key }) {
       try {
@@ -86,7 +87,12 @@ export function createSharedConnectionRateLimiter(options: {
           refillPerSecond: options.refillPerSecond,
         });
       } catch (error) {
-        options.onFallback?.(error);
+        // Told at most once a minute, however many calls fall back.
+        const now = Date.now();
+        if (now - lastFallbackNotice >= 60_000) {
+          lastFallbackNotice = now;
+          options.onFallback?.(error);
+        }
         return local.admit(key);
       }
     },

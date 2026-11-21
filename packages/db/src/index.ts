@@ -31779,8 +31779,7 @@ async function insertConnectorActionRequest(
       policyVersion: entry?.version ?? null,
       policySource: input.resolved.source,
       policyDecision: connectorActionPolicyDecision(input.resolved),
-      agentRule:
-        input.resolved.source === "default" ? (input.resolved.agentRule ?? null) : null,
+      agentRule: input.resolved.source === "default" ? (input.resolved.agentRule ?? null) : null,
       actionFingerprint: input.invocation.actionFingerprint!,
       ...(input.status === "pending"
         ? {
@@ -33843,6 +33842,8 @@ async function sessionAgentBinding(
   tx: Database,
   input: Pick<SessionCreateInput, "workspaceId" | "parentSessionId" | "subjectId" | "visibility">,
   agentId: string,
+  /** The Only me chat's owner, when it is one. */
+  privateOwnerSubjectId: string | null = null,
 ): Promise<{ agentId: string; revision: number }> {
   const subjectId = input.subjectId ?? null;
   const [row] = await rawRows<{ id: string; current_revision: number; visibility: string }>(
@@ -33857,6 +33858,11 @@ async function sessionAgentBinding(
   // Others in a shared chat would run on the owner's private Instructions.
   if (row.visibility !== "workspace" && input.visibility !== "user_private") {
     throw new SessionAgentNotFoundError(agentId, "requires_private_chat");
+  }
+  // An Only me agent runs only in its owner's own Only me chat, whoever's
+  // access (`agent.subjectId`, such as an Only me automation's owner) found it.
+  if (row.visibility !== "workspace" && privateOwnerSubjectId !== subjectId) {
+    throw new SessionAgentNotFoundError(agentId);
   }
   return { agentId: row.id, revision: Number(row.current_revision) };
 }
@@ -34155,6 +34161,7 @@ async function createSessionInTransaction(
         tx as unknown as Database,
         input.agent.subjectId ? { ...input, subjectId: input.agent.subjectId } : input,
         input.agent.id,
+        privateCreateOwnerSubjectId,
       )
     : null;
   if (agentBinding && input.orgAgent) {
