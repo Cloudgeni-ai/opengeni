@@ -26,13 +26,18 @@ import {
   UsersIcon,
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
+import { toast } from "sonner";
+import { readResolvedSidebarOptions } from "@opengeni/contracts/sidebar-layout";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import {
   ORGANIZATION_SETTINGS_GROUPS,
   ORGANIZATION_SETTINGS_ITEMS,
   organizationSettingsLabel,
 } from "./organization-settings-pages";
+import { foldSettingsRail } from "./settings-more";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
+import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import {
   interfaceListsDestination,
   interfaceListsOrganizationSection,
@@ -564,9 +569,28 @@ export function useSettingsRail(input: {
       }
     : { label: `Back to ${productName}`, link: <Link to="/" /> };
 
+  // The person's own choice of which entries stay at the top; the rest fold
+  // under More (docs/sidebar-layout.md). Unset keeps everything at the top.
+  const sidebarLayout = useSidebarLayout(workspace?.id ?? "", !!workspace);
+  const personalLayout = sidebarLayout.layout?.personal.available ? sidebarLayout.layout : null;
+  const updateLayout = sidebarLayout.update;
+  const shownSettings = personalLayout
+    ? readResolvedSidebarOptions(personalLayout.options).settingsShown
+    : null;
+  const railSections = personalLayout
+    ? foldSettingsRail(sections, shownSettings, (settingsShown) => {
+        updateLayout({
+          scope: "personal",
+          changes: [{ op: "options", settingsShown }],
+        }).catch((error: unknown) =>
+          toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
+        );
+      })
+    : sections;
+
   return {
     picker,
-    sections,
+    sections: railSections,
     back,
     home: settingsHomeLink(sessionsWorkspaceId ?? undefined),
     organizationName,

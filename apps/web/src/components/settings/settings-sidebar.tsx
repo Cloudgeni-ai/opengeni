@@ -1,5 +1,11 @@
 import { Link, useNavigate, type NavigateOptions } from "@tanstack/react-router";
-import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ChevronDownIcon,
+  MenuIcon,
+  MoreHorizontalIcon,
+  type LucideIcon,
+} from "lucide-react";
 import {
   useEffect,
   useId,
@@ -14,6 +20,12 @@ import {
 } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@opengeni/react/ui/dropdown-menu";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
 import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
@@ -92,6 +104,11 @@ export interface SettingsRailItem {
   link: ReactElement;
   /** A purple dot for "needs you". */
   attention?: boolean;
+  /**
+   * Where the person keeps it (docs/sidebar-layout.md, `settingsShown`): its
+   * menu moves it under More or back to the top.
+   */
+  place?: { label: string; run: () => void } | undefined;
 }
 
 export interface SettingsRailGroup {
@@ -117,6 +134,10 @@ export interface SettingsRailSection {
    * the words people type for them. The rail doesn't list them.
    */
   searchOnly?: (SettingsRailItem & { keywords?: readonly string[] })[];
+  /** Folded under its label until opened (the More section); open while it holds the current page. */
+  collapsible?: boolean;
+  /** Every page went under More: kept for search only, not shown in the rail. */
+  searchOnlySection?: boolean;
 }
 
 export interface SettingsShellPage {
@@ -204,6 +225,44 @@ function LinkShell({
   );
 }
 
+/** A rail row, with its quiet menu when the person can move it under More or back. */
+function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active: boolean }) {
+  const Icon = item.icon;
+  const row = (
+    <NavItem
+      asChild
+      label={item.label}
+      icon={<Icon />}
+      active={active}
+      attention={item.attention}
+      className={item.place ? "pr-8" : undefined}
+    >
+      {item.link}
+    </NavItem>
+  );
+  if (!item.place) return row;
+  const place = item.place;
+  return (
+    <div className="group/row relative">
+      {row}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={`More for ${item.label}`}
+            className="absolute top-1/2 right-1 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100"
+          >
+            <MoreHorizontalIcon className="size-3.5" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" side="right" className="min-w-40">
+          <DropdownMenuItem onSelect={place.run}>{place.label}</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
 function SettingsRailSectionView({
   section,
   activeId,
@@ -213,6 +272,11 @@ function SettingsRailSectionView({
   activeId: string | null;
   first: boolean;
 }) {
+  const holdsActive = section.groups.some((group) =>
+    group.items.some((item) => item.id === activeId),
+  );
+  const [opened, setOpened] = useState(false);
+  const open = !section.collapsible || opened || holdsActive;
   return (
     <div
       role="group"
@@ -220,33 +284,41 @@ function SettingsRailSectionView({
       data-settings-section={section.id}
       className={cn("flex min-w-0 flex-col gap-3", !first && "border-t border-border pt-4")}
     >
-      <div className="min-w-0 px-2.5">
-        <p className="text-sm leading-5 font-medium text-fg">{section.label}</p>
-        {section.meta ? (
-          <p className="truncate text-xs leading-4.5 text-fg-muted" title={section.meta}>
-            {section.meta}
-          </p>
-        ) : null}
-      </div>
-      {section.groups.map((group, index) => (
-        <NavGroup key={group.label ?? `group-${index}`} label={group.label}>
-          {group.items.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavItem
-                key={item.id}
-                asChild
-                label={item.label}
-                icon={<Icon />}
-                active={activeId === item.id}
-                attention={item.attention}
-              >
-                {item.link}
-              </NavItem>
-            );
-          })}
-        </NavGroup>
-      ))}
+      {section.collapsible ? (
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpened(!open)}
+          className="flex min-w-0 items-center gap-1.5 rounded-md px-2.5 text-left text-sm leading-5 font-medium text-fg hover:text-fg-label"
+        >
+          <span className="min-w-0 flex-1 truncate">{section.label}</span>
+          <ChevronDownIcon
+            aria-hidden="true"
+            className={cn(
+              "size-3.5 shrink-0 text-fg-subtle transition-transform",
+              open && "rotate-180",
+            )}
+          />
+        </button>
+      ) : (
+        <div className="min-w-0 px-2.5">
+          <p className="text-sm leading-5 font-medium text-fg">{section.label}</p>
+          {section.meta ? (
+            <p className="truncate text-xs leading-4.5 text-fg-muted" title={section.meta}>
+              {section.meta}
+            </p>
+          ) : null}
+        </div>
+      )}
+      {open
+        ? section.groups.map((group, index) => (
+            <NavGroup key={group.label ?? `group-${index}`} label={group.label}>
+              {group.items.map((item) => (
+                <SettingsRailItemView key={item.id} item={item} active={activeId === item.id} />
+              ))}
+            </NavGroup>
+          ))
+        : null}
     </div>
   );
 }
@@ -372,14 +444,16 @@ function SettingsRail({
             }}
           />
         ) : (
-          sections.map((section, index) => (
-            <SettingsRailSectionView
-              key={section.id}
-              section={section}
-              activeId={activeId}
-              first={index === 0}
-            />
-          ))
+          sections
+            .filter((section) => !section.searchOnlySection)
+            .map((section, index) => (
+              <SettingsRailSectionView
+                key={section.id}
+                section={section}
+                activeId={activeId}
+                first={index === 0}
+              />
+            ))
         )}
       </SettingsNav>
     </RailSurface>

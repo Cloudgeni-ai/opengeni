@@ -185,3 +185,27 @@ test("a failed read or a server without the sidebar keeps what is shown", async 
   expect((await refreshSidebarLayout(failing, "k", "w"))?.items).toHaveLength(1);
   expect(await refreshSidebarLayout({}, "other", "w")).toBeNull();
 });
+
+test("rows and groups carry their icons; unknown icons fall back", () => {
+  const sections = sidebarMenuSections(
+    readSidebarLayout(
+      layout([
+        { ...app("releases", A), icon: "rocket" },
+        { ...link("status"), icon: "no-such-icon" },
+        {
+          id: "eng",
+          origin: "workspace",
+          type: "group",
+          label: "Engineering",
+          collapsed: false,
+          icon: "code",
+          items: [app("review", B)],
+        },
+      ]),
+    ).items,
+  );
+  expect(sections.map((section) => [section.icon, section.rows.map((row) => row.icon)])).toEqual([
+    [undefined, ["rocket", undefined]],
+    ["code", [undefined]],
+  ]);
+});

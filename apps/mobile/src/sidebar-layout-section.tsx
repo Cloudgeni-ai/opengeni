@@ -1,12 +1,17 @@
+import { SIDEBAR_ITEM_ICONS } from "@opengeni/contracts/sidebar-layout";
 import {
   fontStyle,
   Icon,
+  type NativeIconName,
   SessionAvatar,
   type SessionAvatarClient,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { Linking, Pressable, Text, View } from "react-native";
 import type { SidebarMenuRow, SidebarMenuSection } from "@/sidebar-layout";
+
+// Every sidebar item icon is drawn natively (scripts/generate-native-icons.ts).
+SIDEBAR_ITEM_ICONS satisfies readonly NativeIconName[];
 
 /*
  * The workspace's sidebar links in the side menu, as the web rail shows them
@@ -26,7 +31,7 @@ export function SidebarLayoutSection(props: {
     <View accessibilityLabel="Workspace links" style={{ marginBottom: 4 }}>
       {props.sections.map((section) => (
         <View key={section.key} style={{ marginTop: section.heading ? 12 : 0 }}>
-          {section.heading ? <Heading label={section.heading} /> : null}
+          {section.heading ? <Heading label={section.heading} icon={section.icon} /> : null}
           {section.rows.map((row) => (
             <Row
               key={row.key}
@@ -46,9 +51,9 @@ export function SidebarLayoutSection(props: {
   );
 }
 
-function Heading({ label }: { label: string }) {
+function Heading({ label, icon }: { label: string; icon?: NativeIconName | undefined }) {
   const theme = useNativeTimelineTheme();
-  return (
+  const text = (
     <Text
       accessibilityRole="header"
       numberOfLines={1}
@@ -63,6 +68,13 @@ function Heading({ label }: { label: string }) {
     >
       {label}
     </Text>
+  );
+  if (!icon) return text;
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingLeft: 4 }}>
+      <Icon name={icon} size={12} color={theme.colors["fg-muted"]} />
+      {text}
+    </View>
   );
 }
 
@@ -108,7 +120,7 @@ function Row({
         />
       ) : (
         <Icon
-          name={row.kind === "link" ? "arrow-up-right" : "app-window"}
+          name={row.icon ?? (row.kind === "link" ? "arrow-up-right" : "app-window")}
           size={16}
           color={c["fg-muted"]}
         />

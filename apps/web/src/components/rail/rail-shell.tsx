@@ -11,6 +11,10 @@ import { RailFooter } from "@/components/rail/rail-footer";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
+import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
+import { readResolvedSidebarOptions } from "@opengeni/contracts/sidebar-layout";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { toast } from "sonner";
 import { AppPages } from "@opengeni/react/app/routes/app-page";
 import { PromotionReviewBanner } from "@/components/rail/promotion-review-banner";
 import { workspaceSectionForPath } from "@/components/rail/workspace-nav-data";
@@ -24,9 +28,41 @@ import {
   type SessionShellSlots,
 } from "@opengeni/react/app/components/rail/session-shell";
 
+/**
+ * The person's sidebar (docs/sidebar-layout.md) as the Sessions list uses it:
+ * whether apps are rows of their own there, and "Add to sidebar" in an app
+ * row's menu.
+ */
+function useSessionsSidebarOptions(workspaceId: string) {
+  const { layout, update } = useSidebarLayout(workspaceId);
+  const sessionsShowApps = readResolvedSidebarOptions(layout?.options).sessionsShowApps;
+  const sidebarApps = useMemo(() => {
+    if (!layout?.personal.available) return undefined;
+    const linked = new Set<string>();
+    for (const item of layout.items) {
+      if (item.type === "app") linked.add(item.appId.toLowerCase());
+      if (item.type === "group")
+        for (const child of item.items)
+          if (child.type === "app") linked.add(child.appId.toLowerCase());
+    }
+    return {
+      has: (appId: string) => linked.has(appId.toLowerCase()),
+      add: (appId: string) =>
+        void update({
+          scope: "personal",
+          changes: [{ op: "add", item: { type: "app", appId } }],
+        }).catch((error: unknown) =>
+          toast.error("Couldn't change the sidebar", { description: userErrorText(error) }),
+        ),
+    };
+  }, [layout, update]);
+  return { sessionsShowApps, sidebarApps };
+}
+
 function useWebShellSlots(): SessionShellSlots {
   const { collapsed, workspaceId } = useRail();
   const navigate = useNavigate();
+  const { sessionsShowApps, sidebarApps } = useSessionsSidebarOptions(workspaceId);
   return useMemo(
     () => ({
       switcher: <SwitcherBlock />,
@@ -58,8 +94,10 @@ function useWebShellSlots(): SessionShellSlots {
           ? { label: section.label, onClick: () => void navigate({ to: section.path }) }
           : null;
       },
+      sessionsShowApps,
+      sidebarApps,
     }),
-    [collapsed, navigate, workspaceId],
+    [collapsed, navigate, workspaceId, sessionsShowApps, sidebarApps],
   );
 }
 

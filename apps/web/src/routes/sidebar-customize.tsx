@@ -1,7 +1,9 @@
 // Sidebar: the links and groups above your chats (docs/sidebar-layout.md).
 // "Yours" is the workspace default with your own changes (add, hide,
 // reorder, reset); admins also edit the "Workspace default" everyone starts
-// from. Groups you can change are renamed in place.
+// from. Items you can change are renamed in place and take an icon. Under
+// Navigation: whether apps are rows in the Sessions list, and which built-in
+// rail entries show.
 import {
   AppWindowIcon,
   ArrowDownIcon,
@@ -33,7 +35,10 @@ import { agentInitialsAvatar } from "@opengeni/contracts";
 import {
   isSidebarAppPath,
   isSidebarExternalUrl,
+  readResolvedSidebarOptions,
   SIDEBAR_LABEL_MAX_CHARS,
+  SIDEBAR_NAV_ENTRIES,
+  type SidebarNavEntry,
 } from "@opengeni/contracts/sidebar-layout";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
@@ -41,8 +46,12 @@ import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -52,8 +61,11 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { Section } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { inAppLinkPath } from "@/components/sidebar-layout/in-app-link";
+import { IconMenu, SidebarIcon } from "@/components/sidebar-layout/sidebar-icons";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 
 type Scope = "personal" | "workspace";
@@ -80,6 +92,8 @@ function itemIcon(
   workspaceId: string,
 ) {
   const className = "size-4 shrink-0 text-fg-muted";
+  if ((item.type === "app" || item.type === "link" || item.type === "group") && item.icon)
+    return <SidebarIcon name={item.icon} fallback={AppWindowIcon} className={className} />;
   if (item.type === "agent")
     return (
       <SessionAvatar
@@ -108,7 +122,7 @@ function itemDetail(item: ResolvedSidebarItem): string | null {
   return null;
 }
 
-/** A group's name, edited in place: Enter or leaving the field saves, Escape cancels. */
+/** An item's name, edited in place: Enter or leaving the field saves, Escape cancels. */
 export function RenameField({
   label,
   onSave,
@@ -141,7 +155,7 @@ export function RenameField({
   return (
     <TextInput
       ref={input}
-      aria-label="Group name"
+      aria-label="Name"
       value={value}
       maxLength={SIDEBAR_LABEL_MAX_CHARS}
       onChange={(event) => setValue(event.target.value)}
@@ -183,8 +197,8 @@ function ItemRow({
   const previous = index > 0 ? siblings[index - 1] : undefined;
   const following = index >= 0 ? siblings[index + 1] : undefined;
   const fromWorkspace = scope === "personal" && item.origin === "workspace";
-  // The default's groups are renamed in the workspace default; yours, here.
-  const canRename = item.type === "group" && !fromWorkspace;
+  // The default's items are edited in the workspace default; yours, here.
+  const canEdit = !fromWorkspace;
   return (
     <div
       className={
@@ -242,8 +256,30 @@ function ItemRow({
           if (renaming) event.preventDefault();
         }}
       >
-        {canRename ? (
+        {canEdit ? (
           <DropdownMenuItem onSelect={() => setRenaming(true)}>Rename</DropdownMenuItem>
+        ) : null}
+        {canEdit && (item.type === "app" || item.type === "link" || item.type === "group") ? (
+          <IconMenu
+            value={item.icon}
+            onSelect={(icon) => onChange([{ op: "update", itemId: item.id, icon }])}
+          />
+        ) : null}
+        {canEdit && item.type === "live_list" ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Show</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="min-w-28">
+              {[3, 5, 10, 20].map((size) => (
+                <DropdownMenuItem
+                  key={size}
+                  onSelect={() => onChange([{ op: "update", itemId: item.id, limit: size }])}
+                >
+                  <span className="flex-1">{size} apps</span>
+                  <DropdownMenuCheck checked={item.limit === size} />
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
         ) : null}
         <DropdownMenuItem
           variant={fromWorkspace ? "default" : "destructive"}
@@ -550,6 +586,62 @@ export function AddForm({
   );
 }
 
+const NAV_ENTRY_LABELS: Record<SidebarNavEntry, string> = {
+  inbox: "Inbox",
+  capabilities: "Capabilities",
+  knowledge: "Knowledge",
+  automations: "Automations",
+  agents: "Agents",
+  meetings: "Meetings",
+  artifacts: "Artifacts",
+};
+
+/**
+ * The rest of the navigation, for the scope shown: apps as rows of their own
+ * in the Sessions list, and which built-in rail entries show.
+ */
+function NavigationSection({
+  options,
+  onChange,
+}: {
+  options: { sessionsShowApps: boolean; hiddenNavEntries: string[] };
+  onChange: (changes: SidebarLayoutChange[]) => void;
+}) {
+  const hidden = new Set(options.hiddenNavEntries);
+  return (
+    <Section title="Navigation" variant="group">
+      <SettingRow
+        label="Apps in Sessions"
+        control={
+          <Switch
+            aria-label="Apps in Sessions"
+            checked={options.sessionsShowApps}
+            onCheckedChange={(checked) => onChange([{ op: "options", sessionsShowApps: checked }])}
+          />
+        }
+      />
+      {SIDEBAR_NAV_ENTRIES.map((entry) => (
+        <SettingRow
+          key={entry}
+          label={NAV_ENTRY_LABELS[entry]}
+          control={
+            <Switch
+              aria-label={NAV_ENTRY_LABELS[entry]}
+              checked={!hidden.has(entry)}
+              onCheckedChange={(checked) => {
+                const next = SIDEBAR_NAV_ENTRIES.filter((each) =>
+                  each === entry ? !checked : hidden.has(each),
+                );
+                onChange([{ op: "options", hiddenNavEntries: next }]);
+              }}
+            />
+          }
+        />
+      ))}
+    </Section>
+  );
+}
+
 export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const { layout, failed, update } = useSidebarLayout(workspaceId);
@@ -670,6 +762,16 @@ export function SidebarCustomizeRoute({ workspaceId }: { workspaceId: string }) 
               </div>
             ))}
           </Section>
+        ) : null}
+        {layout && (effectiveScope === "workspace" || personalAvailable) ? (
+          <NavigationSection
+            options={
+              effectiveScope === "workspace"
+                ? readResolvedSidebarOptions(layout.workspace.options)
+                : readResolvedSidebarOptions(layout.options)
+            }
+            onChange={onChange}
+          />
         ) : null}
         {effectiveScope === "personal" && layout?.personal.customized ? (
           <div>

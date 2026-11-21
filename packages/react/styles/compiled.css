@@ -8456,6 +8456,11 @@
       outline-offset: 2px;
     }
   }
+:where(.og-root).focus-visible\:outline-brand,:where(.og-root) .focus-visible\:outline-brand {
+    &:focus-visible {
+      outline-color: var(--color-brand);
+    }
+  }
 :where(.og-root).focus-visible\:outline-brand\/55,:where(.og-root) .focus-visible\:outline-brand\/55 {
     &:focus-visible {
       outline-color: var(--color-brand);
@@ -10093,6 +10098,26 @@
 :where(.og-root).sm\:w-6,:where(.og-root) .sm\:w-6 {
     @media (width >= 40rem) {
       width: calc(var(--spacing) * 6);
+    }
+  }
+:where(.og-root).sm\:w-36,:where(.og-root) .sm\:w-36 {
+    @media (width >= 40rem) {
+      width: calc(var(--spacing) * 36);
+    }
+  }
+:where(.og-root).sm\:w-48,:where(.og-root) .sm\:w-48 {
+    @media (width >= 40rem) {
+      width: calc(var(--spacing) * 48);
+    }
+  }
+:where(.og-root).sm\:w-60,:where(.og-root) .sm\:w-60 {
+    @media (width >= 40rem) {
+      width: calc(var(--spacing) * 60);
+    }
+  }
+:where(.og-root).sm\:w-80,:where(.og-root) .sm\:w-80 {
+    @media (width >= 40rem) {
+      width: calc(var(--spacing) * 80);
     }
   }
 :where(.og-root).sm\:w-\[380px\],:where(.og-root) .sm\:w-\[380px\] {

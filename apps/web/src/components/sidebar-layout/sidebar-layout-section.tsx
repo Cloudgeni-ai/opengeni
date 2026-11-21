@@ -1,7 +1,10 @@
 // The rail's customizable part (docs/sidebar-layout.md): the workspace's
 // default links and groups, with each person's own changes on top. Phones
 // show groups flattened and live lists shortened; the icon rail leaves it out.
-// A quiet Customize row under it opens the Sidebar page.
+// It's edited in place: a group's "+" adds an app, each row's menu renames,
+// sets the icon or a list's size, and hides or removes it, and rows drag to
+// another place (an app dragged from the Sessions list is added where it's
+// dropped). A quiet Customize row under it opens the Sidebar page.
 import { Link, useNavigate, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   AppWindowIcon,
@@ -9,28 +12,40 @@ import {
   ChevronRightIcon,
   LinkIcon,
   MoreHorizontalIcon,
+  PlusIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { ResolvedSidebarChild, ResolvedSidebarItem, SidebarLayoutChange } from "@opengeni/sdk";
 import {
   flattenSidebarItemsForMobile,
+  SIDEBAR_LABEL_MAX_CHARS,
   sidebarItemsShown,
 } from "@opengeni/contracts/sidebar-layout";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  readSiteRowDragPayload,
+  SITE_DRAG_TYPE,
+} from "@opengeni/react/app/components/rail/site-session-group-heading";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
 import { cn } from "@opengeni/react/app/lib/utils";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { pathHasAppPage } from "@/lib/onboarding-return";
 import { appPageLocation, appPagePathname } from "./app-page-location";
 import { inAppLinkPath } from "./in-app-link";
+import { IconMenu, SidebarIcon, useLinkIcon } from "./sidebar-icons";
 import { useSidebarLayout } from "./use-sidebar-layout";
 
 const GROUPS_OPEN_KEY = "opengeni.rail.sidebar-groups";
@@ -47,47 +62,83 @@ function readOpenGroups(): Record<string, boolean> {
 const ROW =
   "group/row relative flex h-8 min-w-0 items-center gap-2.5 rounded-md px-2.5 text-sm font-normal text-fg-label transition-colors hover:bg-hover hover:text-fg pointer-coarse:h-10 data-[active=true]:bg-selection data-[active=true]:text-fg";
 
+/** A quiet button at a row's right end, shown while the pointer is over the row. */
+const ROW_BUTTON =
+  "absolute top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100";
+
+/** A sidebar item being dragged to another place. */
+const ITEM_DRAG_TYPE = "application/x-opengeni-sidebar-item";
+
+type DraggedItem = { id: string; parentId: string | null; origin: string; type: string };
+
+const LIST_SIZES = [3, 5, 10, 20] as const;
+
 type RowActions = {
-  /** The level's ids in order, for Move up/down. */
-  siblings: string[];
   change: (changes: SidebarLayoutChange[]) => void;
   canChange: boolean;
+  /** The item whose name is being edited in place. */
+  renaming: string | null;
+  setRenaming: (id: string | null) => void;
 };
+
+/** Whether this person edits the item itself (their own), rather than hiding it. */
+function editable(item: ResolvedSidebarItem, actions: RowActions): boolean {
+  return actions.canChange && item.origin === "personal";
+}
 
 function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowActions }) {
   const navigate = useNavigate();
   const rail = useRail();
-  const index = actions.siblings.indexOf(item.id);
-  // Moves name the visible neighbour: the stored level may hold items this
-  // person doesn't see, so an index could land elsewhere.
-  const previous = index > 0 ? actions.siblings[index - 1] : undefined;
-  const following = index >= 0 ? actions.siblings[index + 1] : undefined;
+  const own = editable(item, actions);
+  const hasIcon = item.type === "app" || item.type === "link" || item.type === "group";
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
           aria-label={`More for ${item.label}`}
-          className="absolute right-1 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100"
+          className={cn(ROW_BUTTON, "right-1")}
         >
           <MoreHorizontalIcon className="size-3.5" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="right" className="min-w-44">
+      <DropdownMenuContent
+        align="start"
+        side="right"
+        className="min-w-44"
+        onCloseAutoFocus={(event) => {
+          // Rename focuses its field instead.
+          if (actions.renaming === item.id) event.preventDefault();
+        }}
+      >
+        {own ? (
+          <DropdownMenuItem onSelect={() => actions.setRenaming(item.id)}>Rename</DropdownMenuItem>
+        ) : null}
+        {own && hasIcon ? (
+          <IconMenu
+            value={"icon" in item ? item.icon : undefined}
+            onSelect={(icon) => actions.change([{ op: "update", itemId: item.id, icon }])}
+          />
+        ) : null}
+        {own && item.type === "live_list" ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Show</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="min-w-28">
+              {LIST_SIZES.map((size) => (
+                <DropdownMenuItem
+                  key={size}
+                  aria-current={item.limit === size ? "true" : undefined}
+                  onSelect={() => actions.change([{ op: "update", itemId: item.id, limit: size }])}
+                >
+                  <span className="flex-1">{size} apps</span>
+                  <DropdownMenuCheck checked={item.limit === size} />
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : null}
         {actions.canChange ? (
           <>
-            <DropdownMenuItem
-              disabled={previous === undefined}
-              onSelect={() => actions.change([{ op: "move", itemId: item.id, beforeId: previous }])}
-            >
-              Move up
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={following === undefined}
-              onSelect={() => actions.change([{ op: "move", itemId: item.id, afterId: following }])}
-            >
-              Move down
-            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => actions.change([{ op: "remove", itemId: item.id }])}>
               {item.origin === "workspace" ? "Hide" : "Remove"}
             </DropdownMenuItem>
@@ -110,11 +161,266 @@ function RowMenu({ item, actions }: { item: ResolvedSidebarItem; actions: RowAct
   );
 }
 
+/** An item's name, edited in place: Enter or leaving the field saves, Escape cancels. */
+function RenameRow({
+  item,
+  actions,
+  indent,
+}: {
+  item: ResolvedSidebarItem;
+  actions: RowActions;
+  indent?: boolean | undefined;
+}) {
+  const [value, setValue] = useState(item.label);
+  const input = useRef<HTMLInputElement>(null);
+  const finished = useRef(false);
+  // The menu that opened it hands focus back to its button as it closes; take it after that.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      input.current?.focus();
+      input.current?.select();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  const finish = (next: string | null) => {
+    if (finished.current) return;
+    finished.current = true;
+    if (next && next !== item.label)
+      actions.change([{ op: "update", itemId: item.id, label: next }]);
+    actions.setRenaming(null);
+  };
+  return (
+    <div className={cn("flex h-8 items-center px-1 pointer-coarse:h-10", indent && "pl-3")}>
+      <input
+        ref={input}
+        aria-label="Name"
+        value={value}
+        maxLength={SIDEBAR_LABEL_MAX_CHARS}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={() => finish(value.trim())}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            finish(value.trim());
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            finish(null);
+          }
+        }}
+        className="h-7 w-full min-w-0 rounded-md border border-border-strong bg-surface px-1.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      />
+    </div>
+  );
+}
+
+/** Apps to add, by title; the newest first until the person types. */
+function useAppSearch(workspaceId: string, query: string, enabled: boolean) {
+  const { client } = useAppContext();
+  const [apps, setApps] = useState<{ id: string; title: string }[]>([]);
+  useEffect(() => {
+    if (!enabled) return;
+    const abort = new AbortController();
+    const timer = window.setTimeout(() => {
+      void client
+        .listArtifactCatalog(workspaceId, {
+          kind: "site",
+          status: "active",
+          sort: "updated",
+          limit: 8,
+          ...(query.trim() ? { q: query.trim() } : {}),
+          signal: abort.signal,
+        })
+        .then((page) => setApps(page.items.map((app) => ({ id: app.id, title: app.title }))))
+        .catch(() => undefined);
+    }, 150);
+    return () => {
+      abort.abort();
+      window.clearTimeout(timer);
+    };
+  }, [client, enabled, query, workspaceId]);
+  return apps;
+}
+
+/** "+" on a group: add an app to it. */
+function AddAppButton({ group, actions }: { group: ResolvedSidebarItem; actions: RowActions }) {
+  const rail = useRail();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const apps = useAppSearch(rail.workspaceId, query, open);
+  return (
+    <DropdownMenu
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setQuery("");
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Add an app to ${group.label}`}
+          className={cn(ROW_BUTTON, "right-7")}
+        >
+          <PlusIcon className="size-3.5" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="right" className="w-60">
+        <input
+          aria-label="Search apps"
+          placeholder="Search apps"
+          value={query}
+          autoFocus
+          onChange={(event) => setQuery(event.target.value)}
+          // Typing searches; the menu's own type-ahead would jump between items.
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowDown" && event.key !== "Escape") event.stopPropagation();
+          }}
+          className="mb-1 h-8 w-full rounded-md border border-border bg-surface px-2 text-sm text-fg outline-none placeholder:text-fg-subtle focus-visible:ring-2 focus-visible:ring-ring"
+        />
+        {apps.map((app) => (
+          <DropdownMenuItem
+            key={app.id}
+            onSelect={() =>
+              actions.change([
+                { op: "add", item: { type: "app", appId: app.id }, groupId: group.id },
+              ])
+            }
+          >
+            <AppWindowIcon aria-hidden="true" className="size-4" />
+            <span className="min-w-0 flex-1 truncate">{app.title}</span>
+          </DropdownMenuItem>
+        ))}
+        {apps.length === 0 ? (
+          <div className="px-2 py-1.5 text-xs text-fg-muted">No apps found</div>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * The change a drop makes: a sidebar item moves before or after `target`
+ * (into its level when it's the person's own), or into the group `target`
+ * when dropped on a group's name; an app dragged from the Sessions list is
+ * added there.
+ */
+function dropChange(
+  data: DataTransfer,
+  target: ResolvedSidebarItem,
+  parentId: string | null,
+  at: "before" | "after" | "into",
+): SidebarLayoutChange | null {
+  const raw = data.getData(ITEM_DRAG_TYPE);
+  const place = at === "before" ? { beforeId: target.id } : { afterId: target.id };
+  if (raw) {
+    let dragged: DraggedItem;
+    try {
+      dragged = JSON.parse(raw) as DraggedItem;
+    } catch {
+      return null;
+    }
+    if (dragged.id === target.id) return null;
+    if (at === "into") {
+      if (dragged.parentId === target.id || dragged.origin !== "personal") return null;
+      return { op: "move", itemId: dragged.id, groupId: target.id };
+    }
+    if (dragged.parentId === parentId) return { op: "move", itemId: dragged.id, ...place };
+    // Default items stay in the group the admin put them in; groups don't nest.
+    if (dragged.origin !== "personal" || (dragged.type === "group" && parentId !== null))
+      return null;
+    return { op: "move", itemId: dragged.id, groupId: parentId, ...place };
+  }
+  const site = readSiteRowDragPayload(data.getData(SITE_DRAG_TYPE));
+  if (!site) return null;
+  const item = { type: "app" as const, appId: site.siteId };
+  if (at === "into") return { op: "add", item, groupId: target.id };
+  return { op: "add", item, ...(parentId ? { groupId: parentId } : {}), ...place };
+}
+
+/** A row that can be dragged to another place, and dropped on. */
+function DragRow({
+  item,
+  parentId,
+  actions,
+  group,
+  children,
+}: {
+  item: ResolvedSidebarItem;
+  parentId: string | null;
+  actions: RowActions;
+  /** A group's name: the middle of it drops into the group. */
+  group?: boolean;
+  children: React.ReactNode;
+}) {
+  const [over, setOver] = useState<"before" | "after" | "into" | null>(null);
+  if (!actions.canChange) return <>{children}</>;
+  const zone = (event: React.DragEvent<HTMLDivElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const y = (event.clientY - box.top) / Math.max(box.height, 1);
+    if (group && y > 0.25 && y < 0.75) return "into" as const;
+    return y < 0.5 ? ("before" as const) : ("after" as const);
+  };
+  const accepts = (event: React.DragEvent<HTMLDivElement>) =>
+    event.dataTransfer.types.includes(ITEM_DRAG_TYPE) ||
+    event.dataTransfer.types.includes(SITE_DRAG_TYPE);
+  return (
+    <div
+      className="relative"
+      draggable={actions.renaming !== item.id}
+      onDragStart={(event) => {
+        event.stopPropagation();
+        const dragged: DraggedItem = {
+          id: item.id,
+          parentId,
+          origin: item.origin,
+          type: item.type,
+        };
+        event.dataTransfer.setData(ITEM_DRAG_TYPE, JSON.stringify(dragged));
+        event.dataTransfer.effectAllowed = "move";
+      }}
+      onDragOver={(event) => {
+        if (!accepts(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOver(zone(event));
+      }}
+      onDragLeave={() => setOver(null)}
+      onDrop={(event) => {
+        if (!accepts(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOver(null);
+        const change = dropChange(event.dataTransfer, item, parentId, zone(event));
+        if (change) actions.change([change]);
+      }}
+      data-drop={over ?? undefined}
+    >
+      {over === "before" || over === "after" ? (
+        <span
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute inset-x-2 z-10 h-0.5 rounded-full bg-brand",
+            over === "before" ? "-top-px" : "-bottom-px",
+          )}
+        />
+      ) : null}
+      {over === "into" ? (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-10 rounded-md ring-2 ring-brand"
+        />
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
 function AppRow({
   workspaceId,
   appId,
   path,
   label,
+  icon,
   pathname,
   menu,
   indent,
@@ -123,9 +429,10 @@ function AppRow({
   appId: string;
   path: string | null;
   label: string;
+  icon?: string | undefined;
   pathname: string;
   menu?: React.ReactNode;
-  indent?: boolean;
+  indent?: boolean | undefined;
 }) {
   const rail = useRail();
   const location = appPageLocation(path);
@@ -139,8 +446,9 @@ function AppRow({
         data-active={active ? "true" : undefined}
         className={cn(ROW, menu && "pr-8", indent && "pl-4")}
         onClick={() => rail.setDrawerOpen(false)}
+        draggable={false}
       >
-        <AppWindowIcon aria-hidden="true" className="size-4 shrink-0" />
+        <SidebarIcon name={icon} fallback={AppWindowIcon} />
         <span className="min-w-0 flex-1 truncate">{label}</span>
       </Link>
       {menu}
@@ -164,7 +472,7 @@ function AgentRow({
   label: string;
   pathname: string;
   menu?: React.ReactNode;
-  indent?: boolean;
+  indent?: boolean | undefined;
 }) {
   const rail = useRail();
   const active = pathname.startsWith(agentPagePathname(workspaceId, agentId));
@@ -176,6 +484,7 @@ function AgentRow({
         data-active={active ? "true" : undefined}
         className={cn(ROW, menu && "pr-8", indent && "pl-4")}
         onClick={() => rail.setDrawerOpen(false)}
+        draggable={false}
       >
         <SessionAvatar
           avatar={avatar}
@@ -196,35 +505,77 @@ export function agentPagePathname(workspaceId: string, agentId: string): string 
   return `/workspaces/${workspaceId}/agents/${agentId}`;
 }
 
+/** An outside link: its own icon, else its site's, else an arrow. Opens in a new tab. */
+function ExternalLinkRow({
+  item,
+  workspaceId,
+  menu,
+  indent,
+}: {
+  item: Extract<ResolvedSidebarChild, { type: "link" }>;
+  workspaceId: string;
+  menu: React.ReactNode;
+  indent?: boolean | undefined;
+}) {
+  const siteIcon = useLinkIcon(workspaceId, item.url, !item.icon);
+  return (
+    <div className="relative">
+      <a
+        href={item.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={cn(ROW, "pr-8", indent && "pl-4")}
+        title={item.url}
+        draggable={false}
+      >
+        {item.icon || !siteIcon ? (
+          <SidebarIcon name={item.icon} fallback={ArrowUpRightIcon} />
+        ) : (
+          <img alt="" src={siteIcon} className="size-4 shrink-0 rounded-sm object-contain" />
+        )}
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+        <span className="sr-only">(opens in a new tab)</span>
+      </a>
+      {menu}
+    </div>
+  );
+}
+
 function ChildRows({
   item,
+  parentId,
   workspaceId,
   pathname,
   actions,
   indent,
 }: {
   item: ResolvedSidebarChild;
+  parentId: string | null;
   workspaceId: string;
   pathname: string;
   actions: RowActions;
   indent?: boolean;
 }) {
   const router = useRouter();
+  if (actions.renaming === item.id)
+    return <RenameRow item={item} actions={actions} indent={indent} />;
   const menu = <RowMenu item={item} actions={actions} />;
+  let row: React.ReactNode;
   if (item.type === "app")
-    return (
+    row = (
       <AppRow
         workspaceId={workspaceId}
         appId={item.appId}
         path={item.path}
         label={item.label}
+        icon={item.icon}
         pathname={pathname}
         menu={menu}
         indent={indent}
       />
     );
-  if (item.type === "agent")
-    return (
+  else if (item.type === "agent")
+    row = (
       <AgentRow
         workspaceId={workspaceId}
         agentId={item.agentId}
@@ -235,64 +586,56 @@ function ChildRows({
         indent={indent}
       />
     );
-  if (item.type === "link") {
+  else if (item.type === "link") {
     const inApp = inAppLinkPath(item.url, window.location.origin, (path) =>
       pathHasAppPage(router, path),
     );
-    if (inApp !== null)
-      return (
+    row =
+      inApp !== null ? (
         <InAppLinkRow
           path={inApp}
           label={item.label}
+          icon={item.icon}
           pathname={pathname}
           menu={menu}
           indent={indent}
         />
+      ) : (
+        <ExternalLinkRow item={item} workspaceId={workspaceId} menu={menu} indent={indent} />
       );
-    return (
-      <div className="relative">
-        <a
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={cn(ROW, "pr-8", indent && "pl-4")}
-          title={item.url}
-        >
-          <ArrowUpRightIcon aria-hidden="true" className="size-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{item.label}</span>
-          <span className="sr-only">(opens in a new tab)</span>
-        </a>
-        {menu}
+  } else
+    // A live list: its label, then its apps. An empty list isn't shown (see
+    // sidebarItemsShown); the Sidebar page still lists it.
+    row = (
+      <div className="grid gap-0.5">
+        <div className="group/row relative">
+          <div
+            className={cn(
+              "flex h-7 items-center px-2.5 text-xs font-medium text-fg-subtle",
+              indent && "pl-4",
+            )}
+          >
+            <span className="min-w-0 flex-1 truncate">{item.label}</span>
+          </div>
+          {menu}
+        </div>
+        {item.apps.map((app) => (
+          <AppRow
+            key={app.appId}
+            workspaceId={workspaceId}
+            appId={app.appId}
+            path={null}
+            label={app.title}
+            pathname={pathname}
+            indent={indent}
+          />
+        ))}
       </div>
     );
-  }
-  // A live list: its label, then its apps. An empty list isn't shown (see
-  // sidebarItemsShown); the Sidebar page still lists it.
   return (
-    <div className="grid gap-0.5">
-      <div className="group/row relative">
-        <div
-          className={cn(
-            "flex h-7 items-center px-2.5 text-xs font-medium text-fg-subtle",
-            indent && "pl-4",
-          )}
-        >
-          <span className="min-w-0 flex-1 truncate">{item.label}</span>
-        </div>
-        {menu}
-      </div>
-      {item.apps.map((app) => (
-        <AppRow
-          key={app.appId}
-          workspaceId={workspaceId}
-          appId={app.appId}
-          path={null}
-          label={app.title}
-          pathname={pathname}
-          indent={indent}
-        />
-      ))}
-    </div>
+    <DragRow item={item} parentId={parentId} actions={actions}>
+      {row}
+    </DragRow>
   );
 }
 
@@ -300,15 +643,17 @@ function ChildRows({
 function InAppLinkRow({
   path,
   label,
+  icon,
   pathname,
   menu,
   indent,
 }: {
   path: string;
   label: string;
+  icon?: string | undefined;
   pathname: string;
   menu: React.ReactNode;
-  indent?: boolean;
+  indent?: boolean | undefined;
 }) {
   const router = useRouter();
   const rail = useRail();
@@ -320,6 +665,7 @@ function InAppLinkRow({
         data-active={active ? "true" : undefined}
         aria-current={active ? "page" : undefined}
         className={cn(ROW, "pr-8", indent && "pl-4")}
+        draggable={false}
         onClick={(event) => {
           // Let the browser open a new tab or window when asked to.
           if (
@@ -335,7 +681,7 @@ function InAppLinkRow({
           router.history.push(path);
         }}
       >
-        <LinkIcon aria-hidden="true" className="size-4 shrink-0" />
+        <SidebarIcon name={icon} fallback={LinkIcon} />
         <span className="min-w-0 flex-1 truncate">{label}</span>
       </a>
       {menu}
@@ -373,6 +719,7 @@ export function SidebarLayoutSection() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { layout, update } = useSidebarLayout(rail.workspaceId);
   const [openGroups, setOpenGroups] = useState(readOpenGroups);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const shownItems = layout ? sidebarItemsShown(layout.items) : [];
   if (rail.collapsed || !layout || shownItems.length === 0) return null;
   const canChange = layout.personal.available;
@@ -391,13 +738,14 @@ export function SidebarLayoutSection() {
   };
   if (rail.isMobile) {
     const items = flattenSidebarItemsForMobile(shownItems);
-    const actions: RowActions = { siblings: [], change, canChange: false };
+    const actions: RowActions = { change, canChange: false, renaming: null, setRenaming };
     return (
       <nav aria-label="Workspace links" className="mt-2 grid gap-0.5 px-2" data-sidebar-layout>
         {items.map((item) => (
           <ChildRows
             key={item.id}
             item={item}
+            parentId={null}
             workspaceId={rail.workspaceId}
             pathname={pathname}
             actions={actions}
@@ -406,7 +754,7 @@ export function SidebarLayoutSection() {
       </nav>
     );
   }
-  const rootIds = shownItems.map((item) => item.id);
+  const actions: RowActions = { change, canChange, renaming, setRenaming };
   return (
     <nav
       aria-label="Workspace links"
@@ -414,12 +762,12 @@ export function SidebarLayoutSection() {
       data-sidebar-layout
     >
       {shownItems.map((item) => {
-        const actions: RowActions = { siblings: rootIds, change, canChange };
         if (item.type !== "group")
           return (
             <ChildRows
               key={item.id}
               item={item}
+              parentId={null}
               workspaceId={rail.workspaceId}
               pathname={pathname}
               actions={actions}
@@ -437,32 +785,52 @@ export function SidebarLayoutSection() {
               )?.split(/[?#]/)[0] === pathname),
         );
         const open = holdsActive || (openGroups[item.id] ?? !item.collapsed);
-        const childIds = item.items.map((child) => child.id);
         return (
           <div key={item.id} className="grid gap-0.5">
-            <div className="group/row relative">
-              <button
-                type="button"
-                aria-expanded={open}
-                onClick={() => toggle(item.id, !open)}
-                className={cn(ROW, "w-full pr-8 text-left")}
-              >
-                <ChevronRightIcon
-                  aria-hidden="true"
-                  className={cn("size-4 shrink-0 transition-transform", open && "rotate-90")}
-                />
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              </button>
-              <RowMenu item={item} actions={actions} />
-            </div>
+            {renaming === item.id ? (
+              <RenameRow item={item} actions={actions} />
+            ) : (
+              <DragRow item={item} parentId={null} actions={actions} group>
+                <div className="group/row relative">
+                  <button
+                    type="button"
+                    aria-expanded={open}
+                    onClick={() => toggle(item.id, !open)}
+                    className={cn(ROW, "w-full text-left", canChange ? "pr-14" : "pr-8")}
+                  >
+                    {item.icon ? (
+                      <SidebarIcon name={item.icon} fallback={ChevronRightIcon} />
+                    ) : (
+                      <ChevronRightIcon
+                        aria-hidden="true"
+                        className={cn("size-4 shrink-0 transition-transform", open && "rotate-90")}
+                      />
+                    )}
+                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    {item.icon ? (
+                      <ChevronRightIcon
+                        aria-hidden="true"
+                        className={cn(
+                          "size-3.5 shrink-0 text-fg-subtle transition-[transform,opacity] group-hover/row:opacity-0",
+                          open && "rotate-90",
+                        )}
+                      />
+                    ) : null}
+                  </button>
+                  {canChange ? <AddAppButton group={item} actions={actions} /> : null}
+                  <RowMenu item={item} actions={actions} />
+                </div>
+              </DragRow>
+            )}
             {open
               ? item.items.map((child) => (
                   <ChildRows
                     key={child.id}
                     item={child}
+                    parentId={item.id}
                     workspaceId={rail.workspaceId}
                     pathname={pathname}
-                    actions={{ siblings: childIds, change, canChange }}
+                    actions={actions}
                     indent
                   />
                 ))

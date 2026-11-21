@@ -17,7 +17,30 @@ in Artifacts. The sidebar shows those pins through a **Pinned apps** list.
 | `app`       | An App, optionally one of its pages (`path: "/releases"`). Its own title unless `label` is set. |
 | `agent`     | An agent's page (`agentId`), with the agent's avatar. Its name unless `label` is set. Opens in place. |
 | `link`      | An `https://` link with a `label`. An outside link opens in a new tab and is marked external; a link to a page of this Opengeni opens in place. |
-| `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (Apps this person opened last), `limit` 1 to 20 (default 5). |
+| `live_list` | A list the sidebar fills in: `pinned_apps` (the workspace's shared pins) or `recent_apps` (Apps this person opened or edited last), `limit` 1 to 20 (default 5). |
+
+Apps, links and groups take an optional `icon`: a lucide icon name from
+`SIDEBAR_ITEM_ICONS` in `@opengeni/contracts/sidebar-layout` (for example
+`rocket`, `book-open`, `chart-line`). Without one, an app shows the app icon,
+a group its chevron, and an outside link the site's own icon (see API). An
+icon a reader doesn't know is ignored and the item still shows. Apps have no
+icon of their own; the icon belongs to the sidebar item.
+
+An Apps section is an ordinary item: a group holding a `recent_apps` or
+`pinned_apps` list, which can be moved, renamed, given a `limit` or removed
+like any other.
+
+## Options
+
+Beside its items, a layout holds `options` for the rest of the navigation.
+Each is unset by default, which keeps today's behaviour; the workspace
+default sets them for everyone and a person's own value wins:
+
+| Option             | Effect                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------ |
+| `sessionsShowApps` | `false`: project apps don't show as rows of their own in the Sessions list; their chats show as ordinary chats. Default `true`. |
+| `hiddenNavEntries` | Built-in rail entries left out: any of `inbox`, `capabilities`, `knowledge`, `automations`, `agents`, `meetings`, `artifacts`. An entry still shows while it is the current page or has something waiting (a Knowledge review, an Inbox item, a recording). Default none. |
+| `settingsShown`    | Settings rail entry ids (`workspace:general`, `organization:members`, ...) kept at the top; the rest go under one collapsed **More**, which opens while it holds the current page. Settings search still finds everything. Default unset: every entry at the top. |
 
 Item ids are 1 to 64 letters, digits, `-` or `_`; the server makes one when a
 new item has none. A person's own items always get ids starting with `my-`: a
@@ -100,9 +123,14 @@ before their own changes (`workspace.items`) and `workspace.canEdit: true`.
 - `scope: "workspace"` changes the default (`workspace:admin`, else 403).
 - `changes` (1 to 50, applied in order, all or nothing): `add` (`item`,
   optional `groupId` and a position), `update` (`label`, `path`, `url`,
-  `collapsed`, `limit`; renaming a group is an `update` of its `label`),
-  `remove`, `show`, `move` (optional `groupId`, `null` for the top level, and
-  a position) and `reset`.
+  `collapsed`, `limit`, `icon` (`null` removes it); renaming a group is an
+  `update` of its `label`), `remove`, `show`, `move` (optional `groupId`,
+  `null` for the top level, and a position), `options` (any of the options
+  above; `null` unsets one) and `reset` (which also unsets the scope's
+  options).
+- The answer's `options` are the ones in effect for the caller;
+  `personal.options` and, for admins, `workspace.options` are each scope's
+  own.
 - A position is `beforeId` or `afterId` (an item of the target level) or an
   `index`; see Placement below.
 - With `expectedRevision`, a newer revision is refused with 409 instead of
@@ -138,6 +166,13 @@ The SDK has `client.getSidebarLayout(workspaceId)` and
 `client.updateSidebarLayout(workspaceId, request)`. Both routes are app
 actions, so agents with app actions can call them as the person.
 
+`GET /v1/workspaces/:workspaceId/sidebar-layout/link-icon?url=<https url>`
+(`workspace:read`, `client.getSidebarLinkIcon`) returns the icon of a site
+linked in the caller's sidebar: its `/favicon.ico`, fetched by the server
+under the outbound network policy (https only, at most 2 redirects and
+100 KB, raster images only, kept a day). A site that isn't in the caller's
+sidebar, or has no such icon, is a 404.
+
 An app package installer (or any integration) adds an app to the default with
 one call:
 
@@ -162,16 +197,22 @@ Both are in the workspace-admin tool family and need `workspace:read`.
 ## Clients
 
 - **Web and the desktop app**: under the primary navigation, above the
-  chats. Each row has a menu (Move up, Move down, Hide or Remove, Customize
-  sidebar), and a quiet Customize row under the section shows while the
-  pointer is over it (always on touch screens). Both, the account menu's
+  chats. The sidebar is edited in place: drag a row to reorder it (an app
+  row from the Sessions list can be dropped in too), a group's **+** adds an
+  app to it, and each row's menu has Rename, Icon, Show (how many apps a
+  list shows), Hide or Remove, and Customize sidebar. A project app's menu in
+  the Sessions list has **Add to sidebar**. A quiet Customize row under the
+  section shows while the pointer is over it (always on touch screens). Both, the account menu's
   Customize sidebar and settings search ("sidebar") open the Sidebar page
   (`/workspaces/<id>/sidebar`): Yours, and Workspace default for admins. Its
   **Add** menu adds an **App**, an **Agent** (picked from the agents you can
   see), a **Link**, a **Group** or a **List**; a group's menu has Rename (inline: Enter or
   leaving the field saves, Escape cancels) for your own groups, and for the
-  default's groups under Workspace default. Groups remember open or closed
-  per browser. The icon-only rail
+  default's groups under Workspace default; rows also have Icon and, for
+  lists, Show. Its Navigation section switches the options above (Apps in
+  Sessions and each rail entry), for you and, for admins, as the default.
+  A settings entry's menu has **Move to More** or **Show at top**. Groups
+  remember open or closed per browser. The icon-only rail
   leaves the section out. Changes made elsewhere (an agent's tool call,
   another tab or device) show when the window regains focus, on return to
   the tab, or within two minutes.
@@ -185,6 +226,7 @@ Both are in the workspace-admin tool family and need `workspace:read`.
   viewer at its page (`/native-view/workspaces/<id>/sites/<appId>?page=<path>`;
   a server without `?page=` opens its home page), and an outside link opens
   in the browser. It's read only: changes are made on the web or by an agent.
+  Item icons show there too; outside links without one keep the arrow.
   It refreshes each time the menu opens and on pull to refresh, and shows the
   last layout at once.
 
@@ -201,7 +243,8 @@ Artifacts view:
 - The last 3 Apps you left stay open while you go elsewhere, so coming back
   doesn't reload them or lose their state. More than that, the one shown
   longest ago closes. Switching workspaces closes them. Each return to an
-  App counts as opening it, for Recent apps.
+  App counts as opening it, for Recent apps; saving a new version of an App
+  counts too.
 - Coming back to an App seen earlier in the tab draws its last copy at once
   (and refreshes it behind), and a first open is a blank canvas in the
   App's theme, not a loading card. If the refresh finds the App gone or no
@@ -218,6 +261,11 @@ during a rolling deploy) of different versions never break each other's
 layouts. An older client simply doesn't show newer item types: agent links
 are left out of web and phone clients from before they existed, and an older
 API replica keeps them in storage without showing them.
+
+Icons and options follow the same rule: older clients ignore them. An older
+API replica writing a layout during a rolling deploy keeps unknown item
+fields (icons) but drops the layout's `options`; set them again if a change
+made then is lost.
 
 ## Storage
 

@@ -1,6 +1,13 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { PanelLeftIcon, SlidersHorizontalIcon } from "lucide-react";
+import {
+  BotIcon,
+  KeyRoundIcon,
+  PanelLeftIcon,
+  ShieldCheckIcon,
+  SlidersHorizontalIcon,
+  UsersIcon,
+} from "lucide-react";
 import type {
   ResolvedSidebarChild,
   ResolvedSidebarItem,
@@ -12,7 +19,10 @@ import {
   applyPersonalSidebarChanges,
   applyWorkspaceSidebarChanges,
   EMPTY_SIDEBAR_PERSONAL_CHANGES,
+  isSidebarItemIcon,
   mergeSidebarLayout,
+  mergeSidebarOptions,
+  readResolvedSidebarOptions,
   SIDEBAR_LIVE_LIST_DEFAULT_LIMIT,
   SIDEBAR_LIVE_LIST_LABELS,
   sidebarPersonalChangesCustomized,
@@ -28,6 +38,8 @@ import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
 import { resetSidebarLayoutCache } from "@/components/sidebar-layout/use-sidebar-layout";
 import { SettingsShell, type SettingsRailSection } from "@/components/settings/settings-sidebar";
+import { foldSettingsRail } from "@/components/settings/settings-more";
+import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { SidebarCustomizeRoute } from "@/routes/sidebar-customize";
 import { currentWorkspace } from "../fixtures";
 import { KitBlock, KitCanvas, KitSection } from "../kit";
@@ -43,6 +55,7 @@ const WORKSPACE_ID = currentWorkspace.id;
 const APPS = [
   { appId: "0b5b7c3e-6f3e-4d55-9a3c-1f2b3c4d5e01", title: "Release notes" },
   { appId: "0b5b7c3e-6f3e-4d55-9a3c-1f2b3c4d5e02", title: "Incident board" },
+  { appId: "0b5b7c3e-6f3e-4d55-9a3c-1f2b3c4d5e03", title: "Sales dashboard" },
 ];
 const AGENTS: { id: string; name: string; avatar: SessionAvatar | null }[] = [
   {
@@ -70,6 +83,7 @@ function createFixture() {
         id: "team",
         type: "group",
         label: "Team",
+        icon: "users",
         items: [
           { id: "release-helper", type: "agent", agentId: AGENTS[0]!.id },
           {
@@ -77,10 +91,19 @@ function createFixture() {
             type: "app",
             appId: APPS[0]!.appId,
             path: "/latest",
+            icon: "rocket",
           },
+          { id: "docs", type: "link", url: "https://docs.example.com", label: "Docs" },
         ],
       },
       { id: "triage", type: "agent", agentId: AGENTS[1]!.id },
+      {
+        id: "apps",
+        type: "group",
+        label: "Apps",
+        icon: "layout-grid",
+        items: [{ id: "recent", type: "live_list", list: "recent_apps", limit: 3 }],
+      },
     ],
   };
   let personal: StoredSidebarPersonalChanges = {
@@ -91,6 +114,7 @@ function createFixture() {
         item: { id: "my-links", type: "group", label: "My links", items: [] },
       },
     ],
+    options: { settingsShown: ["workspace:general", "workspace:members", "workspace:agents"] },
   };
   let revisions = { personal: 1, workspace: 1 };
   let next = 0;
@@ -118,16 +142,24 @@ function createFixture() {
         appId: app.appId,
         path: item.path ?? null,
         label: item.label ?? app.title,
+        ...(isSidebarItemIcon(item.icon) ? { icon: item.icon } : {}),
       };
     }
-    if (item.type === "link") return { ...base, type: "link", url: item.url, label: item.label };
+    if (item.type === "link")
+      return {
+        ...base,
+        type: "link",
+        url: item.url,
+        label: item.label,
+        ...(isSidebarItemIcon(item.icon) ? { icon: item.icon } : {}),
+      };
     return {
       ...base,
       type: "live_list",
       list: item.list,
       label: item.label ?? SIDEBAR_LIVE_LIST_LABELS[item.list],
       limit: item.limit ?? SIDEBAR_LIVE_LIST_DEFAULT_LIMIT,
-      apps: APPS,
+      apps: APPS.slice(0, item.limit ?? SIDEBAR_LIVE_LIST_DEFAULT_LIMIT),
     };
   };
   const resolve = (items: MergedSidebarItem[]): ResolvedSidebarItem[] =>
@@ -143,6 +175,7 @@ function createFixture() {
           type: "group",
           label: item.label,
           collapsed: item.collapsed ?? false,
+          ...(isSidebarItemIcon(item.icon) ? { icon: item.icon } : {}),
           items: item.items.flatMap((entry) => {
             const resolved = child(entry);
             return resolved ? [resolved] : [];
@@ -154,6 +187,7 @@ function createFixture() {
     const merged = mergeSidebarLayout(workspace, personal);
     return {
       items: resolve(merged.items),
+      options: mergeSidebarOptions(workspace.options, personal.options),
       hidden: merged.hidden.flatMap((entry) => {
         const [item] = resolve([entry.item]);
         return item ? [{ parentId: entry.parentId, item }] : [];
@@ -162,16 +196,20 @@ function createFixture() {
         available: true,
         revision: revisions.personal,
         customized: sidebarPersonalChangesCustomized(personal),
+        ...(personal.options ? { options: personal.options } : {}),
       },
       workspace: {
         revision: revisions.workspace,
         canEdit: true,
+        ...(workspace.options ? { options: workspace.options } : {}),
         items: resolve(mergeSidebarLayout(workspace, EMPTY_SIDEBAR_PERSONAL_CHANGES).items),
       },
     };
   };
   const client = {
     getSidebarLayout: async () => response(),
+    // No network in the kit: outside links keep their fallback icon.
+    getSidebarLinkIcon: async () => null,
     updateSidebarLayout: async (_workspaceId: string, request: UpdateSidebarLayoutRequest) => {
       const parsed = UpdateRequestSchema.parse(request);
       if (parsed.scope === "workspace") {
@@ -237,6 +275,30 @@ function SettingsSearchPreview() {
                 icon: SlidersHorizontalIcon,
                 link: <Link to="/dev/ui-kit" />,
               },
+              {
+                id: "workspace:members",
+                label: "Members",
+                icon: UsersIcon,
+                link: <Link to="/dev/ui-kit" />,
+              },
+              {
+                id: "workspace:agents",
+                label: "Agent settings",
+                icon: BotIcon,
+                link: <Link to="/dev/ui-kit" />,
+              },
+              {
+                id: "workspace:keys",
+                label: "API keys",
+                icon: KeyRoundIcon,
+                link: <Link to="/dev/ui-kit" />,
+              },
+              {
+                id: "workspace:security",
+                label: "Security",
+                icon: ShieldCheckIcon,
+                link: <Link to="/dev/ui-kit" />,
+              },
             ],
           },
         ],
@@ -253,16 +315,22 @@ function SettingsSearchPreview() {
     ],
     [],
   );
+  // The person's own choice of top-level entries; the rest fold under More.
+  const { layout, update } = useSidebarLayout(WORKSPACE_ID);
+  const shown = readResolvedSidebarOptions(layout?.options).settingsShown;
+  const rail = foldSettingsRail(sections, shown, (settingsShown) => {
+    void update({ scope: "personal", changes: [{ op: "options", settingsShown }] });
+  });
   return (
     <div
       data-kit-settings-search
-      className="h-[360px] overflow-hidden rounded-md border border-border"
+      className="h-[480px] overflow-hidden rounded-md border border-border"
     >
       <SettingsShell
         label="Settings"
         back={{ link: <Link to="/dev/ui-kit" />, label: "Back to sessions" }}
         home={<Link to="/dev/ui-kit" />}
-        sections={sections}
+        sections={rail}
         activeId="workspace:general"
         currentPage="General"
         page={{ title: "General" }}
@@ -292,10 +360,10 @@ export default function SidebarPageSection() {
             </div>
           </KitCanvas>
         </KitBlock>
+        <KitBlock title="Settings search">
+          <SettingsSearchPreview />
+        </KitBlock>
       </Provider>
-      <KitBlock title="Settings search">
-        <SettingsSearchPreview />
-      </KitBlock>
     </KitSection>
   );
 }
