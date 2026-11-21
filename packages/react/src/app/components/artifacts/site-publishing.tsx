@@ -204,9 +204,7 @@ function useHostnameAvailability(
   label: string,
   skip: boolean,
 ): Availability {
-  const [availability, setAvailability] = useState<Availability>({
-    state: "idle",
-  });
+  const [availability, setAvailability] = useState<Availability>({ state: "idle" });
   useEffect(() => {
     if (skip || labelProblemMessage(label)) {
       setAvailability({ state: "idle" });
@@ -257,15 +255,6 @@ export type SitePublishPageProps = {
   layout?: "page" | "panel" | undefined;
   /** After Publish or Save changes succeeds, for a page that then goes back. */
   onSubmitted?: (() => void) | undefined;
-  /**
-   * Panel only: the app's rarer settings (Duplicate, Export, Archive…),
-   * shown in the form's collapsed More with search engines and reports.
-   */
-  moreRows?: ReactNode | undefined;
-  /** What `moreRows` holds, lowercase, for More's closed summary: "duplicate, archive". */
-  moreRowsSummary?: string | undefined;
-  /** Panel only: the app's other settings rows, after the form's fields and before More. */
-  settingsRows?: ReactNode | undefined;
 };
 
 /** The publish form's frame: its own page, or a panel in the Site's Settings. */
@@ -287,31 +276,18 @@ function PublishFrame({
 export function SitePublishPage(props: SitePublishPageProps) {
   const { load, site, onBack, layout } = props;
   const back = { label: site.title, onClick: onBack };
-  // Until the form itself shows, the app's other rows follow it, and its
-  // More holds only the app's rarer rows.
-  const more = (
-    <>
-      {props.settingsRows}
-      {props.moreRows ? (
-        <PublishMore summary={sentenceStart(props.moreRowsSummary)}>{props.moreRows}</PublishMore>
-      ) : null}
-    </>
-  );
   const blocked = (title: string, body: ReactNode, action?: ReactNode) => (
-    <>
-      <PublishFrame
-        layout={layout}
-        back={back}
-        title="Publish to web"
-        submitLabel="Publish"
-        footer={false}
-      >
-        <Notice title={title} action={action} actionLayout="responsive">
-          {body}
-        </Notice>
-      </PublishFrame>
-      {more}
-    </>
+    <PublishFrame
+      layout={layout}
+      back={back}
+      title="Publish to web"
+      submitLabel="Publish"
+      footer={false}
+    >
+      <Notice title={title} action={action} actionLayout="responsive">
+        {body}
+      </Notice>
+    </PublishFrame>
   );
   if (!props.canManage || load.state === "forbidden")
     return blocked(
@@ -345,17 +321,14 @@ export function SitePublishPage(props: SitePublishPageProps) {
     );
   if (load.state === "loading")
     return (
-      <>
-        <PublishFrame
-          layout={layout}
-          back={back}
-          title="Publish to web"
-          submitLabel="Publish"
-          loading
-          loadingFields={4}
-        />
-        {more}
-      </>
+      <PublishFrame
+        layout={layout}
+        back={back}
+        title="Publish to web"
+        submitLabel="Publish"
+        loading
+        loadingFields={4}
+      />
     );
   return (
     <SitePublishForm
@@ -379,9 +352,6 @@ function SitePublishForm({
   isAdmin,
   layout = "page",
   onSubmitted,
-  moreRows,
-  moreRowsSummary,
-  settingsRows,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -441,11 +411,7 @@ function SitePublishForm({
     saved?.status === "active" && saved.access === draft.access ? saved.warnings : [];
   const openReports = saved?.moderation.openReports ?? 0;
   const moreSummary =
-    openReports > 0
-      ? `${openReports} open ${openReports === 1 ? "report" : "reports"}`
-      : moreRows && moreRowsSummary
-        ? `Search engines, reports, ${moreRowsSummary}`
-        : "Search engines, reports";
+    openReports > 0 ? `${openReports} open ${openReports === 1 ? "report" : "reports"}` : undefined;
 
   const submit = async () => {
     setLabelError(null);
@@ -497,9 +463,7 @@ function SitePublishForm({
       onPublication(await client.applySitePublicationFix(workspaceId, site.id, fix));
       toast.success("Fixed");
     } catch (error) {
-      toast.error("Couldn't apply the fix", {
-        description: userErrorText(error),
-      });
+      toast.error("Couldn't apply the fix", { description: userErrorText(error) });
     }
   };
 
@@ -517,9 +481,7 @@ function SitePublishForm({
             .updateSitePublication(workspaceId, site.id, { status: "active" })
             .then(onPublication)
             .catch((error) =>
-              toast.error("Couldn't publish again", {
-                description: userErrorText(error),
-              }),
+              toast.error("Couldn't publish again", { description: userErrorText(error) }),
             ),
       });
     } catch (error) {
@@ -535,9 +497,7 @@ function SitePublishForm({
       onPublication(await client.restoreSite(workspaceId, site.id));
       toast.success("App restored");
     } catch (error) {
-      toast.error("Couldn't restore the app", {
-        description: userErrorText(error),
-      });
+      toast.error("Couldn't restore the app", { description: userErrorText(error) });
     } finally {
       setBusy(null);
     }
@@ -614,7 +574,14 @@ function SitePublishForm({
             </div>
           </Field>
 
-          <Field label="Who can open it">
+          <Field
+            label="Who can open it"
+            // The choice's own description, so the closed menu still says it.
+            hint={ACCESS_CHOICES.find((choice) => choice.value === draft.access)?.description({
+              workspaceName,
+              loginOnly: sites.loginOnly === true,
+            })}
+          >
             <SelectMenu
               value={draft.access}
               onValueChange={(value) => update({ access: value })}
@@ -693,10 +660,12 @@ function SitePublishForm({
             ) : null}
           </div>
 
-          {settingsRows}
-
           {/* Rarely changed, and the dangerous ones: closed unless a report waits. */}
-          <PublishMore summary={moreSummary} defaultOpen={openReports > 0}>
+          <PublishMore
+            title="Search engines and reports"
+            summary={moreSummary}
+            defaultOpen={openReports > 0}
+          >
             <CheckboxField
               label="Hide from search engines"
               checked={draft.noindex}
@@ -713,7 +682,6 @@ function SitePublishForm({
                 onTakeDown={() => setTakedownOpen(true)}
               />
             ) : null}
-            {moreRows}
           </PublishMore>
         </FieldStack>
       </PublishFrame>
@@ -723,9 +691,7 @@ function SitePublishForm({
           onOpenChange={setTakedownOpen}
           hostname={saved.hostname}
           onTakeDown={async (reason) => {
-            const next = await client.takeDownSite(workspaceId, site.id, {
-              reason,
-            });
+            const next = await client.takeDownSite(workspaceId, site.id, { reason });
             onPublication(next);
             toast.success("App taken down", {
               description: "Visitors see a takedown notice.",
@@ -737,23 +703,20 @@ function SitePublishForm({
   );
 }
 
-/** "duplicate, archive" → "Duplicate, archive". */
-export function sentenceStart(text: string | undefined): string | undefined {
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : undefined;
-}
-
-/** The form's collapsed More: rare and dangerous settings, one row style. */
+/** A collapsed group of rare and dangerous settings, one row style. */
 export function PublishMore({
+  title = "More",
   summary,
   defaultOpen,
   children,
 }: {
+  title?: string | undefined;
   summary?: ReactNode | undefined;
   defaultOpen?: boolean | undefined;
   children: ReactNode;
 }) {
   return (
-    <Disclosure title="More" summary={summary} defaultOpen={defaultOpen}>
+    <Disclosure title={title} summary={summary} defaultOpen={defaultOpen}>
       <div className="flex min-w-0 flex-col gap-4 pt-2">{children}</div>
     </Disclosure>
   );
@@ -1015,11 +978,7 @@ function OutsideAgentSection({
             <button
               type="button"
               onClick={() =>
-                onChange({
-                  personLimitOn: true,
-                  personLimit: "1",
-                  personPeriod: "day",
-                })
+                onChange({ personLimitOn: true, personLimit: "1", personPeriod: "day" })
               }
               className="inline-flex items-center gap-1 self-start text-sm font-medium og-link"
             >
@@ -1197,15 +1156,11 @@ function SiteReports({
   }, [client, openReports, siteId, workspaceId]);
   const close = async (report: SiteAbuseReport, status: "dismissed" | "actioned") => {
     try {
-      await client.updateSiteAbuseReport(workspaceId, siteId, report.id, {
-        status,
-      });
+      await client.updateSiteAbuseReport(workspaceId, siteId, report.id, { status });
       setReports((current) => current?.filter((item) => item.id !== report.id) ?? null);
       toast.success(status === "dismissed" ? "Report dismissed" : "Report marked as handled");
     } catch (error) {
-      toast.error("Couldn't update the report", {
-        description: userErrorText(error),
-      });
+      toast.error("Couldn't update the report", { description: userErrorText(error) });
     }
   };
   return (

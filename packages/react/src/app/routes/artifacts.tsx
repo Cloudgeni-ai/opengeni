@@ -9,12 +9,8 @@ import { loadSiteSnapshot } from "../../sites";
 import { SiteConversations } from "../components/artifacts/site-conversations";
 import { SiteData } from "../components/artifacts/site-data";
 import { SitePublishButton, sitePublicationHeader } from "../components/artifacts/site-publishing";
-import {
-  SiteSettings,
-  hasSiteSettings,
-  useSiteManagement,
-} from "../components/artifacts/site-settings";
-import { Link, useNavigate, useRouterState, useSearch } from "../lib/navigation";
+import { SiteSettings, useSiteManagement } from "../components/artifacts/site-settings";
+import { Link, useNavigate, usePage, useRouterState, useSearch } from "../lib/navigation";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -223,14 +219,9 @@ function ArtifactListRoute({
     setPreparingNew(true);
     try {
       await readyNewChat(context.client, workspaceId, newArtifactPrompt(filters.kind));
-      await navigate({
-        to: "/workspaces/$workspaceId/sessions",
-        params: { workspaceId },
-      });
+      await navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
     } catch (nextError) {
-      toast.error("Couldn't open a new chat", {
-        description: userErrorText(nextError),
-      });
+      toast.error("Couldn't open a new chat", { description: userErrorText(nextError) });
     } finally {
       setPreparingNew(false);
     }
@@ -517,21 +508,29 @@ function ArtifactDetailPage({
   const fromSite = useRouterState({
     select: (state) => state.location.state.artifactDetailFromSite === artifactId,
   });
-  const back: DetailBackLink = fromSite
-    ? {
-        label: "App",
-        href: `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(artifactId)}`,
-        onClick: (event?: MouseEvent) => {
-          if (
-            event &&
-            (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
-          )
-            return;
-          event?.preventDefault();
-          window.history.back();
-        },
-      }
-    : artifactsBack;
+  // A host that opens pages beside the chat has no history to go back through.
+  const opensBeside = usePage().opensBeside;
+  const back: DetailBackLink =
+    fromSite && !opensBeside
+      ? {
+          // Named after the app once it has loaded (below).
+          label: "",
+          href: `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(artifactId)}`,
+          onClick: (event?: MouseEvent) => {
+            if (
+              event &&
+              (event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey)
+            )
+              return;
+            event?.preventDefault();
+            window.history.back();
+          },
+        }
+      : artifactsBack;
   const copyLink = useCopyArtifactLink(workspaceId);
   const search = useSearch({ strict: false }) as ArtifactReturnSearch;
   // The tab is in the address, so Settings (from the workbench or the old
@@ -673,12 +672,12 @@ function ArtifactDetailPage({
   const artifact = detail.artifact;
   const toolCount = content?.requestedTools.length ?? 0;
   const publicationHeader = sitePublicationHeader(publication.load);
-  const showSettings = hasSiteSettings(management);
-  const shownTab: SiteTab =
-    (tab === "settings" && !showSettings) || (tab === "data" && !manageData) ? "versions" : tab;
+  // Everyone who can open the app has Settings: its workspace access and
+  // their own allowed actions.
+  const shownTab: SiteTab = tab === "data" && !manageData ? "versions" : tab;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
-      <DetailPage back={fromSite ? { ...back, label: artifact.title } : back}>
+      <DetailPage back={back.label ? back : { ...back, label: artifact.title }}>
         <LineTabs
           value={shownTab}
           onValueChange={(value) => setTab(value as SiteTab)}
@@ -756,7 +755,7 @@ function ArtifactDetailPage({
                 </LineTabsTrigger>
                 <LineTabsTrigger value="conversations">Conversations</LineTabsTrigger>
                 {manageData ? <LineTabsTrigger value="data">Data</LineTabsTrigger> : null}
-                {showSettings ? <LineTabsTrigger value="settings">Settings</LineTabsTrigger> : null}
+                <LineTabsTrigger value="settings">Settings</LineTabsTrigger>
               </LineTabsList>
             }
           />
@@ -845,11 +844,9 @@ function ArtifactDetailPage({
               />
             </LineTabsContent>
           ) : null}
-          {showSettings ? (
-            <LineTabsContent value="settings" className="pt-6">
-              <SiteSettings workspaceId={workspaceId} artifact={artifact} management={management} />
-            </LineTabsContent>
-          ) : null}
+          <LineTabsContent value="settings" className="pt-6">
+            <SiteSettings workspaceId={workspaceId} artifact={artifact} management={management} />
+          </LineTabsContent>
         </LineTabs>
       </DetailPage>
       {audience.dialog}

@@ -12,6 +12,8 @@ const id = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")
 
 let permissions = ["sessions:create"];
 let subjectId = "me";
+/** The router's location state, as the route that navigated here left it. */
+let routerLocationState: Record<string, unknown> | undefined;
 let conversations: Session[] = [];
 let listPage: ((options: SessionListPageOptions) => object) | null = null;
 let fullSessions: Record<string, Session> = {};
@@ -105,8 +107,8 @@ mock.module("../lib/navigation", () => ({
   useSearch: () => ({}),
   useStringifySearch: () => () => "",
   // The window bar's module imports these; its title never calls them.
-  usePage: () => null,
-  useRouter: () => ({ state: { location: { pathname: "/" } } }),
+  usePage: () => ({ opensBeside: false }),
+  useRouter: () => ({ state: { location: { pathname: "/", state: routerLocationState } } }),
   useRouterState: () => undefined,
   Link: ({
     children,
@@ -361,6 +363,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   permissions = ["sessions:create"];
   subjectId = "me";
+  routerLocationState = undefined;
   fullSessions = {};
   siteDetails = async () => siteAt(4);
   siteReads = 0;
@@ -438,6 +441,11 @@ const heading = (container: HTMLElement) => panel(container).querySelector("h2")
 const separator = (container: HTMLElement) =>
   container.querySelector<HTMLElement>("[role='separator']")!;
 const storageKey = "og.site-view.chat:v1:me";
+/** Whether each app's chat is open, per person. */
+const openKey = "og.site-view.chat-open:v1:me";
+const openChoices = (key = openKey) => JSON.parse(localStorage.getItem(key) ?? "{}");
+const leaveClosed = (key = openKey) =>
+  localStorage.setItem(key, JSON.stringify({ [siteId]: false }));
 const press = (element: HTMLElement, key: string, shiftKey = false) =>
   act(async () => {
     element.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey, bubbles: true }));
@@ -739,7 +747,7 @@ test("an empty app waits for its details, and offers to retry when they fail", a
 
 test("the panel's width is remembered per person and resized from the keyboard", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
+  localStorage.setItem(storageKey, JSON.stringify({ width: 512 }));
   const { container } = await render();
   const handle = separator(container);
   expect(handle.getAttribute("aria-label")).toBe("Resize chat");
@@ -753,7 +761,6 @@ test("the panel's width is remembered per person and resized from the keyboard",
   expect(separator(container).getAttribute("aria-valuenow")).toBe("528");
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
     width: 528,
-    collapsed: false,
     position: "right",
   });
   await press(separator(container), "ArrowRight", true);
@@ -777,19 +784,19 @@ test("the chat can be hidden and shown again, and stays as it was left", async (
   const { container } = await render();
   const hide = container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!;
   expect(hide.getAttribute("aria-expanded")).toBe("true");
+  // Open, with nothing to bring it back.
+  expect(container.querySelector("button[aria-label='Show chat']")).toBeNull();
   await act(async () => hide.click());
   // Hidden, not unmounted: the conversation keeps its place.
   expect(panel(container).hidden).toBe(true);
   expect(openConversation(container)).toBe(id(1));
+  // No strip is left beside the app: the control is in the app's header.
   const show = container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!;
+  expect(show.closest("[data-site-header]")).not.toBeNull();
   expect(show.getAttribute("aria-expanded")).toBe("false");
   expect(document.activeElement).toBe(show);
-  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
-    width: 400,
-    collapsed: true,
-    position: "right",
-  });
-  // Opening another Site, or this one later, keeps it hidden.
+  expect(openChoices()).toEqual({ [siteId]: false });
+  // Opening this app later keeps it hidden.
   act(() => root?.unmount());
   const again = await render();
   expect(panel(again.container).hidden).toBe(true);
@@ -798,36 +805,55 @@ test("the chat can be hidden and shown again, and stays as it was left", async (
   );
   expect(panel(again.container).hidden).toBe(false);
   expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide chat");
-  expect(JSON.parse(localStorage.getItem(storageKey)!).collapsed).toBe(false);
+  expect(openChoices()).toEqual({ [siteId]: true });
   // Enter on the handle hides it too, as a window splitter collapses its pane.
   await press(separator(again.container), "Enter");
   expect(panel(again.container).hidden).toBe(true);
 });
 
-test("choosing a conversation shows a hidden chat; opening the page keeps it hidden", async () => {
+test("the chat starts closed on an app no one has chatted with, open on one they have", async () => {
+  conversations = [];
+  const { container } = await render();
+  expect(panel(container).hidden).toBe(true);
+  expect(container.querySelector("button[aria-label='Show chat']")).not.toBeNull();
+  // Nothing is remembered until the person chooses.
+  expect(localStorage.getItem(openKey)).toBeNull();
+  act(() => root?.unmount());
+  conversations = [conversation(1, "Time filters across all graphs", 2)];
+  const chatted = await render();
+  expect(panel(chatted.container).hidden).toBe(false);
+  expect(localStorage.getItem(openKey)).toBeNull();
+});
+
+test("arriving from a chat, or choosing one, shows a hidden chat", async () => {
   conversations = [
     conversation(1, "Time filters across all graphs", 2),
     conversation(2, "Weekly active users by plan", 180),
   ];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
-  const { container, rerender } = await render(id(1));
+  leaveClosed();
+  const { container, rerender } = await render();
   expect(panel(container).hidden).toBe(true);
   // The sidebar is where conversations are chosen now.
   await rerender(id(2));
   expect(panel(container).hidden).toBe(false);
   expect(openConversation(container)).toBe(id(2));
-  expect(JSON.parse(localStorage.getItem(storageKey)!).collapsed).toBe(false);
+  expect(openChoices()).toEqual({ [siteId]: true });
   // Back to the Site itself: it stays as the person left it.
   await act(async () =>
     container.querySelector<HTMLButtonElement>("button[aria-label='Hide chat']")!.click(),
   );
   await rerender(undefined);
   expect(panel(container).hidden).toBe(true);
+  // Opened from one of its chats, it shows that chat.
+  act(() => root?.unmount());
+  const arrived = await render(id(1));
+  expect(panel(arrived.container).hidden).toBe(false);
+  expect(openConversation(arrived.container)).toBe(id(1));
 });
 
 test("the chat never takes the room the app needs, unless the window is narrower still", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 720, collapsed: false }));
+  localStorage.setItem(storageKey, JSON.stringify({ width: 720 }));
   const measure = HTMLElement.prototype.getBoundingClientRect;
   let frameWidth = 900;
   HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
@@ -858,11 +884,9 @@ test("the chat never takes the room the app needs, unless the window is narrower
 
 test("another person signing in on the page gets their own layout", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
-  localStorage.setItem(
-    "og.site-view.chat:v1:someone",
-    JSON.stringify({ width: 336, collapsed: true }),
-  );
+  localStorage.setItem(storageKey, JSON.stringify({ width: 512 }));
+  localStorage.setItem("og.site-view.chat:v1:someone", JSON.stringify({ width: 336 }));
+  leaveClosed("og.site-view.chat-open:v1:someone");
   const { container, rerender } = await render();
   expect(separator(container).getAttribute("aria-valuenow")).toBe("512");
   subjectId = "someone";
@@ -873,8 +897,9 @@ test("another person signing in on the page gets their own layout", async () => 
   await act(async () =>
     container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!.click(),
   );
-  expect(JSON.parse(localStorage.getItem("og.site-view.chat:v1:someone")!).collapsed).toBe(false);
-  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ width: 512, collapsed: false });
+  expect(openChoices("og.site-view.chat-open:v1:someone")).toEqual({ [siteId]: true });
+  expect(localStorage.getItem(openKey)).toBeNull();
+  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ width: 512 });
 });
 
 const shownVersion = (container: HTMLElement) =>
@@ -992,7 +1017,7 @@ test("someone who can't publish the app gets no editing context, as from the API
 test("Edit with Opengeni opens a new conversation beside the app, composer focused", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   // Even with the chat hidden last time.
-  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
+  leaveClosed();
   const { container } = await render(undefined, { startNew: true });
   await settle();
   expect(panel(container).hidden).toBe(false);
@@ -1171,6 +1196,57 @@ test("a published app's settings open the same form; its back link returns to th
   expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
 });
 
+test("opened from the app, the form's back link is the browser's Back", async () => {
+  conversations = [];
+  permissions = ["sessions:create", "artifacts:publish"];
+  publicationLink = async () => published;
+  routerLocationState = { sitePublishingFromSite: `${workspaceId}/${siteId}` };
+  const backBefore = window.history.back;
+  let backs = 0;
+  window.history.back = () => void (backs += 1);
+  try {
+    const { container, rerender } = await render(undefined, {});
+    await rerender(undefined, false, true);
+    await settle();
+    expect(container.querySelector("[data-publish-page]")).not.toBeNull();
+    const before = navigations.length;
+    await act(async () => button(container, "Back to the app")!.click());
+    // No new entry: the history doesn't keep the form.
+    expect(backs).toBe(1);
+    expect(navigations).toHaveLength(before);
+    // The browser's Back closes it, and focus returns to the control that opens it.
+    await rerender(undefined, false, false);
+    expect(container.querySelector("[data-publish-page]")).toBeNull();
+    expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
+  } finally {
+    window.history.back = backBefore;
+  }
+});
+
+test("a shared publishing link opens just the app for people who can't publish", async () => {
+  conversations = [];
+  publicationLink = async () => published;
+  const { container, rerender } = await render();
+  await rerender(undefined, false, true);
+  await settle();
+  expect(container.querySelector("[data-publish-page]")).toBeNull();
+  expect(siteHidden(container)).toBe(false);
+});
+
+test("choosing a conversation keeps the publish form open", async () => {
+  conversations = [
+    conversation(1, "Time filters across all graphs", 2),
+    conversation(2, "Weekly active users by plan", 180),
+  ];
+  permissions = ["sessions:create", "artifacts:publish"];
+  publicationLink = async () => published;
+  const { container, rerender } = await render(id(1));
+  await rerender(id(1), false, true);
+  await settle();
+  await act(async () => button(container, "New")!.click());
+  expect(navigations.at(-1)).toMatchObject({ search: { publishing: true } });
+});
+
 test("people who can't publish see Published and its address, with no Publish or settings", async () => {
   conversations = [];
   publicationLink = async () => published;
@@ -1200,7 +1276,7 @@ const layoutRoot = (container: HTMLElement) =>
 
 test("the chat moves to the left in one click, and stays there for this person", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 512, collapsed: false }));
+  localStorage.setItem(storageKey, JSON.stringify({ width: 512 }));
   const { container } = await render();
   // On the right by default.
   expect(layoutRoot(container).getAttribute("data-site-chat-position")).toBe("right");
@@ -1220,7 +1296,6 @@ test("the chat moves to the left in one click, and stays there for this person",
   expect(panel(container).className).toContain("lg:border-r");
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
     width: 512,
-    collapsed: false,
     position: "left",
   });
   // The handle is now on the panel's right edge, toward the Site: Right widens it.
@@ -1236,11 +1311,11 @@ test("the chat moves to the left in one click, and stays there for this person",
   );
   expect(panel(container).hidden).toBe(true);
   const show = container.querySelector<HTMLButtonElement>("button[aria-label='Show chat']")!;
-  expect(show.parentElement!.parentElement!.className).toContain("lg:border-r");
+  // At the header's start, the side the chat opens on.
+  expect(show.closest("[data-site-header]")!.firstElementChild).toBe(show);
   await act(async () => show.click());
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({
     width: 528,
-    collapsed: false,
     position: "left",
   });
   // Another visit opens it on the left, and the menu offers the way back.
@@ -1314,7 +1389,7 @@ test("a drag that leaves the app clears the chat's highlight; text drags are lef
 
 test("with the chat hidden, or no chat to take files, the app keeps its drops", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
-  localStorage.setItem(storageKey, JSON.stringify({ width: 400, collapsed: true }));
+  leaveClosed();
   const shot = new File(["png"], "Screenshot.png", { type: "image/png" });
   const hidden = await render();
   await act(async () => void fireFileDrag(document.body, "dragenter", [shot]));
@@ -1345,7 +1420,7 @@ test("the app's own menu keeps the common actions; the rare ones are in its sett
     "More app actions",
   );
   // Without a sidebar listing the Site, its Pin and Archive have nowhere to act.
-  expect(siteActions(container)).toEqual(["Duplicate", "Reload app", "Settings"]);
+  expect(siteActions(container)).toEqual(["Open app full screen", "Reload app", "Settings"]);
   // The chat's header has no menu of its own.
   const chatMenus = [...container.querySelectorAll("[role='menu']")].filter(
     (menu) => !menu.closest("[data-site-actions-root]") && panel(container).contains(menu),
@@ -1353,10 +1428,10 @@ test("the app's own menu keeps the common actions; the rare ones are in its sett
   expect(chatMenus).toHaveLength(0);
 });
 
-test("people who can't publish get no Duplicate in the app's menu", async () => {
+test("people who can't publish get the same short menu", async () => {
   permissions = ["sessions:create"];
   const { container } = await render();
-  expect(siteActions(container)).toEqual(["Reload app", "Settings"]);
+  expect(siteActions(container)).toEqual(["Open app full screen", "Reload app", "Settings"]);
 });
 
 test("the app's menu pins and archives through the sidebar's own actions", async () => {
@@ -1371,7 +1446,13 @@ test("the app's menu pins and archives through the sidebar's own actions", async
   });
   try {
     const { container } = await render();
-    expect(siteActions(container)).toEqual(["Unpin", "Reload app", "Settings", "Archive"]);
+    expect(siteActions(container)).toEqual([
+      "Open app full screen",
+      "Reload app",
+      "Unpin",
+      "Settings",
+      "Archive",
+    ]);
     await act(async () => button(container, "Unpin")!.click());
     await act(async () => button(container, "Archive")!.click());
     expect(pins).toEqual([[siteId, false]]);
@@ -1379,15 +1460,4 @@ test("the app's menu pins and archives through the sidebar's own actions", async
   } finally {
     act(() => withdraw());
   }
-});
-
-test("an app with nothing published yet offers no Duplicate", async () => {
-  permissions = ["sessions:create", "artifacts:publish"];
-  siteDetails = async () => ({
-    artifact: { title: "Opengeni usage", status: "active", currentVersion: null },
-    versions: [],
-    events: [],
-  });
-  const { container } = await render();
-  expect(siteActions(container)).toEqual(["Reload app", "Settings"]);
 });

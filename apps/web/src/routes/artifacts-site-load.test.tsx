@@ -194,6 +194,52 @@ test("loaded app keeps Archive and Edit with Opengeni behind permission checks",
   }
 });
 
+test("Settings opened from the app goes back to the app, also after switching tabs", async () => {
+  loadError = null;
+  withoutContent = false;
+  // The app view, then its "…" Settings.
+  const { container, root, router } = await renderDetail(sitePath());
+  try {
+    await act(async () => {
+      await router.navigate({
+        to: "/",
+        search: { tab: "settings" },
+        state: { artifactDetailFromSite: siteId } as never,
+      });
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    // Named after the app, and it is the browser's Back.
+    const back = [...container.querySelectorAll<HTMLAnchorElement>("a")].find((link) =>
+      link.textContent?.includes("Café menu"),
+    );
+    expect(back?.getAttribute("href")).toBe(sitePath());
+    const backBefore = window.history.back;
+    let backs = 0;
+    window.history.back = () => void (backs += 1);
+    try {
+      await act(async () => back!.click());
+    } finally {
+      window.history.back = backBefore;
+    }
+    expect(backs).toBe(1);
+    // A tab switch keeps where the page was opened from.
+    const versions = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((tab) =>
+      tab.textContent?.trim().startsWith("Versions"),
+    )!;
+    await act(async () => {
+      versions.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      versions.click();
+    });
+    expect(router.state.location.search).toMatchObject({ tab: "versions" });
+    expect(
+      (router.state.location.state as { artifactDetailFromSite?: string }).artifactDetailFromSite,
+    ).toBe(siteId);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 const sitePath = (id = siteId) => `/workspaces/${workspaceId}/sites/${id}`;
 
 test("a link to the app, or the Artifacts list's old one, opens the app view in its place", async () => {

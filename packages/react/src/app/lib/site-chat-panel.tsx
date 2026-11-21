@@ -1,11 +1,11 @@
 import { useCallback, useRef, useState } from "react";
 
 /**
- * The Site view's chat panel width, whether it is hidden and which side it
- * sits on, remembered per person (not per Site or workspace) in this
- * browser: a reader who likes a wide chat on the left gets it on every
- * Site. Storage that is blocked or full only means the choice lasts until
- * the page reloads.
+ * The Site view's chat panel width and which side it sits on, remembered per
+ * person (not per Site or workspace) in this browser: a reader who likes a
+ * wide chat on the left gets it on every Site. Whether the chat is open is
+ * remembered per person and Site (`useSiteChatOpen`). Storage that is blocked
+ * or full only means the choice lasts until the page reloads.
  */
 export const SITE_CHAT_MIN_WIDTH = 320;
 export const SITE_CHAT_MAX_WIDTH = 720;
@@ -21,7 +21,6 @@ export type SiteChatPosition = "left" | "right";
 
 export type SiteChatPanelLayout = Readonly<{
   width: number;
-  collapsed: boolean;
   position: SiteChatPosition;
 }>;
 
@@ -63,7 +62,6 @@ export function readSiteChatPanelLayout(
 ): SiteChatPanelLayout {
   const fallback: SiteChatPanelLayout = {
     width: SITE_CHAT_DEFAULT_WIDTH,
-    collapsed: false,
     position: "right",
   };
   if (!storage) return fallback;
@@ -72,10 +70,9 @@ export function readSiteChatPanelLayout(
     if (!raw) return fallback;
     const value: unknown = JSON.parse(raw);
     if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
-    const { width, collapsed, position } = value as Record<string, unknown>;
+    const { width, position } = value as Record<string, unknown>;
     return {
       width: typeof width === "number" ? clampSiteChatWidth(width) : fallback.width,
-      collapsed: collapsed === true,
       // Layouts saved before the choice existed, or unreadable, keep the right.
       position: position === "left" ? "left" : "right",
     };
@@ -95,7 +92,6 @@ export function writeSiteChatPanelLayout(
       storageId,
       JSON.stringify({
         width: clampSiteChatWidth(layout.width),
-        collapsed: layout.collapsed,
         position: layout.position,
       }),
     );
@@ -131,6 +127,103 @@ export function useSiteChatPanelLayout(subjectId: string) {
     setState(latest.current);
   }, []);
   return { layout: current.layout, update };
+}
+
+/** Sites whose open or closed chat is remembered; the least recent is forgotten first. */
+const OPEN_MEMORY = 200;
+
+export function siteChatOpenStorageId(subjectId: string): string {
+  return ["og.site-view.chat-open", `v${VERSION}`, encodeURIComponent(subjectId)].join(":");
+}
+
+function readOpenMap(storageId: string, storage: PanelStorage | null): Record<string, boolean> {
+  if (!storage) return {};
+  try {
+    const value: unknown = JSON.parse(storage.getItem(storageId) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter(
+        (entry): entry is [string, boolean] => typeof entry[1] === "boolean",
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+/** Whether this person left the Site's chat open or closed; undefined when they never chose. */
+export function readSiteChatOpen(
+  storageId: string,
+  siteId: string,
+  storage: PanelStorage | null = browserStorage(),
+): boolean | undefined {
+  return readOpenMap(storageId, storage)[siteId];
+}
+
+export function writeSiteChatOpen(
+  storageId: string,
+  siteId: string,
+  open: boolean,
+  storage: PanelStorage | null = browserStorage(),
+): void {
+  if (!storage) return;
+  const { [siteId]: _previous, ...others } = readOpenMap(storageId, storage);
+  // Most recent last, so the oldest choices are the ones dropped.
+  const kept = Object.entries(others).slice(-(OPEN_MEMORY - 1));
+  try {
+    storage.setItem(storageId, JSON.stringify({ ...Object.fromEntries(kept), [siteId]: open }));
+  } catch {
+    // The choice lasts until the page reloads.
+  }
+}
+
+/**
+ * Whether the Site's chat is open, remembered per person and Site. Until the
+ * person chooses, the view decides (`setFallback`): closed for a Site no one
+ * has chatted with, open for one that has conversations or was reached from a
+ * chat.
+ */
+export function useSiteChatOpen(subjectId: string, siteId: string) {
+  const storageId = siteChatOpenStorageId(subjectId);
+  const key = `${storageId}|${siteId}`;
+  const [state, setState] = useState(() => ({
+    key,
+    siteId,
+    stored: readSiteChatOpen(storageId, siteId),
+    fallback: false,
+  }));
+  // Another person signing in keeps the Site's default; another Site starts over.
+  const current =
+    state.key === key
+      ? state
+      : {
+          key,
+          siteId,
+          stored: readSiteChatOpen(storageId, siteId),
+          fallback: state.siteId === siteId && state.fallback,
+        };
+  if (current !== state) setState(current);
+  const setOpen = useCallback(
+    (open: boolean) => {
+      writeSiteChatOpen(storageId, siteId, open);
+      setState((previous) => ({ ...previous, key, stored: open }));
+    },
+    [key, siteId, storageId],
+  );
+  const setFallback = useCallback(
+    (open: boolean) =>
+      setState((previous) =>
+        previous.fallback === open ? previous : { ...previous, fallback: open },
+      ),
+    [],
+  );
+  return {
+    open: current.stored ?? current.fallback,
+    /** The person chose, so the view's default no longer applies. */
+    chosen: current.stored !== undefined,
+    setOpen,
+    setFallback,
+  };
 }
 
 function browserStorage(): Storage | null {

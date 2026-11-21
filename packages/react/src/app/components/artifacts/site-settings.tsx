@@ -17,7 +17,7 @@ import { toast } from "../../lib/toast";
 
 import { useSiteAudience } from "./site-audience";
 import { sitePublishFormProps } from "./site-publish-form-props";
-import { PublishMore, SitePublishPage, sentenceStart, useSitePublication } from "./site-publishing";
+import { PublishMore, SitePublishPage, useSitePublication } from "./site-publishing";
 import { Button } from "../../../ui/button";
 import { ConfirmDialog } from "../../../ui/confirm-dialog";
 import { SettingRow } from "../../../ui/setting-row";
@@ -79,12 +79,7 @@ export function useSiteManagement({
     hasWorkspacePermission(accessContext, workspaceId, "workspace:admin") ||
     isPersonalWorkspace(workspace, context.managedSelfContext);
   const workspaceName = workspace?.name ?? "this workspace";
-  const publication = useSitePublication({
-    client,
-    workspaceId,
-    siteId,
-    enabled: manageData,
-  });
+  const publication = useSitePublication({ client, workspaceId, siteId, enabled: manageData });
   const audience = useSiteAudience({
     client,
     workspaceId,
@@ -137,14 +132,6 @@ export function useSiteManagement({
 }
 
 export type SiteManagement = ReturnType<typeof useSiteManagement>;
-
-/**
- * Whether a Site has anything in Settings for this person: everyone who can
- * open it sees its workspace access and may reset their own allowed actions.
- */
-export function hasSiteSettings(_management: SiteManagement): boolean {
-  return true;
-}
 
 /**
  * Forget this person's "Always allow" choices on this Site: its next actions
@@ -240,20 +227,16 @@ export function SiteSettings({
   const canDuplicate = management.canPublish && hasVersion;
   const canExport = canDuplicate && exportApp !== null;
   const canReset = resetAllowed !== null && !archived;
-  const moreSummary = [
-    canDuplicate && "duplicate",
-    canExport && "export",
-    canReset && "allowed actions",
-    management.canPublish && (archived ? "restore" : "archive"),
-  ]
-    .filter(Boolean)
-    .join(", ");
+  // Rarely used, so collapsed under More; a lone row shows as it is.
+  const moreCount = [canDuplicate, canExport, canReset, management.canPublish && !archived].filter(
+    Boolean,
+  ).length;
   const moreRows = (
     <>
       {canDuplicate ? (
         <SettingRow
           label="Duplicate"
-          description="A new app from this version, owned by you."
+          description="A new app from this version, owned by you. Its address, data and history aren't copied."
           control={
             <Button
               type="button"
@@ -304,13 +287,6 @@ export function SiteSettings({
           }
         />
       ) : null}
-      {management.canPublish && archived ? (
-        <SettingRow
-          label="Restore"
-          description="Bring it back to edit or publish it."
-          control={restoreButton}
-        />
-      ) : null}
       {management.canPublish && !archived ? (
         <SettingRow
           label="Archive"
@@ -353,11 +329,18 @@ export function SiteSettings({
       }
     />
   );
-  // The publish form carries Workspace access and the More (with search
-  // engines and reports) after its fields; without it, they follow here.
+  // The publish form (with its own Save), then the app's rows, which act at
+  // once.
   const formShown = publishing && !archived;
   return (
     <div className="flex min-w-0 max-w-[560px] flex-col gap-6" data-site-settings="">
+      {management.canPublish && archived ? (
+        <SettingRow
+          label="Restore"
+          description="Bring it back to edit or publish it."
+          control={restoreButton}
+        />
+      ) : null}
       {formShown ? (
         <SitePublishPage
           {...sitePublishFormProps(management, {
@@ -370,18 +353,10 @@ export function SiteSettings({
           onPublication={publication.setPublication}
           onBack={() => undefined}
           canManage
-          settingsRows={workspaceAccess}
-          moreRows={moreSummary ? moreRows : undefined}
-          moreRowsSummary={moreSummary}
         />
-      ) : (
-        <>
-          {workspaceAccess}
-          {moreSummary ? (
-            <PublishMore summary={sentenceStart(moreSummary)}>{moreRows}</PublishMore>
-          ) : null}
-        </>
-      )}
+      ) : null}
+      {workspaceAccess}
+      {moreCount > 1 ? <PublishMore>{moreRows}</PublishMore> : moreRows}
       <ConfirmDialog
         open={archiveOpen}
         onOpenChange={setArchiveOpen}
