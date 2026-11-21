@@ -1,5 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withSessionActivityRlsContext, type Database } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import {
   lockSessionEventWriteRows,
   registerSessionWorkflowWakeInTransaction,
@@ -21,28 +22,13 @@ export type QuiescenceReceiptWakeRepairFailure = {
 };
 
 const ERROR_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
-const SQLSTATE = /^[0-9A-Z]{5}$/;
 
-/** The first SQLSTATE on the error or its `cause` chain (drizzle wraps the
- * driver's PostgresError), bounded and cycle-safe. */
-function sqlStateOf(error: unknown): string | null {
-  const visited = new Set<unknown>();
-  let current = error;
-  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
-    if (visited.has(current)) break;
-    visited.add(current);
-    const code = (current as { code?: unknown }).code;
-    if (typeof code === "string" && SQLSTATE.test(code)) return code;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return null;
-}
-
+/** The SQLSTATE may sit under drizzle's wrapper; transport codes are not SQLSTATEs. */
 export function classifyQuiescenceReceiptWakeRepairFailure(
   error: unknown,
 ): QuiescenceReceiptWakeRepairFailure {
   const name = error instanceof Error ? error.name : null;
-  const sqlState = sqlStateOf(error);
+  const sqlState = nestedPostgresSqlState(error);
   return {
     errorName: name && ERROR_NAME.test(name) ? name : error instanceof Error ? "Error" : "NonError",
     sqlState,

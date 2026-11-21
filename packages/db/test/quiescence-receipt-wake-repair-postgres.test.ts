@@ -268,12 +268,13 @@ describe("missing quiescence-receipt wake repair", () => {
       sqlState: "23505",
       sqlStateClass: "23",
     });
-    // Node transport codes are not SQLSTATEs.
-    expect(
-      classifyQuiescenceReceiptWakeRepairFailure(
-        Object.assign(new Error("x"), { code: "ECONNRESET" }),
-      ).sqlState,
-    ).toBeNull();
+    // Node transport codes are not SQLSTATEs, even five-character ones.
+    for (const code of ["ECONNRESET", "EPIPE"]) {
+      expect(
+        classifyQuiescenceReceiptWakeRepairFailure(Object.assign(new Error("x"), { code }))
+          .sqlState,
+      ).toBeNull();
+    }
     const cyclic: { cause?: unknown } = {};
     cyclic.cause = cyclic;
     expect(classifyQuiescenceReceiptWakeRepairFailure(cyclic).sqlState).toBeNull();

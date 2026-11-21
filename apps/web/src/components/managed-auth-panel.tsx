@@ -377,7 +377,7 @@ export function ManagedAuthPanel(props: {
     setFormError(null);
     setFormActionMode(null);
     setSuccessMessage(null);
-    // The Sign up tab may already hold a solved token; it is used up here.
+    // The email form's visible widget may already hold a solved token; it is used up here.
     let token = challengeRequired ? signupChallengeToken : undefined;
     if (token) {
       setSignupChallengeToken(undefined);
