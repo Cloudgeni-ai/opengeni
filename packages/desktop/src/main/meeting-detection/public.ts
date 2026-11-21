@@ -10,10 +10,13 @@
 // then records when the person chooses Record on the card.
 
 export {
+  CALENDAR_OVERRUN_MS,
   MeetingDetection,
   MeetingDetectionStore,
   promptText,
+  STOP_UNANSWERED_MS,
   type MeetingDetectionOptions,
+  type MeetingNotice,
   type MeetingPage,
   type MeetingPrompt,
   type MeetingPromptOutcome,
@@ -27,5 +30,6 @@ export { handleMeetingDetectionIpc } from "./ipc";
 export {
   createMeetingDetection,
   meetingDetectionFileLog,
+  postMeetingNotice,
   type CreateMeetingDetectionOptions,
 } from "./electron";

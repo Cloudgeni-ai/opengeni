@@ -348,17 +348,8 @@ export class CalendarReminders {
    */
   declinedCall(now: number, appId: string): CalendarMeeting | null {
     const accountId = this.accountId;
-    if (!accountId || !this.upcoming) return null;
-    const current = this.upcoming.meetings.filter(
-      (meeting) =>
-        meeting.startsAt - EARLY_JOIN_MS <= now &&
-        now < meeting.endsAt &&
-        meeting.endsAt - meeting.startsAt <= LONGEST_CALL_MS,
-    );
-    // The one that started last, or else the next to start.
-    const started = current.filter((meeting) => meeting.startsAt <= now);
-    const meeting = started.at(-1) ?? current[0] ?? null;
-    if (!meeting) return null;
+    const meeting = this.meetingDuring(now);
+    if (!accountId || !meeting) return null;
     this.declined.set(key(accountId, meeting), appId);
     // Only today's matter; keep the map small.
     if (this.declined.size > 50) {
@@ -366,6 +357,23 @@ export class CalendarReminders {
       if (oldest !== undefined) this.declined.delete(oldest);
     }
     return meeting;
+  }
+
+  /**
+   * The calendar meeting a call at `at` is: started, or starting within
+   * {@link EARLY_JOIN_MS}, and not a long block; the one that started last,
+   * or else the next to start. Null when there is none, or no calendar.
+   */
+  meetingDuring(at: number): CalendarMeeting | null {
+    if (!this.accountId || !this.upcoming) return null;
+    const current = this.upcoming.meetings.filter(
+      (meeting) =>
+        meeting.startsAt - EARLY_JOIN_MS <= at &&
+        at < meeting.endsAt &&
+        meeting.endsAt - meeting.startsAt <= LONGEST_CALL_MS,
+    );
+    const started = current.filter((meeting) => meeting.startsAt <= at);
+    return started.at(-1) ?? current[0] ?? null;
   }
 
   private pollInterval(now: number): number {

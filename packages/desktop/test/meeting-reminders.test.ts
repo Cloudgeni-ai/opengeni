@@ -10,6 +10,7 @@ mock.module("electron", () => electronStub);
 
 import { DESKTOP_IPC, type DesktopMeetingRequest } from "../src/contract";
 import {
+  CALENDAR_OVERRUN_MS,
   ENDED_AFTER_MS,
   joinPrompt,
   MeetingDetection,
@@ -17,6 +18,7 @@ import {
   PROMPT_AFTER_MS,
   promptRequest,
   promptText,
+  STOP_UNANSWERED_MS,
   type MeetingPage,
   type MeetingPrompt,
   type MeetingPromptOutcome,
@@ -692,6 +694,70 @@ describe("reminders before calendar meetings", () => {
     run.cards[0]!.done("dismissed");
     await run.at(START - REMIND_BEFORE_MS);
     expect(run.shown()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+});
+
+const meet: MicrophoneUser = {
+  pid: 300,
+  name: "Google Chrome Helper",
+  path: null,
+  bundleId: "com.google.Chrome.helper",
+  owners: [],
+};
+
+describe("a meeting tab left on the microphone", () => {
+  /** The reminder's meeting joined and recorded, its call in Chrome until `until`. */
+  async function joined(until: number) {
+    const run = reminders();
+    const page = new FakePage(1);
+    run.subject.listen(page, true);
+    await run.at(START - REMIND_BEFORE_MS);
+    run.shown()[0]!.done("chosen");
+    run.subject.setRecording(page, true);
+    for (let time = START; time <= until; time += MINUTE) run.microphone([meet], time);
+    const stops = () => run.cards.filter((card) => card.prompt.kind === "stop");
+    return { ...run, page, stops };
+  }
+  const end = START + 30 * MINUTE;
+
+  test("a while after the calendar meeting ends, the card asks whether it's over; it doesn't stop by itself", async () => {
+    const run = await joined(end + CALENDAR_OVERRUN_MS - MINUTE);
+    expect(run.stops()).toHaveLength(0);
+    run.microphone([meet], end + CALENDAR_OVERRUN_MS);
+    expect(run.stops()).toHaveLength(1);
+    const card = run.stops()[0]!;
+    expect(promptText(card.prompt)).toEqual({
+      question: "Meeting over?",
+      reason: "The meeting on your calendar has ended. Still recording.",
+      action: "Stop recording",
+      dismiss: "Keep recording",
+    });
+    expect(run.log).toContain("Meeting detection: the calendar meeting being recorded ended.");
+    // The call still holds the microphone: the meeting may be running over.
+    run.microphone([meet], end + CALENDAR_OVERRUN_MS + 2 * STOP_UNANSWERED_MS);
+    expect(card.closed).toBe(false);
+    expect(run.page.sent.filter((request) => request.kind === "stop")).toEqual([]);
+    // Keep recording: not asked again while the tab stays.
+    card.done("dismissed");
+    run.microphone([meet], end + 2 * 60 * MINUTE);
+    expect(run.stops()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("the call letting go asks as it always did, and that question stops by itself", async () => {
+    const run = await joined(end - MINUTE);
+    run.microphone([], end);
+    run.microphone([], end + ENDED_AFTER_MS);
+    expect(run.stops()).toHaveLength(1);
+    expect(promptText(run.stops()[0]!.prompt).reason).toBe(
+      "Google Chrome stopped using your microphone. Still recording.",
+    );
+    // Already asked: the calendar's end asks nothing more.
+    run.microphone([], end + CALENDAR_OVERRUN_MS);
+    expect(run.stops()).toHaveLength(1);
+    run.microphone([], end + ENDED_AFTER_MS + STOP_UNANSWERED_MS);
+    expect(run.page.sent.at(-1)).toEqual({ kind: "stop", app: "Google Chrome" });
     run.subject.shutdown();
   });
 });
