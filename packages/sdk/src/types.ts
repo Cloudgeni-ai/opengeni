@@ -50,6 +50,7 @@ export type {
   McpElicitationValue,
 } from "@opengeni/contracts";
 import type { McpElicitationApprovalRequest, McpElicitationContent } from "@opengeni/contracts";
+import type { AppSyncPaging, AppSyncTableTarget } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -4168,15 +4169,23 @@ export type ScheduledTaskAction =
       /** An App data sync (see the App sync methods); no model runs. */
       kind: "app_sync";
       siteId: string;
-      collection: string;
+      /** Null when the sync fills an SQL table (`target`). */
+      collection: string | null;
       mode: "shared" | "personal";
       ownerSubjectId: string;
       tool: { serverId: string; toolName: string };
       declaredTools: Array<{ serverId: string; toolName: string }>;
+      connectorTool?: { serverId: string; toolName: string } | null | undefined;
       arguments: Record<string, unknown>;
       recordsPath: string | null;
       key: string;
       fields: string[] | null;
+      target?: AppSyncTableTarget | null | undefined;
+      paging?: AppSyncPaging | null | undefined;
+      maxRecords?: number | null | undefined;
+      removeMissing?: boolean | undefined;
+      /** The account (route server id) the owner chose for a shared sync. */
+      ownerAccount?: string | null | undefined;
     };
 
 export type ScheduledTask = {

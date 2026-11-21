@@ -1,4 +1,4 @@
-import { appSyncStatusForSite } from "../app-sync/service";
+import { appSyncOptInReview, appSyncStatusForSite, setAppSyncOptIn } from "../app-sync/service";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ReasoningEffort,
@@ -297,6 +297,14 @@ function unsupported() {
     "This operation is not available to published apps",
   );
 }
+
+const SiteSyncOptInToolRequest = z
+  .object({
+    syncId: z.string().uuid(),
+    optedIn: z.boolean().optional(),
+    account: z.string().min(1).max(256).optional(),
+  })
+  .strict();
 
 function parseJson<S extends z.ZodType>(bytes: Uint8Array, schema: S): z.infer<S> {
   let value: unknown = null;
@@ -1009,6 +1017,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     } else if (method === "setup") {
       // The host's connect card; the page sends no body worth reading.
       result = await describeWorkspaceSiteToolSetup(deps, authorization, site, options);
+    } else if (method === "sync-review" || method === "sync-opt-in") {
+      // Only the host's own page reaches tool methods: it shows the platform's
+      // confirmation and posts the opt-in after the viewer confirms.
+      const input = parseJson(request.body, SiteSyncOptInToolRequest);
+      result = await runSiteData(() =>
+        method === "sync-review"
+          ? appSyncOptInReview(deps, authorization.grant, site.siteArtifactId, input.syncId)
+          : setAppSyncOptIn(
+              deps,
+              authorization.grant,
+              site.siteArtifactId,
+              input.syncId,
+              input.optedIn !== false,
+              {},
+              input.account ? { account: input.account } : {},
+            ),
+      );
     } else if (method === "invoke") {
       result = await withSiteSecretContext(
         { siteId: site.siteArtifactId, siteVersion: site.siteVersionId },

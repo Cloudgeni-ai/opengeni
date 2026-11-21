@@ -21,6 +21,7 @@ import {
   OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
   OPENGENI_SITE_BRIDGE_CONNECTIONS_CONNECT_METHOD,
   OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD,
+  OPENGENI_SITE_BRIDGE_SYNCS_OPT_IN_METHOD,
   OPENGENI_SITE_BRIDGE_CONNECTIONS_STATUS_METHOD,
   OPENGENI_SITE_BRIDGE_EVENT,
   OPENGENI_SITE_BRIDGE_LOCATION_METHOD,
@@ -137,6 +138,20 @@ export type SiteBridgeToolHandlers = {
    * draws the card itself; these answer the App's `site.connections.*`.
    */
   connections?: SiteBridgeConnectionHandlers;
+  /**
+   * Personal sync opt-in (advertised as `syncs: 1`): the host shows its own
+   * confirmation naming the tool, account and collection, and posts the
+   * opt-in only after the viewer confirms. Resolves the viewer's final state.
+   */
+  syncs?: SiteBridgeSyncHandlers;
+};
+
+/** A host's sync opt-in confirmation, as the App's `site.data.syncs.optIn/optOut` reaches it. */
+export type SiteBridgeSyncHandlers = {
+  optIn: (
+    request: { syncId: string; optedIn: boolean },
+    options: { signal: AbortSignal },
+  ) => Promise<{ optedIn: boolean }>;
 };
 
 /** A host's connect card, as the App's `site.connections` reaches it. */
@@ -191,7 +206,8 @@ export type SiteBridgeRequestValue =
   | { watching: boolean }
   | OpenGeniSiteConnectionStatus
   | { connected: boolean }
-  | { shown: boolean };
+  | { shown: boolean }
+  | { syncId: string; optedIn: boolean };
 
 /** Capabilities the host advertises when a Site connects; Sites never ask for more. */
 export function siteBridgeReadyMessage(
@@ -211,6 +227,7 @@ export function siteBridgeReadyMessage(
     ...(viewer ? { viewer: 1 as const } : {}),
     ...(location ? { location: 1 as const } : {}),
     ...(bridge?.connections ? { connections: 1 as const } : {}),
+    ...(bridge?.syncs ? { syncs: 1 as const } : {}),
   };
 }
 
@@ -597,6 +614,17 @@ export async function handleSiteBridgeRequest(
   if (message.method === OPENGENI_SITE_BRIDGE_CONNECTIONS_SHOW_METHOD) {
     const show = bridge?.connections?.show;
     return { shown: show ? (await show({ signal })) === true : false };
+  }
+  if (message.method === OPENGENI_SITE_BRIDGE_SYNCS_OPT_IN_METHOD) {
+    const syncs = bridge?.syncs;
+    if (!syncs)
+      throw siteBridgeHostError(
+        "syncs_unsupported",
+        "This app host can't ask the viewer to join a sync",
+      );
+    const { syncId, optedIn } = message.payload;
+    const result = await syncs.optIn({ syncId, optedIn }, { signal });
+    return { syncId, optedIn: result.optedIn === true };
   }
   if (!bridge) throw new Error("App tool bridge is unavailable");
   if (message.method === OPENGENI_SITE_BRIDGE_WATCH_DATA_METHOD) {

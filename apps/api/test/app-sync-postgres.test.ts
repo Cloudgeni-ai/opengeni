@@ -419,7 +419,7 @@ test("a personal sync fills only the opted-in person's own records", async () =>
 
   const optIn = await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${syncId}/subscription`);
   expect(optIn.status, JSON.stringify(optIn.json)).toBe(200);
-  expect(optIn.json).toEqual({ syncId, optedIn: true });
+  expect(optIn.json).toEqual({ syncId, optedIn: true, account: null });
 
   const fake = fakeTool((subjectId) => [{ id: "t-1", title: `task of ${subjectId}` }]);
   const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
@@ -458,7 +458,7 @@ test("a personal sync fills only the opted-in person's own records", async () =>
 
   // Opting out stops further runs for that person.
   const optOut = await f.request(f.alice, "DELETE", `/${f.siteId}/syncs/${syncId}/subscription`);
-  expect(optOut.json).toEqual({ syncId, optedIn: false });
+  expect(optOut.json).toEqual({ syncId, optedIn: false, account: null });
   await runAppSyncNow(f.deps, f.owner.grant, f.siteId, syncId, fake.callTool);
   expect(fake.calls).toHaveLength(1);
 });
@@ -959,8 +959,22 @@ test("each person's run uses their own account, and a new owner's shared sync us
     schedule: { type: "manual" },
   });
   const personalId = String(personal.json.id);
-  for (const who of [f.alice, f.bob])
-    await f.request(who, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`);
+  // Alice has two accounts: she picks one at opt-in, and it is kept.
+  const unchosen = await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`);
+  expect(unchosen.status).toBe(422);
+  expect(unchosen.json.error.message).toContain("several");
+  expect(
+    unchosen.json.error.details.accounts.map((choice: { id: string }) => choice.id).sort(),
+  ).toEqual(["account-alice", "account-alice-2"]);
+  const chosen = await f.request(f.alice, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`, {
+    account: "account-alice-2",
+  });
+  expect(chosen.json).toEqual({ syncId: personalId, optedIn: true, account: "account-alice-2" });
+  const foreign = await f.request(f.bob, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`, {
+    account: "account-alice",
+  });
+  expect(foreign.status).toBe(422);
+  await f.request(f.bob, "PUT", `/${f.siteId}/syncs/${personalId}/subscription`);
   const run = await runAppSyncNow(f.deps, f.owner.grant, f.siteId, personalId, callTool);
   expect(identities.at(-1)).toEqual({ subjectId: f.alice.subjectId, serverId: "account-alice-2" });
   expect(identities.some((item) => item.subjectId === f.bob.subjectId)).toBe(false);

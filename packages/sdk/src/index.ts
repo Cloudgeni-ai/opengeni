@@ -147,13 +147,17 @@ export type {
   AppSyncCreateRequest,
   AppSyncDefinition,
   AppSyncLastRun,
+  AppSyncAccountChoice,
   AppSyncListResponse,
   AppSyncMode,
+  AppSyncOptInReview,
+  AppSyncPaging,
   AppSyncRunResponse,
   AppSyncRunSummary,
   AppSyncStatus,
   AppSyncStatusResponse,
   AppSyncSubscriptionResponse,
+  AppSyncTableTarget,
   AppSyncUpdateRequest,
 } from "@opengeni/contracts";
 export type {

@@ -126,6 +126,9 @@ export const SITE_TOOL_METHODS = Object.freeze([
   "readiness",
   // The platform's connect card for the App: what the viewer still has to connect.
   "setup",
+  // The platform's personal sync confirmation: what the viewer joins, then the opt-in.
+  "sync-review",
+  "sync-opt-in",
 ] as const);
 export type SiteToolMethod = (typeof SITE_TOOL_METHODS)[number];
 

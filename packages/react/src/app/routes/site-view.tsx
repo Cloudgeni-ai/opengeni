@@ -106,6 +106,7 @@ import {
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
 import { AppConnectCard } from "../lib/app-connect-card";
+import { AppSyncJoinCard, AppSyncOptInHost } from "../lib/app-sync-opt-in";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
@@ -255,7 +256,8 @@ export function SiteViewRoute({
   );
   const connectCard =
     artifact?.status === "active" ? (
-      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex justify-end">
+      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-20 flex flex-col items-end gap-2">
+        <AppSyncJoinCard workspaceId={workspaceId} siteId={siteId} />
         <AppConnectCard
           workspaceId={workspaceId}
           siteId={siteId}
@@ -263,6 +265,7 @@ export function SiteViewRoute({
           connectKey={connect}
           onConnectKeyHandled={connectHandled}
         />
+        <AppSyncOptInHost workspaceId={workspaceId} siteId={siteId} />
       </div>
     ) : null;
   // The publish form, open for this Site; another Site starts without it.

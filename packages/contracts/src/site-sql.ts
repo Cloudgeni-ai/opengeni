@@ -1029,7 +1029,14 @@ export type SiteDbInsertRequest = SiteDbBase & {
   table: string;
   columns: string[];
   rows: SiteSqlValue[][];
-  onConflict: "fail" | "replace" | "ignore";
+  /**
+   * `update` upserts: a row whose `conflictColumn` value exists updates that
+   * row's other given columns (the column must be the primary key or unique).
+   * Older gateways treat it as `fail`.
+   */
+  onConflict: "fail" | "replace" | "ignore" | "update";
+  /** With `update`: the key column (one of `columns`). */
+  conflictColumn?: string;
   maxDatabaseBytes: number;
 };
 

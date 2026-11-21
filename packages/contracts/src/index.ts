@@ -14916,7 +14916,15 @@ export type AppSyncDefinitionInput = z.input<typeof AppSyncDefinition>;
 
 /** Create a sync. */
 export const AppSyncCreateRequest = /* @__PURE__ */ defineSchema(() =>
-  AppSyncDefinition.extend({ status: ScheduledTaskStatus.default("active") }),
+  AppSyncDefinition.extend({
+    status: ScheduledTaskStatus.default("active"),
+    /**
+     * Shared syncs: the owner's account to run on, when they have several of
+     * the connector (an `id` the error lists). Not part of a definition, so
+     * packages stay portable.
+     */
+    account: z.string().min(1).max(256).optional(),
+  }),
 );
 export type AppSyncCreateRequest = z.input<typeof AppSyncCreateRequest>;
 
@@ -14935,6 +14943,11 @@ export const AppSyncUpdateRequest = /* @__PURE__ */ defineSchema(() =>
       schedule: ScheduledTaskScheduleSpec,
       events: ScheduledTaskEventsInput,
       status: ScheduledTaskStatus,
+      target: AppSyncSettings.shape.target.unwrap().nullable(),
+      paging: AppSyncSettings.shape.paging.unwrap().nullable(),
+      maxRecords: AppSyncSettings.shape.maxRecords.unwrap().nullable(),
+      removeMissing: AppSyncSettings.shape.removeMissing.unwrap(),
+      account: z.string().min(1).max(256),
     })
     .partial(),
 );
@@ -14954,6 +14967,12 @@ export const AppSync = /* @__PURE__ */ defineSchema(() =>
     recordsPath: z.string().nullable(),
     key: z.string(),
     fields: z.array(z.string()).nullable(),
+    target: AppSyncSettings.shape.target.unwrap().nullable().optional(),
+    paging: AppSyncSettings.shape.paging.unwrap().nullable().optional(),
+    maxRecords: z.number().int().nullable().optional(),
+    removeMissing: z.boolean().optional(),
+    /** Shared syncs: the owner's chosen account, when they chose one. */
+    account: z.string().nullable().optional(),
     schedule: ScheduledTaskScheduleSpec,
     events: ScheduledTaskEvents.nullable(),
     ownerSubjectId: z.string(),

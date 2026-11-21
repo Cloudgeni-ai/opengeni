@@ -3,6 +3,7 @@ import { useCallback, useMemo } from "react";
 import type { SiteToolBridgeFactory } from "../../artifacts";
 import { useAppContext } from "../app-context";
 import { useAppApi } from "./app-api";
+import { requestSiteSyncOptIn } from "./app-sync-opt-in";
 import { createSiteToolBridge } from "./site-tool-bridge";
 import { useSiteToolConsentHost } from "./site-tool-consent";
 
@@ -99,6 +100,9 @@ export function useConsoleSiteToolBridge(workspaceId: string): SiteToolBridgeFac
             },
             readinessChanges: (listener) => subscribeSiteToolReadiness(site.artifactId, listener),
             connectCard: { show: () => showSiteConnectCard(site.artifactId) },
+            // The platform's own confirmation posts the opt-in, never the App.
+            syncOptIn: ({ syncId, optedIn }, { signal }) =>
+              requestSiteSyncOptIn(site.artifactId, syncId, optedIn, signal),
           })
         : createSiteToolBridge(api, scope);
     },
