@@ -27,6 +27,7 @@ jobs:
         with:
           workspaces: agent
           key: aarch64-pc-windows-msvc
+          cache-on-failure: true
       - name: Install agent build and smoke dependencies
         # Do not install unrelated apps (e.g. the site gateway's x64-only workerd).
         run: >-
