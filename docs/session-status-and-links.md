@@ -85,10 +85,12 @@ own Linear or Slack connection (`get_issue`, `slack_read_thread`), or one the
 workspace shares; never through another person's own connection. The read
 goes through the same tool gateway as the viewer's own calls, so the
 connection's tool permissions apply (a tool set to Ask first or Block isn't
-read). Status is cached per viewer. A viewer without a connection sees the
-title and a quiet **Connect Linear** or **Connect Slack** link (`connect` on
-the link, `{ name, capabilityId }`). Only signed-in people read live status
-this way; service and API-key callers get titles for these links.
+read). Status is cached per viewer for two minutes (an explicit refresh
+re-reads it), and each read stops after 6 seconds. A viewer without a
+connection sees the title and a quiet **Connect Linear** or **Connect Slack**
+link (`connect` on the link, `{ name, capabilityId }`), only where the
+workspace offers that connector. Only signed-in people read live status this
+way; service and API-key callers get titles for these links.
 
 ## Report back when a pull request merges
 

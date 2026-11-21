@@ -45,6 +45,19 @@ const PROVIDERS: Record<ViewerLinkProvider, ProviderSpec> = {
 /** At most this many of the viewer's accounts are tried per link (two Linear workspaces, ...). */
 const ACCOUNTS_PER_LINK = 3;
 const SLACK_FIRST_MESSAGE_CHARS = 120;
+/** One link's read, across its accounts, stops after this long (as GitHub's do). */
+export const VIEWER_READ_TIMEOUT_MS = 6_000;
+
+/** Resolves to null once `ms` pass; the read itself is left to finish or fail. */
+function within<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work,
+    new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 export type ViewerLinkRead =
   | { kind: "status"; status: SessionLinkLiveStatus }
@@ -70,6 +83,7 @@ export type ViewerLinkReaderIo = {
     deps: ApiRouteDeps,
     grant: AccessGrant,
     identities: readonly ToolGatewayIdentity[],
+    signal?: AbortSignal,
   ) => Promise<ViewerToolSession>;
 };
 
@@ -88,7 +102,7 @@ function domainMatches(domain: string, domains: readonly string[]): boolean {
 export function viewerAccountsFor(
   inventory: SiteToolAccountInventory,
   provider: ViewerLinkProvider,
-): { accounts: ToolGatewayIdentity[]; connect: SessionLinkConnect } {
+): { accounts: ToolGatewayIdentity[]; connect: SessionLinkConnect | null } {
   const spec = PROVIDERS[provider];
   const connectors = [...inventory.canonical.entries()].filter(([, connect]) =>
     domainMatches(connect.providerDomain, spec.domains),
@@ -102,7 +116,8 @@ export function viewerAccountsFor(
   const capabilityId = connectors.find(([, connect]) => connect.capabilityId)?.[1].capabilityId;
   return {
     accounts: ordered.map((account) => ({ serverId: account.serverId, toolName: spec.toolName })),
-    connect: { name: spec.name, capabilityId: capabilityId ?? null },
+    // Connect only where the workspace offers the connector.
+    connect: connectors.length > 0 ? { name: spec.name, capabilityId: capabilityId ?? null } : null,
   };
 }
 
@@ -161,8 +176,9 @@ export function linearIssueArguments(
   return { [id]: identifier, ...(properties.has("fields") ? { fields: LINEAR_FIELDS } : {}) };
 }
 
-function linearState(type: string | null): SessionLinkLiveStatus["state"] {
-  switch (type) {
+function linearState(type: string | null, name: string | null): SessionLinkLiveStatus["state"] {
+  // Without a state type, Linear's default state names.
+  switch (type ?? linearTypeFromName(name)) {
     case "completed":
       return "done";
     case "canceled":
@@ -176,6 +192,26 @@ function linearState(type: string | null): SessionLinkLiveStatus["state"] {
       return "open";
     default:
       return "unknown";
+  }
+}
+
+function linearTypeFromName(name: string | null): string | null {
+  switch (name?.toLowerCase()) {
+    case "done":
+    case "completed":
+      return "completed";
+    case "canceled":
+    case "cancelled":
+    case "duplicate":
+      return "canceled";
+    case "backlog":
+    case "todo":
+    case "in progress":
+    case "in review":
+    case "triage":
+      return "started";
+    default:
+      return null;
   }
 }
 
@@ -197,7 +233,7 @@ export function linearIssueStatus(value: unknown): SessionLinkLiveStatus | null 
   );
   if (!title && !statusName) return null;
   return {
-    state: linearState(statusType ?? null),
+    state: linearState(statusType ?? null, statusName),
     label: statusName,
     title,
     checks: null,
@@ -236,8 +272,9 @@ export function slackThreadStatus(
   const messages = record(value).messages;
   if (!Array.isArray(messages) || messages.length === 0) return null;
   const parent = record(messages[0]);
-  const count = Number(parent.reply_count);
-  const replies = Number.isSafeInteger(count) && count >= 0 ? count : 0;
+  const count = typeof parent.reply_count === "number" ? parent.reply_count : Number.NaN;
+  // Unknown when the server leaves the count out, never "No replies".
+  const replies = Number.isSafeInteger(count) && count >= 0 ? count : null;
   return {
     state: "unknown",
     label: null,
@@ -246,7 +283,7 @@ export function slackThreadStatus(
     checks: null,
     review: null,
     replies,
-    lastReplyAt: replies > 0 ? slackTime(parent.latest_reply) : null,
+    lastReplyAt: replies !== 0 ? slackTime(parent.latest_reply) : null,
   };
 }
 
@@ -280,11 +317,12 @@ export function viewerReadsOwnConnections(grant: AccessGrant): boolean {
 
 const defaultIo: ViewerLinkReaderIo = {
   inventory: readSiteToolAccountInventory,
-  async open(deps, grant, identities) {
+  async open(deps, grant, identities, signal) {
     const prepared: PreparedWorkspaceToolGateway = await prepareWorkspaceToolGatewayForGrant(
       deps,
       grant,
       identities,
+      signal ? { signal } : {},
     );
     const entries = prepared.toolGatewayCatalog.entries;
     return {
@@ -318,6 +356,7 @@ export function viewerSessionLinkReader(
   grant: AccessGrant,
   links: readonly Pick<SessionLink, "provider" | "kind">[],
   io: ViewerLinkReaderIo = defaultIo,
+  timeoutMs = VIEWER_READ_TIMEOUT_MS,
 ): { read: (link: SessionLink) => Promise<ViewerLinkRead>; close: () => Promise<void> } {
   let inventory: Promise<SiteToolAccountInventory | null> | null = null;
   let session: Promise<ViewerToolSession | null> | null = null;
@@ -337,7 +376,9 @@ export function viewerSessionLinkReader(
       const all = await Promise.all(needed.map(accountsOf));
       const identities = all.flatMap((each) => each?.accounts ?? []);
       if (identities.length === 0) return null;
-      return await io.open(deps, grant, identities).catch(() => null);
+      return await io
+        .open(deps, grant, identities, AbortSignal.timeout(VIEWER_READ_TIMEOUT_MS))
+        .catch(() => null);
     })();
     return await session;
   };
@@ -345,21 +386,25 @@ export function viewerSessionLinkReader(
     async read(link) {
       const provider = viewerLinkProvider(link);
       if (!provider || !viewerReadsOwnConnections(grant)) return { kind: "none" };
-      const found = await accountsOf(provider);
-      if (!found) return { kind: "none" };
-      if (found.accounts.length === 0) return { kind: "connect", connect: found.connect };
-      const tools = await sessionFor();
-      if (!tools) return { kind: "none" };
-      for (const identity of found.accounts.slice(0, ACCOUNTS_PER_LINK)) {
-        const entry = tools.entry(identity);
-        if (!entry) continue;
-        const plan = readOne(provider, link, entry);
-        if (!plan) continue;
-        const result = await tools.call(identity, plan.args).catch(() => null);
-        const status = result ? plan.parse(viewerToolResultValue(result)) : null;
-        if (status) return { kind: "status", status };
-      }
-      return { kind: "none" };
+      const read = async (): Promise<ViewerLinkRead> => {
+        const found = await accountsOf(provider);
+        if (!found) return { kind: "none" };
+        if (found.accounts.length === 0)
+          return found.connect ? { kind: "connect", connect: found.connect } : { kind: "none" };
+        const tools = await sessionFor();
+        if (!tools) return { kind: "none" };
+        for (const identity of found.accounts.slice(0, ACCOUNTS_PER_LINK)) {
+          const entry = tools.entry(identity);
+          if (!entry) continue;
+          const plan = readOne(provider, link, entry);
+          if (!plan) continue;
+          const result = await tools.call(identity, plan.args).catch(() => null);
+          const status = result ? plan.parse(viewerToolResultValue(result)) : null;
+          if (status) return { kind: "status", status };
+        }
+        return { kind: "none" };
+      };
+      return (await within(read(), timeoutMs)) ?? { kind: "none" };
     },
     async close() {
       const open = await session?.catch(() => null);

@@ -1091,12 +1091,15 @@ export function flattenSidebarItemsForMobile(
 /**
  * What the sidebar itself shows: a live list with no apps is left out until
  * it fills, so the built-in Pinned apps list shows only in a workspace with
- * pins. Groups stay, as admins set them. The Sidebar page lists every item.
+ * pins. A group left with only such lists goes too. The Sidebar page lists
+ * every item.
  */
 export function sidebarItemsShown(items: readonly ResolvedSidebarItem[]): ResolvedSidebarItem[] {
   const shown = (item: ResolvedSidebarChild) => item.type !== "live_list" || item.apps.length > 0;
   return items.flatMap((item): ResolvedSidebarItem[] => {
     if (item.type !== "group") return shown(item) ? [item] : [];
-    return [{ ...item, items: item.items.filter(shown) }];
+    const children = item.items.filter(shown);
+    // A group left with nothing to show goes too; one that was empty stays (to fill).
+    return children.length > 0 || item.items.length === 0 ? [{ ...item, items: children }] : [];
   });
 }

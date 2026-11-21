@@ -9,6 +9,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { SiteToolAccountInventory } from "../src/site-tool-routing";
 import { withSessionLinkStatuses } from "../src/integrations/session-link-status";
+import { sessionLinksWithStatus } from "../src/routes/session-links";
 import {
   linearIssueArguments,
   linearIssueStatus,
@@ -124,6 +125,10 @@ describe("Linked status read as the viewer", () => {
       accounts: [],
       connect: { name: "Slack", capabilityId: null },
     });
+    // No Connect where the workspace doesn't offer the connector.
+    const none = inventory([]);
+    none.canonical.delete("slack");
+    expect(viewerAccountsFor(none, "slack").connect).toBeNull();
   });
 
   test("Linear: state, assignee and title from get_issue", () => {
@@ -154,6 +159,10 @@ describe("Linked status read as the viewer", () => {
     ).toMatchObject({ state: "done", label: "Done", assignee: null });
     expect(linearIssueStatus({ status: "Canceled", statusType: "canceled" })?.state).toBe("closed");
     expect(linearIssueStatus({ status: "Custom" })?.state).toBe("unknown");
+    // Without a state type, Linear's default state names.
+    expect(linearIssueStatus({ status: "Done" })?.state).toBe("done");
+    expect(linearIssueStatus({ status: "Canceled" })?.state).toBe("closed");
+    expect(linearIssueStatus({ status: "In Progress" })?.state).toBe("open");
     expect(linearIssueStatus({})).toBeNull();
   });
 
@@ -183,6 +192,10 @@ describe("Linked status read as the viewer", () => {
     expect(
       slackThreadStatus({ messages: [{ text: "x", reply_count: 0 }] }, { title: "Incident" }),
     ).toMatchObject({ title: "Incident", replies: 0, lastReplyAt: null });
+    // A count the server leaves out is unknown, not "No replies".
+    expect(slackThreadStatus({ messages: [{ text: "x" }] }, { title: null })).toMatchObject({
+      replies: null,
+    });
     expect(slackThreadStatus({ messages: [] }, { title: null })).toBeNull();
   });
 
@@ -229,6 +242,23 @@ describe("Linked status read as the viewer", () => {
     expect(fake.closed()).toBe(1);
   });
 
+  test("a read that doesn't answer stops in time and leaves the title", async () => {
+    const linear = sessionLink("https://linear.app/acme/issue/ENG-2");
+    const fake = fakeIo(inventory([{ serverId: "linear-a", canonical: "linear" }]), () => ({}), {
+      get_issue: schema(["id"]),
+    });
+    const io = {
+      ...fake.io,
+      open: async (...args: Parameters<typeof fake.io.open>) => ({
+        ...(await fake.io.open(...args)),
+        call: () => new Promise<never>(() => undefined),
+      }),
+    };
+    const reader = viewerSessionLinkReader(deps, grant("user:ada"), [linear], io, 20);
+    expect(await reader.read(linear)).toEqual({ kind: "none" });
+    await reader.close();
+  });
+
   test("keys, services and other links read nothing", async () => {
     const linear = sessionLink("https://linear.app/acme/issue/ENG-1");
     const fake = fakeIo(inventory([{ serverId: "linear-a", canonical: "linear" }]), () => ({}));
@@ -270,5 +300,42 @@ describe("Linked status read as the viewer", () => {
       },
     });
     expect(connect).toMatchObject({ status: null, connect: { name: "Linear" } });
+  });
+
+  test("the list reads as a person, titles only for others, and always releases the gateway", async () => {
+    const linear = sessionLink("https://linear.app/acme/issue/ENG-11", "Login fails");
+    const opened: string[] = [];
+    let closed = 0;
+    const viewerReader = (_deps: ApiRouteDeps, viewerGrant: AccessGrant) => {
+      opened.push(viewerGrant.subjectId);
+      return {
+        read: async (): Promise<never> => {
+          throw new Error("gateway down");
+        },
+        close: async () => {
+          closed += 1;
+        },
+      };
+    };
+    const reader = async () => null;
+    // Keys and services (no viewer grant) get titles; no gateway opens.
+    const [keyed] = await sessionLinksWithStatus(deps, crypto.randomUUID(), [linear], {
+      reader,
+      viewerGrant: null,
+      viewerReader,
+      fresh: false,
+    });
+    expect(keyed).toMatchObject({ title: "Login fails", status: null });
+    expect(opened).toEqual([]);
+    // A person's read that fails still leaves the title and closes the gateway.
+    const [person] = await sessionLinksWithStatus(deps, crypto.randomUUID(), [linear], {
+      reader,
+      viewerGrant: grant("user:ada"),
+      viewerReader,
+      fresh: false,
+    });
+    expect(person).toMatchObject({ title: "Login fails", status: null });
+    expect(opened).toEqual(["user:ada"]);
+    expect(closed).toBe(1);
   });
 });

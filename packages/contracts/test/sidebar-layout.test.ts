@@ -468,5 +468,16 @@ describe("built-in default", () => {
     ).toEqual([
       { id: "g", origin: "workspace", type: "group", label: "G", collapsed: false, items: [link] },
     ]);
+    const group = (items: ReturnType<typeof list>[]) => ({
+      id: "g",
+      origin: "workspace" as const,
+      type: "group" as const,
+      label: "G",
+      collapsed: false,
+      items,
+    });
+    // A group with only empty lists goes; an empty group stays, to fill.
+    expect(sidebarItemsShown([group([list([])])])).toEqual([]);
+    expect(sidebarItemsShown([group([])])).toHaveLength(1);
   });
 });

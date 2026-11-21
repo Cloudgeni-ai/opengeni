@@ -215,6 +215,7 @@ function ConnectorCanUse({
   rules,
   saving,
   onChange,
+  defaultLabel = "Connection's setting",
 }: {
   agent: Agent;
   /** The rule key: a provider domain or a server id. */
@@ -225,6 +226,8 @@ function ConnectorCanUse({
   rules: readonly AgentToolPermissionRule[];
   saving: boolean;
   onChange: (rules: AgentToolPermissionRule[]) => void;
+  /** The reset choice's name: what applies without a rule. */
+  defaultLabel?: string;
 }) {
   const [tools, setTools] = useState<string[] | null>(null);
   const [open, setOpen] = useState(false);
@@ -264,7 +267,7 @@ function ConnectorCanUse({
           label={`${name}: all tools`}
           value={all ?? "default"}
           disabled={disabled}
-          resetLabel="Connection's setting"
+          resetLabel={defaultLabel}
           onChange={(permission) => onChange(withAgentRule(rules, connector, "*", permission))}
         />
       }
@@ -280,7 +283,7 @@ function ConnectorCanUse({
                   label={`${name}: ${tool}`}
                   value={toolRules.find((rule) => rule.tool === tool)?.permission ?? "default"}
                   disabled={disabled}
-                  resetLabel={all ? "Same as all tools" : "Connection's setting"}
+                  resetLabel={all ? "Same as all tools" : defaultLabel}
                   onChange={(permission) =>
                     onChange(withAgentRule(rules, connector, tool, permission))
                   }
@@ -356,9 +359,13 @@ export function AgentCanUse({
           connector={agentConnectorKey(item)}
           name={item.name}
           loadTools={() =>
-            client
-              .getConnectorToolPermissions(workspaceId, item.id)
-              .then((response) => response.tools.map((tool) => tool.name))
+            client.getConnectorToolPermissions(workspaceId, item.id).then((response) => {
+              const names = response.tools.map((tool) => tool.name);
+              // A github.com rule also covers Opengeni's own GitHub tools.
+              return agentConnectorKey(item) === AGENT_BUILT_IN_GITHUB_CONNECTOR
+                ? [...new Set([...names, ...GITHUB_REST_TOOL_NAMES])]
+                : names;
+            })
           }
           rules={agent.toolPermissions}
           saving={saving}
@@ -371,6 +378,7 @@ export function AgentCanUse({
           connector={AGENT_BUILT_IN_GITHUB_CONNECTOR}
           name="GitHub"
           loadTools={loadBuiltInGitHubTools}
+          defaultLabel="Default"
           rules={agent.toolPermissions}
           saving={saving}
           onChange={(rules) => void save(rules)}

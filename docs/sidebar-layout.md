@@ -33,8 +33,8 @@ that holds them, so they don't count toward the limits; restoring an archived
 App doesn't bring its links back.
 
 The built-in default is one **Pinned apps** live list (`pinned_apps`, id
-`pinned-apps`). A live list with no apps is left out of the sidebar (the
-Sidebar page still lists it), so a workspace without pinned apps sees no
+`pinned-apps`). A live list with no apps is left out of the sidebar, as is a
+group left with only such lists (the Sidebar page still lists them), so a workspace without pinned apps sees no
 change. It's an ordinary default item: admins can remove it or change the
 default, and people can hide it. The built-in default applies only while a
 workspace has never saved its default; a saved default is used as it is,

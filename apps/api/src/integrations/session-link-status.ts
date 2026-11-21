@@ -28,6 +28,11 @@ import {
  */
 
 const STATUS_TTL_MS = 30_000;
+/**
+ * Viewer reads (Linear, Slack) go through each viewer's connection gateway,
+ * so they're kept longer; an explicit refresh still re-reads them.
+ */
+const VIEWER_STATUS_TTL_MS = 120_000;
 /** Even an explicit refresh re-reads one link at most this often. */
 const FRESH_MIN_INTERVAL_MS = 5_000;
 const TOKEN_REUSE_MARGIN_MS = 60_000;
@@ -364,7 +369,11 @@ export async function withSessionLinkStatuses(
         ? `${workspaceId}:viewer:${viewer.subjectId}:${link.url}`
         : `${workspaceId}:${link.url}`;
       const cached = statusCache.get(key);
-      const maxAge = options.fresh ? FRESH_MIN_INTERVAL_MS : STATUS_TTL_MS;
+      const maxAge = options.fresh
+        ? FRESH_MIN_INTERVAL_MS
+        : viewer
+          ? VIEWER_STATUS_TTL_MS
+          : STATUS_TTL_MS;
       if (cached && Date.now() - cached.at < maxAge) {
         results[index] = withRead(link, cached);
         continue;

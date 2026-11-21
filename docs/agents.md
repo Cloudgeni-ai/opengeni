@@ -554,7 +554,8 @@ whole.
   stays available to every chat, so there are no per-Skill switches.
 
 Not in self-hosted deployments without these pieces: Codex Apps rules need
-the Codex Apps deployment flag, and Slack lines need the Opengeni Slack app.
+the Codex Apps deployment flag, Slack lines need the Opengeni Slack app, and
+the GitHub row only has an effect with the GitHub App or Your GitHub set up.
 Writes through `git` and `gh` with Your GitHub follow Can use too: a
 `github.com` or `github_personal` rule applies to the GitHub action each
 write maps to (for example `pull_request_merge` for `gh pr merge`). `gh`
@@ -563,8 +564,7 @@ GitHub read tool (for example a `github.com` `*` Block rule). A read can't
 be mapped to one tool reliably, so a Block on a single read tool applies only
 to Opengeni's GitHub tools, and Ask first isn't applied to reads (the gateway
 has no read approvals; `gh` would fail rather than wait). `git clone` and
-`git fetch` aren't checked: the chat's own checkout needs
-them.
+`git fetch` aren't checked: the chat's own checkout needs them.
 
 ### Ready-made agents
 

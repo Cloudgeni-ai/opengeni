@@ -24,7 +24,7 @@ import {
 } from "../integrations/session-link-viewer-status";
 import { requireWorkspaceToolGatewayAuthorization } from "../workspace-tool-gateway";
 
-type ViewerReaderFactory = (
+export type ViewerReaderFactory = (
   deps: ApiRouteDeps,
   grant: AccessGrant,
   links: readonly SessionLink[],
@@ -39,6 +39,34 @@ function viewerToolGrant(
     return viewerReadsOwnConnections(grant) ? grant : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The links with live status: GitHub through the workspace's App, Linear and
+ * Slack as the viewer when there is one (a person), else titles only. The
+ * viewer's gateway is released however the read ends.
+ */
+export async function sessionLinksWithStatus(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  links: SessionLink[],
+  options: {
+    reader: SessionLinkStatusReader;
+    viewerGrant: AccessGrant | null;
+    viewerReader: ViewerReaderFactory;
+    fresh: boolean;
+  },
+) {
+  const grant = options.viewerGrant;
+  const viewer = grant ? options.viewerReader(deps, grant, links) : null;
+  try {
+    return await withSessionLinkStatuses(workspaceId, links, options.reader, {
+      fresh: options.fresh,
+      viewer: viewer && grant ? { subjectId: grant.subjectId, read: viewer.read } : null,
+    });
+  } finally {
+    await viewer?.close().catch(() => undefined);
   }
 }
 
@@ -73,19 +101,14 @@ export function registerSessionLinkRoutes(
     const fresh = c.req.query("fresh") === "true";
     // Linear and Slack are read as the viewer, only when the caller is a
     // person who may use their own connections here.
-    const viewerGrant = viewerToolGrant(authorization);
-    const viewer = viewerGrant ? viewerReader(deps, viewerGrant, links) : null;
-    try {
-      return c.json({
-        links: await withSessionLinkStatuses(workspaceId, links, reader, {
-          fresh,
-          viewer:
-            viewer && viewerGrant ? { subjectId: viewerGrant.subjectId, read: viewer.read } : null,
-        }),
-      });
-    } finally {
-      await viewer?.close();
-    }
+    return c.json({
+      links: await sessionLinksWithStatus(deps, workspaceId, links, {
+        reader,
+        viewerGrant: viewerToolGrant(authorization),
+        viewerReader,
+        fresh,
+      }),
+    });
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/links", async (c) => {

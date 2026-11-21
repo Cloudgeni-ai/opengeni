@@ -274,7 +274,7 @@ export function LinkedList({
               <a
                 href={connectHref(link.connect)}
                 data-session-link-connect={link.connect.name}
-                className="mb-1 ml-9 block w-fit text-xs text-fg-muted underline decoration-fg/25 underline-offset-2 hover:text-fg hover:decoration-fg"
+                className="og-link mb-1 ml-9 block w-fit text-xs text-fg-muted"
               >
                 Connect {link.connect.name}
               </a>
