@@ -221,7 +221,6 @@ import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
-  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
@@ -4427,9 +4426,6 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
-    throw new Error("A Connected Machine agent requires its reported workspace root");
-  }
   const repositorySkillsContext: RepositorySkillsContextState = { visible: null };
   const agent = new SandboxAgent({
     ...baseConfig,
@@ -4439,20 +4435,13 @@ export function buildOpenGeniAgent(
       resources,
       options.sandboxEnvironment,
       options.fileResourceDownloads,
-      options.activeSandboxBackend === "selfhosted"
-        ? {
-            root: options.sandboxWorkspaceRoot!,
-            includeResourceEntries: false,
-          }
-        : // File mounts are for the box this turn runs on, which is also the
-          // backend its pre-signed downloads were decided for.
-          { sandboxBackend: options.activeSandboxBackend ?? settings.sandboxBackend },
+      options,
     ),
-    instructionManifest: (manifest: Manifest) =>
-      manifestWithoutFileResourceEntries(manifest, resources),
-    // The layout names the active machine's root, so it reaches the model as a
-    // history item (`workspaceFilesystemLayout`), never in the system prompt.
-    filesystemInstructions: false,
+    // The model reads the workspace from the layout history item
+    // (`workspaceFilesystemLayout`), never from the system prompt: the layout
+    // names the active machine's root, and per-turn file mounts are described
+    // by the turn's attachment notice.
+    manifestInstructions: false,
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.sandboxEnvironment ? { sandboxEnvironment: options.sandboxEnvironment } : {}),
       ...(options.authorizeAttemptExecution
@@ -14166,21 +14155,36 @@ function ensureManifest(
   });
 }
 
+/**
+ * Where a turn's workspace is: the backend of the box it runs on (the
+ * deployment's own when absent) and, on a Connected Machine, the root that
+ * machine reported.
+ */
+export type WorkspacePlacement = {
+  activeSandboxBackend?: Settings["sandboxBackend"];
+  sandboxWorkspaceRoot?: string;
+};
+
+/**
+ * The manifest of a turn's workspace: its root and the resources Opengeni
+ * puts there. A managed sandbox has `/workspace` with repositories and files
+ * mounted. A Connected Machine is the person's own machine: its reported root
+ * and no resource entries (repositories are not cloned there, and files reach
+ * it by download only). File mounts follow the box the turn runs on, which is
+ * also the backend its pre-signed downloads were decided for.
+ */
 export function buildManifest(
   settings: Settings,
   resources: ResourceRef[],
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
-  options: {
-    root?: string;
-    includeResourceEntries?: boolean;
-    /**
-     * The backend whose box applies this manifest. File mounts follow it,
-     * like the turn's pre-signed downloads; defaults to settings.sandboxBackend.
-     */
-    sandboxBackend?: Settings["sandboxBackend"];
-  } = {},
+  placement: WorkspacePlacement = {},
 ): Manifest {
+  const onConnectedMachine = placement.activeSandboxBackend === "selfhosted";
+  if (onConnectedMachine && !placement.sandboxWorkspaceRoot) {
+    throw new Error("A Connected Machine workspace requires its reported workspace root");
+  }
+  const boxBackend = placement.activeSandboxBackend ?? settings.sandboxBackend;
   assertUniqueResourceMountPaths(resources);
   const entries: Record<string, any> = {};
   const downloadsByFileId = new Map(
@@ -14189,7 +14193,7 @@ export function buildManifest(
       download,
     ]),
   );
-  for (const resource of options.includeResourceEntries === false ? [] : resources) {
+  for (const resource of onConnectedMachine ? [] : resources) {
     if (resource.kind === "repository") {
       const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
@@ -14208,23 +14212,18 @@ export function buildManifest(
       const download = downloadsByFileId.get(resource.fileId);
       entries[mountPath] = download
         ? sandboxDownloadDirectory(download, mountPath)
-        : objectStorageFileMount(
-            settings,
-            options.sandboxBackend ?? settings.sandboxBackend,
-            `files/${resource.fileId}/original`,
-          );
+        : objectStorageFileMount(settings, boxBackend, `files/${resource.fileId}/original`);
     }
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
   // that carry them at create/apply time, which broke every Modal session.
-
-  // sandbox-safe in-memory or staged local-dir sources, so no host path grant
-  // is required here.
+  // Every entry is a sandbox-safe in-memory or staged local-dir source, so no
+  // host path grant is required.
   // RM-3: the manifest env holds deployment constants only. Any other key is a
   // regression (user secrets are delivered per command), so drop it here.
   const keepEnvironmentName = sandboxManifestEnvironmentNamePredicate(settings);
   return new Manifest({
-    root: options.root ?? "/workspace",
+    root: onConnectedMachine ? placement.sandboxWorkspaceRoot! : "/workspace",
     entries,
     environment: Object.fromEntries(
       Object.entries(environment).filter(([name]) => keepEnvironmentName(name)),
@@ -14233,79 +14232,41 @@ export function buildManifest(
 }
 
 /**
- * The manifest the SDK renders into the system instructions (remote mount
- * policy and filesystem layout): the runtime manifest without file resource
- * entries. Files are attached per turn, so listing them there would change the
- * cached instruction prefix on every turn with a file. The session still
- * materializes the full manifest, and the turn's attachment notice at the end
- * of the input tells the model where each file is and how to treat it. Entries
- * under the default file root are dropped too, because a resumed sandbox's
- * manifest state can still hold files attached on earlier turns.
- */
-export function manifestWithoutFileResourceEntries(
-  manifest: Manifest,
-  resources: readonly ResourceRef[],
-): Manifest {
-  const filePaths = new Set(
-    resources.flatMap((resource) =>
-      resource.kind === "file" ? [resourceMountPath(resource)] : [],
-    ),
-  );
-  const fileRoot = `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/`;
-  const entries = Object.entries(manifest.entries).filter(
-    ([path]) => !filePaths.has(path) && !path.startsWith(fileRoot),
-  );
-  if (entries.length === Object.keys(manifest.entries).length) return manifest;
-  return new Manifest({ ...manifest, entries: Object.fromEntries(entries) });
-}
-
-/**
- * The filesystem layout of a turn's active workspace as the model reads it:
- * the instruction manifest (without file resources) rendered the way the SDK
- * renders its filesystem section. It names the active machine's root, so it is
- * delivered as a session history item (`ensureSessionWorkspaceFilesystem`)
- * instead of in the system prompt, where moving the session to another machine
- * would rewrite every cached request prefix. Null without a sandbox.
+ * The filesystem layout of a turn's workspace as the model reads it: the
+ * turn's manifest (`buildManifest`, same placement) rendered the way the SDK
+ * renders its filesystem section. It is the only place the model learns the
+ * workspace: the system prompt has none of it (`manifestInstructions: false`),
+ * because the root changes when the session moves to another machine and
+ * every cached request prefix would change with it. The worker delivers it as
+ * a session history item (`ensureSessionWorkspaceFilesystem`). Null without a
+ * sandbox.
+ *
+ * Files are left out: they are attached per turn and the turn's attachment
+ * notice describes them, so the layout of a turn with a file is the layout of
+ * a turn without one. (A file entry would also need the turn's pre-signed
+ * download where storage cannot be mounted, which the layout has no use for.)
  */
 export function workspaceFilesystemLayout(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    activeSandboxBackend?: Settings["sandboxBackend"];
-    sandboxWorkspaceRoot?: string;
+  options: WorkspacePlacement & {
     /** The configured agent's renderer; omitted for a plain chat. */
     renderer?: AgentRenderer;
   } = {},
 ): string | null {
   if (settings.sandboxBackend === "none") return null;
-  if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) return null;
-  // The layout never lists file resources, so they are left out before the
-  // manifest is built: a file entry needs the turn's pre-signed download where
-  // the storage cannot be mounted (Azure Blob on a native bucket-mount backend,
-  // AWS S3, GCS), and the layout has none to give.
-  const layoutResources = resources.filter((resource) => resource.kind !== "file");
   const manifest = buildManifest(
     settings,
-    layoutResources,
+    resources.filter((resource) => resource.kind !== "file"),
     {},
     [],
-    options.activeSandboxBackend === "selfhosted"
-      ? { root: options.sandboxWorkspaceRoot!, includeResourceEntries: false }
-      : {},
+    options,
   );
-  const layout = renderManifestDescription(
-    manifestWithoutFileResourceEntries(manifest, layoutResources),
-    {
-      depth: 3,
-    },
-  ).text;
+  const layout = renderManifestDescription(manifest, { depth: 3 }).text;
   // The system prompt describes the deployment's own kind of compute
   // (promptSandboxBackend). A session that moved onto a Connected Machine
   // learns what that means here, with the layout that changes with the move.
-  if (
-    options.activeSandboxBackend !== "selfhosted" ||
-    promptSandboxBackend(settings, "selfhosted") === "selfhosted"
-  )
+  if (options.activeSandboxBackend !== "selfhosted" || settings.sandboxBackend === "selfhosted")
     return layout;
   return [
     layout,
